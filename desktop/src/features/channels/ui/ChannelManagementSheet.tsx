@@ -60,6 +60,7 @@ import {
   PANEL_OVERLAY_CLASS,
 } from "@/shared/ui/OverlayPanelBackdrop";
 import { ChannelCanvas } from "./ChannelCanvas";
+import { ChannelWebsitesSettings } from "./ChannelWebsitesSettings";
 import { ChannelWorkflowsSection } from "./ChannelWorkflowsSection";
 import {
   CHANNEL_FORM_FIELD_CONTROL_CLASS,
@@ -862,6 +863,10 @@ function ChannelManagementPanelContent({
                 testId="channel-workflows-ingress"
                 trailing={workflowsQuery.isLoading ? "Loading..." : undefined}
               />
+            ) : null}
+
+            {channelId ? (
+              <ChannelWebsitesSettings channelId={channelId} />
             ) : null}
 
             {canJoin || canLeave || canEditChannel ? (

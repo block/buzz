@@ -8,6 +8,8 @@ import { getChannelDescription } from "@/features/channels/lib/channelDescriptio
 import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDisplay";
 import { ChannelHeaderStatusBadge } from "@/features/channels/ui/ChannelHeaderStatusBadge";
 import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
+import { ChannelWebsiteTabs } from "@/features/channels/ui/ChannelWebsiteTabs";
+import type { ChannelWebsite } from "@/features/channels/lib/channelWebsites";
 import {
   DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
   ProfileAvatarWithStatus,
@@ -46,6 +48,12 @@ type ChannelScreenHeaderProps = {
   onJoinChannel?: () => Promise<void>;
   onManageChannel: () => void;
   onToggleMembers: () => void;
+  websites?: readonly ChannelWebsite[];
+  activeWebsite?: ChannelWebsite | null;
+  channelSurface?: "chat" | string;
+  onChannelSurfaceChange?: (surface: "chat" | string) => void;
+  onRefreshWebsite?: () => void;
+  onOpenWebsiteExternal?: () => void;
 };
 
 export function ChannelScreenHeader({
@@ -66,6 +74,12 @@ export function ChannelScreenHeader({
   onJoinChannel,
   onManageChannel,
   onToggleMembers,
+  websites = [],
+  activeWebsite = null,
+  channelSurface = "chat",
+  onChannelSurfaceChange,
+  onRefreshWebsite,
+  onOpenWebsiteExternal,
 }: ChannelScreenHeaderProps) {
   const isGroupDm =
     activeChannel?.channelType === "dm" &&
@@ -106,11 +120,14 @@ export function ChannelScreenHeader({
       </Button>
     ) : (
       <ChannelMembersBar
+        activeWebsite={activeWebsite}
         channel={activeChannel}
         currentPubkey={currentPubkey}
         isAddBotOpen={isAddBotOpen}
         onAddBotOpenChange={onAddBotOpenChange}
         onManageChannel={onManageChannel}
+        onOpenWebsiteExternal={onOpenWebsiteExternal}
+        onRefreshWebsite={onRefreshWebsite}
         onToggleMembers={onToggleMembers}
         variant={actionsVariant}
       />
@@ -183,6 +200,23 @@ export function ChannelScreenHeader({
       title={activeChannelTitle}
       transparentChrome={transparentChrome}
       visibility={activeChannel?.visibility}
+      stackContentBelow={channelSurface !== "chat"}
+      onTitleClick={
+        channelSurface !== "chat" && onChannelSurfaceChange
+          ? () => onChannelSurfaceChange("chat")
+          : undefined
+      }
+      titleExtras={
+        onChannelSurfaceChange && websites.length > 0 ? (
+          <ChannelWebsiteTabs
+            onOpenExternal={onOpenWebsiteExternal}
+            onRefresh={onRefreshWebsite}
+            onSurfaceChange={onChannelSurfaceChange}
+            surface={channelSurface}
+            websites={websites}
+          />
+        ) : null
+      }
     />
   );
 }

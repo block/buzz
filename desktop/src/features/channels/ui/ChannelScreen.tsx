@@ -7,6 +7,7 @@ import { useChannelPaneHandlers } from "@/features/channels/useChannelPaneHandle
 import { useMessageEventProfilePubkeys } from "@/features/channels/useMessageEventProfilePubkeys";
 import { useMessageOwnerProfiles } from "@/features/channels/useMessageOwnerProfiles";
 import { useThreadTargetSync } from "@/features/channels/useThreadTargetSync";
+import { useChannelWebsiteSurface } from "@/features/channels/useChannelWebsiteSurface";
 import * as channelHooks from "@/features/channels/hooks";
 import * as readStateFormat from "@/features/channels/readState/readStateFormat";
 import { ChannelScreenEmptyState } from "@/features/channels/ui/ChannelScreenEmptyState";
@@ -742,6 +743,16 @@ export function ChannelScreen({
     () => setIsMembersSidebarOpen((prev) => !prev),
     [],
   );
+  const { websites, channelSurface, setChannelSurface, activeWebsite } =
+    useChannelWebsiteSurface(activeChannelId);
+  const [websiteReloadKey, setWebsiteReloadKey] = React.useState(0);
+  const handleRefreshWebsite = React.useCallback(() => {
+    setWebsiteReloadKey((key) => key + 1);
+  }, []);
+  const handleOpenWebsiteExternal = React.useCallback(() => {
+    if (!activeWebsite?.url) return;
+    window.open(activeWebsite.url, "_blank", "noopener,noreferrer");
+  }, [activeWebsite?.url]);
   const channelHeader = React.useMemo(
     () => (
       <ChannelScreenHeader
@@ -752,6 +763,7 @@ export function ChannelScreen({
         activeDmAvatarUrl={activeDmAvatarUrl}
         activeDmHeaderParticipants={activeDmHeaderParticipants}
         activeDmPresenceStatus={activeDmPresenceStatus}
+        activeWebsite={activeWebsite}
         chromeWrapperRef={channelHeaderChromeRef}
         currentPubkey={currentPubkey}
         isAddBotOpen={isAddBotOpen}
@@ -759,9 +771,14 @@ export function ChannelScreen({
         onAddBotOpenChange={setIsAddBotOpen}
         onJoinChannel={joinChannelMutation.mutateAsync}
         onManageChannel={handleManageChannel}
+        onOpenWebsiteExternal={handleOpenWebsiteExternal}
+        onRefreshWebsite={handleRefreshWebsite}
         onToggleMembers={handleToggleMembers}
         showHeaderContent={!isSinglePanelView && !isHuddleTranscript}
         transparentChrome={activeChannel?.channelType !== "forum"}
+        websites={websites}
+        channelSurface={channelSurface}
+        onChannelSurfaceChange={setChannelSurface}
       />
     ),
     [
@@ -772,15 +789,21 @@ export function ChannelScreen({
       activeDmAvatarUrl,
       activeDmHeaderParticipants,
       activeDmPresenceStatus,
+      activeWebsite,
       channelHeaderChromeRef,
       currentPubkey,
       isAddBotOpen,
       joinChannelMutation.isPending,
       joinChannelMutation.mutateAsync,
       handleManageChannel,
+      handleOpenWebsiteExternal,
+      handleRefreshWebsite,
       handleToggleMembers,
       isSinglePanelView,
       isHuddleTranscript,
+      websites,
+      channelSurface,
+      setChannelSurface,
     ],
   );
   return (
@@ -848,6 +871,8 @@ export function ChannelScreen({
               >
                 {searchForwarding.renderSearchAwareChannel(
                   <GuardedChannelPane
+                    activeWebsite={activeWebsite}
+                    websiteReloadKey={websiteReloadKey}
                     activeChannel={activeChannel}
                     activityAgents={channelAgentSessionAgents}
                     agentPubkeys={agentPubkeys}

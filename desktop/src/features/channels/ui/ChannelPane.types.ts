@@ -13,7 +13,10 @@ import type {
 } from "@/features/profile/ui/UserProfilePanel";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import type { Channel } from "@/shared/api/types";
+import type { ChannelWebsite } from "@/features/channels/lib/channelWebsites";
 export type ChannelPaneProps = {
+  activeWebsite?: ChannelWebsite | null;
+  websiteReloadKey?: number;
   activeChannel: Channel | null;
   activityAgents?: BotActivityAgent[];
   agentPubkeys?: ReadonlySet<string>;

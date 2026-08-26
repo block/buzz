@@ -422,6 +422,16 @@ pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder,
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
 }
 
+/// Kind 40150 — channel website list (JSON).
+pub fn build_set_channel_websites(
+    channel_id: Uuid,
+    content: &str,
+) -> Result<EventBuilder, String> {
+    check_content(content)?;
+    let tags = vec![tag(vec!["h", &channel_id.to_string()])?];
+    Ok(EventBuilder::new(Kind::Custom(40150), content).tags(tags))
+}
+
 // ── Profile ──────────────────────────────────────────────────────────────────
 
 /// Kind 0 — NIP-01 profile metadata (full snapshot).

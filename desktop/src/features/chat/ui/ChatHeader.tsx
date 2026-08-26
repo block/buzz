@@ -35,6 +35,12 @@ type ChatHeaderProps = {
   statusBadge?: React.ReactNode;
   /** Render the chrome wrapper without an individual backdrop when a parent supplies shared blur. */
   transparentChrome?: boolean;
+  /** Inline pills/tabs on the title row (channel websites). */
+  titleExtras?: React.ReactNode;
+  /** When set, clicking the channel title invokes this handler (e.g. return to chat). */
+  onTitleClick?: () => void;
+  /** When true, header sits in document flow instead of overlaying content below. */
+  stackContentBelow?: boolean;
 };
 
 const HEADER_ICON_CLASS = "h-4 w-4 text-muted-foreground";
@@ -97,6 +103,9 @@ export function ChatHeader({
   overlaysContent = false,
   statusBadge,
   transparentChrome = false,
+  titleExtras,
+  onTitleClick,
+  stackContentBelow = false,
 }: ChatHeaderProps) {
   const trimmedDescription = description?.trim() ?? "";
 
@@ -137,8 +146,23 @@ export function ChatHeader({
               className={cn(
                 "min-w-0 truncate text-base font-semibold leading-6 tracking-tight",
                 channelType !== "dm" && "translate-y-px",
+                onTitleClick &&
+                  "cursor-pointer rounded-sm hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
               )}
               data-testid="chat-title"
+              onClick={onTitleClick}
+              onKeyDown={
+                onTitleClick
+                  ? (event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        onTitleClick();
+                      }
+                    }
+                  : undefined
+              }
+              role={onTitleClick ? "button" : undefined}
+              tabIndex={onTitleClick ? 0 : undefined}
               title={trimmedDescription || undefined}
             >
               {title}
@@ -162,6 +186,10 @@ export function ChatHeader({
           </div>
         </div>
 
+        {titleExtras ? (
+          <div className="flex min-w-0 shrink items-center">{titleExtras}</div>
+        ) : null}
+
         <div className="flex shrink-0 items-center gap-1">
           <UpdateIndicator />
           {actions ? <div className="shrink-0">{actions}</div> : null}
@@ -182,7 +210,7 @@ export function ChatHeader({
         transparentChrome
           ? "bg-transparent"
           : "bg-background/80 backdrop-blur-md supports-backdrop-filter:bg-background/70 dark:bg-background/70 dark:backdrop-blur-xl dark:supports-backdrop-filter:bg-background/55",
-        channelChrome.negativeMargin,
+        !stackContentBelow && channelChrome.negativeMargin,
       )}
     >
       {header}

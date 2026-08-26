@@ -493,6 +493,8 @@ pub const KIND_STREAM_REMINDER: u32 = 40007;
 pub const KIND_STREAM_MESSAGE_DIFF: u32 = 40008;
 /// Canvas (shared document) for a channel.
 pub const KIND_CANVAS: u32 = 40100;
+/// Channel website list for header tabs (JSON array in content).
+pub const KIND_CHANNEL_WEBSITES: u32 = 40150;
 /// System message for channel state changes (join, leave, rename, etc.).
 pub const KIND_SYSTEM_MESSAGE: u32 = 40099;
 
@@ -708,6 +710,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_STREAM_REMINDER,
     KIND_STREAM_MESSAGE_DIFF,
     KIND_CANVAS,
+    KIND_CHANNEL_WEBSITES,
     KIND_SYSTEM_MESSAGE,
     KIND_CHANNEL_SUMMARY,
     KIND_PRESENCE_SNAPSHOT,
@@ -878,6 +881,7 @@ const _: () = assert!(
 // Compile-time: all Buzz kind constants fit in nostr's u16-backed Kind.
 const _: () = assert!(KIND_AUTH <= u16::MAX as u32);
 const _: () = assert!(KIND_CANVAS <= u16::MAX as u32);
+const _: () = assert!(KIND_CHANNEL_WEBSITES <= u16::MAX as u32);
 const _: () = assert!(KIND_HUDDLE_GUIDELINES <= u16::MAX as u32);
 const _: () = assert!(EPHEMERAL_KIND_MIN < EPHEMERAL_KIND_MAX);
 // Compile-time: KIND_AGENT_TURN_METRIC is a regular stored kind (not ephemeral, not replaceable).

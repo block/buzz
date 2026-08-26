@@ -636,6 +636,8 @@ pub fn run() {
             leave_channel,
             get_canvas,
             set_canvas,
+            get_channel_websites,
+            set_channel_websites,
             get_feed,
             search_messages,
             send_channel_message,
@@ -852,6 +854,9 @@ pub fn run() {
             archive::sync::stop_archive_sync,
             is_auto_update_supported,
             set_window_vibrancy,
+            show_channel_embed,
+            set_channel_embed_bounds,
+            hide_channel_embed,
             #[cfg(target_os = "macos")]
             tray_menu::clear_tray_agent_activity,
             #[cfg(target_os = "macos")]

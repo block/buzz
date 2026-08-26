@@ -85,6 +85,15 @@ export type SetCanvasResult = {
   eventId: string;
 };
 
+export type ChannelWebsitesResponse = CanvasResponse;
+
+export type SetChannelWebsitesInput = {
+  channelId: string;
+  content: string;
+};
+
+export type SetChannelWebsitesResult = SetCanvasResult;
+
 export type AddChannelMembersInput = {
   channelId: string;
   pubkeys: string[];
