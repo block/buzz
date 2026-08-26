@@ -24,6 +24,10 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
   Completer<void>? hiddenSubscribeGate;
   bool failNextHiddenSubscribe = false;
   int hiddenUnsubscribeCount = 0;
+  // Per-batch gates keyed by hidden-subscribe call order (0-based), so a test
+  // can park an individual batch's REQ while letting earlier ones settle.
+  final Map<int, Completer<void>> hiddenSubscribeGatesByCall = {};
+  int hiddenSubscribeCallCount = 0;
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -109,6 +113,9 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
         filter.tags.containsKey('#h') &&
         filter.kinds.length == EventKind.channelMessageEventKinds.length;
     if (isHidden) {
+      final callIndex = hiddenSubscribeCallCount++;
+      final perCallGate = hiddenSubscribeGatesByCall[callIndex];
+      if (perCallGate != null) await perCallGate.future;
       final gate = hiddenSubscribeGate;
       if (gate != null) await gate.future;
       if (failNextHiddenSubscribe) {
@@ -970,21 +977,47 @@ void main() {
       expect(batches.single, hasLength(1));
     });
 
+    test('teardown during batch-1 setup self-disposes batch 1 and never starts '
+        'batch 2', () async {
+      final session = _RecordingSessionNotifier()
+        ..hiddenSubscribeGatesByCall[0] = Completer<void>();
+      final container = containerFor(session, hiddenIds(129));
+
+      await container.read(channelsProvider.future);
+      await container.read(activityProvider.future);
+      // Batch 1's REQ is parked in flight; batch 2 has not been requested.
+      await _waitFor(() => session.hiddenSubscribeCallCount == 1);
+
+      // Supersede this generation mid-setup, then let batch 1's REQ resolve.
+      container.dispose();
+      session.hiddenSubscribeGatesByCall[0]!.complete();
+
+      // Batch 1 resolves stale and self-disposes; batch 2 is never requested.
+      await _waitFor(() => session.hiddenUnsubscribeCount == 1);
+      expect(session.hiddenUnsubscribeCount, 1);
+      expect(session.hiddenSubscribeCallCount, 1);
+      expect(session.hiddenDmSubscriptionBatches, isEmpty);
+    });
+
     test(
-      'teardown while batch setup is pending disposes every settled batch',
+      'teardown after batch 1 settles while batch 2 is pending tears down both',
       () async {
         final session = _RecordingSessionNotifier()
-          ..hiddenSubscribeGate = Completer<void>();
+          ..hiddenSubscribeGatesByCall[1] = Completer<void>();
         final container = containerFor(session, hiddenIds(129));
 
         await container.read(channelsProvider.future);
         await container.read(activityProvider.future);
-        // Dispose while both batches are parked on the gate: the generation is
-        // superseded, so every batch that later resolves must be torn down.
-        container.dispose();
-        session.hiddenSubscribeGate!.complete();
-        await _waitFor(() => session.hiddenUnsubscribeCount == 2);
+        // Batch 1 has settled and registered; batch 2's REQ is parked in flight.
+        await _waitFor(() => session.hiddenSubscribeCallCount == 2);
+        expect(session.hiddenDmSubscriptionBatches, hasLength(1));
 
+        // Supersede this generation with batch 2 pending, then let it resolve.
+        container.dispose();
+        session.hiddenSubscribeGatesByCall[1]!.complete();
+
+        // Batch 2 resolves stale and disposes itself plus the settled batch 1.
+        await _waitFor(() => session.hiddenUnsubscribeCount == 2);
         expect(session.hiddenUnsubscribeCount, 2);
         expect(session.hiddenDmSubscriptionBatches, isEmpty);
       },

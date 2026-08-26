@@ -473,6 +473,21 @@ export function InboxListPane({
                     <>
                       <AlertCircle className="h-3 w-3 shrink-0" />
                       Couldn’t reopen
+                      {canOpen ? (
+                        <button
+                          className="ml-0.5 rounded font-semibold underline underline-offset-2 hover:no-underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                          data-testid={`home-inbox-reopen-retry-${item.id}`}
+                          onClick={(event) => {
+                            // The row wrapper selects on click; stop it so
+                            // Retry only re-issues the reopen for this row.
+                            event.stopPropagation();
+                            onOpenDirect(item);
+                          }}
+                          type="button"
+                        >
+                          Retry
+                        </button>
+                      ) : null}
                     </>
                   )}
                 </div>

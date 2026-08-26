@@ -165,6 +165,15 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         start < hiddenDmIds.length;
         start += kMaxExplicitChannelValues
       ) {
+        // Never open a batch REQ for a superseded generation: check before
+        // each subscribe so teardown mid-setup stops issuing new REQs, and
+        // tear down everything this generation already opened.
+        if (generation != _subscriptionGeneration) {
+          for (final unsubscribe in hiddenUnsubscribers) {
+            unsubscribe();
+          }
+          return;
+        }
         final end = start + kMaxExplicitChannelValues < hiddenDmIds.length
             ? start + kMaxExplicitChannelValues
             : hiddenDmIds.length;
@@ -179,21 +188,38 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
             ),
             (event) => _handleHiddenDmLiveEvent(event, generation),
           );
+          // A newer generation may have superseded us while this batch's REQ
+          // was in flight. Dispose the just-resolved subscription plus every
+          // batch this generation already opened, and return without
+          // initiating another REQ.
+          if (generation != _subscriptionGeneration) {
+            unsubscribeHiddenDms();
+            for (final unsubscribe in hiddenUnsubscribers) {
+              unsubscribe();
+            }
+            return;
+          }
           hiddenUnsubscribers.add(unsubscribeHiddenDms);
         } catch (error) {
+          // Superseded while this batch's REQ was rejected: tear down what we
+          // opened and stop rather than initiating another REQ.
+          if (generation != _subscriptionGeneration) {
+            for (final unsubscribe in hiddenUnsubscribers) {
+              unsubscribe();
+            }
+            return;
+          }
           // One batch's REQ was rejected; keep subscribing the rest so a
           // partially-rejected hidden set still resurfaces every other batch.
-          if (generation == _subscriptionGeneration) {
-            debugPrint(
-              '[ActivityNotifier] hidden-DM batch subscription failed: $error',
-            );
-          }
+          debugPrint(
+            '[ActivityNotifier] hidden-DM batch subscription failed: $error',
+          );
         }
       }
-      // A newer generation may have superseded us while a batch's REQ was in
-      // flight; tear down every batch this generation opened so none leak past
-      // the generation that owns them, and never publish into the field the
-      // successor already cleared.
+      // A newer generation may have superseded us after the final batch
+      // settled; tear down every batch this generation opened so none leak
+      // past the generation that owns them, and never publish into the field
+      // the successor already cleared.
       if (generation != _subscriptionGeneration) {
         for (final unsubscribe in hiddenUnsubscribers) {
           unsubscribe();

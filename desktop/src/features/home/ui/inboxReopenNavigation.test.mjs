@@ -279,6 +279,26 @@ const HIDDEN_DM_ITEM = {
   unreadCount: 1,
 };
 
+// A second, already-open conversation used as the selected detail while the
+// hidden DM row fails to reopen — so the detail pane's Retry belongs to a
+// different channel and cannot cover the failed row.
+const OTHER_CHANNEL_ID = "other-open-channel";
+const OTHER_EVENT_ID = "f".repeat(64);
+const OTHER_ITEM = {
+  ...HIDDEN_DM_ITEM,
+  conversationId: OTHER_CHANNEL_ID,
+  id: OTHER_EVENT_ID,
+  item: {
+    ...HIDDEN_DM_ITEM.item,
+    id: OTHER_EVENT_ID,
+    channelId: OTHER_CHANNEL_ID,
+    channelName: "other",
+    channelType: "channel",
+  },
+  channelLabel: "other",
+  senderLabel: "Other",
+};
+
 let React;
 let act;
 let createRoot;
@@ -332,7 +352,8 @@ after(() => dom.window.close());
  * router is not needed: the reopen path terminates at onOpenContext, which we
  * capture, and goChannel is only reached via handleOpenDm (not exercised here).
  */
-async function mountInbox() {
+async function mountInbox(options = {}) {
+  const { items = [HIDDEN_DM_ITEM], selectedItem = HIDDEN_DM_ITEM } = options;
   seedCommunity();
   openDmCalls = 0;
   const navigations = [];
@@ -350,7 +371,7 @@ async function mountInbox() {
       currentPubkey: SELF,
       onOpenContext: (channelId, messageId, threadRootId) =>
         navigations.push([channelId, messageId, threadRootId ?? null]),
-      selectedItem: HIDDEN_DM_ITEM,
+      selectedItem,
     });
     return React.createElement(
       React.Fragment,
@@ -360,7 +381,7 @@ async function mountInbox() {
         draftItems: [],
         doneSet: new Set(),
         filter: "all",
-        items: [HIDDEN_DM_ITEM],
+        items,
         onFilterChange() {},
         onDeleteDraft() {},
         onMarkRead() {},
@@ -373,7 +394,7 @@ async function mountInbox() {
         onSelectDraft() {},
         onSelectReminder() {},
         onUnreadOnlyChange() {},
-        selectedConversationId: HIDDEN_DM_ID,
+        selectedConversationId: selectedItem.conversationId,
         selectedDraftKey: null,
         dueReminderCount: 0,
         reminders: [],
@@ -387,8 +408,8 @@ async function mountInbox() {
         channel: null,
         currentPubkey: SELF,
         editTargetId: null,
-        item: HIDDEN_DM_ITEM,
-        selectedEventId: SOURCE_EVENT_ID,
+        item: selectedItem,
+        selectedEventId: selectedItem.id,
         onDelete() {},
         onDeleteMessage() {},
         onEditTargetChange() {},
@@ -396,8 +417,8 @@ async function mountInbox() {
         onRequestEmptyEditDelete() {},
         onManageChannel() {},
         onOpenContext: nav.handleOpenSelectedContext,
-        reopenPending: nav.isReopenPending(HIDDEN_DM_ID),
-        reopenErrored: nav.isReopenErrored(HIDDEN_DM_ID),
+        reopenPending: nav.isReopenPending(selectedItem.item.channelId),
+        reopenErrored: nav.isReopenErrored(selectedItem.item.channelId),
         onSendReply: async () => {},
       }),
     );
@@ -668,6 +689,99 @@ test("failed reopen surfaces a keyboard-operable Retry that then navigates", asy
       inbox.navigations,
       [[HIDDEN_DM_ID, SOURCE_EVENT_ID, null]],
       "the successful retry finally navigates",
+    );
+  } finally {
+    await inbox.unmount();
+  }
+});
+
+test("a failed reopen from an unselected row exposes its own keyboard Retry that navigates", async () => {
+  // The selected detail is a DIFFERENT, already-open conversation, so the
+  // detail pane's Retry belongs to OTHER_CHANNEL_ID and cannot reopen the
+  // hidden DM. The failed hidden-DM row must therefore carry its own Retry.
+  const inbox = await mountInbox({
+    items: [OTHER_ITEM, HIDDEN_DM_ITEM],
+    selectedItem: OTHER_ITEM,
+  });
+  try {
+    let attempts = 0;
+    openDmHandler = async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("relay offline");
+      return { id: HIDDEN_DM_ID, channel_type: "dm" };
+    };
+    const openButton = inbox.container.querySelector(
+      '[data-testid="home-inbox-item-' +
+        SOURCE_EVENT_ID +
+        '"] [aria-label="Open in channel"]',
+    );
+    assert.ok(
+      openButton,
+      "the unselected hidden-DM row must render its action",
+    );
+    await act(async () => {
+      click(openButton);
+    });
+    await inbox.settle();
+
+    assert.equal(attempts, 1, "one reopen attempt was made");
+    assert.equal(
+      inbox.navigations.length,
+      0,
+      "a failed reopen does not navigate",
+    );
+    // The selected detail pane belongs to another channel, so its status
+    // region must not be showing this failure.
+    const detailStatus = inbox.container.querySelector(
+      '[data-testid="home-inbox-reopen-status"]',
+    );
+    assert.equal(
+      detailStatus,
+      null,
+      "the other-channel detail pane must not show the hidden DM's error",
+    );
+
+    // The failed row itself surfaces a keyboard-operable Retry.
+    const rowStatus = inbox.container.querySelector(
+      '[data-testid="home-inbox-reopen-status-' + SOURCE_EVENT_ID + '"]',
+    );
+    assert.ok(rowStatus, "the failed row must show its own error status");
+    const retry = inbox.container.querySelector(
+      '[data-testid="home-inbox-reopen-retry-' + SOURCE_EVENT_ID + '"]',
+    );
+    assert.ok(retry, "the failed row must expose its own Retry");
+    assert.equal(retry.tagName, "BUTTON");
+    assert.equal(retry.disabled, false);
+    assert.notEqual(
+      dom.window.getComputedStyle(retry).pointerEvents,
+      "none",
+      "the row Retry must not be pointer-events-blocked",
+    );
+    await act(async () => {
+      retry.focus();
+    });
+    assert.equal(
+      dom.window.document.activeElement,
+      retry,
+      "the row Retry must accept keyboard focus",
+    );
+    await act(async () => {
+      dom.window.document.activeElement.dispatchEvent(
+        new dom.window.KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    });
+    await inbox.settle();
+
+    assert.equal(attempts, 2, "the row Retry issues exactly one more reopen");
+    assert.deepEqual(
+      inbox.navigations,
+      [[HIDDEN_DM_ID, SOURCE_EVENT_ID, null]],
+      "the successful row retry navigates to the hidden DM",
     );
   } finally {
     await inbox.unmount();
