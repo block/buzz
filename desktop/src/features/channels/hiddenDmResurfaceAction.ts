@@ -2,7 +2,7 @@ import type { ChannelMember, RelayEvent } from "@/shared/api/types";
 import type { OpenDmInput } from "@/shared/api/tauriChannels";
 import {
   dmPeerPubkeysFromMembers,
-  isIncomingDmMessageRelayEvent,
+  isIncomingChannelMessageFromOther,
   relayEventChannelId,
 } from "./dmResurface";
 
@@ -10,7 +10,7 @@ type HiddenDmResurfaceActionOptions = {
   event: RelayEvent;
   expectedRelayUrl: string;
   expectedSignerPubkey: string;
-  fetchHiddenDmIds: () => Promise<ReadonlySet<string>>;
+  hiddenDmIds: ReadonlySet<string>;
   fetchMembers: (channelId: string) => Promise<readonly ChannelMember[]>;
   isCurrent: () => boolean;
   reopen: (input: OpenDmInput) => Promise<{ id: string }>;
@@ -20,17 +20,16 @@ export async function resurfaceHiddenDmMessage({
   event,
   expectedRelayUrl,
   expectedSignerPubkey,
-  fetchHiddenDmIds,
+  hiddenDmIds,
   fetchMembers,
   isCurrent,
   reopen,
 }: HiddenDmResurfaceActionOptions): Promise<boolean> {
-  if (!isIncomingDmMessageRelayEvent(event, expectedSignerPubkey)) return false;
+  if (!isIncomingChannelMessageFromOther(event, expectedSignerPubkey)) {
+    return false;
+  }
   const channelId = relayEventChannelId(event);
-  if (!channelId) return false;
-
-  const hiddenDmIds = await fetchHiddenDmIds();
-  if (!isCurrent() || !hiddenDmIds.has(channelId)) return false;
+  if (!channelId || !hiddenDmIds.has(channelId)) return false;
 
   const members = await fetchMembers(channelId);
   if (!isCurrent()) return false;

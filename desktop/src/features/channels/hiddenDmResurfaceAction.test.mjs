@@ -40,7 +40,7 @@ test("reopens the source hidden group DM from authoritative membership", async (
       event: event(),
       expectedRelayUrl: "wss://relay.example",
       expectedSignerPubkey: SELF,
-      fetchHiddenDmIds: async () => new Set(["hidden-dm"]),
+      hiddenDmIds: new Set(["hidden-dm"]),
       fetchMembers: async () => [member(SELF), member(ALICE), member(BOB)],
       isCurrent: () => true,
       reopen: async (input) => {
@@ -59,6 +59,26 @@ test("reopens the source hidden group DM from authoritative membership", async (
   ]);
 });
 
+test("ignores an event for a channel outside the hidden set", async () => {
+  let reopenCount = 0;
+  assert.equal(
+    await resurfaceHiddenDmMessage({
+      event: event(),
+      expectedRelayUrl: "wss://relay.example",
+      expectedSignerPubkey: SELF,
+      hiddenDmIds: new Set(["other-dm"]),
+      fetchMembers: async () => [member(SELF), member(ALICE)],
+      isCurrent: () => true,
+      reopen: async () => {
+        reopenCount += 1;
+        return { id: "hidden-dm" };
+      },
+    }),
+    false,
+  );
+  assert.equal(reopenCount, 0);
+});
+
 test("a suspended old-community read cannot reopen a DM", async () => {
   let current = true;
   let resume;
@@ -70,7 +90,7 @@ test("a suspended old-community read cannot reopen a DM", async () => {
     event: event(),
     expectedRelayUrl: "wss://old.example",
     expectedSignerPubkey: SELF,
-    fetchHiddenDmIds: async () => new Set(["hidden-dm"]),
+    hiddenDmIds: new Set(["hidden-dm"]),
     fetchMembers: async () => members,
     isCurrent: () => current,
     reopen: async () => {
@@ -91,7 +111,7 @@ test("rejects a reopen result for any channel other than the source", async () =
       event: event(),
       expectedRelayUrl: "wss://relay.example",
       expectedSignerPubkey: SELF,
-      fetchHiddenDmIds: async () => new Set(["hidden-dm"]),
+      hiddenDmIds: new Set(["hidden-dm"]),
       fetchMembers: async () => [member(SELF), member(ALICE)],
       isCurrent: () => true,
       reopen: async () => ({ id: "alternate-dm" }),

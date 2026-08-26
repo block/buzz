@@ -22,43 +22,20 @@ export function dmPeerPubkeysFromMembers(
   return normalized.filter((pubkey) => pubkey !== self);
 }
 
-export function isIncomingDmMessageFeedItem(
-  item: FeedItem,
-  currentPubkey: string | undefined,
-): boolean {
-  const self = normalizePubkey(currentPubkey ?? "");
-  if (
-    !item.channelId ||
-    self.length === 0 ||
-    !CHANNEL_MESSAGE_KINDS.has(item.kind) ||
-    normalizePubkey(item.pubkey) === self
-  ) {
-    return false;
-  }
-
-  return item.tags.some(
-    (tag) => tag[0] === "p" && normalizePubkey(tag[1] ?? "") === self,
-  );
-}
-
-export function isIncomingDmMessageRelayEvent(
+// The resurface subscription is `#h`-scoped to the hidden-DM set, so the relay
+// only delivers events already addressed to a hidden channel the reader belongs
+// to. Eligibility therefore drops the `#p` requirement — an untagged DM (a CLI
+// or agent send that omits participant `p` tags) still resurfaces the row.
+export function isIncomingChannelMessageFromOther(
   event: RelayEvent,
   currentPubkey: string | undefined,
 ): boolean {
-  return isIncomingDmMessageFeedItem(
-    {
-      id: event.id,
-      kind: event.kind,
-      pubkey: event.pubkey,
-      content: event.content,
-      createdAt: event.created_at,
-      channelId:
-        event.tags.find((tag) => tag[0] === "h" && tag[1])?.[1] ?? null,
-      channelName: "",
-      tags: event.tags,
-      category: "mention",
-    },
-    currentPubkey,
+  const self = normalizePubkey(currentPubkey ?? "");
+  return (
+    self.length > 0 &&
+    CHANNEL_MESSAGE_KINDS.has(event.kind) &&
+    relayEventChannelId(event) !== null &&
+    normalizePubkey(event.pubkey) !== self
   );
 }
 

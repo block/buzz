@@ -51,13 +51,16 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
 
   void Function()? _unsubscribeAddressed;
   void Function()? _unsubscribeDms;
+  void Function()? _unsubscribeHiddenDms;
   Timer? _liveRefreshTimer;
   Future<void>? _refreshInFlight;
   int? _refreshGeneration;
   bool _refreshQueued = false;
   int _subscriptionGeneration = 0;
-  final Set<String> _handledDmResurfaceEventIds = {};
-  final Set<String> _pendingDmResurfaceChannelIds = {};
+  // Per-hidden-channel resurface coalescing. Presence of a key means an attempt
+  // is in flight; its value records whether a follower event arrived while it
+  // was running, so a failed reopen re-runs instead of dropping the follower.
+  final Map<String, bool> _pendingDmResurfaceRetry = {};
   String? _dmResurfaceScope;
 
   @override
@@ -75,8 +78,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         '${ref.read(relayConfigProvider).baseUrl}\u0000$currentPubkey';
     if (_dmResurfaceScope != currentScope) {
       _dmResurfaceScope = currentScope;
-      _handledDmResurfaceEventIds.clear();
-      _pendingDmResurfaceChannelIds.clear();
+      _pendingDmResurfaceRetry.clear();
     }
     _clearLiveSubscriptions();
     ref.onDispose(() {
@@ -116,27 +118,51 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
       }
       _unsubscribeAddressed = unsubscribeAddressed;
 
+      final channels =
+          ref.read(channelsProvider).asData?.value ?? const <Channel>[];
       final dmChannelIds = [
-        for (final channel
-            in ref.read(channelsProvider).asData?.value ?? const <Channel>[])
+        for (final channel in channels)
           if (channel.isDm && channel.isMember) channel.id,
       ];
-      if (dmChannelIds.isEmpty) return;
-
-      final unsubscribeDms = await session.subscribe(
-        NostrFilter(
-          kinds: const [9],
-          tags: {'#h': dmChannelIds},
-          since: since,
-          limit: 100,
-        ),
-        (_) => _scheduleLiveRefresh(generation),
-      );
-      if (generation != _subscriptionGeneration) {
-        unsubscribeDms();
-        return;
+      if (dmChannelIds.isNotEmpty) {
+        final unsubscribeDms = await session.subscribe(
+          NostrFilter(
+            kinds: const [9],
+            tags: {'#h': dmChannelIds},
+            since: since,
+            limit: 100,
+          ),
+          (_) => _scheduleLiveRefresh(generation),
+        );
+        if (generation != _subscriptionGeneration) {
+          unsubscribeDms();
+          return;
+        }
+        _unsubscribeDms = unsubscribeDms;
       }
-      _unsubscribeDms = unsubscribeDms;
+
+      // Resurface trigger: hidden DMs are dropped from the visible-DM sub above,
+      // so subscribe to them separately. Channel messages carry a channel_id and
+      // the relay only fans channel-scoped events to channel-scoped subs, so an
+      // `#h` filter (never `#p`, which the relay treats as global) is required.
+      // Hiding never drops membership, so `#h` authorization holds.
+      final hiddenDmIds = ref.read(channelsProvider.notifier).hiddenDmIds;
+      if (hiddenDmIds.isNotEmpty) {
+        final unsubscribeHiddenDms = await session.subscribe(
+          NostrFilter(
+            kinds: EventKind.channelMessageEventKinds,
+            tags: {'#h': hiddenDmIds.toList()},
+            since: since,
+            limit: 100,
+          ),
+          (event) => _handleHiddenDmLiveEvent(event, generation),
+        );
+        if (generation != _subscriptionGeneration) {
+          unsubscribeHiddenDms();
+          return;
+        }
+        _unsubscribeHiddenDms = unsubscribeHiddenDms;
+      }
     } catch (error) {
       if (generation == _subscriptionGeneration) {
         debugPrint('[ActivityNotifier] live subscription failed: $error');
@@ -146,10 +172,13 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
 
   void _handleAddressedLiveEvent(NostrEvent event, int generation) {
     _scheduleLiveRefresh(generation);
+  }
+
+  void _handleHiddenDmLiveEvent(NostrEvent event, int generation) {
+    if (generation != _subscriptionGeneration) return;
     final myPk = ref.read(myPubkeyProvider);
-    if (myPk == null || !isIncomingDmMessageEvent(event, myPk)) {
-      return;
-    }
+    if (myPk == null || !isIncomingChannelMessageFromOther(event, myPk)) return;
+    _scheduleLiveRefresh(generation);
     if (!ref.read(channelsProvider.notifier).hasLoaded) {
       unawaited(
         _resurfaceAfterChannelDiscovery(event, myPk, _dmResurfaceScope),
@@ -187,36 +216,50 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     if (channelId == null || generation != _subscriptionGeneration) return;
     final channelsNotifier = ref.read(channelsProvider.notifier);
     if (!channelsNotifier.hasLoaded ||
-        !channelsNotifier.hiddenDmIds.contains(channelId) ||
-        !_handledDmResurfaceEventIds.add(event.id)) {
+        !channelsNotifier.hiddenDmIds.contains(channelId)) {
       return;
     }
-    if (!_pendingDmResurfaceChannelIds.add(channelId)) return;
+    // Coalesce per channel: a concurrent follower for the same DM marks the
+    // in-flight attempt for retry rather than being dropped, so a failed reopen
+    // re-runs instead of leaving the row hidden.
+    if (_pendingDmResurfaceRetry.containsKey(channelId)) {
+      _pendingDmResurfaceRetry[channelId] = true;
+      return;
+    }
+    _pendingDmResurfaceRetry[channelId] = false;
 
     try {
-      final members = await ref.read(channelMembersProvider(channelId).future);
-      if (generation != _subscriptionGeneration) return;
-      final peers = dmPeerPubkeysFromMembers(
-        members.map((member) => member.pubkey),
-        myPk,
-      );
-      if (peers.isEmpty) return;
-      final openedChannelId = await ref.read(dmResurfaceActionProvider)(
-        peers.toList(),
-      );
-      if (generation != _subscriptionGeneration) return;
-      if (openedChannelId != channelId) {
-        throw StateError('Relay reopened a different DM conversation.');
-      }
-    } catch (error) {
-      _handledDmResurfaceEventIds.remove(event.id);
-      if (generation == _subscriptionGeneration) {
-        debugPrint(
-          '[ActivityNotifier] failed to resurface hidden DM $channelId: $error',
-        );
-      }
+      do {
+        _pendingDmResurfaceRetry[channelId] = false;
+        try {
+          final members = await ref.read(
+            channelMembersProvider(channelId).future,
+          );
+          if (generation != _subscriptionGeneration) return;
+          final peers = dmPeerPubkeysFromMembers(
+            members.map((member) => member.pubkey),
+            myPk,
+          );
+          if (peers.isEmpty) return;
+          final openedChannelId = await ref.read(dmResurfaceActionProvider)(
+            peers.toList(),
+          );
+          if (generation != _subscriptionGeneration) return;
+          if (openedChannelId != channelId) {
+            throw StateError('Relay reopened a different DM conversation.');
+          }
+          return;
+        } catch (error) {
+          if (generation == _subscriptionGeneration) {
+            debugPrint(
+              '[ActivityNotifier] failed to resurface hidden DM $channelId: $error',
+            );
+          }
+        }
+      } while ((_pendingDmResurfaceRetry[channelId] ?? false) &&
+          generation == _subscriptionGeneration);
     } finally {
-      _pendingDmResurfaceChannelIds.remove(channelId);
+      _pendingDmResurfaceRetry.remove(channelId);
     }
   }
 
@@ -277,6 +320,8 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     _unsubscribeAddressed = null;
     _unsubscribeDms?.call();
     _unsubscribeDms = null;
+    _unsubscribeHiddenDms?.call();
+    _unsubscribeHiddenDms = null;
   }
 
   /// Stable identity for the joined DM channel set: null while channels are

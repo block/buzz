@@ -444,6 +444,86 @@ void main() {
     },
   );
 
+  test('a concurrent follower survives a failed in-flight reopen', () async {
+    const self =
+        '1111111111111111111111111111111111111111111111111111111111111111';
+    const alice =
+        '2222222222222222222222222222222222222222222222222222222222222222';
+    final session = _RecordingSessionNotifier();
+    final reopenAttempts = <List<String>>[];
+    final firstReopenGate = Completer<void>();
+    var reopenCalls = 0;
+    final container = ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue(self),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FixedChannelsNotifier(
+            const <Channel>[],
+            hiddenDmIds: const {'hidden-dm'},
+          ),
+        ),
+        channelMembersProvider('hidden-dm').overrideWith(
+          (ref) async => [
+            ChannelMember(
+              pubkey: self,
+              role: 'member',
+              joinedAt: DateTime(2026),
+            ),
+            ChannelMember(
+              pubkey: alice,
+              role: 'member',
+              joinedAt: DateTime(2026),
+            ),
+          ],
+        ),
+        dmResurfaceActionProvider.overrideWithValue((pubkeys) async {
+          reopenCalls += 1;
+          reopenAttempts.add(pubkeys);
+          if (reopenCalls == 1) {
+            // Hold the first attempt open so the follower coalesces into it,
+            // then fail it — the follower must not be silently dropped.
+            await firstReopenGate.future;
+            throw StateError('transient reopen failure');
+          }
+          return 'hidden-dm';
+        }),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    await container.read(activityProvider.future);
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+
+    NostrEvent hiddenDmEvent(String id) => NostrEvent(
+      id: id,
+      pubkey: alice,
+      createdAt: 1_700_000_000,
+      kind: EventKind.streamMessageV2,
+      tags: const [
+        ['p', self],
+        ['h', 'hidden-dm'],
+      ],
+      content: 'Hello again',
+      sig: '',
+    );
+
+    session.emit(hiddenDmEvent('message-a'));
+    await _waitFor(() => reopenCalls == 1);
+    // Follower arrives while attempt A is in flight → coalesced for retry.
+    session.emit(hiddenDmEvent('message-b'));
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    firstReopenGate.complete();
+
+    await _waitFor(() => reopenCalls >= 2);
+    expect(reopenAttempts, [
+      [alice],
+      [alice],
+    ]);
+  });
+
   test('a suspended membership read cannot mutate a rebuilt scope', () async {
     const self =
         '1111111111111111111111111111111111111111111111111111111111111111';

@@ -9,6 +9,18 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export const dmVisibilityQueryKey = ["dm-visibility"] as const;
 
+/** Exact query key for one relay+identity scope's DM-visibility snapshot. */
+export function dmVisibilityQueryKeyFor(
+  relayUrl: string | undefined,
+  pubkey: string | undefined,
+) {
+  return [
+    ...dmVisibilityQueryKey,
+    relayUrl ?? "",
+    normalizePubkey(pubkey ?? ""),
+  ] as const;
+}
+
 export function extractHiddenDmIds(events: readonly RelayEvent[]): Set<string> {
   const latest = events.reduce<RelayEvent | null>(
     (current, event) =>
@@ -40,7 +52,7 @@ export function useHiddenDmIds(pubkey: string | undefined) {
   const normalizedPubkey = normalizePubkey(pubkey ?? "");
   const relayUrl = activeCommunity?.relayUrl ?? "";
   const query = useQuery({
-    queryKey: [...dmVisibilityQueryKey, relayUrl, normalizedPubkey],
+    queryKey: dmVisibilityQueryKeyFor(relayUrl, normalizedPubkey),
     queryFn: () => fetchHiddenDmIds(normalizedPubkey),
     enabled: relayUrl.length > 0 && normalizedPubkey.length > 0,
     staleTime: 30_000,

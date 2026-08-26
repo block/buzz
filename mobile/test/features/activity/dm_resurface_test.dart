@@ -15,26 +15,47 @@ void main() {
     expect(dmPeerPubkeysFromMembers([alice, bob], self), isEmpty);
   });
 
-  test('accepts only external addressed human-message events', () {
-    NostrEvent event({int kind = EventKind.streamMessage, String? author}) =>
-        NostrEvent(
-          id: 'event-1',
-          pubkey: author ?? alice,
-          createdAt: 1,
-          kind: kind,
-          tags: const [
+  test('accepts external channel messages regardless of p tags', () {
+    NostrEvent event({
+      int kind = EventKind.streamMessage,
+      String? author,
+      List<List<String>>? tags,
+    }) => NostrEvent(
+      id: 'event-1',
+      pubkey: author ?? alice,
+      createdAt: 1,
+      kind: kind,
+      tags:
+          tags ??
+          const [
             ['h', 'dm-1'],
             ['p', self],
           ],
-          content: 'hello',
-          sig: 'sig',
-        );
+      content: 'hello',
+      sig: 'sig',
+    );
 
-    expect(isIncomingDmMessageEvent(event(), self), isTrue);
+    expect(isIncomingChannelMessageFromOther(event(), self), isTrue);
     expect(
-      isIncomingDmMessageEvent(event(kind: EventKind.reaction), self),
+      isIncomingChannelMessageFromOther(event(kind: EventKind.reaction), self),
       isFalse,
     );
-    expect(isIncomingDmMessageEvent(event(author: self), self), isFalse);
+    expect(
+      isIncomingChannelMessageFromOther(event(author: self), self),
+      isFalse,
+    );
+    // #h-scoped delivery already guarantees relevance: an untagged DM from
+    // another sender still qualifies.
+    expect(
+      isIncomingChannelMessageFromOther(
+        event(
+          tags: const [
+            ['h', 'dm-1'],
+          ],
+        ),
+        self,
+      ),
+      isTrue,
+    );
   });
 }

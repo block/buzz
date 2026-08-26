@@ -94,6 +94,11 @@ export function useHiddenDmInboxNavigation({
             expectedRelayUrl.length > 0 &&
             expectedSignerPubkey.length > 0)),
     ),
+    isReopenPending: React.useCallback(
+      (channelId: string | null | undefined) =>
+        Boolean(channelId && pendingChannelIdsRef.current.has(channelId)),
+      [],
+    ),
     handleOpenDirect: React.useCallback(
       (item: InboxItem) => {
         const channelId = item.item.channelId;

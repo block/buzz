@@ -215,6 +215,7 @@ type InboxListPaneProps = {
   onMarkRead: (itemId: string) => void;
   onMarkUnread: (itemId: string) => void;
   onOpenDirect: (item: InboxItem) => void;
+  isReopenPending?: (channelId: string | null | undefined) => boolean;
   onRemindLater: (item: InboxItem) => void;
   onSelect: (itemId: string) => void;
   onSelectDraft: (draftKey: string) => void;
@@ -243,6 +244,7 @@ export function InboxListPane({
   onMarkRead,
   onMarkUnread,
   onOpenDirect,
+  isReopenPending,
   onRemindLater,
   onSelect,
   onSelectDraft,
@@ -303,6 +305,13 @@ export function InboxListPane({
         (eventId) => activeReminderEventIds?.has(eventId) ?? false,
       );
     const hasChannelTarget = Boolean(item.item.channelId);
+    const isReopening = isReopenPending?.(item.item.channelId) ?? false;
+    const canOpen = hasChannelTarget && !isReopening;
+    const openLabel = !hasChannelTarget
+      ? "No channel link"
+      : isReopening
+        ? "Reopening…"
+        : "Open in channel";
     const typeLabel = getInboxTypeLabel(item);
     const videoReviewCommentRootId = getInboxVideoReviewCommentRootId(item);
     const isSenderAgent =
@@ -468,8 +477,8 @@ export function InboxListPane({
             </InboxRowActionButton>
           )}
           <InboxRowActionButton
-            disabled={!hasChannelTarget}
-            label={hasChannelTarget ? "Open in channel" : "No channel link"}
+            disabled={!canOpen}
+            label={openLabel}
             onClick={() => onOpenDirect(item)}
           >
             <ExternalLink className="!h-4 !w-4" />
@@ -509,15 +518,15 @@ export function InboxListPane({
           )}
           <ContextMenuSeparator />
           <ContextMenuItem
-            disabled={!hasChannelTarget}
+            disabled={!canOpen}
             onClick={() => {
-              if (hasChannelTarget) {
+              if (canOpen) {
                 onOpenDirect(item);
               }
             }}
           >
             <ExternalLink className="h-4 w-4" />
-            {hasChannelTarget ? "Open in channel" : "No channel link"}
+            {openLabel}
           </ContextMenuItem>
           <ContextMenuItem
             disabled={!hasChannelTarget}

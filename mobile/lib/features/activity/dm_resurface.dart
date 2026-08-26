@@ -15,13 +15,13 @@ Set<String> dmPeerPubkeysFromMembers(
   return members..remove(self);
 }
 
-bool isIncomingDmMessageEvent(NostrEvent event, String currentPubkey) {
+// The resurface subscription is `#h`-scoped to the hidden-DM set, so the relay
+// only delivers events already addressed to a hidden channel the reader belongs
+// to. Eligibility therefore drops the `#p` requirement — an untagged DM (a CLI
+// or agent send that omits participant `p` tags) still resurfaces the row.
+bool isIncomingChannelMessageFromOther(NostrEvent event, String currentPubkey) {
   final self = currentPubkey.trim().toLowerCase();
   return event.channelId != null &&
       EventKind.channelMessageEventKinds.contains(event.kind) &&
-      event.pubkey.toLowerCase() != self &&
-      event.tags.any(
-        (tag) =>
-            tag.length >= 2 && tag[0] == 'p' && tag[1].toLowerCase() == self,
-      );
+      event.pubkey.toLowerCase() != self;
 }
