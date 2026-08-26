@@ -75,7 +75,21 @@ None of this blocks picking it up later. `KindDescriptor` and
 `KindExtension` were built with room for it, see the doc comments in
 `crates/buzz-kinds/src/descriptor.rs` and `extension.rs`.
 
+## Review focus
+
+1. Is deferring authorize/validate logic into `KindExtension` acceptable as
+   its own follow-up PR, or should more of it be bundled here given it's
+   part of the same chokepoint?
+2. `KindDescriptor::read_gate` is declared but not yet consumed anywhere.
+   Is that an acceptable staging point, or should the read-gate flip land
+   in this same PR since it's mechanical and low-risk?
+3. Any objection to leaving `is_relay_only_kind` and `KIND_PUSH_LEASE`'s
+   inline handling outside the registry for now, as described above?
+
 ## Testing
+
+At commit `a05a9c51b` (the last code commit on this branch; later commits
+only touch this description):
 
 - `cargo test -p buzz-relay --lib handlers::ingest`: 174 passed, 1 ignored
   (needs Postgres, pre-existing, unrelated). These are the existing policy
