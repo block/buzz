@@ -10,6 +10,7 @@ import {
   useProvisionChannelManagedAgentMutation,
   useStartManagedAgentMutation,
 } from "@/features/agents/hooks";
+import { applyReusableAgentAccessPolicy } from "@/features/agents/channelAgents";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import { useAddChannelMembersMutation } from "@/features/channels/hooks";
 import { useCanAddChannelMembers } from "@/features/channels/useCanAddChannelMembers";
@@ -30,6 +31,8 @@ import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import {
   getErrorMessage,
+  isManagedAgentRunning,
+  isProviderBackedAgent,
   mergeMentionRecipients,
   MENTION_REFERENCE_TAG,
   mergeOutgoingTagsWithReferenceMentions,
@@ -38,7 +41,6 @@ import {
   resolvePreviewTags,
   uniqueNormalizedPubkeys,
 } from "./useMentionSendFlow.helpers";
-import { prepareManagedAgentMentionsForChannel } from "./managedAgentMentionReadiness";
 import { buildAgentAddressMentionTags } from "@/features/messages/lib/agentAddressMention.mjs";
 import type { UseMentionSendFlowOptions } from "./useMentionSendFlow.types";
 
@@ -149,19 +151,50 @@ export function useMentionSendFlow({
       for (const agent of preparedManagedAgents) {
         managedAgentsByPubkey.set(normalizePubkey(agent.pubkey), agent);
       }
-      return prepareManagedAgentMentionsForChannel({
-        mentionPubkeys,
-        channelId: capturedChannelId,
-        managedAgents: managedAgentsByPubkey.values(),
-        personas,
-        participantPubkeys: [
-          ...mentions.memberPubkeys,
-          ...preparedParticipantPubkeys,
-        ],
-        newlyAddedParticipantPubkeys: preparedParticipantPubkeys,
-        attachAgent: (input) => attachAgentMutation.mutateAsync(input),
-        startAgent: (pubkey) => startAgentMutation.mutateAsync(pubkey),
-      });
+      const existingMembers = new Set(
+        [...mentions.memberPubkeys].map(normalizePubkey),
+      );
+      const participants = new Set([
+        ...existingMembers,
+        ...preparedParticipantPubkeys.map(normalizePubkey),
+      ]);
+      const errors: string[] = [];
+      const pubkeys: string[] = [];
+      for (const pubkey of uniqueNormalizedPubkeys(mentionPubkeys)) {
+        const agent = managedAgentsByPubkey.get(pubkey);
+        if (!agent) continue;
+        try {
+          const readyAgent = existingMembers.has(pubkey)
+            ? agent
+            : await applyReusableAgentAccessPolicy(
+                agent,
+                {},
+                personas.find((persona) => persona.id === agent.personaId),
+              );
+          if (participants.has(pubkey)) {
+            if (
+              (isProviderBackedAgent(readyAgent) &&
+                readyAgent.status !== "deployed") ||
+              (!isProviderBackedAgent(readyAgent) &&
+                !isManagedAgentRunning(readyAgent))
+            ) {
+              await startAgentMutation.mutateAsync(readyAgent.pubkey);
+            }
+          } else {
+            await attachAgentMutation.mutateAsync({
+              channelId: capturedChannelId,
+              agent: readyAgent,
+              role: "bot",
+            });
+          }
+          pubkeys.push(pubkey);
+        } catch (error) {
+          errors.push(
+            `${agent.name}: ${getErrorMessage(error, "Could not prepare agent.")}`,
+          );
+        }
+      }
+      return { errors, pubkeys: uniqueNormalizedPubkeys(pubkeys) };
     },
     [
       attachAgentMutation,

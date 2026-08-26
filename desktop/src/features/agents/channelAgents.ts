@@ -3,25 +3,25 @@ import {
   findReusableGenericAgent,
   findReusablePersonaAgent,
   pickPreferredManagedAgent,
+  resolveReusableAgentAccessPolicy,
 } from "@/features/agents/agentReuse";
 export { findReusableAgent } from "@/features/agents/agentReuse";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { resolveManagedAgentAvatarUrl } from "@/features/agents/ui/managedAgentAvatar";
 import {
-  applyManagedAgentAccessPolicy,
-  type AgentAccessPolicyDefinition,
-} from "@/features/agents/lib/managedAgentAccessPolicy";
-import {
   addChannelMembers,
   createManagedAgent,
   getChannelMembers,
   listManagedAgents,
+  updateManagedAgent,
 } from "@/shared/api/tauri";
 import { listPersonas } from "@/shared/api/tauriPersonas";
 import { startManagedAgent } from "@/shared/api/tauriManagedAgents";
 import type {
   AcpRuntime,
+  AgentPersona,
   ChannelRole,
+  CreateManagedAgentInput,
   ManagedAgent,
   ManagedAgentBackend,
   RespondToMode,
@@ -114,8 +114,33 @@ export type CreateChannelManagedAgentsResult = {
 type ChannelAgentReuseContext = {
   managedAgents: ManagedAgent[];
   channelMemberPubkeys: ReadonlySet<string>;
-  personas: readonly AgentAccessPolicyDefinition[];
+  personas: readonly Pick<
+    AgentPersona,
+    "id" | "respondTo" | "respondToAllowlist"
+  >[];
 };
+
+export async function applyReusableAgentAccessPolicy(
+  agent: ManagedAgent,
+  request: Pick<CreateManagedAgentInput, "respondTo" | "respondToAllowlist">,
+  persona?: Pick<AgentPersona, "respondTo" | "respondToAllowlist">,
+) {
+  const policy = resolveReusableAgentAccessPolicy(request, persona);
+  const matches =
+    agent.respondTo === policy.respondTo &&
+    agent.respondToAllowlist.length === policy.respondToAllowlist.length &&
+    agent.respondToAllowlist.every(
+      (pubkey, index) => pubkey === policy.respondToAllowlist[index],
+    );
+  if (matches) return agent;
+
+  return (
+    await updateManagedAgent({
+      pubkey: agent.pubkey,
+      ...policy,
+    })
+  ).agent;
+}
 
 export async function attachManagedAgentToChannel(
   channelId: string,
@@ -292,7 +317,7 @@ export async function provisionChannelManagedAgent(
       const definition = context.personas.find(
         (persona) => persona.id === input.personaId,
       );
-      const updatedAgent = await applyManagedAgentAccessPolicy(
+      const updatedAgent = await applyReusableAgentAccessPolicy(
         reusable,
         input,
         definition,
@@ -321,7 +346,10 @@ export async function provisionChannelManagedAgent(
       context.channelMemberPubkeys,
     );
     if (reusable) {
-      const updatedAgent = await applyManagedAgentAccessPolicy(reusable, input);
+      const updatedAgent = await applyReusableAgentAccessPolicy(
+        reusable,
+        input,
+      );
 
       return {
         agent: updatedAgent,
