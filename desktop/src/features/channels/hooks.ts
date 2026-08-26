@@ -832,7 +832,20 @@ export function useAddChannelMembersMutation(channelId: string | null) {
       // Invalidate the effective channel (the one actually mutated) not the
       // live hook-closure channel, which may have changed mid-send.
       const effectiveChannelId = variables?.channelId ?? channelId;
-      await invalidateChannelState(queryClient, effectiveChannelId);
+      await Promise.all([
+        invalidateChannelState(queryClient, effectiveChannelId),
+        // Relay-agent discovery is membership-backed. Without this refresh,
+        // adding an existing agent through the members picker leaves the
+        // autocomplete directory stale and the same-named local persona can
+        // be offered as a new agent until the five-minute focus refresh.
+        ...(variables?.role === "bot"
+          ? [
+              queryClient.invalidateQueries({
+                queryKey: ["relay-agents"],
+              }),
+            ]
+          : []),
+      ]);
     },
   });
 }

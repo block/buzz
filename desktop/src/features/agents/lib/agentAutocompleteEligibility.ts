@@ -216,7 +216,7 @@ export function filterAdmittedMentionPubkeys(
 }
 
 export function isAgentMentionChannelType(type?: string | null) {
-  return type === "stream" || type === "forum";
+  return type === "stream" || type === "forum" || type === "dm";
 }
 
 export function uniqueAutocompleteLabels(

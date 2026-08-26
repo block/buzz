@@ -224,7 +224,7 @@ test("getMentionableAgentPubkeys: scopes channel composers and fails closed with
 test("autocomplete helper extraction preserves safe filtering and labels", () => {
   assert.equal(isAgentMentionChannelType("stream"), true);
   assert.equal(isAgentMentionChannelType("forum"), true);
-  assert.equal(isAgentMentionChannelType("dm"), false);
+  assert.equal(isAgentMentionChannelType("dm"), true);
   assert.equal(isAgentMentionChannelType(null), false);
 
   assert.deepEqual(
