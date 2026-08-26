@@ -301,20 +301,47 @@ pub async fn resolve_report_with_enforcement(
         .await
         .map_err(ResolutionError::from)?
     {
-        ClaimResult::Claimed(a) | ClaimResult::AlreadyClaimed(a) => a,
+        ClaimResult::Claimed(a) => a,
+        ClaimResult::AlreadyClaimed(a) => {
+            // Idempotent retry: the report was already claimed under this
+            // request_id. A retry that changes `action`/`reason`/`timeout_until`/
+            // actor must NOT execute or finalize the new values — that would drive
+            // an action the persisted audit record does not describe. Log the
+            // divergence and drive exclusively from the persisted record below
+            // (single source of truth: retries converge to the first outcome).
+            if a.action != action
+                || a.reason.as_deref() != reason
+                || a.timeout_until != timeout_until
+                || a.actor_pubkey.as_slice() != actor_pubkey
+            {
+                warn!(
+                    action_id = %a.id,
+                    request_id = %request_id,
+                    persisted_action = %a.action,
+                    retry_action = %action,
+                    "idempotent retry body differs from the persisted claim; driving from the persisted record"
+                );
+            }
+            a
+        }
         ClaimResult::NotOpen(status) => return Err(ResolutionError::NotOpen(status)),
         ClaimResult::NotFound => return Err(ResolutionError::NotFound),
     };
 
+    // Drive and finalize from the persisted record's fields — the single source
+    // of truth for this action. For a fresh `Claimed`, these equal the request
+    // values; for an `AlreadyClaimed` retry, they are the first claim's values,
+    // so a changed retry body can never diverge the executed mutation, the outbox
+    // payloads, or the audit record from the first claim.
     drive_enforcement(
         state,
         tenant,
         community_id,
         report_id,
-        action,
-        reason,
-        timeout_until,
-        actor_pubkey,
+        &action_record.action,
+        action_record.reason.as_deref(),
+        action_record.timeout_until,
+        &action_record.actor_pubkey,
         target_pubkey_opt.as_deref(),
         target_event_id_opt.as_deref(),
         channel_id,

@@ -5073,7 +5073,114 @@ mod tests {
         );
     }
 
-    // ── 2. kick retry after this action removed the member ────────────────────
+    // ── 1b. timeout affected-user notice: worker renders the authoritative term ─
+
+    #[tokio::test]
+    #[ignore = "requires Postgres — timeout affected_user_notice worker delivery renders the expiry"]
+    async fn timeout_affected_user_notice_worker_renders_expiry_term() {
+        // The seam this pins: an authoritative `timeout_until` must survive from
+        // the persisted action row, through the `affected_user_notice` outbox
+        // payload, into the recipient-facing kind-9 DM the worker delivers. Drives
+        // the FULL path — HTTP resolve → finalize → real `deliver_one` — then reads
+        // the persisted recipient event and asserts its body carries the actual
+        // expiry timestamp. Replacing the worker's `timeout_until` parse with `None`
+        // (Thufir's mutation) drops the term and fails this test.
+        let pool = e2e_pool().await;
+        let (community_id, host) = e2e_community(&pool, "timeout-notice-worker").await;
+        let target = vec![0x71u8; 32];
+        let actor = vec![0x72u8; 32];
+        let report_id = e2e_report_pubkey(&pool, community_id, &target).await;
+
+        let state = state_from_pool(pool.clone()).await;
+        let tenant = e2e_tenant(community_id, &host);
+        let report = state
+            .db
+            .admin_get_report(report_id)
+            .await
+            .expect("load report")
+            .expect("report exists");
+
+        // A fixed, sub-second-free expiry so the rendered RFC3339 string is exact.
+        let until = chrono::DateTime::parse_from_rfc3339("2099-01-02T03:04:05+00:00")
+            .expect("parse expiry")
+            .with_timezone(&chrono::Utc);
+
+        let resolved = crate::handlers::report_resolution::resolve_report_with_enforcement(
+            &state,
+            &tenant,
+            &report,
+            "timeout",
+            Some("Cooling-off period."),
+            Some(until),
+            uuid::Uuid::new_v4(),
+            &actor,
+            "operator",
+            "relay_operator",
+        )
+        .await
+        .expect("timeout enforcement must succeed");
+        let action_id = resolved.action_id;
+
+        // Fetch the affected_user_notice outbox row finalization enqueued.
+        let notice_outbox_id: uuid::Uuid = sqlx::query_scalar(
+            "SELECT id FROM relay_admin_outbox WHERE action_id = $1 AND task_type = 'affected_user_notice'",
+        )
+        .bind(action_id)
+        .fetch_one(&pool)
+        .await
+        .expect("timeout must enqueue an affected_user_notice outbox row");
+
+        // Claim it and deliver through the real outbox worker entry point.
+        let lease_until = chrono::Utc::now() + chrono::Duration::seconds(30);
+        let mut batch = state
+            .db
+            .claim_pending_admin_outbox_batch("timeout-notice-worker", lease_until, 100)
+            .await
+            .expect("claim outbox batch");
+        let idx = batch
+            .iter()
+            .position(|r| r.id == notice_outbox_id)
+            .expect("affected_user_notice row must be in batch");
+        let row = batch.remove(idx);
+        crate::handlers::admin_outbox_worker::deliver_one(&state, &row).await;
+
+        // The row must be delivered (a delivery failure would leave it pending).
+        let notice_state: String =
+            sqlx::query_scalar("SELECT state FROM relay_admin_outbox WHERE id = $1")
+                .bind(notice_outbox_id)
+                .fetch_one(&pool)
+                .await
+                .expect("notice outbox state");
+        assert_eq!(
+            notice_state, "delivered",
+            "affected_user_notice must be delivered after deliver_one"
+        );
+
+        // The persisted recipient kind-9 DM body must carry the authoritative
+        // expiry term. `moderation_source` = action_id links the notice to its
+        // action, so we can find exactly this event.
+        let body: String = sqlx::query_scalar(
+            r#"SELECT content FROM events
+               WHERE community_id = $1 AND kind = 9
+                 AND tags @> $2::jsonb"#,
+        )
+        .bind(community_id)
+        .bind(serde_json::json!([[
+            "moderation_source",
+            action_id.to_string()
+        ]]))
+        .fetch_one(&pool)
+        .await
+        .expect("recipient timeout notice event must be persisted");
+        assert!(
+            body.contains(&until.to_rfc3339()),
+            "timeout notice body must carry the authoritative expiry term; body was: {body}"
+        );
+        assert!(
+            body.contains("timed out"),
+            "timeout notice body must name the restriction; body was: {body}"
+        );
+    }
 
     #[tokio::test]
     #[ignore = "requires Postgres — kick retry provenance: Removed vs AlreadyGone"]
@@ -5655,6 +5762,162 @@ mod tests {
         assert_eq!(
             action_count, 0,
             "no action row may exist for a pre-claim rejection"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres — same-request_id retry with a changed body drives from the persisted claim"]
+    async fn same_request_id_retry_with_changed_body_uses_persisted_claim() {
+        // Idempotency contract: a retry that reuses the request_id but changes the
+        // action/reason/timeout must converge to the FIRST claim's outcome. The
+        // divergence window is a report still `processing` — the first request
+        // claimed a `ban` but has not yet finalized (a crash or concurrent retry).
+        // A same-request_id retry saying `timeout` with an expiry and a different
+        // reason then reaches `AlreadyClaimed`; the executed mutation, the outbox
+        // payloads, and the audit record must ALL reflect the persisted `ban`,
+        // never the retry's `timeout`.
+        let pool = e2e_pool().await;
+        let (community_id, host) = e2e_community(&pool, "retry-changed-body").await;
+        let cid = buzz_core::CommunityId::from_uuid(community_id);
+        let target = vec![0x81u8; 32];
+        let actor = vec![0x82u8; 32];
+        let report_id = e2e_report_pubkey(&pool, community_id, &target).await;
+
+        let request_id = uuid::Uuid::new_v4();
+
+        // Seed the first claim (report open→processing, action row persisted as a
+        // `ban`) WITHOUT driving it to completion — the report stays `processing`,
+        // reproducing a first request that has not yet finalized.
+        let claimed = match buzz_db::relay_admin_actions::claim_report(
+            &pool,
+            cid,
+            report_id,
+            request_id,
+            &actor,
+            "operator",
+            "ban",
+            Some("Repeated spam."),
+            None,
+            "resolve:ban",
+            "relay_operator",
+            Some(&target),
+            None,
+            None,
+        )
+        .await
+        .expect("first claim")
+        {
+            buzz_db::relay_admin_actions::ClaimResult::Claimed(a) => a,
+            other => panic!("expected Claimed, got {other:?}"),
+        };
+        let action_id = claimed.id;
+
+        let state = state_from_pool(pool.clone()).await;
+        let tenant = e2e_tenant(community_id, &host);
+        let report = state
+            .db
+            .admin_get_report(report_id)
+            .await
+            .expect("load report")
+            .expect("report exists");
+
+        // Retry with the SAME request_id but a changed body: timeout + expiry +
+        // different reason. The resolver must reach AlreadyClaimed, drive from the
+        // persisted ban, and converge to the first outcome.
+        let retry_until = chrono::DateTime::parse_from_rfc3339("2099-06-07T08:09:10+00:00")
+            .expect("parse expiry")
+            .with_timezone(&chrono::Utc);
+        let retry = crate::handlers::report_resolution::resolve_report_with_enforcement(
+            &state,
+            &tenant,
+            &report,
+            "timeout",
+            Some("Different reason entirely."),
+            Some(retry_until),
+            request_id,
+            &actor,
+            "operator",
+            "relay_operator",
+        )
+        .await
+        .expect("retry must converge idempotently");
+        assert_eq!(
+            action_id, retry.action_id,
+            "same request_id must return the same action"
+        );
+
+        // Persisted action row still describes the FIRST ban — not the retry.
+        let rec = buzz_db::relay_admin_actions::get_action(&pool, action_id)
+            .await
+            .expect("get_action")
+            .expect("action exists");
+        assert_eq!(
+            rec.action, "ban",
+            "persisted action must remain the first ban"
+        );
+        assert_eq!(rec.reason.as_deref(), Some("Repeated spam."));
+        assert!(
+            rec.timeout_until.is_none(),
+            "a ban is indefinite; the retry's expiry must not have been written"
+        );
+        assert_eq!(
+            rec.state, "succeeded",
+            "the ban must have been driven to success"
+        );
+
+        // Executed mutation: an indefinite ban row (banned=TRUE), NOT a timeout
+        // mute (muted_until set). The retry's `timeout` never ran.
+        let (banned, muted_until): (bool, Option<chrono::DateTime<chrono::Utc>>) =
+            sqlx::query_as(
+                "SELECT banned, muted_until FROM community_bans WHERE community_id = $1 AND pubkey = $2",
+            )
+            .bind(community_id)
+            .bind(&target)
+            .fetch_one(&pool)
+            .await
+            .expect("community_bans row");
+        assert!(banned, "the persisted ban must have executed (banned=TRUE)");
+        assert!(
+            muted_until.is_none(),
+            "the retry's timeout must not have muted the user"
+        );
+
+        // Outbox affected_user_notice payload reflects the ban restriction, with
+        // no timeout expiry from the retry.
+        let notice_payload: serde_json::Value = sqlx::query_scalar(
+            "SELECT payload FROM relay_admin_outbox WHERE action_id = $1 AND task_type = 'affected_user_notice'",
+        )
+        .bind(action_id)
+        .fetch_one(&pool)
+        .await
+        .expect("affected_user_notice row");
+        assert_eq!(
+            notice_payload["restriction_kind"].as_str(),
+            Some("ban"),
+            "notice must describe the persisted ban"
+        );
+        assert!(
+            notice_payload.get("timeout_until").is_none(),
+            "ban notice must carry no expiry from the retry"
+        );
+        assert_eq!(
+            notice_payload["public_reason"].as_str(),
+            Some("Repeated spam."),
+            "notice reason must be the first claim's reason"
+        );
+
+        // Audit record: exactly one row, describing the ban.
+        let audit_actions: Vec<String> = sqlx::query_scalar(
+            "SELECT action FROM moderation_actions WHERE community_id = $1 ORDER BY created_at",
+        )
+        .bind(community_id)
+        .fetch_all(&pool)
+        .await
+        .expect("audit rows");
+        assert_eq!(
+            audit_actions,
+            vec!["resolve:ban".to_string()],
+            "exactly one audit row, describing the first ban"
         );
     }
 

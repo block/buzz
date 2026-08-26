@@ -2189,64 +2189,70 @@ mod tests {
     #[ignore = "requires Postgres"]
     async fn finalize_maps_delete_and_kick_to_content_actioned_notice() {
         // The four-action mapping: delete/kick → content_actioned. (ban/timeout →
-        // restriction are covered by the restriction tests above.) A `kick`
-        // carries a target pubkey, so the affected user is notified.
+        // restriction are covered by the restriction tests above.) Both `delete`
+        // and `kick` are finalized against a target pubkey so the affected user is
+        // notified; removing EITHER mapping arm fails this test.
         let pool = setup_pool().await;
         let community_id = make_community(&pool).await;
-        let report_id = make_report(&pool, community_id).await;
 
-        let claimed = match do_claim(&pool, community_id, report_id, Uuid::new_v4()).await {
-            ClaimResult::Claimed(a) => a,
-            other => panic!("expected Claimed, got {other:?}"),
-        };
-        let action_id = claimed.id;
-        let _ = begin_enforcing(&pool, action_id)
-            .await
-            .expect("begin_enforcing");
-        let _ = commit_mutation_step(&pool, action_id)
-            .await
-            .expect("commit_mutation_step");
+        // Finalize one action per verb on its own report (the affected_user_notice
+        // dedup_key is per-action) and assert each enqueues a content_actioned
+        // notice with no restriction fields.
+        for verb in ["delete", "kick"] {
+            let report_id = make_report(&pool, community_id).await;
+            let claimed = match do_claim(&pool, community_id, report_id, Uuid::new_v4()).await {
+                ClaimResult::Claimed(a) => a,
+                other => panic!("expected Claimed, got {other:?}"),
+            };
+            let action_id = claimed.id;
+            let _ = begin_enforcing(&pool, action_id)
+                .await
+                .expect("begin_enforcing");
+            let _ = commit_mutation_step(&pool, action_id)
+                .await
+                .expect("commit_mutation_step");
 
-        let target = vec![1u8; 32];
-        let channel_id = Uuid::new_v4();
-        let finalized = finalize_success(
-            &pool,
-            action_id,
-            CommunityId::from_uuid(community_id),
-            report_id,
-            "resolved",
-            &actor(),
-            "kick",
-            Some(&target),
-            None,
-            Some(channel_id),
-            Some("Off-topic."),
-            None,
-        )
-        .await
-        .expect("finalize_success");
-        assert!(finalized);
-
-        let rows = list_pending_outbox(&pool, action_id)
+            let target = vec![1u8; 32];
+            let channel_id = Uuid::new_v4();
+            let finalized = finalize_success(
+                &pool,
+                action_id,
+                CommunityId::from_uuid(community_id),
+                report_id,
+                "resolved",
+                &actor(),
+                verb,
+                Some(&target),
+                None,
+                Some(channel_id),
+                Some("Off-topic."),
+                None,
+            )
             .await
-            .expect("list_pending_outbox");
-        let notice = rows
-            .iter()
-            .find(|r| r.task_type == "affected_user_notice")
-            .expect("kick must enqueue an affected_user_notice");
-        assert_eq!(
-            notice.payload["notice_kind"].as_str(),
-            Some("content_actioned"),
-            "kick maps to content_actioned"
-        );
-        assert!(
-            notice.payload.get("restriction_kind").is_none(),
-            "content_actioned notice carries no restriction_kind"
-        );
-        assert!(
-            notice.payload.get("timeout_until").is_none(),
-            "content_actioned notice carries no timeout_until"
-        );
+            .expect("finalize_success");
+            assert!(finalized);
+
+            let rows = list_pending_outbox(&pool, action_id)
+                .await
+                .expect("list_pending_outbox");
+            let notice = rows
+                .iter()
+                .find(|r| r.task_type == "affected_user_notice")
+                .unwrap_or_else(|| panic!("{verb} must enqueue an affected_user_notice"));
+            assert_eq!(
+                notice.payload["notice_kind"].as_str(),
+                Some("content_actioned"),
+                "{verb} maps to content_actioned"
+            );
+            assert!(
+                notice.payload.get("restriction_kind").is_none(),
+                "content_actioned notice carries no restriction_kind"
+            );
+            assert!(
+                notice.payload.get("timeout_until").is_none(),
+                "content_actioned notice carries no timeout_until"
+            );
+        }
     }
 
     #[tokio::test]
