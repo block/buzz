@@ -11,6 +11,7 @@ import {
 } from "@/features/channels/lib/ephemeralChannel";
 import { useIsProjectHomeChannel } from "@/features/projects/lib/projectHomeChannel";
 import type { Channel } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -124,7 +125,14 @@ export function ChannelTypeSettings({
         className="flex items-center justify-between gap-3 px-3 py-3"
         data-testid={`${testIdPrefix}-channel-type-row`}
       >
-        <span className="text-sm font-medium text-foreground">{label}</span>
+        <span
+          className={cn(
+            "text-sm font-medium text-foreground",
+            disabled && variant === "segmented" && "opacity-50",
+          )}
+        >
+          {label}
+        </span>
         {variant === "segmented" ? (
           <SegmentedControl
             disabled={disabled}
@@ -166,7 +174,10 @@ export function ChannelTypeSettings({
               data-testid={`${testIdPrefix}-ephemeral-settings`}
             >
               <label
-                className="text-sm font-medium"
+                className={cn(
+                  "text-sm font-medium",
+                  disabled && variant === "segmented" && "opacity-50",
+                )}
                 htmlFor={`${testIdPrefix}-ttl`}
               >
                 Expires after

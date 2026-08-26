@@ -40,7 +40,14 @@ export function ChannelPermissionsSettings({
       )}
       data-testid={`${testIdPrefix}-permissions-container`}
     >
-      <span className="text-sm font-medium text-foreground">Visibility</span>
+      <span
+        className={cn(
+          "text-sm font-medium text-foreground",
+          disabled && variant === "segmented" && "opacity-50",
+        )}
+      >
+        Visibility
+      </span>
       {variant === "segmented" ? (
         <SegmentedControl
           disabled={disabled}

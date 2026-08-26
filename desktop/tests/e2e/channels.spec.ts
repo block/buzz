@@ -1565,7 +1565,7 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
   ).toHaveAttribute("aria-pressed", "true");
   await expect(
     page.getByTestId("create-channel-permissions-option-open"),
-  ).toBeVisible();
+  ).toHaveAttribute("aria-pressed", "false");
   await page.getByTestId("create-channel-permissions-option-open").click();
   await expect(
     page.getByTestId("create-channel-permissions-option-open"),
