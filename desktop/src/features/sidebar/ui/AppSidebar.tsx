@@ -34,6 +34,7 @@ import {
   AppSidebarPrimaryMenu,
 } from "@/features/sidebar/ui/AppSidebarPinnedHeader";
 import {
+  canPreviewUnreadDm,
   MoreUnreadButton,
   preferredUnreadTarget,
 } from "@/features/sidebar/ui/MoreUnreadButton";
@@ -152,7 +153,7 @@ export function AppSidebar({
   const scrollRef = React.useRef<HTMLDivElement>(null);
   useSidebarScrollLock(scrollRef);
   // biome-ignore format: keep compact to stay within file size limit
-  const { scrollToChannel, scrollToNextAbove, scrollToNextBelow, unreadAboveCount, unreadBelowCount, unreadBelowChannelIds, unreadAboveLabel, unreadBelowLabel } = useSidebarActivityOverflow({ activeWorkingByChannelId, previewActivityChannelIds, scrollRef, unreadChannelIds });
+  const { scrollToChannel, scrollToNextAbove, scrollToNextBelow, unreadAboveCount, unreadBelowCount, unreadMessageBelowChannelIds, unreadAboveLabel, unreadBelowLabel } = useSidebarActivityOverflow({ activeWorkingByChannelId, previewActivityChannelIds, scrollRef, unreadChannelIds });
 
   React.useEffect(() => {
     const scrollElement = scrollRef.current;
@@ -396,12 +397,22 @@ export function AppSidebar({
   );
   const unreadDmPreviewsBelow = React.useMemo(
     () =>
-      unreadBelowChannelIds.flatMap((channelId) => {
+      unreadMessageBelowChannelIds.flatMap((channelId) => {
         const channel = directMessages.find(
           (candidate) => candidate.id === channelId,
         );
-        const participant = dmParticipantsByChannelId[channelId]?.[0];
-        if (!channel || !participant) return [];
+        const participants = dmParticipantsByChannelId[channelId];
+        const participant = participants?.[0];
+        if (
+          !channel ||
+          !participant ||
+          !canPreviewUnreadDm(
+            channel.participantPubkeys.length,
+            participants?.length ?? 0,
+          )
+        ) {
+          return [];
+        }
         return [
           {
             accessibleLabel: participant.label,
@@ -415,7 +426,7 @@ export function AppSidebar({
       directMessages,
       dmChannelLabels,
       dmParticipantsByChannelId,
-      unreadBelowChannelIds,
+      unreadMessageBelowChannelIds,
     ],
   );
   const nextUnreadDmBelowId = preferredUnreadTarget(unreadDmPreviewsBelow);

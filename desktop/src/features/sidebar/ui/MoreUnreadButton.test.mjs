@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  canPreviewUnreadDm,
   MoreUnreadButton,
   preferredUnreadTarget,
   unreadDmAccessibleLabel,
@@ -20,6 +21,12 @@ function preview(channelId, label = channelId, avatarUrl = null) {
 }
 
 describe("MoreUnreadButton model", () => {
+  it("previews only honest one-to-one DM identities", () => {
+    assert.equal(canPreviewUnreadDm(2, 1), true);
+    assert.equal(canPreviewUnreadDm(3, 2), false);
+    assert.equal(canPreviewUnreadDm(2, 0), false);
+  });
+
   it("caps the stack at three avatars without a numeric overflow chip", () => {
     assert.deepEqual(
       visibleUnreadDmPreviews([preview("a"), preview("b"), preview("c")]).map(
@@ -51,6 +58,15 @@ describe("MoreUnreadButton model", () => {
         position: "bottom",
       }),
       "Go to unread direct message from Alice. 2 new messages below.",
+    );
+    assert.equal(
+      unreadDmAccessibleLabel({
+        count: 2,
+        dmPreviews: [preview("dm", "Alice")],
+        label: "2 new activity",
+        position: "bottom",
+      }),
+      "Go to unread direct message from Alice. 2 new activity below.",
     );
     assert.equal(
       unreadDmAccessibleLabel({

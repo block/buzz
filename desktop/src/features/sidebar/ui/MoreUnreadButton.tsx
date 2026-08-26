@@ -9,6 +9,13 @@ export type UnreadDmPreview = {
   label: string;
 };
 
+export function canPreviewUnreadDm(
+  participantPubkeyCount: number,
+  resolvedParticipantCount: number,
+) {
+  return participantPubkeyCount === 2 && resolvedParticipantCount === 1;
+}
+
 export function visibleUnreadDmPreviews(dmPreviews: UnreadDmPreview[]) {
   return dmPreviews.slice(0, 3);
 }
@@ -16,16 +23,19 @@ export function visibleUnreadDmPreviews(dmPreviews: UnreadDmPreview[]) {
 export function unreadDmAccessibleLabel({
   count,
   dmPreviews,
+  label,
   position,
 }: {
   count: number;
   dmPreviews: UnreadDmPreview[];
+  label?: string;
   position: "top" | "bottom";
 }) {
   const direction = position === "top" ? "above" : "below";
+  const resolvedLabel = label ?? unreadCountLabel(count);
   return dmPreviews[0]
-    ? `Go to unread direct message from ${dmPreviews[0].accessibleLabel}. ${unreadCountLabel(count)} ${direction}.`
-    : `${unreadCountLabel(count)} ${direction}`;
+    ? `Go to unread direct message from ${dmPreviews[0].accessibleLabel}. ${resolvedLabel} ${direction}.`
+    : `${resolvedLabel} ${direction}`;
 }
 
 export function preferredUnreadTarget(
@@ -59,6 +69,7 @@ export function MoreUnreadButton({
   const accessibleLabel = unreadDmAccessibleLabel({
     count,
     dmPreviews,
+    label: resolvedLabel,
     position,
   });
 
