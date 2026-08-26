@@ -25,24 +25,26 @@ export function unreadDmAccessibleLabel({
   dmPreviews,
   label,
   position,
+  targetChannelId,
 }: {
   count: number;
   dmPreviews: UnreadDmPreview[];
   label?: string;
   position: "top" | "bottom";
+  targetChannelId?: string;
 }) {
   const direction = position === "top" ? "above" : "below";
   const resolvedLabel = label ?? unreadCountLabel(count);
-  return dmPreviews[0]
-    ? `Go to unread direct message from ${dmPreviews[0].accessibleLabel}. ${resolvedLabel} ${direction}.`
+  const targetPreview = dmPreviews.find(
+    ({ channelId }) => channelId === targetChannelId,
+  );
+  return targetPreview
+    ? `Go to unread direct message from ${targetPreview.accessibleLabel}. ${resolvedLabel} ${direction}.`
     : `${resolvedLabel} ${direction}`;
 }
 
-export function preferredUnreadTarget(
-  dmPreviews: UnreadDmPreview[],
-  nearestChannelId?: string,
-) {
-  return dmPreviews[0]?.channelId ?? nearestChannelId;
+export function preferredUnreadTarget(unreadChannelIds: string[]) {
+  return unreadChannelIds[0];
 }
 
 export function MoreUnreadButton({
@@ -52,6 +54,7 @@ export function MoreUnreadButton({
   label,
   onClick,
   position,
+  targetChannelId,
   testId,
 }: {
   bottomClassName?: string;
@@ -60,6 +63,7 @@ export function MoreUnreadButton({
   label?: string;
   onClick: () => void;
   position: "top" | "bottom";
+  targetChannelId?: string;
   testId: string;
 }) {
   const positionClassName =
@@ -71,6 +75,7 @@ export function MoreUnreadButton({
     dmPreviews,
     label: resolvedLabel,
     position,
+    targetChannelId,
   });
 
   return (

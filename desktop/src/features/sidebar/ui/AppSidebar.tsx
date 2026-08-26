@@ -429,7 +429,9 @@ export function AppSidebar({
       unreadMessageBelowChannelIds,
     ],
   );
-  const nextUnreadDmBelowId = preferredUnreadTarget(unreadDmPreviewsBelow);
+  const nextUnreadDmBelowId = preferredUnreadTarget(
+    unreadMessageBelowChannelIds,
+  );
   const sidebarLoadingShape = useSidebarLoadingShape({
     activeCommunityId: activeCommunity?.id,
     currentPubkey,
@@ -808,6 +810,7 @@ export function AppSidebar({
                   : scrollToNextBelow()
               }
               position="bottom"
+              targetChannelId={nextUnreadDmBelowId}
               testId="sidebar-more-unread-below"
             />
           ) : null}

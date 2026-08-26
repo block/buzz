@@ -45,17 +45,21 @@ describe("MoreUnreadButton model", () => {
     );
   });
 
-  it("uses the preview channel as the advertised navigation target", () => {
-    assert.equal(preferredUnreadTarget([preview("dm")], "nearer"), "dm");
-    assert.equal(preferredUnreadTarget([], "nearer"), "nearer");
+  it("keeps navigation ordering independent from avatar eligibility", () => {
+    assert.equal(
+      preferredUnreadTarget(["near-group", "far-previewable", "channel"]),
+      "near-group",
+    );
+    assert.equal(preferredUnreadTarget([]), undefined);
   });
 
-  it("announces the DM target and message count", () => {
+  it("announces a DM identity only when it matches the navigation target", () => {
     assert.equal(
       unreadDmAccessibleLabel({
         count: 2,
         dmPreviews: [preview("dm", "Alice")],
         position: "bottom",
+        targetChannelId: "dm",
       }),
       "Go to unread direct message from Alice. 2 new messages below.",
     );
@@ -65,8 +69,18 @@ describe("MoreUnreadButton model", () => {
         dmPreviews: [preview("dm", "Alice")],
         label: "2 new activity",
         position: "bottom",
+        targetChannelId: "dm",
       }),
       "Go to unread direct message from Alice. 2 new activity below.",
+    );
+    assert.equal(
+      unreadDmAccessibleLabel({
+        count: 2,
+        dmPreviews: [preview("far-previewable", "Alice")],
+        position: "bottom",
+        targetChannelId: "near-group",
+      }),
+      "2 new messages below",
     );
     assert.equal(
       unreadDmAccessibleLabel({
@@ -90,6 +104,7 @@ describe("MoreUnreadButton model", () => {
         ],
         onClick() {},
         position: "bottom",
+        targetChannelId: "dm-one",
         testId: "more-unread",
       }),
     );
