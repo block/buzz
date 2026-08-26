@@ -13,6 +13,7 @@ import {
 import { useHuddleSpeakerActivity } from "./lib/useHuddleSpeakerActivity";
 import { useMicLevelAnalyser } from "./lib/useMicLevelAnalyser";
 import { useTtsSubscription } from "./lib/useTtsSubscription";
+import { huddleRequestRingtone } from "./lib/huddleRequestRingtone";
 import type {
   HuddleContextValue,
   HuddleLevelsValue,
@@ -708,6 +709,7 @@ export function HuddleProvider({
       ephemeralChannelId: string,
       huddleThreadEventId?: string,
     ) => {
+      huddleRequestRingtone.stop(ephemeralChannelId);
       if (busyRef.current) return;
       busyRef.current = true;
       tokenRef.current += 1;

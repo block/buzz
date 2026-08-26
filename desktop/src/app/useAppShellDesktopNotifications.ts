@@ -23,6 +23,12 @@ import {
 } from "@/features/notifications/lib/sound";
 import { useNotificationSenderName } from "@/features/notifications/useNotificationSenderName";
 import type { Channel, RelayEvent } from "@/shared/api/types";
+import { KIND_HUDDLE_STARTED } from "@/shared/constants/kinds";
+import {
+  huddleRequestRingtone,
+  huddleRingtoneCommand,
+  shouldRingForHuddleRequest,
+} from "@/features/huddle/lib/huddleRequestRingtone";
 
 export function useAppShellDesktopNotifications({
   channels,
@@ -32,6 +38,7 @@ export function useAppShellDesktopNotifications({
   notificationSettings,
   openSearchHit,
   pubkey,
+  mutedChannelIds,
   silentChannelIds,
 }: {
   channels: Channel[];
@@ -47,6 +54,7 @@ export function useAppShellDesktopNotifications({
     behavior?: { force?: boolean },
   ) => Promise<unknown>;
   pubkey?: string;
+  mutedChannelIds?: ReadonlySet<string>;
   silentChannelIds?: ReadonlySet<string>;
 }) {
   // Roster alerts are owner/admin-only and self-gating; mounted here because
@@ -70,9 +78,11 @@ export function useAppShellDesktopNotifications({
   const handleDmNotification = React.useEffectEvent(
     (event: RelayEvent, channel: Channel) => {
       if (!enabled) return;
+      const isHuddleRequest = event.kind === KIND_HUDDLE_STARTED;
+      const slot = isHuddleRequest ? "huddle_request" : "dm";
       if (
         !notificationSettings.desktopEnabled ||
-        !notificationSettings.slotAlertsEnabled.dm
+        !notificationSettings.slotAlertsEnabled[slot]
       ) {
         return;
       }
@@ -94,13 +104,56 @@ export function useAppShellDesktopNotifications({
         }),
       }).then((didSend) => {
         if (!didSend) return;
-        if (shouldPlayNotificationSound(channel.id, silentChannelIds)) {
+        if (
+          !isHuddleRequest &&
+          shouldPlayNotificationSound(channel.id, silentChannelIds)
+        ) {
           playNotificationSound(resolveSlotSound(notificationSettings, "dm"));
         }
         void requestDockBounce();
       });
     },
   );
+
+  const handleDmHuddleLifecycleEvent = React.useEffectEvent(
+    (event: RelayEvent, channel: Channel) => {
+      const command = huddleRingtoneCommand(event.kind, event.content);
+      if (
+        command?.action === "start" &&
+        enabled &&
+        notificationSettings.desktopEnabled &&
+        shouldRingForHuddleRequest({
+          currentPubkey: pubkey,
+          enabled: notificationSettings.slotAlertsEnabled.huddle_request,
+          initiatorPubkey: event.pubkey,
+          muted: mutedChannelIds?.has(channel.id) ?? false,
+        })
+      ) {
+        huddleRequestRingtone.start(
+          command.huddleId,
+          resolveSlotSound(notificationSettings, "huddle_request"),
+        );
+      }
+      if (command?.action === "stop") {
+        huddleRequestRingtone.stop(command.huddleId);
+      }
+    },
+  );
+
+  React.useEffect(() => {
+    if (
+      enabled &&
+      notificationSettings.desktopEnabled &&
+      notificationSettings.slotAlertsEnabled.huddle_request
+    ) {
+      return;
+    }
+    huddleRequestRingtone.stop();
+  }, [
+    enabled,
+    notificationSettings.desktopEnabled,
+    notificationSettings.slotAlertsEnabled.huddle_request,
+  ]);
 
   const handleThreadReplyDesktopNotification = React.useEffectEvent(
     (channelId: string, event: RelayEvent) => {
@@ -201,6 +254,7 @@ export function useAppShellDesktopNotifications({
   return {
     handleChannelNotification,
     handleDmNotification,
+    handleDmHuddleLifecycleEvent,
     handleThreadReplyDesktopNotification,
   };
 }

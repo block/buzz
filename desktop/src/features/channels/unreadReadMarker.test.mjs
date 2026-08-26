@@ -19,6 +19,7 @@ import {
 } from "./useUnreadChannels.ts";
 import {
   isChannelUnreadTriggerKind,
+  shouldDispatchDmHuddleLifecycle,
   trackSeenEvent,
   withChannelTagFallback,
 } from "./useLiveChannelUpdates.ts";
@@ -117,6 +118,35 @@ test("dmHuddleStart_isDmOnlyUnreadTrigger", () => {
     isChannelUnreadTriggerKind(KIND_HUDDLE_ENDED, true),
     false,
     "huddle end lifecycle should stay quiet",
+  );
+});
+
+test("reconnect replay dispatches huddle ends but suppresses stale starts", () => {
+  const subscriptionStartedAt = 200;
+
+  assert.equal(
+    shouldDispatchDmHuddleLifecycle(
+      KIND_HUDDLE_ENDED,
+      100,
+      subscriptionStartedAt,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldDispatchDmHuddleLifecycle(
+      KIND_HUDDLE_STARTED,
+      100,
+      subscriptionStartedAt,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldDispatchDmHuddleLifecycle(
+      KIND_HUDDLE_STARTED,
+      201,
+      subscriptionStartedAt,
+    ),
+    true,
   );
 });
 

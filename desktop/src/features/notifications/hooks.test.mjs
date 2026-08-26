@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { sanitizeSlotAlertsEnabled } from "./hooks.ts";
+
 import {
   buildHomeBadgeFeedItems,
   isHomeBadgeFeedItemUnread,
@@ -35,6 +37,28 @@ const homeFeed = (feed) => ({
     ...feed,
   },
   meta: { since: 0, total: 0, generatedAt: 0 },
+});
+
+test("adding a sound slot preserves an existing all-disabled master state", () => {
+  const migrated = sanitizeSlotAlertsEnabled({
+    dm: false,
+    mention: false,
+    thread_reply: false,
+    needs_action: false,
+  });
+
+  assert.equal(migrated.huddle_request, false);
+});
+
+test("adding a sound slot keeps its default when existing alerts are active", () => {
+  const migrated = sanitizeSlotAlertsEnabled({
+    dm: false,
+    mention: true,
+    thread_reply: false,
+    needs_action: false,
+  });
+
+  assert.equal(migrated.huddle_request, true);
 });
 
 test("home badge excludes thread activity already shown in a channel preview", () => {
