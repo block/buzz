@@ -1690,7 +1690,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
 
     if args.task_bound_auto_delivery {
         sections.push(
-            "[Buzz Delivery]\nReturn ordinary user-visible text as your final answer; the Buzz harness signs and publishes it to this conversation. If you need to deliver one or more files, use `buzz messages send --file <path>` yourself so the files become real attachments, then return a brief delivery summary as your final answer. Do not paste a local path or a bare upload URL as a substitute for an attachment."
+            "[Buzz Delivery]\nReturn ordinary user-visible text as your final answer; the Buzz harness signs and publishes it to this conversation. The shared Codex app-server intentionally has no Agent Buzz credentials: run every `buzz` CLI command through this session's `buzz-dev-mcp` `shell` tool, never through Codex's native shell or `exec_command`. A native-shell `BUZZ_PRIVATE_KEY` error means the wrong tool path was used, not that the Agent must reconnect or be recreated. If you need to deliver one or more files, run `buzz messages send --file <path>` through `buzz-dev-mcp` so the files become real attachments, then return a brief delivery summary as your final answer. Do not paste a local path or a bare upload URL as a substitute for an attachment."
                 .to_string(),
         );
     }
@@ -5131,6 +5131,9 @@ mod tests {
             .position(|section| section.starts_with("[Context]"))
             .expect("room context section");
         assert!(sections[delivery_index].contains("buzz messages send --file <path>"));
+        assert!(sections[delivery_index].contains("buzz-dev-mcp"));
+        assert!(sections[delivery_index].contains("wrong tool path"));
+        assert!(sections[delivery_index].contains("not that the Agent must reconnect"));
         assert!(delivery_index < context_index);
     }
 

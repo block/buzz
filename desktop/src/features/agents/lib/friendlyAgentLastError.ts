@@ -48,8 +48,17 @@ export const CLI_ACP_INTERNAL_ERROR_COPY =
 export const CODEX_TASK_LOAD_FAILED_COPY =
   "The Codex task did not load before the 60-second timeout. It may be busy in Codex Desktop, or the shared app-server may be unresponsive. Wait for the task to become idle, then retry.";
 
+export const CODEX_TASK_FRAME_TOO_LARGE_COPY =
+  "This Codex task produced more history than this Buzz build can load in one ACP frame. Update Buzz, or compact/fork the Codex task, then retry.";
+
 export const CODEX_WRITER_CONFLICT_COPY =
   "This Codex task is open in a separate Codex Desktop runtime. Open Codex shared runtime settings, take over Desktop, then retry the agent.";
+
+export const AGENT_IDENTITY_MISSING_COPY =
+  "Buzz no longer has this agent's local identity key. Its Codex task and workspace are intact. Add the same Codex task again to replace the Buzz identity.";
+
+export const AGENT_KEYRING_UNAVAILABLE_COPY =
+  "Buzz cannot read this agent's identity because the Windows keyring is unavailable. Unlock Windows or restart the computer, then retry.";
 
 const CODEX_WRITER_CONFLICT_MARKERS = [
   "already has an active writer",
@@ -63,6 +72,12 @@ export function isCodexWriterConflictError(
   return CODEX_WRITER_CONFLICT_MARKERS.some((marker) =>
     normalized.includes(marker),
   );
+}
+
+export function isAgentIdentityMissingError(
+  raw: string | null | undefined,
+): boolean {
+  return (raw?.toLocaleLowerCase() ?? "").includes("identity key is missing");
 }
 
 const EMBEDDED_CODE_RE = /^Agent reported error \(code (-?\d+)\): /;
@@ -94,6 +109,18 @@ export function friendlyAgentLastError(
   // before the unknown-code pass-through so automatic retries can stop.
   if (isCodexWriterConflictError(trimmed)) {
     return { severity: "generic", copy: CODEX_WRITER_CONFLICT_COPY };
+  }
+
+  if (isAgentIdentityMissingError(trimmed)) {
+    return { severity: "generic", copy: AGENT_IDENTITY_MISSING_COPY };
+  }
+
+  if (trimmed.toLocaleLowerCase().includes("os keyring is unavailable")) {
+    return { severity: "generic", copy: AGENT_KEYRING_UNAVAILABLE_COPY };
+  }
+
+  if (trimmed.toLocaleLowerCase().includes("stdout line exceeded")) {
+    return { severity: "generic", copy: CODEX_TASK_FRAME_TOO_LARGE_COPY };
   }
 
   // Structured code first; a code embedded in the message string is the

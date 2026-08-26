@@ -59,6 +59,18 @@ export function findReusablePersonaAgent(
   return pickPreferredManagedAgent(candidates);
 }
 
+export function findTaskBoundPersonaAgent(
+  agents: ManagedAgent[],
+  personaId: string,
+): ManagedAgent | undefined {
+  return pickPreferredManagedAgent(
+    agents.filter(
+      (agent) =>
+        agent.personaId === personaId && agent.codexTaskBinding != null,
+    ),
+  );
+}
+
 export function findReusableGenericAgent(
   agents: ManagedAgent[],
   command: string,

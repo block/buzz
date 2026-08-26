@@ -79,7 +79,7 @@ pub struct CodexTaskHistory {
     pub truncated: bool,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct CodexTaskBindingStore {
     version: u32,
     bindings: HashMap<String, CodexTaskBinding>,
@@ -186,6 +186,50 @@ pub fn load_codex_task_binding(
     agent_pubkey: &str,
 ) -> Result<Option<CodexTaskBinding>, String> {
     Ok(load_binding_store(app)?.bindings.get(agent_pubkey).cloned())
+}
+
+pub fn codex_task_binding_owner(app: &AppHandle, task_id: &str) -> Result<Option<String>, String> {
+    Ok(load_binding_store(app)?
+        .bindings
+        .into_iter()
+        .find_map(|(pubkey, binding)| (binding.task_id == task_id).then_some(pubkey)))
+}
+
+fn replace_task_binding_in_store(
+    store: &mut CodexTaskBindingStore,
+    old_agent_pubkey: &str,
+    new_agent_pubkey: &str,
+    binding: CodexTaskBinding,
+) -> Result<(), String> {
+    if old_agent_pubkey == new_agent_pubkey {
+        return Err("replacement agent must use a new Buzz identity".to_string());
+    }
+
+    let existing = store
+        .bindings
+        .get(old_agent_pubkey)
+        .ok_or_else(|| format!("agent {old_agent_pubkey} no longer owns a Codex task binding"))?;
+    if existing.task_id != binding.task_id {
+        return Err(format!(
+            "agent {old_agent_pubkey} is bound to Codex task {}, not {}",
+            existing.task_id, binding.task_id
+        ));
+    }
+    if let Some((pubkey, _)) = store.bindings.iter().find(|(pubkey, existing)| {
+        *pubkey != old_agent_pubkey
+            && *pubkey != new_agent_pubkey
+            && existing.task_id == binding.task_id
+    }) {
+        return Err(format!(
+            "Codex task {} is already bound to agent {pubkey}",
+            binding.task_id
+        ));
+    }
+
+    store.bindings.remove(old_agent_pubkey);
+    store.version = STORE_VERSION;
+    store.bindings.insert(new_agent_pubkey.to_string(), binding);
+    Ok(())
 }
 
 pub fn save_codex_task_binding(
@@ -384,6 +428,40 @@ pub fn save_agents_with_codex_task_binding(
         let _ = remove_codex_task_binding(app, agent_pubkey);
         return Err(error);
     }
+    Ok(())
+}
+
+pub fn save_agents_with_replaced_codex_task_binding(
+    app: &AppHandle,
+    records: &[ManagedAgentRecord],
+    old_agent_pubkey: &str,
+    new_agent_pubkey: &str,
+    binding: CodexTaskBinding,
+) -> Result<(), String> {
+    let original_store = load_binding_store(app)?;
+    let mut replacement_store = original_store.clone();
+    replace_task_binding_in_store(
+        &mut replacement_store,
+        old_agent_pubkey,
+        new_agent_pubkey,
+        binding,
+    )?;
+    save_binding_store(app, &replacement_store)?;
+
+    if let Err(save_error) = super::save_managed_agents(app, records) {
+        let mut errors = vec![save_error];
+        if let Err(rollback_error) = save_binding_store(app, &original_store) {
+            errors.push(format!("binding rollback failed: {rollback_error}"));
+        }
+        if let Err(cleanup_error) = super::try_delete_agent_key(new_agent_pubkey) {
+            errors.push(format!("new identity cleanup failed: {cleanup_error}"));
+        }
+        return Err(format!(
+            "failed to replace the Codex task agent identity: {}",
+            errors.join("; ")
+        ));
+    }
+
     Ok(())
 }
 
@@ -1064,6 +1142,67 @@ mod tests {
         assert!(store.bindings.contains_key("active-agent"));
         assert!(!store.bindings.contains_key("deleted-agent"));
         assert!(!prune_stale_codex_task_bindings(&mut store, &active));
+    }
+
+    #[test]
+    fn missing_identity_replacement_moves_one_task_binding() {
+        let binding = CodexTaskBinding {
+            task_id: "019eca9a-beb9-7902-8ce6-527b2ba56020".to_string(),
+            thread_name: "Electroplating DoE".to_string(),
+            workspace: r"C:\repo".to_string(),
+            updated_at: "2026-08-26T00:00:00Z".to_string(),
+            model: Some("gpt-5.5[xhigh]".to_string()),
+            app_server_url: Some(DEFAULT_CODEX_SHARED_APP_SERVER_URL.to_string()),
+            ssh_host: None,
+            ssh_port: None,
+            ssh_username: None,
+            ssh_identity_file: None,
+            ssh_remote_app_server_port: None,
+            ssh_remote_shell: None,
+        };
+        let mut store = CodexTaskBindingStore {
+            version: STORE_VERSION,
+            bindings: HashMap::from([("old-agent".to_string(), binding.clone())]),
+        };
+
+        replace_task_binding_in_store(&mut store, "old-agent", "new-agent", binding.clone())
+            .unwrap();
+
+        assert!(!store.bindings.contains_key("old-agent"));
+        assert_eq!(store.bindings.get("new-agent"), Some(&binding));
+        assert_eq!(store.bindings.len(), 1);
+    }
+
+    #[test]
+    fn identity_replacement_refuses_a_different_task() {
+        let existing = CodexTaskBinding {
+            task_id: "019eca9a-beb9-7902-8ce6-527b2ba56020".to_string(),
+            thread_name: "Electroplating DoE".to_string(),
+            workspace: r"C:\repo".to_string(),
+            updated_at: "2026-08-26T00:00:00Z".to_string(),
+            model: None,
+            app_server_url: Some(DEFAULT_CODEX_SHARED_APP_SERVER_URL.to_string()),
+            ssh_host: None,
+            ssh_port: None,
+            ssh_username: None,
+            ssh_identity_file: None,
+            ssh_remote_app_server_port: None,
+            ssh_remote_shell: None,
+        };
+        let mut replacement = existing.clone();
+        replacement.task_id = "019d8afc-5883-7563-8b86-20ccfe11a550".to_string();
+        let mut store = CodexTaskBindingStore {
+            version: STORE_VERSION,
+            bindings: HashMap::from([("old-agent".to_string(), existing)]),
+        };
+
+        let error =
+            replace_task_binding_in_store(&mut store, "old-agent", "new-agent", replacement)
+                .unwrap_err();
+
+        assert!(error.contains("is bound to Codex task"));
+        assert!(store.bindings.contains_key("old-agent"));
+        assert!(!store.bindings.contains_key("new-agent"));
     }
 
     #[test]

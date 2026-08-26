@@ -6,15 +6,17 @@ use super::managed_agent_definition::validate_create_definition;
 use crate::{
     app_state::AppState,
     managed_agents::{
-        agent_readiness, build_managed_agent_summary, current_instance_id,
+        agent_key_availability, agent_readiness, build_managed_agent_summary,
+        codex_task_binding_owner, current_instance_id, delete_agent_key,
         discover_provider_candidates, ensure_persona_is_active, find_managed_agent_mut,
         known_acp_runtime, load_global_agent_config, load_managed_agents, load_personas,
         load_teams, managed_agent_avatar_url, normalize_agent_args, prepare_codex_task_binding,
         prepare_remote_codex_task_binding, provider_deploy, record_agent_command,
         resolve_effective_agent_env, resolve_provider_binary, save_agents_with_codex_task_binding,
-        save_managed_agents, start_managed_agent_process, stop_managed_agent_process,
-        stop_managed_agent_workspace_pair, sync_managed_agent_processes, try_regenerate_nest,
-        validate_provider_config, AgentReadiness, BackendKind, CreateManagedAgentRequest,
+        save_agents_with_replaced_codex_task_binding, save_managed_agents,
+        start_managed_agent_process, stop_managed_agent_process, stop_managed_agent_workspace_pair,
+        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config,
+        AgentKeyAvailability, AgentReadiness, BackendKind, CreateManagedAgentRequest,
         CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
         DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
@@ -625,7 +627,7 @@ pub async fn create_managed_agent(
     let owner_hex = workspace_owner_hex(&state)?;
 
     // ── Phase 1: generate keys (sync lock) ────────────────────────────────────
-    let (agent_keys, private_key_nsec, pubkey, resolved_relay_url, input) = {
+    let (agent_keys, private_key_nsec, pubkey, resolved_relay_url, replacement_agent_pubkey, input) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -648,6 +650,44 @@ pub async fn create_managed_agent(
             let personas = load_personas(&app)?;
             ensure_persona_is_active(&personas, persona_id)?;
         }
+        let replacement_agent_pubkey = if let Some(binding) = codex_task_binding.as_ref() {
+            match codex_task_binding_owner(&app, &binding.task_id)? {
+                Some(existing_pubkey) => {
+                    match records
+                        .iter()
+                        .find(|record| record.pubkey == existing_pubkey)
+                    {
+                        Some(existing) => match agent_key_availability(existing) {
+                            AgentKeyAvailability::Available => {
+                                return Err(format!(
+                                    "Codex task {} is already bound to agent {}",
+                                    binding.task_id, existing_pubkey
+                                ));
+                            }
+                            AgentKeyAvailability::KeyringUnavailable => {
+                                return Err(format!(
+                                    "Cannot verify the identity for agent {existing_pubkey} because the OS keyring is unavailable. Unlock the keyring or restart Windows, then retry."
+                                ));
+                            }
+                            AgentKeyAvailability::Missing => {
+                                if runtimes.keys().any(|key| key.pubkey == existing_pubkey) {
+                                    return Err(format!(
+                                        "Agent {existing_pubkey} is still running. Stop it before replacing its missing identity."
+                                    ));
+                                }
+                                Some(existing_pubkey)
+                            }
+                        },
+                        // The normal save path prunes stale bindings whose
+                        // managed-agent record no longer exists.
+                        None => None,
+                    }
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
         let keys = Keys::generate();
         let pubkey = keys.public_key().to_hex();
         if records.iter().any(|record| record.pubkey == pubkey) {
@@ -668,7 +708,14 @@ pub async fn create_managed_agent(
             .unwrap_or("")
             .to_string();
 
-        (keys, private_key_nsec, pubkey, resolved_relay_url, input)
+        (
+            keys,
+            private_key_nsec,
+            pubkey,
+            resolved_relay_url,
+            replacement_agent_pubkey,
+            input,
+        )
     };
 
     // ── Pre-Phase 2: validate provider config BEFORE any side effects ────────
@@ -720,6 +767,44 @@ pub async fn create_managed_agent(
         // (extremely unlikely but safe to check).
         if records.iter().any(|record| record.pubkey == pubkey) {
             return Err(format!("agent {pubkey} already exists"));
+        }
+        if let Some(existing_pubkey) = replacement_agent_pubkey.as_deref() {
+            let binding = codex_task_binding.as_ref().ok_or_else(|| {
+                "a replacement identity requires a Codex task binding".to_string()
+            })?;
+            let current_owner = codex_task_binding_owner(&app, &binding.task_id)?;
+            if current_owner.as_deref() != Some(existing_pubkey) {
+                return Err(format!(
+                    "Codex task {} binding changed while the replacement identity was being created; retry",
+                    binding.task_id
+                ));
+            }
+            let existing = records
+                .iter()
+                .find(|record| record.pubkey == existing_pubkey)
+                .ok_or_else(|| {
+                    format!(
+                        "agent {existing_pubkey} disappeared while its replacement identity was being created; retry"
+                    )
+                })?;
+            match agent_key_availability(existing) {
+                AgentKeyAvailability::Missing => {}
+                AgentKeyAvailability::Available => {
+                    return Err(format!(
+                        "Agent {existing_pubkey} identity became available; retry starting the existing agent instead."
+                    ));
+                }
+                AgentKeyAvailability::KeyringUnavailable => {
+                    return Err(format!(
+                        "Cannot replace agent {existing_pubkey} while the OS keyring is unavailable. Unlock the keyring or restart Windows, then retry."
+                    ));
+                }
+            }
+            if runtimes.keys().any(|key| key.pubkey == existing_pubkey) {
+                return Err(format!(
+                    "Agent {existing_pubkey} started while its replacement identity was being created. Stop it, then retry."
+                ));
+            }
         }
         // Provider config was already validated in Pre-Phase 2; cache the discovered binary path for deploy_to_provider.
         let provider_binary_path = if let BackendKind::Provider { ref id, .. } = input.backend {
@@ -941,8 +1026,33 @@ pub async fn create_managed_agent(
             },
         };
 
+        if let Some(existing_pubkey) = replacement_agent_pubkey.as_deref() {
+            records.retain(|record| record.pubkey != existing_pubkey);
+        }
         records.push(record);
-        save_agents_with_codex_task_binding(&app, &records, &pubkey, codex_task_binding.clone())?;
+        if let Some(existing_pubkey) = replacement_agent_pubkey.as_deref() {
+            let binding = codex_task_binding
+                .clone()
+                .ok_or_else(|| "replacement task binding disappeared".to_string())?;
+            save_agents_with_replaced_codex_task_binding(
+                &app,
+                &records,
+                existing_pubkey,
+                &pubkey,
+                binding,
+            )?;
+            state.clear_agent_session_caches(existing_pubkey);
+            delete_agent_key(existing_pubkey);
+            tombstone_managed_agent_pending(&app, &state, existing_pubkey);
+            archive_managed_agent_pending(&app, &state, existing_pubkey);
+        } else {
+            save_agents_with_codex_task_binding(
+                &app,
+                &records,
+                &pubkey,
+                codex_task_binding.clone(),
+            )?;
+        }
 
         let record = records
             .iter()

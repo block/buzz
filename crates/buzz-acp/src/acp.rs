@@ -20,7 +20,9 @@ use crate::usage::{
 
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
-const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
+/// Codex `session/load` can replay a long task as one JSON-RPC line, so this
+/// must accommodate real task history while remaining bounded.
+const MAX_LINE_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
 
 /// An MCP server configuration passed to `session/new`.
 ///
@@ -1388,7 +1390,7 @@ impl AcpClient {
                 None => return Err(AcpError::AgentExited),
                 Some(Err(LinesCodecError::MaxLineLengthExceeded)) => {
                     return Err(AcpError::Protocol(
-                        "agent stdout line exceeded 10MB limit".into(),
+                        "agent stdout line exceeded 64 MiB limit".into(),
                     ));
                 }
                 Some(Err(e)) => {
@@ -1715,7 +1717,7 @@ impl AcpClient {
                         let _ = ack_tx.send(crate::pool::SteerAck::PromptCompletedNeutral);
                     }
                     return Err(AcpError::Protocol(
-                        "agent stdout line exceeded 10MB limit".into(),
+                        "agent stdout line exceeded 64 MiB limit".into(),
                     ));
                 }
                 Some(Err(e)) => {
@@ -2552,6 +2554,11 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stdout_frame_limit_accommodates_long_codex_task_history() {
+        assert_eq!(MAX_LINE_SIZE, 64 * 1024 * 1024);
+    }
 
     #[test]
     fn captures_only_codex_final_answer_messages() {

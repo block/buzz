@@ -185,6 +185,38 @@ enum KeyMigration {
     Nothing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentKeyAvailability {
+    Available,
+    Missing,
+    KeyringUnavailable,
+}
+
+fn agent_key_availability_with(
+    store: &impl KeyStore,
+    record: &ManagedAgentRecord,
+) -> AgentKeyAvailability {
+    if !record.private_key_nsec.is_empty() {
+        return AgentKeyAvailability::Available;
+    }
+
+    match store.load(&agent_keyring_name(&record.pubkey)) {
+        Ok(Some(_)) => AgentKeyAvailability::Available,
+        Ok(None) => AgentKeyAvailability::Missing,
+        Err(_) => AgentKeyAvailability::KeyringUnavailable,
+    }
+}
+
+pub(crate) fn agent_key_availability(record: &ManagedAgentRecord) -> AgentKeyAvailability {
+    if !record.private_key_nsec.is_empty() {
+        return AgentKeyAvailability::Available;
+    }
+
+    agent_secret_store().map_or(AgentKeyAvailability::Missing, |store| {
+        agent_key_availability_with(store, record)
+    })
+}
+
 /// Attempt to lift one record's inline key into the keyring with read-back
 /// verify. Pure decision logic — does NOT mutate the record, so the caller
 /// chooses whether to strip the inline copy based on the returned outcome.
@@ -224,14 +256,29 @@ fn migrate_inline_key(store: &impl KeyStore, record: &ManagedAgentRecord) -> Key
 /// deliberately keyless agent. Spawning anyway would inject an empty
 /// `BUZZ_PRIVATE_KEY`/`NOSTR_PRIVATE_KEY`, launching with no identity. Callers
 /// (the spawn path) must fail closed (Wes storage.rs:158).
-pub(crate) fn spawn_key_refusal(record: &ManagedAgentRecord) -> Option<String> {
-    record.private_key_nsec.is_empty().then(|| {
-        format!(
-            "agent {} has no private key available — the OS keyring may be unreachable. \
-             Refusing to start without an identity; retry once the keyring is reachable.",
+fn spawn_key_refusal_for_availability(
+    record: &ManagedAgentRecord,
+    availability: AgentKeyAvailability,
+) -> Option<String> {
+    match availability {
+        AgentKeyAvailability::Available if record.private_key_nsec.is_empty() => Some(format!(
+            "agent {} identity key became available after this agent was loaded. Retry the start.",
             record.pubkey
-        )
-    })
+        )),
+        AgentKeyAvailability::Available => None,
+        AgentKeyAvailability::Missing => Some(format!(
+            "agent {} identity key is missing. The Codex task and workspace are intact; add the same Codex task again to replace this Buzz identity.",
+            record.pubkey
+        )),
+        AgentKeyAvailability::KeyringUnavailable => Some(format!(
+            "agent {} identity key cannot be read because the OS keyring is unavailable. Unlock the keyring or restart Windows, then retry.",
+            record.pubkey
+        )),
+    }
+}
+
+pub(crate) fn spawn_key_refusal(record: &ManagedAgentRecord) -> Option<String> {
+    spawn_key_refusal_for_availability(record, agent_key_availability(record))
 }
 
 /// Read the raw unified store — keyed instances AND key-less definitions —
