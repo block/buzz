@@ -274,6 +274,14 @@ fn extract_before_id(raw: &Value) -> BeforeId {
     }
 }
 
+fn extract_buzz_channel(raw: &Value) -> Option<&str> {
+    raw.get("#buzz-channel")
+        .and_then(Value::as_array)
+        .filter(|values| values.len() == 1)
+        .and_then(|values| values.first())
+        .and_then(Value::as_str)
+}
+
 /// True when the raw filter opts into a bridge extension flag (`top_level`,
 /// `include_summaries`, `include_aux`). Absent or non-boolean = false.
 fn extension_flag(raw: &Value, key: &str) -> bool {
@@ -1365,6 +1373,9 @@ async fn query_events_authed(
             extract_channel_from_filter(filter),
             &accessible_channels,
         );
+        if let Some(channel) = extract_buzz_channel(raw) {
+            query.custom_tag = Some(("buzz-channel".into(), channel.into()));
+        }
         // Shared-gated visibility pushdown: must mirror WS REQ so that a page of
         // newer private events does not starve older shared ones off the page.
         if crate::handlers::req::filter_can_match_shared_gated_kinds(filter) {
@@ -3245,6 +3256,22 @@ mod tests {
         assert!(
             search_hit_accepted(&filter, &stored, &[scoped_channel], &reader),
             "channel-scoped hit must be accepted when caller has access to that channel"
+        );
+    }
+
+    #[test]
+    fn extract_buzz_channel_requires_one_string_value() {
+        assert_eq!(
+            extract_buzz_channel(&serde_json::json!({"#buzz-channel": ["channel-a"]})),
+            Some("channel-a")
+        );
+        assert_eq!(
+            extract_buzz_channel(&serde_json::json!({"#buzz-channel": ["channel-a", "channel-b"]})),
+            None
+        );
+        assert_eq!(
+            extract_buzz_channel(&serde_json::json!({"#buzz-channel": [42]})),
+            None
         );
     }
 

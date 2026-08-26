@@ -5,6 +5,7 @@ import {
   KIND_PROJECT_ANNOUNCEMENT,
   KIND_REPO_ANNOUNCEMENT,
 } from "@/shared/constants/kinds";
+import { absorbStandaloneProjectRepositories } from "./lib/projectCollection";
 import { buildProjectReadModels, type Project } from "./projectModels";
 
 const PROJECT_ENUMERATION_PAGE_SIZE = 500;
@@ -173,6 +174,7 @@ export async function buildProjectsFromFetcher(
   options: {
     relayOrigin?: string | null;
     hiddenAddresses?: ReadonlySet<string>;
+    viewerPubkey?: string | null;
   } = {},
 ): Promise<Project[]> {
   const [projectEvents, repositoryEvents] = await Promise.all([
@@ -200,11 +202,14 @@ export async function buildProjectsFromFetcher(
     );
   }
 
-  return buildProjectReadModels({
-    projectEvents,
-    repositoryEvents,
-    deletionEvents: tombstoneResult.events,
-    relayOrigin: options.relayOrigin ?? null,
-    hiddenAddresses: options.hiddenAddresses ?? new Set(),
-  }).sort((a, b) => b.createdAt - a.createdAt);
+  return absorbStandaloneProjectRepositories(
+    buildProjectReadModels({
+      projectEvents,
+      repositoryEvents,
+      deletionEvents: tombstoneResult.events,
+      relayOrigin: options.relayOrigin ?? null,
+      hiddenAddresses: options.hiddenAddresses ?? new Set(),
+      viewerPubkey: options.viewerPubkey,
+    }),
+  ).sort((a, b) => b.createdAt - a.createdAt);
 }

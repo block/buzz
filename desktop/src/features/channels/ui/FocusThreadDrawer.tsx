@@ -11,7 +11,9 @@ import { cn } from "@/shared/lib/cn";
 type FocusThreadDrawerProps = {
   channelName: string;
   children: React.ReactNode;
-  hasActiveEdit: boolean;
+  /** Accessible name for the drawer. Channel threads leave the default. */
+  label?: string;
+  hasActiveEdit?: boolean;
   onClose: () => void;
 };
 
@@ -140,7 +142,8 @@ const REDUCED_MOTION_TRANSITION = { duration: 0.12, ease: "linear" } as const;
 export function FocusThreadDrawer({
   channelName,
   children,
-  hasActiveEdit,
+  label = "Thread",
+  hasActiveEdit = false,
   onClose,
 }: FocusThreadDrawerProps) {
   const prefersReducedMotion = useReducedMotion();
@@ -228,9 +231,9 @@ export function FocusThreadDrawer({
           // share a radius — a smaller one here would put two radii on one
           // element. `shadow-panel-left` draws the left edge and its corners;
           // see the token for why a `border-l` cannot.
-          "absolute inset-y-0 right-0 flex flex-col overflow-hidden rounded-l-2xl bg-background shadow-panel-left",
+          "absolute inset-y-0 right-0 flex flex-col overflow-hidden rounded-l-2xl bg-background shadow-panel-left outline-hidden",
         )}
-        aria-label="Thread"
+        aria-label={label}
         data-testid="focus-thread-drawer"
         ref={drawerRef}
         role="complementary"

@@ -864,25 +864,27 @@ export function useUnreadChannels(
             observedEvents,
             readAtForObservedEvent,
           );
+        // Sidebar numerals on non-DM rows count every unread mention and
+        // broadcast, including threaded ones. The Dock projection
+        // (appBadgeCount) keeps excluding threaded replies because Home's
+        // badge subtotal already counts those; reusing it here would hide
+        // thread mentions from the channel row.
+        const highPriorityCount =
+          nativeProjection?.highPriorityCount ??
+          countUnreadHighPriorityObservedEvents(
+            observedEvents,
+            readAtForObservedEvent,
+          );
         counts.set(
           channel.id,
-          channel.channelType === "dm" ? badgeCount : appBadgeCount,
+          channel.channelType === "dm" ? badgeCount : highPriorityCount,
         );
         unreadChannelNotificationCount += appBadgeCount;
 
-        // DM channels: any unread DM is high-priority.
-        if (channel.channelType === "dm") {
-          highPriority.add(channel.id);
-        } else if (
-          nativeProjection?.highPriorityUnread ||
-          (!nativeProjection &&
-            countUnreadHighPriorityObservedEvents(
-              observedEvents,
-              readAtForObservedEvent,
-            ) > 0)
-        ) {
-          // Non-DM: high-priority only if at least one mention/broadcast
-          // remains unread in its own channel/thread context.
+        // DM channels: any unread DM is high-priority. Non-DM: high-priority
+        // only if at least one mention/broadcast remains unread in its own
+        // channel/thread context.
+        if (channel.channelType === "dm" || highPriorityCount > 0) {
           highPriority.add(channel.id);
         }
       }
