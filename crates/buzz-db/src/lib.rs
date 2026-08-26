@@ -4116,6 +4116,7 @@ impl Db {
         target_event_id: Option<&[u8]>,
         channel_id: Option<uuid::Uuid>,
         reason: Option<&str>,
+        timeout_until: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<bool> {
         relay_admin_actions::finalize_success(
             &self.pool,
@@ -4129,6 +4130,7 @@ impl Db {
             target_event_id,
             channel_id,
             reason,
+            timeout_until,
         )
         .await
     }

@@ -824,6 +824,7 @@ pub async fn finalize_success(
     target_event_id: Option<&[u8]>,
     channel_id: Option<Uuid>,
     reason: Option<&str>,
+    timeout_until: Option<DateTime<Utc>>,
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
 
@@ -884,6 +885,7 @@ pub async fn finalize_success(
                 "channel_id": ch.to_string(),
                 "target_event_id": hex::encode(target_eid),
                 "action_id": action_str,
+                "actor": hex::encode(actor_pubkey),
                 "reason_code": reason.unwrap_or(""),
             });
             sqlx::query(
@@ -969,6 +971,14 @@ pub async fn finalize_success(
         });
         if let Some(rk) = restriction_kind {
             affected_payload["restriction_kind"] = serde_json::Value::String(rk.to_string());
+        }
+        // A `timeout` carries its expiry so the notice can tell the user "until
+        // <when>". A `ban` is indefinite (no expiry); a `delete`/`kick` is not a
+        // restriction. `timeout_until` is authoritative from the action row.
+        if restriction_kind == Some("timeout") {
+            if let Some(until) = timeout_until {
+                affected_payload["timeout_until"] = serde_json::Value::String(until.to_rfc3339());
+            }
         }
         sqlx::query(
             r#"
@@ -1756,6 +1766,7 @@ mod tests {
             None,
             None,
             Some("test reason"),
+            None,
         )
         .await
         .expect("finalize_success")
@@ -2066,7 +2077,8 @@ mod tests {
     #[ignore = "requires Postgres"]
     async fn finalize_enqueues_affected_user_notice_for_restriction() {
         // A `ban` must enqueue an `affected_user_notice` addressed to the target
-        // pubkey, carrying the sanitized reason and restriction kind — so the
+        // pubkey, carrying the operator-authored public reason and restriction
+        // kind — so the
         // restricted user is told what happened (VISION_MODERATION).
         let pool = setup_pool().await;
         let community_id = make_community(&pool).await;
@@ -2105,6 +2117,136 @@ mod tests {
             notice.payload["public_reason"].as_str(),
             Some("test reason")
         );
+        // A ban is indefinite: no timeout_until in the payload.
+        assert!(
+            notice.payload.get("timeout_until").is_none(),
+            "ban notice must not carry a timeout_until; got: {:?}",
+            notice.payload
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn finalize_carries_timeout_until_for_timeout_notice() {
+        // A `timeout` must enqueue an `affected_user_notice` carrying the
+        // authoritative expiry so the restricted user is told "for how long"
+        // (VISION_MODERATION: "what restriction was applied, why, and for how long").
+        let pool = setup_pool().await;
+        let community_id = make_community(&pool).await;
+        let report_id = make_report(&pool, community_id).await;
+
+        let claimed = match do_claim(&pool, community_id, report_id, Uuid::new_v4()).await {
+            ClaimResult::Claimed(a) => a,
+            other => panic!("expected Claimed, got {other:?}"),
+        };
+        let action_id = claimed.id;
+        let _ = begin_enforcing(&pool, action_id)
+            .await
+            .expect("begin_enforcing");
+        let _ = commit_mutation_step(&pool, action_id)
+            .await
+            .expect("commit_mutation_step");
+
+        let target = vec![1u8; 32];
+        let until = chrono::DateTime::parse_from_rfc3339("2026-09-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let finalized = finalize_success(
+            &pool,
+            action_id,
+            CommunityId::from_uuid(community_id),
+            report_id,
+            "resolved",
+            &actor(),
+            "timeout",
+            Some(&target),
+            None,
+            None,
+            Some("Cool off."),
+            Some(until),
+        )
+        .await
+        .expect("finalize_success");
+        assert!(finalized);
+
+        let rows = list_pending_outbox(&pool, action_id)
+            .await
+            .expect("list_pending_outbox");
+        let notice = rows
+            .iter()
+            .find(|r| r.task_type == "affected_user_notice")
+            .expect("timeout must enqueue an affected_user_notice");
+        assert_eq!(notice.payload["notice_kind"].as_str(), Some("restriction"));
+        assert_eq!(notice.payload["restriction_kind"].as_str(), Some("timeout"));
+        assert_eq!(
+            notice.payload["timeout_until"].as_str(),
+            Some(until.to_rfc3339().as_str()),
+            "timeout notice payload must carry the authoritative expiry"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn finalize_maps_delete_and_kick_to_content_actioned_notice() {
+        // The four-action mapping: delete/kick → content_actioned. (ban/timeout →
+        // restriction are covered by the restriction tests above.) A `kick`
+        // carries a target pubkey, so the affected user is notified.
+        let pool = setup_pool().await;
+        let community_id = make_community(&pool).await;
+        let report_id = make_report(&pool, community_id).await;
+
+        let claimed = match do_claim(&pool, community_id, report_id, Uuid::new_v4()).await {
+            ClaimResult::Claimed(a) => a,
+            other => panic!("expected Claimed, got {other:?}"),
+        };
+        let action_id = claimed.id;
+        let _ = begin_enforcing(&pool, action_id)
+            .await
+            .expect("begin_enforcing");
+        let _ = commit_mutation_step(&pool, action_id)
+            .await
+            .expect("commit_mutation_step");
+
+        let target = vec![1u8; 32];
+        let channel_id = Uuid::new_v4();
+        let finalized = finalize_success(
+            &pool,
+            action_id,
+            CommunityId::from_uuid(community_id),
+            report_id,
+            "resolved",
+            &actor(),
+            "kick",
+            Some(&target),
+            None,
+            Some(channel_id),
+            Some("Off-topic."),
+            None,
+        )
+        .await
+        .expect("finalize_success");
+        assert!(finalized);
+
+        let rows = list_pending_outbox(&pool, action_id)
+            .await
+            .expect("list_pending_outbox");
+        let notice = rows
+            .iter()
+            .find(|r| r.task_type == "affected_user_notice")
+            .expect("kick must enqueue an affected_user_notice");
+        assert_eq!(
+            notice.payload["notice_kind"].as_str(),
+            Some("content_actioned"),
+            "kick maps to content_actioned"
+        );
+        assert!(
+            notice.payload.get("restriction_kind").is_none(),
+            "content_actioned notice carries no restriction_kind"
+        );
+        assert!(
+            notice.payload.get("timeout_until").is_none(),
+            "content_actioned notice carries no timeout_until"
+        );
     }
 
     #[tokio::test]
@@ -2142,6 +2284,7 @@ mod tests {
             None,
             None,
             Some("test reason"),
+            None,
         )
         .await
         .expect("finalize_success");

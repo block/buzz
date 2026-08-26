@@ -53,17 +53,22 @@ pub enum ModerationNotice {
     ContentActioned {
         /// The audit action row.
         action_id: Uuid,
-        /// Sanitized reason (mirrors the tombstone's `public_reason`).
+        /// The operator-authored public reason (mirrors the tombstone's
+        /// `public_reason`); the resolve API documents this text is public.
         public_reason: String,
     },
     /// To a banned/timed-out user: terms of the restriction.
     Restriction {
         /// The audit action row.
         action_id: Uuid,
-        /// `ban` | `timeout` (with expiry rendered into the message).
+        /// `ban` | `timeout`.
         kind: String,
-        /// Sanitized reason.
+        /// The operator-authored public reason; the resolve API documents this
+        /// text is public.
         public_reason: String,
+        /// For `timeout`: when the restriction lifts. `None` for `ban`
+        /// (indefinite) — rendered as "until <RFC3339>" in the timeout body.
+        timeout_until: Option<chrono::DateTime<chrono::Utc>>,
     },
 }
 
@@ -227,9 +232,11 @@ impl ModerationNotice {
     /// Render the recipient-facing message body.
     ///
     /// Privacy invariant (module docs): these strings are built only from the
-    /// notice's own sanitized fields — a report/action status, a summary, and a
-    /// `public_reason` that already mirrors the tombstone. They never carry
-    /// reporter identities, other reporters, or raw report notes.
+    /// notice's own fields — a report/action status, a summary, and a
+    /// `public_reason` that mirrors the tombstone. `public_reason` is the
+    /// operator-authored public reason (documented public at the resolve API),
+    /// not report-private context: these bodies never carry reporter
+    /// identities, other reporters, or raw report notes.
     fn body(&self, tenant: &TenantContext) -> String {
         let community = tenant.host();
         match self {
@@ -254,6 +261,7 @@ impl ModerationNotice {
             ModerationNotice::Restriction {
                 kind,
                 public_reason,
+                timeout_until,
                 ..
             } => {
                 let action = match kind.as_str() {
@@ -261,7 +269,14 @@ impl ModerationNotice {
                     "timeout" => "You have been timed out in",
                     other => other,
                 };
-                format!("{action} {community}.\n\nReason: {public_reason}")
+                // A timeout tells the user when it lifts; a ban is indefinite.
+                let terms = match (kind.as_str(), timeout_until) {
+                    ("timeout", Some(until)) => {
+                        format!(" until {}", until.to_rfc3339())
+                    }
+                    _ => String::new(),
+                };
+                format!("{action} {community}{terms}.\n\nReason: {public_reason}")
             }
         }
     }
@@ -304,6 +319,7 @@ mod tests {
                 action_id: action,
                 kind: "ban".into(),
                 public_reason: String::new(),
+                timeout_until: None,
             }
             .source_id(),
             action
@@ -331,18 +347,30 @@ mod tests {
             action_id: Uuid::new_v4(),
             kind: "ban".into(),
             public_reason: "Repeated spam.".into(),
+            timeout_until: None,
         }
         .body(&t);
         assert!(ban.contains("banned from example.org"));
         assert!(ban.contains("Repeated spam."));
+        // A ban is indefinite: no "until" clause.
+        assert!(!ban.contains("until"));
 
+        let until = chrono::DateTime::parse_from_rfc3339("2026-09-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
         let timeout = ModerationNotice::Restriction {
             action_id: Uuid::new_v4(),
             kind: "timeout".into(),
             public_reason: "Cool off.".into(),
+            timeout_until: Some(until),
         }
         .body(&t);
         assert!(timeout.contains("timed out in example.org"));
+        // The timeout notice must tell the user for how long (VISION_MODERATION).
+        assert!(
+            timeout.contains("until 2026-09-01T12:00:00+00:00"),
+            "timeout body must carry the expiry term; got: {timeout}"
+        );
     }
 
     #[test]

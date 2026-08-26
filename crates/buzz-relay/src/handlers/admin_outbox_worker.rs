@@ -156,11 +156,15 @@ async fn resolve_tenant(
 ///
 /// The emitted system message matches the channel-moderation tombstone schema
 /// (`side_effects.rs` NIP-29 DELETE_EVENT: `type: "message_deleted"` with
-/// `target_event_id` and an optional sanitized reason) so the room renders it
-/// identically. Without `target_event_id` the room cannot tell which message
-/// was removed, and without a reason it renders as a bare self-delete rather
-/// than a moderator removal — `SystemMessageRow` keys "Removed by community
-/// moderators" on `public_reason`.
+/// `actor`, `target_event_id`, and an optional public reason) so the room
+/// renders it identically. Without `target_event_id` the room cannot tell which
+/// message was removed, and without a reason it renders as a bare self-delete
+/// rather than a moderator removal — `SystemMessageRow` keys "Removed by
+/// community moderators" on `public_reason`.
+///
+/// The `reason_code`/`public_reason` fields are the operator's `reason` string
+/// verbatim (an operator-authored public reason, not a sanitized derivative);
+/// the resolve API documents that this text is public.
 async fn deliver_tombstone(state: &Arc<AppState>, row: &OutboxRecord) -> Result<(), String> {
     let payload = &row.payload;
     let community_uuid: Uuid = payload["community_id"]
@@ -176,15 +180,22 @@ async fn deliver_tombstone(state: &Arc<AppState>, row: &OutboxRecord) -> Result<
     let target_event_id = payload["target_event_id"]
         .as_str()
         .ok_or("tombstone: missing target_event_id")?;
+    let actor = payload["actor"]
+        .as_str()
+        .ok_or("tombstone: missing actor")?;
 
     let community_id = buzz_core::CommunityId::from_uuid(community_uuid);
     let tenant = resolve_tenant(state, community_id, "tombstone").await?;
 
-    // `reason_code` is the operator's `reason` string (see `finalize_success`).
-    // Forward it as the room-facing sanitized reason; the room renders the
-    // moderator-removal template only when a non-empty reason is present.
+    // Match the established channel-moderation `message_deleted` schema
+    // (`side_effects.rs`): `type`, `actor` (the acting operator's pubkey hex),
+    // and `target_event_id`, plus the admin `action_id`. `reason_code` is the
+    // operator's `reason` string (see `finalize_success`) — forwarded as the
+    // room-facing public reason; the room renders the moderator-removal template
+    // only when a non-empty reason is present.
     let mut content = serde_json::json!({
         "type": "message_deleted",
+        "actor": actor,
         "target_event_id": target_event_id,
         "action_id": row.action_id.to_string(),
     });
@@ -298,7 +309,7 @@ async fn deliver_reporter_notice(state: &Arc<AppState>, row: &OutboxRecord) -> R
 
 /// Deliver a moderation DM to the actioned user. `delete`/`kick` map to the
 /// `ContentActioned` notice, `ban`/`timeout` to `Restriction`. The recipient
-/// pubkey and sanitized reason travel in the payload (enqueued in the same
+/// pubkey and public reason travel in the payload (enqueued in the same
 /// finalization transaction as the enforcement), so no extra DB lookup is
 /// needed here.
 async fn deliver_affected_user_notice(
@@ -335,6 +346,13 @@ async fn deliver_affected_user_notice(
                 .ok_or("affected_user_notice: missing restriction_kind")?
                 .to_string(),
             public_reason,
+            // Present for `timeout` (the expiry the notice renders); absent for
+            // an indefinite `ban`. A malformed timestamp is treated as absent
+            // rather than failing delivery — the notice is best-effort.
+            timeout_until: payload["timeout_until"]
+                .as_str()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc)),
         },
         other => {
             return Err(format!(

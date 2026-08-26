@@ -418,7 +418,12 @@ struct ResolveReportBody {
     request_id: Option<Uuid>,
     /// Seconds until timeout expiry. Required for `timeout`, rejected otherwise.
     expiration_secs: Option<u64>,
-    /// Optional operator reason.
+    /// Operator-authored **public** reason. THIS TEXT IS PUBLIC: it is
+    /// broadcast verbatim to the channel as the removal tombstone's public
+    /// reason AND sent verbatim to the affected user in a moderation DM. It is
+    /// NOT sanitized, redacted, or mapped. Do not put private, internal, or
+    /// report-derived context here — only text safe for the room and the
+    /// actioned user to read.
     reason: Option<String>,
 }
 
@@ -4521,6 +4526,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("finalize_success");
@@ -4536,6 +4542,7 @@ mod tests {
             &actor,
             "ban",
             Some(&actor),
+            None,
             None,
             None,
             None,
@@ -4995,19 +5002,46 @@ mod tests {
 
         crate::handlers::admin_outbox_worker::deliver_one(&state, &outbox_row).await;
 
-        // Assert: tombstone system message event is durably persisted.
-        // emit_system_message writes a kind:40099 event into the target channel.
-        let tombstone_event_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM events WHERE community_id = $1 AND channel_id = $2 AND kind = 40099",
+        // Assert: tombstone system message event is durably persisted with the
+        // complete channel-moderation `message_deleted` schema. This pins the
+        // worker's emitted content (Carl's requested worker regression) — it must
+        // carry `type`, `actor` (the acting operator hex), `target_event_id`,
+        // `action_id`, and the operator-authored public reason under both
+        // `reason_code` and `public_reason`.
+        let tombstone_content: String = sqlx::query_scalar(
+            "SELECT content FROM events WHERE community_id = $1 AND channel_id = $2 AND kind = 40099",
         )
         .bind(community_id)
         .bind(channel_id)
         .fetch_one(&pool)
         .await
-        .expect("count tombstone events");
+        .expect("fetch tombstone event content");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&tombstone_content).expect("tombstone content is JSON");
+        assert_eq!(parsed["type"].as_str(), Some("message_deleted"));
         assert_eq!(
-            tombstone_event_count, 1,
-            "tombstone system message event must be durably persisted after deliver_one"
+            parsed["actor"].as_str(),
+            Some(hex::encode([5u8; 32]).as_str()),
+            "tombstone must carry the acting operator pubkey hex as `actor`"
+        );
+        assert_eq!(
+            parsed["target_event_id"].as_str(),
+            Some(hex::encode(&target_event_id).as_str()),
+            "tombstone must name the removed event"
+        );
+        assert_eq!(
+            parsed["action_id"].as_str(),
+            Some(action_id.to_string().as_str())
+        );
+        assert_eq!(
+            parsed["reason_code"].as_str(),
+            Some("e2e test"),
+            "tombstone must forward the operator reason"
+        );
+        assert_eq!(
+            parsed["public_reason"].as_str(),
+            Some("e2e test"),
+            "tombstone public_reason mirrors the operator reason"
         );
 
         // Assert: tombstone outbox row is now delivered.
@@ -5855,6 +5889,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("finalize_success");
@@ -6235,6 +6270,7 @@ mod tests {
             &actor,
             "ban",
             Some(&target),
+            None,
             None,
             None,
             None,
@@ -6633,6 +6669,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("finalize");
@@ -6853,6 +6890,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("finalize");
@@ -7040,6 +7078,7 @@ mod tests {
             &actor,
             "ban",
             Some(&target),
+            None,
             None,
             None,
             None,

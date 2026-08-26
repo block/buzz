@@ -281,6 +281,13 @@ set; the **Acted on** checkbox is stored in that browser's local storage.
   Target/channel are always derived from server-owned report provenance.
   Response: `{"status": "<terminal>", "activeAction": <action | null>}`. Enforcement
   actions return the governing action record; `dismiss`/`escalate` return `null`.
+
+  **`reason` is PUBLIC.** For `delete`/`kick`/`ban`/`timeout` the string is
+  broadcast verbatim to the channel as the removal tombstone's public reason
+  **and** sent verbatim to the affected user in a moderation DM. It is not
+  sanitized, redacted, or mapped to a code. Never put private, internal, or
+  report-derived context in `reason` — write only text that is safe for the
+  room and the actioned user to read.
 - `POST /api/admin/v1/reports/:id/reopen`
   Body: `{"requestId": "<uuid>", "reason": "<string>"}`
   Returns a terminal report (`resolved`, `dismissed`, or `escalated`) to `open` and

@@ -210,6 +210,7 @@ async fn handle_ban(
             action_id,
             kind: "ban".to_string(),
             public_reason,
+            timeout_until: None,
         },
         chrono::Utc::now(),
     )
@@ -316,6 +317,7 @@ async fn handle_timeout(
             action_id,
             kind: "timeout".to_string(),
             public_reason,
+            timeout_until: Some(muted_until),
         },
         chrono::Utc::now(),
     )

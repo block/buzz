@@ -595,6 +595,7 @@ async fn drive_enforcement(
                 target_event_id,
                 channel_id,
                 reason,
+                timeout_until,
             )
             .await
             .map_err(ResolutionError::from)?;
