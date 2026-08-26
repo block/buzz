@@ -6,6 +6,7 @@ import {
   parseTimestamp,
   pickPreferredManagedAgent,
   findReusablePersonaAgent,
+  findTaskBoundPersonaAgent,
   findReusableGenericAgent,
   findReusableAgent,
 } from "./agentReuse.ts";
@@ -213,6 +214,30 @@ test("findReusablePersonaAgent: pubkey comparison is case-insensitive", () => {
   const channelMembers = new Set([PUB_A]);
   const result = findReusablePersonaAgent([agent], "p1", channelMembers);
   assert.equal(result, undefined);
+});
+
+test("findTaskBoundPersonaAgent: returns the existing bound task identity", () => {
+  const ordinary = makeAgent({
+    id: "ordinary",
+    personaId: "p1",
+    pubkey: PUB_A,
+  });
+  const taskBound = makeAgent({
+    id: "task-bound",
+    personaId: "p1",
+    pubkey: PUB_B,
+    codexTaskBinding: { taskId: "task-1" },
+  });
+
+  assert.equal(
+    findTaskBoundPersonaAgent([ordinary, taskBound], "p1"),
+    taskBound,
+  );
+});
+
+test("findTaskBoundPersonaAgent: ignores ordinary persona instances", () => {
+  const ordinary = makeAgent({ personaId: "p1" });
+  assert.equal(findTaskBoundPersonaAgent([ordinary], "p1"), undefined);
 });
 
 test("findReusableGenericAgent: finds agent with matching command and no persona/prompt", () => {

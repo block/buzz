@@ -7,6 +7,11 @@ export function buildUnifiedGroups(
   personas: AgentPersona[],
   agents: ManagedAgent[],
 ) {
+  const taskBoundPersonaIds = new Set(
+    agents.flatMap((agent) =>
+      agent.codexTaskBinding && agent.personaId ? [agent.personaId] : [],
+    ),
+  );
   const byPersonaId = new Map<string, ManagedAgent[]>();
   const ungrouped: ManagedAgent[] = [];
 
@@ -15,7 +20,11 @@ export function buildUnifiedGroups(
     // on the agent record. A migration may manufacture a persona link for
     // them, but that internal link must not move them out of Custom agents or
     // remove their instance-level edit affordance.
-    if (!agent.personaId || agent.codexTaskBinding) {
+    if (
+      !agent.personaId ||
+      agent.codexTaskBinding ||
+      taskBoundPersonaIds.has(agent.personaId)
+    ) {
       ungrouped.push(agent);
     } else {
       const list = byPersonaId.get(agent.personaId) ?? [];
@@ -25,10 +34,12 @@ export function buildUnifiedGroups(
   }
 
   const matched = new Set<string>();
-  const groups: PersonaGroup[] = personas.map((persona) => {
-    matched.add(persona.id);
-    return { persona, agents: byPersonaId.get(persona.id) ?? [] };
-  });
+  const groups: PersonaGroup[] = personas
+    .filter((persona) => !taskBoundPersonaIds.has(persona.id))
+    .map((persona) => {
+      matched.add(persona.id);
+      return { persona, agents: byPersonaId.get(persona.id) ?? [] };
+    });
 
   const unknown: ManagedAgent[] = [];
   for (const [id, list] of byPersonaId) {

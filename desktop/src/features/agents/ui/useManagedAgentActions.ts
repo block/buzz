@@ -19,6 +19,7 @@ import { usePresenceQuery } from "@/features/presence/hooks";
 import type { AgentPersona, Channel, ManagedAgent } from "@/shared/api/types";
 import { removeChannelMember } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { findTaskBoundPersonaAgent } from "../agentReuse";
 import {
   deleteManagedAgentWithRules,
   isManagedAgentActive,
@@ -214,6 +215,21 @@ export function useManagedAgentActions() {
     setPersonaStartPending(persona.id, true);
     clearFeedback();
     try {
+      const taskBoundAgent = findTaskBoundPersonaAgent(
+        managedAgents,
+        persona.id,
+      );
+      if (taskBoundAgent) {
+        if (!isManagedAgentActive(taskBoundAgent)) {
+          await startManagedAgentWithRules({
+            agent: taskBoundAgent,
+            startManagedAgent: startMutation.mutateAsync,
+          });
+        }
+        toast.success("Buzz connected to Codex task");
+        return;
+      }
+
       const runtimes = await availableRuntimesForStart(availableRuntimesQuery);
       const { runtime, warnings } = resolveStartRuntimeForDefinition(
         persona,
