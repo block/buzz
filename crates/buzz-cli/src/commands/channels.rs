@@ -1018,6 +1018,19 @@ pub async fn cmd_remove_channel_member(
     Ok(())
 }
 
+/// Merge `channel_add_policy` into an existing kind:10100 content object,
+/// preserving every other field (#3663). Unparseable or absent head content
+/// merges into an empty object — matching `agents_from_events`, which treats
+/// non-object content as empty rather than failing.
+fn merge_add_policy(head_content: Option<&str>, policy: &str) -> String {
+    let mut obj = head_content
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    obj.insert("channel_add_policy".to_string(), serde_json::json!(policy));
+    serde_json::Value::Object(obj).to_string()
+}
+
 /// Set the channel addition policy — sign and submit a kind:10100 (agent profile) event.
 pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(), CliError> {
     match policy {
@@ -1049,7 +1062,33 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
         }
     }
 
-    let content = serde_json::json!({ "channel_add_policy": policy }).to_string();
+    // Merge into the current head record instead of replacing it (#3663).
+    // kind:10100 is replaceable: a bare `{"channel_add_policy"}` write wipes
+    // the directory fields (name, agent_type, channels, channel_ids,
+    // respond_to, status) that make this agent @-mentionable from other
+    // installs (`agentAutocompleteEligibility` in the desktop, #4489). Same
+    // carry-forward stance as the harness publisher: never overwrite a record
+    // we could not read — abort instead of destroying state.
+    let own_pubkey = client.keys().public_key().to_hex();
+    let head = client
+        .query_paginated(
+            serde_json::json!({
+                "kinds": [buzz_sdk::kind::KIND_AGENT_PROFILE],
+                "authors": [own_pubkey],
+            }),
+            1,
+        )
+        .await
+        .map_err(|e| {
+            CliError::Other(format!(
+                "could not read current kind:10100 record (refusing to overwrite it blind): {e}"
+            ))
+        })?;
+    let head_content = head
+        .first()
+        .and_then(|ev| ev.get("content"))
+        .and_then(|c| c.as_str());
+    let content = merge_add_policy(head_content, policy);
     use nostr::{EventBuilder, Kind};
     let builder = EventBuilder::new(
         Kind::Custom(buzz_sdk::kind::KIND_AGENT_PROFILE as u16),
@@ -1746,5 +1785,46 @@ mod tests {
             report.get("archive_state_warning").is_none(),
             "no warning key expected: {report}"
         );
+    }
+
+    // ── merge_add_policy (#3663) ─────────────────────────────────────────
+
+    #[test]
+    fn merge_add_policy_preserves_directory_fields() {
+        let head = r#"{"name":"Fizz","agent_type":"claude-agent-acp","channels":["general"],"channel_ids":["8d888ccd-c50a-5f3a-b927-aa05c8e7e8b2"],"respond_to":"anyone","status":"online"}"#;
+        let merged: serde_json::Value =
+            serde_json::from_str(&super::merge_add_policy(Some(head), "owner_only")).unwrap();
+        assert_eq!(merged["channel_add_policy"], "owner_only");
+        assert_eq!(merged["name"], "Fizz");
+        assert_eq!(merged["agent_type"], "claude-agent-acp");
+        assert_eq!(merged["respond_to"], "anyone");
+        assert_eq!(merged["status"], "online");
+        assert_eq!(
+            merged["channel_ids"][0],
+            "8d888ccd-c50a-5f3a-b927-aa05c8e7e8b2"
+        );
+    }
+
+    #[test]
+    fn merge_add_policy_overwrites_existing_policy() {
+        let head = r#"{"channel_add_policy":"anyone","name":"Fizz"}"#;
+        let merged: serde_json::Value =
+            serde_json::from_str(&super::merge_add_policy(Some(head), "nobody")).unwrap();
+        assert_eq!(merged["channel_add_policy"], "nobody");
+        assert_eq!(merged["name"], "Fizz");
+    }
+
+    #[test]
+    fn merge_add_policy_absent_head_yields_minimal_record() {
+        let merged: serde_json::Value =
+            serde_json::from_str(&super::merge_add_policy(None, "anyone")).unwrap();
+        assert_eq!(merged, serde_json::json!({"channel_add_policy": "anyone"}));
+    }
+
+    #[test]
+    fn merge_add_policy_non_object_head_treated_as_empty() {
+        let merged: serde_json::Value =
+            serde_json::from_str(&super::merge_add_policy(Some("[1,2]"), "anyone")).unwrap();
+        assert_eq!(merged, serde_json::json!({"channel_add_policy": "anyone"}));
     }
 }
