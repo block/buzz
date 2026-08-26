@@ -196,6 +196,12 @@ fn reconcile_inbound_persona_event_blocking(
     if let Some(managed_agent) = &inbound_managed_agent {
         validate_inbound_managed_agent_definition(managed_agent)?;
     }
+    let inbound_team = (kind == KIND_TEAM)
+        .then(|| team_content_from_event(&event))
+        .transpose()?;
+    if let Some(team) = &inbound_team {
+        validate_inbound_team_definition(team)?;
+    }
     let d_tag = match &inbound_persona {
         Some(persona) => persona_d_tag(persona),
         None => event_d_tag(&event)?,
@@ -257,10 +263,12 @@ fn reconcile_inbound_persona_event_blocking(
         }
         KIND_TEAM => {
             let mut teams = load_teams(&app)?;
+            let team = inbound_team
+                .ok_or_else(|| "team content was not parsed before retention".to_string())?;
             commit_inbound_team(
                 &mut teams,
                 d_tag,
-                team_content_from_event(&event)?,
+                team,
                 |teams| save_teams(&app, teams),
                 || load_managed_agents(&app),
                 |records| save_managed_agents(&app, records),
@@ -359,6 +367,15 @@ fn validate_inbound_managed_agent_definition(
         managed_agent.system_prompt.as_deref(),
     )
     .map_err(|error| format!("Inbound managed-agent definition is unsafe: {error}"))
+}
+
+fn validate_inbound_team_definition(team: &TeamEventContent) -> Result<(), String> {
+    let instructions = match &team.instructions {
+        Some(inner) => inner.as_deref(),
+        None => None,
+    };
+    crate::managed_agents::validate_team_definition_text(&team.name, instructions)
+        .map_err(|error| format!("Inbound team definition is unsafe: {error}"))
 }
 
 /// Parse an inbound wire event and enforce the signature gate. Everything

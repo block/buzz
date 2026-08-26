@@ -18,7 +18,8 @@ use crate::{
     managed_agents::{
         agent_snapshot::{build_snapshot, AgentSnapshot, AgentSnapshotMemoryEntry, MemoryLevel},
         load_managed_agents, load_personas, load_teams, load_teams_readonly, save_managed_agents,
-        save_personas, save_teams, AgentDefinition, ManagedAgentRecord, TeamRecord,
+        save_personas, save_teams, validate_team_definition_text, AgentDefinition,
+        ManagedAgentRecord, TeamRecord,
     },
     relay::{effective_agent_relay_url, relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -164,6 +165,7 @@ pub(crate) fn build_import_team(
     if name.is_empty() {
         return Err("Team snapshot name is empty.".to_string());
     }
+    validate_team_definition_text(name, snapshot.team.instructions.as_deref())?;
 
     Ok(TeamRecord {
         id: Uuid::new_v4().to_string(),
@@ -270,6 +272,8 @@ fn build_team_export_snapshot(
     memory_level: MemoryLevel,
     memory_entries_by_persona: &std::collections::HashMap<String, Vec<AgentSnapshotMemoryEntry>>,
 ) -> Result<TeamSnapshot, String> {
+    validate_team_definition_text(&team.name, team.instructions.as_deref())
+        .map_err(|error| format!("Team snapshot is unsafe to export: {error}"))?;
     let members = team
         .persona_ids
         .iter()
@@ -461,6 +465,10 @@ pub async fn preview_team_snapshot_import(
 ) -> Result<TeamSnapshotImportPreview, String> {
     tokio::task::spawn_blocking(move || {
         let snapshot = decode_team_snapshot_from_bytes(&file_bytes)?;
+        validate_team_definition_text(
+            snapshot.team.name.trim(),
+            snapshot.team.instructions.as_deref(),
+        )?;
         let members: Vec<_> = snapshot.members.iter().map(member_preview).collect();
         Ok(TeamSnapshotImportPreview {
             name: snapshot.team.name,
