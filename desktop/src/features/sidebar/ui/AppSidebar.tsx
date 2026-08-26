@@ -37,7 +37,7 @@ import {
   MoreUnreadButton,
   preferredUnreadTarget,
 } from "@/features/sidebar/ui/MoreUnreadButton";
-import { unreadChannelCountLabel } from "@/shared/ui/UnreadPill";
+import { unreadCountLabel } from "@/shared/ui/UnreadPill";
 import { SidebarSection } from "@/features/sidebar/ui/SidebarSection";
 import {
   ChannelGroupSection,
@@ -516,9 +516,7 @@ export function AppSidebar({
           {unreadAboveCount > 0 ? (
             <MoreUnreadButton
               count={unreadAboveCount}
-              label={
-                unreadAboveLabel ?? unreadChannelCountLabel(unreadAboveCount)
-              }
+              label={unreadAboveLabel ?? unreadCountLabel(unreadAboveCount)}
               onClick={scrollToNextAbove}
               position="top"
               testId="sidebar-more-unread-above"
@@ -792,9 +790,7 @@ export function AppSidebar({
               bottomClassName="bottom-full"
               count={unreadBelowCount}
               dmPreviews={unreadDmPreviewsBelow}
-              label={
-                unreadBelowLabel ?? unreadChannelCountLabel(unreadBelowCount)
-              }
+              label={unreadBelowLabel ?? unreadCountLabel(unreadBelowCount)}
               onClick={() =>
                 nextUnreadDmBelowId
                   ? scrollToChannel(nextUnreadDmBelowId)

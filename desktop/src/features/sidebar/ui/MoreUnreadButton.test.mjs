@@ -20,7 +20,7 @@ function preview(channelId, label = channelId, avatarUrl = null) {
 }
 
 describe("MoreUnreadButton model", () => {
-  it("shows three avatars until overflow requires a +N chip", () => {
+  it("caps the stack at three avatars without a numeric overflow chip", () => {
     assert.deepEqual(
       visibleUnreadDmPreviews([preview("a"), preview("b"), preview("c")]).map(
         ({ channelId }) => channelId,
@@ -34,7 +34,7 @@ describe("MoreUnreadButton model", () => {
         preview("c"),
         preview("d"),
       ]).map(({ channelId }) => channelId),
-      ["a", "b"],
+      ["a", "b", "c"],
     );
   });
 
@@ -43,14 +43,14 @@ describe("MoreUnreadButton model", () => {
     assert.equal(preferredUnreadTarget([], "nearer"), "nearer");
   });
 
-  it("announces the DM target and honest channel count", () => {
+  it("announces the DM target and message count", () => {
     assert.equal(
       unreadDmAccessibleLabel({
         count: 2,
         dmPreviews: [preview("dm", "Alice")],
         position: "bottom",
       }),
-      "Go to unread direct message from Alice. 2 unread channels below.",
+      "Go to unread direct message from Alice. 2 new messages below.",
     );
     assert.equal(
       unreadDmAccessibleLabel({
@@ -58,11 +58,11 @@ describe("MoreUnreadButton model", () => {
         dmPreviews: [],
         position: "top",
       }),
-      "1 unread channel above",
+      "1 new message above",
     );
   });
 
-  it("renders a decorative channel-keyed stack, overflow, and immediate fallback", () => {
+  it("renders a decorative right-to-left stack with immediate fallback", () => {
     const markup = renderToStaticMarkup(
       MoreUnreadButton({
         count: 5,
@@ -78,15 +78,27 @@ describe("MoreUnreadButton model", () => {
       }),
     );
 
+    assert.match(markup, /class="[^"]*overflow-hidden[^"]*"/);
     assert.match(
       markup,
-      /aria-label="Go to unread direct message from Alice\. 5 unread channels below\."/,
+      /<span class="min-w-0 truncate">5 new messages<\/span>/,
     );
+    assert.match(
+      markup,
+      /aria-label="Go to unread direct message from Alice\. 5 new messages below\."/,
+    );
+    assert.doesNotMatch(markup, />Next<\/span>/);
+    assert.match(markup, />·<\/span>/);
     assert.match(markup, /<span aria-hidden="true"/);
     assert.match(markup, /data-testid="sidebar-unread-dm-avatar-dm-one"/);
     assert.match(markup, /data-testid="sidebar-unread-dm-avatar-dm-two"/);
-    assert.doesNotMatch(markup, /sidebar-unread-dm-avatar-dm-three/);
-    assert.match(markup, />\+2<\/span>/);
+    assert.match(markup, /data-testid="sidebar-unread-dm-avatar-dm-three"/);
+    assert.doesNotMatch(markup, /sidebar-unread-dm-avatar-dm-four/);
+    assert.doesNotMatch(markup, />\+\d+<\/span>/);
+    const stackOrder = [...markup.matchAll(/style="z-index:(\d+)"/g)].map(
+      ([, zIndex]) => Number(zIndex),
+    );
+    assert.deepEqual(stackOrder, [3, 2, 1]);
   });
 
   it("keeps channel-based previews distinct for repeated participants", () => {

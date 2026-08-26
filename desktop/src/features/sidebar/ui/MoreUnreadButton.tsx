@@ -1,6 +1,6 @@
 import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import { UnreadPill, unreadChannelCountLabel } from "@/shared/ui/UnreadPill";
+import { UnreadPill, unreadCountLabel } from "@/shared/ui/UnreadPill";
 
 export type UnreadDmPreview = {
   accessibleLabel: string;
@@ -10,8 +10,7 @@ export type UnreadDmPreview = {
 };
 
 export function visibleUnreadDmPreviews(dmPreviews: UnreadDmPreview[]) {
-  const maxVisibleAvatars = dmPreviews.length > 3 ? 2 : 3;
-  return dmPreviews.slice(0, maxVisibleAvatars);
+  return dmPreviews.slice(0, 3);
 }
 
 export function unreadDmAccessibleLabel({
@@ -23,9 +22,10 @@ export function unreadDmAccessibleLabel({
   dmPreviews: UnreadDmPreview[];
   position: "top" | "bottom";
 }) {
+  const direction = position === "top" ? "above" : "below";
   return dmPreviews[0]
-    ? `Go to unread direct message from ${dmPreviews[0].accessibleLabel}. ${unreadChannelCountLabel(count, position)}.`
-    : unreadChannelCountLabel(count, position);
+    ? `Go to unread direct message from ${dmPreviews[0].accessibleLabel}. ${unreadCountLabel(count)} ${direction}.`
+    : `${unreadCountLabel(count)} ${direction}`;
 }
 
 export function preferredUnreadTarget(
@@ -55,8 +55,7 @@ export function MoreUnreadButton({
   const positionClassName =
     position === "top" ? topChromeInset.top : bottomClassName;
   const visibleDmPreviews = visibleUnreadDmPreviews(dmPreviews);
-  const dmOverflowCount = dmPreviews.length - visibleDmPreviews.length;
-  const resolvedLabel = label ?? unreadChannelCountLabel(count);
+  const resolvedLabel = label ?? unreadCountLabel(count);
   const accessibleLabel = unreadDmAccessibleLabel({
     count,
     dmPreviews,
@@ -75,23 +74,29 @@ export function MoreUnreadButton({
         label={resolvedLabel}
         leading={
           visibleDmPreviews.length > 0 ? (
-            <span aria-hidden="true" className="flex shrink-0 -space-x-1.5">
-              {visibleDmPreviews.map((preview) => (
-                <UserAvatar
-                  avatarUrl={preview.avatarUrl}
-                  className="ring-2 ring-primary"
-                  displayName={preview.label}
-                  fallbackDelayMs={0}
-                  key={preview.channelId}
-                  size="xs"
-                  testId={`sidebar-unread-dm-avatar-${preview.channelId}`}
-                />
-              ))}
-              {dmOverflowCount > 0 ? (
-                <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-primary-foreground px-1 text-3xs font-semibold text-primary ring-2 ring-primary">
-                  +{dmOverflowCount}
-                </span>
-              ) : null}
+            <span
+              aria-hidden="true"
+              className="flex shrink-0 items-center gap-1.5"
+            >
+              <span className="flex -space-x-1.5">
+                {visibleDmPreviews.map((preview, index) => (
+                  <span
+                    className="relative"
+                    key={preview.channelId}
+                    style={{ zIndex: visibleDmPreviews.length - index }}
+                  >
+                    <UserAvatar
+                      avatarUrl={preview.avatarUrl}
+                      className="ring-2 ring-primary"
+                      displayName={preview.label}
+                      fallbackDelayMs={0}
+                      size="xs"
+                      testId={`sidebar-unread-dm-avatar-${preview.channelId}`}
+                    />
+                  </span>
+                ))}
+              </span>
+              <span>·</span>
             </span>
           ) : undefined
         }
