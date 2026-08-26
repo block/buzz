@@ -593,6 +593,16 @@ pub fn resolve_command_cached(command: &str) -> Option<PathBuf> {
     if let Some(managed) = resolve_buzz_managed_command(command) {
         return Some(managed);
     }
+    // Bundled sidecars (e.g. `buzz-agent`) ship next to the app executable, so
+    // `resolve_workspace_command` finds them with a filesystem stat and no
+    // login-shell spawn — the same class of work the managed-shim check above
+    // already performs. Without this the cheap path could never see the sidecar
+    // until a forced discovery warmed the resolve cache, so `buzz-agent` (which
+    // cannot legitimately be missing) reported "not installed" at every cold
+    // launch across the create/edit and agent-defaults surfaces.
+    if let Some(workspace) = resolve_workspace_command(command) {
+        return Some(workspace);
+    }
     resolve_cache()
         .lock()
         .ok()
@@ -820,34 +830,23 @@ pub(crate) fn is_npm_global_install(cmd: &str) -> bool {
         || t.starts_with("npm uninstall -g ")
 }
 
-/// Run a CLI auth probe with a 10-second process-level timeout.
+/// Run `command` to completion, bounded by `timeout`.
 ///
-/// Spawns the probe CLI as a child process. Stdout and stderr are drained on
-/// background threads to prevent pipe-buffer deadlock. On timeout the child is
-/// killed and `Unknown` is returned; no orphaned threads or processes are left
-/// behind. Returns `Unknown` on timeout.
-fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
-    use crate::managed_agents::readiness::cli_probe;
-
-    let augmented_path = cli_probe::augmented_path();
-
-    let mut command = std::process::Command::new(binary_path);
-    command.args(&probe_args[1..]);
-    if let Some(ref path) = augmented_path {
-        command.env("PATH", path);
-    }
+/// Returns `Some(output)` when the child exits within the deadline, `None` when
+/// it fails to spawn or is killed for exceeding it. Stdout and stderr are piped
+/// and drained on background threads so a chatty child can't dead-lock on a
+/// full pipe buffer. Mirrors the auth-probe timeout discipline so any spawn on
+/// the discovery path — including the login-shell PATH probes — is bounded.
+pub(crate) fn output_with_timeout(
+    mut command: Command,
+    timeout: Duration,
+) -> Option<std::process::Output> {
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    crate::util::configure_no_window(&mut command);
 
-    let mut child = match command.spawn() {
-        Ok(c) => c,
-        Err(_) => return AuthStatus::Unknown,
-    };
-
-    // Drain stdout/stderr on background threads to prevent pipe-buffer deadlock.
+    let mut child = command.spawn().ok()?;
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
@@ -856,6 +855,7 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
         if let Some(mut pipe) = stdout_pipe {
             let _ = pipe.read_to_end(&mut buf);
         }
+        buf
     });
     let stderr_thread = std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -865,16 +865,14 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
         buf
     });
 
-    // Save PID for kill-on-timeout before moving child into the wait thread.
     let child_pid = child.id();
     let (tx, rx) = std::sync::mpsc::channel();
     let wait_thread = std::thread::spawn(move || {
         let _ = tx.send(child.wait());
     });
 
-    // 10-second timeout for auth probes.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let exit_status = loop {
+    let deadline = Instant::now() + timeout;
+    let status = loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             #[cfg(unix)]
@@ -887,30 +885,51 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
             let _ = wait_thread.join();
             let _ = stdout_thread.join();
             let _ = stderr_thread.join();
-            return AuthStatus::Unknown;
+            return None;
         }
         match rx.recv_timeout(Duration::from_millis(100).min(remaining)) {
             Ok(Ok(status)) => break status,
-            Ok(Err(_)) => {
+            Ok(Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                 let _ = wait_thread.join();
                 let _ = stdout_thread.join();
                 let _ = stderr_thread.join();
-                return AuthStatus::Unknown;
+                return None;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
-                return AuthStatus::Unknown;
-            }
         }
     };
 
     let _ = wait_thread.join();
-    let _ = stdout_thread.join();
-    let stderr_bytes = stderr_thread.join().unwrap_or_default();
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+    Some(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
 
-    match cli_probe::classify_probe_output(&stderr_bytes, exit_status.success()) {
+/// Run a CLI auth probe with a 10-second process-level timeout.
+///
+/// On timeout or spawn failure the child is killed and `Unknown` is returned;
+/// no orphaned threads or processes are left behind (see [`output_with_timeout`]).
+fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
+    use crate::managed_agents::readiness::cli_probe;
+
+    let augmented_path = cli_probe::augmented_path();
+
+    let mut command = std::process::Command::new(binary_path);
+    command.args(&probe_args[1..]);
+    if let Some(ref path) = augmented_path {
+        command.env("PATH", path);
+    }
+    crate::util::configure_no_window(&mut command);
+
+    let Some(output) = output_with_timeout(command, Duration::from_secs(10)) else {
+        return AuthStatus::Unknown;
+    };
+
+    match cli_probe::classify_probe_output(&output.stderr, output.status.success()) {
         cli_probe::ProbeOutcome::LoggedIn => AuthStatus::LoggedIn,
         cli_probe::ProbeOutcome::LoggedOut => AuthStatus::LoggedOut,
         cli_probe::ProbeOutcome::ConfigInvalid { stderr_excerpt } => AuthStatus::ConfigInvalid {

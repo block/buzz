@@ -120,6 +120,60 @@ fn explicit_path_resolution_ignores_non_executable_files() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[cfg(unix)]
+#[test]
+fn cheap_path_resolves_workspace_sidecar_without_cache() {
+    // Regression: `resolve_command_cached` (the cheap discovery path) must find
+    // a bundled sidecar sitting next to the executable via a filesystem stat,
+    // even with a cold resolve cache. Before the fix it consulted only the
+    // managed-shim dirs + cache, so `buzz-agent` reported "not installed" at
+    // every cold launch. We assert the workspace resolver — the seam the cheap
+    // path now shares — resolves an executable file by path.
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join(format!("buzz-sidecar-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let bin = dir.join("buzz-agent");
+    std::fs::write(&bin, "#!/bin/sh\n").expect("write sidecar");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    assert_eq!(
+        super::resolve_command_cached(bin.to_str().expect("utf8 path")),
+        Some(bin.clone()),
+        "cheap path must resolve a bundled sidecar by path with a cold cache"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn output_with_timeout_returns_output_for_fast_command() {
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.args(["-c", "printf hi"]);
+    let out = super::output_with_timeout(cmd, std::time::Duration::from_secs(5))
+        .expect("fast command must complete within the timeout");
+    assert!(out.status.success());
+    assert_eq!(out.stdout, b"hi");
+}
+
+#[cfg(unix)]
+#[test]
+fn output_with_timeout_kills_and_returns_none_on_timeout() {
+    let start = std::time::Instant::now();
+    let mut cmd = std::process::Command::new("/bin/sh");
+    cmd.args(["-c", "sleep 30"]);
+    let result = super::output_with_timeout(cmd, std::time::Duration::from_millis(200));
+    assert!(
+        result.is_none(),
+        "a command exceeding the timeout must return None"
+    );
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "the call must return promptly after the timeout, not block on the child"
+    );
+}
+
 #[test]
 fn classifies_available_when_adapter_found() {
     let (status, cmd, path) = classify_runtime(

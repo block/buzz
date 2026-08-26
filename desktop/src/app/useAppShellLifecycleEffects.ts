@@ -1,5 +1,7 @@
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
+import { refreshAcpRuntimes } from "@/features/agents/acpRuntimesQuery";
 import { setDesktopAppBadge } from "@/features/notifications/lib/desktop";
 import { useForegroundQueryRefresh } from "@/features/workflows/hooks";
 import { relayClient } from "@/shared/api/relayClient";
@@ -22,6 +24,20 @@ export function useAppShellLifecycleEffects({
   // the backoff timer when the relay session is degraded (CMD+R gap G1).
   useRelayResumeTriggers();
   useForegroundQueryRefresh();
+
+  // Warm the ACP runtime catalog once at app launch. The shared runtime-catalog
+  // cache is in-memory only, so it starts cold every boot; the cheap discovery
+  // path reports every harness as "(not installed)" until a forced pass warms
+  // it. The create/edit picker and Agents > Agent defaults surfaces read that
+  // cheap path, so without this warm they render all-missing (and block agent
+  // save) until the user visits Settings > Agents — the accidental workaround.
+  // Fire-and-forget: `refreshAcpRuntimes` writes the fresh catalog into the
+  // shared cache and swallows its own errors, so a failed probe leaves the last
+  // good catalog in place without an unhandled rejection.
+  const queryClient = useQueryClient();
+  React.useEffect(() => {
+    void refreshAcpRuntimes(queryClient);
+  }, [queryClient]);
 
   // Prevent webview file:/// navigation on file drop outside the composer.
   // Scoped to file drags only (text drag-and-drop into inputs still works).

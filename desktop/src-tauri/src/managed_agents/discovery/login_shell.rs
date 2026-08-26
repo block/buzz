@@ -6,8 +6,14 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use super::is_executable_file;
+
+/// Per-candidate wall-clock bound for a login-shell spawn. Matches the auth
+/// probe's 10s discipline: long enough for a healthy interactive shell to
+/// source its rc files, short enough that a wedged shell can't stall discovery.
+const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Test-only spawn counter lives beside `discovery.rs`; import it here so the
 /// spawn-record call site stays byte-identical to the pre-extraction source.
@@ -34,6 +40,13 @@ pub(crate) fn login_shell_candidates() -> Vec<PathBuf> {
 
 /// Run a command in a login shell (tries zsh then bash on Unix, Git Bash on Windows).
 /// Returns trimmed stdout if the command succeeds with non-empty output.
+///
+/// Each candidate shell is bounded by [`LOGIN_SHELL_TIMEOUT`]: a shell whose
+/// startup blocks (an interactive prompt in `.zshrc`, a stalled network mount,
+/// a credential helper waiting on input) is killed and treated as a miss so the
+/// loop falls through to the next candidate rather than hanging the whole
+/// discovery. Without this bound a single slow login shell froze the forced
+/// pipeline indefinitely, which is what left "Check again" spinning forever.
 fn run_in_login_shell(args: &[&str]) -> Option<String> {
     #[cfg(test)]
     login_shell_spawn_probe::record();
@@ -41,7 +54,7 @@ fn run_in_login_shell(args: &[&str]) -> Option<String> {
         let mut cmd = Command::new(&shell);
         cmd.args(args);
         crate::util::configure_no_window(&mut cmd);
-        let Ok(output) = cmd.output() else {
+        let Some(output) = super::output_with_timeout(cmd, LOGIN_SHELL_TIMEOUT) else {
             continue;
         };
         if !output.status.success() {
