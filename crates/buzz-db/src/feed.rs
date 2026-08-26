@@ -904,8 +904,19 @@ mod tests {
 
         // 11,000 rows x 6 binds = 66,000 > 65,535: overflows a single statement.
         let mention_count = 11_000usize;
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey, role) \
+             SELECT $1, $2, decode(lpad(to_hex(n), 64, '0'), 'hex'), 'member' \
+             FROM generate_series(1, $3) n",
+        )
+        .bind(community.as_uuid())
+        .bind(channel)
+        .bind(mention_count as i64)
+        .execute(&pool)
+        .await
+        .expect("insert canonical roster members");
         let tags: Vec<Tag> = (1..=mention_count)
-            .map(|n| Tag::parse(["p", &format!("{n:064x}")]).expect("p tag"))
+            .map(|n| Tag::parse(["p", &format!("{n:064x}"), "", "member"]).expect("p tag"))
             .collect();
         let event = store_feed_event(&pool, community, 39002, "", Some(channel), tags).await;
 
