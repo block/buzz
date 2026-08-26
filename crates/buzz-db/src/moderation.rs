@@ -14,12 +14,13 @@
 //! Lane ownership: L1 (Max). Signatures below are the contract; changes go
 //! through the integration thread.
 
+use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row as _};
 use uuid::Uuid;
 
 use crate::error::Result;
-use crate::CommunityId;
+use crate::{CommunityId, Db};
 
 /// What a report points at. Exactly one target class per report row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -651,13 +652,174 @@ fn row_to_action(row: sqlx::postgres::PgRow) -> Result<ActionRecord> {
     })
 }
 
+impl Db {
+    /// Insert a tenant-scoped NIP-56 report row, idempotent by report event id.
+    #[datastore_span(name = "insert_moderation_report", system = "postgresql")]
+    pub async fn insert_moderation_report(
+        &self,
+        community: CommunityId,
+        report: NewReport<'_>,
+    ) -> Result<Uuid> {
+        insert_report(&self.pool, community, report).await
+    }
+
+    /// List moderation reports for a community, newest first.
+    #[datastore_span(name = "list_moderation_reports", system = "postgresql")]
+    pub async fn list_moderation_reports(
+        &self,
+        community: CommunityId,
+        status: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<ReportRecord>> {
+        list_reports(&self.pool, community, status, limit).await
+    }
+
+    /// Fetch one moderation report by row id.
+    #[datastore_span(name = "get_moderation_report", system = "postgresql")]
+    pub async fn get_moderation_report(
+        &self,
+        community: CommunityId,
+        report_id: Uuid,
+    ) -> Result<Option<ReportRecord>> {
+        get_report(&self.pool, community, report_id).await
+    }
+
+    /// Fetch one moderation report by signed NIP-56 report event id.
+    #[datastore_span(name = "get_moderation_report_by_event", system = "postgresql")]
+    pub async fn get_moderation_report_by_event(
+        &self,
+        community: CommunityId,
+        report_event_id: &[u8],
+    ) -> Result<Option<ReportRecord>> {
+        get_report_by_event(&self.pool, community, report_event_id).await
+    }
+
+    /// Resolve, dismiss, or escalate an open moderation report.
+    #[datastore_span(name = "resolve_moderation_report", system = "postgresql")]
+    pub async fn resolve_moderation_report(
+        &self,
+        community: CommunityId,
+        report_id: Uuid,
+        status: &str,
+        resolved_by: &[u8],
+        action_id: Option<Uuid>,
+    ) -> Result<bool> {
+        resolve_report(
+            &self.pool,
+            community,
+            report_id,
+            status,
+            resolved_by,
+            action_id,
+        )
+        .await
+    }
+
+    /// Upsert a community ban for a member pubkey.
+    #[datastore_span(name = "ban_community_member", system = "postgresql")]
+    pub async fn ban_community_member(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        actor: &[u8],
+        reason: Option<&str>,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        ban_member(&self.pool, community, pubkey, actor, reason, expires_at).await
+    }
+
+    /// Lift a community ban for a member pubkey.
+    #[datastore_span(name = "unban_community_member", system = "postgresql")]
+    pub async fn unban_community_member(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        actor: &[u8],
+    ) -> Result<bool> {
+        unban_member(&self.pool, community, pubkey, actor).await
+    }
+
+    /// Upsert a community timeout/write-block for a member pubkey.
+    #[datastore_span(name = "timeout_community_member", system = "postgresql")]
+    pub async fn timeout_community_member(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        actor: &[u8],
+        muted_until: DateTime<Utc>,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        timeout_member(&self.pool, community, pubkey, actor, muted_until, reason).await
+    }
+
+    /// Clear a community timeout/write-block for a member pubkey.
+    #[datastore_span(name = "untimeout_community_member", system = "postgresql")]
+    pub async fn untimeout_community_member(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+        actor: &[u8],
+    ) -> Result<bool> {
+        untimeout_member(&self.pool, community, pubkey, actor).await
+    }
+
+    /// Fetch the active ban/timeout restriction state for enforcement hot paths.
+    #[datastore_span(name = "moderation_restriction_state", system = "postgresql")]
+    pub async fn moderation_restriction_state(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<RestrictionState> {
+        restriction_state(&self.pool, community, pubkey).await
+    }
+
+    /// Fetch the full ban/timeout row for a member pubkey.
+    #[datastore_span(name = "get_community_ban", system = "postgresql")]
+    pub async fn get_community_ban(
+        &self,
+        community: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<Option<BanRecord>> {
+        get_ban(&self.pool, community, pubkey).await
+    }
+
+    /// List currently restricted members in a community.
+    #[datastore_span(name = "list_community_restrictions", system = "postgresql")]
+    pub async fn list_community_restrictions(
+        &self,
+        community: CommunityId,
+    ) -> Result<Vec<BanRecord>> {
+        list_restricted(&self.pool, community).await
+    }
+
+    /// Insert a moderation audit action row.
+    #[datastore_span(name = "insert_moderation_action", system = "postgresql")]
+    pub async fn insert_moderation_action(
+        &self,
+        community: CommunityId,
+        action: NewAction<'_>,
+    ) -> Result<Uuid> {
+        insert_action(&self.pool, community, action).await
+    }
+
+    /// List moderation audit action rows, newest first.
+    #[datastore_span(name = "list_moderation_actions", system = "postgresql")]
+    pub async fn list_moderation_actions(
+        &self,
+        community: CommunityId,
+        limit: i64,
+    ) -> Result<Vec<ActionRecord>> {
+        list_actions(&self.pool, community, limit).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Duration;
     use uuid::Uuid;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     async fn setup_pool() -> PgPool {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
