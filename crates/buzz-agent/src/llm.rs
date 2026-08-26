@@ -170,13 +170,17 @@ impl Llm {
                         )
                     }
                     DatabricksV2Route::MlflowChatCompletions => {
-                        // MLflow Chat path (OpenAI-shaped): normalize effort via manifest.
+                        // UC model-service FQNs are not native provider model names. Build
+                        // against a neutral capability identity so family-name text in a
+                        // catalog/schema/service component cannot change request semantics,
+                        // then restore the actual FQN in the payload.
+                        let capability_model = databricks_v2_capability_model(effective_model);
                         let e = effort
-                            .map(|ef| normalize_effort_for_databricks_v2(ef, effective_model));
-                        (
-                            openai_body(cfg, system_prompt, history, tools, effective_model, e),
-                            parse_openai as OpenAiParse,
-                        )
+                            .map(|ef| normalize_effort_for_databricks_v2(ef, capability_model));
+                        let mut body =
+                            openai_body(cfg, system_prompt, history, tools, capability_model, e);
+                        body["model"] = json!(effective_model);
+                        (body, parse_openai as OpenAiParse)
                     }
                 })
                 .await
@@ -325,18 +329,21 @@ impl Llm {
                                 }),
                                 parse_anthropic as OpenAiParse,
                             ),
-                            DatabricksV2Route::MlflowChatCompletions => (
-                                json!({
-                                    "model": effective_model,
+                            DatabricksV2Route::MlflowChatCompletions => {
+                                let capability_model =
+                                    databricks_v2_capability_model(effective_model);
+                                let mut body = json!({
+                                    "model": capability_model,
                                     "stream": false,
                                     "max_completion_tokens": max_output_tokens,
                                     "messages": [
                                         { "role": "system", "content": system_prompt },
                                         { "role": "user", "content": user_prompt },
                                     ],
-                                }),
-                                parse_openai as OpenAiParse,
-                            ),
+                                });
+                                body["model"] = json!(effective_model);
+                                (body, parse_openai as OpenAiParse)
+                            }
                         })
                         .await?;
                     Ok(r.text)
@@ -967,26 +974,47 @@ fn is_responses_required_error(body: &str) -> bool {
         || b.contains("use the responses api")
 }
 
-/// Resolve the Databricks v2 AI Gateway wire route for `model` from the manifest.
+/// Resolve the Databricks v2 AI Gateway wire route for `model`.
 ///
-/// The route is a capability of the `(databricks_v2, model)` pair, owned by
-/// `scripts/model-capabilities.json` and resolved by the shared interpreter — the
-/// same authority that drives effort/label resolution. This function only maps the
-/// manifest's route enum onto the three concrete wire routes this dispatch path can
-/// serve; it holds no routing knowledge of its own.
+/// Strict three-component Unity Catalog model-service FQNs are checked before
+/// the manifest, because their namespace is catalog data rather than a model
+/// family hint. Other IDs retain the manifest-owned route.
+fn databricks_v2_capability_model(model: &str) -> &str {
+    if is_model_service_fqn(model) {
+        "model-service"
+    } else {
+        model
+    }
+}
+
+/// Return whether `model` is exactly three non-empty dot-separated components.
+/// This is deliberately structural: model-service names are catalog data, so
+/// family words such as `claude` and `gpt-5` have no routing meaning here.
+pub(crate) fn is_model_service_fqn(model: &str) -> bool {
+    let mut components = model.split('.');
+    let (Some(catalog), Some(schema), Some(service)) =
+        (components.next(), components.next(), components.next())
+    else {
+        return false;
+    };
+    [catalog, schema, service].into_iter().all(|component| {
+        !component.is_empty()
+            && !component.chars().any(char::is_whitespace)
+            && !component.contains('/')
+    }) && components.next().is_none()
+}
+
+/// Resolve the Databricks v2 AI Gateway wire route for `model`.
 ///
-/// The manifest enum carries two non-wire variants that cannot occur here for a
-/// concrete Databricks v2 model at dispatch time:
-/// - `NotApplicable` is produced only for non-`databricks_v2` providers, and this
-///   seam is reached only under `Provider::DatabricksV2`.
-/// - `RouteUnknown` is produced only for a blank model id, which `Config` rejects at
-///   startup (`DATABRICKS_MODEL` required) and `session/set_model` rejects at runtime
-///   (empty `modelId` → `invalid_params`), so `effective_model` is never blank here.
-///
-/// Both are folded into `MlflowChatCompletions` — the manifest's own concrete-unknown
-/// fallback and the route a blank id would historically have taken — so an unforeseen
-/// reshape degrades to the safe OpenAI-wire route rather than panicking.
+/// A Unity Catalog model-service FQN always uses MLflow Chat Completions. The
+/// namespace is data, not a provider-family hint, so names containing `claude`
+/// or `gpt` must not reach native Anthropic/Responses routes. Non-FQN ids keep
+/// the existing manifest projection unchanged.
 fn databricks_v2_route(model: &str) -> DatabricksV2Route {
+    if is_model_service_fqn(model) {
+        return DatabricksV2Route::MlflowChatCompletions;
+    }
+
     use crate::model_capabilities::DatabricksV2Route as Manifest;
     match crate::model_capabilities::resolve("databricks_v2", model).databricks_v2_wire_route {
         Manifest::OpenaiResponses => DatabricksV2Route::OpenAiResponses,
@@ -2615,6 +2643,7 @@ mod tests {
             stop_max_rejections: 0,
             require_reply: false,
             hook_servers: HookServers::None,
+            databricks_model_filter: None,
             api_key: "key".into(),
             model: "model".into(),
             base_url: "http://example.invalid".into(),
@@ -2830,6 +2859,33 @@ mod tests {
                 "no catalog probe belongs on this path"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn databricks_v2_model_service_fqn_summary_uses_mlflow_chat() {
+        let model = "catalog.schema.claude-gpt-5";
+        let (base_url, captured) =
+            spawn_sequence_stub(vec![StubHttpResponse::ok(chat_response("summary"))]).await;
+        let mut config = cfg(Provider::DatabricksV2);
+        config.base_url = base_url;
+        let llm = Llm::new(&config).unwrap();
+
+        let summary = llm
+            .summarize(&config, "system", "history", 128, model)
+            .await
+            .unwrap();
+        assert_eq!(summary, "summary");
+
+        let requests = captured.lock().await;
+        let request = requests
+            .iter()
+            .find(|request| request.method == "POST")
+            .expect("summary must issue one POST");
+        assert_eq!(request.path, "/v1/ai-gateway/mlflow/v1/chat/completions");
+        let body = request.body.as_ref().expect("summary body");
+        assert_eq!(body["model"], model);
+        assert!(body["messages"].is_array());
+        assert_eq!(body["max_completion_tokens"], 128);
     }
 
     fn image_history() -> Vec<HistoryItem> {
@@ -3238,6 +3294,52 @@ mod tests {
             let got = databricks_v2_route(model);
             assert_eq!(got, route, "model={model}");
             assert_eq!(databricks_v2_path(got), path, "model={model}");
+        }
+    }
+
+    #[test]
+    fn databricks_v2_model_service_fqn_shape_is_strict_and_precedes_manifest() {
+        use crate::model_capabilities::{resolve, DatabricksV2Route as Manifest};
+
+        for model in [
+            "catalog.schema.service",
+            "catalog.schema.claude-gpt-5",
+            "data_tools.goose.kimi-k3",
+        ] {
+            assert!(is_model_service_fqn(model), "expected FQN shape: {model}");
+            assert_eq!(
+                databricks_v2_route(model),
+                DatabricksV2Route::MlflowChatCompletions,
+                "FQN route must precede manifest family inference: {model}"
+            );
+        }
+
+        let manifest_route =
+            |model: &str| match resolve("databricks_v2", model).databricks_v2_wire_route {
+                Manifest::OpenaiResponses => DatabricksV2Route::OpenAiResponses,
+                Manifest::AnthropicMessages => DatabricksV2Route::AnthropicMessages,
+                Manifest::MlflowChat | Manifest::NotApplicable | Manifest::RouteUnknown => {
+                    DatabricksV2Route::MlflowChatCompletions
+                }
+            };
+        for model in [
+            "catalog.schema",
+            "catalog..service",
+            ".schema.service",
+            "catalog.schema.",
+            "catalog.schema.service.extra",
+            "catalog/schema/service",
+            "catalog.schema service",
+        ] {
+            assert!(
+                !is_model_service_fqn(model),
+                "unexpected FQN shape: {model}"
+            );
+            assert_eq!(
+                databricks_v2_route(model),
+                manifest_route(model),
+                "malformed/partial IDs must retain manifest routing: {model}"
+            );
         }
     }
 
