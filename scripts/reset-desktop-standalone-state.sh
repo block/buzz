@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # Reset only one standalone desktop development instance.
+#
+# This clears UI/webview/cache state. Durable identity and managed-agent data
+# live in the app data directory and must survive a fresh standalone launch.
 set -euo pipefail
 
 instance_id="${1:-}"
@@ -22,20 +25,48 @@ remove_path() {
     fi
 }
 
+remove_app_data_path() {
+    local path="$1"
+    if [[ ! -e "$path" && ! -L "$path" ]]; then
+        return
+    fi
+
+    if [[ ! -d "$path" || ( -L "$path" && ! -d "$path/" ) ]]; then
+        remove_path "$path"
+        return
+    fi
+
+    echo "Removing $path contents except identity files and agents/"
+    find "$path" -mindepth 1 -maxdepth 1 \
+        ! -name agents \
+        ! -name identity.key \
+        ! -name identity.migrated \
+        ! -name 'identity.buzz-desktop-dev*.migrated' \
+        ! -name identity.ncryptsec \
+        -exec rm -rf -- {} +
+}
+
+delete_dev_keyring_if_requested() {
+    if [[ "${BUZZ_RESET_DESKTOP_KEYRING:-0}" != "1" ]]; then
+        return
+    fi
+    if command -v security >/dev/null 2>&1; then
+        while security delete-generic-password -s "$keyring_service" >/dev/null 2>&1; do :; done
+    fi
+}
+
 case "${BUZZ_TEST_PLATFORM:-$(uname -s)}" in
     Darwin)
-        remove_path "$HOME/Library/Application Support/$instance_id"
+        remove_app_data_path "$HOME/Library/Application Support/$instance_id"
         remove_path "$HOME/Library/Caches/$instance_id"
         remove_path "$HOME/Library/WebKit/$instance_id"
         remove_path "$HOME/Library/HTTPStorages/$instance_id"
         remove_path "$HOME/Library/Saved Application State/$instance_id.savedState"
         remove_path "$HOME/Library/Preferences/$instance_id.plist"
-        if command -v security >/dev/null 2>&1; then
-            while security delete-generic-password -s "$keyring_service" >/dev/null 2>&1; do :; done
-        fi
+        delete_dev_keyring_if_requested
         ;;
     Linux)
-        remove_path "${XDG_DATA_HOME:-$HOME/.local/share}/$instance_id"
+        remove_app_data_path "${XDG_DATA_HOME:-$HOME/.local/share}/$instance_id"
         remove_path "${XDG_CONFIG_HOME:-$HOME/.config}/$instance_id"
         remove_path "${XDG_CACHE_HOME:-$HOME/.cache}/$instance_id"
         ;;
@@ -45,4 +76,4 @@ case "${BUZZ_TEST_PLATFORM:-$(uname -s)}" in
         ;;
 esac
 
-echo "Standalone state removed for $instance_id; relay and database data were not touched"
+echo "Standalone UI state removed for $instance_id; managed agents, relay, and database data were not touched"
