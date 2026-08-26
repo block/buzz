@@ -1860,6 +1860,58 @@ test("empty channel shows intro actions", async ({ page }) => {
   );
 });
 
+test("a client without runtimes can add an existing remote agent", async ({
+  page,
+}) => {
+  const remoteAgentPubkey =
+    "1234123412341234123412341234123412341234123412341234123412341234";
+  await installMockBridge(page, {
+    acpRuntimesCatalog: [],
+    relayAgents: [
+      {
+        pubkey: remoteAgentPubkey,
+        name: "PM Bot",
+        channels: ["general"],
+        channelIds: ["00000000-0000-4000-8000-000000000001"],
+        status: "online",
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-random").click();
+  await page.getByTestId("channel-intro-action-create-agent").click();
+
+  const existingAgent = page.getByTestId(
+    `add-existing-agent-${remoteAgentPubkey}`,
+  );
+  await expect(existingAgent).toContainText("PM Bot");
+  await expect(existingAgent).toContainText("Online");
+  await existingAgent.click();
+
+  const submit = page
+    .getByTestId("add-channel-bot-dialog-footer")
+    .getByRole("button", { name: "Add agent" });
+  await expect(submit).toBeEnabled();
+  await submit.click();
+  await expect(page.getByTestId("add-channel-bot-dialog")).toHaveCount(0);
+
+  const commands = await readCommandPayloadLog(page);
+  expect(
+    commands.filter((entry) => entry.command === "create_managed_agent"),
+  ).toHaveLength(0);
+  expect(commands).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        command: "add_channel_members",
+        payload: expect.objectContaining({
+          pubkeys: [remoteAgentPubkey],
+          role: "bot",
+        }),
+      }),
+    ]),
+  );
+});
+
 test("short channel with messages shows intro actions on open", async ({
   page,
 }) => {

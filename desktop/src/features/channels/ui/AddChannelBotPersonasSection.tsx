@@ -88,6 +88,7 @@ function CreateAgentRow({ onCreateAgent }: { onCreateAgent: () => void }) {
 }
 
 type AddChannelBotPersonasSectionProps = {
+  availableLabel?: string;
   canToggleSelections: boolean;
   inChannelPersonaIds?: ReadonlySet<string>;
   isLoading: boolean;
@@ -103,6 +104,7 @@ type AddChannelBotPersonasSectionProps = {
 };
 
 export function AddChannelBotPersonasSection({
+  availableLabel = "Your agents",
   canToggleSelections,
   inChannelPersonaIds,
   isLoading,
@@ -133,7 +135,7 @@ export function AddChannelBotPersonasSection({
       {!isLoading && available.length > 0 ? (
         <div className="space-y-1">
           <div className="px-3 pb-1 text-xs font-medium text-muted-foreground">
-            Your agents
+            {availableLabel}
           </div>
           {available.map((persona) => (
             <AgentRow
