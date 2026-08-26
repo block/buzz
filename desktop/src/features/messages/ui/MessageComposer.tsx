@@ -123,6 +123,9 @@ function MessageComposerImpl({
     setIsFormattingOpen(pressed);
   }, []);
   const drafts = useDrafts();
+  const implicitAgentMentionNamesByDraftRef = React.useRef(
+    new Map<string, readonly string[]>(),
+  );
   const identityQuery = useIdentityQuery();
   const effectiveDraftKey = draftKey ?? channelId;
   const ownerPubkey = identityQuery.data?.pubkey ?? null;
@@ -131,6 +134,7 @@ function MessageComposerImpl({
       ? getPersistentAgentAudienceScope({
           ownerPubkey,
           channelId,
+          composerKey: effectiveDraftKey,
         })
       : null;
   const effectiveDraftKeyRef = React.useRef(effectiveDraftKey);
@@ -204,6 +208,11 @@ function MessageComposerImpl({
     setSpoileredAttachmentUrls,
     spoileredAttachmentUrlsRef,
     syncComposerContentFromEditor,
+    getImplicitAgentMentionNames: () =>
+      effectiveDraftKey
+        ? (implicitAgentMentionNamesByDraftRef.current.get(effectiveDraftKey) ??
+          [])
+        : [],
   });
   // biome-ignore lint/correctness/useExhaustiveDependencies: effectiveDraftKey is the sole trigger
   React.useEffect(() => {
@@ -477,6 +486,16 @@ function MessageComposerImpl({
     richText,
   });
   restoreAddressedAgentMentionsRef.current = restoreAddressedAgentMentions;
+  if (effectiveDraftKey) {
+    implicitAgentMentionNamesByDraftRef.current.set(
+      effectiveDraftKey,
+      lockedAgents.map((agent) => agent.displayName),
+    );
+  }
+  React.useLayoutEffect(() => {
+    if (!audienceScope || editTarget != null) return;
+    restoreAddressedAgentMentions();
+  }, [audienceScope, editTarget, restoreAddressedAgentMentions]);
   syncAddressedAgentsFromTextRef.current = syncAddressedAgentsFromText;
   const applyChannelInsert = React.useCallback(
     (suggestion: ChannelSuggestion) => {
@@ -944,7 +963,9 @@ function MessageComposerImpl({
               <EditorContent editor={richText.editor} />
             </div>
             <ComposerDockToolbar
-              addressedAgents={editTarget == null ? lockedAgents : []}
+              addressedAgents={
+                editTarget == null && !composerDisabled ? lockedAgents : []
+              }
               autoPinConfirmationTitle={autoPinConfirmationTitle}
               layoutMode={layoutMode}
               composerDisabled={composerDisabled}

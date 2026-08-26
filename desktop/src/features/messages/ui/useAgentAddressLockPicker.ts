@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { getMentionOffsets } from "@/features/messages/lib/hasMention";
+import { stripImplicitAgentMentions } from "@/features/messages/lib/stripImplicitAgentMentions";
 import type { usePersistentAgentAudience } from "@/features/messages/lib/persistentAgentAudience";
 import type { UseMentionsResult } from "@/features/messages/lib/useMentions";
 import type {
@@ -83,6 +84,9 @@ export function useAgentAddressLockPicker({
     unpinnedAudienceScopeRef.current = audienceScope;
     unpinnedAgentPubkeysRef.current.clear();
   }
+  for (const pubkey of lockedAgentPubkeys) {
+    unpinnedAgentPubkeysRef.current.delete(pubkey);
+  }
   const lockedAgentNamesRef = React.useRef(new Map<string, string>());
   const visibleAgentMentionPubkeysRef = React.useRef(new Set<string>());
   const mentionSyncScopeRef = React.useRef(audienceScope);
@@ -156,9 +160,31 @@ export function useAgentAddressLockPicker({
       const normalized = normalizePubkey(pubkey);
       if (!audienceScope || !normalized) return;
       unpinnedAgentPubkeysRef.current.add(normalized);
-      audience.removePubkey(normalized);
+      const excludePubkey = audience.excludePubkey ?? audience.removePubkey;
+      excludePubkey(normalized);
+      const displayName = lockedAgents.find(
+        (agent) => agent.pubkey === normalized,
+      )?.displayName;
+      if (displayName) {
+        const text = richText.getPlainTextAndCursor().text;
+        const strippedText = stripImplicitAgentMentions(text, [displayName]);
+        if (strippedText !== text) {
+          applyAutocompleteEdit({
+            replaceFromOffset: 0,
+            replaceToOffset: text.length - strippedText.length,
+            insertText: "",
+          });
+        }
+      }
     },
-    [audience.removePubkey, audienceScope],
+    [
+      applyAutocompleteEdit,
+      audience.excludePubkey,
+      audience.removePubkey,
+      audienceScope,
+      lockedAgents,
+      richText.getPlainTextAndCursor,
+    ],
   );
   const removeAddressedAgentMentions = React.useCallback(
     (pubkey: string) => {

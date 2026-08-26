@@ -5,6 +5,7 @@ import { installMockBridge } from "../helpers/bridge";
 
 const SHOTS = "test-results/persistent-agent-audience";
 const CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+const RANDOM_CHANNEL_ID = "9dae0116-799b-5071-a0a8-fdd30a91a35d";
 const AGENT_A = "a".repeat(64);
 const AGENT_B = "b".repeat(64);
 const THREAD_ROOT_ID = "mock-general-welcome";
@@ -285,6 +286,45 @@ test("automatically mentions multiple agents from the mention picker", async ({
   ).toBeVisible();
 });
 
+test("hides automatic mention state while disabled without clearing the draft", async ({
+  page,
+}) => {
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  await automaticallyMention(composer, "Morgarita");
+  await input.type("draft text");
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toBeVisible();
+
+  await page.getByTestId("channel-management-trigger").click();
+  await expect(page.getByTestId("channel-management-sheet")).toBeVisible();
+  await page.getByTestId("channel-management-archive").click();
+  await expect(page.getByTestId("channel-management-unarchive")).toBeVisible();
+  await page.getByTestId("auxiliary-panel-close").click();
+
+  await expect(input).toHaveAttribute("contenteditable", "false");
+  await expect(input).toHaveText("@Morgarita draft text");
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
+
+  await page.getByTestId("channel-management-trigger").click();
+  await expect(page.getByTestId("channel-management-sheet")).toBeVisible();
+  await page.getByTestId("channel-management-unarchive").click();
+  await expect(page.getByTestId("channel-management-archive")).toBeVisible();
+  await page.getByTestId("auxiliary-panel-close").click();
+
+  await expect(input).toHaveAttribute("contenteditable", "true");
+  await expect(input).toHaveText("@Morgarita draft text");
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toBeVisible();
+});
+
 test("Tab inserts a one-time agent mention by default", async ({ page }) => {
   await installAudienceFixtures(page);
   await openGeneral(page);
@@ -370,7 +410,7 @@ test("primary+Shift+M addresses the default agent, then selects the highlighted 
   await expect(
     composer
       .getByTestId("composer-address-locks")
-      .getByRole("button", { name: /^Stop automatically mentioning / }),
+      .getByRole("button", { name: /^Don't automatically mention / }),
   ).toHaveCount(1);
 
   await input.fill("@Vog");
@@ -391,7 +431,7 @@ test("primary+Shift+M addresses the default agent, then selects the highlighted 
   await expect(
     composer
       .getByTestId("composer-address-locks")
-      .getByRole("button", { name: /^Stop automatically mentioning / }),
+      .getByRole("button", { name: /^Don't automatically mention / }),
   ).toHaveCount(1);
 });
 
@@ -468,12 +508,14 @@ test("the mention button opens settings and can undo an address", async ({
   await expect(page.getByTestId("user-profile-panel")).toHaveCount(0);
   await expect(
     menu.getByRole("button", {
-      name: "Stop automatically mentioning Morgarita",
+      name: "Don't automatically mention Morgarita in this conversation",
     }),
   ).toHaveAttribute("aria-pressed", "true");
 
   await menu
-    .getByRole("button", { name: "Stop automatically mentioning Morgarita" })
+    .getByRole("button", {
+      name: "Don't automatically mention Morgarita in this conversation",
+    })
     .click();
   await expect(input).toHaveText("draft text");
   await expect(
@@ -740,28 +782,102 @@ test("the auto-pin popover can turn off automatic agent mentions", async ({
   await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
 });
 
-test("channel automatic mentions carry into threads and stay synchronized", async ({
+test("automatic mentions are scoped to their channel or thread composer", async ({
   page,
 }) => {
   await installAudienceFixtures(page);
   await openGeneral(page);
   await automaticallyMention(channelComposer(page), "Morgarita");
+  await expect(
+    channelComposer(page).getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toBeVisible();
 
   await openThread(page);
-  const channelAutomaticMention = channelComposer(page).getByTestId(
-    `composer-address-lock-${AGENT_A}`,
-  );
-  const threadAutomaticMention = threadComposer(page).getByTestId(
-    `composer-address-lock-${AGENT_A}`,
-  );
-  await expect(channelAutomaticMention).toBeVisible();
-  await expect(threadAutomaticMention).toBeVisible();
+  await expect(
+    threadComposer(page).getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
 
-  await threadComposer(page)
-    .getByTestId(`composer-address-lock-remove-${AGENT_A}`)
-    .click();
-  await expect(threadAutomaticMention).toHaveCount(0);
-  await expect(channelAutomaticMention).toHaveCount(0);
+  await automaticallyMention(threadComposer(page), "Vogue");
+  await openGeneral(page);
+  await expect(
+    channelComposer(page).getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toBeVisible();
+  await expect(
+    channelComposer(page).getByTestId(`composer-address-lock-${AGENT_B}`),
+  ).toHaveCount(0);
+
+  await openThread(page);
+  await expect(
+    threadComposer(page).getByTestId(`composer-address-lock-${AGENT_B}`),
+  ).toBeVisible();
+
+  await openThread(page, "mock-general-alice");
+  await expect(
+    threadComposer(page).getByTestId(`composer-address-lock-${AGENT_B}`),
+  ).toHaveCount(0);
+});
+
+test("an unchecked agent remains excluded while automatic mentions stay enabled", async ({
+  page,
+}) => {
+  await keepMentionedAgentsPinned(page);
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+  await automaticallyMention(channelComposer(page), "Morgarita");
+
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  await composer.getByTestId(`composer-address-lock-remove-${AGENT_A}`).click();
+  await expect(input).toHaveText("");
+  await input.fill("@Mor");
+  await input.press("Tab");
+  await input.type("one time");
+  await input.press("Enter");
+
+  await expect(input).toHaveText("");
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
+});
+
+test("implicit automatic mentions stay out of persisted drafts", async ({
+  page,
+}) => {
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+  await automaticallyMention(channelComposer(page), "Morgarita");
+  const input = channelComposer(page).getByTestId("message-input");
+  await input.type("draft text");
+
+  await openThread(page);
+  await openGeneral(page);
+
+  await expect(input).toHaveText("@Morgarita draft text");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
+  await input.pressSequentially(" continues");
+  await expect(input).toHaveText("@Morgarita draft text continues");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
+
+  await page.goto(`/#/channels/${RANDOM_CHANNEL_ID}`, {
+    waitUntil: "domcontentloaded",
+  });
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+
+  await expect
+    .poll(() =>
+      page.evaluate((channelId) => {
+        for (const storageKey of Object.keys(window.localStorage)) {
+          if (!storageKey.startsWith("buzz-drafts.v2:")) continue;
+          const drafts = JSON.parse(
+            window.localStorage.getItem(storageKey) ?? "{}",
+          ) as Record<string, { channelId?: string; content?: string }>;
+          const draft = drafts[channelId];
+          if (draft?.channelId === channelId) return draft.content ?? "";
+        }
+        return "";
+      }, CHANNEL_ID),
+    )
+    .toBe("draft text continues");
 });
 
 test("reduced motion removes addressed agents without spatial animation", async ({

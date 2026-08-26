@@ -577,7 +577,14 @@ test("selecting an explicitly unpinned agent inserts a mention until send", asyn
   );
 
   act(() => result.current.removeAddressedAgent("AGENT-PUBKEY"));
-  assert.deepEqual(appliedEdits, []);
+  assert.deepEqual(appliedEdits, [
+    {
+      replaceFromOffset: 0,
+      replaceToOffset: 11,
+      insertText: "",
+    },
+  ]);
+  appliedEdits.length = 0;
   rerender({ pubkeys: [] });
   act(() => {
     result.current.selectMentionSuggestion({

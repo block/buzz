@@ -88,7 +88,7 @@ test("agent rows offer automatic mention controls", async () => {
     }),
   );
   const selectedAction = view.getByRole("button", {
-    name: "Stop automatically mentioning Agent Ada",
+    name: "Don't automatically mention Agent Ada in this conversation",
   });
   assert.equal(selectedAction.getAttribute("aria-pressed"), "true");
   assert.equal(selectedAction.getAttribute("data-state"), "on");
