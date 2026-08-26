@@ -1766,53 +1766,6 @@ impl Db {
     pub async fn update_feedback_status(&self, id: uuid::Uuid, status: &str) -> Result<bool> {
         relay_admin_actions::update_feedback_status(&self.pool, id, status).await
     }
-
-    /// Returns `true` if `pubkey` (64-char hex) is archived in `community_id`.
-    #[datastore_span(name = "is_archived", system = "postgresql")]
-    pub async fn is_archived(&self, community_id: CommunityId, pubkey: &str) -> Result<bool> {
-        archived_identities::is_archived(&self.pool, community_id, pubkey).await
-    }
-
-    /// Archives an identity in `community_id`. Returns `true` if inserted, `false` if already archived.
-    #[allow(clippy::too_many_arguments)]
-    #[datastore_span(name = "archive", system = "postgresql")]
-    pub async fn archive(
-        &self,
-        community_id: CommunityId,
-        pubkey: &str,
-        consent_path: &str,
-        actor: &str,
-        reason: Option<&str>,
-        replaced_by: Option<&str>,
-        request_event_id: &str,
-    ) -> Result<bool> {
-        archived_identities::archive(
-            &self.pool,
-            community_id,
-            pubkey,
-            consent_path,
-            actor,
-            reason,
-            replaced_by,
-            request_event_id,
-        )
-        .await
-    }
-
-    /// Unarchives an identity from `community_id`. Returns `true` if deleted, `false` if absent.
-    #[datastore_span(name = "unarchive", system = "postgresql")]
-    pub async fn unarchive(&self, community_id: CommunityId, pubkey: &str) -> Result<bool> {
-        archived_identities::unarchive(&self.pool, community_id, pubkey).await
-    }
-
-    /// Returns all identities archived in `community_id`, ordered by archive time ascending.
-    #[datastore_span(name = "list_archived", system = "postgresql")]
-    pub async fn list_archived(
-        &self,
-        community_id: CommunityId,
-    ) -> Result<Vec<archived_identities::ArchivedIdentity>> {
-        archived_identities::list_archived(&self.pool, community_id).await
-    }
 }
 
 #[cfg(test)]
