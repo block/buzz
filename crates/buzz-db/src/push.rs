@@ -25,10 +25,13 @@ async fn acquire_push_gate_lock(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     community: CommunityId,
 ) -> Result<()> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!("{PUSH_GATE_LOCK_NAMESPACE}{}", community.as_uuid()))
-        .execute(&mut **tx)
-        .await?;
+    crate::observability::observe_advisory_lock(
+        crate::observability::LockType::PushGate,
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("{PUSH_GATE_LOCK_NAMESPACE}{}", community.as_uuid()))
+            .execute(&mut **tx),
+    )
+    .await?;
     Ok(())
 }
 
@@ -220,7 +223,13 @@ pub async fn accept_lease_event(
     max_active_leases: i64,
 ) -> Result<AcceptLeaseOutcome> {
     let author = event.pubkey.as_bytes();
-    let mut tx = pool.begin().await?;
+    let (mut tx, transaction_timer) = crate::observability::begin_transaction(
+        pool,
+        crate::observability::TransactionOperation::AcceptPushLeaseEvent,
+    )
+    .await?;
+    transaction_timer
+        .observe(async {
     let mut address_lock = Vec::with_capacity(16 + author.len() + installation_id.len());
     address_lock.extend_from_slice(community.as_uuid().as_bytes());
     address_lock.extend_from_slice(author);
@@ -230,14 +239,20 @@ pub async fn accept_lease_event(
     author_lock.extend_from_slice(community.as_uuid().as_bytes());
     author_lock.extend_from_slice(author);
     let author_lock = i64::from_le_bytes(Sha256::digest(&author_lock)[..8].try_into().unwrap());
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(address_lock)
-        .execute(&mut *tx)
-        .await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(author_lock)
-        .execute(&mut *tx)
-        .await?;
+    crate::observability::observe_advisory_lock(
+        crate::observability::LockType::PushGate,
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(address_lock)
+            .execute(&mut *tx),
+    )
+    .await?;
+    crate::observability::observe_advisory_lock(
+        crate::observability::LockType::PushGate,
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(author_lock)
+            .execute(&mut *tx),
+    )
+    .await?;
     // T1b: an activation can flip the community from "no eligible lease" to
     // "eligible", so it must serialize against the trigger's shared gate lock.
     // Acquired after the address/author locks to keep one global lock order.
@@ -392,6 +407,8 @@ pub async fn accept_lease_event(
     }
     tx.commit().await?;
     Ok(AcceptLeaseOutcome::Accepted)
+        })
+        .await
 }
 
 fn constraint_acceptance_outcome(error: &sqlx::Error) -> Option<AcceptLeaseOutcome> {
@@ -852,6 +869,7 @@ where
             WHERE attempts < $3
               AND next_attempt_at <= now()
               AND (state = 'pending' OR (state = 'matching' AND lease_until < now()))
+              AND community_write_allowed(community_id)
             ORDER BY next_attempt_at, created_at
             LIMIT 1
         ),
@@ -933,7 +951,8 @@ where
 pub async fn reap_exhausted_matches(pool: &PgPool) -> Result<u64> {
     Ok(sqlx::query(
         "DELETE FROM push_match_queue WHERE attempts >= $1 \
-         AND (state='pending' OR (state='matching' AND lease_until < now()))",
+         AND (state='pending' OR (state='matching' AND lease_until < now())) \
+         AND community_write_allowed(community_id)",
     )
     .bind(MAX_MATCH_ATTEMPTS)
     .execute(pool)
@@ -1269,7 +1288,7 @@ mod tests {
     async fn setup_pool() -> PgPool {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".into()); // sadscan:disable np.postgres.1 -- local test-only credentials
         let pool = PgPool::connect(&database_url)
             .await
             .expect("connect to test DB");
@@ -2119,6 +2138,128 @@ mod tests {
             1,
             "reaped poison job must release delivered-wake retention"
         );
+    }
+
+    async fn seed_matcher_fixture(
+        pool: &PgPool,
+        community: CommunityId,
+        marker: u8,
+        attempts: i32,
+        age_seconds: i64,
+    ) {
+        let event_id = vec![marker; 32];
+        sqlx::query(
+            "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig) \
+             VALUES ($1, $2, $3, to_timestamp(1), 9, '[]', '', $4)",
+        )
+        .bind(community.as_uuid())
+        .bind(&event_id)
+        .bind(vec![marker.saturating_add(20); 32])
+        .bind(vec![marker.saturating_add(30); 64])
+        .execute(pool)
+        .await
+        .expect("seed source event");
+        sqlx::query(
+            "INSERT INTO push_match_queue \
+             (community_id, event_id, attempts, next_attempt_at) \
+             VALUES ($1, $2, $3, now() - make_interval(secs => $4))",
+        )
+        .bind(community.as_uuid())
+        .bind(event_id)
+        .bind(attempts)
+        .bind(age_seconds)
+        .execute(pool)
+        .await
+        .expect("seed matcher row");
+    }
+
+    async fn quiesce_test_community(pool: &PgPool, community: CommunityId) {
+        let mut lifecycle = pool.begin().await.expect("begin lifecycle fixture");
+        sqlx::query(
+            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+                    set_config('buzz.deletion_fence_generation', '0', true)",
+        )
+        .bind(community.to_string())
+        .execute(&mut *lifecycle)
+        .await
+        .expect("authorize target lifecycle");
+        sqlx::query("UPDATE communities SET deletion_state = 'quiescing' WHERE id = $1")
+            .bind(community.as_uuid())
+            .execute(&mut *lifecycle)
+            .await
+            .expect("quiesce target");
+        lifecycle.commit().await.expect("commit target lifecycle");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn matcher_claim_skips_quiescing_tenant_while_active_bystanders_progress() {
+        let pool = setup_pool().await;
+        sqlx::query("DELETE FROM push_match_queue WHERE community_write_allowed(community_id)")
+            .execute(&pool)
+            .await
+            .expect("drain active matcher queue");
+        let active_a = make_community(&pool).await;
+        let target = make_community(&pool).await;
+        let active_x = make_community(&pool).await;
+        seed_matcher_fixture(&pool, active_a, 1, 0, 30).await;
+        seed_matcher_fixture(&pool, target, 2, 0, 40).await;
+        seed_matcher_fixture(&pool, active_x, 3, 0, 20).await;
+        quiesce_test_community(&pool, target).await;
+
+        let batch = claim_due_match_batch(&pool, 16, Utc::now() + chrono::Duration::minutes(1))
+            .await
+            .expect("claim active bystander")
+            .expect("active A is claimable despite older target row");
+        assert_eq!(batch.community, active_a);
+        let target_state: String =
+            sqlx::query_scalar("SELECT state FROM push_match_queue WHERE community_id = $1")
+                .bind(target.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .expect("target row remains attributed");
+        assert_eq!(target_state, "pending");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn exhausted_match_reaper_skips_quiescing_tenant_and_reaps_active_bystanders() {
+        let pool = setup_pool().await;
+        sqlx::query("DELETE FROM push_match_queue WHERE community_write_allowed(community_id)")
+            .execute(&pool)
+            .await
+            .expect("drain active matcher queue");
+        let active_a = make_community(&pool).await;
+        let target = make_community(&pool).await;
+        let active_x = make_community(&pool).await;
+        seed_matcher_fixture(&pool, active_a, 4, MAX_MATCH_ATTEMPTS, 30).await;
+        seed_matcher_fixture(&pool, target, 5, MAX_MATCH_ATTEMPTS, 40).await;
+        seed_matcher_fixture(&pool, active_x, 6, MAX_MATCH_ATTEMPTS, 20).await;
+        quiesce_test_community(&pool, target).await;
+
+        assert_eq!(
+            reap_exhausted_matches(&pool)
+                .await
+                .expect("reap active bystanders"),
+            2
+        );
+        let target_remaining: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM push_match_queue WHERE community_id = $1")
+                .bind(target.as_uuid())
+                .fetch_one(&pool)
+                .await
+                .expect("target exhausted row remains attributed");
+        assert_eq!(target_remaining, 1);
+        for active in [active_a, active_x] {
+            let active_remaining: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM push_match_queue WHERE community_id = $1")
+                    .bind(active.as_uuid())
+                    .fetch_one(&pool)
+                    .await
+                    .expect("active bystander is drained");
+            assert_eq!(active_remaining, 0);
+        }
     }
 
     /// T2b batch contract: one claim returns jobs from exactly ONE community

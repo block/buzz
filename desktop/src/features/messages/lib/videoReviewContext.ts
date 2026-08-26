@@ -1,6 +1,10 @@
+import { fromMarkdown } from "mdast-util-from-markdown";
+
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ChannelType } from "@/shared/api/types";
+import { isVideoMedia } from "@/shared/ui/markdown/mediaEntry";
+import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 
 type SendVideoReviewComment = (
@@ -17,16 +21,77 @@ type ToggleMessageReaction = (
   remove: boolean,
 ) => Promise<void>;
 
-export function hasVideoAttachment(message: TimelineMessage): boolean {
-  if (message.body.includes("![video](")) return true;
+type VideoRootPredicate = (
+  message: Pick<TimelineMessage, "body" | "tags">,
+) => boolean;
 
-  return (
-    message.tags?.some(
-      (tag) =>
-        tag[0] === "imeta" &&
-        tag.some((part) => part.toLowerCase().startsWith("m video/")),
-    ) ?? false
+type MarkdownAstNode = {
+  children?: MarkdownAstNode[];
+  identifier?: string;
+  type: string;
+  url?: string;
+};
+
+function markdownImageUrls(body: string): string[] {
+  if (!body.includes("![")) return [];
+
+  const definitions = new Map<string, string>();
+  const directUrls: string[] = [];
+  const referenceIds: string[] = [];
+
+  const visit = (node: MarkdownAstNode) => {
+    if (node.type === "definition" && node.identifier && node.url) {
+      if (!definitions.has(node.identifier)) {
+        definitions.set(node.identifier, node.url);
+      }
+    } else if (node.type === "image" && node.url) {
+      directUrls.push(node.url);
+    } else if (node.type === "imageReference" && node.identifier) {
+      referenceIds.push(node.identifier);
+    }
+
+    node.children?.forEach(visit);
+  };
+
+  visit(fromMarkdown(body) as MarkdownAstNode);
+  return [
+    ...directUrls,
+    ...referenceIds.flatMap((identifier) => {
+      const url = definitions.get(identifier);
+      return url ? [url] : [];
+    }),
+  ];
+}
+
+/**
+ * Returns whether a message contains a video URL in a Markdown image that
+ * the renderer will actually mount. Orphan imeta entries are intentionally
+ * excluded because they do not produce a video player.
+ */
+export function hasRenderedVideoAttachment(
+  message: Pick<TimelineMessage, "body" | "tags">,
+): boolean {
+  const imetaByUrl = parseImetaTags(message.tags ?? []);
+  return markdownImageUrls(message.body).some((src) =>
+    isVideoMedia(src, imetaByUrl.get(src)?.m),
   );
+}
+
+export function hasVideoAttachment(
+  message: Pick<TimelineMessage, "body" | "tags">,
+): boolean {
+  const imetaByUrl = parseImetaTags(message.tags ?? []);
+  if (
+    [...imetaByUrl.values()].some((entry) => isVideoMedia(entry.url, entry.m))
+  ) {
+    return true;
+  }
+
+  for (const src of markdownImageUrls(message.body)) {
+    if (isVideoMedia(src, imetaByUrl.get(src)?.m)) return true;
+  }
+
+  return false;
 }
 
 export function buildVideoReviewCommentsByRootId(
@@ -93,6 +158,34 @@ export function buildVideoReviewCommentsForRoot(
   return comments;
 }
 
+export function buildVideoReviewCommentRootIdsByMessageId(
+  messages: TimelineMessage[],
+  videoRootPredicate: VideoRootPredicate = hasVideoAttachment,
+): ReadonlyMap<string, string> {
+  const messageById = new Map(messages.map((message) => [message.id, message]));
+  const videoMessageIds = new Set(
+    messages.filter(videoRootPredicate).map((message) => message.id),
+  );
+  const rootIdsByMessageId = new Map<string, string>();
+
+  for (const message of messages) {
+    if (videoMessageIds.has(message.id)) continue;
+
+    let ancestorId = message.parentId ?? null;
+    const visited = new Set<string>();
+    while (ancestorId && !visited.has(ancestorId)) {
+      if (videoMessageIds.has(ancestorId)) {
+        rootIdsByMessageId.set(message.id, ancestorId);
+        break;
+      }
+      visited.add(ancestorId);
+      ancestorId = messageById.get(ancestorId)?.parentId ?? null;
+    }
+  }
+
+  return rootIdsByMessageId;
+}
+
 export function buildVideoReviewContextForMessage({
   channelId,
   channelName,
@@ -103,6 +196,7 @@ export function buildVideoReviewContextForMessage({
   onSendVideoReviewComment,
   onToggleReaction,
   profiles,
+  videoRootPredicate = hasVideoAttachment,
 }: {
   channelId?: string | null;
   channelName?: string;
@@ -113,8 +207,9 @@ export function buildVideoReviewContextForMessage({
   onSendVideoReviewComment?: SendVideoReviewComment;
   onToggleReaction?: ToggleMessageReaction;
   profiles?: UserProfileLookup;
+  videoRootPredicate?: VideoRootPredicate;
 }): VideoReviewContext | undefined {
-  if (!hasVideoAttachment(message)) {
+  if (!videoRootPredicate(message)) {
     return undefined;
   }
 
@@ -158,6 +253,7 @@ export function buildVideoReviewContextsByMessageId({
   onSendVideoReviewComment,
   onToggleReaction,
   profiles,
+  videoRootPredicate = hasVideoAttachment,
 }: {
   channelId?: string | null;
   channelName?: string;
@@ -167,9 +263,10 @@ export function buildVideoReviewContextsByMessageId({
   onSendVideoReviewComment?: SendVideoReviewComment;
   onToggleReaction?: ToggleMessageReaction;
   profiles?: UserProfileLookup;
+  videoRootPredicate?: VideoRootPredicate;
 }): ReadonlyMap<string, VideoReviewContext> {
   const contexts = new Map<string, VideoReviewContext>();
-  if (!messages.some(hasVideoAttachment)) {
+  if (!messages.some(videoRootPredicate)) {
     return contexts;
   }
 
@@ -185,6 +282,7 @@ export function buildVideoReviewContextsByMessageId({
       onSendVideoReviewComment,
       onToggleReaction,
       profiles,
+      videoRootPredicate,
     });
     if (context) {
       contexts.set(message.id, context);
@@ -193,3 +291,29 @@ export function buildVideoReviewContextsByMessageId({
 
   return contexts;
 }
+
+/**
+ * Builds the paired video-review maps used by timeline presentation: contexts
+ * are keyed by video message, while comment roots map each descendant back to
+ * its nearest video ancestor.
+ */
+export function buildVideoReviewPresentationByMessageId(
+  args: Parameters<typeof buildVideoReviewContextsByMessageId>[0],
+  videoRootPredicate: VideoRootPredicate = hasVideoAttachment,
+) {
+  return {
+    commentRootIdsByMessageId: buildVideoReviewCommentRootIdsByMessageId(
+      args.messages,
+      videoRootPredicate,
+    ),
+    contextsByMessageId: buildVideoReviewContextsByMessageId({
+      ...args,
+      videoRootPredicate,
+    }),
+  };
+}
+
+/** The synchronized context and comment-root maps for a rendered timeline. */
+export type VideoReviewPresentation = ReturnType<
+  typeof buildVideoReviewPresentationByMessageId
+>;

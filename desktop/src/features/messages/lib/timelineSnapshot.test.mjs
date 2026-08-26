@@ -14,6 +14,7 @@ import {
   selectLatestMessageKey,
   selectTimelineBodySurface,
   selectTimelineIntroSurface,
+  selectThreadRepliesSurface,
 } from "./timelineSnapshot.ts";
 
 // Local-midnight unix-second timestamps so isSameDay (local time) is stable
@@ -399,6 +400,126 @@ test("deferred-render: keys the empty decision off the live count, not deferred"
   assert.equal(selectDeferredListRenderState(0, 1), "pending");
 });
 
+// ── selectThreadRepliesSurface ──────────────────────────────────────────────
+// PR-1 defect 2: a terminal thread-load error must NEVER be presented as the
+// authoritative "No replies in this branch yet" empty state. These pin the
+// paint precedence that gates that in MessageThreadPanel.
+
+test("thread-surface: pending query paints the skeleton", () => {
+  assert.equal(
+    selectThreadRepliesSurface({
+      isPending: true,
+      isError: false,
+      renderState: "empty",
+    }),
+    "skeleton",
+  );
+});
+
+test("thread-surface: terminal error with no data paints error, never empty", () => {
+  // The core false-empty guard: the load failed (isError) and there is nothing
+  // cached (renderState "empty"). This MUST be "error" so the UI shows
+  // "Couldn't load replies" + Retry instead of an authoritative empty thread.
+  const surface = selectThreadRepliesSurface({
+    isPending: false,
+    isError: true,
+    renderState: "empty",
+  });
+  assert.equal(surface, "error");
+  assert.notEqual(surface, "empty");
+});
+
+test("thread-surface: page-2 failure with no committed rows never claims empty", () => {
+  // A later-page fetch rejects the whole attempt; partial rows are never
+  // committed, so the deferred+live lists are empty and isError is set. The
+  // surface must be "error", never "empty" — the thread is not known-empty.
+  assert.equal(
+    selectThreadRepliesSurface({
+      isPending: false,
+      isError: true,
+      renderState: "empty",
+    }),
+    "error",
+  );
+});
+
+test("thread-surface: cached rows stay visible even under a load error", () => {
+  // An error with cached replies (renderState "list") keeps painting the rows
+  // non-destructively rather than blanking them for the error card.
+  assert.equal(
+    selectThreadRepliesSurface({
+      isPending: false,
+      isError: true,
+      renderState: "list",
+    }),
+    "list",
+  );
+});
+
+test("thread-surface: successful empty load paints the empty state", () => {
+  // No error, genuinely no replies → the real empty affordance is correct.
+  assert.equal(
+    selectThreadRepliesSurface({
+      isPending: false,
+      isError: false,
+      renderState: "empty",
+    }),
+    "empty",
+  );
+});
+
+test("thread-surface: retry success renders the reply list", () => {
+  // After a Retry re-fetch succeeds, isError clears and rows commit
+  // (renderState "list") → the list body paints, replacing the error card.
+  assert.equal(
+    selectThreadRepliesSurface({
+      isPending: false,
+      isError: false,
+      renderState: "list",
+    }),
+    "list",
+  );
+});
+
+test("thread-surface: streaming-in rows paint nothing (pending), not empty", () => {
+  assert.equal(
+    selectThreadRepliesSurface({
+      isPending: false,
+      isError: false,
+      renderState: "pending",
+    }),
+    "pending",
+  );
+});
+
+test("thread-surface: huddle transcripts collapse non-list surfaces to pending", () => {
+  // Huddle transcripts flatten replies into the chat timeline, so they never
+  // show the skeleton/error/empty affordances — only the list body or nothing.
+  for (const isError of [false, true]) {
+    for (const renderState of ["empty", "pending"]) {
+      assert.equal(
+        selectThreadRepliesSurface({
+          isPending: false,
+          isError,
+          renderState,
+          isHuddleTranscript: true,
+        }),
+        "pending",
+      );
+    }
+  }
+  // The list body still paints for a transcript with rows.
+  assert.equal(
+    selectThreadRepliesSurface({
+      isPending: false,
+      isError: false,
+      renderState: "list",
+      isHuddleTranscript: true,
+    }),
+    "list",
+  );
+});
+
 test("timeline-body-surface: loading and deferred-pending both paint the single static skeleton", () => {
   assert.equal(
     selectTimelineBodySurface({
@@ -420,11 +541,26 @@ test("timeline-body-surface: loading and deferred-pending both paint the single 
   );
 });
 
-test("timeline-body-surface: first deferred message preserves a persistent channel intro", () => {
+test("timeline-body-surface: first authoritative rows wait for deferred paint", () => {
+  // A newly selected populated channel has already resolved live rows, but the
+  // deferred snapshot is still empty. It has never committed a settled empty
+  // surface, so showing its intro here would flash Create agent / Add people.
   assert.equal(
     selectTimelineBodySurface({
       deferredCount: 0,
-      hasPersistentIntro: true,
+      preserveSettledEmptyIntro: false,
+      isLoading: false,
+      liveCount: 1,
+    }),
+    "skeleton",
+  );
+});
+
+test("timeline-body-surface: append preserves a previously settled empty intro", () => {
+  assert.equal(
+    selectTimelineBodySurface({
+      deferredCount: 0,
+      preserveSettledEmptyIntro: true,
       isLoading: false,
       liveCount: 1,
     }),

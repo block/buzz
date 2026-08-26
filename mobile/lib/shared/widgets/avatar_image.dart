@@ -4,6 +4,9 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
+import '../animated_avatar.dart';
+import '../emoji/emoji_avatar.dart';
+import '../emoji/native_emoji_glyph.dart';
 import '../relay/relay.dart';
 
 /// A circular avatar that supports both remote URLs and inline image data.
@@ -27,13 +30,21 @@ class AvatarImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final animatedAvatar = parseAnimatedAvatarUrl(imageUrl);
     return CircleAvatar(
       radius: radius,
-      backgroundColor: backgroundColor,
+      // Animated avatar posters carry their own backdrop disc; preserve their
+      // transparent surroundings on static/list surfaces, matching desktop.
+      backgroundColor: animatedAvatar == null
+          ? backgroundColor
+          : Colors.transparent,
       child: ClipOval(
         child: SizedBox.square(
           dimension: radius * 2,
-          child: AvatarImageContent(imageUrl: imageUrl, fallback: fallback),
+          child: AvatarImageContent(
+            imageUrl: animatedAvatar?.posterUrl ?? imageUrl,
+            fallback: fallback,
+          ),
         ),
       ),
     );
@@ -76,16 +87,16 @@ class _AvatarImageContentState extends State<AvatarImageContent> {
       _EmojiAvatarSource(:final emoji, :final color) => ColoredBox(
         color: color,
         child: LayoutBuilder(
-          builder: (_, constraints) => Center(
-            child: Text(
-              emoji,
-              textScaler: TextScaler.noScaling,
-              style: TextStyle(
-                fontSize: constraints.biggest.shortestSide * 258 / 512,
-                height: 1,
+          builder: (_, constraints) {
+            final glyphSize = constraints.biggest.shortestSide * 258 / 512;
+            return Center(
+              child: NativeEmojiGlyph(
+                emoji: emoji,
+                size: glyphSize,
+                opticalBoxSize: glyphSize,
               ),
-            ),
-          ),
+            );
+          },
         ),
       ),
       _SvgAvatarSource(:final svg) => SvgPicture.string(
@@ -122,36 +133,19 @@ sealed class _AvatarSource {
       if (data.mimeType == 'image/svg+xml') {
         final Uint8List bytes = data.contentAsBytes();
         final svg = utf8.decode(bytes);
-        return _parseEmojiAvatar(svg) ?? _SvgAvatarSource(svg);
+        final emojiAvatar = parseEmojiAvatarSvg(svg);
+        return emojiAvatar == null
+            ? _SvgAvatarSource(svg)
+            : _EmojiAvatarSource(
+                emojiAvatar.emoji,
+                Color(emojiAvatar.colorValue),
+              );
       }
       return _RasterDataAvatarSource(data.contentAsBytes());
     } on FormatException {
       return null;
     }
   }
-}
-
-_EmojiAvatarSource? _parseEmojiAvatar(String svg) {
-  final colorValue = RegExp(
-    r'<rect\b[^>]*\sfill="([^"]+)"',
-  ).firstMatch(svg)?[1];
-  final emojiValue = RegExp(r'<text\b[^>]*>(.*?)</text>').firstMatch(svg)?[1];
-  if (colorValue == null || emojiValue == null) return null;
-
-  final color = _parseHexColor(colorValue);
-  if (color == null) return null;
-  final emoji = emojiValue
-      .replaceAll('&gt;', '>')
-      .replaceAll('&lt;', '<')
-      .replaceAll('&amp;', '&');
-  return _EmojiAvatarSource(emoji, color);
-}
-
-Color? _parseHexColor(String value) {
-  final hex = value.startsWith('#') ? value.substring(1) : value;
-  if (!RegExp(r'^[0-9a-fA-F]{6}$').hasMatch(hex)) return null;
-  final rgb = int.tryParse(hex, radix: 16);
-  return rgb == null ? null : Color(0xFF000000 | rgb);
 }
 
 class _EmojiAvatarSource extends _AvatarSource {

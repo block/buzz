@@ -3,7 +3,7 @@ use crate::managed_agents::{BackendKind, ManagedAgentRecord, RespondTo};
 
 /// A linked instance record with no persona-derived fields set yet — the
 /// state right after creation, before any snapshot apply.
-fn sample_record() -> ManagedAgentRecord {
+pub(super) fn sample_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
         pubkey: "p".repeat(64),
         name: "agent".into(),
@@ -31,6 +31,7 @@ fn sample_record() -> ManagedAgentRecord {
         runtime_pid: None,
         backend: BackendKind::Local,
         backend_agent_id: None,
+        provider_policy_pending: false,
         provider_binary_path: None,
         team_id: None,
         persona_team_dir: None,
@@ -58,6 +59,7 @@ fn sample_record() -> ManagedAgentRecord {
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        effort_level: None,
     }
 }
 
@@ -139,7 +141,7 @@ fn preview_passes_through_unchanged_when_persona_missing() {
     assert_eq!(preview.persona_id.as_deref(), Some("deleted-persona"));
 }
 
-fn sample_persona() -> AgentDefinition {
+pub(super) fn sample_persona() -> AgentDefinition {
     AgentDefinition {
         id: "test-persona".to_string(),
         display_name: "Test Persona".to_string(),

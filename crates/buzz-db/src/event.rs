@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use nostr::Event;
-use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Row, Transaction};
 use uuid::Uuid;
 
 use buzz_core::kind::{
@@ -70,10 +70,17 @@ pub struct EventQuery {
     /// Restrict results to events with an `e` tag referencing any of these event IDs (hex).
     /// Uses JSONB containment (`tags @> ...`) against the `tags` column.
     pub e_tags: Option<Vec<String>>,
-    /// Restrict results to events in any of these channels, while retaining
-    /// channel-less global events. Applied before SQL `LIMIT` so access-filtered
-    /// historical pages have exact exhaustion semantics.
+    /// Restrict results to events in any of these channels. By default,
+    /// channel-less global events are retained so this can enforce a viewer's
+    /// accessible-channel scope without hiding global events. Set
+    /// [`EventQuery::channel_ids_include_global`] to `false` for an explicit
+    /// multi-channel `#h` filter, which must match only requested channels.
+    /// Applied before SQL `LIMIT` so access- and filter-scoped historical pages
+    /// have exact exhaustion semantics.
     pub channel_ids: Option<Vec<uuid::Uuid>>,
+    /// Whether [`EventQuery::channel_ids`] also retains channel-less global
+    /// events. Defaults to `true` for access-scope queries.
+    pub channel_ids_include_global: bool,
     /// Override the default page clamp ([`DEFAULT_MAX_PAGE_LIMIT`]). Used by
     /// the COUNT fallback path, which needs to fetch all matching events for
     /// post-filter counting. When None, the default clamp applies.
@@ -122,6 +129,7 @@ impl EventQuery {
             ids: None,
             e_tags: None,
             channel_ids: None,
+            channel_ids_include_global: true,
             max_limit: None,
             shared_gated_reader: None,
         }
@@ -268,6 +276,30 @@ pub async fn insert_event(
     event: &Event,
     channel_id: Option<Uuid>,
 ) -> Result<(StoredEvent, bool)> {
+    let mut connection = pool.acquire().await?;
+    insert_event_on(&mut connection, community_id, event, channel_id).await
+}
+
+/// Insert a Nostr event in a caller-owned PostgreSQL transaction.
+///
+/// This is the transaction-composition seam for callers that must keep the
+/// event insert open while performing related work. The caller owns commit or
+/// rollback.
+pub async fn insert_event_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Option<Uuid>,
+) -> Result<(StoredEvent, bool)> {
+    insert_event_on(tx.as_mut(), community_id, event, channel_id).await
+}
+
+async fn insert_event_on(
+    connection: &mut PgConnection,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Option<Uuid>,
+) -> Result<(StoredEvent, bool)> {
     let kind_u16 = event.kind.as_u16();
     let kind_u32 = u32::from(kind_u16);
 
@@ -309,7 +341,7 @@ pub async fn insert_event(
     .bind(channel_id)
     .bind(d_tag.as_deref())
     .bind(not_before)
-    .execute(pool)
+    .execute(connection)
     .await?;
 
     let was_inserted = result.rows_affected() > 0;
@@ -404,20 +436,24 @@ pub(crate) async fn query_events_on(
         qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
     }
 
-    // Multi-channel IN pushdown: restrict to events in any of these channels
-    // OR global events (channel_id IS NULL). Used by NIP-45 COUNT to enforce
-    // channel access at the SQL level without fetching all rows.
+    // Multi-channel IN pushdown. Access-scope queries retain global events;
+    // explicit multi-value #h filters do not.
     //
-    // SECURITY: Some(empty vec) means "user has access to NO channels" —
-    // only global events (channel_id IS NULL) should be returned.
+    // SECURITY: Some(empty vec) means "match no channels". Access-scope
+    // queries still retain globals; explicit #h queries match nothing.
     if let Some(ref ch_ids) = q.channel_ids {
         if ch_ids.is_empty() {
-            // No channel access — only global (non-channel) events visible.
-            qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
+            if q.channel_ids_include_global {
+                qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
+            } else {
+                qb.push(" AND FALSE");
+            }
         } else {
-            qb.push(format!(
-                " AND ({col_prefix}channel_id IS NULL OR {col_prefix}channel_id IN ("
-            ));
+            qb.push(" AND (");
+            if q.channel_ids_include_global {
+                qb.push(format!("{col_prefix}channel_id IS NULL OR "));
+            }
+            qb.push(format!("{col_prefix}channel_id IN ("));
             let mut sep = qb.separated(", ");
             for ch in ch_ids {
                 sep.push_bind(*ch);
@@ -670,15 +706,21 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
         qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
     }
 
-    // Multi-channel IN pushdown for COUNT: restrict to accessible channels + global.
-    // SECURITY: Some(empty vec) = no channel access → global events only.
+    // Multi-channel IN pushdown for COUNT. Access-scope queries retain global
+    // events; explicit multi-value #h filters do not.
     if let Some(ref ch_ids) = q.channel_ids {
         if ch_ids.is_empty() {
-            qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
+            if q.channel_ids_include_global {
+                qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
+            } else {
+                qb.push(" AND FALSE");
+            }
         } else {
-            qb.push(format!(
-                " AND ({col_prefix}channel_id IS NULL OR {col_prefix}channel_id IN ("
-            ));
+            qb.push(" AND (");
+            if q.channel_ids_include_global {
+                qb.push(format!("{col_prefix}channel_id IS NULL OR "));
+            }
+            qb.push(format!("{col_prefix}channel_id IN ("));
             let mut sep = qb.separated(", ");
             for ch in ch_ids {
                 sep.push_bind(*ch);
@@ -1111,7 +1153,7 @@ pub struct ThreadMetadataParams<'a> {
     pub broadcast: bool,
 }
 
-async fn insert_event_with_thread_metadata_tx(
+pub(crate) async fn insert_event_with_thread_metadata_tx(
     tx: &mut Transaction<'_, Postgres>,
     community_id: CommunityId,
     event: &Event,
@@ -1541,7 +1583,7 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     async fn setup_pool() -> PgPool {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -1587,6 +1629,31 @@ mod tests {
         .await
         .expect("insert test channel");
         id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn event_insert_in_existing_transaction_rolls_back_with_caller() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let event = make_text_event("caller-owned transaction");
+
+        let mut tx = pool.begin().await.expect("begin event insert transaction");
+        let (_, was_inserted) = insert_event_in_transaction(&mut tx, community, &event, None)
+            .await
+            .expect("insert event in caller transaction");
+        assert!(was_inserted);
+        tx.rollback().await.expect("roll back event insert");
+
+        let persisted: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community_uuid)
+                .bind(event.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count rolled-back event");
+        assert_eq!(persisted, 0);
     }
 
     #[tokio::test]
@@ -1880,6 +1947,70 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn explicit_multi_channel_scope_is_applied_before_historical_page_limit() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel_a = make_test_channel(&pool, community_uuid, None).await;
+        let channel_b = make_test_channel(&pool, community_uuid, None).await;
+        let unrelated_c = make_test_channel(&pool, community_uuid, None).await;
+        let base = 1_800_000_000;
+
+        let older_a = make_event_at(39_000, "older requested A", base + 1);
+        insert_event(&pool, community, &older_a, Some(channel_a))
+            .await
+            .expect("insert requested A candidate");
+        let requested_b = make_event_at(39_000, "requested B", base + 2);
+        insert_event(&pool, community, &requested_b, Some(channel_b))
+            .await
+            .expect("insert requested B candidate");
+        let newer_c = make_event_at(39_000, "newer unrelated C", base + 3);
+        insert_event(&pool, community, &newer_c, Some(unrelated_c))
+            .await
+            .expect("insert unrelated C candidate");
+        let global = make_event_at(39_000, "global candidate", base + 4);
+        insert_event(&pool, community, &global, None)
+            .await
+            .expect("insert global candidate");
+
+        let events = query_events(
+            &pool,
+            &EventQuery {
+                kinds: Some(vec![39_000]),
+                channel_ids: Some(vec![channel_a, channel_b]),
+                channel_ids_include_global: false,
+                limit: Some(1),
+                ..EventQuery::for_community(community)
+            },
+        )
+        .await
+        .expect("query explicit multi-channel page");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].event.id, requested_b.id,
+            "newer unrelated channel C must not consume the requested A/B limit"
+        );
+
+        let partial_authorization_count = count_events(
+            &pool,
+            &EventQuery {
+                kinds: Some(vec![39_000]),
+                channel_ids: Some(vec![channel_a]),
+                channel_ids_include_global: false,
+                ..EventQuery::for_community(community)
+            },
+        )
+        .await
+        .expect("count one authorized channel from a multi-channel request");
+        assert_eq!(
+            partial_authorization_count, 1,
+            "partial authorization must exclude requested B, unrelated C, and global rows"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn access_scope_is_applied_before_historical_page_limit() {
         let pool = setup_pool().await;
         let community_uuid = make_test_community(&pool).await;
@@ -1941,6 +2072,42 @@ mod tests {
             ])
             .sign_with_keys(keys)
             .expect("sign reaction event")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reaction_single_tx_stores_wrapped_max_shortcode() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let target = make_text_event("long custom emoji target");
+        insert_event(&pool, community, &target, None)
+            .await
+            .expect("insert target");
+
+        let actor = Keys::generate();
+        let emoji = format!(":{}:", "a".repeat(64));
+        let reaction = make_reaction_event(&actor, &target.id.to_hex(), &emoji);
+        let outcome = insert_reaction_event_with_thread_metadata(
+            &pool,
+            community,
+            &reaction,
+            None,
+            None,
+            target.id.as_bytes(),
+            &actor.public_key().to_bytes(),
+            &emoji,
+        )
+        .await
+        .expect("store wrapped 64-character shortcode");
+
+        assert!(matches!(
+            outcome,
+            ReactionEventInsertOutcome::Inserted {
+                was_inserted: true,
+                ..
+            }
+        ));
+        assert_eq!(emoji.chars().count(), 66);
     }
 
     #[tokio::test]

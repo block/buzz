@@ -49,6 +49,15 @@ abstract final class NostrFilters {
     until: until,
   );
 
+  /// Huddle lifecycle state for one parent channel, independent of timeline paging.
+  static NostrFilter huddleLifecycle(String channelId) => NostrFilter(
+    kinds: [EventKind.huddleStarted, EventKind.huddleEnded],
+    tags: {
+      '#h': [channelId],
+    },
+    limit: 200,
+  );
+
   /// Reactions (kind:7) on a specific event.
   static NostrFilter reactions(String eventId) => NostrFilter(
     kinds: [7],
@@ -203,7 +212,7 @@ abstract final class NostrFilters {
 
   /// Relay membership list (kind:13534).
   static NostrFilter relayMembers() =>
-      const NostrFilter(kinds: [13534], limit: 1);
+      const NostrFilter(kinds: [EventKind.relayMembership], limit: 1);
 
   /// Agent profiles (kind:10100).
   static NostrFilter agentProfiles() =>

@@ -21,7 +21,7 @@ use crate::state::AppState;
 
 use super::{api_error, internal_error, not_found};
 
-async fn enforce_http_admission(
+pub(crate) async fn enforce_http_admission(
     state: &AppState,
     tenant: &TenantContext,
     pubkey: &nostr::PublicKey,
@@ -393,6 +393,83 @@ const WINDOW_AUX_DELETE_KINDS: [u32; 2] = [
     buzz_core::kind::KIND_NIP29_DELETE_EVENT,
 ];
 
+/// Page size for one aux-closure hop. Matches the DB clamp
+/// (`buzz_db::DEFAULT_MAX_PAGE_LIMIT`) so each page is one full query.
+const AUX_PAGE_LIMIT: i64 = buzz_db::DEFAULT_MAX_PAGE_LIMIT;
+/// Upper bound on pages drained per hop: 64k aux events referencing one page
+/// of rows is far past any real thread; past it we log and stop rather than
+/// loop forever against a pathological write pattern.
+const AUX_MAX_PAGES: usize = 64;
+
+fn build_aux_query(
+    community: buzz_core::CommunityId,
+    target_ids: Vec<String>,
+    kinds: &[u32],
+) -> buzz_db::EventQuery {
+    let mut query = buzz_db::EventQuery::for_community(community);
+    query.kinds = Some(kinds.iter().map(|kind| *kind as i32).collect());
+    query.e_tags = Some(target_ids);
+    query
+}
+
+/// Where an aux hop reads from: the window path pins the request's proved
+/// read session; the thread path takes the routed display-read fast path.
+enum AuxReader<'a> {
+    Session(&'a mut buzz_db::ReadSession),
+    Routed(&'a buzz_db::Db, &'static str),
+    #[cfg(test)]
+    Fake(&'a mut (dyn FnMut(&buzz_db::EventQuery) -> Vec<buzz_core::StoredEvent> + Send)),
+}
+
+impl AuxReader<'_> {
+    async fn fetch(
+        &mut self,
+        query: &buzz_db::EventQuery,
+    ) -> buzz_db::Result<Vec<buzz_core::StoredEvent>> {
+        match self {
+            AuxReader::Session(session) => session.query_events(query).await,
+            AuxReader::Routed(db, path) => db.query_events_routed(path, query).await,
+            #[cfg(test)]
+            AuxReader::Fake(fetch) => Ok(fetch(query)),
+        }
+    }
+}
+
+/// Drain every event matching `query`, walking the `(created_at, id)` keyset
+/// cursor `query_events` already orders by until a short page. An aux hop
+/// over a reaction-heavy page can exceed a single page clamp, and because
+/// results are newest-first a one-shot query silently drops the *oldest*
+/// edits and deletions — rendering original or deleted content, not merely
+/// losing decoration.
+async fn query_all_pages(
+    mut query: buzz_db::EventQuery,
+    page_limit: i64,
+    reader: &mut AuxReader<'_>,
+) -> buzz_db::Result<Vec<buzz_core::StoredEvent>> {
+    query.limit = Some(page_limit);
+    let mut events = Vec::new();
+    for _ in 0..AUX_MAX_PAGES {
+        let page = reader.fetch(&query).await?;
+        let next = if page.len() as i64 >= page_limit {
+            page.last().map(|se| (se.event.created_at, se.event.id))
+        } else {
+            None
+        };
+        events.extend(page);
+        let Some((created_at, id)) = next else {
+            return Ok(events);
+        };
+        query.until = chrono::DateTime::from_timestamp(created_at.as_secs() as i64, 0);
+        query.before_id = Some(id.to_bytes().to_vec());
+    }
+    tracing::warn!(
+        pages = AUX_MAX_PAGES,
+        events = events.len(),
+        "aux closure hop exceeded page cap; returning truncated closure"
+    );
+    Ok(events)
+}
+
 /// Serve one `top_level: true` channel-window filter on the bridge `/query`
 /// path (docs/bridge-channel-window.md). Appends, in order: row events, the
 /// aux closure (`include_aux`), `39005` thread-summary overlays
@@ -496,14 +573,15 @@ async fn handle_channel_window_filter(
             std::collections::HashSet::new();
         let mut hop_ids = row_ids_hex.clone();
         for hop_kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
-            let mut aux_query = buzz_db::EventQuery::for_community(tenant.community());
-            aux_query.kinds = Some(hop_kinds.iter().map(|k| *k as i32).collect());
-            aux_query.e_tags = Some(std::mem::take(&mut hop_ids));
-            aux_query.limit = Some(1000);
-            let aux_events = session
-                .query_events(&aux_query)
-                .await
-                .map_err(|e| internal_error(&format!("window aux error: {e}")))?;
+            let aux_query =
+                build_aux_query(tenant.community(), std::mem::take(&mut hop_ids), hop_kinds);
+            let aux_events = query_all_pages(
+                aux_query,
+                AUX_PAGE_LIMIT,
+                &mut AuxReader::Session(&mut session),
+            )
+            .await
+            .map_err(|e| internal_error(&format!("window aux error: {e}")))?;
             for se in aux_events {
                 if !seen_aux.insert(se.event.id) {
                     continue;
@@ -654,12 +732,13 @@ pub async fn submit_event(
         submit_event_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
 
     match &outcome {
-        SubmitOutcome::Ok { accepted, .. } => {
+        SubmitOutcome::Ok { accepted, kind, .. } => {
             tracing::info!(
                 pubkey = %pubkey_hex,
                 route = "/events",
                 status = 200u16,
                 accepted,
+                kind,
                 "HTTP bridge request"
             );
         }
@@ -713,6 +792,7 @@ enum SubmitOutcome {
     /// Ingest pipeline ran and returned a result (accepted or not).
     Ok {
         accepted: bool,
+        kind: u32,
         response: Json<Value>,
     },
     /// JSON parse failure before ingest — log category/line/column, not msg.
@@ -843,6 +923,7 @@ async fn submit_event_authed(
             }));
             SubmitOutcome::Ok {
                 accepted: result.accepted,
+                kind: kind_u32,
                 response,
             }
         }
@@ -978,6 +1059,8 @@ async fn query_events_authed(
         .map(|v| serde_json::from_value(v.clone()))
         .collect::<Result<_, _>>()
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
+        .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
 
     // P-gated kinds (gift wraps, member notifications, observer frames) require
     // the caller's own pubkey in the #p tag — same enforcement as WS REQ handler.
@@ -1002,10 +1085,18 @@ async fn query_events_authed(
     }
 
     // Get channels this user can access — same enforcement as WS REQ handler.
-    let accessible_channels = state
+    let mut accessible_channels = state
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    repair_requested_channel_access(
+        state,
+        tenant,
+        &filters,
+        &pubkey_bytes,
+        &mut accessible_channels,
+    )
+    .await?;
 
     if filters.iter().any(|f| f.search.is_some()) {
         if has_mixed_search_filters(&filters) {
@@ -1190,6 +1281,8 @@ async fn query_events_authed(
             .await
             .map_err(|e| internal_error(&format!("thread query error: {e}")))?;
 
+        let mut thread_row_ids = Vec::with_capacity(thread_replies.len() + 1);
+        thread_row_ids.push(root_hex.to_string());
         for reply in thread_replies {
             let se = reply.stored_event;
             if !event_in_accessible_channel(&se, &accessible_channels) {
@@ -1201,8 +1294,43 @@ async fn query_events_authed(
             if !buzz_core::filter::reader_authorized_for_event(&se.event, &authed_pubkey_hex) {
                 continue;
             }
+            thread_row_ids.push(se.event.id.to_hex());
             if let Ok(v) = serde_json::to_value(&se.event) {
                 events.push(v);
+            }
+        }
+
+        if extension_flag(raw, "include_aux") && !thread_row_ids.is_empty() {
+            let mut seen_aux = std::collections::HashSet::new();
+            let mut hop_ids = thread_row_ids;
+            for hop_kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
+                let aux_query =
+                    build_aux_query(tenant.community(), std::mem::take(&mut hop_ids), hop_kinds);
+                let aux_events = query_all_pages(
+                    aux_query,
+                    AUX_PAGE_LIMIT,
+                    &mut AuxReader::Routed(&state.db, "bridge_thread_aux"),
+                )
+                .await
+                .map_err(|e| internal_error(&format!("thread aux query error: {e}")))?;
+                for se in aux_events {
+                    if !seen_aux.insert(se.event.id)
+                        || !event_in_accessible_channel(&se, &accessible_channels)
+                        || !buzz_core::filter::reader_authorized_for_event(
+                            &se.event,
+                            &authed_pubkey_hex,
+                        )
+                    {
+                        continue;
+                    }
+                    hop_ids.push(se.event.id.to_hex());
+                    if let Ok(value) = serde_json::to_value(&se.event) {
+                        events.push(value);
+                    }
+                }
+                if hop_ids.is_empty() {
+                    break;
+                }
             }
         }
         handled.insert(idx);
@@ -1231,8 +1359,9 @@ async fn query_events_authed(
             tenant.community(),
         )
         .await;
-        crate::handlers::req::apply_access_scope_to_query(
+        crate::handlers::req::apply_channel_scope_to_query(
             &mut query,
+            filter,
             extract_channel_from_filter(filter),
             &accessible_channels,
         );
@@ -1319,6 +1448,39 @@ async fn query_events_authed(
     }
 
     Ok(Json(Value::Array(events)))
+}
+
+async fn repair_requested_channel_access(
+    state: &AppState,
+    tenant: &TenantContext,
+    filters: &[nostr::Filter],
+    pubkey_bytes: &[u8],
+    accessible_channels: &mut Vec<uuid::Uuid>,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    for filter in filters {
+        let Some(requested) =
+            crate::handlers::req::extract_channel_ids_from_filters(std::slice::from_ref(filter))
+        else {
+            continue;
+        };
+        for channel_id in requested {
+            if accessible_channels.contains(&channel_id) {
+                continue;
+            }
+            let is_member = state
+                .db
+                .is_member(tenant.community(), channel_id, pubkey_bytes)
+                .await
+                .map_err(|e| internal_error(&format!("channel membership confirmation: {e}")))?;
+            crate::handlers::req::resolve_request_local_access(
+                accessible_channels,
+                channel_id,
+                true,
+                Some(is_member),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Count events via HTTP bridge (NIP-98 auth). Returns `{"count": N}`.
@@ -1412,6 +1574,8 @@ async fn count_events_authed(
 
     let filters: Vec<nostr::Filter> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
+        .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
 
     // P-gated kinds enforcement — same as WS REQ and /query.
     let authed_pubkey_hex = pubkey.to_hex();
@@ -1435,10 +1599,18 @@ async fn count_events_authed(
     }
 
     // Get channels this user can access.
-    let accessible_channels = state
+    let mut accessible_channels = state
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
         .map_err(|e| internal_error(&format!("channel access lookup: {e}")))?;
+    repair_requested_channel_access(
+        state,
+        tenant,
+        &filters,
+        &pubkey_bytes,
+        &mut accessible_channels,
+    )
+    .await?;
 
     let mut total: u64 = 0;
     for filter in &filters {
@@ -1460,9 +1632,19 @@ async fn count_events_authed(
             crate::handlers::req::filter_can_match_shared_gated_kinds(filter);
 
         // If filter targets a specific channel, verify access.
-        if let Some(ch_id) = extract_channel_from_filter(filter) {
-            if !accessible_channels.contains(&ch_id) {
-                continue; // Skip filters targeting inaccessible channels.
+        if crate::handlers::req::extract_channel_ids_from_filters(std::slice::from_ref(filter))
+            .is_some()
+        {
+            let ch_id = extract_channel_from_filter(filter);
+            let requested = crate::handlers::req::extract_channel_ids_from_filters(
+                std::slice::from_ref(filter),
+            )
+            .unwrap_or_default();
+            if !requested
+                .iter()
+                .any(|channel_id| accessible_channels.contains(channel_id))
+            {
+                continue;
             }
             // Channel is accessible — count with pushability check.
             let mut query = crate::handlers::req::build_event_query_from_filter(
@@ -1472,6 +1654,12 @@ async fn count_events_authed(
                 tenant.community(),
             )
             .await;
+            crate::handlers::req::apply_channel_scope_to_query(
+                &mut query,
+                filter,
+                ch_id,
+                &accessible_channels,
+            );
             // Shared-gated visibility pushdown: same as REQ and /query paths, so
             // the fallback's query_events call doesn't over-fetch private rows.
             if needs_shared_gate_filtering {
@@ -1935,7 +2123,10 @@ pub async fn workflow_webhook(
                         buzz_db::workflow::RunStatus::Failed,
                         0,
                         &serde_json::json!([]),
-                        Some(&format!("definition parse error: {e}")),
+                        Some(buzz_db::workflow::WorkflowRunFailure {
+                            code: "invalid_definition",
+                            message: &format!("definition parse error: {e}"),
+                        }),
                     )
                     .await
                 {
@@ -2295,6 +2486,113 @@ mod tests {
         ];
 
         assert!(!has_mixed_search_filters(&filters));
+    }
+
+    #[test]
+    fn thread_aux_query_targets_root_and_replies() {
+        let tenant = fresh_tenant("relay.example");
+        let targets = vec!["root".to_string(), "reply".to_string()];
+        let query = build_aux_query(tenant.community(), targets.clone(), &WINDOW_AUX_KINDS);
+
+        assert_eq!(query.e_tags, Some(targets));
+        assert_eq!(
+            query.kinds,
+            Some(WINDOW_AUX_KINDS.iter().map(|kind| *kind as i32).collect())
+        );
+        assert_eq!(query.limit, None);
+        assert_eq!(query.until, None);
+        assert_eq!(query.before_id, None);
+    }
+
+    fn aux_event(keys: &Keys, created_at: u64, content: &str) -> buzz_core::StoredEvent {
+        let ev = EventBuilder::new(Kind::Custom(7), content)
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .unwrap();
+        buzz_core::StoredEvent::new(ev, None)
+    }
+
+    /// Carl/#6572: a one-shot `limit=1000` aux query is newest-first, so the
+    /// oldest reactions/edits/deletions past the clamp vanished. The paged
+    /// drain must walk the keyset cursor until a short page and return every
+    /// event exactly once.
+    #[tokio::test]
+    async fn query_all_pages_drains_past_the_page_clamp() {
+        let keys = Keys::generate();
+        // Newest-first store: 5 events, two sharing a second so the id
+        // tiebreak is exercised.
+        let mut store = [
+            aux_event(&keys, 50, "e"),
+            aux_event(&keys, 40, "d1"),
+            aux_event(&keys, 40, "d2"),
+            aux_event(&keys, 30, "c"),
+            aux_event(&keys, 10, "a"),
+        ];
+        store.sort_by(|l, r| {
+            r.event
+                .created_at
+                .cmp(&l.event.created_at)
+                .then(l.event.id.cmp(&r.event.id))
+        });
+        let expected: Vec<_> = store.iter().map(|se| se.event.id).collect();
+        let mut calls = Vec::new();
+
+        let tenant = fresh_tenant("relay.example");
+        let query = build_aux_query(tenant.community(), vec!["root".into()], &WINDOW_AUX_KINDS);
+        let mut fetch = |q: &buzz_db::EventQuery| {
+            calls.push((q.limit, q.until, q.before_id.clone()));
+            // Emulate `query_events_on`: `created_at < until OR
+            // (created_at = until AND id > before_id)`, newest-first, limit.
+            let page: Vec<_> = store
+                .iter()
+                .filter(|se| match (q.until, q.before_id.as_deref()) {
+                    (Some(until), Some(before)) => {
+                        let ts = se.event.created_at.as_secs() as i64;
+                        ts < until.timestamp()
+                            || (ts == until.timestamp()
+                                && se.event.id.as_bytes().as_slice() > before)
+                    }
+                    _ => true,
+                })
+                .take(q.limit.unwrap() as usize)
+                .cloned()
+                .collect();
+            page
+        };
+        let events = query_all_pages(query, 2, &mut AuxReader::Fake(&mut fetch))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            events.iter().map(|se| se.event.id).collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(calls.len(), 3, "2 full pages + 1 short page");
+        assert!(calls.iter().all(|(limit, _, _)| *limit == Some(2)));
+        assert_eq!(calls[0].1, None);
+        // Second page resumes from the last row of the first (ts 40, larger id).
+        assert_eq!(calls[1].1.unwrap().timestamp(), 40);
+        assert_eq!(
+            calls[1].2.as_deref(),
+            Some(store[1].event.id.as_bytes().as_slice())
+        );
+        assert_eq!(calls[2].1.unwrap().timestamp(), 30);
+    }
+
+    #[tokio::test]
+    async fn query_all_pages_stops_at_one_short_page() {
+        let tenant = fresh_tenant("relay.example");
+        let query = build_aux_query(tenant.community(), vec!["root".into()], &WINDOW_AUX_KINDS);
+        let mut calls = 0;
+        let mut fetch = |_q: &buzz_db::EventQuery| {
+            calls += 1;
+            Vec::new()
+        };
+        let events = query_all_pages(query, 1000, &mut AuxReader::Fake(&mut fetch))
+            .await
+            .unwrap();
+        assert!(events.is_empty());
+        assert_eq!(calls, 1);
     }
 
     #[test]

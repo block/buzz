@@ -65,7 +65,14 @@ export function ChannelMembersBar({
   );
   const { startHuddle, isStarting: isStartingHuddle } = useHuddle();
   const queryClient = useQueryClient();
-  const membersQuery = useChannelMembersQuery(channel.id);
+  // The roster is only needed for DM huddle composition (agent detection and
+  // participant naming). Streams/forums render the count from the channel
+  // summary and gate huddle access on `channel.isMember`, so mounting this
+  // bar must not put a full-roster fetch on the channel-switch path.
+  const membersQuery = useChannelMembersQuery(
+    channel.id,
+    channel.channelType === "dm",
+  );
   const providersQuery = useAvailableAcpRuntimes();
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
@@ -165,8 +172,8 @@ export function ChannelMembersBar({
               members,
             }),
           );
-          // Refetch channels so the new ephemeral channel appears in the sidebar immediately
-          // (default poll interval is 60s — too slow for huddle UX).
+          // Keep the channel cache current so the ephemeral transcript is
+          // available immediately if the huddle returns to the in-app drawer.
           void queryClient.invalidateQueries({ queryKey: ["channels"] });
         } catch (e) {
           console.error("Failed to start huddle:", e);

@@ -12,7 +12,7 @@ This chart has two operating profiles selected by values:
 ## Quickstart (eval only)
 
 ```sh
-helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.7 \
+helm install buzz oci://ghcr.io/block/buzz/charts/buzz --version 0.1.8 \
   --create-namespace --namespace buzz \
   --set quickstart=true \
   --set postgresql.enabled=true \
@@ -29,11 +29,26 @@ intent marker surfaced in NOTES.txt; the bundled services are opted in via the
 four `*.enabled` flags above (see `ci/quickstart-values.yaml` for the exact set
 CI installs). Eval-only: every bundled service is a single replica with no HA.
 
+For immutable delivery, pin the OCI digest instead of a tag. `image.digest`
+overrides `image.tag` when both are present:
+
+```yaml
+image:
+  repository: ghcr.io/block/buzz
+  digest: sha256:<64-lowercase-hex-characters>
+```
+
 ## Production (GitOps)
 
 The chart is designed for ArgoCD and Flux. Both render charts with `helm template`, in which mode Helm's `lookup` function returns empty — any chart-side `randAlphaNum` call would regenerate secrets on every sync. The chart-managed Secret path is **only** safe for `helm install` / `helm upgrade`.
 
 Production deploys MUST use `secrets.existingSecret:`. The Secret is consumed for any keys present and ignored for keys missing — extras are harmless.
+
+To enable relay-proxied KLIPY search, add `BUZZ_KLIPY_API_KEY` to that Secret.
+The key stays in the relay pod; clients discover the public `buzz-gif`
+extension and `gif` descriptor in NIP-11, then receive KLIPY-hosted media URLs.
+See [`docs/gif-search.md`](../../../docs/gif-search.md) for the protocol and
+security boundaries.
 
 See:
 
@@ -62,9 +77,15 @@ Buzz uses one URL style for both media and Git/CAS object-store requests:
 | `virtual` | `https://bucket.endpoint/key` | AWS-style providers and new Railway Storage Buckets |
 
 The chart always renders `s3.addressingStyle` as
-`BUZZ_S3_ADDRESSING_STYLE`. It renders `s3.region` as `BUZZ_S3_REGION` only
-when explicitly set, preserving the relay's existing `AWS_REGION` fallback for
-upgrades. Only `path` and `virtual` addressing styles are accepted; invalid
+`BUZZ_S3_ADDRESSING_STYLE` and `s3.region` as `BUZZ_S3_REGION`. The region
+defaults to `us-east-1`, keeping bundled MinIO and the in-pod
+`buzz-admin deletions` workflow operable without an ambient `AWS_REGION`.
+Production providers must set their credential region explicitly when it
+differs. Existing releases that previously omitted `s3.region` will begin
+rendering `BUZZ_S3_REGION=us-east-1` after upgrade, even if an image or
+`relay.extraEnv` entry supplied `AWS_REGION`; set `s3.region` to the provider's
+actual credential region before upgrading. Only `path` and `virtual` addressing
+styles are accepted; invalid
 values fail chart rendering and relay startup. The bundled MinIO quickstart
 deliberately keeps `path` because its Service DNS resolves one endpoint
 hostname, not arbitrary `<bucket>.<service>` names.
@@ -198,6 +219,8 @@ default so long-lived WebSocket connections have time to drain.
 ## Upgrades
 
 Schema migrations are embedded in the relay binary via `sqlx::migrate!` and run at startup, gated by `BUZZ_AUTO_MIGRATE` (default `true`). Multiple replicas race-safely behind a Postgres advisory lock. `helm upgrade` is the entire upgrade procedure.
+
+Migration 0032 is a hard compatibility boundary for relay versions that publish repaired channel rosters. The relay verifies the roster-fence trigger catalog and behavior before opening listeners and refuses to start if 0032 is missing or inert. Apply migrations before rolling the relay; for large installations, prefer a controlled `buzz-admin migrate` job with PostgreSQL lock monitoring before the code rollout.
 
 If you prefer decoupling migrations from serving, set `migrate.autoMigrate=false`. **In that mode the chart does not run migrations for you** — you own running `buzz-admin migrate` (separate Pod / one-shot Job) against the database before every `helm install` / `helm upgrade`. Readiness probes only verify DB connectivity, not schema freshness, so a pod will appear healthy against an unmigrated schema and fail under load. A pre-upgrade Helm Job for this is on the chart roadmap; the values knob `migrate.preUpgradeJob.enabled` is reserved.
 

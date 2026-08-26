@@ -1,18 +1,31 @@
-import { BookOpen } from "lucide-react";
+import {
+  BookOpen,
+  DownloadCloud,
+  ExternalLink,
+  Globe,
+  Loader2,
+} from "lucide-react";
 
 import type { ProjectRepoFile } from "@/features/projects/hooks";
+import { projectExternalRefUrl } from "@/features/projects/lib/projectExternalUrl";
+import type { ProjectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
+import { formatLastChangedAt } from "@/features/projects/lib/projectsViewHelpers";
+import { Button } from "@/shared/ui/button";
+import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { Markdown, SyntaxHighlightedCode } from "@/shared/ui/markdown";
+import { baseName, languageForPath } from "./ProjectRepositoryPanel";
 import {
-  baseName,
-  formatLastChangedAt,
-  languageForPath,
-} from "./ProjectRepositoryPanel";
+  type RepositoryFileContentSource,
+  useRepositoryFileContent,
+} from "./useRepositoryFileContent";
 import {
   type RepoSourceHeaderControls,
   RepoSourceDropdown,
   RepoSyncActionButton,
   RepositoryBranchDropdown,
 } from "./ProjectRepositorySource";
+import { GitHubMark } from "./GitHubMark";
+import { ProjectRepositoryUnavailableState } from "./ProjectRepositoryUnavailableState";
 
 export function findReadmeFile(files: ProjectRepoFile[]) {
   const readmes = files.filter((file) =>
@@ -77,16 +90,46 @@ function normalizeReadmeMarkdown(content: string) {
 }
 
 export function ReadmePanel({
+  accessChannelId,
   file,
+  fileContentSource,
+  gitDataState,
+  externalHost,
+  externalUrl,
+  hideHeader,
+  ownerAvatarUrl,
+  ownerIsAgent,
+  ownerName,
   sourceControls,
+  unavailableReason,
 }: {
+  /** `buzz-channel` binding of the repository, for access-restricted copy. */
+  accessChannelId?: string | null;
   file: ProjectRepoFile | null;
+  fileContentSource?: RepositoryFileContentSource;
+  gitDataState: "checking" | "available" | "empty" | "unavailable";
+  externalHost?: string;
+  externalUrl?: string | null;
+  /**
+   * Skip the header rows entirely — the workspace layout renders the source
+   * controls and last-changed timestamp itself.
+   */
+  hideHeader?: boolean;
+  ownerAvatarUrl?: string | null;
+  ownerIsAgent?: boolean;
+  ownerName?: string;
+  unavailableReason?: ProjectRepoUnavailableReason;
   /** Branch picker + remote/local toggle rendered in the panel header. */
   sourceControls?: RepoSourceHeaderControls;
 }) {
+  const fileContent = useRepositoryFileContent(file, fileContentSource);
+  const externalOpenUrl = projectExternalRefUrl(
+    externalUrl,
+    sourceControls?.selectedTag ?? sourceControls?.branch,
+  );
   // Two header rows, mirroring the files panel: controls on top, then the
   // file identity row.
-  const header = (
+  const header = hideHeader ? null : (
     <>
       {sourceControls ? (
         <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
@@ -94,7 +137,6 @@ export function ReadmePanel({
           <RepositoryBranchDropdown
             branch={sourceControls.branch}
             branchOptions={sourceControls.branchOptions}
-            compact
             createBranchDisabled={sourceControls.createBranchDisabled}
             createBranchTitle={sourceControls.createBranchTitle}
             deleteBranchDisabled={sourceControls.deleteBranchDisabled}
@@ -125,13 +167,108 @@ export function ReadmePanel({
     </>
   );
 
-  if (!file?.previewContent) {
+  if (gitDataState === "checking") {
     return (
       <section className="overflow-hidden">
-        {sourceControls ? header : null}
-        <div className="p-6 text-sm text-muted-foreground">
-          Add a README to this repository to describe setup, usage, and project
-          context.
+        {header}
+        <BuzzLoadingState label="Loading repository" />
+      </section>
+    );
+  }
+
+  if (gitDataState === "unavailable") {
+    if (!externalHost) {
+      return (
+        <section className="overflow-hidden">
+          <ProjectRepositoryUnavailableState
+            accessChannelId={accessChannelId}
+            onAskForAccess={sourceControls?.onAskForAccess}
+            onRetry={sourceControls?.onFetch}
+            ownerAvatarUrl={ownerAvatarUrl}
+            ownerIsAgent={ownerIsAgent}
+            ownerName={ownerName}
+            reason={unavailableReason}
+            retryPending={sourceControls?.fetchPending}
+          />
+        </section>
+      );
+    }
+
+    return (
+      <section className="overflow-hidden">
+        <div className="flex min-h-64 flex-col items-center justify-center p-8 text-center">
+          <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl border border-border/60 bg-muted/40 text-muted-foreground">
+            {externalHost === "github.com" ? (
+              <GitHubMark className="h-6 w-6" />
+            ) : (
+              <Globe className="h-6 w-6" />
+            )}
+          </div>
+          <h3 className="text-base font-semibold text-foreground">
+            Code hosted on {externalHost}
+          </h3>
+          <p className="mt-1 max-w-lg text-sm text-muted-foreground">
+            Clone this repository locally to explore its files, commits, and
+            contributors in Buzz.
+          </p>
+          {externalOpenUrl ? (
+            <a
+              className="mt-2 max-w-lg truncate font-mono text-xs text-primary hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              href={externalOpenUrl}
+              rel="noreferrer"
+              target="_blank"
+            >
+              {externalOpenUrl}
+            </a>
+          ) : null}
+          <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+            {sourceControls?.onCloneLocal ? (
+              <Button
+                disabled={sourceControls.clonePending}
+                onClick={sourceControls.onCloneLocal}
+                size="sm"
+              >
+                {sourceControls.clonePending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <DownloadCloud className="h-4 w-4" />
+                )}
+                {sourceControls.clonePending ? "Cloning…" : "Clone locally"}
+              </Button>
+            ) : null}
+            {externalOpenUrl ? (
+              <Button asChild size="sm" variant="outline">
+                <a href={externalOpenUrl} rel="noreferrer" target="_blank">
+                  <ExternalLink className="h-4 w-4" />
+                  Open on {externalHost}
+                </a>
+              </Button>
+            ) : null}
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  if (fileContent.isLoading) {
+    return (
+      <section className="overflow-hidden">
+        {header}
+        <BuzzLoadingState label="Loading README" />
+      </section>
+    );
+  }
+
+  if (!file || !fileContent.content) {
+    return (
+      <section className="overflow-hidden">
+        {header}
+        <div className="px-8 py-6 text-sm text-muted-foreground">
+          {fileContent.error
+            ? "Could not load this README. Try again after refreshing the repository."
+            : gitDataState === "empty"
+              ? "No files have been pushed to this repository yet."
+              : "Add a README to this repository to describe setup, usage, and project context."}
         </div>
       </section>
     );
@@ -140,31 +277,33 @@ export function ReadmePanel({
   const language = languageForPath(file.path);
   const isMarkdown = /\.(?:md|markdown|mdx)$/i.test(file.path);
   const readmeContent = isMarkdown
-    ? normalizeReadmeMarkdown(file.previewContent)
-    : file.previewContent;
+    ? normalizeReadmeMarkdown(fileContent.content)
+    : fileContent.content;
 
   return (
     <section className="overflow-hidden">
       {header}
-      <div className="p-4">
+      <div className="min-w-0 px-8 py-6">
         {isMarkdown ? (
           <Markdown
+            blockCode
             className="text-sm"
             content={readmeContent}
+            hardLineBreaks={false}
             interactive={false}
           />
         ) : language ? (
           <pre className="overflow-x-auto bg-muted/40 p-4">
             <SyntaxHighlightedCode
               className="text-xs leading-relaxed"
-              code={file.previewContent}
+              code={fileContent.content}
               language={language}
             />
           </pre>
         ) : (
           <pre className="overflow-x-auto bg-muted/40 p-4">
             <code className="block min-w-full whitespace-pre font-mono text-xs leading-relaxed text-foreground">
-              {file.previewContent}
+              {fileContent.content}
             </code>
           </pre>
         )}

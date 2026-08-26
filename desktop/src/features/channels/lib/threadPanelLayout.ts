@@ -3,11 +3,22 @@ import type * as React from "react";
 import { THREAD_FOCUS_COLUMN_MAX_WIDTH_PX } from "@/features/channels/lib/threadFocusLayout";
 
 export type ThreadPanelLayoutProps = {
+  canResetWidth?: boolean;
   columnMaxWidthPx?: number;
+  enterMotion?: boolean;
   headerLeading?: React.ReactNode;
+  /** Replaces the default "Thread" label. Channel threads leave this unset. */
+  headerTitle?: string;
+  headerTitleAriaLabel?: string;
   isFocusMode: boolean;
   isSinglePanelView?: boolean;
   layout?: "standalone" | "split";
+  showBackButton?: boolean;
+  onHeaderTitleClick?: () => void;
+  onResetWidth?: () => void;
+  onResizeStart?: React.PointerEventHandler<HTMLButtonElement>;
+  splitPaneClamp?: boolean;
+  testId?: string;
   transparentChrome?: boolean;
 };
 

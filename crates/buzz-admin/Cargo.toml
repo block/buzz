@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 buzz-db = { workspace = true }
+buzz-deletion = { workspace = true }
 buzz-core = { workspace = true }
 buzz-auth = { workspace = true }
 buzz-pubsub = { workspace = true }
@@ -34,4 +35,5 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tracing = { workspace = true }
 sqlx = { workspace = true }
 url = { workspace = true }
+uuid = { workspace = true }
 clap = { version = "4", features = ["derive"] }

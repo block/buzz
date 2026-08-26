@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
@@ -17,7 +19,7 @@ import 'channels_provider.dart';
 /// held (not dropped) while channels are still loading, so cold-start links
 /// dispatch as soon as the first channel fetch completes.
 typedef DeepLinkDestinationBuilder =
-    Widget Function(Channel channel, MessageDeepLink link);
+    Widget Function(Channel channel, BuzzDeepLink link);
 
 class DeepLinkDispatcher extends ConsumerStatefulWidget {
   final Widget child;
@@ -63,28 +65,34 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
   }
 
   void _maybeDispatch(BuzzDeepLink? link) {
-    if (link == null) return;
+    if (link == null || _preparingInvite) return;
     if (link is InviteDeepLink) {
       _maybeDispatchInvite(link);
       return;
     }
-    if (link is! MessageDeepLink || !widget.dispatchMessageLinks) return;
+    if ((link is! MessageDeepLink && link is! ChannelDeepLink) ||
+        !widget.dispatchMessageLinks) {
+      return;
+    }
 
+    final channelId = switch (link) {
+      MessageDeepLink(:final channelId) => channelId,
+      ChannelDeepLink(:final channelId) => channelId,
+      _ => throw StateError('unsupported navigable deep link: $link'),
+    };
     final channels = ref.read(channelsProvider).asData?.value;
     // Channels not loaded yet — keep the link parked; the channelsProvider
     // listener re-attempts once data arrives.
     if (channels == null) return;
 
-    ref.read(pendingDeepLinkProvider.notifier).consume();
-
     final channel = channels
-        .where((c) => c.id == link.channelId)
+        .where((c) => c.id == channelId)
         .cast<Channel?>()
         .firstOrNull;
     if (channel == null) {
+      ref.read(pendingDeepLinkProvider.notifier).consume();
       debugPrint(
-        'deep-link: channel ${link.channelId} not found in workspace; '
-        'dropping link',
+        'deep-link: channel $channelId not found in workspace; dropping link',
       );
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
         const SnackBar(content: Text('Channel not found in this workspace')),
@@ -93,14 +101,21 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     }
     if (!context.mounted) return;
 
+    _pushChannel(channel, link);
+    ref.read(pendingDeepLinkProvider.notifier).consume();
+  }
+
+  void _pushChannel(Channel channel, BuzzDeepLink link) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) =>
             widget.destinationBuilder?.call(channel, link) ??
             ChannelDetailPage(
               channel: channel,
-              initialMessageId: link.messageId,
-              initialThreadRootId: link.threadRootId,
+              initialMessageId: link is MessageDeepLink ? link.messageId : null,
+              initialThreadRootId: link is MessageDeepLink
+                  ? link.threadRootId
+                  : null,
             ),
       ),
     );
@@ -112,13 +127,37 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
     final navigatorContext = context;
     final messenger = ScaffoldMessenger.maybeOf(context);
     Future.microtask(() async {
+      var consumed = false;
       try {
         await ref.read(inviteJoinProvider.notifier).prepare(link);
         ref.read(pendingDeepLinkProvider.notifier).consume();
+        consumed = true;
         if (!navigatorContext.mounted) return;
-        final status = ref.read(inviteJoinProvider).status;
-        if (status == InviteJoinStatus.confirming) {
-          showInviteJoinSheet(navigatorContext, ref);
+        final inviteState = ref.read(inviteJoinProvider);
+        final status = inviteState.status;
+        if (status == InviteJoinStatus.confirming ||
+            inviteState.isStarterSetupRecovery) {
+          final sheet = showInviteJoinSheet(navigatorContext);
+          if (status == InviteJoinStatus.claiming &&
+              inviteState.isStarterSetupRecovery) {
+            unawaited(
+              ref.read(inviteJoinProvider.notifier).startStarterSetupRecovery(),
+            );
+          }
+          final shouldFocusStarter = await sheet;
+          final focusChannelId = ref.read(inviteJoinProvider).focusChannelId;
+          if (shouldFocusStarter == true &&
+              focusChannelId != null &&
+              ref.read(pendingDeepLinkProvider) == null &&
+              navigatorContext.mounted) {
+            final channels = ref.read(channelsProvider).asData?.value;
+            final channel = channels
+                ?.where((candidate) => candidate.id == focusChannelId)
+                .firstOrNull;
+            if (channel != null) {
+              _pushChannel(channel, ChannelDeepLink(channelId: focusChannelId));
+            }
+          }
         } else if (status == InviteJoinStatus.switchedExisting) {
           messenger?.showSnackBar(
             const SnackBar(content: Text('Switched to this community')),
@@ -137,6 +176,9 @@ class _DeepLinkDispatcherState extends ConsumerState<DeepLinkDispatcher> {
         }
       } finally {
         _preparingInvite = false;
+        if (mounted && consumed) {
+          _maybeDispatch(ref.read(pendingDeepLinkProvider));
+        }
       }
     });
   }

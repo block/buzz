@@ -56,12 +56,12 @@ export function parsePromptText(text: string): {
 }
 
 /**
- * Split the framed `session/new` `systemPrompt` into its `Base`/`System`/
+ * Split the framed `session/new` `systemPrompt` into its `Base`/`Agent Instructions`/
  * `Team Instructions`/`Core Memory`/`Channel Canvas` sub-sections
  * deterministically.
  *
  * The harness composes the value in order:
- *   `[Base]\n{base}\n\n[System]\n{persona}\n\n[Team Instructions]\n{team}\n\n[Agent Memory — core]\n{core}\n\n[Channel Canvas]\n{canvas}`
+ *   `[Base]\n{base}\n\n[Agent Instructions]\n{persona}\n\n[Team Instructions]\n{team}\n\n[Agent Memory — core]\n{core}\n\n[Channel Canvas]\n{canvas}`
  * with any section omitted when absent. Extraction runs in reverse producer
  * order so that each `lastIndexOf` search operates on the full input and each
  * extraction boundary is unambiguous.
@@ -80,18 +80,19 @@ export function parsePromptText(text: string): {
  * 3. **Team Instructions** (`[Team Instructions]`): appended before core by
  *    `with_team()` in `buzz-acp/src/pool.rs`. Same two cases (start-of-string
  *    or `\n\n[Team Instructions]\n` inline), same last-occurrence guard. Output
- *    position: after System, before Core Memory.
+ *    position: after Agent Instructions, before Core Memory.
  *
- * 4. **Base/System**: remainder after the three top-level section extractions.
- *    Split on the first `\n[System]\n` boundary; no embedded `[...]` line
- *    inside a body can start a new section.
+ * 4. **Base/Agent Instructions**: remainder after the three top-level section
+ *    extractions. Split on the first `\n[Agent Instructions]\n` boundary.
+ *    Archived frames using the former `[System]` header remain supported and
+ *    retain their historical observer label.
  *
- * 5. **Legacy Team Instructions** (backward compat): if the `System` body
+ * 5. **Legacy Team Instructions** (backward compat): if the agent-instructions body
  *    contains the exact canonical delimiter `\n\n---\n# Team Instructions\n`
  *    (produced by the now-removed `compose_prompt()` in buzz-persona), the body
  *    is split at the **last** occurrence of that boundary. The text before
- *    becomes the `System` body; the text after becomes a `Team Instructions`
- *    section inserted immediately after `System`. Non-canonical lookalikes
+ *    becomes the agent-instructions body; the text after becomes a `Team Instructions`
+ *    section inserted immediately after it. Non-canonical lookalikes
  *    (bare `---` without the heading, a `# Team Instructions` on a different
  *    line, or only a single preceding newline) are kept literal inside `System`.
  */
@@ -137,7 +138,7 @@ export function parseSystemPromptSections(
 
   // ── 3. Extract [Team Instructions] (modern runtime framing) ─────────────
   // with_team() in buzz-acp/src/pool.rs appends "\n\n[Team Instructions]\n{instructions}"
-  // after [System] and before core/canvas. Same two cases as canvas/core:
+  // after [Agent Instructions] and before core/canvas. Same two cases as canvas/core:
   // start-of-string (team-only input) or the inline double-newline marker
   // (last occurrence guards against embedded lookalikes preceded by a single \n).
   const TEAM_HEADER = "[Team Instructions]";
@@ -157,48 +158,110 @@ export function parseSystemPromptSections(
     }
   }
 
-  // ── 4. Parse Base/System from the remaining prefix ────────────────────────
+  // ── 4. Parse Base/Workspace/Agent Instructions from the remaining prefix ─
   // The canonical team-instructions delimiter produced by compose_prompt() in
   // buzz-persona/src/resolve.rs:
   //   format!("{persona_prompt}\n\n---\n# Team Instructions\n{instructions}")
   const TEAM_DELIMITER = "\n\n---\n# Team Instructions\n";
 
-  // splitSystemBody: split a raw [System] body string at the last occurrence
-  // of the canonical team delimiter, returning { systemBody, teamBody | null }.
+  // splitInstructionsBody: split a raw agent-instructions body string at the last occurrence
+  // of the canonical team delimiter, returning { instructionsBody, teamBody | null }.
   // Using lastIndexOf mirrors the canvas/core last-occurrence guard: a persona
   // author can embed an exact delimiter-like passage inside the persona body;
   // only the final occurrence is the producer boundary appended by compose_prompt().
-  function splitSystemBody(raw: string): {
-    systemBody: string;
+  function splitInstructionsBody(raw: string): {
+    instructionsBody: string;
     teamBody: string | null;
   } {
     const at = raw.lastIndexOf(TEAM_DELIMITER);
-    if (at === -1) return { systemBody: raw.trim(), teamBody: null };
+    if (at === -1) return { instructionsBody: raw.trim(), teamBody: null };
     return {
-      systemBody: raw.slice(0, at).trim(),
+      instructionsBody: raw.slice(0, at).trim(),
       teamBody: raw.slice(at + TEAM_DELIMITER.length).trim() || null,
     };
   }
 
-  const baseAndSystem = remainder;
-  if (baseAndSystem) {
-    if (baseAndSystem.startsWith("[System]\n")) {
-      const raw = baseAndSystem.slice("[System]\n".length);
-      const { systemBody, teamBody } = splitSystemBody(raw);
-      if (systemBody) sections.push({ title: "System", body: systemBody });
+  const instructionFrames = [
+    { header: "[Agent Instructions]", title: "Agent Instructions" },
+    { header: "[System]", title: "System" },
+  ] as const;
+
+  function appendBaseAndWorkspace(raw: string): void {
+    const BASE_HEADER = "[Base]";
+    const WORKSPACE_HEADER = "[Workspace]";
+    const workspaceMarker = `\n\n${WORKSPACE_HEADER}\n`;
+    const baseMarker = `\n\n${BASE_HEADER}\n`;
+
+    // Current framing keeps the static base first, followed by the dynamic cwd.
+    if (raw.startsWith(`${BASE_HEADER}\n`)) {
+      const workspaceAt = raw.lastIndexOf(workspaceMarker);
+      if (workspaceAt !== -1) {
+        const baseBody = raw
+          .slice(`${BASE_HEADER}\n`.length, workspaceAt)
+          .trim();
+        const workspaceBody = raw
+          .slice(workspaceAt + workspaceMarker.length)
+          .trim();
+        if (baseBody) sections.push({ title: "Base", body: baseBody });
+        if (workspaceBody)
+          sections.push({ title: "Workspace", body: workspaceBody });
+        return;
+      }
+    }
+
+    // Preserve readable transcripts for sessions captured with the former
+    // Workspace-before-Base framing.
+    if (raw.startsWith(`${WORKSPACE_HEADER}\n`)) {
+      const baseAt = raw.lastIndexOf(baseMarker);
+      if (baseAt !== -1) {
+        const workspaceBody = raw
+          .slice(`${WORKSPACE_HEADER}\n`.length, baseAt)
+          .trim();
+        const baseBody = raw.slice(baseAt + baseMarker.length).trim();
+        if (workspaceBody)
+          sections.push({ title: "Workspace", body: workspaceBody });
+        if (baseBody) sections.push({ title: "Base", body: baseBody });
+        return;
+      }
+    }
+
+    const baseBody = raw.replace(/^\[Base]\n/, "").trim();
+    if (baseBody) sections.push({ title: "Base", body: baseBody });
+  }
+
+  const baseAndInstructions = remainder;
+  if (baseAndInstructions) {
+    const leadingFrame = instructionFrames.find(({ header }) =>
+      baseAndInstructions.startsWith(`${header}\n`),
+    );
+    if (leadingFrame) {
+      const raw = baseAndInstructions.slice(`${leadingFrame.header}\n`.length);
+      const { instructionsBody, teamBody } = splitInstructionsBody(raw);
+      if (instructionsBody)
+        sections.push({ title: leadingFrame.title, body: instructionsBody });
       if (teamBody)
         sections.push({ title: "Team Instructions", body: teamBody });
     } else {
-      const marker = "\n[System]\n";
-      const at = baseAndSystem.indexOf(marker);
-      const head = at === -1 ? baseAndSystem : baseAndSystem.slice(0, at);
-      const baseBody = head.replace(/^\[Base]\n/, "").trim();
-      if (baseBody) sections.push({ title: "Base", body: baseBody });
+      const boundary = instructionFrames
+        .map((frame) => ({
+          ...frame,
+          marker: `\n${frame.header}\n`,
+          at: baseAndInstructions.indexOf(`\n${frame.header}\n`),
+        }))
+        .filter(({ at }) => at !== -1)
+        .sort((a, b) => a.at - b.at)[0];
+      const head = boundary
+        ? baseAndInstructions.slice(0, boundary.at)
+        : baseAndInstructions;
+      appendBaseAndWorkspace(head);
 
-      if (at !== -1) {
-        const raw = baseAndSystem.slice(at + marker.length);
-        const { systemBody, teamBody } = splitSystemBody(raw);
-        if (systemBody) sections.push({ title: "System", body: systemBody });
+      if (boundary) {
+        const raw = baseAndInstructions.slice(
+          boundary.at + boundary.marker.length,
+        );
+        const { instructionsBody, teamBody } = splitInstructionsBody(raw);
+        if (instructionsBody)
+          sections.push({ title: boundary.title, body: instructionsBody });
         if (teamBody)
           sections.push({ title: "Team Instructions", body: teamBody });
       }

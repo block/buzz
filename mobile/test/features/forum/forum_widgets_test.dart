@@ -8,8 +8,8 @@ import 'package:buzz/features/forum/forum_posts_view.dart';
 import 'package:buzz/features/forum/forum_provider.dart';
 import 'package:buzz/features/forum/forum_thread_page.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
-import 'package:buzz/features/profile/user_cache_provider.dart';
-import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/profile/user_cache_provider.dart';
+import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -158,6 +158,30 @@ void main() {
   setUp(() async {
     SharedPreferences.setMockInitialValues({});
     _testPrefs = await SharedPreferences.getInstance();
+  });
+
+  test('cancels a captured forum delivery after the community changes', () {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    container
+        .read(relayConfigProvider.notifier)
+        .update(baseUrl: 'https://first.example');
+    final delivery = ForumEventDelivery.capture(container);
+
+    container
+        .read(relayConfigProvider.notifier)
+        .update(baseUrl: 'https://second.example');
+
+    expect(
+      delivery.createPost(channelId: _channelId, content: 'Queued post'),
+      throwsA(
+        isA<StateError>().having(
+          (error) => error.message,
+          'message',
+          contains('active community changed'),
+        ),
+      ),
+    );
   });
 
   group('ForumPostCard', () {

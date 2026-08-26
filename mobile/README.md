@@ -4,18 +4,27 @@ Flutter mobile client for Buzz.
 
 ## Setup
 
+Use the Flutter SDK pinned by the repository. Activate Hermit from the repo
+root before resolving packages or running any Flutter command:
+
 ```bash
-cd mobile
-flutter pub get
+cd /path/to/buzz
+. ./bin/activate-hermit
+./bin/just mobile-install
 ```
+
+`mobile-build-android` intentionally builds with `--no-pub`. If an IDE or an
+external Flutter SDK has touched `mobile/.dart_tool`, rerun `mobile-install`
+with the pinned SDK before building so `flutter_test`, `sky_engine`, and the
+engine all come from the same Flutter version.
 
 ## Run
 
 ```bash
-# From repo root (recommended — starts Docker, relay, and simulator):
+# From repo root (applies a worktree-isolated debug identity and starts/reuses Simulator):
 just mobile-dev
 
-# Direct (requires services and relay already running):
+# Direct (uses the app's configured community; apply worktree overrides first):
 cd mobile && flutter run
 ```
 
@@ -41,12 +50,42 @@ files:
   signing always win)
 - `mobile/android/worktree.properties` (read by the debug build type only)
 
+Android developers can keep a stable local test identity that takes precedence
+over the generated worktree values by creating the gitignored
+`mobile/android/AppOverrides.properties`:
+
+```properties
+appName=Buzz Pairing
+applicationIdSuffix=.device_pairing_e2e1
+```
+
+These values are consumed by the debug build type only. The standard
+`just mobile-build-android` command can still be used; regenerating
+`worktree.properties` does not overwrite `AppOverrides.properties`. Release
+and profile builds keep the production `Buzz` name and application ID.
+
 For direct Xcode / Android Studio / `flutter run` development, run
 `./scripts/mobile-worktree-overrides.sh` from the repo root once per branch
 switch to refresh the display label (the install identity never changes);
 the persisted files are then picked up by any subsequent build. In the main
 checkout the script is a no-op that removes stale override files, restoring
 the plain `Buzz` identity.
+
+For an Android debug build that must remain installed alongside other Buzz
+worktree builds, set an explicit launcher name and package suffix when invoking
+the generator or a recipe that invokes it:
+
+```bash
+BUZZ_ANDROID_DEBUG_APP_NAME="Buzz Huddles" \
+BUZZ_ANDROID_DEBUG_ID_SUFFIX=".huddles_829c" \
+./bin/just mobile-build-android
+```
+
+This example produces the debug-only package
+`xyz.block.buzz.mobile.huddles_829c` with the launcher label `Buzz Huddles`.
+The suffix must start with a dot followed by a lowercase letter and may contain
+only lowercase letters, digits, and underscores. Release and profile builds
+ignore these overrides and retain the production package and name.
 
 To remove leftover worktree-suffixed installs from booted iOS simulators and
 connected Android emulators, run `just mobile-clean` (add `--dry-run` via
