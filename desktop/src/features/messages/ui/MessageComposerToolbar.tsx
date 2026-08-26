@@ -3,6 +3,7 @@ import type { Editor } from "@tiptap/react";
 import { AnimatePresence, motion } from "motion/react";
 import { ALargeSmall, Paperclip, X } from "lucide-react";
 
+import type { MediaUploadController } from "@/features/messages/lib/useMediaUpload";
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import {
@@ -26,15 +27,19 @@ const ignoreAddressRemoval = () => {};
 export const MessageComposerToolbar = React.memo(
   function MessageComposerToolbar({
     addressedAgents = NO_ADDRESSED_AGENTS,
+    autoPinConfirmationTitle,
     composerDisabled,
     editor,
     extraActions,
     formattingDisabled,
+    gifMediaController,
     isEmojiPickerOpen,
     isFormattingOpen,
     isSending,
     isUploading,
     onCaptureSelection,
+    onAutoPinConfirmationDismiss,
+    onAutoPinConfirmationTurnOff,
     onEmojiPickerOpenChange,
     onEmojiSelect,
     onFormattingToggle,
@@ -47,15 +52,19 @@ export const MessageComposerToolbar = React.memo(
     shakeVersionByPubkey,
   }: {
     addressedAgents?: readonly ComposerAddressAgent[];
+    autoPinConfirmationTitle?: string | null;
     composerDisabled: boolean;
     editor: Editor | null;
     extraActions?: React.ReactNode;
     formattingDisabled: boolean;
+    gifMediaController: Pick<MediaUploadController, "setPendingImeta">;
     isEmojiPickerOpen: boolean;
     isFormattingOpen: boolean;
     isSending: boolean;
     isUploading: boolean;
     onCaptureSelection: () => void;
+    onAutoPinConfirmationDismiss?: () => void;
+    onAutoPinConfirmationTurnOff?: () => void;
     onEmojiPickerOpenChange: (open: boolean) => void;
     onEmojiSelect: (emoji: string) => void;
     onFormattingToggle: (pressed: boolean) => void;
@@ -175,7 +184,10 @@ export const MessageComposerToolbar = React.memo(
               >
                 <ComposerMentionButton
                   agents={addressedAgents}
+                  confirmationTitle={autoPinConfirmationTitle}
                   disabled={composerDisabled}
+                  onConfirmationDismiss={onAutoPinConfirmationDismiss}
+                  onConfirmationTurnOff={onAutoPinConfirmationTurnOff}
                   onCaptureSelection={onCaptureSelection}
                   onOpen={onOpenMentionPicker}
                   onRemove={onRemoveAddressedAgent}
@@ -201,6 +213,7 @@ export const MessageComposerToolbar = React.memo(
                 </Tooltip>
                 <ComposerEmojiPicker
                   disabled={composerDisabled}
+                  gifMediaController={gifMediaController}
                   onClose={() => editor?.commands.focus()}
                   onEmojiSelect={onEmojiSelect}
                   onOpenChange={onEmojiPickerOpenChange}

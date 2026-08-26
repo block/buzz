@@ -920,6 +920,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "hex",
+ "metrics",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1035,6 +1036,8 @@ dependencies = [
 name = "buzz-datastore-tracing"
 version = "0.1.0"
 dependencies = [
+ "metrics",
+ "metrics-util",
  "opentelemetry 0.32.0",
  "opentelemetry_sdk 0.32.1",
  "proc-macro2",
@@ -1136,6 +1139,7 @@ dependencies = [
  "infer",
  "mp4",
  "nostr 0.44.7",
+ "quick-xml 0.38.4",
  "rust-s3",
  "serde",
  "serde_json",
@@ -1360,6 +1364,7 @@ version = "0.1.0"
 dependencies = [
  "buzz-core",
  "buzz-datastore-tracing",
+ "metrics",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",

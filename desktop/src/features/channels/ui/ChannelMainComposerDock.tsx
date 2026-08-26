@@ -45,6 +45,7 @@ type ChannelMainComposerDockProps = {
   prepareDmSendChannel: MessageComposerProps["onPrepareSendChannel"];
   profiles: ChannelPaneProps["profiles"];
   projectedThreadComposer: ReturnType<typeof useProjectedThreadComposer>;
+  recentMentionPubkeys: MessageComposerProps["recentMentionPubkeys"];
   setMainDeferredEditPending: (pending: boolean) => void;
   timeoutState: TimeoutState;
   typingPubkeys: ChannelPaneProps["typingPubkeys"];
@@ -106,6 +107,7 @@ export function ChannelMainComposerDock({
   prepareDmSendChannel,
   profiles,
   projectedThreadComposer,
+  recentMentionPubkeys,
   setMainDeferredEditPending,
   timeoutState,
   typingPubkeys,
@@ -177,6 +179,7 @@ export function ChannelMainComposerDock({
             timeoutActive: timeoutState.active,
           })}
           profiles={profiles}
+          recentMentionPubkeys={recentMentionPubkeys}
           replyTarget={projectedThreadComposer.composerTarget}
           showBackgroundUploadProgress={false}
           showTopBorder={false}

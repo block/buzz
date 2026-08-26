@@ -478,14 +478,17 @@ async fn acquire_channel_membership_lock(
     community_id: CommunityId,
     channel_id: Uuid,
 ) -> Result<()> {
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!(
-            "{CHANNEL_MEMBERSHIP_LOCK_NAMESPACE}{}:{}",
-            community_id.as_uuid(),
-            channel_id
-        ))
-        .execute(&mut **tx)
-        .await?;
+    crate::observability::observe_advisory_lock(
+        crate::observability::LockType::Membership,
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "{CHANNEL_MEMBERSHIP_LOCK_NAMESPACE}{}:{}",
+                community_id.as_uuid(),
+                channel_id
+            ))
+            .execute(&mut **tx),
+    )
+    .await?;
     Ok(())
 }
 
@@ -631,10 +634,13 @@ pub async fn lock_member_snapshot(
         relay_pubkey,
         Some(channel_id.as_bytes()),
     );
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(replacement_lock)
-        .execute(&mut *tx)
-        .await?;
+    crate::observability::observe_advisory_lock(
+        crate::observability::LockType::Replacement,
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(replacement_lock)
+            .execute(&mut *tx),
+    )
+    .await?;
     acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
     let rows = sqlx::query(
         r#"

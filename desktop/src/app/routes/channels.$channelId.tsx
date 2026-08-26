@@ -1,5 +1,7 @@
 import * as React from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useLocation } from "@tanstack/react-router";
+
+import { selectSearchHighlightRouteState } from "@/app/routes/searchHighlightRouteState";
 
 import {
   parseProfilePanelTab,
@@ -59,6 +61,9 @@ const ChannelRouteScreen = React.lazy(async () => {
 function ChannelRouteComponent() {
   const { channelId } = Route.useParams();
   const search = Route.useSearch();
+  const searchHighlight = useLocation({
+    select: selectSearchHighlightRouteState,
+  });
   const isHuddleTranscript = huddleWindowChannelId() !== null;
 
   return (
@@ -74,6 +79,7 @@ function ChannelRouteComponent() {
       <ChannelRouteScreen
         autoSendDraftKey={search.autoSend ?? null}
         channelId={channelId}
+        searchHighlight={searchHighlight}
         selectedPostId={null}
         targetMessageId={search.messageId ?? null}
         targetReplyId={null}

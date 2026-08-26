@@ -95,6 +95,8 @@ export type MessageComposerProps = {
   ) => Promise<void>;
   placeholder?: string;
   profiles?: UserProfileLookup;
+  /** Explicit mention pubkeys from the loaded channel window, newest first. */
+  recentMentionPubkeys?: readonly string[];
   replyTarget?: {
     author: string;
     body: string;

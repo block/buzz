@@ -189,6 +189,9 @@ importers:
       jdenticon:
         specifier: ^3.3.0
         version: 3.3.0
+      linkifyjs:
+        specifier: ^4.3.2
+        version: 4.3.2
       lucide-react:
         specifier: ^1.0.0
         version: 1.16.0(react@19.2.8)
