@@ -157,13 +157,12 @@ test("thread head reflects the channel-window edit even before thread aux loads"
 
   // 5. Release the gate; the held thread-aux backfill now lands and the head
   //    stays edited (dedup against relay-provided aux, no regression).
-  await page.evaluate(
-    () =>
-      (
-        window as Window & {
-          __BUZZ_E2E_RELEASE_THREAD_REPLIES__?: () => number;
-        }
-      ).__BUZZ_E2E_RELEASE_THREAD_REPLIES__?.(),
+  await page.evaluate(() =>
+    (
+      window as Window & {
+        __BUZZ_E2E_RELEASE_THREAD_REPLIES__?: () => number;
+      }
+    ).__BUZZ_E2E_RELEASE_THREAD_REPLIES__?.(),
   );
   await expect(headBody).toContainText("these PRs?");
   await expect(headBody).not.toContainText("these two PRs?");
