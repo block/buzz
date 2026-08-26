@@ -3,7 +3,10 @@ mod app_menu;
 mod app_state;
 mod archive;
 mod builderlab;
+mod channel_file_index;
 mod commands;
+// TEMPORARY: diagnostic relay logging — remove before release.
+mod relay_debug_log;
 mod deep_link;
 mod egress_guard;
 mod event_sync;
@@ -667,6 +670,9 @@ pub fn run() {
             get_channel_reconnect_repair,
             get_channel_window,
             get_channel_messages_before,
+            channel_file_index::sync_channel_file_index,
+            channel_file_index::list_channel_file_index,
+            relay_debug_log::debug_append_relay_log,
             edit_message,
             delete_message,
             add_reaction,

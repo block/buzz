@@ -1,8 +1,9 @@
 import { getChannelMessagesBefore } from "./tauriChannels";
+import { getThreadReplies } from "./tauri";
 import { collectChannelLinkEntries } from "@/shared/lib/channelLinkEntries.mjs";
 import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 import { SUPERSEDES_MARKER, SUPERSEDES_SUBJECT_MARKER } from "./supersedesTags";
-import type { ChannelPageCursor, RelayEvent } from "./types";
+import type { ChannelPageCursor, RelayEvent, ThreadCursor } from "./types";
 
 /** Nostr message kinds that carry channel content (mirrors `TIMELINE_KINDS` in
  * `desktop/src-tauri/src/commands/messages.rs`, which `getChannelMessagesBefore`
@@ -49,6 +50,77 @@ const PAGE_SIZE = 500;
 /** A page count high enough to cover any realistically-sized channel without
  * looping forever if the relay ever returns a malformed cursor. */
 const MAX_PAGES = 200;
+
+/** One thread's reply page. `get_thread_replies` caps its own return, so this
+ * only needs to be large enough that most threads resolve in a single page. */
+const THREAD_PAGE_SIZE = 200;
+
+/** Per-thread page ceiling — the same malformed-cursor guard as `MAX_PAGES`,
+ * scaled down since a single thread is far smaller than a whole channel. */
+const MAX_THREAD_PAGES = 50;
+
+/**
+ * How many threads to sweep at once.
+ *
+ * The relay exposes no "all replies in a channel" query — every channel-scope
+ * query is forced `top_level` (see `build_channel_window_filter` /
+ * `build_channel_messages_before_filter` in `commands`), so the only way to
+ * reach files posted inside thread replies is to walk each thread with
+ * `get_thread_replies`. That's one request per top-level message; a small pool
+ * keeps the Files-tab load from firing hundreds of requests simultaneously
+ * while still finishing quickly. Threads with no replies return an empty page
+ * and cost one cheap round-trip.
+ */
+const THREAD_SWEEP_CONCURRENCY = 8;
+
+/**
+ * Fetch every reply event under the given thread roots.
+ *
+ * `get_thread_replies` returns the whole subtree for a root in one shot
+ * (depth-bounded, paged only for very large threads), so one sweep per
+ * top-level message reaches replies at any nesting depth without recursing.
+ * Roots are swept through a bounded worker pool.
+ */
+async function collectThreadReplyEvents(
+  channelId: string,
+  rootEventIds: readonly string[],
+): Promise<RelayEvent[]> {
+  const collected: RelayEvent[] = [];
+  let nextIndex = 0;
+
+  async function worker(): Promise<void> {
+    while (nextIndex < rootEventIds.length) {
+      const rootEventId = rootEventIds[nextIndex];
+      nextIndex += 1;
+
+      // Best-effort per thread: a file inside a reply is an enhancement over
+      // the top-level list, so one thread's fetch failing must not fail the
+      // whole Files tab. Skip that thread and keep sweeping the rest.
+      try {
+        let cursor: ThreadCursor | null = null;
+        for (
+          let page = 0;
+          page === 0 || (cursor && page < MAX_THREAD_PAGES);
+          page += 1
+        ) {
+          const response = await getThreadReplies(rootEventId, channelId, {
+            limit: THREAD_PAGE_SIZE,
+            cursor,
+          });
+          collected.push(...response.events);
+          cursor = response.nextCursor;
+          if (!cursor) break;
+        }
+      } catch {
+        // Ignore and move on to the next root.
+      }
+    }
+  }
+
+  const workerCount = Math.min(THREAD_SWEEP_CONCURRENCY, rootEventIds.length);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return collected;
+}
 
 /**
  * One file shared in a channel, with its version-chain links.
@@ -132,8 +204,8 @@ function supersedesLinkDeclaration(
 }
 
 /**
- * List every file shared in a channel (top-level messages only — see caveat
- * below), newest upload first.
+ * List every file shared in a channel — including files posted inside thread
+ * replies (see the thread-replies note below) — newest upload first.
  *
  * Deliberately does NOT call `list_channel_files` / `GET
  * /api/channels/{id}/files`: that custom relay endpoint only exists on a
@@ -154,11 +226,15 @@ function supersedesLinkDeclaration(
  * same two-pass approach: resolve `supersedes` per file, then back-fill
  * `supersededBy` from the resulting links).
  *
- * Caveat: `getChannelMessagesBefore` queries `TIMELINE_KINDS`, which the
- * relay scopes to *top-level* channel messages (thread replies are excluded
- * via a `thread_metadata` join) — so a file attached only inside a thread
- * reply won't show up here. Fine for a first pass; would need a separate
- * per-thread sweep (e.g. `getThreadReplies`) to close that gap.
+ * Thread replies: `getChannelMessagesBefore` queries `TIMELINE_KINDS` scoped
+ * to *top-level* channel messages (replies are excluded via a `thread_metadata`
+ * join), so files posted inside a thread reply don't come back in those pages.
+ * To include them, after paging the top-level history we sweep each top-level
+ * message's thread with `getThreadReplies` (see `collectThreadReplyEvents`) and
+ * fold the reply events into the same `events` array. Everything downstream —
+ * deletion tombstones, imeta/link extraction, version chains — then treats a
+ * reply-borne file exactly like a top-level one, so it lands in the Files tab
+ * with full version and deletion handling.
  *
  * `crates/buzz-relay/src/api/files.rs` and the `list_channel_files` Tauri
  * command are NOT deleted — they still matter for anyone who self-hosts —
@@ -178,6 +254,32 @@ export async function listChannelFiles(
     );
     events.push(...response.events);
     cursor = response.nextCursor;
+  }
+
+  // Every top-level content message is a potential thread root. Sweep each
+  // thread and fold its replies into `events` so files posted inside replies
+  // are indexed alongside top-level ones. Done before deletion/extraction so a
+  // reply file, a reply's version tag, and a reply-deleting tombstone are all
+  // processed by the identical passes below.
+  const threadRootEventIds = events
+    .filter(
+      (event) =>
+        event.kind === KIND_STREAM_MESSAGE ||
+        event.kind === KIND_STREAM_MESSAGE_V2,
+    )
+    .map((event) => event.id);
+  const replyEvents = await collectThreadReplyEvents(
+    channelId,
+    threadRootEventIds,
+  );
+  // Defensive de-dup by id: reply subtrees never overlap and pages don't
+  // repeat, but combining two independently paged sources shouldn't be able to
+  // produce a duplicate file entry if either ever returns an id twice.
+  const seenEventIds = new Set(events.map((event) => event.id));
+  for (const replyEvent of replyEvents) {
+    if (seenEventIds.has(replyEvent.id)) continue;
+    seenEventIds.add(replyEvent.id);
+    events.push(replyEvent);
   }
 
   // Collected first: a tombstone can appear anywhere in the paged stream
