@@ -1,5 +1,7 @@
 part of '../animated_avatar_capture.dart';
 
+enum _AnimatedReviewSection { person, color, poster }
+
 class _RepositionablePreviewSemantics extends StatelessWidget {
   const _RepositionablePreviewSemantics({
     required this.offset,
@@ -53,6 +55,7 @@ class _AnimatedReviewNav extends StatelessWidget {
       Expanded(
         child: AvatarEditorOptionButton(
           icon: LucideIcons.userRound,
+          iosIcon: IosGlassNavigationIcon.person,
           label: 'You',
           selected: selected == _AnimatedReviewSection.person,
           onTap: () => onSelected(_AnimatedReviewSection.person),
@@ -62,6 +65,7 @@ class _AnimatedReviewNav extends StatelessWidget {
       Expanded(
         child: AvatarEditorOptionButton(
           icon: LucideIcons.palette,
+          iosIcon: IosGlassNavigationIcon.palette,
           label: 'Background',
           selected: selected == _AnimatedReviewSection.color,
           onTap: () => onSelected(_AnimatedReviewSection.color),
@@ -71,6 +75,7 @@ class _AnimatedReviewNav extends StatelessWidget {
       Expanded(
         child: AvatarEditorOptionButton(
           icon: LucideIcons.galleryThumbnails,
+          iosIcon: IosGlassNavigationIcon.frame,
           label: 'Frame',
           selected: selected == _AnimatedReviewSection.poster,
           onTap: () => onSelected(_AnimatedReviewSection.poster),
@@ -82,6 +87,7 @@ class _AnimatedReviewNav extends StatelessWidget {
       Expanded(
         child: AvatarEditorOptionButton(
           icon: LucideIcons.camera,
+          iosIcon: IosGlassNavigationIcon.camera,
           label: 'Retake',
           selected: false,
           onTap: onRetake,

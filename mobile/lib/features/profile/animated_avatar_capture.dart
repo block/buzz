@@ -18,7 +18,9 @@ import '../../shared/emoji/emoji_avatar.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
 import 'avatar_background_grid.dart';
+import 'camera_disposal_barrier.dart';
 import 'avatar_editor_option_button.dart';
 import 'animated_avatar_orientation.dart';
 import 'profile_avatar_draft.dart';
@@ -35,8 +37,6 @@ const _outputSize = 256;
 const _mobileDefaultPersonScale = 1.15;
 const _animatedReviewRailHeight = 88.0;
 
-enum _AnimatedReviewSection { person, color, poster }
-
 /// Records and prepares a short camera animation for a profile avatar.
 class AnimatedAvatarCapture extends HookConsumerWidget {
   /// Creates an animated-avatar capture and review surface.
@@ -45,6 +45,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
     required this.height,
     required this.onPrepareChanged,
     this.initialFrames = const [],
+    this.disposalBarrier,
   });
 
   /// The vertical space available to the capture surface.
@@ -56,10 +57,18 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
   /// Seeds processed frames in lifecycle-focused widget tests.
   @visibleForTesting
   final List<Uint8List> initialFrames;
+
+  /// Serializes ownership release with another profile capture surface.
+  final CameraDisposalBarrier? disposalBarrier;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = useState<CameraController?>(null);
     final controllerRef = useRef<CameraController?>(null);
+    final controllerDisposal = useRef(
+      disposalBarrier ?? CameraDisposalBarrier(),
+    );
+    final candidateRef = useRef<CameraController?>(null);
     final captureEpoch = useRef(0);
     final cameraGeneration = useState(0);
     final isInitializing = useState(true);
@@ -96,6 +105,8 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
             shapeOffsetX: shapeOffset.value.dx,
             shapeOffsetY: shapeOffset.value.dy,
           );
+    final latestEncodeKey = useRef<_EncodeKey?>(null);
+    latestEncodeKey.value = encodeKey;
     useEffect(() {
       encodedCache.value = null;
       final key = encodeKey;
@@ -129,15 +140,25 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
 
       isInitializing.value = true;
 
+      Future<void> releaseController(CameraController? active) {
+        if (active == null) return controllerDisposal.value.settled;
+        return controllerDisposal.value.release(active.dispose);
+      }
+
       Future<void> initialize() async {
+        CameraController? next;
+        CameraDisposalReservation? reservation;
+        var installed = false;
         try {
+          await controllerDisposal.value.settled;
+          if (disposed) return;
           final cameras = await availableCameras();
           if (disposed || cameras.isEmpty) return;
           final selected = cameras.firstWhere(
             (camera) => camera.lensDirection == CameraLensDirection.front,
             orElse: () => cameras.first,
           );
-          final next = CameraController(
+          next = CameraController(
             selected,
             ResolutionPreset.medium,
             enableAudio: false,
@@ -145,14 +166,33 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
                 ? ImageFormatGroup.bgra8888
                 : ImageFormatGroup.yuv420,
           );
-          await next.initialize();
+          reservation = controllerDisposal.value.reserve();
+          candidateRef.value = next;
+          await reservation.ready;
           if (disposed) {
-            await next.dispose();
+            if (identical(candidateRef.value, next)) candidateRef.value = null;
+            await reservation.dispose(next.dispose);
             return;
           }
+          await next.initialize();
+          await next.lockCaptureOrientation(DeviceOrientation.portraitUp);
+          if (disposed) {
+            if (identical(candidateRef.value, next)) candidateRef.value = null;
+            await reservation.dispose(next.dispose);
+            return;
+          }
+          candidateRef.value = null;
+          reservation.complete();
           controllerRef.value = next;
           controller.value = next;
+          installed = true;
         } catch (_) {
+          if (!installed &&
+              next != null &&
+              identical(candidateRef.value, next)) {
+            candidateRef.value = null;
+            await reservation?.dispose(next.dispose);
+          }
           if (!disposed) error.value = 'Could not access the camera.';
         } finally {
           if (!disposed) isInitializing.value = false;
@@ -165,12 +205,12 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
         captureEpoch.value++;
         final active = controllerRef.value;
         controllerRef.value = null;
-        unawaited(active?.dispose() ?? Future<void>.value());
+        unawaited(releaseController(active));
       };
     }, [lifecycle, frames.value.isEmpty, cameraGeneration.value]);
 
     Future<ProfileAvatarDraft?> prepare() async {
-      final key = encodeKey;
+      final key = latestEncodeKey.value;
       if (key == null) return null;
       isProcessing.value = true;
       error.value = null;
@@ -242,7 +282,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
         if (context.mounted && identical(controller.value, active)) {
           controller.value = null;
         }
-        await active.dispose();
+        await controllerDisposal.value.release(active.dispose);
       }
 
       final timer = Timer.periodic(const Duration(milliseconds: 40), (_) {
@@ -290,12 +330,14 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
           await Future<void>.delayed(const Duration(milliseconds: 10));
         }
         if (captureEpoch.value != currentCapture || !context.mounted) return;
-        await releaseCamera();
         if (captured.length < 2) {
           throw StateError('Not enough frames were captured.');
         }
         isRecording.value = false;
+        // Enter the processing state before releasing the controller. Clearing
+        // the camera first briefly exposed the unavailable-camera placeholder.
         isPreparingFrames.value = true;
+        await releaseCamera();
         // Cut out only the frames each device captured, then resample the
         // three-second window so Android and iOS use the same playback cadence.
         final cutouts = await _removeBackgrounds(captured);
@@ -342,7 +384,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
       final previewTop = activeSection.value == _AnimatedReviewSection.color
           ? -avatarBackgroundPreviewShift
           : 0.0;
-      final controlsTop = previewTop + 220;
+      final controlsTop = previewTop + _animatedAvatarPreviewSize;
       return SizedBox(
         height: height,
         child: Stack(
@@ -357,7 +399,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
               left: 0,
               right: 0,
               top: previewTop,
-              height: 220,
+              height: _animatedAvatarPreviewSize,
               child: Center(
                 child: _RepositionablePreviewSemantics(
                   offset: offset.value,
@@ -385,7 +427,7 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
                           .toDouble();
                     },
                     child: SizedBox.square(
-                      dimension: 220,
+                      dimension: _animatedAvatarPreviewSize,
                       child: Stack(
                         fit: StackFit.expand,
                         children: [
@@ -396,13 +438,17 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
                                 Center(
                                   child: Transform.translate(
                                     offset:
-                                        const Offset(0, 20.625) +
-                                        shapeOffset.value * 51.5625,
+                                        const Offset(
+                                          0,
+                                          _animatedAvatarShapeYOffset,
+                                        ) +
+                                        shapeOffset.value *
+                                            _animatedAvatarShapeTranslation,
                                     child: Transform.scale(
                                       scale: shapeScale.value,
                                       child: Container(
-                                        width: 172,
-                                        height: 172,
+                                        width: _animatedAvatarShapeSize,
+                                        height: _animatedAvatarShapeSize,
                                         decoration: BoxDecoration(
                                           color: Color(backdropColor.value),
                                           shape: BoxShape.circle,
@@ -413,7 +459,9 @@ class AnimatedAvatarCapture extends HookConsumerWidget {
                                 ),
                                 _AnimatedPersonPreview(
                                   bytes: selectedFrame,
-                                  offset: offset.value * 48,
+                                  offset:
+                                      offset.value *
+                                      _animatedAvatarPersonTranslation,
                                   scale: scale.value,
                                   outline: personOutline.value,
                                   outlineColor: _personOutlineColor(
@@ -632,13 +680,6 @@ List<Uint8List> _resampleCapturedFrames(
     final sourceIndex = (progress * (frames.length - 1)).round();
     return frames[sourceIndex];
   }, growable: false);
-}
-
-Color _personOutlineColor(int backdropColor) {
-  final color = Color(backdropColor);
-  return color.computeLuminance() > 0.74
-      ? const Color(0xFF111111)
-      : Colors.white;
 }
 
 @immutable
@@ -880,12 +921,14 @@ _EncodedAvatar _encodeAvatar(_EncodeRequest request) {
           height: _outputSize,
           numChannels: 4,
         );
-        const previewSize = 220.0;
-        const previewTranslation = 48.0;
+        const previewSize = _animatedAvatarPreviewSize;
+        const previewTranslation = _animatedAvatarPersonTranslation;
         final translationScale = _outputSize / previewSize;
         image.compositeImage(
           person,
           scaledPerson,
+          dstW: scaledSize,
+          dstH: scaledSize,
           dstX:
               ((_outputSize - scaledSize) / 2 +
                       request.offsetX * previewTranslation * translationScale)
@@ -903,9 +946,9 @@ _EncodedAvatar _encodeAvatar(_EncodeRequest request) {
         final color = request.backdropColor;
         image.fillCircle(
           frame,
-          x: (_outputSize / 2 + request.shapeOffsetX * 60).round(),
-          y: (_outputSize / 2 + 24 + request.shapeOffsetY * 60).round(),
-          radius: (100 * request.shapeScale).round(),
+          x: _animatedAvatarShapeX(request.shapeOffsetX),
+          y: _animatedAvatarShapeY(request.shapeOffsetY),
+          radius: _animatedAvatarShapeRadius(request.shapeScale),
           color: image.ColorRgba8(
             (color >> 16) & 0xff,
             (color >> 8) & 0xff,
@@ -923,16 +966,7 @@ _EncodedAvatar _encodeAvatar(_EncodeRequest request) {
               ..b = (outlineColor.b * 255).round()
               ..a = (pixel.a * 0.92).round();
           }
-          for (final (x, y) in const [
-            (-2, 0),
-            (2, 0),
-            (0, -2),
-            (0, 2),
-            (-1, -1),
-            (1, -1),
-            (-1, 1),
-            (1, 1),
-          ]) {
+          for (final (x, y) in _animatedAvatarOutlineOffsets) {
             image.compositeImage(frame, outline, dstX: x, dstY: y);
           }
         }
@@ -955,26 +989,6 @@ _EncodedAvatar _encodeAvatar(_EncodeRequest request) {
   );
   return _EncodedAvatar(animation, poster);
 }
-
-/// Encodes one poster frame for validating animated-avatar framing parity.
-@visibleForTesting
-Uint8List encodeAnimatedAvatarPoster({
-  required Uint8List frame,
-  required double scale,
-}) => _encodeAvatar(
-  _EncodeRequest(
-    frames: [frame],
-    posterIndex: 0,
-    scale: scale,
-    offsetX: 0,
-    offsetY: 0,
-    backdropColor: 0xff0000ff,
-    personOutline: false,
-    shapeScale: 1,
-    shapeOffsetX: 0,
-    shapeOffsetY: 0,
-  ),
-).poster;
 
 extension<T> on Iterable<T> {
   Iterable<T> skipLast(int count) {

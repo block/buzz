@@ -115,14 +115,12 @@ final class ProfileAnimatedAvatarDraft extends ProfileAvatarDraft {
     }
     final existing = _uploadedUrl;
     if (existing != null) return existing;
-    // Cache each content-addressed part independently. Upload sequentially so
-    // relays configured to allow only one in-flight media request can accept an
-    // animated avatar in a single Save attempt.
-    final upload = _uploadPoster(service).then(
-      (poster) => _uploadAnimation(
-        service,
-      ).then((animation) => buildAnimatedAvatarUrl(poster.url, animation.url)),
-    );
+    // Cache each content-addressed part independently. If one request fails,
+    // retry only that part so a successful counterpart remains attached to
+    // this draft instead of becoming an abandoned duplicate.
+    final upload = Future.wait(
+      [_uploadPoster(service), _uploadAnimation(service)],
+    ).then((uploads) => buildAnimatedAvatarUrl(uploads[0].url, uploads[1].url));
     _uploadedUrl = upload;
     try {
       return await upload;

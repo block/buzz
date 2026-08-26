@@ -83,11 +83,16 @@ class _EmojiMode extends HookConsumerWidget {
                 child: Opacity(
                   opacity: transitionProgress,
                   child: activeSection == _EmojiEditorSection.background
-                      ? AvatarBackgroundGrid(
-                          key: const ValueKey('emoji-background-editor'),
-                          selectedColor: selectedColor,
-                          onColorSelected: onColorSelected,
-                          colorKeyPrefix: 'emoji-avatar-color',
+                      ? Center(
+                          key: const ValueKey(
+                            'emoji-background-editor-alignment',
+                          ),
+                          child: AvatarBackgroundGrid(
+                            key: const ValueKey('emoji-background-editor'),
+                            selectedColor: selectedColor,
+                            onColorSelected: onColorSelected,
+                            colorKeyPrefix: 'emoji-avatar-color',
+                          ),
                         )
                       : Column(
                           key: const ValueKey('emoji-glyph-editor'),
@@ -223,6 +228,7 @@ class _EmojiMode extends HookConsumerWidget {
                       child: AvatarEditorOptionButton(
                         key: const ValueKey('emoji-editor-background'),
                         icon: LucideIcons.palette,
+                        iosIcon: IosGlassNavigationIcon.palette,
                         label: 'Background',
                         selected:
                             activeSection == _EmojiEditorSection.background,
@@ -236,6 +242,7 @@ class _EmojiMode extends HookConsumerWidget {
                       child: AvatarEditorOptionButton(
                         key: const ValueKey('emoji-editor-emoji'),
                         icon: LucideIcons.smile,
+                        iosIcon: IosGlassNavigationIcon.emoji,
                         label: 'Emoji',
                         selected: activeSection == _EmojiEditorSection.emoji,
                         onTap: () =>

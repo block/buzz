@@ -78,9 +78,8 @@ test("mention control expands with automatically mentioned agents", async () => 
   assert.match(manage.className, /(?:^|\s)pl-2(?:\s|$)/);
   assert.match(manage.parentElement?.className ?? "", /(?:^|\s)pl-2(?:\s|$)/);
   assert.match(
-    view.getByRole("button", { name: "Manage automatic agent mentions" })
-      .parentElement?.className ?? "",
-    /(?:^|\s)pr-1(?:\s|$)/,
+    manage.parentElement?.className ?? "",
+    /(?:^|\s)pr-1\.5(?:\s|$)/,
   );
   assert.match(
     view.getByRole("button", { name: "Manage automatic agent mentions" })
@@ -111,17 +110,21 @@ test("mention control expands with automatically mentioned agents", async () => 
       /scale\(0.8\)/,
     );
   }
-  const remove = view.getByRole("button", {
-    name: "Stop automatically mentioning Agent Ada",
-  });
+  const remove = view.getByTestId("composer-address-lock-remove-agent-pubkey");
   assert.match(
     remove.querySelector("span.absolute")?.className ?? "",
     /group-hover\/address:opacity-100/,
   );
   fireEvent.click(remove);
   assert.deepEqual(removed, ["agent-pubkey"]);
-  fireEvent.click(
-    view.getByRole("button", { name: "Manage automatic agent mentions" }),
+  view.rerender(renderButton([]));
+  const exitingLocks = view.getByTestId("composer-address-locks");
+  assert.match(exitingLocks.className, /(?:^|\s)overflow-hidden(?:\s|$)/);
+  assert.match(
+    view.getByRole("button", { name: "Mention someone" }).parentElement
+      ?.className ?? "",
+    /(?:^|\s)pr-1\.5(?:\s|$)/,
   );
+  fireEvent.click(view.getByRole("button", { name: "Mention someone" }));
   assert.equal(opened, 1);
 });

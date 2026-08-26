@@ -166,9 +166,9 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
   {
     id: "always-address-agent",
     label: "Always address agent",
-    description: "Open the agent picker, or toggle the highlighted agent",
-    keys: "⇧⌘↵",
-    keysWindows: "Ctrl+Shift+Enter",
+    description: "Address the default agent, or select the highlighted agent",
+    keys: "⇧⌘M",
+    keysWindows: "Ctrl+Shift+M",
     category: "Messages",
   },
   {

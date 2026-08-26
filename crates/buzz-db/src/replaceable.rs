@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{Acquire, Postgres, Transaction};
 use uuid::Uuid;
 
+use crate::observability::{self, LockType, TransactionOperation};
 use crate::{Db, DbError, Result};
 
 /// Result category for a parameterized-replaceable event write.
@@ -122,10 +123,13 @@ async fn replace_parameterized_event_in_transaction_impl(
         pubkey_bytes.as_slice(),
         Some(d_tag.as_bytes()),
     );
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(lock_key)
-        .execute(&mut **tx)
-        .await?;
+    observability::observe_advisory_lock(
+        LockType::Replacement,
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut **tx),
+    )
+    .await?;
 
     let d_tag_count = event
         .tags
@@ -395,23 +399,31 @@ impl Db {
         d_tag: &str,
         channel_id: Option<Uuid>,
     ) -> Result<(StoredEvent, bool)> {
-        let mut tx = self.pool.begin().await?;
-        let result = self
-            .replace_parameterized_event_in_transaction(
-                &mut tx,
-                community_id,
-                event,
-                d_tag,
-                channel_id,
-                ParameterizedReplacePrecondition::Unconditional,
-            )
-            .await?;
-        let was_inserted = result.status == ParameterizedReplaceStatus::Inserted;
-        if was_inserted {
-            tx.commit().await?;
-        } else {
-            tx.rollback().await?;
-        }
-        Ok((result.event, was_inserted))
+        let (mut tx, transaction_timer) = observability::begin_transaction(
+            &self.pool,
+            TransactionOperation::ReplaceParameterizedEvent,
+        )
+        .await?;
+        transaction_timer
+            .observe(async {
+                let result = self
+                    .replace_parameterized_event_in_transaction(
+                        &mut tx,
+                        community_id,
+                        event,
+                        d_tag,
+                        channel_id,
+                        ParameterizedReplacePrecondition::Unconditional,
+                    )
+                    .await?;
+                let was_inserted = result.status == ParameterizedReplaceStatus::Inserted;
+                if was_inserted {
+                    tx.commit().await?;
+                } else {
+                    tx.rollback().await?;
+                }
+                Ok((result.event, was_inserted))
+            })
+            .await
     }
 }

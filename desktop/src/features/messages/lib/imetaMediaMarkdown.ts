@@ -79,29 +79,31 @@ export function imetaMediaFromTags(
  * Shared by the send path (initial post) and the edit path (full new tag set
  * on the edit event), so the two stay perfectly symmetric.
  *
- * `url` and `m` are always emitted (NIP-92's only de-facto required fields;
- * `m` carries a fallback in `imetaMediaFromTags`). All other fields are
- * conditional — including `x` and `size` — because legacy and cross-client
- * imeta entries can land without a sha256 or size, and our relay validator
- * rejects literal `"x "` / `"size 0"` empties. NIP-92 itself treats every
- * field except `url` as optional, so dropping them is spec-clean.
+ * `url`, `m`, and `x` are emitted for verified relay-hosted media. Entries
+ * without a hash represent external content (for example KLIPY GIFs); their
+ * markdown URL remains in the message body, but they are omitted from imeta
+ * because Buzz's relay validator requires a hash-backed local `/media/` path.
+ * Other fields remain conditional so legacy entries do not emit invalid
+ * literal `"size 0"` values.
  */
 export function buildImetaTags(
   imetaMedia: ReadonlyArray<ImetaMedia>,
 ): string[][] {
-  return imetaMedia.map((d) => [
-    "imeta",
-    `url ${d.url}`,
-    `m ${d.type}`,
-    ...(d.sha256 ? [`x ${d.sha256}`] : []),
-    ...(typeof d.size === "number" && d.size > 0 ? [`size ${d.size}`] : []),
-    ...(d.dim ? [`dim ${d.dim}`] : []),
-    ...(d.blurhash ? [`blurhash ${d.blurhash}`] : []),
-    ...(d.thumb ? [`thumb ${d.thumb}`] : []),
-    ...(d.duration != null ? [`duration ${d.duration}`] : []),
-    ...(d.image ? [`image ${d.image}`] : []),
-    ...(d.filename ? [`filename ${d.filename}`] : []),
-  ]);
+  return imetaMedia
+    .filter((d) => d.sha256.length > 0)
+    .map((d) => [
+      "imeta",
+      `url ${d.url}`,
+      `m ${d.type}`,
+      `x ${d.sha256}`,
+      ...(typeof d.size === "number" && d.size > 0 ? [`size ${d.size}`] : []),
+      ...(d.dim ? [`dim ${d.dim}`] : []),
+      ...(d.blurhash ? [`blurhash ${d.blurhash}`] : []),
+      ...(d.thumb ? [`thumb ${d.thumb}`] : []),
+      ...(d.duration != null ? [`duration ${d.duration}`] : []),
+      ...(d.image ? [`image ${d.image}`] : []),
+      ...(d.filename ? [`filename ${d.filename}`] : []),
+    ]);
 }
 
 const MEDIA_LINE_RE =
@@ -329,9 +331,11 @@ export function buildOutgoingMessage(
       spoiler: spoileredMediaUrls.has(d.url),
     });
   }
-  const mediaTags =
-    pendingImeta.length > 0 ? buildImetaTags(pendingImeta) : undefined;
-  return { content, mediaTags };
+  const mediaTags = buildImetaTags(pendingImeta);
+  return {
+    content,
+    mediaTags: mediaTags.length > 0 ? mediaTags : undefined,
+  };
 }
 
 /**
