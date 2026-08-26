@@ -863,8 +863,12 @@ const MessageTimelineBase = React.forwardRef<
           <div
             className={cn(
               "pointer-events-none absolute inset-x-0 bottom-4 z-50 flex justify-center px-4",
+              // Position the pill with layout rather than a transform. WebKit
+              // can keep an inherited custom property stale on a promoted
+              // transform layer when the composer grows, leaving the pill
+              // stranded inside the dock.
               hasComposerOverlay &&
-                "translate-y-[calc(-1*var(--composer-overlay-height,8rem))] transform-gpu transition-transform duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
+                "bottom-[calc(1rem+var(--composer-overlay-height,8rem))] transition-[bottom] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none",
             )}
           >
             <UnreadPill

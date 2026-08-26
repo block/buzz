@@ -14,12 +14,8 @@ class _ConnectionSection extends ConsumerWidget {
 
     return AppListCard(
       label: 'Connection',
+      verticalPadding: Grid.twelve,
       children: [
-        AppListRow(
-          icon: LucideIcons.server,
-          title: 'Connected to',
-          subtitle: config.baseUrl,
-        ),
         if (nsec != null && nsec.isNotEmpty && community != null) ...[
           _IdentityRow(nsec: nsec),
           AppListRow(
@@ -104,6 +100,7 @@ class _RemoveCommunitySection extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     return AppListCard(
+      verticalPadding: Grid.twelve,
       children: [
         AppListRow(
           icon: LucideIcons.logOut,
@@ -126,19 +123,19 @@ class _IdentityRow extends StatelessWidget {
     final privHex = nostr.Nip19.decode(payload: nsec).data;
     final pubkey = privHex.isNotEmpty ? nostr.Keys(privHex).public : 'unknown';
 
-    return AppListRow(
-      icon: LucideIcons.key,
-      title: 'Identity (pubkey)',
-      subtitle: pubkey,
-      subtitleStyle: context.textTheme.bodySmall?.copyWith(
-        color: context.colors.onSurfaceVariant,
-        fontFamily: 'GeistMono',
-        fontSize: 11,
-      ),
-      subtitleMaxLines: 2,
-      trailing: IconButton(
-        icon: const Icon(LucideIcons.copy, size: 16),
-        onPressed: () async {
+    return Semantics(
+      button: true,
+      label: 'Copy identity public key',
+      value: pubkey,
+      child: AppListRow(
+        icon: LucideIcons.key,
+        title: 'Identity (pubkey)',
+        trailing: Icon(
+          LucideIcons.copy,
+          size: 18,
+          color: context.colors.onSurfaceVariant,
+        ),
+        onTap: () async {
           await copyToClipboard(context, pubkey, message: 'Pubkey copied');
         },
       ),

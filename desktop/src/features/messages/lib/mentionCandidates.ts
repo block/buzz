@@ -46,6 +46,7 @@ export type MentionCandidate = {
   secondaryLabel?: string | null;
   ownerPubkey?: string | null;
   isAgent: boolean;
+  isActiveAgent?: boolean;
   isManagedAgent?: boolean;
   isGlobalSearchResult?: boolean;
 };

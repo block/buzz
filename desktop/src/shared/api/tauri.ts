@@ -7,7 +7,6 @@ import {
   fromRawInstallRuntimeResult,
   type RawInstallRuntimeResult,
 } from "@/shared/api/installTypes";
-import type { RawSendChannelMessageResult } from "@/shared/api/tauriMessageTypes";
 import type {
   AddChannelMembersInput,
   AddChannelMembersResult,
@@ -26,7 +25,6 @@ import type {
   RelayEvent,
   SearchMessagesInput,
   SearchMessagesResponse,
-  SendChannelMessageResult,
   SetCanvasInput,
   SetCanvasResult,
   ThreadCursor,
@@ -44,6 +42,8 @@ import type {
 } from "@/shared/api/types";
 
 export * from "@/shared/api/tauriChannels";
+export { sendChannelMessage } from "@/shared/api/tauriMessages";
+export { getEventById, getEventsByIds } from "@/shared/api/tauriEvents";
 
 type RawPresenceLookup = Record<string, PresenceStatus>;
 
@@ -65,7 +65,7 @@ type RawFeedItem = {
   channel_name: string;
   channel_type: string | null;
   tags: string[][];
-  category: "mention" | "needs_action" | "activity" | "agent_activity";
+  category: HomeFeedResponse["feed"]["mentions"][number]["category"];
 };
 
 type RawHomeFeedResponse = {
@@ -466,11 +466,6 @@ export async function searchMessages(
   };
 }
 
-export async function getEventById(eventId: string): Promise<RelayEvent> {
-  const eventJson = await invokeTauri<string>("get_event", { eventId });
-  return JSON.parse(eventJson) as RelayEvent;
-}
-
 type RawThreadCursor = {
   created_at: number;
   event_id: string;
@@ -530,42 +525,6 @@ export async function getThreadReplies(
           eventId: response.next_cursor.event_id,
         }
       : null,
-  };
-}
-
-export async function sendChannelMessage(
-  channelId: string,
-  content: string,
-  parentEventId?: string | null,
-  mediaTags?: string[][],
-  mentionPubkeys?: string[],
-  kind?: number,
-  emojiTags?: string[][],
-  mentionTags?: string[][],
-  linkPreviewTags?: string[][],
-  sentFromThreadTag?: string[],
-): Promise<SendChannelMessageResult> {
-  const response = await invokeTauri<RawSendChannelMessageResult>(
-    "send_channel_message",
-    {
-      channelId,
-      content,
-      parentEventId,
-      mediaTags: mediaTags ?? null,
-      emojiTags: emojiTags ?? null,
-      mentionTags: mentionTags ?? null,
-      linkPreviewTags,
-      sentFromThreadTag: sentFromThreadTag ?? null,
-      mentionPubkeys: mentionPubkeys ?? null,
-      kind: kind ?? null,
-    },
-  );
-  return {
-    eventId: response.event_id,
-    parentEventId: response.parent_event_id,
-    rootEventId: response.root_event_id,
-    depth: response.depth,
-    createdAt: response.created_at,
   };
 }
 
@@ -898,12 +857,6 @@ export async function discoverGitBashPrerequisite(): Promise<GitBashPrerequisite
       installHint: prerequisite.install_hint,
     }
   );
-}
-
-export async function discoverAcpRuntimes(): Promise<AcpRuntimeCatalogEntry[]> {
-  return (
-    await invokeTauri<RawAcpRuntimeCatalogEntry[]>("discover_acp_providers")
-  ).map(fromRawAcpRuntimeCatalogEntry);
 }
 
 /** Input shape for creating or updating a custom harness. */

@@ -2,6 +2,7 @@
 #![warn(missing_docs)]
 //! Shared durable whole-community deletion engine and store adapters.
 
+use std::future::Future;
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -10,10 +11,14 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use buzz_db::deletion::{
     ClaimedDeletion, DeletionRequest, DeletionStage, DeletionStore, FrozenInventory,
-    KeyStreamDigest, LeaseToken, PrefixManifest, StorageManifest, DEFAULT_LEASE_DURATION,
+    KeyStreamDigest, LeaseToken, PrefixManifest, StorageManifest, StorageManifestEntry,
+    DEFAULT_LEASE_DURATION,
 };
 use buzz_db::{Db, DbConfig};
-use buzz_media::{is_tenant_owned_key, tenant_prefixes, MediaStorage};
+use buzz_media::{
+    is_tenant_owned_key, tenant_prefixes, BulkDeleteOutcome, MediaStorage, ObjectVersionKind,
+    ObjectVersionRef,
+};
 use clap::Subcommand;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
@@ -547,23 +552,17 @@ fn nonempty_s3_region(region: String) -> Option<String> {
     (!region.is_empty()).then(|| region.to_string())
 }
 
-fn s3_region_from_env() -> String {
-    resolve_s3_region(
-        std::env::var("BUZZ_S3_REGION").ok(),
-        std::env::var("AWS_REGION").ok(),
-    )
-}
-
 async fn connect_services() -> Result<Services> {
     let store = connect_store().await?;
     connect_services_with_store(store).await
 }
 
 async fn connect_services_with_store(store: DeletionStore) -> Result<Services> {
+    let (s3_access_key, s3_secret_key) = s3_key_pair_from_env();
     let media_config = buzz_media::MediaConfig {
         s3_endpoint: required_env("BUZZ_S3_ENDPOINT")?,
-        s3_access_key: required_env("BUZZ_S3_ACCESS_KEY")?,
-        s3_secret_key: required_env("BUZZ_S3_SECRET_KEY")?,
+        s3_access_key,
+        s3_secret_key,
         s3_bucket: required_env("BUZZ_S3_BUCKET")?,
         s3_region: s3_region_from_env(),
         s3_addressing_style: std::env::var("BUZZ_S3_ADDRESSING_STYLE")
@@ -596,12 +595,36 @@ async fn connect_services_with_store(store: DeletionStore) -> Result<Services> {
     })
 }
 
+fn s3_region_from_env() -> String {
+    resolve_s3_region(
+        std::env::var("BUZZ_S3_REGION").ok(),
+        std::env::var("AWS_REGION").ok(),
+    )
+}
+
+fn s3_key_pair_from_env() -> (String, String) {
+    s3_key_pair_from(|name| std::env::var(name).ok())
+}
+
+fn s3_key_pair_from(get_env: impl Fn(&str) -> Option<String>) -> (String, String) {
+    (
+        optional_env_from(&get_env, "BUZZ_S3_ACCESS_KEY"),
+        optional_env_from(&get_env, "BUZZ_S3_SECRET_KEY"),
+    )
+}
+
 fn required_env(name: &str) -> Result<String> {
     std::env::var(name)
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("{name} is required for community deletion"))
+}
+
+fn optional_env_from(get_env: impl Fn(&str) -> Option<String>, name: &str) -> String {
+    get_env(name)
+        .map(|value| value.trim().to_owned())
+        .unwrap_or_default()
 }
 
 fn env_parse<T>(name: &str, default: T) -> T
@@ -682,6 +705,26 @@ async fn flush_chunk(services: &Services, sink: &mut ChunkSink<'_>, prefix: &str
     Ok(())
 }
 
+fn manifest_kind_name(kind: ObjectVersionKind) -> &'static str {
+    match kind {
+        ObjectVersionKind::Object => "object",
+        ObjectVersionKind::DeleteMarker => "delete_marker",
+    }
+}
+
+fn manifest_chunk_deleted_detail(
+    prefix: &str,
+    key_count: usize,
+    outcome: &buzz_media::BulkDeleteOutcome,
+) -> serde_json::Value {
+    serde_json::json!({
+        "prefix": prefix,
+        "keys": key_count,
+        "deleted": outcome.deleted,
+        "already_missing": outcome.already_missing,
+    })
+}
+
 /// Enumerate the target's three tenant prefixes into per-prefix summaries.
 ///
 /// Cost is O(tenant objects) regardless of fleet size. Unknown shapes inside
@@ -697,36 +740,44 @@ async fn enumerate_tenant_prefixes(
     heartbeat_lost: Option<&CancellationToken>,
     mut sink: Option<&mut ChunkSink<'_>>,
 ) -> Result<StorageManifest> {
-    if services.media.bucket_versioning_detected().await? {
-        return Err(permanent(
-            "bucket versioning detected; deletion cannot prove logical absence with delete markers",
-        ));
-    }
     let community = *request.community_id.as_uuid();
     let chunk_keys = manifest_chunk_keys();
     let mut prefixes = Vec::new();
     for prefix in tenant_prefixes(community) {
         let mut digest = KeyStreamDigest::new();
         let mut total_bytes: u64 = 0;
-        let mut continuation = None;
+        let mut key_marker = None;
+        let mut version_id_marker = None;
         loop {
             if heartbeat_lost.is_some_and(CancellationToken::is_cancelled) {
                 return Err(DeletionLeaseLost.into());
             }
             let page = services
                 .media
-                .list_prefix_page(&prefix, continuation.take(), LIST_PAGE_SIZE)
+                .list_prefix_versions_page(
+                    &prefix,
+                    key_marker.take(),
+                    version_id_marker.take(),
+                    LIST_PAGE_SIZE,
+                )
                 .await?;
-            for (key, size) in page.objects {
-                if !is_tenant_owned_key(community, &key) {
+            for entry in page.entries {
+                if !is_tenant_owned_key(community, &entry.key) {
                     return Err(permanent(format!(
-                        "key under a tenant prefix is outside the exact writer taxonomy: {key}"
+                        "key under a tenant prefix is outside the exact writer taxonomy: {}",
+                        entry.key
                     )));
                 }
-                digest.fold(&key)?;
-                total_bytes = total_bytes.saturating_add(size);
+                let encoded = StorageManifestEntry::new(
+                    entry.key,
+                    entry.version_id,
+                    manifest_kind_name(entry.kind),
+                )
+                .encode()?;
+                digest.fold_unordered(&encoded)?;
+                total_bytes = total_bytes.saturating_add(entry.size);
                 if let Some(sink) = sink.as_deref_mut() {
-                    sink.buffered.push(key);
+                    sink.buffered.push(encoded);
                     if sink.buffered.len() >= chunk_keys {
                         flush_chunk(services, sink, &prefix).await?;
                     }
@@ -735,12 +786,12 @@ async fn enumerate_tenant_prefixes(
             if !page.is_truncated {
                 break;
             }
-            continuation = page.next_continuation_token;
-            if continuation.is_none() {
-                return Err(transient(
-                    "truncated tenant listing page has no continuation token",
-                ));
-            }
+            let (next_key_marker, next_version_id_marker) = require_truncated_version_markers(
+                page.next_key_marker,
+                page.next_version_id_marker,
+            )?;
+            key_marker = Some(next_key_marker);
+            version_id_marker = Some(next_version_id_marker);
         }
         if let Some(sink) = sink.as_deref_mut() {
             flush_chunk(services, sink, &prefix).await?;
@@ -754,11 +805,111 @@ async fn enumerate_tenant_prefixes(
         });
     }
     let manifest = StorageManifest {
-        version: 4,
+        version: 5,
         prefixes,
     };
     buzz_db::deletion::validate_storage_manifest(&manifest)?;
     Ok(manifest)
+}
+
+fn require_truncated_version_markers(
+    next_key_marker: Option<String>,
+    next_version_id_marker: Option<String>,
+) -> Result<(String, String)> {
+    match (next_key_marker, next_version_id_marker) {
+        (Some(key_marker), Some(version_id_marker)) => Ok((key_marker, version_id_marker)),
+        (None, Some(_)) => Err(transient(
+            "truncated tenant version listing page has no key marker",
+        )),
+        (Some(_), None) => Err(transient(
+            "truncated tenant version listing page has no version id marker",
+        )),
+        (None, None) => Err(transient(
+            "truncated tenant version listing page has no key marker or version id marker",
+        )),
+    }
+}
+
+async fn delete_manifest_chunk_with<F, Fut>(
+    chunk: &buzz_db::deletion::ManifestKeyChunk,
+    storage_version: i32,
+    delete: F,
+) -> Result<BulkDeleteOutcome>
+where
+    F: FnOnce(Vec<ObjectVersionRef>) -> Fut,
+    Fut: Future<Output = Result<BulkDeleteOutcome>>,
+{
+    let versions = object_versions_from_manifest_chunk(chunk, storage_version)?;
+    delete(versions).await
+}
+
+fn object_versions_from_manifest_chunk(
+    chunk: &buzz_db::deletion::ManifestKeyChunk,
+    storage_version: i32,
+) -> Result<Vec<ObjectVersionRef>> {
+    if storage_version >= 5 {
+        chunk
+            .keys
+            .iter()
+            .map(|entry| {
+                let entry = StorageManifestEntry::decode(entry)?;
+                Ok(ObjectVersionRef {
+                    key: entry.key,
+                    version_id: entry.version_id,
+                })
+            })
+            .collect()
+    } else {
+        Ok(chunk
+            .keys
+            .iter()
+            .map(|key| ObjectVersionRef {
+                key: key.clone(),
+                version_id: String::new(),
+            })
+            .collect())
+    }
+}
+
+fn manifest_chunk_deleted_checkpoint_detail(
+    chunk: &buzz_db::deletion::ManifestKeyChunk,
+    outcome: &BulkDeleteOutcome,
+) -> Result<serde_json::Value> {
+    validate_manifest_chunk_delete_outcome(chunk, outcome)?;
+    Ok(manifest_chunk_deleted_detail(
+        &chunk.prefix,
+        chunk.keys.len(),
+        outcome,
+    ))
+}
+
+fn validate_manifest_chunk_delete_outcome(
+    chunk: &buzz_db::deletion::ManifestKeyChunk,
+    outcome: &BulkDeleteOutcome,
+) -> Result<()> {
+    if !outcome.versioned_keys.is_empty() {
+        return Err(transient(format!(
+            "bulk delete returned version metadata for {} explicit versions: {}",
+            outcome.versioned_keys.len(),
+            outcome.versioned_keys.join(",")
+        )));
+    }
+    if !outcome.failed.is_empty() {
+        let (key, code, message) = &outcome.failed[0];
+        return Err(transient(format!(
+            "bulk delete failed for {} key(s); first: {key}: {code}: {message}",
+            outcome.failed.len()
+        )));
+    }
+    let acknowledged = outcome.deleted.saturating_add(outcome.already_missing);
+    if acknowledged != chunk.keys.len() as u64 {
+        return Err(transient(format!(
+            "bulk delete acknowledged {acknowledged} of {} keys in chunk {}",
+            chunk.keys.len(),
+            chunk.chunk_no
+        )));
+    }
+    Ok(())
 }
 
 /// Freeze the post-fence, post-drain destructive enumeration: stream the
@@ -1053,6 +1204,35 @@ async fn execute_stage(
     }
     match request.stage {
         DeletionStage::Approved => {
+            // Fail closed on missing version-list permission before we take the
+            // durable write fence. Exact-version delete permission cannot be
+            // proven safely here: S3 has no dry-run DeleteObjectVersion, and a
+            // fabricated-version delete would still be a destructive API call
+            // while proving less than the real tenant-prefix operation.
+            run_guarded_external_step(
+                services,
+                &token,
+                DeletionStage::Approved,
+                heartbeat_lost,
+                || async {
+                    for prefix in tenant_prefixes(*request.community_id.as_uuid()) {
+                        services
+                            .media
+                            .preflight_version_listing(&prefix)
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "S3 version-list preflight failed for prefix {prefix}; \
+                                     verify s3:ListBucketVersions and s3:DeleteObjectVersion \
+                                     on the relay bucket before fencing"
+                                )
+                            })?;
+                    }
+                    Ok(())
+                },
+            )
+            .await?;
+
             // Approval binds immutable catalog + community-prefix ownership.
             // Live row counts and tenant binding keys are deliberately not
             // equality-bound until the durable fence closes all writers.
@@ -1132,51 +1312,38 @@ async fn execute_stage(
             let mut removed: u64 = 0;
             let mut already_missing: u64 = 0;
             while let Some(chunk) = services.store.next_pending_manifest_chunk(&token).await? {
+                let chunk_no = chunk.chunk_no;
                 let outcome = run_guarded_external_step(
                     services,
                     &token,
                     DeletionStage::Drained,
                     heartbeat_lost,
-                    || async { Ok(services.media.delete_objects(&chunk.keys).await?) },
+                    || async {
+                        delete_manifest_chunk_with(&chunk, storage.version, |versions| async {
+                            if storage.version >= 5 {
+                                Ok(services.media.delete_object_versions(&versions).await?)
+                            } else {
+                                let keys = versions
+                                    .into_iter()
+                                    .map(|version| version.key)
+                                    .collect::<Vec<_>>();
+                                Ok(services.media.delete_objects(&keys).await?)
+                            }
+                        })
+                        .await
+                    },
                 )
                 .await?;
-                if !outcome.versioned_keys.is_empty() {
-                    return Err(permanent(format!(
-                        "bulk delete produced version artifacts; bucket versioning blocks \
-                         deletion: {}",
-                        outcome.versioned_keys.join(",")
-                    )));
+                if heartbeat_lost.is_cancelled() {
+                    return Err(DeletionLeaseLost.into());
                 }
-                if !outcome.failed.is_empty() {
-                    let (key, code, message) = &outcome.failed[0];
-                    return Err(transient(format!(
-                        "bulk delete failed for {} key(s); first: {key}: {code}: {message}",
-                        outcome.failed.len()
-                    )));
-                }
-                let acknowledged = outcome.deleted.saturating_add(outcome.already_missing);
-                if acknowledged != chunk.keys.len() as u64 {
-                    return Err(transient(format!(
-                        "bulk delete acknowledged {acknowledged} of {} keys in chunk {}",
-                        chunk.keys.len(),
-                        chunk.chunk_no
-                    )));
-                }
-                removed += outcome.deleted;
-                already_missing += outcome.already_missing;
+                let detail = manifest_chunk_deleted_checkpoint_detail(&chunk, &outcome)?;
                 services
                     .store
-                    .mark_manifest_chunk_deleted(
-                        &token,
-                        chunk.chunk_no,
-                        serde_json::json!({
-                            "prefix": chunk.prefix,
-                            "keys": chunk.keys.len(),
-                            "deleted": outcome.deleted,
-                            "already_missing": outcome.already_missing,
-                        }),
-                    )
+                    .mark_manifest_chunk_deleted(&token, chunk_no, detail)
                     .await?;
+                removed += outcome.deleted;
+                already_missing += outcome.already_missing;
             }
             let frozen_keys: u64 = storage
                 .prefixes
@@ -1259,10 +1426,16 @@ fn token_with_current_fence(token: &LeaseToken, request: &DeletionRequest) -> Le
 /// empty — O(1) requests per prefix, independent of fleet size.
 async fn verify_storage_absence(services: &Services, request: &DeletionRequest) -> Result<()> {
     for prefix in tenant_prefixes(*request.community_id.as_uuid()) {
-        let page = services.media.list_prefix_page(&prefix, None, 1).await?;
-        if let Some((key, _)) = page.objects.first() {
+        let page = services
+            .media
+            .list_prefix_versions_page(&prefix, None, None, 1)
+            .await?;
+        if let Some(entry) = page.entries.first() {
             return Err(transient(format!(
-                "logical verification found a live target object binding: {key}"
+                "logical verification found a retained target object version: {}@{} ({})",
+                entry.key,
+                entry.version_id,
+                manifest_kind_name(entry.kind)
             )));
         }
     }
@@ -1543,6 +1716,68 @@ mod tests {
         (db, services, claim)
     }
 
+    fn env_of<'a>(set: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + use<'a> {
+        move |name| {
+            set.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        }
+    }
+
+    #[test]
+    fn deletion_s3_key_pair_normalizes_missing_and_blank_pairs_for_default_credentials() {
+        assert_eq!(
+            s3_key_pair_from(env_of(&[])),
+            (String::new(), String::new())
+        );
+
+        assert_eq!(
+            s3_key_pair_from(env_of(&[
+                ("BUZZ_S3_ACCESS_KEY", ""),
+                ("BUZZ_S3_SECRET_KEY", "   "),
+            ])),
+            (String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn deletion_s3_key_pair_trims_static_and_preserves_partial_pairs() {
+        assert_eq!(
+            s3_key_pair_from(env_of(&[
+                ("BUZZ_S3_ACCESS_KEY", " buzz_dev "),
+                ("BUZZ_S3_SECRET_KEY", " buzz_dev_secret "),
+            ])),
+            ("buzz_dev".to_string(), "buzz_dev_secret".to_string())
+        );
+
+        for (env, expected) in [
+            (
+                &[("BUZZ_S3_ACCESS_KEY", " buzz_dev ")][..],
+                ("buzz_dev".to_string(), String::new()),
+            ),
+            (
+                &[("BUZZ_S3_SECRET_KEY", " buzz_dev_secret ")][..],
+                (String::new(), "buzz_dev_secret".to_string()),
+            ),
+            (
+                &[
+                    ("BUZZ_S3_ACCESS_KEY", " buzz_dev "),
+                    ("BUZZ_S3_SECRET_KEY", "   "),
+                ][..],
+                ("buzz_dev".to_string(), String::new()),
+            ),
+            (
+                &[
+                    ("BUZZ_S3_ACCESS_KEY", "   "),
+                    ("BUZZ_S3_SECRET_KEY", " buzz_dev_secret "),
+                ][..],
+                (String::new(), "buzz_dev_secret".to_string()),
+            ),
+        ] {
+            assert_eq!(s3_key_pair_from(env_of(env)), expected);
+        }
+    }
+
     fn deletion_test_media_storage() -> Arc<MediaStorage> {
         let endpoint = std::env::var("BUZZ_TEST_S3_ENDPOINT")
             .or_else(|_| std::env::var("BUZZ_S3_ENDPOINT"))
@@ -1739,6 +1974,99 @@ mod tests {
                 "tenant binding {key} must be gone"
             );
         }
+    }
+
+    #[test]
+    fn truncated_version_listing_requires_key_marker() {
+        let error = require_truncated_version_markers(None, Some("v1".to_string()))
+            .expect_err("missing key marker must fail closed");
+
+        assert!(format!("{error:#}").contains("no key marker"));
+    }
+
+    #[test]
+    fn truncated_version_listing_requires_version_id_marker() {
+        let error = require_truncated_version_markers(Some("key".to_string()), None)
+            .expect_err("missing version id marker must fail closed");
+
+        assert!(format!("{error:#}").contains("no version id marker"));
+    }
+
+    #[test]
+    fn legacy_v4_manifest_chunk_decodes_bare_keys_for_resume_delete() {
+        let chunk = buzz_db::deletion::ManifestKeyChunk {
+            chunk_no: 3,
+            prefix: "_meta/community/".to_string(),
+            keys: vec![
+                "_meta/community/a.json".to_string(),
+                "_meta/community/b.json".to_string(),
+            ],
+        };
+
+        let versions = object_versions_from_manifest_chunk(&chunk, 4).expect("decode v4 chunk");
+        assert_eq!(
+            versions,
+            vec![
+                ObjectVersionRef {
+                    key: "_meta/community/a.json".to_string(),
+                    version_id: String::new(),
+                },
+                ObjectVersionRef {
+                    key: "_meta/community/b.json".to_string(),
+                    version_id: String::new(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_delete_ack_fails_before_checkpoint_detail() {
+        let chunk = buzz_db::deletion::ManifestKeyChunk {
+            chunk_no: 7,
+            prefix: "_meta/community/".to_string(),
+            keys: vec![
+                StorageManifestEntry::new("_meta/community/a.json", "v1", "object")
+                    .encode()
+                    .expect("encode manifest entry"),
+                StorageManifestEntry::new("_meta/community/b.json", "v2", "object")
+                    .encode()
+                    .expect("encode manifest entry"),
+            ],
+        };
+        let delete = delete_manifest_chunk_with(&chunk, 5, |versions| async move {
+            assert_eq!(versions.len(), 2);
+            Ok(BulkDeleteOutcome {
+                deleted: 1,
+                already_missing: 0,
+                versioned_keys: Vec::new(),
+                failed: Vec::new(),
+            })
+        })
+        .await
+        .expect("delete call returns partial acknowledgement");
+        let checkpoint = manifest_chunk_deleted_checkpoint_detail(&chunk, &delete);
+
+        let error = checkpoint.expect_err("partial acknowledgement must be transient");
+        assert!(format!("{error:#}").contains("bulk delete acknowledged 1 of 2 keys in chunk 7"));
+    }
+
+    #[test]
+    fn manifest_chunk_checkpoint_detail_records_partial_delete_response_counts() {
+        let detail = manifest_chunk_deleted_detail(
+            "_meta/community/",
+            3,
+            &buzz_media::BulkDeleteOutcome {
+                deleted: 2,
+                already_missing: 1,
+                versioned_keys: Vec::new(),
+                failed: Vec::new(),
+            },
+        );
+
+        assert_eq!(detail["prefix"], "_meta/community/");
+        assert_eq!(detail["keys"], 3);
+        assert_eq!(detail["deleted"], 2);
+        assert_eq!(detail["already_missing"], 1);
     }
 
     #[test]

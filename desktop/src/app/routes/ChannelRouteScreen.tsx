@@ -1,8 +1,10 @@
 import * as React from "react";
 
+import type { SearchHighlightNavigation } from "@/app/navigation/searchHighlightNavigation";
 import { getCachedSearchHitEvent } from "@/app/navigation/searchHitEventCache";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useChannelsQuery } from "@/features/channels/hooks";
+import { useOpenChannelDirectoryQuery } from "@/features/channels/openChannelDirectory";
 import { ChannelScreen } from "@/features/channels/ui/ChannelScreen";
 import { HuddleStartingView } from "@/features/huddle/components/HuddleStartingView";
 import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
@@ -19,6 +21,7 @@ import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 type ChannelRouteScreenProps = {
   autoSendDraftKey: string | null;
   channelId: string;
+  searchHighlight: SearchHighlightNavigation | null | undefined;
   selectedPostId: string | null;
   targetMessageId: string | null;
   targetReplyId: string | null;
@@ -99,6 +102,7 @@ async function fetchRouteTargetEvents(
 export function ChannelRouteScreen({
   autoSendDraftKey,
   channelId,
+  searchHighlight,
   selectedPostId,
   targetMessageId,
   targetReplyId,
@@ -110,31 +114,88 @@ export function ChannelRouteScreen({
   const identityQuery = useIdentityQuery();
   const profileQuery = useProfileQuery();
   const channels = channelsQuery.data ?? [];
-  const activeChannel =
+  const memberChannel =
     channels.find((channel) => channel.id === channelId) ?? null;
+  // A deep link to a non-member open channel resolves nothing in the
+  // member-only poll list. Fall back to the discovery directory — but only for
+  // that case, so a normal in-membership route never triggers the all-open
+  // scan. React Query dedups the shared directory key across surfaces.
+  const needsDirectoryFallback =
+    !memberChannel && channelsQuery.isSuccess && !isHuddleTranscript;
+  const openDirectoryQuery = useOpenChannelDirectoryQuery({
+    enabled: needsDirectoryFallback,
+  });
+  const activeChannel =
+    memberChannel ??
+    openDirectoryQuery.data?.find((channel) => channel.id === channelId) ??
+    null;
   const [targetMessageEvents, setTargetMessageEvents] = React.useState<
     RelayEvent[]
   >(() => {
     const cachedTarget = getCachedSearchHitEvent(targetMessageId);
     return cachedTarget ? [cachedTarget] : [];
   });
-
-  // Reset spliced target events when the channel context changes (channel
-  // switch or entering/leaving a forum post). Tied to channel identity rather
-  // than the route target so clearing the `messageId` param mid-channel keeps
-  // the deep-linked row in view. Seeded with the mount key so the initial
-  // cache-seeded events survive first commit; only a genuine channel change
-  // clears them. Declared before the fetch effect so a channel switch clears
-  // stale events before the new target is fetched.
-  const previousResetKeyRef = React.useRef<string>(
-    `${channelId}::${selectedPostId ?? ""}`,
+  const [activeSearchHighlight, setActiveSearchHighlight] =
+    React.useState<SearchHighlightNavigation | null>(searchHighlight ?? null);
+  const appliedSearchActivationIdRef = React.useRef<string | null>(
+    searchHighlight?.activationId ?? null,
   );
+
+  // Router state is transient and can be cleared by the target URL cleanup.
+  // Retain the applied activation locally until an ordinary route transition
+  // explicitly arrives without search state.
   React.useEffect(() => {
-    const resetKey = `${channelId}::${selectedPostId ?? ""}`;
-    if (previousResetKeyRef.current === resetKey) return;
-    previousResetKeyRef.current = resetKey;
+    if (searchHighlight === null) {
+      appliedSearchActivationIdRef.current = null;
+      setActiveSearchHighlight(null);
+      return;
+    }
+    if (!searchHighlight) {
+      const ordinaryTargetIds = [
+        selectedPostId,
+        targetMessageId,
+        targetReplyId,
+        targetThreadRootId,
+      ].filter((targetId): targetId is string => targetId !== null);
+      if (
+        ordinaryTargetIds.length > 0 &&
+        activeSearchHighlight &&
+        !ordinaryTargetIds.includes(activeSearchHighlight.messageId)
+      ) {
+        appliedSearchActivationIdRef.current = null;
+        setActiveSearchHighlight(null);
+      }
+      return;
+    }
+    if (appliedSearchActivationIdRef.current === searchHighlight.activationId) {
+      return;
+    }
+
+    appliedSearchActivationIdRef.current = searchHighlight.activationId;
+    setActiveSearchHighlight(searchHighlight);
+  }, [
+    activeSearchHighlight,
+    searchHighlight,
+    selectedPostId,
+    targetMessageId,
+    targetReplyId,
+    targetThreadRootId,
+  ]);
+
+  // Reset spliced target events when the channel changes. Tied to channel
+  // identity rather than the route target so clearing the `messageId` param
+  // mid-channel keeps the deep-linked row in view. Seeded with the mount key so
+  // the initial cache-seeded events survive first commit; only a genuine
+  // channel change clears them. Declared before the fetch effect so a channel
+  // switch clears stale events before the new target is fetched.
+  const previousResetKeyRef = React.useRef<string>(channelId);
+  React.useEffect(() => {
+    if (previousResetKeyRef.current === channelId) return;
+    previousResetKeyRef.current = channelId;
+    appliedSearchActivationIdRef.current = null;
     setTargetMessageEvents([]);
-  }, [channelId, selectedPostId]);
+    setActiveSearchHighlight(null);
+  }, [channelId]);
 
   React.useEffect(() => {
     let isCancelled = false;
@@ -188,7 +249,11 @@ export function ChannelRouteScreen({
     };
   }, [selectedPostId, targetMessageId, targetThreadRootId]);
 
-  if (channelsQuery.isPending && !activeChannel) {
+  if (
+    !activeChannel &&
+    (channelsQuery.isPending ||
+      (needsDirectoryFallback && openDirectoryQuery.isPending))
+  ) {
     if (isHuddleTranscript) {
       return <HuddleStartingView />;
     }
@@ -216,6 +281,8 @@ export function ChannelRouteScreen({
       targetForumReplyId={targetReplyId}
       targetMessageEvents={targetMessageEvents}
       targetMessageId={targetMessageId}
+      targetSearchMessageId={activeSearchHighlight?.messageId}
+      targetSearchQuery={activeSearchHighlight?.query}
     />
   );
 }

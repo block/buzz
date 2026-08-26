@@ -164,6 +164,15 @@ class _SystemMessageRow extends HookConsumerWidget {
                         ],
                       ),
               ),
+              if (systemEvent.type == SystemEventType.huddleStarted &&
+                  systemEvent.ephemeralChannelId != null)
+                _HuddleJoinSurface(
+                  message: message,
+                  allMessages: allMessages ?? const [],
+                  parentChannelId: channelId,
+                  isMember: isMember,
+                  isArchived: isArchived,
+                ),
               if (reactions.isNotEmpty)
                 Padding(
                   padding: EdgeInsets.only(
@@ -378,28 +387,31 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
         ),
         const SizedBox(width: messageAvatarContentGap),
         Expanded(
-          child: Transform.translate(
-            offset: const Offset(0, -Grid.quarter),
+          child: Padding(
+            padding: const EdgeInsets.only(top: Grid.half),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                MessageAuthorMeta(
-                  displayName: resolveLabel(displayPubkey),
-                  username: messageUsernameLabel(
-                    userCache[displayPubkey.toLowerCase()],
-                  ),
-                  timestamp: formatMessageTime(createdAt),
-                  nameColor: context.colors.onSurface,
-                  metadataColor: context.colors.onSurfaceVariant,
-                  nameStyle: systemMessageHeadingTextStyle,
-                  displayNameKey: ValueKey(
-                    'system-message-author-$displayPubkey',
-                  ),
-                  usernameKey: ValueKey(
-                    'system-message-username-$displayPubkey',
-                  ),
-                  timestampKey: ValueKey(
-                    'system-message-timestamp-$displayPubkey',
+                Padding(
+                  padding: const EdgeInsets.only(bottom: Grid.quarter),
+                  child: MessageAuthorMeta(
+                    displayName: resolveLabel(displayPubkey),
+                    username: messageUsernameLabel(
+                      userCache[displayPubkey.toLowerCase()],
+                    ),
+                    timestamp: formatMessageTime(createdAt),
+                    nameColor: context.colors.onSurface,
+                    metadataColor: context.colors.onSurfaceVariant,
+                    nameStyle: systemMessageHeadingTextStyle,
+                    displayNameKey: ValueKey(
+                      'system-message-author-$displayPubkey',
+                    ),
+                    usernameKey: ValueKey(
+                      'system-message-username-$displayPubkey',
+                    ),
+                    timestampKey: ValueKey(
+                      'system-message-timestamp-$displayPubkey',
+                    ),
                   ),
                 ),
                 Text.rich(

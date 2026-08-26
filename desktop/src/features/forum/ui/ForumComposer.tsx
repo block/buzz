@@ -527,6 +527,7 @@ export function ForumComposer({
                 mentions.isMentionOpen ? mentions.suggestions : []
               }
               onChannelSelect={applyChannelInsert}
+              onMentionDismiss={mentions.cancelMentionAutocomplete}
               onMentionFetchMore={mentions.fetchMoreSuggestions}
               onMentionSelect={applyMentionInsert}
               position={autocompletePosition}
@@ -609,6 +610,7 @@ export function ForumComposer({
                 ) : undefined
               }
               formattingDisabled={Boolean(disabled || isSubmissionPending)}
+              gifMediaController={media}
               isEmojiPickerOpen={isEmojiPickerOpen}
               isFormattingOpen={isFormattingOpen}
               isSending={Boolean(isSending || isSubmissionPending)}

@@ -7,9 +7,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
-import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/theme/theme.dart';
+import 'message_action_backdrop_state.dart';
 
 /// The active date and vertical push-off applied to a sticky date header.
 @immutable
@@ -90,28 +90,33 @@ class StickyDateHeader extends StatelessWidget {
         borderRadius: BorderRadius.circular(Radii.full),
         child: BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
-          child: Container(
+          child: ConstrainedBox(
             key: const ValueKey('channel-sticky-date-header-surface'),
-            padding: const EdgeInsets.symmetric(
-              horizontal: Grid.twelve,
-              vertical: Grid.half,
-            ),
-            decoration: BoxDecoration(
-              color: context.colors.surface.withValues(alpha: 0.82),
-              borderRadius: BorderRadius.circular(Radii.full),
-              border: Border.all(
-                color: context.colors.onSurface.withValues(alpha: 0.08),
+            constraints: BoxConstraints(minHeight: heightOf(context)),
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: context.colors.surface.withValues(alpha: 0.82),
+                borderRadius: BorderRadius.circular(Radii.full),
+                border: Border.all(
+                  color: context.colors.onSurface.withValues(alpha: 0.08),
+                ),
               ),
-            ),
-            child: Semantics(
-              header: true,
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: context.textTheme.labelMedium?.copyWith(
-                  color: context.colors.onSurfaceVariant,
-                  fontWeight: FontWeight.w500,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: Grid.twelve,
+                  vertical: Grid.half,
+                ),
+                child: Semantics(
+                  header: true,
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: context.textTheme.labelMedium?.copyWith(
+                      color: context.colors.onSurfaceVariant,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
                 ),
               ),
             ),
@@ -128,23 +133,43 @@ class StickyDateHeader extends StatelessWidget {
     return ValueListenableBuilder<StickyDateHeaderState>(
       valueListenable: state,
       builder: (context, value, _) {
-        return IgnorePointer(
-          child: ExcludeSemantics(
-            excluding: !value.isVisible,
-            child: AnimatedOpacity(
-              duration: reducedMotion
-                  ? Duration.zero
-                  : const Duration(milliseconds: 120),
-              curve: Curves.easeOutCubic,
-              opacity: value.isVisible ? 1 : 0,
-              child: Transform.translate(
-                offset: Offset(0, value.translateY),
-                child: Center(
-                  child: RepaintBoundary(
-                    child: defaultTargetPlatform == TargetPlatform.iOS
-                        ? _buildIosGlass(context, value.label ?? '')
-                        : _buildFlutterSurface(context, value.label ?? ''),
-                  ),
+        final stickyHeight = heightOf(context);
+        return SizedBox(
+          height: stickyHeight,
+          child: IgnorePointer(
+            child: ExcludeSemantics(
+              excluding: !value.isVisible,
+              child: AnimatedOpacity(
+                duration: reducedMotion
+                    ? Duration.zero
+                    : const Duration(milliseconds: 120),
+                curve: Curves.easeOutCubic,
+                opacity: value.isVisible ? 1 : 0,
+                child: ValueListenableBuilder<bool>(
+                  valueListenable: messageActionBackdropActive,
+                  builder: (context, backdropActive, _) {
+                    final useNativeGlass =
+                        defaultTargetPlatform == TargetPlatform.iOS &&
+                        !backdropActive;
+                    final surface = Center(
+                      child: RepaintBoundary(
+                        child: useNativeGlass
+                            ? _buildIosGlass(context, value.label ?? '')
+                            : _buildFlutterSurface(context, value.label ?? ''),
+                      ),
+                    );
+
+                    final pushOffProgress =
+                        (-value.translateY / (stickyHeight + 5)).clamp(
+                          0.0,
+                          1.0,
+                        );
+                    return Opacity(
+                      key: const ValueKey('sticky-date-push-off-opacity'),
+                      opacity: 1 - pushOffProgress,
+                      child: surface,
+                    );
+                  },
                 ),
               ),
             ),
@@ -155,7 +180,7 @@ class StickyDateHeader extends StatelessWidget {
   }
 }
 
-class _IosStickyDateGlass extends HookConsumerWidget {
+class _IosStickyDateGlass extends HookWidget {
   final String label;
   final double width;
   final double height;
@@ -167,7 +192,7 @@ class _IosStickyDateGlass extends HookConsumerWidget {
   });
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final nativeChannel = useState<MethodChannel?>(null);
     final brightness = context.theme.brightness.name;
 

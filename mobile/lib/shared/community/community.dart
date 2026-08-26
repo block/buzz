@@ -12,6 +12,9 @@ class Community {
   final String? pubkey;
   final String? nsec;
   final SensitiveActionPolicy sensitiveActionPolicy;
+
+  /// Whether invite-created starter channels still need to be recovered.
+  final bool starterSetupIncomplete;
   final DateTime addedAt;
 
   const Community({
@@ -21,6 +24,7 @@ class Community {
     this.pubkey,
     this.nsec,
     this.sensitiveActionPolicy = SensitiveActionPolicy.disabledByUser,
+    this.starterSetupIncomplete = false,
     required this.addedAt,
   });
 
@@ -31,6 +35,7 @@ class Community {
     String? nsec,
     SensitiveActionPolicy sensitiveActionPolicy =
         SensitiveActionPolicy.disabledByUser,
+    bool starterSetupIncomplete = false,
   }) {
     return Community(
       id: _uuid.v4(),
@@ -39,6 +44,7 @@ class Community {
       pubkey: pubkey,
       nsec: nsec,
       sensitiveActionPolicy: sensitiveActionPolicy,
+      starterSetupIncomplete: starterSetupIncomplete,
       addedAt: DateTime.now(),
     );
   }
@@ -49,6 +55,7 @@ class Community {
     Object? pubkey = _sentinel,
     Object? nsec = _sentinel,
     SensitiveActionPolicy? sensitiveActionPolicy,
+    bool? starterSetupIncomplete,
   }) {
     return Community(
       id: id,
@@ -58,6 +65,8 @@ class Community {
       nsec: nsec == _sentinel ? this.nsec : nsec as String?,
       sensitiveActionPolicy:
           sensitiveActionPolicy ?? this.sensitiveActionPolicy,
+      starterSetupIncomplete:
+          starterSetupIncomplete ?? this.starterSetupIncomplete,
       addedAt: addedAt,
     );
   }
@@ -69,6 +78,7 @@ class Community {
     if (pubkey != null) 'pubkey': pubkey,
     if (nsec != null) 'nsec': nsec,
     'sensitiveActionPolicy': sensitiveActionPolicy.name,
+    'starterSetupIncomplete': starterSetupIncomplete,
     'addedAt': addedAt.toIso8601String(),
   };
 
@@ -82,6 +92,7 @@ class Community {
       (value) => value.name == json['sensitiveActionPolicy'],
       orElse: () => SensitiveActionPolicy.disabledByUser,
     ),
+    starterSetupIncomplete: json['starterSetupIncomplete'] as bool? ?? false,
     addedAt: DateTime.parse(json['addedAt'] as String),
   );
 

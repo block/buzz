@@ -7,6 +7,150 @@ import XCTest
 
 class RunnerTests: XCTestCase {
 
+  func testHuddleActiveTalkerSelectorBoundsAndReactivates() {
+    var selector = HuddleActiveTalkerSelector(capacity: 15)
+
+    for peer in 0..<15 {
+      XCTAssertEqual(
+        selector.activate(peerIndex: peer, levelDbov: -20),
+        HuddleTalkerSelection(accepted: true, evictedPeerIndex: nil)
+      )
+    }
+    let rejected = selector.activate(peerIndex: 15, levelDbov: -20)
+    XCTAssertEqual(
+      rejected,
+      HuddleTalkerSelection(accepted: false, evictedPeerIndex: nil)
+    )
+    var allocationCount = 0
+    XCTAssertNil(rejected.allocateIfAccepted {
+      allocationCount += 1
+      return NSObject()
+    })
+    XCTAssertEqual(allocationCount, 0)
+    XCTAssertEqual(Set(selector.active.keys), Set(0..<15))
+
+    selector.remove(7)
+    XCTAssertFalse(selector.active.keys.contains(7))
+    XCTAssertEqual(
+      selector.activate(peerIndex: 7, levelDbov: -10),
+      HuddleTalkerSelection(accepted: true, evictedPeerIndex: nil)
+    )
+    XCTAssertTrue(selector.active.keys.contains(7))
+  }
+
+  func testHuddleActiveTalkerSelectorUsesRecentActivity() {
+    var selector = HuddleActiveTalkerSelector(capacity: 2)
+
+    XCTAssertEqual(
+      selector.activate(peerIndex: 4, levelDbov: -10),
+      HuddleTalkerSelection(accepted: true, evictedPeerIndex: nil)
+    )
+    XCTAssertEqual(
+      selector.activate(peerIndex: 2, levelDbov: -20),
+      HuddleTalkerSelection(accepted: true, evictedPeerIndex: nil)
+    )
+    XCTAssertEqual(
+      selector.activate(peerIndex: 4, levelDbov: -10),
+      HuddleTalkerSelection(accepted: true, evictedPeerIndex: nil)
+    )
+    XCTAssertEqual(
+      selector.activate(peerIndex: 9, levelDbov: -5),
+      HuddleTalkerSelection(accepted: true, evictedPeerIndex: 2)
+    )
+    XCTAssertEqual(Set(selector.active.keys), Set([4, 9]))
+  }
+
+  func testHuddleActiveTalkerSelectorDoesNotChurnAtEqualLevels() {
+    var selector = HuddleActiveTalkerSelector(capacity: 2)
+
+    XCTAssertEqual(
+      selector.activate(peerIndex: 4, levelDbov: -127),
+      HuddleTalkerSelection(accepted: true, evictedPeerIndex: nil)
+    )
+    XCTAssertEqual(
+      selector.activate(peerIndex: 2, levelDbov: -127),
+      HuddleTalkerSelection(accepted: true, evictedPeerIndex: nil)
+    )
+    let rejected = selector.activate(peerIndex: 9, levelDbov: -127)
+    XCTAssertEqual(
+      rejected,
+      HuddleTalkerSelection(accepted: false, evictedPeerIndex: nil)
+    )
+    XCTAssertNil(rejected.allocateIfAccepted { NSObject() })
+    XCTAssertNil(selector.active[9])
+    XCTAssertEqual(Set(selector.active.keys), Set([2, 4]))
+  }
+
+  func testHuddleActiveTalkerSelectorExpiresInactiveSlots() {
+    var now: TimeInterval = 0
+    var selector = HuddleActiveTalkerSelector(
+      capacity: 2,
+      now: { now },
+      inactivityTimeout: 1
+    )
+
+    _ = selector.activate(peerIndex: 4, levelDbov: -10)
+    now = 0.999
+    _ = selector.activate(peerIndex: 2, levelDbov: -5)
+    now = 1
+
+    XCTAssertEqual(
+      selector.activate(peerIndex: 9, levelDbov: -30),
+      HuddleTalkerSelection(accepted: true, evictedPeerIndex: 4)
+    )
+    XCTAssertEqual(Set(selector.active.keys), Set([2, 9]))
+  }
+
+  func testHuddlePacketJitterQueueReordersAndRejectsStaleDuplicates() {
+    var queue = HuddlePacketJitterQueue(capacity: 3, startPackets: 2)
+    queue.enqueue(remotePacket(sequence: 11))
+    queue.enqueue(remotePacket(sequence: 10))
+    XCTAssertEqual(queue.packets.map(\.sequence), [10, 11])
+    XCTAssertEqual(queue.drainOne()?.sequence, 10)
+    queue.enqueue(remotePacket(sequence: 10))
+    queue.enqueue(remotePacket(sequence: 12))
+    XCTAssertEqual(queue.packets.map(\.sequence), [11, 12])
+  }
+
+  private func remotePacket(sequence: Int) -> HuddleRemoteOpusPacket {
+    HuddleRemoteOpusPacket(
+      peerIndex: 1,
+      sequence: sequence,
+      timestamp48k: Int64(sequence * 960),
+      levelDbov: -20,
+      opus: Data([1])
+    )
+  }
+
+  func testHuddleOpusCodecRoundTripsFixedV2Frame() throws {
+    let encoder = try HuddleOpusEncoder()
+    let decoder = try HuddleOpusDecoder()
+    let samples = (0..<HuddleAudioFormats.frameSamples).map { index in
+      Float(sin(2 * .pi * 440 * Double(index) / HuddleAudioFormats.sampleRate))
+    }
+
+    let packet = try encoder.encode(samples)
+    let decoded = try decoder.decode(packet)
+
+    XCTAssertFalse(packet.isEmpty)
+    XCTAssertLessThanOrEqual(packet.count, HuddleAudioFormats.maximumOpusPacketBytes)
+    XCTAssertGreaterThan(decoded.frameLength, 0)
+    XCTAssertLessThanOrEqual(
+      decoded.frameLength,
+      AVAudioFrameCount(HuddleAudioFormats.frameSamples)
+    )
+  }
+
+  func testHuddleAudioLevelsReportDbovWithoutPersistingAudio() {
+    let silence = Array(repeating: Float.zero, count: HuddleAudioFormats.frameSamples)
+    let halfScale = Array(repeating: Float(0.5), count: HuddleAudioFormats.frameSamples)
+
+    XCTAssertEqual(HuddleAudioLevels.rmsDbov(silence), -127)
+    XCTAssertEqual(HuddleAudioLevels.peakDbov(silence), -127)
+    XCTAssertEqual(HuddleAudioLevels.rmsDbov(halfScale), -6)
+    XCTAssertEqual(HuddleAudioLevels.peakDbov(halfScale), -6)
+  }
+
   func testRelativeTrackInsertionTimesPreserveAudioDelay() {
     let times = AppDelegate.relativeTrackInsertionTimes(
       videoStart: CMTime(seconds: 1, preferredTimescale: 600),
@@ -517,6 +661,50 @@ class RunnerTests: XCTestCase {
         viewportTop: 0,
         viewportBottom: 500,
         contentBottom: 240
+      ),
+      "people"
+    )
+  }
+
+  func testCategoryTrackerDoesNotFlickerBackAtPinnedHeaderBoundary() {
+    let order = ["people", "nature", "flags"]
+
+    // Nature has just become selected. A subsequent layout pass can briefly
+    // report its pinned header a couple of points below the boundary while the
+    // previous header is still pinned. Keep Nature selected through that
+    // transient frame instead of alternating the category rail.
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: ["people": 0, "nature": 2, "flags": 400],
+        viewportTop: 0,
+        currentSelection: "nature"
+      ),
+      "nature"
+    )
+  }
+
+  func testCategoryTrackerReleasesBoundaryLatchOnRealUpwardScroll() {
+    let order = ["people", "nature", "flags"]
+
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: order,
+        offsets: ["people": 0, "nature": 24, "flags": 424],
+        viewportTop: 0,
+        currentSelection: "nature"
+      ),
+      "people"
+    )
+  }
+
+  func testCategoryTrackerReleasesSelectionWhenOldHeaderIsMissing() {
+    XCTAssertEqual(
+      NativeEmojiCategoryTracker.selectedSectionID(
+        order: ["people", "nature", "flags"],
+        offsets: ["people": 0, "flags": 400],
+        viewportTop: 0,
+        currentSelection: "nature"
       ),
       "people"
     )

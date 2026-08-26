@@ -411,7 +411,7 @@ pub struct CliArgs {
     pub no_memory: bool,
 
     /// Disable the [Base] platform-context section prepended to every prompt.
-    /// When set, agents receive only the persona [System] prompt with no Buzz orientation.
+    /// When set, agents receive only the persona `[Agent Instructions]` prompt with no Buzz orientation.
     #[arg(long, env = "BUZZ_ACP_NO_BASE_PROMPT")]
     pub no_base_prompt: bool,
 
@@ -480,7 +480,7 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_ALLOWED_RESPOND_TO", value_delimiter = ',')]
     pub allowed_respond_to: Option<Vec<String>>,
 
-    /// Team-owned instructions layered after `[System]` and before agent memory.
+    /// Team-owned instructions layered after `[Agent Instructions]` and before agent memory.
     #[arg(long, env = "BUZZ_ACP_TEAM_INSTRUCTIONS")]
     pub team_instructions: Option<String>,
 

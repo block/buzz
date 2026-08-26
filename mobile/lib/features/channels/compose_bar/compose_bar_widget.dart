@@ -456,6 +456,7 @@ class ComposeBar extends HookConsumerWidget {
           uploadingCount.value > 0) {
         return;
       }
+      final submittedDraftRevision = draftRevision.value;
       // Resolved before any await: see
       // `_reportSendCancelledByCommunitySwitch`.
       final messenger = ScaffoldMessenger.maybeOf(context);
@@ -501,29 +502,25 @@ class ComposeBar extends HookConsumerWidget {
       isSending.value = true;
       try {
         if (queuedAttachments.isEmpty) {
-          try {
-            await addMentionedNonMembers();
-            final payload = _ComposeDraftPayload.fromDraft(
+          if (!context.mounted) return;
+          await _sendTextOnlyDraft(
+            context: context,
+            controller: controller,
+            mentionMap: mentionMap,
+            draftRevision: draftRevision,
+            submittedDraftRevision: submittedDraftRevision,
+            focusNode: focusNode,
+            clearComposer: clearComposer,
+            addMentionedNonMembers: addMentionedNonMembers,
+            payload: _ComposeDraftPayload.fromDraft(
               text: text,
               attachments: const [],
               customEmoji: customEmoji,
-            );
-            await onSend(
-              payload.content,
-              outgoing.pubkeys,
-              mediaTags: [...payload.mediaTags, ...outgoing.referenceTags],
-            );
-            if (context.mounted) clearComposer();
-          } on StateError {
-            _reportSendCancelledByCommunitySwitch(messenger);
-          } catch (error) {
-            // send() runs unawaited, so a relay rejection or publish timeout
-            // would otherwise vanish with the composer looking idle. The draft
-            // is kept (clearComposer never ran) so the user can retry.
-            messenger?.showSnackBar(
-              SnackBar(content: Text(_composeSendErrorMessage(error))),
-            );
-          }
+            ),
+            outgoing: outgoing,
+            onSend: onSend,
+            messenger: messenger,
+          );
           return;
         }
 

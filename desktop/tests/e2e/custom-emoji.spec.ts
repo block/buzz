@@ -285,7 +285,7 @@ async function quickReactionStorageContains(
   }, emoji);
 }
 
-test("message quick reaction tray stays neutral after selecting a tray emoji", async ({
+test("message reaction action stays neutral after selecting from the picker", async ({
   page,
 }) => {
   await openGeneral(page);
@@ -294,19 +294,53 @@ test("message quick reaction tray stays neutral after selecting a tray emoji", a
   await expect(row).toBeVisible();
   await row.hover();
 
-  const quickReactionButton = row.getByRole("button", {
-    name: "React with :+1:",
-  });
-  await expect(quickReactionButton).toBeVisible();
-  await quickReactionButton.click();
+  const reactionTrigger = messageReactionTrigger(row);
+  await expect(reactionTrigger).toBeVisible();
+  await reactionTrigger.click();
+  const picker = page.locator("em-emoji-picker");
+  await expect(picker).toBeVisible();
+  await picker.locator("input[type='search']").fill("thumbs up");
+  await picker.getByRole("button", { name: "👍" }).first().click();
 
   await expect(row.getByLabel("Toggle 👍 reaction")).toBeVisible();
   await row.hover();
-  await expect(quickReactionButton).not.toHaveAttribute("aria-pressed", "true");
-  await expect(quickReactionButton).not.toHaveClass(SELECTED_ACTION_CLASS);
-  await expect(messageReactionTrigger(row)).not.toHaveClass(
-    SELECTED_ACTION_CLASS,
-  );
+  await expect(reactionTrigger).not.toHaveAttribute("aria-pressed", "true");
+  await expect(reactionTrigger).not.toHaveClass(SELECTED_ACTION_CLASS);
+});
+
+test("emoji picker keeps Frequently used live within the app session", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("emoji-mart.frequently", "{}");
+    window.localStorage.removeItem("emoji-mart.last");
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  const row = reactionTargetRow(page);
+  await expect(row).toBeVisible();
+  await row.hover();
+  await row.getByLabel("Open reactions").click();
+
+  let picker = page.locator("em-emoji-picker");
+  await expect(
+    picker.getByRole("button", { name: "Frequently used" }),
+  ).toBeVisible();
+
+  await picker.locator("input[type='search']").fill("unicorn");
+  await picker.getByRole("button", { name: "🦄" }).first().click();
+  await expect(row.getByLabel("Toggle 🦄 reaction")).toBeVisible();
+
+  await row.hover();
+  await row.getByLabel("Open reactions").click();
+  picker = page.locator("em-emoji-picker");
+  await picker.getByRole("button", { name: "Frequently used" }).click();
+  await expect(
+    picker.getByRole("button", { name: "🦄" }).first(),
+  ).toBeVisible();
 });
 
 test("reacting with a custom emoji renders via the loopback media proxy", async ({
