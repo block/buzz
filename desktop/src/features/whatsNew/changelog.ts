@@ -197,6 +197,15 @@ export const WHATS_NEW_CHANGELOG: ChangelogEntry[] = [
       "Fixed Windows desktop notifications — new messages now show a native toast, clicking it opens the conversation, and Buzz is registered in Windows Notification Settings on launch",
     ],
   },
+  {
+    version: "0.5.20-1",
+    date: "2026-08-26",
+    bullets: [
+      "Desktop notifications now alert for every message in a channel until you mute it, and direct messages and thread replies alert reliably regardless of your sound settings",
+      "Type @channel or @here in the composer to reach everyone or just those currently active — now offered as autocomplete suggestions",
+      "Caught up to upstream Buzz 0.5.20: faster channel switching, image navigation across message threads, and a range of composer and stability fixes",
+    ],
+  },
 ];
 
 /**
