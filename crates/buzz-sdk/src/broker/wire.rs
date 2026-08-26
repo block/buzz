@@ -11,25 +11,16 @@ use super::{absent_or_valued, ActionOutcome, BrokerError, BrokerResponse, Broker
 /// The strict wire form of a [`BrokerResponse`]: every key spelled out, no
 /// `flatten`, so `deny_unknown_fields` is actually in force.
 ///
-/// The status-specific members are `Option` here only because one struct has to
-/// describe three shapes; [`BrokerResponse::deserialize`] then requires the exact
-/// set for the declared status, so `error` beside a succeeded outcome — or a
-/// missing `outcome` under `succeeded` — is a parse failure rather than a field
-/// nobody reads.
+/// The status-specific members are `Option` only because one struct describes
+/// three shapes; the status match below requires the exact set per status.
+/// They deserialize through [`absent_or_valued`] because the match reads
+/// `None` as *absent*, and plain `#[serde(default)]` would map an explicit
+/// `null` to the same `None` — letting a contradictory response like
+/// `{"status":"failed","outcome":null}` skip the check.
 ///
-/// Those members deserialize through [`absent_or_valued`] rather than plain
-/// `#[serde(default)]`, because the status match below reads `None` as *absent*
-/// and `#[serde(default)] Option<T>` also produces `None` for an explicit
-/// `null`. Without it, `{"status":"failed","action":null,"outcome":null}` — or a
-/// succeeded response with `"error":null` — parsed as well-formed and skipped the
-/// contradiction check entirely. `null` is now rejected for these members whether
-/// or not the declared status admits them, so there is exactly one way for a
-/// member to be absent.
-///
-/// `outcome` is held as a `serde_json::Value` and re-deserialized under its
-/// action tag, so this reader is JSON-specific. That is not a narrowing: the HTTP
-/// binding in [`client`] declares `application/json`, and JSON is the only
-/// encoding this contract has ever specified.
+/// `outcome` is held as a `RawValue` and re-parsed, so this reader is
+/// JSON-specific — which is fine, JSON is the only encoding this contract has
+/// ever specified.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct WireResponse {
@@ -72,13 +63,10 @@ impl<'de> Deserialize<'de> for BrokerResponse {
                 let outcome = wire
                     .outcome
                     .ok_or_else(|| D::Error::missing_field("outcome"))?;
-                // Re-deserialize the outcome under its action tag, which is how
-                // the adjacently-tagged `ActionOutcome` — and the
-                // `deny_unknown_fields` on each outcome type — get applied.
-                // Re-deserialize from the original bytes, not from a
-                // `serde_json::Value`: buffering through `Value` collapses
-                // duplicate keys last-wins, which would let `outcome` carry a
-                // duplicate that no other part of this contract accepts.
+                // Re-parse the outcome under its action tag from the original
+                // bytes — not via `serde_json::Value`, which collapses
+                // duplicate keys last-wins — so each outcome type's
+                // `deny_unknown_fields` applies to the bytes as sent.
                 let tagged = format!(
                     "{{\"action\":{},\"outcome\":{}}}",
                     serde_json::to_string(&action).map_err(D::Error::custom)?,

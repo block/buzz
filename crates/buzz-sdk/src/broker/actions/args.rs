@@ -1,12 +1,7 @@
 //! Argument types — one per [`Action`], plus the tagged union that pairs a
-//! wire action name with its arguments.
-//!
-//! Every type here is `deny_unknown_fields`, so a credential or environment map
-//! smuggled into a payload fails to deserialize rather than reaching an
-//! executor. Optional members mean absent by being **omitted**: an explicit
-//! `null` is rejected, so there is one spelling of absence and no member can be
-//! present-but-empty. Each carries a `validated()` returning a normalized copy;
-//! the shared validators live in the [parent module](super).
+//! wire action name with its arguments. Each type carries a `validated()`
+//! returning a normalized copy; the shared validators and the contract-wide
+//! strictness rules live in the [parent module](super).
 
 use serde::{Deserialize, Serialize};
 
@@ -19,9 +14,6 @@ use super::{
 use crate::SdkError;
 
 /// Arguments for `channel.read` — the one read action.
-///
-/// Reads are actions like any other, because #6467 requires a host with no
-/// relay route of its own to be able to serve them.
 ///
 /// One action covers channel, thread, and mention-feed scope, because they
 /// differ only by filter and a name per scope would split one permission —
@@ -39,24 +31,16 @@ pub struct ChannelReadArgs {
         skip_serializing_if = "Option::is_none"
     )]
     pub root_event_id: Option<String>,
-    /// Narrow to messages mentioning the requester — the wake path.
-    ///
-    /// The requester is never named; see [`crate::broker::BrokerRequest`] on why no body
-    /// names its own subject.
-    ///
-    /// A plain `bool`, so it needs no explicit null guard: `null` already fails
-    /// as a type error rather than defaulting to `false`.
+    /// Narrow to messages mentioning the requester — the wake path. The
+    /// requester is never named; no body names its own subject.
     #[serde(default, skip_serializing_if = "is_false")]
     pub mentions_only: bool,
     /// Opaque position to resume from, as returned in [`super::outcomes::MessagePage::next_cursor`].
     ///
-    /// Absent on a first read, which starts at the host's default window. A
-    /// cursor is **opaque**: callers must round-trip it verbatim and must not
-    /// parse, compare, or synthesize one. That is deliberate — a timestamp
-    /// cursor cannot page safely when more events than `limit` share one
-    /// second, and it would commit every future host to one relay ordering
-    /// strategy. The host defines ordering and cursor stability, including
-    /// whether a cursor stays valid across restarts.
+    /// Absent on a first read, which starts at the host's default window.
+    /// Callers must round-trip a cursor verbatim, never parse or synthesize
+    /// one: the host defines ordering and cursor stability, including whether
+    /// a cursor stays valid across restarts.
     #[serde(
         default,
         deserialize_with = "absent_or_valued",
@@ -76,13 +60,9 @@ pub struct ChannelReadArgs {
 }
 
 impl ChannelReadArgs {
-    /// The page size a response to these arguments is held to.
-    ///
-    /// Explicit `limit` when set, otherwise [`super::DEFAULT_PAGE_LIMIT`].
-    /// Omitting a limit asks the host to choose a sensible page, not to send an
-    /// unbounded one, so there is always a number a response can be checked
-    /// against — which is what
-    /// [`crate::broker::BrokerResponse::validate_for`] does.
+    /// The page size a response to these arguments is held to: explicit
+    /// `limit` when set, otherwise [`super::DEFAULT_PAGE_LIMIT`] — omitting a
+    /// limit asks for a sensible page, not an unbounded one.
     #[must_use]
     pub fn effective_limit(&self) -> u32 {
         self.limit.unwrap_or(DEFAULT_PAGE_LIMIT)
@@ -283,8 +263,7 @@ impl ProfileSetArgs {
 /// Arguments for `storage.address`.
 ///
 /// Deriving a record's address needs the secret this contract exists to avoid
-/// holding, which is why #6467 lists it among the operations to route through
-/// the interface rather than compute locally.
+/// holding, which is why it routes through the interface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StorageAddressArgs {
@@ -335,9 +314,8 @@ impl AgentTarget {
 
 /// Arguments for `agents.create`.
 ///
-/// There is no owner field: the owner is whoever the host authenticated, so an
-/// agent creating an agent owns it. See the [module docs](super) on ownership
-/// recursion, and [`crate::broker::BrokerRequest`] on why no body names its own subject.
+/// There is no owner field: the owner is whoever the host authenticated. See
+/// the [contract docs](crate::broker) on ownership recursion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentsCreateArgs {
@@ -563,13 +541,8 @@ impl ActionArgs {
 
     /// Return a normalized copy with every field validated.
     ///
-    /// There is deliberately no `validate(&self)` beside this. One existed and
-    /// was the lower half of the same trap [`crate::broker::BrokerRequest::validated`]
-    /// describes: it called this method, dropped the normalized copy, and
-    /// returned `Ok(())` — so a caller could hold a padded value that had just
-    /// been pronounced valid. A verdict about a value nobody replaces is a
-    /// verdict that can drift from the value in hand, so the normalized copy is
-    /// the only thing this layer returns.
+    /// There is deliberately no non-consuming `validate(&self)` beside this;
+    /// see [`crate::broker::BrokerRequest::validated`] for the trap it was.
     ///
     /// # Errors
     ///

@@ -1,16 +1,7 @@
-//! Broker actions — the closed set of operations an agent may ask a host to perform.
-//!
-//! An action is the unit of policy; see the [module docs](super) for why this is
-//! an operation enum rather than a signing primitive.
-//!
-//! Two consequences of that choice are visible in the types below. Every args
-//! and outcome type is `deny_unknown_fields`, so a credential or environment map
-//! smuggled into a payload fails to deserialize instead of reaching an executor.
-//! And the wire key set of every type is pinned by test, so a secret-bearing
-//! field cannot be added without a test failing.
-//!
-//! [`Action`] and the shared validators live here; the payload types are split
-//! into [`args`] and [`outcomes`] so each side of a call reviews on its own.
+//! Broker actions — the closed set of operations an agent may ask a host to
+//! perform. [`Action`] and the shared validators live here; the payload types
+//! are split into [`args`] and [`outcomes`] so each side of a call reviews on
+//! its own.
 
 use serde::{Deserialize, Serialize};
 
@@ -72,26 +63,16 @@ pub const MAX_CURSOR_LEN: usize = 256;
 /// nobody can talk to.
 pub const RESPOND_TO_MODES: [&str; 2] = ["owner-only", "anyone"];
 
-/// A public key in lowercase hex — the only identity this contract has.
+/// A public key in lowercase hex — the only identity this contract has. No
+/// secret-key counterpart exists in this module (#6467's identity/signing
+/// separation, made structural).
 ///
-/// #6467 asks for identity to be separable from signing. This type is that
-/// separation made structural: it holds a public key and has no counterpart in
-/// this module for the corresponding secret.
-///
-/// # A value of this type is a real public key
-///
-/// 64 hex characters is a *shape*, not a key. The x coordinate of a
-/// secp256k1 point is what a pubkey is, and most 32-byte values are not one —
-/// `ffff…ff` is 64 valid hex characters and lies on no curve. Accepting shape
-/// alone would make this type's name a claim it does not check, and would push
-/// the first real rejection out to whichever consumer eventually converts the
-/// string to a key: a host resolving a mention, a relay filter, a signature
-/// check. That consumer fails at a point where the request has already been
-/// accepted, so [`Self::parse`] requires the point here instead.
-///
-/// The curve check is the `nostr` crate's, which this crate already depends on
-/// for events and signatures, so the contract and the events it carries agree on
-/// what a key is by construction rather than by two parallel implementations.
+/// A value of this type is a **real x-only secp256k1 point**, not just 64 hex
+/// characters — most 32-byte values lie on no curve. Accepting shape alone
+/// would defer the first real rejection to whichever consumer eventually
+/// converts the string to a key, after the request was already accepted. The
+/// curve check is the `nostr` crate's, so the contract and the events it
+/// carries agree on what a key is by construction.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct PubkeyHex(String);
@@ -102,8 +83,7 @@ impl PubkeyHex {
     /// # Errors
     ///
     /// Returns [`SdkError::InvalidInput`] unless `value` is exactly 64 hex
-    /// characters **and** those bytes are a point on secp256k1. See the type
-    /// docs for why the curve check belongs here.
+    /// characters **and** those bytes are a point on secp256k1.
     pub fn parse(value: impl AsRef<str>) -> Result<Self, SdkError> {
         let value = value.as_ref().trim();
         if value.len() != 64 || !value.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -112,9 +92,8 @@ impl PubkeyHex {
             ));
         }
         let value = value.to_ascii_lowercase();
-        // `PublicKey::from_hex` only decodes hex; `xonly` is the conversion that
-        // actually rejects a value that is not on the curve. Doing only the
-        // former here would leave this check believing it had run.
+        // `from_hex` only decodes hex; `xonly` is what actually rejects a
+        // value that is not on the curve.
         nostr::PublicKey::from_hex(&value)
             .and_then(|key| key.xonly().map(|_| ()))
             .map_err(|_| {
@@ -240,37 +219,25 @@ fn is_false(value: &bool) -> bool {
 
 /// Deserialize an optional member that may be **absent but never `null`**.
 ///
-/// Every optional member in this contract means "absent" by being absent. JSON
-/// `null` is a second spelling of the same thing that no serializer here emits —
-/// `skip_serializing_if` omits the member instead — so accepting it would define
-/// a wire value the contract does not.
-///
-/// That is not merely untidy. `#[serde(default)] Option<T>` maps an explicit
-/// `null` to `None`, which is *indistinguishable from absent* to any code
-/// downstream. A reader that decides something from absence — the status match in
+/// This is the contract's one spelling-of-absence rule, and this is its
+/// canonical rationale. `#[serde(default)] Option<T>` maps an explicit `null`
+/// to `None`, *indistinguishable from absent* to downstream code — so a reader
+/// that decides something from absence (the status match in
 /// [`crate::broker::BrokerResponse`], or
-/// [`args::ChannelReadArgs::effective_limit`] choosing [`DEFAULT_PAGE_LIMIT`] —
-/// then silently treats a member the sender did supply as one it did not. In the
-/// response envelope that was a real hole: `{"status":"failed","outcome":null}`
-/// parsed as a plain failure, so the per-status contradiction check never fired.
-///
-/// Rejecting `null` outright is stronger than tracking presence beside the value
-/// and cheaper to reason about: there is then exactly one way to say "absent",
-/// and no layer has to decide what a present-but-empty member meant. Applied
-/// uniformly, it also means a host implementer never has to guess whether
-/// `{"limit": null}` means the default or no limit — it means neither, it is a
-/// malformed request.
+/// [`args::ChannelReadArgs::effective_limit`]) would silently treat a member
+/// the sender did supply as one it did not. In the response envelope that was
+/// a real hole: `{"status":"failed","outcome":null}` parsed as a plain failure
+/// and skipped the per-status contradiction check. Rejecting `null` outright
+/// leaves exactly one way to say "absent" and no layer guessing what a
+/// present-but-empty member meant.
 ///
 /// Used with `#[serde(default, deserialize_with = "…")]`: serde calls this only
-/// when the key is present, so reaching the `None` arm below means the member was
-/// present and `null`. `deny_unknown_fields` stays in force alongside it.
+/// when the key is present, so reaching the `None` arm below means the member
+/// was present and `null`. `deny_unknown_fields` stays in force alongside it.
 ///
-/// Not every member needs this. A required member of a non-`Option` type already
-/// rejects `null` as a type error — which covers the request envelope's flattened
-/// `action`/`args` (adjacently tagged, both required), every canonical member of
-/// the strict event intermediary, and the two `bool` members here. The guard is
-/// only load-bearing where `Option` plus `default` would otherwise make `null`
-/// and absent the same value.
+/// A required member of a non-`Option` type already rejects `null` as a type
+/// error; the guard is only load-bearing where `Option` plus `default` would
+/// otherwise conflate `null` with absent.
 pub(super) fn absent_or_valued<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     T: Deserialize<'de>,
@@ -303,22 +270,12 @@ fn optional(value: Option<&String>, label: &str, max: usize) -> Result<Option<St
     value.map(|value| required(value, label, max)).transpose()
 }
 
-/// Validate a channel id and return its **canonical** spelling.
-///
-/// A UUID has several legal spellings — `Uuid::parse_str` accepts uppercase, the
-/// unhyphenated 32-character form, `{braced}`, and `urn:uuid:` — and they all
-/// name the same channel. Returning the caller's spelling would freeze a request
-/// body that disagrees with the host's canonical echo of the same identity, and
-/// the response correlation in
-/// [`crate::broker::BrokerResponse::validate_for`] would then reject a correct
-/// answer. So this returns the lowercase hyphenated form and nothing else: one
-/// identity, one spelling, chosen at the only point that sees the value before it
-/// is frozen.
-///
-/// This is the same treatment [`PubkeyHex::parse`] gives the other identity in
-/// this contract, and it is applied at both doors — the validators, and the
-/// [`channel_id`] deserializer — so a value cannot reach a caller
-/// un-canonicalized whether it was built or parsed.
+/// Validate a channel id and return its **canonical** spelling — lowercase
+/// hyphenated. `Uuid::parse_str` accepts several spellings of one channel, and
+/// freezing the caller's spelling would make the host's canonical echo of the
+/// same identity look like a mismatch in
+/// [`crate::broker::BrokerResponse::validate_for`]. Same treatment
+/// [`PubkeyHex::parse`] gives the other identity in this contract.
 fn channel(value: &str) -> Result<String, SdkError> {
     let value = required(value, "channel", 128)?;
     uuid::Uuid::parse_str(&value)
@@ -328,12 +285,10 @@ fn channel(value: &str) -> Result<String, SdkError> {
 
 /// Deserialize a `channelId`, canonicalizing it and rejecting a non-UUID.
 ///
-/// The wire is the one door a validator cannot cover: every args and outcome
-/// field holding a channel id is a public `String`, so a payload parsed from
-/// JSON reaches a caller without passing through any `validated()`. Delegating
-/// to [`channel`] means the wire form and the constructed form are canonicalized
-/// by the same code, so the two cannot drift, and a malformed channel id never
-/// becomes a value at all — the same rule the no-null guard follows.
+/// The wire is the one door a validator cannot cover: fields holding a channel
+/// id are public `String`s, so a payload parsed from JSON reaches a caller
+/// without passing through any `validated()`. Delegating to [`channel`] keeps
+/// the wire form and the constructed form canonicalized by the same code.
 pub(super) fn channel_id<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -354,15 +309,10 @@ fn event_id(value: &str, label: &str) -> Result<String, SdkError> {
     Ok(value.to_ascii_lowercase())
 }
 
-/// Deserialize a 64-hex identifier (`eventId`, `dTag`), lowercasing it and
-/// rejecting anything that is not 64 hex characters.
-///
-/// Hex admits two spellings of one identifier, so this is the [`channel_id`] rule
-/// applied to the contract's other multi-spelling identities. See that function
-/// for why the wire needs a door of its own.
-///
-/// The label is generic because serde reports which member failed; naming the
-/// member here as well would be a second copy to keep true.
+/// Deserialize a 64-hex identifier (`eventId`, `dTag`), lowercasing it —
+/// the [`channel_id`] rule applied to the contract's other multi-spelling
+/// identities. The label is generic because serde already reports which
+/// member failed.
 pub(super) fn hex64_field<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -373,12 +323,9 @@ where
     event_id(&raw, "identifier").map_err(D::Error::custom)
 }
 
-/// [`hex64_field`] for an optional member: `null` is still rejected.
-///
-/// A dedicated function rather than a composition of the two guards, because
-/// `deserialize_with` takes one function and both rules — reject `null`,
-/// canonicalize the value — apply to the same member. Reaching the `None` arm
-/// means the key was present and `null`; see [`absent_or_valued`].
+/// [`hex64_field`] for an optional member: `null` is still rejected (see
+/// [`absent_or_valued`]). One function because `deserialize_with` takes one,
+/// and both rules apply to the same member.
 pub(super) fn absent_or_valued_hex64<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,

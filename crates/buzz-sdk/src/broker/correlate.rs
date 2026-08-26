@@ -8,26 +8,10 @@ use super::{ActionArgs, ActionOutcome, AgentTarget, PubkeyHex, SdkError};
 /// Reject an outcome that echoes back a different identity than the request
 /// supplied.
 ///
-/// The table of what is and is not compared, with the reasoning for each, is on
+/// What is and is not compared, and why comparison is on parsed identities
+/// rather than bytes, is documented once on
 /// [`BrokerResponse::validate_for`][super::BrokerResponse::validate_for] — the
-/// public entry point a host author reads. It is documented there rather than
-/// here so there is one copy to keep true.
-///
-/// # Identities are compared parsed, never as strings
-///
-/// Both identities in this contract have more than one legal spelling: a UUID
-/// may be uppercase, unhyphenated, braced, or `urn:uuid:`-prefixed, and hex may
-/// be either case. A byte comparison would therefore reject a *correct* answer
-/// whenever the caller and the host spelled the same identity differently —
-/// which is a worse failure than the one this function exists to catch, because
-/// it makes a working host unusable.
-///
-/// Canonicalization at the validators and at the wire doors (see
-/// [`channel_id`][super::actions::channel_id]) means both sides normally arrive
-/// canonical already. This function does not rely on that: it parses each side
-/// into the identity's own type and compares those, so a spelling variant that
-/// reached here by any route still correlates. The two guards are deliberately
-/// independent — neither is load-bearing alone.
+/// public entry point a host author reads.
 ///
 /// The match below is exhaustive over [`ActionArgs`], so adding an action is a
 /// compile error here rather than a silent default to "not compared".
@@ -49,12 +33,9 @@ pub(super) fn correlate_identities(
         }
     }
 
-    /// Compare two pubkeys.
-    ///
-    /// [`PubkeyHex`] lowercases in [`PubkeyHex::parse`], which is its only
-    /// constructor and also its `Deserialize` path, so a value of this type is
-    /// already canonical however it was built. Comparing the typed values is
-    /// therefore the parsed comparison, not a string one.
+    /// Compare two pubkeys. [`PubkeyHex::parse`] is the type's only
+    /// constructor and lowercases, so comparing typed values *is* the parsed
+    /// comparison.
     fn same_pubkey(requested: &PubkeyHex, returned: &PubkeyHex) -> Result<(), SdkError> {
         if requested == returned {
             return Ok(());
@@ -97,7 +78,7 @@ pub(super) fn correlate_identities(
                 None => Ok(()),
             }
         }
-        // These outcomes echo no identity the request supplied; see the table.
+        // These outcomes echo no identity the request supplied.
         (ActionArgs::ChannelRead(_), _)
         | (ActionArgs::MessagePost(_), _)
         | (ActionArgs::MessageReply(_), _)

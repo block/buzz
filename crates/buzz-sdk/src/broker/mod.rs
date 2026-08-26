@@ -1,179 +1,62 @@
 //! Agent ↔ broker contract — the operations an agent asks a host to perform.
 //!
-//! This module is a **contract only**. It defines the request envelope, the
-//! closed set of [`Action`]s, the result shape, the HTTP binding, and a client
-//! trait. It contains no host, no transport, and no signing: the only
-//! implementation here is a test double.
-//!
-//! # Mental model
+//! This module is a **contract only**: the request envelope, the closed set of
+//! [`Action`]s, the result shape, the HTTP binding, and a client trait. No
+//! host, no transport, no signing. The full design rationale lives in the
+//! English spec (`docs/agent-broker.md`); doc comments here explain only what
+//! the code cannot say itself.
 //!
 //! ```text
 //! agent → BrokerRequest → (POST /v1/action, bearer credential) → host
 //!   host: authenticate → authorize → validate → execute → BrokerResponse
 //! ```
 //!
-//! The agent holds its public key and a session credential. It holds no secret
-//! key, has no relay connection of its own, and can reach the relay only by
-//! asking. Everything it wants to do — including reading — is an action.
+//! The agent holds its public key and a session credential — no secret key, no
+//! relay connection. Everything it wants to do, reading included, is an action.
+//! Actions are named business operations rather than a `sign(bytes)` primitive
+//! so a host can hold per-operation policy; that and the rest of the
+//! [#6467](https://github.com/block/buzz/issues/6467) mapping are covered in
+//! the spec.
 //!
-//! # Why an operation enum rather than a "sign this" primitive
+//! # Contract-wide rules
 //!
-//! [#6467](https://github.com/block/buzz/issues/6467) leaves this open. This
-//! contract answers it: a closed enum of named business operations.
+//! - **No secret crosses this boundary, in either direction.** Every wire type
+//!   is strict — unknown members are rejected at every depth, and each type's
+//!   exact key set is pinned by test. Where a derive would have left a lax
+//!   reader ([`BrokerResponse`], [`BrokerMessage`], [`BrokerResult`]), the type
+//!   documents how its strictness is restored.
+//! - **Identities have exactly one spelling.** UUIDs and hex admit several
+//!   legal spellings, so every identity is canonicalized at both doors —
+//!   `validated()` and deserialization. See [`actions`]'s shared validators.
+//! - **Omission is the only spelling of absence.** An explicit `null` is
+//!   rejected anywhere, at any depth. Canonical rationale on the
+//!   `absent_or_valued` guard in [`actions`]; host implementers must configure
+//!   serializers to omit unset members.
+//! - **No request names its own subject.** Requester, owner, and scope are
+//!   derived from the authenticated credential; see [`BrokerRequest`]. This is
+//!   also why `agents.create` has no owner field — the creator owns the agent,
+//!   and the ownership chain always terminates at a human. Bounding its depth
+//!   is a host concern.
 //!
-//! A `sign(bytes)` primitive makes the broker a signing oracle. It can tell
-//! *who* is asking but not *what for*, so the only policies it can express are
-//! "all" and "none". Named operations invert that: a host can serve
-//! `channel.read` while refusing `agents.create`, and a later policy or
-//! information-flow layer has a per-operation surface to attach to. The cost is
-//! that a new operation needs a new variant — deliberately, since adding one is
-//! then a reviewable change to the contract rather than a new use of an existing
-//! blank cheque.
-//!
-//! The same reasoning is why signing, publishing, and credential access are not
-//! actions. `message.post` names an intent a host can reason about;
-//! `publish(event)` names a mechanism it cannot.
-//!
-//! # How this satisfies #6467
-//!
-//! | #6467 requirement | Where |
-//! |---|---|
-//! | Identity separable from signing; pubkey-only identity | [`PubkeyHex`] is the only identity type; no secret-key type exists in this module. |
-//! | Secret-dependent operations funnelled through the interface | Event signing is subsumed by the write actions (`message.post`, `message.reply`, `reaction.add`, `profile.set`, `agents.*`) — the agent states intent, the host signs. Encrypted-storage address derivation is [`Action::StorageAddress`]. NIP-42 relay auth, NIP-44 encryption, and NIP-98 request auth are **not** actions: they are mechanisms internal to whoever holds the key. |
-//! | Relay auth is a control-flow choice | Nothing here mentions relay authentication, so there is no local auth step to skip. |
-//! | Every relay-touching op, reads included, routable | [`Action::ChannelRead`] covers channel, thread, and mention-feed reads. No action assumes the caller can reach a relay. |
-//! | Non-essential housekeeping skippable | [`Action::is_best_effort`] marks such actions; a host answers [`BrokerErrorCode::Unsupported`] and the agent carries on. |
-//! | No secret leaks to children via env | No args type carries an environment map, and `deny_unknown_fields` means one cannot be smuggled in. Process spawning is a host concern this contract cannot express. |
-//! | Lives in the shared client layer | `buzz-sdk`, which the CLI and the harness already depend on. |
-//!
-//! # The no-secret rule
-//!
-//! No secret key material crosses this boundary in either direction. What
-//! enforces it is the wire schema, not a comment: every args and outcome type is
-//! `deny_unknown_fields`, and tests pin each type's exact key set, so a
-//! secret-bearing field cannot be added without a test failing.
-//! [`AgentsCreateOutcome`] is the case that matters — it returns public identity
-//! only, never the key it just minted.
-//!
-//! Strictness has to hold at every layer, or the outermost one decides. Three
-//! places needed explicit work, because each had a hole a derive left open:
-//! [`BrokerResponse`] cannot combine `deny_unknown_fields` with the `flatten`
-//! that produces its wire shape; [`BrokerMessage`] wraps `nostr`'s `Event`,
-//! whose own deserializer discards unknown members; and [`ActionArgs`] /
-//! [`ActionOutcome`] are adjacently tagged, so without `deny_unknown_fields` on
-//! the enum itself a sibling of their two keys was ignored when either type was
-//! deserialized directly — and both are public and wire-facing, so that is a
-//! real door, not a hypothetical one. The first two now deserialize through
-//! private strict intermediaries and the third denies unknown fields, so the
-//! rule reaches *inside* the envelope, inside each event object, and around each
-//! nested action object — a host cannot ship a `secretKey` beside `sig`, or
-//! beside `args`, and have it silently trimmed.
-//!
-//! There is also exactly **one** wire door per payload, so no lax reader sits
-//! beside a strict one. [`BrokerResult`] is the case that needed work: its
-//! members reach the wire only flattened into [`BrokerResponse`], but it also
-//! derived a reader of its own, and that reader accepted and dropped siblings the
-//! envelope rejects. It is no longer [`Deserialize`] — see the reasoning on that
-//! type. Removing the second door is what keeps the rule single-sourced, since two
-//! copies of a strictness check are exactly how this hole arose.
-//!
-//! # Identities have exactly one spelling
-//!
-//! Both identity types in this contract admit several legal spellings. A UUID may
-//! be uppercase, unhyphenated, `{braced}`, or `urn:uuid:`-prefixed; hex may be
-//! either case. Two spellings of one identity are the same identity, so the
-//! contract picks one and normalizes to it: **lowercase hyphenated** for a
-//! `channelId`, **lowercase** for a pubkey, `eventId`, or `dTag`.
-//!
-//! Normalization happens at both doors — each `validated()` and the
-//! [`Deserialize`] impl of every member that holds an identity — so a value is
-//! canonical whether it was built in Rust or parsed from JSON, and the frozen
-//! request body carries the canonical spelling rather than the caller's. A host
-//! may send any legal spelling and will be read as having sent the canonical one.
-//!
-//! Without this, [`BrokerResponse::validate_for`] would have compared the
-//! caller's spelling of a `channelId` against the host's canonical echo of the
-//! same channel and rejected a correct answer. That check compares parsed
-//! identities as well, so neither guard is load-bearing alone.
-//!
-//! # Duplicate members are rejected
-//!
-//! A key may appear at most once in any object. serde's derived readers reject a
-//! repeated field, so most of this contract gets that for free — but the strict
-//! response intermediary originally buffered `outcome` through a
-//! `serde_json::Value`, and that collapses duplicates last-wins. `outcome` was
-//! therefore the one place a reader could observe a value the envelope's own
-//! strictness never vetted, so it now re-parses the original bytes. The practical
-//! consequence for a host author is the same as the no-null rule: emit each
-//! member once, and do not rely on a later occurrence overriding an earlier one.
-//!
-//! A fourth hole was subtler and is closed the same way — see
-//! [Optional members](#optional-members-omission-is-the-only-spelling-of-absence).
-//!
-//! Two limits are worth stating. A `String` field can physically hold secret
-//! text, so keeping secrets out of message content and error messages is host
-//! policy this contract cannot enforce. And nothing stops a host from *holding*
-//! keys — that is the point; it stops one from handing them over.
-//!
-//! # Optional members: omission is the only spelling of absence
-//!
-//! **`null` is never a legal value anywhere in this contract.** Every optional
-//! member means "absent" by being **omitted from the object**. A member present
-//! with the value `null` is a malformed payload and is rejected — in a request,
-//! in a response, in `args`, in an outcome, at any depth.
-//!
-//! This matters most to a host or agent implemented in another language. Many
-//! serializers emit `null` for an unset field by default — Go's
-//! `encoding/json` for a nil pointer without `omitempty`, Python's `json.dumps`
-//! of an attribute left at `None`, a hand-built map that assigns the key
-//! unconditionally. Such a payload will be rejected in full, not quietly read as
-//! absent. Configure the serializer to **omit** unset members.
-//!
-//! The reason is that this contract decides meaning from absence, so absence
-//! cannot have two spellings. `#[serde(default)] Option<T>` maps an explicit
-//! `null` to the same value as an omitted member, which made
-//! `{"status":"failed","outcome":null}` parse as a plain failure and skip the
-//! per-status contradiction check. Rejecting `null` is stronger than recording
-//! presence beside the value, because it leaves no layer with the question of
-//! what a present-but-empty member was supposed to mean. Applied uniformly, it
-//! also removes the guess about whether `{"limit": null}` requests the default
-//! page limit or no limit at all: it requests neither, it is a malformed request.
-//!
-//! The rule is uniform, so there is nothing to look up per field: if a member
-//! carries no value, leave it out.
-//!
-//! # Ownership recursion
-//!
-//! [`Action::AgentsCreate`] has no owner field. The owner of a created agent is
-//! whichever identity the host authenticated for the request, so an agent that
-//! creates an agent owns it, and following the chain upward always terminates at
-//! a human. Bounding the depth of that chain is a host concern: it depends on
-//! resources and policy this contract cannot see. A request that could name its
-//! own authority would let any caller mint agents under someone else.
+//! Two limits worth stating: a `String` field can physically hold secret text,
+//! so keeping secrets out of content and error messages is host policy; and
+//! nothing stops a host from *holding* keys — that is the point. It stops one
+//! from handing them over.
 //!
 //! # Deferred operations
 //!
-//! `presence.set` and `typing.set` are not in v1. They are housekeeping a host
-//! can decline anyway, and the closed enum makes adding them purely additive —
-//! a new variant, a new wire name, no change to existing ones.
-//!
-//! Streaming reads are also deferred. Reads are request/response; waking on a
-//! mention is `channel.read` with `mentionsOnly`, polled.
+//! Not in v1, all purely additive later: memory read/write (intent-level
+//! operations over the encrypted store — until then [`Action::StorageAddress`]
+//! only addresses a record, and the key holder remains the only reader/writer),
+//! `presence.set`, `typing.set`, and streaming reads (waking on a mention is
+//! `channel.read` with `mentionsOnly`, polled).
 //!
 //! # Non-goals
 //!
-//! - **Hosts.** Authentication, authorization, idempotency storage, execution,
-//!   and depth caps all live in the host.
-//! - **Transports.** [`BrokerClient`] exists so an in-process and an HTTP
-//!   implementation are interchangeable; neither is here.
-//! - **Relay changes.** A host does ordinary relay work as an ordinary client.
-//!   The relay never learns a broker exists.
-//! - **Grants and authorization fields.** There is no `authorization` field.
-//!   One gets added, as a discriminated object, when a real grant format and
-//!   verifier exist — not before, so no field looks security-bearing while
-//!   enforcing nothing.
-//! - **Secret-key custody.** How the host holds keys, and whether it refuses to
-//!   start when a stale local key is present, are host decisions.
+//! Hosts (auth, idempotency storage, execution), transports, relay changes,
+//! grant/authorization fields (added when a real verifier exists, not before),
+//! and secret-key custody. [`BrokerClient`] exists so in-process and HTTP
+//! implementations are interchangeable; neither is here.
 
 use serde::{Deserialize, Serialize};
 
@@ -213,32 +96,19 @@ pub const MAX_REQUEST_ID_LEN: usize = 128;
 
 /// A request to execute one broker action.
 ///
-/// # What this envelope deliberately omits
-///
-/// There is no requester, owner, scope, or relay field. Those are derived by the
-/// host from the authenticated session credential. **A body that could name its
-/// own subject would let any caller act as anyone** — that one rule is why
-/// `channel.read` cannot ask about another identity's mentions, why
-/// `profile.set` has no subject, and why `agents.create` has no owner.
+/// There is deliberately no requester, owner, scope, or relay field: those are
+/// derived by the host from the authenticated session credential. **A body
+/// that could name its own subject would let any caller act as anyone.**
 ///
 /// # Retry contract
 ///
-/// Retrying means resending the identical serialized request with the same
-/// `requestId`, which is why a client never sends this type directly: call
-/// [`Self::prepare`] to freeze it into a [`PreparedRequest`] and hand *that* to
-/// [`BrokerClientExt::execute`]. The host hashes the bytes it receives and compares
-/// that digest against the digest recorded under the same idempotency key:
-///
-/// - same key, same digest → the recorded outcome is replayed, nothing re-runs
-/// - same key, different digest → rejected as a request-ID conflict
-///
-/// A typed value cannot carry that guarantee. Two serializations of one value
-/// can differ in bytes across serde versions or implementations, and the
-/// difference would surface as a spurious [`BrokerErrorCode::RequestIdConflict`]
-/// on retry. Serializing once removes the possibility rather than warning about
-/// it. There is no client-computed digest field: idempotency is decided
-/// host-side, and a caller-supplied digest would be a claim the host has to
-/// recompute anyway.
+/// Retrying means resending the identical bytes with the same `requestId` —
+/// the host compares a digest of the bytes against what it recorded under that
+/// idempotency key (same digest → replay the recorded outcome; different →
+/// [`BrokerErrorCode::RequestIdConflict`]). Two serializations of one value
+/// can differ in bytes, so a client never sends this type directly: call
+/// [`Self::prepare`] to freeze it into a [`PreparedRequest`] and hand *that*
+/// to [`BrokerClientExt::execute`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct BrokerRequest {
@@ -266,11 +136,8 @@ impl BrokerRequest {
     pub fn new(request_id: impl Into<String>, action: ActionArgs) -> Result<Self, SdkError> {
         let request_id = request_id.into();
         validate_request_id(&request_id)?;
-        // Store the normalized copy, not the caller's. `validated` both checks
-        // and normalizes (trimming names, lowercasing pubkeys), so keeping the
-        // original would let a padded selector pass validation and then travel
-        // in the frozen body — the host would look up something the validator
-        // never approved.
+        // Store the normalized copy, not the caller's, so a padded-but-valid
+        // value cannot travel in the frozen body.
         let action = action.validated()?;
         Ok(Self {
             r#type: BROKER_REQUEST_TYPE.to_string(),
@@ -289,27 +156,13 @@ impl BrokerRequest {
 
     /// Validate and normalize into the only form execution-side code accepts.
     ///
-    /// This is the **one normalization door**. It consumes the request, so the
-    /// un-normalized value is gone rather than sitting beside its normalized
-    /// copy waiting to be executed by mistake.
-    ///
-    /// # Why there is no `validate(&self)`
-    ///
-    /// There used to be, and it was a trap. It called the arguments' own
-    /// `validated()`, which *computes* a normalized copy, and then threw that
-    /// copy away and returned `Ok(())`. A hand-built request targeting
-    /// `"  helper  "` therefore validated successfully and still carried the
-    /// padding, so a host that trusted the verdict and executed the struct
-    /// looked up a name the validator never approved. [`Self::prepare`] was
-    /// safe, but a host cannot force its callers through the client's outgoing
-    /// path.
-    ///
-    /// A check that returns a verdict about a value it does not change can
-    /// always drift from the value the caller keeps holding. So the verdict and
-    /// the normalized value are now the same thing: the only way to learn that a
-    /// request is valid is to receive the normalized [`ValidatedRequest`], and
-    /// the only way to execute one is to have it. "Validated but not
-    /// normalized" is unrepresentable rather than merely discouraged.
+    /// This is the **one normalization door**, and it consumes the request.
+    /// There is deliberately no non-consuming `validate(&self)`: a verdict
+    /// about a value it does not replace can drift from the value the caller
+    /// keeps holding (an earlier one validated a normalized copy, discarded
+    /// it, and let the caller execute the un-normalized original). The only
+    /// way to learn a request is valid is to receive the normalized
+    /// [`ValidatedRequest`].
     ///
     /// # Errors
     ///
@@ -323,12 +176,7 @@ impl BrokerRequest {
     }
 
     /// Validate and normalize, then serialize once into the bytes every attempt
-    /// will send.
-    ///
-    /// A convenience for the client path; it is exactly
-    /// [`Self::validated`] followed by [`ValidatedRequest::prepare`], so the
-    /// bytes are frozen from the normalized value and there is no second
-    /// normalization to keep in step.
+    /// will send — [`Self::validated`] followed by [`ValidatedRequest::prepare`].
     ///
     /// # Errors
     ///
@@ -338,11 +186,8 @@ impl BrokerRequest {
         self.validated()?.prepare()
     }
 
-    /// Validate everything except the action arguments.
-    ///
-    /// Split out so [`Self::validated`] can check the envelope and then take the
-    /// normalized arguments from a single `validated` call on the arguments,
-    /// rather than validating them twice.
+    /// Validate everything except the action arguments, which
+    /// [`Self::validated`] normalizes in the same step.
     fn validate_envelope(&self) -> Result<(), SdkError> {
         if self.r#type != BROKER_REQUEST_TYPE {
             return Err(SdkError::InvalidInput(format!(
@@ -403,26 +248,19 @@ pub fn validate_request_id(request_id: &str) -> Result<(), SdkError> {
 
 /// A [`BrokerRequest`] that has been validated **and normalized**.
 ///
-/// This is the type execution-side code accepts. Holding one is proof that every
-/// field passed its validator *and* that the value carries what the validator
-/// approved — not the caller's spelling of it. The two facts are inseparable
-/// because there is one way to obtain this type, [`BrokerRequest::validated`],
-/// which normalizes on the way through.
+/// The type execution-side code accepts. The only way to obtain one is
+/// [`BrokerRequest::validated`], which normalizes on the way through, so
+/// holding one proves the value carries what the validator approved — not the
+/// caller's spelling of it.
 ///
-/// # Why the inner request is not reachable
+/// The inner request is private with no borrowing accessor: a borrow would let
+/// execution-side code clone it, mutate a public field, and execute the result.
+/// [`Self::into_request`] consumes the wrapper for a host that needs to move
+/// the envelope onward; what it yields is no longer evidence of anything.
 ///
-/// The field is private and there is no accessor returning `&BrokerRequest`,
-/// only [`Self::action`] and the metadata below. A borrow of the inner value
-/// would let execution-side code clone it, mutate a public field, and execute
-/// the result — which is the "validated but not normalized" state this type
-/// exists to make unrepresentable. [`Self::into_request`] exists for a host that
-/// genuinely needs to move the whole envelope onward; it consumes the wrapper,
-/// so what it yields is no longer evidence of anything.
-///
-/// A host that receives bytes builds one the same way a client does: parse a
-/// [`BrokerRequest`], call [`BrokerRequest::validated`], execute what comes
-/// back. Only the host's verdict is authoritative, so it revalidates regardless
-/// of what the client did.
+/// A host that receives bytes builds one the same way a client does — parse,
+/// call `validated()`, execute what comes back — since only its own verdict is
+/// authoritative.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidatedRequest(BrokerRequest);
 
@@ -460,12 +298,9 @@ impl ValidatedRequest {
         })
     }
 
-    /// Consume this wrapper, yielding the normalized envelope.
-    ///
-    /// For a host that needs to move the whole request onward. The result is a
-    /// plain [`BrokerRequest`] with public fields, so it is no longer evidence
-    /// that anything was validated — which is why this consumes rather than
-    /// borrows.
+    /// Consume this wrapper, yielding the normalized envelope — a plain
+    /// [`BrokerRequest`] with public fields, no longer evidence that anything
+    /// was validated, which is why this consumes rather than borrows.
     #[must_use]
     pub fn into_request(self) -> BrokerRequest {
         self.0
@@ -475,16 +310,10 @@ impl ValidatedRequest {
 /// A validated request together with the exact bytes to send.
 ///
 /// This is what [`BrokerClient::send`] takes, so the retry contract is
-/// structural rather than documented: the first attempt and every retry send
-/// `body` verbatim, and no implementation gets the chance to reserialize.
-///
-/// Construct one with [`ValidatedRequest::prepare`], or with
-/// [`BrokerRequest::prepare`] which is the two steps together. The typed
-/// [`BrokerRequest`] is retained privately and **deliberately not exposed**: an
-/// implementation that could reach the typed value could serialize it again,
-/// which is exactly the possibility freezing the bytes removes. What an
-/// implementation legitimately needs is correlation metadata, so that — and only
-/// that — is public: [`Self::request_id`] and [`Self::action`].
+/// structural: every attempt sends `body` verbatim, and no implementation gets
+/// the chance to reserialize. The typed request is deliberately not exposed —
+/// only the correlation metadata ([`Self::request_id`], [`Self::action`]) an
+/// implementation legitimately needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedRequest {
     request: BrokerRequest,
@@ -512,15 +341,17 @@ impl PreparedRequest {
 }
 
 /// Machine-readable broker error code.
-/// These name failures the *broker* is responsible for. Failures inside an
+///
+/// These name failures the *broker* is responsible for; failures inside an
 /// action arrive as [`BrokerErrorCode::ActionFailed`] with detail in the
 /// message.
 ///
 /// # Which status a code may carry
 ///
-/// A code and a [`BrokerResult`] status are two statements about the same thing
-/// — whether side effects landed — so they cannot be paired freely. This is the
-/// whole table, and it lives only here:
+/// A code and a [`BrokerResult`] status are two statements about the same
+/// thing — whether side effects landed — so they cannot be paired freely.
+/// `Failed` promises no side effects took hold; `Indeterminate` promises
+/// nothing. This is the whole table, and it lives only here:
 ///
 /// | Code | with `failed` | with `indeterminate` |
 /// |---|---|---|
@@ -528,15 +359,9 @@ impl PreparedRequest {
 /// | `internal` | yes | yes |
 /// | every other code | yes | no |
 ///
-/// `Failed` promises no side effects took hold; `Indeterminate` promises
-/// nothing. Every code but two names a fate the host *knows* — a refused
-/// credential, a rejected envelope, a `requestId` conflict, an action that ran
-/// and failed — so those are `Failed`-only. [`Self::OutcomeUnknown`] is the code
-/// for not knowing, so it is `Indeterminate`-only. [`Self::Internal`] is the one
-/// code that is legitimately either: a host fault before dispatch is a known
-/// no-op, and the same fault mid-execution genuinely is not.
-///
-/// [`Self::may_be_failed`] and [`Self::may_be_indeterminate`] are that table in
+/// [`Self::Internal`] is the one code legitimately either: a host fault before
+/// dispatch is a known no-op, the same fault mid-execution is not.
+/// [`Self::may_be_failed`] and [`Self::may_be_indeterminate`] are this table in
 /// code, consulted by [`BrokerResponse::validate`], which rejects a mismatched
 /// pairing as malformed rather than trusting either half.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -569,14 +394,8 @@ pub enum BrokerErrorCode {
     /// The action ran and reported a domain failure.
     ActionFailed,
     /// The host could not determine whether side effects occurred.
-    ///
-    /// The only code that is [`BrokerResult::Indeterminate`]-only; see the
-    /// status table on [`BrokerErrorCode`].
     OutcomeUnknown,
     /// An unexpected host-side fault.
-    ///
-    /// The only code that may carry either status: a fault before dispatch is a
-    /// known no-op, the same fault mid-execution is not.
     Internal,
 }
 
@@ -599,12 +418,10 @@ impl BrokerErrorCode {
         }
     }
 
-    /// Whether this code may appear with [`BrokerResult::Failed`], which
-    /// promises no side effects took hold.
+    /// Whether this code may appear with [`BrokerResult::Failed`].
     ///
-    /// One half of the table documented on [`BrokerErrorCode`]. Written as an
-    /// exhaustive match so adding a code forces a decision here rather than
-    /// silently inheriting a default.
+    /// One half of the table documented on [`BrokerErrorCode`], written as an
+    /// exhaustive match so adding a code forces a decision here.
     #[must_use]
     pub fn may_be_failed(self) -> bool {
         match self {
@@ -622,10 +439,8 @@ impl BrokerErrorCode {
         }
     }
 
-    /// Whether this code may appear with [`BrokerResult::Indeterminate`], which
-    /// promises nothing about side effects.
-    ///
-    /// The other half of the table documented on [`BrokerErrorCode`].
+    /// Whether this code may appear with [`BrokerResult::Indeterminate`] —
+    /// the other half of the table documented on [`BrokerErrorCode`].
     #[must_use]
     pub fn may_be_indeterminate(self) -> bool {
         match self {
@@ -684,37 +499,20 @@ impl BrokerError {
 /// The terminal disposition of a broker request.
 ///
 /// A discriminated union, so "succeeded with an error" and "failed with an
-/// outcome" are unrepresentable rather than merely discouraged.
-///
-/// [`Self::Indeterminate`] is distinct from [`Self::Failed`] on purpose:
-/// `Failed` promises no side effects took hold, while `Indeterminate` promises
-/// nothing at all and demands reconciliation. Which [`BrokerErrorCode`] may
-/// carry which status is a closed table, documented on that type.
+/// outcome" are unrepresentable. [`Self::Indeterminate`] is distinct from
+/// [`Self::Failed`] on purpose: `Failed` promises no side effects took hold,
+/// `Indeterminate` promises nothing and demands reconciliation. Which
+/// [`BrokerErrorCode`] may carry which status is a closed table on that type.
 ///
 /// # Why this type is not [`Deserialize`]
 ///
-/// It is deliberately **not readable from the wire**, and that is the point:
-/// [`BrokerResponse`] is the only door, and it is strict.
-///
-/// This type has no wire form of its own. Its members only ever appear flattened
-/// into the response envelope, whose strict reader requires the exact key set the
-/// declared status admits — so `status: failed` beside an `error` and a
-/// `secretKey`, or a succeeded result beside an `error`, fail to parse. A derived
-/// reader on this type answered the same bytes with `Ok`, dropping the members it
-/// could not represent, so a consumer that parsed the result directly got a value
-/// whose complete wire shape had never been checked.
-///
-/// The two ways to close that were to give this type its own strict reader, or to
-/// take it off the wire. A second strict reader would be a second copy of the
-/// per-status contradiction rules, and two copies of a security check drift — the
-/// hole above exists precisely because one layer's strictness did not reach
-/// another's. Removing the door leaves one implementation of the rule and nothing
-/// to keep in sync. Nothing is lost: a bare `{"status": …}` object is not a
-/// payload this contract defines, so no host or client had a legitimate reason to
-/// parse one.
-///
-/// [`Serialize`] is retained — it is what produces the envelope's flattened wire
-/// form — so this is a read-side restriction only, and the wire form is unchanged.
+/// Its members reach the wire only flattened into [`BrokerResponse`], whose
+/// strict reader enforces the exact key set per status. A derived reader here
+/// was a second, laxer door onto the same bytes — it accepted and dropped
+/// members the envelope rejects — and two copies of a strictness check drift.
+/// [`Serialize`] is retained (it produces the envelope's flattened wire form),
+/// so this is a read-side restriction only. Nothing is lost: a bare
+/// `{"status": …}` object is not a payload this contract defines.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum BrokerResult {
@@ -782,20 +580,13 @@ impl BrokerResult {
 ///
 /// # Why deserialization goes through an intermediary
 ///
-/// `#[serde(flatten)]` on `result` silently disables `deny_unknown_fields` —
-/// serde cannot combine the two — so this envelope used to accept and discard an
-/// unknown top-level key, an unknown key beside `status`, and even an `error`
-/// riding alongside a succeeded outcome. Every other payload in this contract is
-/// strict, and a discarded field is exactly how a secret-bearing host field
-/// crosses a boundary unnoticed.
-///
-/// So [`Deserialize`] routes through a private strict wire form with an exact key
-/// set per status, and anything else fails to parse. A transport reports that as
-/// [`BrokerTransportError::MalformedResponse`] — the bytes claimed to be an
-/// envelope and were not one — so the caller gets no verdict instead of a
-/// quietly trimmed one. Serialization is unchanged, so the wire form is still
-/// the flattened one; a round-trip test pins that the strict reader accepts what
-/// the writer emits.
+/// `#[serde(flatten)]` on `result` silently disables `deny_unknown_fields`, so
+/// the derived reader accepted and discarded unknown members — exactly how a
+/// secret-bearing host field crosses a boundary unnoticed. [`Deserialize`]
+/// therefore routes through a private strict wire form (see `wire.rs`) with an
+/// exact key set per status; anything else fails to parse and surfaces as
+/// [`BrokerTransportError::MalformedResponse`]. Serialization is unchanged, and
+/// a round-trip test pins that the strict reader accepts what the writer emits.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrokerResponse {
@@ -867,11 +658,9 @@ impl BrokerResponse {
         validate_request_id(&self.request_id)?;
         match &self.result {
             BrokerResult::Succeeded { outcome } => outcome.validate()?,
-            // A code and a status are two statements about whether side effects
-            // landed, so a pairing the table forbids is a response
-            // contradicting itself. Neither half can be trusted over the other,
-            // so it is rejected rather than reinterpreted. The table itself
-            // lives on `BrokerErrorCode`.
+            // A forbidden code/status pairing is a response contradicting
+            // itself; neither half can be trusted, so it is rejected. The
+            // table lives on `BrokerErrorCode`.
             BrokerResult::Failed { error } if !error.code.may_be_failed() => {
                 return Err(SdkError::InvalidInput(format!(
                     "{} is not a valid code for a failed status",
@@ -891,19 +680,12 @@ impl BrokerResponse {
 
     /// Validate this response *as the answer to `request`*.
     ///
-    /// A response that validates in isolation can still be the wrong answer: a
-    /// host (or a confused proxy) could return a `message.post` success to a
-    /// `channel.read`, and a caller matching on the outcome enum would quietly
-    /// take the wrong branch. This is the check that makes such a response
-    /// unusable instead of merely surprising.
-    ///
-    /// A client does not call this directly and cannot forget to:
-    /// [`BrokerClientExt::execute`] runs it for every implementation and returns
-    /// a [`ValidatedResponse`], which is the only response type a caller can
-    /// obtain. This method stays public for a host validating its own output.
-    ///
-    /// Signature verification of read results is deliberately not included; see
-    /// [`BrokerMessage::verify`].
+    /// A response that validates in isolation can still be the wrong answer —
+    /// a success for a different action, or for the wrong subject. A client
+    /// never calls this directly: [`BrokerClientExt::execute`] runs it for
+    /// every implementation and returns a [`ValidatedResponse`]. It stays
+    /// public for a host validating its own output. Signature verification of
+    /// read results is deliberately not included; see [`BrokerMessage::verify`].
     ///
     /// # Errors
     ///
@@ -915,37 +697,19 @@ impl BrokerResponse {
     ///
     /// # What identity correlation compares
     ///
-    /// `requestId` plus action is not enough: a host routing bug can return a
-    /// well-formed success for the wrong *subject*. Every identity the request
-    /// supplies and the outcome echoes must name the same thing. This is the
-    /// whole table:
+    /// Every identity the request supplies and the outcome echoes must name
+    /// the same thing. Most outcomes echo nothing prior (host-minted ids, or a
+    /// page with no `channelId` echo; `storage.address` deliberately omits the
+    /// slug, whose `d` tag is a keyed hash of it). What remains: `agents.create`
+    /// compares `channelId` as UUIDs; `agents.update`/`agents.delete` compare
+    /// `agentPubkey` when targeted by pubkey. A name target is resolved
+    /// host-side and unverifiable by construction — a rename may be the very
+    /// thing the call performed.
     ///
-    /// | Action | compared | not compared, and why |
-    /// |---|---|---|
-    /// | `channel.read` | — | outcome carries a page and cursor, no echo of `channelId` |
-    /// | `message.post` | — | outcome is `eventId`/`kind`/`createdAt`, all host-minted |
-    /// | `message.reply` | — | same; the parent id is not echoed |
-    /// | `reaction.add` | — | same |
-    /// | `profile.set` | — | same |
-    /// | `storage.address` | — | `slug` is deliberately absent from the outcome: a `d` tag is a keyed hash of it, and echoing the slug would defeat that |
-    /// | `agents.create` | `channelId`, as UUIDs | pubkey and name are newly minted, so there is nothing prior to compare |
-    /// | `agents.update` | `agentPubkey` when targeted by pubkey | a name target is resolved host-side; `displayName` may be exactly what this call changed |
-    /// | `agents.delete` | `agentPubkey` when targeted by pubkey | ditto for a name target |
-    ///
-    /// **Comparison is on parsed identities, never on bytes.** Both identity
-    /// types here admit more than one legal spelling — a UUID may be uppercase,
-    /// unhyphenated, braced or `urn:uuid:`-prefixed; hex may be either case — and
-    /// two spellings of one identity are the same identity. A byte comparison
-    /// would reject a correct answer whenever the caller and the host spelled it
-    /// differently, which is a worse failure than the one this check exists to
-    /// catch. Values are also canonicalized where they enter — at each
-    /// `validated()` and at the wire — so both sides normally arrive canonical;
-    /// the parsed comparison does not depend on that having happened.
-    ///
-    /// A name-targeted `agents.update`/`agents.delete` is the one case where the
-    /// caller asked for an identity it cannot verify in the reply. That is
-    /// inherent: the host resolves the name, and a rename may be the very thing
-    /// the call performed.
+    /// **Comparison is on parsed identities, never on bytes**: both identity
+    /// types admit more than one legal spelling, and a byte comparison would
+    /// reject a correct answer spelled differently — a worse failure than the
+    /// one this check exists to catch.
     pub fn validate_for(&self, request: &PreparedRequest) -> Result<(), SdkError> {
         self.validate()?;
         if self.request_id != request.request_id() {
@@ -965,11 +729,9 @@ impl BrokerResponse {
                 )));
             }
             correlate::correlate_identities(&request.request.action, outcome)?;
-            // `ActionOutcome::validate` can only enforce the protocol-wide cap,
-            // because it never sees the request. A page bounded only by that cap
-            // still overruns a caller that asked for one message and was handed
-            // five hundred, so the request's own number is applied here — the
-            // one place both halves are in scope.
+            // `ActionOutcome::validate` never sees the request, so it can only
+            // enforce the protocol-wide cap; the request's own limit is
+            // applied here, the one place both halves are in scope.
             if let (
                 ActionArgs::ChannelRead(args),
                 ActionOutcome::ChannelRead(MessagePage { messages, .. }),

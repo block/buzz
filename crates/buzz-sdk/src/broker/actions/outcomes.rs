@@ -1,11 +1,7 @@
 //! Outcome types — the success payload of each [`Action`], and the tagged union
-//! that pairs a wire action name with its outcome.
-//!
-//! Outcomes are shared where actions agree on what success means: the four
-//! event-publishing actions all return [`EventPublished`]. Every type is
-//! `deny_unknown_fields` with its exact wire key set pinned by test, which is
-//! what enforces the no-secret rule — see the [contract docs](crate::broker).
-//! Optional members are absent by omission; an explicit `null` is rejected.
+//! that pairs a wire action name with its outcome. Outcomes are shared where
+//! actions agree on what success means: the four event-publishing actions all
+//! return [`EventPublished`].
 
 use serde::{Deserialize, Serialize};
 
@@ -18,12 +14,10 @@ use nostr::{Event, EventId, Kind, PublicKey, Tags, Timestamp};
 
 /// The seven canonical members of a Nostr event object, and nothing else.
 ///
-/// `nostr`'s own `Event` deserializer accepts and *discards* unknown members, so
-/// deserializing straight into it would put read results outside the strict-wire
-/// rule that every other payload in this contract obeys: a host could ship an
-/// extra `secretKey` member inside an event and nothing would object. Routing
-/// through a `deny_unknown_fields` intermediary restores the rule at the one
-/// place the contract does not own the type.
+/// `nostr`'s own `Event` deserializer accepts and *discards* unknown members,
+/// which would put read results outside the contract's strict-wire rule.
+/// Routing through a `deny_unknown_fields` intermediary restores the rule at
+/// the one place the contract does not own the type.
 ///
 /// Field names are the wire names from NIP-01 (`created_at`, not `createdAt`) —
 /// this is the event's own encoding, not ours to rename.
@@ -41,23 +35,16 @@ struct StrictEvent {
 
 /// One message returned by a read: the signed Nostr event, verbatim.
 ///
-/// The event is authoritative. It is carried whole — signature and tags
-/// included — rather than reduced to a projection, because Schnorr verification
-/// is local and needs no relay: see [`Self::verify`]. A keyless agent therefore
-/// still gets independently verifiable authorship and content, and only has to
-/// trust the host for *completeness* (that no message was withheld) and for
-/// authorization. Reducing to a projection would have widened that trust to
-/// cover authorship too, and dropped the tags later consumers need.
-///
-/// The wire form is the event's own JSON, so this adds no envelope of its own.
-/// Ancestry and mentions are exposed as derived accessors rather than sibling
-/// fields, so there is nothing that can disagree with the signed bytes.
+/// The event is carried whole — signature and tags included — rather than
+/// reduced to a projection, because Schnorr verification is local (see
+/// [`Self::verify`]): a keyless agent gets independently verifiable authorship
+/// and content, and only trusts the host for *completeness* and authorization.
+/// Ancestry and mentions are derived accessors rather than sibling fields, so
+/// nothing can disagree with the signed bytes.
 ///
 /// Deserialization is **strict**, via a private `deny_unknown_fields`
-/// intermediary: an event object carrying any member beyond the canonical seven
-/// is rejected rather than quietly trimmed, which is what keeps read results
-/// inside the same no-secret rule as every other payload here. Serialization is
-/// the event's own, so the wire form is unchanged.
+/// intermediary; serialization is the event's own, so the wire form is
+/// unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct BrokerMessage(pub Event);
@@ -87,13 +74,11 @@ impl BrokerMessage {
         &self.0
     }
 
-    /// Verify the event's id and Schnorr signature.
-    ///
-    /// This is the caller's provenance check and it is entirely local. A host
+    /// Verify the event's id and Schnorr signature — entirely local; a host
     /// that fabricated or altered a message fails here regardless of what it
-    /// claims. It is deliberately *not* called by
-    /// [`crate::broker::BrokerResponse::validate_for`]: whether to pay for verification,
-    /// and what to do when it fails, is the caller's policy.
+    /// claims. Deliberately *not* called by
+    /// [`crate::broker::BrokerResponse::validate_for`]: whether to pay for
+    /// verification, and what to do when it fails, is the caller's policy.
     ///
     /// # Errors
     ///
@@ -182,10 +167,9 @@ pub struct StorageAddress {
 
 /// Outcome of a successful `agents.create`.
 ///
-/// Carries the new agent's **public** key only: pubkey, name, channel, and
-/// nothing else. There is no field for the minted secret — it stays on the
-/// host — and `deny_unknown_fields` plus a test pinning this exact key set is
-/// what enforces that rather than a comment.
+/// Carries the new agent's **public** identity only — there is no field for
+/// the minted secret, and `deny_unknown_fields` plus the key-set test is what
+/// enforces that rather than a comment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentsCreateOutcome {
@@ -273,10 +257,8 @@ impl ActionOutcome {
     /// Validate the identifiers and cursors this outcome asserts.
     ///
     /// A well-typed outcome can still carry a malformed id or an unusable
-    /// cursor, and a caller that trusted either would fail later and further
-    /// away. Signature verification is deliberately *not* here — that is
-    /// [`BrokerMessage::verify`], and whether to pay for it is the caller's
-    /// choice.
+    /// cursor. Signature verification is deliberately *not* here — see
+    /// [`BrokerMessage::verify`].
     ///
     /// # Errors
     ///
