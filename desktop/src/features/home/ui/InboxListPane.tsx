@@ -1,4 +1,12 @@
-import { Bell, Clock, Ellipsis, ExternalLink, MailOpen } from "lucide-react";
+import {
+  AlertCircle,
+  Bell,
+  Clock,
+  Ellipsis,
+  ExternalLink,
+  LoaderCircle,
+  MailOpen,
+} from "lucide-react";
 import * as React from "react";
 
 import {
@@ -216,6 +224,7 @@ type InboxListPaneProps = {
   onMarkUnread: (itemId: string) => void;
   onOpenDirect: (item: InboxItem) => void;
   isReopenPending?: (channelId: string | null | undefined) => boolean;
+  isReopenErrored?: (channelId: string | null | undefined) => boolean;
   onRemindLater: (item: InboxItem) => void;
   onSelect: (itemId: string) => void;
   onSelectDraft: (draftKey: string) => void;
@@ -245,6 +254,7 @@ export function InboxListPane({
   onMarkUnread,
   onOpenDirect,
   isReopenPending,
+  isReopenErrored,
   onRemindLater,
   onSelect,
   onSelectDraft,
@@ -306,6 +316,7 @@ export function InboxListPane({
       );
     const hasChannelTarget = Boolean(item.item.channelId);
     const isReopening = isReopenPending?.(item.item.channelId) ?? false;
+    const hasReopenError = isReopenErrored?.(item.item.channelId) ?? false;
     const canOpen = hasChannelTarget && !isReopening;
     const openLabel = !hasChannelTarget
       ? "No channel link"
@@ -437,6 +448,33 @@ export function InboxListPane({
                 >
                   <Bell className="h-3 w-3" />
                   Reminder due
+                </div>
+              ) : null}
+
+              {isReopening || hasReopenError ? (
+                <div
+                  aria-busy={isReopening}
+                  aria-live="polite"
+                  className={cn(
+                    "mt-1 flex items-center gap-1 text-2xs font-medium",
+                    hasReopenError
+                      ? "text-destructive"
+                      : "text-muted-foreground",
+                  )}
+                  data-testid={`home-inbox-reopen-status-${item.id}`}
+                  role="status"
+                >
+                  {isReopening ? (
+                    <>
+                      <LoaderCircle className="h-3 w-3 shrink-0 animate-spin" />
+                      Reopening…
+                    </>
+                  ) : (
+                    <>
+                      <AlertCircle className="h-3 w-3 shrink-0" />
+                      Couldn’t reopen
+                    </>
+                  )}
                 </div>
               ) : null}
 

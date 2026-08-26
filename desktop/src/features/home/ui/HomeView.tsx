@@ -456,6 +456,7 @@ export function HomeView({
     handleOpenDm,
     handleOpenSelectedContext,
     isReopenPending,
+    isReopenErrored,
   } = useHiddenDmInboxNavigation({
     availableChannelIds,
     currentPubkey,
@@ -704,6 +705,7 @@ export function HomeView({
               onMarkUnread={markItemUnread}
               onOpenDirect={handleOpenDirect}
               isReopenPending={isReopenPending}
+              isReopenErrored={isReopenErrored}
               onRemindLater={(item) => {
                 const channelId = item.item.channelId;
                 if (!channelId) {
@@ -820,6 +822,8 @@ export function HomeView({
               onEditSave={editMessage}
               onRequestEmptyEditDelete={setEmptyDeleteId}
               onOpenContext={handleOpenSelectedContext}
+              reopenPending={isReopenPending(selectedItem?.item.channelId)}
+              reopenErrored={isReopenErrored(selectedItem?.item.channelId)}
               onSendReply={async ({
                 content,
                 mediaTags,

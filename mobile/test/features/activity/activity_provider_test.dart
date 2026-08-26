@@ -21,6 +21,9 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
   int mentionFetchCount = 0;
   int activeMentionFetches = 0;
   int maxActiveMentionFetches = 0;
+  Completer<void>? hiddenSubscribeGate;
+  bool failNextHiddenSubscribe = false;
+  int hiddenUnsubscribeCount = 0;
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -99,10 +102,36 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
   }) async {
+    // A hidden-DM resurface subscription carries the full channel-message kind
+    // set plus an `#h` tag; the visible-DM sub uses only kind 9. Batching and
+    // teardown assertions look only at the hidden-DM subscriptions.
+    final isHidden =
+        filter.tags.containsKey('#h') &&
+        filter.kinds.length == EventKind.channelMessageEventKinds.length;
+    if (isHidden) {
+      final gate = hiddenSubscribeGate;
+      if (gate != null) await gate.future;
+      if (failNextHiddenSubscribe) {
+        failNextHiddenSubscribe = false;
+        throw StateError('relay rejected hidden-DM subscription');
+      }
+    }
     final subscription = (filter: filter, onEvent: onEvent);
     _subscriptions.add(subscription);
-    return () => _subscriptions.remove(subscription);
+    return () {
+      if (isHidden) hiddenUnsubscribeCount += 1;
+      _subscriptions.remove(subscription);
+    };
   }
+
+  /// The `#h` value lists of every registered hidden-DM subscription, in order.
+  List<List<String>> get hiddenDmSubscriptionBatches => [
+    for (final subscription in _subscriptions)
+      if (subscription.filter.tags.containsKey('#h') &&
+          subscription.filter.kinds.length ==
+              EventKind.channelMessageEventKinds.length)
+        subscription.filter.tags['#h']!,
+  ];
 
   void emit(NostrEvent event) {
     _history.add(event);
@@ -799,6 +828,166 @@ void main() {
     expect(
       container.read(inboxItemsProvider).map((item) => item.id),
       containsAll(['existing', 'newer']),
+    );
+  });
+
+  group('hidden-DM subscription batching', () {
+    const self =
+        '1111111111111111111111111111111111111111111111111111111111111111';
+
+    Set<String> hiddenIds(int count) => {
+      for (var i = 0; i < count; i++) 'dm-${i.toString().padLeft(4, '0')}',
+    };
+
+    ProviderContainer containerFor(
+      _RecordingSessionNotifier session,
+      Set<String> hidden,
+    ) => ProviderContainer(
+      overrides: [
+        relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+        myPubkeyProvider.overrideWithValue(self),
+        relaySessionProvider.overrideWith(() => session),
+        channelsProvider.overrideWith(
+          () => _FixedChannelsNotifier(const <Channel>[], hiddenDmIds: hidden),
+        ),
+      ],
+    );
+
+    test(
+      '128 hidden DMs register a single subscription within the cap',
+      () async {
+        final session = _RecordingSessionNotifier();
+        final container = containerFor(session, hiddenIds(128));
+        addTearDown(container.dispose);
+
+        await container.read(channelsProvider.future);
+        await container.read(activityProvider.future);
+        await _waitFor(() => session.hiddenDmSubscriptionBatches.isNotEmpty);
+
+        final batches = session.hiddenDmSubscriptionBatches;
+        expect(batches, hasLength(1));
+        expect(batches.single, hasLength(128));
+      },
+    );
+
+    test(
+      '129 hidden DMs split into two subscriptions, both within the cap',
+      () async {
+        final session = _RecordingSessionNotifier();
+        final container = containerFor(session, hiddenIds(129));
+        addTearDown(container.dispose);
+
+        await container.read(channelsProvider.future);
+        await container.read(activityProvider.future);
+        await _waitFor(() => session.hiddenDmSubscriptionBatches.length == 2);
+
+        final batches = session.hiddenDmSubscriptionBatches;
+        expect(batches.map((batch) => batch.length), [128, 1]);
+        final all = batches.expand((batch) => batch).toSet();
+        expect(all, hasLength(129));
+        for (final batch in batches) {
+          expect(batch.length, lessThanOrEqualTo(128));
+        }
+      },
+    );
+
+    test('activity on the final batch resurfaces its DM', () async {
+      const alice =
+          '2222222222222222222222222222222222222222222222222222222222222222';
+      final hidden = hiddenIds(129);
+      final target = 'dm-0128';
+      final session = _RecordingSessionNotifier();
+      final reopened = <List<String>>[];
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue(self),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () =>
+                _FixedChannelsNotifier(const <Channel>[], hiddenDmIds: hidden),
+          ),
+          channelMembersProvider(target).overrideWith(
+            (ref) async => [
+              ChannelMember(
+                pubkey: self,
+                role: 'member',
+                joinedAt: DateTime(2026),
+              ),
+              ChannelMember(
+                pubkey: alice,
+                role: 'member',
+                joinedAt: DateTime(2026),
+              ),
+            ],
+          ),
+          dmResurfaceActionProvider.overrideWithValue((pubkeys) async {
+            reopened.add(pubkeys);
+            return target;
+          }),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      await container.read(activityProvider.future);
+      await _waitFor(() => session.hiddenDmSubscriptionBatches.length == 2);
+
+      // The target lives only in the second batch; delivering it exercises
+      // that batch's live subscription.
+      session.emit(
+        NostrEvent(
+          id: 'final-batch-message',
+          pubkey: alice,
+          createdAt: 1_700_000_000,
+          kind: EventKind.streamMessageV2,
+          tags: [
+            ['p', self],
+            ['h', target],
+          ],
+          content: 'Hello again',
+          sig: '',
+        ),
+      );
+
+      await _waitFor(() => reopened.isNotEmpty);
+      expect(reopened.single, [alice]);
+    });
+
+    test('a batch subscription failure does not abort later batches', () async {
+      final session = _RecordingSessionNotifier()
+        ..failNextHiddenSubscribe = true;
+      final container = containerFor(session, hiddenIds(129));
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      await container.read(activityProvider.future);
+      // The first batch throws; the loop continues and registers the second.
+      await _waitFor(() => session.hiddenDmSubscriptionBatches.isNotEmpty);
+
+      final batches = session.hiddenDmSubscriptionBatches;
+      expect(batches, hasLength(1));
+      expect(batches.single, hasLength(1));
+    });
+
+    test(
+      'teardown while batch setup is pending disposes every settled batch',
+      () async {
+        final session = _RecordingSessionNotifier()
+          ..hiddenSubscribeGate = Completer<void>();
+        final container = containerFor(session, hiddenIds(129));
+
+        await container.read(channelsProvider.future);
+        await container.read(activityProvider.future);
+        // Dispose while both batches are parked on the gate: the generation is
+        // superseded, so every batch that later resolves must be torn down.
+        container.dispose();
+        session.hiddenSubscribeGate!.complete();
+        await _waitFor(() => session.hiddenUnsubscribeCount == 2);
+
+        expect(session.hiddenUnsubscribeCount, 2);
+        expect(session.hiddenDmSubscriptionBatches, isEmpty);
+      },
     );
   });
 }

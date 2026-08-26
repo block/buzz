@@ -36,16 +36,19 @@ export function useHiddenDmInboxNavigation({
       ? `${expectedRelayUrl}\u0000${expectedSignerPubkey}`
       : "";
   const pendingChannelIdsRef = React.useRef(new Set<string>());
+  const errorChannelIdsRef = React.useRef(new Set<string>());
   const generationRef = React.useRef(0);
   const [, setPendingVersion] = React.useState(0);
   React.useEffect(() => {
     if (!scopeKey) return;
     generationRef.current += 1;
     pendingChannelIdsRef.current.clear();
+    errorChannelIdsRef.current.clear();
     setPendingVersion((version) => version + 1);
     return () => {
       generationRef.current += 1;
       pendingChannelIdsRef.current.clear();
+      errorChannelIdsRef.current.clear();
     };
   }, [scopeKey]);
 
@@ -57,6 +60,9 @@ export function useHiddenDmInboxNavigation({
       threadRootId?: string | null,
     ) => {
       const generation = generationRef.current;
+      // A retry starts fresh: drop any prior error so the pending state shows
+      // and the error/retry affordance clears until this attempt resolves.
+      errorChannelIdsRef.current.delete(channelId);
       await openHiddenDmInboxContext({
         item,
         channelId,
@@ -70,7 +76,12 @@ export function useHiddenDmInboxNavigation({
         openDm,
         isCurrent: () => generationRef.current === generation,
         onOpenContext,
-        onError: () => toast.error("Could not reopen conversation. Try again."),
+        onError: () => {
+          if (generationRef.current === generation) {
+            errorChannelIdsRef.current.add(channelId);
+          }
+          toast.error("Could not reopen conversation. Try again.");
+        },
         onPendingChange: () => setPendingVersion((version) => version + 1),
       });
     },
@@ -97,6 +108,11 @@ export function useHiddenDmInboxNavigation({
     isReopenPending: React.useCallback(
       (channelId: string | null | undefined) =>
         Boolean(channelId && pendingChannelIdsRef.current.has(channelId)),
+      [],
+    ),
+    isReopenErrored: React.useCallback(
+      (channelId: string | null | undefined) =>
+        Boolean(channelId && errorChannelIdsRef.current.has(channelId)),
       [],
     ),
     handleOpenDirect: React.useCallback(

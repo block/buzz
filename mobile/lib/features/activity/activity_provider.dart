@@ -51,7 +51,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
 
   void Function()? _unsubscribeAddressed;
   void Function()? _unsubscribeDms;
-  void Function()? _unsubscribeHiddenDms;
+  final List<void Function()> _unsubscribeHiddenDms = [];
   Timer? _liveRefreshTimer;
   Future<void>? _refreshInFlight;
   int? _refreshGeneration;
@@ -149,23 +149,58 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
       // the relay only fans channel-scoped events to channel-scoped subs, so an
       // `#h` filter (never `#p`, which the relay treats as global) is required.
       // Hiding never drops membership, so `#h` authorization holds.
-      final hiddenDmIds = ref.read(channelsProvider.notifier).hiddenDmIds;
-      if (hiddenDmIds.isNotEmpty) {
-        final unsubscribeHiddenDms = await session.subscribe(
-          NostrFilter(
-            kinds: EventKind.channelMessageEventKinds,
-            tags: {'#h': hiddenDmIds.toList()},
-            since: since,
-            limit: 100,
-          ),
-          (event) => _handleHiddenDmLiveEvent(event, generation),
-        );
-        if (generation != _subscriptionGeneration) {
-          unsubscribeHiddenDms();
-          return;
+      //
+      // The relay rejects a REQ whose aggregate explicit `#h` values exceed
+      // [kMaxExplicitChannelValues], so the hidden set is split into batches of
+      // at most that size, each its own subscription. All batches are owned by
+      // this generation and torn down together, so an over-limit hidden set no
+      // longer silently disables resurfacing.
+      final hiddenDmIds = ref
+          .read(channelsProvider.notifier)
+          .hiddenDmIds
+          .toList();
+      final hiddenUnsubscribers = <void Function()>[];
+      for (
+        var start = 0;
+        start < hiddenDmIds.length;
+        start += kMaxExplicitChannelValues
+      ) {
+        final end = start + kMaxExplicitChannelValues < hiddenDmIds.length
+            ? start + kMaxExplicitChannelValues
+            : hiddenDmIds.length;
+        final batch = hiddenDmIds.sublist(start, end);
+        try {
+          final unsubscribeHiddenDms = await session.subscribe(
+            NostrFilter(
+              kinds: EventKind.channelMessageEventKinds,
+              tags: {'#h': batch},
+              since: since,
+              limit: 100,
+            ),
+            (event) => _handleHiddenDmLiveEvent(event, generation),
+          );
+          hiddenUnsubscribers.add(unsubscribeHiddenDms);
+        } catch (error) {
+          // One batch's REQ was rejected; keep subscribing the rest so a
+          // partially-rejected hidden set still resurfaces every other batch.
+          if (generation == _subscriptionGeneration) {
+            debugPrint(
+              '[ActivityNotifier] hidden-DM batch subscription failed: $error',
+            );
+          }
         }
-        _unsubscribeHiddenDms = unsubscribeHiddenDms;
       }
+      // A newer generation may have superseded us while a batch's REQ was in
+      // flight; tear down every batch this generation opened so none leak past
+      // the generation that owns them, and never publish into the field the
+      // successor already cleared.
+      if (generation != _subscriptionGeneration) {
+        for (final unsubscribe in hiddenUnsubscribers) {
+          unsubscribe();
+        }
+        return;
+      }
+      _unsubscribeHiddenDms.addAll(hiddenUnsubscribers);
     } catch (error) {
       if (generation == _subscriptionGeneration) {
         debugPrint('[ActivityNotifier] live subscription failed: $error');
@@ -331,8 +366,10 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     _unsubscribeAddressed = null;
     _unsubscribeDms?.call();
     _unsubscribeDms = null;
-    _unsubscribeHiddenDms?.call();
-    _unsubscribeHiddenDms = null;
+    for (final unsubscribe in _unsubscribeHiddenDms) {
+      unsubscribe();
+    }
+    _unsubscribeHiddenDms.clear();
   }
 
   /// Stable identity for the joined DM channel set: null while channels are
