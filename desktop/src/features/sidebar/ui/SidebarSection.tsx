@@ -284,7 +284,6 @@ export function ChannelMenuButton({
   label,
   isActive,
   hasUnread,
-  unreadCount = 0,
   activeWorking,
   isMuted,
   dmParticipants,
@@ -295,7 +294,6 @@ export function ChannelMenuButton({
   label?: string;
   isActive: boolean;
   hasUnread: boolean;
-  unreadCount?: number;
   activeWorking?: ActiveChannelTurnSummary;
   isMuted?: boolean;
   dmParticipants?: SidebarDmParticipant[];
@@ -570,7 +568,6 @@ export function SidebarSection({
                       activeWorking={activeWorkingByChannelId?.get(channel.id)}
                       dmParticipants={dmParticipantsByChannelId?.[channel.id]}
                       hasUnread={unreadChannelIds.has(channel.id)}
-                      unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
                       isMuted={mutedChannelIds?.has(channel.id)}
                       isActive={
                         isActiveChannel && selectedChannelId === channel.id

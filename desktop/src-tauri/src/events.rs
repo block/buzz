@@ -14,7 +14,11 @@ use uuid::Uuid;
 
 mod message_tags;
 
-use message_tags::{append_client_tags, append_sent_from_thread_tag, mention_scope_tag};
+use message_tags::{
+    append_client_tags, append_sent_from_thread_tag, emoji_tags, imeta_tags, mention_reference_tags,
+    mention_scope_tag,
+};
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum content size — matches buzz-sdk (64 KiB).
@@ -76,56 +80,6 @@ fn mention_tags(mentions: &[&str]) -> Result<Vec<Tag>, String> {
         }
     }
     Ok(tags)
-}
-
-fn mention_reference_tags(mentions: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
-    for mention in mentions {
-        if mention.first().map(String::as_str) != Some("mention") {
-            return Err(format!(
-                "mention reference tags must use 'mention' prefix (got {:?})",
-                mention.first()
-            ));
-        }
-        let Some(pubkey) = mention.get(1) else {
-            return Err("mention reference tag missing pubkey".into());
-        };
-        check_pubkey(pubkey)?;
-        tags.push(tag(vec!["mention", &pubkey.to_ascii_lowercase()])?);
-    }
-    Ok(())
-}
-
-/// Validate and append imeta tags. Rejects any tag whose first element is not "imeta"
-/// to prevent injection of arbitrary tags (e.g., forged "h", "e", or "p" tags).
-fn imeta_tags(media_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
-    for mt in media_tags {
-        if mt.first().map(String::as_str) != Some("imeta") {
-            return Err(format!(
-                "media tags must use 'imeta' prefix (got {:?})",
-                mt.first()
-            ));
-        }
-        let parts: Vec<&str> = mt.iter().map(String::as_str).collect();
-        tags.push(Tag::parse(parts).map_err(|e| format!("invalid imeta tag: {e}"))?);
-    }
-    Ok(())
-}
-
-/// Validate and append NIP-30 custom-emoji tags. Mirrors `imeta_tags`: rejects
-/// any tag whose first element is not "emoji" so this path can't be used to
-/// smuggle forged "h"/"e"/"p" tags. Each tag is `["emoji", shortcode, url]`.
-fn emoji_tags(emoji_tags: &[Vec<String>], tags: &mut Vec<Tag>) -> Result<(), String> {
-    for et in emoji_tags {
-        if et.first().map(String::as_str) != Some("emoji") {
-            return Err(format!(
-                "emoji tags must use 'emoji' prefix (got {:?})",
-                et.first()
-            ));
-        }
-        let parts: Vec<&str> = et.iter().map(String::as_str).collect();
-        tags.push(Tag::parse(parts).map_err(|e| format!("invalid emoji tag: {e}"))?);
-    }
-    Ok(())
 }
 
 /// Validate and append `supersedes` reference tags: `["e", "<64-hex-id>", "",

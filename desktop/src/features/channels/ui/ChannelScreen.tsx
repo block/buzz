@@ -35,6 +35,7 @@ import {
 import { buildMessageComposerEditTarget } from "@/features/messages/lib/draftMentionRefs";
 import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMessages";
 import { DeleteMessageConfirmDialog } from "@/features/messages/ui/DeleteMessageConfirmDialog";
+import type { TimelineMessage } from "@/features/messages/types";
 import * as threading from "@/features/messages/lib/threading";
 import { hasPersistedHydratedChannel } from "@/features/messages/lib/channelHeadCache";
 import {
@@ -521,6 +522,14 @@ export function ChannelScreen({
         ? handleToggleReaction
         : undefined,
     [activeChannel, handleToggleReaction],
+  );
+  const handleMessageMarkUnread = React.useCallback(
+    (message: TimelineMessage) => handleMarkMessageUnread(message.id),
+    [handleMarkMessageUnread],
+  );
+  const handleMessageMarkRead = React.useCallback(
+    (message: TimelineMessage) => handleMarkMessageRead(message.id),
+    [handleMarkMessageRead],
   );
   const sendMessageMutateAsync = sendMessageMutation.mutateAsync;
   const handleSendVideoReviewComment = React.useCallback(

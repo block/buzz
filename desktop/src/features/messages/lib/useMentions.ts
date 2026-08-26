@@ -623,7 +623,7 @@ export function useMentions(
       // (see `detectMentionScope`). Nothing goes into the mention maps.
       if (suggestion.kind === "scope") {
         setMentionQuery(null);
-        setMentionSelectedIndex(0);
+        setSelected(0);
         const scopeStartIndex =
           flushedMentionStartIndexRef.current ?? mentionStartIndex;
         flushedMentionStartIndexRef.current = null;

@@ -424,20 +424,6 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   // close-out state (error messages, animation) behaves normally.
   const [hasOpenedForwardDialog, setHasOpenedForwardDialog] =
     React.useState(false);
-  const customEmoji = useCustomEmoji();
-  const quickReactionEmojis = useQuickReactionEmojis(4, customEmoji);
-  const quickReactionItems = React.useMemo(
-    () =>
-      quickReactionEmojis
-        .map((emoji) => ({
-          customEmojiUrl: reactionEmojiUrl(emoji, customEmoji),
-          emoji,
-        }))
-        .filter(
-          (item) => !isCustomEmojiShortcode(item.emoji) || item.customEmojiUrl,
-        ),
-    [customEmoji, quickReactionEmojis],
-  );
   const hasReplyAction = Boolean(onReply);
   const hasReactionAction = Boolean(onReactionSelect);
   const hasForwardAction =

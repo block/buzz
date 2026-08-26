@@ -358,7 +358,7 @@ export function ChannelGroupSection({
   onSortModeChange,
   actionsTestId,
   title,
-  unreadChannelCounts,
+  unreadChannelCounts: _unreadChannelCounts,
   unreadChannelIds,
   sections,
   assignments,
@@ -440,7 +440,6 @@ export function ChannelGroupSection({
                       channel={channel}
                       activeWorking={activeWorkingByChannelId?.get(channel.id)}
                       hasUnread={unreadChannelIds.has(channel.id)}
-                      unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
                       isMuted={mutedChannelIds?.has(channel.id)}
                       isActive={
                         isActiveChannel && selectedChannelId === channel.id
@@ -453,7 +452,6 @@ export function ChannelGroupSection({
                     channel={channel}
                     activeWorking={activeWorkingByChannelId?.get(channel.id)}
                     hasUnread={unreadChannelIds.has(channel.id)}
-                    unreadCount={unreadChannelCounts.get(channel.id) ?? 0}
                     isMuted={mutedChannelIds?.has(channel.id)}
                     isActive={
                       isActiveChannel && selectedChannelId === channel.id
@@ -548,7 +546,7 @@ export function CustomChannelSection({
   isActiveChannel,
   activeWorkingByChannelId,
   selectedChannelId,
-  unreadChannelCounts,
+  unreadChannelCounts: _unreadChannelCounts,
   unreadChannelIds,
   sections,
   assignments,
@@ -744,9 +742,6 @@ export function CustomChannelSection({
                                   channel.id,
                                 )}
                                 hasUnread={unreadChannelIds.has(channel.id)}
-                                unreadCount={
-                                  unreadChannelCounts.get(channel.id) ?? 0
-                                }
                                 isMuted={mutedChannelIds?.has(channel.id)}
                                 isActive={
                                   isActiveChannel &&
