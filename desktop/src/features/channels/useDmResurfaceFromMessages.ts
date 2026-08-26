@@ -8,6 +8,7 @@ import {
 } from "@/shared/api/tauriChannels";
 import { CHANNEL_MESSAGE_EVENT_KINDS } from "@/shared/constants/kinds";
 import { relayEventChannelId } from "./dmResurface";
+import { createHiddenDmResurfaceCoordinator } from "./hiddenDmResurfaceCoordinator";
 import { resurfaceHiddenDmMessage } from "./hiddenDmResurfaceAction";
 import { useHiddenDmIds } from "./useHiddenDmIds";
 
@@ -35,13 +36,6 @@ export function useDmResurfaceFromMessages({
   reopen,
 }: UseDmResurfaceFromMessagesOptions) {
   const hiddenDmIds = useHiddenDmIds(pubkey);
-  // Coalesce per channel: the reopen action is idempotent, so concurrent
-  // messages for the same DM share one in-flight attempt. `retry` records that
-  // a follower event arrived while the attempt was in flight, so a failed
-  // reopen re-runs instead of silently dropping that follower.
-  const pendingChannelsRef = React.useRef(
-    new Map<string, { retry: boolean }>(),
-  );
   const generationRef = React.useRef(0);
   const reopenLatest = React.useEffectEvent(reopen);
 
@@ -56,7 +50,6 @@ export function useDmResurfaceFromMessages({
     const expectedRelayUrl = relayUrl?.trim() ?? "";
     const channelIds = hiddenDmKey.length > 0 ? hiddenDmKey.split(",") : [];
     const generation = ++generationRef.current;
-    pendingChannelsRef.current.clear();
     if (!expectedSignerPubkey || !expectedRelayUrl || channelIds.length === 0) {
       return;
     }
@@ -66,51 +59,33 @@ export function useDmResurfaceFromMessages({
     let unsubscribe: (() => Promise<void>) | undefined;
     const isCurrent = () => !disposed && generationRef.current === generation;
 
-    // Latest event seen per channel drives the in-flight/retry attempt so a
-    // coalesced follower reopens from a real event, not a captured stale one.
-    const latestEventByChannel = new Map<string, RelayEvent>();
-
-    const attempt = async (channelId: string) => {
-      const state = { retry: false };
-      pendingChannelsRef.current.set(channelId, state);
-      try {
-        do {
-          state.retry = false;
-          const event = latestEventByChannel.get(channelId);
-          if (!event) return;
-          try {
-            await resurfaceHiddenDmMessage({
-              event,
-              expectedRelayUrl,
-              expectedSignerPubkey,
-              hiddenDmIds: hiddenDmIdSet,
-              fetchMembers: getChannelMembers,
-              isCurrent,
-              reopen: reopenLatest,
-            });
-            return;
-          } catch (error) {
-            if (isCurrent()) {
-              console.error("Failed to resurface hidden DM", channelId, error);
-            }
-          }
-        } while (state.retry && isCurrent());
-      } finally {
-        pendingChannelsRef.current.delete(channelId);
-      }
-    };
+    // A coordinator owned by this generation: coalescing and cleanup touch only
+    // its private map, so a torn-down generation's in-flight attempt can never
+    // drop a follower coalesced onto the replacement subscription.
+    const coordinator = createHiddenDmResurfaceCoordinator({
+      resurface: (event) =>
+        resurfaceHiddenDmMessage({
+          event,
+          expectedRelayUrl,
+          expectedSignerPubkey,
+          hiddenDmIds: hiddenDmIdSet,
+          fetchMembers: getChannelMembers,
+          isCurrent,
+          reopen: reopenLatest,
+        }),
+      isCurrent,
+      onError: (channelId, error) => {
+        if (isCurrent()) {
+          console.error("Failed to resurface hidden DM", channelId, error);
+        }
+      },
+    });
 
     const handleEvent = (event: RelayEvent) => {
       if (!isCurrent()) return;
       const channelId = relayEventChannelId(event);
       if (!channelId || !hiddenDmIdSet.has(channelId)) return;
-      latestEventByChannel.set(channelId, event);
-      const pending = pendingChannelsRef.current.get(channelId);
-      if (pending) {
-        pending.retry = true;
-        return;
-      }
-      void attempt(channelId);
+      coordinator.handle(channelId, event);
     };
 
     void relayClient

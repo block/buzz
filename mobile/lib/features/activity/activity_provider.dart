@@ -58,9 +58,12 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   bool _refreshQueued = false;
   int _subscriptionGeneration = 0;
   // Per-hidden-channel resurface coalescing. Presence of a key means an attempt
-  // is in flight; its value records whether a follower event arrived while it
-  // was running, so a failed reopen re-runs instead of dropping the follower.
-  final Map<String, bool> _pendingDmResurfaceRetry = {};
+  // is in flight; the entry records the owning subscription generation and
+  // whether a follower event arrived while it was running, so a failed reopen
+  // re-runs instead of dropping the follower. The entry is generation-owned so
+  // a follower on a rebuilt subscription starts its own attempt instead of
+  // coalescing into a suspended old-generation attempt that will never resume.
+  final Map<String, _PendingResurface> _pendingDmResurfaceRetry = {};
   String? _dmResurfaceScope;
 
   @override
@@ -219,18 +222,22 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         !channelsNotifier.hiddenDmIds.contains(channelId)) {
       return;
     }
-    // Coalesce per channel: a concurrent follower for the same DM marks the
-    // in-flight attempt for retry rather than being dropped, so a failed reopen
-    // re-runs instead of leaving the row hidden.
-    if (_pendingDmResurfaceRetry.containsKey(channelId)) {
-      _pendingDmResurfaceRetry[channelId] = true;
+    // Coalesce per channel within a generation: a concurrent follower for the
+    // same DM marks the in-flight attempt for retry rather than being dropped,
+    // so a failed reopen re-runs instead of leaving the row hidden. A follower
+    // whose attempt was started by a superseded generation does not coalesce —
+    // that attempt can never resume, so this generation starts a fresh one.
+    final existing = _pendingDmResurfaceRetry[channelId];
+    if (existing != null && existing.generation == generation) {
+      existing.retry = true;
       return;
     }
-    _pendingDmResurfaceRetry[channelId] = false;
+    final pending = _PendingResurface(generation);
+    _pendingDmResurfaceRetry[channelId] = pending;
 
     try {
       do {
-        _pendingDmResurfaceRetry[channelId] = false;
+        pending.retry = false;
         try {
           final members = await ref.read(
             channelMembersProvider(channelId).future,
@@ -256,10 +263,14 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
             );
           }
         }
-      } while ((_pendingDmResurfaceRetry[channelId] ?? false) &&
-          generation == _subscriptionGeneration);
+      } while (pending.retry && generation == _subscriptionGeneration);
     } finally {
-      _pendingDmResurfaceRetry.remove(channelId);
+      // Only clear the entry if it is still the one this attempt installed; a
+      // newer generation may have replaced it, and stomping that entry would
+      // let its follower be dropped.
+      if (identical(_pendingDmResurfaceRetry[channelId], pending)) {
+        _pendingDmResurfaceRetry.remove(channelId);
+      }
     }
   }
 
@@ -531,6 +542,17 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   Future<void> refresh() async {
     await _queueRefresh(_subscriptionGeneration);
   }
+}
+
+/// A generation-owned, in-flight hidden-DM resurface attempt. `generation` ties
+/// the entry to the subscription that started it so a follower on a rebuilt
+/// subscription never coalesces into a suspended attempt that will never
+/// resume; `retry` records that a follower arrived mid-attempt.
+class _PendingResurface {
+  _PendingResurface(this.generation);
+
+  final int generation;
+  bool retry = false;
 }
 
 final activityProvider =

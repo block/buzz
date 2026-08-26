@@ -524,6 +524,95 @@ void main() {
     ]);
   });
 
+  test(
+    'a follower on a rebuilt subscription reopens after the old attempt retires',
+    () async {
+      const self =
+          '1111111111111111111111111111111111111111111111111111111111111111';
+      const alice =
+          '2222222222222222222222222222222222222222222222222222222222222222';
+      final session = _RecordingSessionNotifier();
+      final reopenAttempts = <String>[];
+      final firstReopenGate = Completer<void>();
+      var reopenCalls = 0;
+      final container = ProviderContainer(
+        overrides: [
+          relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+          myPubkeyProvider.overrideWithValue(self),
+          relaySessionProvider.overrideWith(() => session),
+          channelsProvider.overrideWith(
+            () => _FixedChannelsNotifier(
+              const <Channel>[],
+              hiddenDmIds: const {'hidden-dm'},
+            ),
+          ),
+          channelMembersProvider('hidden-dm').overrideWith(
+            (ref) async => [
+              ChannelMember(
+                pubkey: self,
+                role: 'member',
+                joinedAt: DateTime(2026),
+              ),
+              ChannelMember(
+                pubkey: alice,
+                role: 'member',
+                joinedAt: DateTime(2026),
+              ),
+            ],
+          ),
+          dmResurfaceActionProvider.overrideWithValue((pubkeys) async {
+            reopenCalls += 1;
+            reopenAttempts.add(pubkeys.single);
+            if (reopenCalls == 1) {
+              // Hold attempt A open past the rebuild so the follower lands on a
+              // new generation while A is still suspended.
+              await firstReopenGate.future;
+            }
+            return 'hidden-dm';
+          }),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      await container.read(activityProvider.future);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      NostrEvent hiddenDmEvent(String id) => NostrEvent(
+        id: id,
+        pubkey: alice,
+        createdAt: 1_700_000_000,
+        kind: EventKind.streamMessageV2,
+        tags: const [
+          ['p', self],
+          ['h', 'hidden-dm'],
+        ],
+        content: 'Hello again',
+        sig: '',
+      );
+
+      // Attempt A starts on generation N and suspends inside the reopen.
+      session.emit(hiddenDmEvent('message-a'));
+      await _waitFor(() => reopenCalls == 1);
+
+      // Activity rebuilds (generation N+1) with the pending map preserved, then
+      // a follower lands on the replacement subscription.
+      container.invalidate(activityProvider);
+      await container.read(activityProvider.future);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      session.emit(hiddenDmEvent('message-b'));
+
+      // B owns generation N+1, so it starts its own attempt and reopens even
+      // though A has not yet retired.
+      await _waitFor(() => reopenCalls >= 2);
+
+      // A retires; its cleanup must not delete B's live entry.
+      firstReopenGate.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(reopenAttempts, [alice, alice]);
+    },
+  );
+
   test('a suspended membership read cannot mutate a rebuilt scope', () async {
     const self =
         '1111111111111111111111111111111111111111111111111111111111111111';
