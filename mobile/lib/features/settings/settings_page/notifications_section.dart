@@ -10,6 +10,28 @@ class _NotificationsSection extends ConsumerWidget {
     }
     final community = ref.watch(activeCommunityProvider).value;
     if (community == null) return const SizedBox.shrink();
+    final authorization = ref.watch(buzzPushAuthorizationStatusProvider);
+    final status = authorization.value;
+    final permissionUnavailable = authorization.hasError;
+    final permissionDenied = status == BuzzPushAuthorizationStatus.denied;
+    final showSettingsRecovery =
+        community.pushNotificationsEnabled &&
+        (permissionDenied || permissionUnavailable);
+    final subtitle = !community.pushNotificationsEnabled
+        ? 'Off for this community'
+        : switch (status) {
+            BuzzPushAuthorizationStatus.notDetermined =>
+              'Waiting for iOS notification permission',
+            BuzzPushAuthorizationStatus.denied =>
+              'Enabled in Buzz, but disabled in iOS Settings',
+            BuzzPushAuthorizationStatus.authorized ||
+            BuzzPushAuthorizationStatus.provisional ||
+            BuzzPushAuthorizationStatus.ephemeral =>
+              'Receive message notifications from this community',
+            null when authorization.isLoading =>
+              'Checking iOS notification permission',
+            null => 'Enabled in Buzz; iOS permission status unavailable',
+          };
 
     return AppListCard(
       label: 'Notifications',
@@ -19,7 +41,12 @@ class _NotificationsSection extends ConsumerWidget {
           key: const ValueKey('push-notifications-enabled'),
           icon: LucideIcons.bell,
           title: 'Push notifications',
-          subtitle: 'Receive message notifications from this community',
+          subtitle: subtitle,
+          subtitleStyle: showSettingsRecovery
+              ? context.textTheme.bodySmall?.copyWith(
+                  color: context.colors.error,
+                )
+              : null,
           trailing: Switch.adaptive(
             value: community.pushNotificationsEnabled,
             onChanged: (enabled) => unawaited(
@@ -37,6 +64,15 @@ class _NotificationsSection extends ConsumerWidget {
                 ),
           ),
         ),
+        if (showSettingsRecovery)
+          AppListRow(
+            key: const ValueKey('push-notifications-open-settings'),
+            icon: LucideIcons.settings,
+            title: 'Open iOS Notification Settings',
+            onTap: () => unawaited(
+              ref.read(buzzPushNotificationSettingsOpenerProvider)(),
+            ),
+          ),
       ],
     );
   }

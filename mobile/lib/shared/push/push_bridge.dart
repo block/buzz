@@ -1,13 +1,91 @@
+import 'dart:async';
+
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../community/community.dart';
 import '../deeplink/deep_link.dart';
 import '../relay/relay_provider.dart';
+import '../relay/app_lifecycle_provider.dart';
 import 'push_snapshot.dart';
 
 const _channel = MethodChannel('buzz/push');
+
+enum BuzzPushAuthorizationStatus {
+  notDetermined,
+  denied,
+  authorized,
+  provisional,
+  ephemeral,
+}
+
+typedef BuzzPushAuthorizationStatusReader =
+    Future<BuzzPushAuthorizationStatus> Function();
+typedef BuzzPushNotificationSettingsOpener = Future<bool> Function();
+
+final buzzPushAuthorizationStatusReaderProvider =
+    Provider<BuzzPushAuthorizationStatusReader>((ref) {
+      return readBuzzPushAuthorizationStatus;
+    });
+
+final buzzPushNotificationSettingsOpenerProvider =
+    Provider<BuzzPushNotificationSettingsOpener>((ref) {
+      return openBuzzPushNotificationSettings;
+    });
+
+final buzzPushAuthorizationStatusProvider =
+    AsyncNotifierProvider<
+      BuzzPushAuthorizationStatusNotifier,
+      BuzzPushAuthorizationStatus
+    >(BuzzPushAuthorizationStatusNotifier.new);
+
+class BuzzPushAuthorizationStatusNotifier
+    extends AsyncNotifier<BuzzPushAuthorizationStatus> {
+  @override
+  Future<BuzzPushAuthorizationStatus> build() async {
+    ref.listen(appLifecycleProvider, (previous, next) {
+      if (previous != AppLifecycleState.resumed &&
+          next == AppLifecycleState.resumed) {
+        unawaited(refresh());
+      }
+    });
+    return ref.read(buzzPushAuthorizationStatusReaderProvider)();
+  }
+
+  Future<void> refresh() async {
+    state = const AsyncLoading<BuzzPushAuthorizationStatus>();
+    state = await AsyncValue.guard(
+      ref.read(buzzPushAuthorizationStatusReaderProvider),
+    );
+  }
+}
+
+Future<BuzzPushAuthorizationStatus> readBuzzPushAuthorizationStatus() async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) {
+    return BuzzPushAuthorizationStatus.authorized;
+  }
+  final raw = await _channel.invokeMethod<String>(
+    'notificationAuthorizationStatus',
+  );
+  return switch (raw) {
+    'notDetermined' => BuzzPushAuthorizationStatus.notDetermined,
+    'denied' => BuzzPushAuthorizationStatus.denied,
+    'authorized' => BuzzPushAuthorizationStatus.authorized,
+    'provisional' => BuzzPushAuthorizationStatus.provisional,
+    'ephemeral' => BuzzPushAuthorizationStatus.ephemeral,
+    _ => throw FormatException(
+      'Native push bridge returned unknown authorization status: $raw',
+    ),
+  };
+}
+
+Future<bool> openBuzzPushNotificationSettings() async {
+  if (defaultTargetPlatform != TargetPlatform.iOS) return false;
+  return await _channel.invokeMethod<bool>('openNotificationSettings') ?? false;
+}
 
 /// Latest APNs registration state, including callbacks replayed by iOS after
 /// the Flutter method channel attaches.
@@ -169,9 +247,7 @@ void reportPushCommunitySnapshotError(Object error, StackTrace stackTrace) {
 
 void reportPushLeaseCleanupError(Object error, StackTrace stackTrace) {
   pushLeaseCleanupError.value = error.toString();
-  debugPrint(
-    'Push lease cleanup failed; relay expiry remains the fallback: $error',
-  );
+  debugPrint('Push lease cleanup failed: $error');
   debugPrintStack(stackTrace: stackTrace);
 }
 
