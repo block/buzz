@@ -688,7 +688,7 @@ export class RelayClient {
     if (!g.__buzzRelayBuildLogged) {
       g.__buzzRelayBuildLogged = true;
       void invoke("debug_append_relay_log", {
-        line: "BUILD=dm-notify-diag-v9 (0.5.18-9)",
+        line: "BUILD=dm-notify-diag-v10 (0.5.20-0)",
       }).catch(() => {});
     }
     void invoke("debug_append_relay_log", { line }).catch(() => {});
