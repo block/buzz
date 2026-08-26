@@ -1,4 +1,5 @@
 import 'package:buzz/shared/push/dev_push_lease.dart';
+import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/push/push_bootstrap.dart';
 import 'package:buzz/shared/push/push_subscription.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -78,6 +79,76 @@ void main() {
       isNot(original),
     );
   });
+
+  test('relay capability alone does not activate push without opt-in', () {
+    final disabled = Community.create(
+      name: 'Team',
+      relayUrl: 'wss://relay.example',
+    );
+    final enabled = disabled.copyWith(pushNotificationsEnabled: true);
+
+    expect(
+      buzzPushLifecycleEnabled(
+        community: disabled,
+        descriptor: _descriptor(keyId: 'relay-v1', pubkey: _hex('b')),
+      ),
+      isFalse,
+    );
+    expect(
+      buzzPushLifecycleEnabled(
+        community: enabled,
+        descriptor: _descriptor(keyId: 'relay-v1', pubkey: _hex('b')),
+      ),
+      isTrue,
+    );
+    expect(
+      buzzPushLifecycleEnabled(community: enabled, descriptor: null),
+      isFalse,
+    );
+  });
+
+  test(
+    'relay commit followed by local failure retries at a newer generation',
+    () async {
+      var durableCursor = 0;
+      var relayGeneration = 0;
+      var acceptedGeneration = 0;
+      var failLocalSave = true;
+
+      Future<int> reserve() async => ++durableCursor;
+      Future<void> publish(int generation) async {
+        expect(generation, greaterThan(relayGeneration));
+        relayGeneration = generation;
+      }
+
+      Future<void> markAccepted(int generation) async {
+        if (failLocalSave) {
+          failLocalSave = false;
+          throw StateError('injected local persistence failure');
+        }
+        acceptedGeneration = generation;
+      }
+
+      await expectLater(
+        publishBuzzPushLeaseRecoverably(
+          reserveGeneration: reserve,
+          publish: publish,
+          markAccepted: markAccepted,
+        ),
+        throwsStateError,
+      );
+      expect(relayGeneration, 1);
+      expect(acceptedGeneration, 0);
+
+      await publishBuzzPushLeaseRecoverably(
+        reserveGeneration: reserve,
+        publish: publish,
+        markAccepted: markAccepted,
+      );
+      expect(relayGeneration, 2);
+      expect(acceptedGeneration, 2);
+    },
+  );
 }
 
 BuzzPushLeaseDescriptor _descriptor({

@@ -76,6 +76,24 @@ String buzzPushPublicationAttemptKey({
   buzzPushSubscriptionsFingerprint(subscriptions),
 ].join('|');
 
+@visibleForTesting
+bool buzzPushLifecycleEnabled({
+  required Community? community,
+  required BuzzPushLeaseDescriptor? descriptor,
+}) => community?.pushNotificationsEnabled == true && descriptor != null;
+
+@visibleForTesting
+Future<int> publishBuzzPushLeaseRecoverably({
+  required Future<int> Function() reserveGeneration,
+  required Future<void> Function(int generation) publish,
+  required Future<void> Function(int generation) markAccepted,
+}) async {
+  final generation = await reserveGeneration();
+  await publish(generation);
+  await markAccepted(generation);
+  return generation;
+}
+
 /// Starts the push lifecycle only after authenticated relay connectivity and a
 /// push-capable NIP-11 descriptor are both present.
 class BuzzPushBootstrap extends HookConsumerWidget {
@@ -107,15 +125,20 @@ class BuzzPushBootstrap extends HookConsumerWidget {
     useEffect(
       () {
         if (!_ready(session, config, community, memberPubkey) ||
-            descriptor == null) {
+            !buzzPushLifecycleEnabled(
+              community: community,
+              descriptor: descriptor,
+            )) {
           return null;
         }
-        final attempt = '${community!.id}|${config.baseUrl}';
+        final activeCommunity = community!;
+        final activeDescriptor = descriptor!;
+        final attempt = '${activeCommunity.id}|${config.baseUrl}';
         if (!registrationAttempt.tryBegin(attempt)) return null;
         unawaited(() async {
           try {
             await startBuzzPushRegistrationIfCapable(
-              descriptor,
+              activeDescriptor,
               startRegistration: startBuzzPushRegistration,
             );
           } catch (error, stack) {
@@ -145,17 +168,22 @@ class BuzzPushBootstrap extends HookConsumerWidget {
     useEffect(
       () {
         if (!_ready(session, config, community, memberPubkey) ||
-            descriptor == null ||
+            !buzzPushLifecycleEnabled(
+              community: community,
+              descriptor: descriptor,
+            ) ||
             token == null) {
           return null;
         }
-        final state = community!.pushSubscriptionState;
+        final activeCommunity = community!;
+        final activeDescriptor = descriptor!;
+        final state = activeCommunity.pushSubscriptionState;
         if (state.desired.isEmpty) return null;
         final attempt = buzzPushPublicationAttemptKey(
-          communityId: community.id,
+          communityId: activeCommunity.id,
           relayBaseUrl: config.baseUrl,
           token: token,
-          descriptor: descriptor,
+          descriptor: activeDescriptor,
           subscriptions: state.desired,
         );
         if (!publicationAttempt.tryBegin(attempt)) return null;
@@ -168,7 +196,7 @@ class BuzzPushBootstrap extends HookConsumerWidget {
             final grant = await _publish(
               ref,
               config,
-              community,
+              activeCommunity,
               memberPubkey!,
               relay,
             );
@@ -247,24 +275,25 @@ class BuzzPushBootstrap extends HookConsumerWidget {
     // Relay lease replacement and gateway delegation are independent state
     // machines. Subscription changes advance only the kind-30350 generation;
     // the opaque grant remains reusable until its own authority changes.
-    final leaseGeneration = (state.acceptedGeneration ?? 0) + 1;
-
-    await publishBuzzDevPushLeaseThroughRelay(
-      grant: grant,
-      leaseGeneration: leaseGeneration,
-      descriptor: descriptor,
-      nsec: config.nsec!,
-      memberPubkey: memberPubkey,
-      subscriptions: desired,
-      relay: relay,
+    final notifier = ref.read(communityListProvider.notifier);
+    await publishBuzzPushLeaseRecoverably(
+      reserveGeneration: () =>
+          notifier.reservePushLeaseGeneration(community.id),
+      publish: (leaseGeneration) => publishBuzzDevPushLeaseThroughRelay(
+        grant: grant,
+        leaseGeneration: leaseGeneration,
+        descriptor: descriptor,
+        nsec: config.nsec!,
+        memberPubkey: memberPubkey,
+        subscriptions: desired,
+        relay: relay,
+      ),
+      markAccepted: (leaseGeneration) => notifier.markPushLeaseAccepted(
+        community.id,
+        subscriptions: desired,
+        generation: leaseGeneration,
+      ),
     );
-    await ref
-        .read(communityListProvider.notifier)
-        .markPushLeaseAccepted(
-          community.id,
-          subscriptions: desired,
-          generation: leaseGeneration,
-        );
     return grant;
   }
 }

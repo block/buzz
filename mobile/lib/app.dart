@@ -327,7 +327,9 @@ class App extends HookConsumerWidget {
       ref.watch(observerRelayProvider);
       ref.watch(appLifecycleProvider);
       ref.watch(userStatusCacheProvider);
-      if (ref.watch(currentRelayPushDescriptorProvider).value != null) {
+      if (ref.watch(activeCommunityProvider).value?.pushNotificationsEnabled ==
+              true &&
+          ref.watch(currentRelayPushDescriptorProvider).value != null) {
         ref.watch(pushSubscriptionSyncProvider);
       }
       hasUnreadInbox = ref.watch(_unreadInboxItemCountProvider) > 0;

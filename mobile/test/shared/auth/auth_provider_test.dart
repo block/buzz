@@ -223,8 +223,9 @@ void main() {
             snapshots.add(List.of(communities));
           }),
           communityPushLeaseDeactivatorProvider.overrideWithValue((
-            community,
-          ) async {
+            community, {
+            generation,
+          }) async {
             deactivatedCommunityIds.add(community.id);
           }),
         ],

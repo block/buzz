@@ -1,4 +1,5 @@
 import 'dart:developer' as developer;
+import 'dart:math';
 
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -91,18 +92,24 @@ final _communitySnapshotSyncProvider = Provider<_CommunitySnapshotSync>((ref) {
 });
 
 typedef CommunityPushLeaseDeactivator =
-    Future<void> Function(Community community);
+    Future<void> Function(Community community, {int? generation});
 
 final communityPushLeaseDeactivatorProvider =
     Provider<CommunityPushLeaseDeactivator>((ref) {
-      return (community) => _deactivateCommunityPushLease(community);
+      return (community, {generation}) =>
+          _deactivateCommunityPushLease(community, generation: generation);
     });
 
-Future<void> _deactivateCommunityPushLease(Community community) async {
+Future<void> _deactivateCommunityPushLease(
+  Community community, {
+  int? generation,
+}) async {
   final state = community.pushSubscriptionState;
   final acceptedGeneration = state.acceptedGeneration;
   final nsec = community.nsec;
-  if (acceptedGeneration == null || nsec == null || nsec.isEmpty) {
+  if ((acceptedGeneration == null && generation == null) ||
+      nsec == null ||
+      nsec.isEmpty) {
     return;
   }
   try {
@@ -129,11 +136,12 @@ Future<void> _deactivateCommunityPushLease(Community community) async {
     // Skip over the one renewal generation that could already be in flight
     // when removal begins. Strict relay monotonicity then makes any stale
     // active publication lose to this tombstone.
-    final generation = acceptedGeneration + 2;
+    final tombstoneGeneration =
+        generation ?? (state.generationCursor ?? acceptedGeneration!) + 2;
     await publishBuzzPushLeaseTombstone(
       descriptor: descriptor,
       installationId: installationId,
-      generation: generation,
+      generation: tombstoneGeneration,
       nsec: nsec,
       memberPubkey: memberPubkey,
       submit: ({required kind, required content, required tags, createdAt}) =>
@@ -169,6 +177,7 @@ class _CommunitySnapshotSync {
             community.relayUrl,
             community.pubkey,
             community.nsec,
+            community.pushNotificationsEnabled,
             buzzPushSubscriptionStateFingerprint(
               community.pushSubscriptionState,
             ),
@@ -197,6 +206,17 @@ Future<void> syncStoredCommunitySnapshot(Ref ref) async {
 }
 
 class CommunityListNotifier extends AsyncNotifier<List<Community>> {
+  Future<void> _pushMutationTail = Future.value();
+
+  Future<T> _serializePushMutation<T>(Future<T> Function() operation) {
+    final result = _pushMutationTail.then((_) => operation());
+    _pushMutationTail = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace _) {},
+    );
+    return result;
+  }
+
   @override
   Future<List<Community>> build() async {
     final storage = ref.read(communityStorageProvider);
@@ -297,7 +317,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   Future<void> updateDesiredPushSubscriptions(
     String id,
     List<BuzzPushSubscription> desired,
-  ) async {
+  ) => _serializePushMutation(() async {
     final storage = ref.read(communityStorageProvider);
     final current = state.value ?? await storage.loadAll();
     final index = current.indexWhere((community) => community.id == id);
@@ -319,19 +339,52 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     final updatedList = [...current]..[index] = updated;
     state = AsyncData(updatedList);
     await syncCommunitySnapshot(ref, updatedList);
+  });
+
+  Future<int> reservePushLeaseGeneration(String id) {
+    return _serializePushMutation(() async {
+      final storage = ref.read(communityStorageProvider);
+      final current = state.value ?? await storage.loadAll();
+      final index = current.indexWhere((community) => community.id == id);
+      if (index < 0) throw StateError('Push community is unavailable.');
+
+      final community = current[index];
+      if (!community.pushNotificationsEnabled) {
+        throw StateError('Push notifications are disabled.');
+      }
+      final cursor =
+          community.pushSubscriptionState.generationCursor ??
+          community.pushSubscriptionState.acceptedGeneration ??
+          0;
+      final generation = cursor + 1;
+      final updated = community.copyWith(
+        pushSubscriptionState: community.pushSubscriptionState
+            .withReservedGeneration(generation),
+      );
+      await storage.save(updated);
+      final updatedList = [...current]..[index] = updated;
+      state = AsyncData(updatedList);
+      await syncCommunitySnapshot(ref, updatedList);
+      return generation;
+    });
   }
 
   Future<void> markPushLeaseAccepted(
     String id, {
     required List<BuzzPushSubscription> subscriptions,
     required int generation,
-  }) async {
+  }) => _serializePushMutation(() async {
     final storage = ref.read(communityStorageProvider);
     final current = state.value ?? await storage.loadAll();
     final index = current.indexWhere((community) => community.id == id);
     if (index < 0) return;
 
     final community = current[index];
+    final acceptedGeneration =
+        community.pushSubscriptionState.acceptedGeneration ?? 0;
+    final generationCursor =
+        community.pushSubscriptionState.generationCursor ?? 0;
+    if (generation < max(acceptedGeneration, generationCursor)) return;
     final updated = community.copyWith(
       pushSubscriptionState: community.pushSubscriptionState.withAccepted(
         subscriptions: subscriptions,
@@ -342,6 +395,44 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     final updatedList = [...current]..[index] = updated;
     state = AsyncData(updatedList);
     await syncCommunitySnapshot(ref, updatedList);
+  });
+
+  Future<void> setPushNotificationsEnabled(String id, bool enabled) async {
+    Community? deactivation;
+    int? tombstoneGeneration;
+    await _serializePushMutation(() async {
+      final storage = ref.read(communityStorageProvider);
+      final current = state.value ?? await storage.loadAll();
+      final index = current.indexWhere((community) => community.id == id);
+      if (index < 0) return;
+
+      final community = current[index];
+      if (community.pushNotificationsEnabled == enabled) return;
+      var pushState = community.pushSubscriptionState;
+      if (!enabled &&
+          (pushState.acceptedGeneration != null ||
+              pushState.generationCursor != null)) {
+        final cursor =
+            pushState.generationCursor ?? pushState.acceptedGeneration ?? 0;
+        tombstoneGeneration = cursor + 1;
+        pushState = pushState.withReservedGeneration(tombstoneGeneration!);
+      }
+      final updated = community.copyWith(
+        pushNotificationsEnabled: enabled,
+        pushSubscriptionState: pushState,
+      );
+      await storage.save(updated);
+      final updatedList = [...current]..[index] = updated;
+      state = AsyncData(updatedList);
+      await syncCommunitySnapshot(ref, updatedList);
+      if (!enabled && tombstoneGeneration != null) deactivation = updated;
+    });
+    if (deactivation != null) {
+      await ref.read(communityPushLeaseDeactivatorProvider)(
+        deactivation!,
+        generation: tombstoneGeneration,
+      );
+    }
   }
 
   Future<void> renameCommunity(String id, String name) async {

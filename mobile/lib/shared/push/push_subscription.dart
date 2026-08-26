@@ -185,22 +185,34 @@ class BuzzPushLeaseSubscriptionState {
   /// Monotonic generation of the relay-facing kind-30350 lease.
   final int? acceptedGeneration;
 
+  /// Highest lease generation durably reserved by the client. This advances
+  /// before relay publication so a relay commit followed by a local failure
+  /// cannot make the next retry reuse a stale generation.
+  final int? generationCursor;
+
   const BuzzPushLeaseSubscriptionState.desired({
     this.desired = const [],
     this.accepted,
     this.acceptedGeneration,
+    this.generationCursor,
   }) : authority = BuzzPushLeaseSubscriptionAuthority.desired;
 
   BuzzPushLeaseSubscriptionState.accepted({
     required Iterable<BuzzPushSubscription> desired,
     required Iterable<BuzzPushSubscription> acceptedSubscriptions,
     required this.acceptedGeneration,
+    this.generationCursor,
   }) : authority = BuzzPushLeaseSubscriptionAuthority.accepted,
        desired = List.unmodifiable(desired),
        accepted = List.unmodifiable(acceptedSubscriptions) {
     if (acceptedGeneration == null || acceptedGeneration! <= 0) {
       throw const FormatException(
         'Accepted push authority requires a positive lease generation.',
+      );
+    }
+    if (generationCursor != null && generationCursor! < acceptedGeneration!) {
+      throw const FormatException(
+        'Push lease generation cursor cannot trail the accepted generation.',
       );
     }
   }
@@ -220,12 +232,14 @@ class BuzzPushLeaseSubscriptionState {
           desired: updated,
           accepted: accepted,
           acceptedGeneration: acceptedGeneration,
+          generationCursor: generationCursor,
         ),
       BuzzPushLeaseSubscriptionAuthority.accepted =>
         BuzzPushLeaseSubscriptionState.accepted(
           desired: updated,
           acceptedSubscriptions: accepted!,
           acceptedGeneration: acceptedGeneration,
+          generationCursor: generationCursor,
         ),
     };
   }
@@ -237,7 +251,34 @@ class BuzzPushLeaseSubscriptionState {
     desired: desired,
     acceptedSubscriptions: subscriptions,
     acceptedGeneration: generation,
+    generationCursor: generationCursor == null || generation > generationCursor!
+        ? generation
+        : generationCursor,
   );
+
+  BuzzPushLeaseSubscriptionState withReservedGeneration(int generation) {
+    if (generation <= (generationCursor ?? acceptedGeneration ?? 0)) {
+      throw const FormatException(
+        'Reserved push lease generation must advance monotonically.',
+      );
+    }
+    return switch (authority) {
+      BuzzPushLeaseSubscriptionAuthority.desired =>
+        BuzzPushLeaseSubscriptionState.desired(
+          desired: desired,
+          accepted: accepted,
+          acceptedGeneration: acceptedGeneration,
+          generationCursor: generation,
+        ),
+      BuzzPushLeaseSubscriptionAuthority.accepted =>
+        BuzzPushLeaseSubscriptionState.accepted(
+          desired: desired,
+          acceptedSubscriptions: accepted!,
+          acceptedGeneration: acceptedGeneration,
+          generationCursor: generation,
+        ),
+    };
+  }
 
   Map<String, dynamic> toJson() => {
     'authority': authority.name,
@@ -245,6 +286,7 @@ class BuzzPushLeaseSubscriptionState {
     if (accepted != null)
       'accepted': [for (final subscription in accepted!) subscription.toJson()],
     if (acceptedGeneration != null) 'acceptedGeneration': acceptedGeneration,
+    if (generationCursor != null) 'generationCursor': generationCursor,
   };
 
   factory BuzzPushLeaseSubscriptionState.fromJson(Map<String, dynamic> json) {
@@ -253,6 +295,7 @@ class BuzzPushLeaseSubscriptionState {
       'desired',
       'accepted',
       'acceptedGeneration',
+      'generationCursor',
     }, 'push subscription state');
     final authority = json['authority'];
     final desired = _subscriptionList(
@@ -265,9 +308,15 @@ class BuzzPushLeaseSubscriptionState {
         ? null
         : _subscriptionList(acceptedRaw, 'accepted');
     final acceptedGeneration = json['acceptedGeneration'];
+    final generationCursor = json['generationCursor'];
     if (acceptedGeneration != null && acceptedGeneration is! int) {
       throw const FormatException(
         'Accepted push lease generation must be an integer.',
+      );
+    }
+    if (generationCursor != null && generationCursor is! int) {
+      throw const FormatException(
+        'Push lease generation cursor must be an integer.',
       );
     }
     return switch (authority) {
@@ -275,12 +324,14 @@ class BuzzPushLeaseSubscriptionState {
         desired: desired,
         accepted: accepted,
         acceptedGeneration: acceptedGeneration as int?,
+        generationCursor: generationCursor as int?,
       ),
       'accepted' when accepted != null && acceptedGeneration is int =>
         BuzzPushLeaseSubscriptionState.accepted(
           desired: desired,
           acceptedSubscriptions: accepted,
           acceptedGeneration: acceptedGeneration,
+          generationCursor: generationCursor as int?,
         ),
       'accepted' => throw const FormatException(
         'Accepted push authority requires accepted subscriptions and generations.',

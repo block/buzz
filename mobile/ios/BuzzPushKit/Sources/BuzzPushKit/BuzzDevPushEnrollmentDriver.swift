@@ -61,6 +61,12 @@ public struct BuzzPushEndpointGrantRecord: Codable, Equatable, Sendable {
 public protocol BuzzPushEndpointGrantStore {
   func records() throws -> [BuzzPushEndpointGrantRecord]
   func save(_ record: BuzzPushEndpointGrantRecord) throws
+  func pendingEnrollment(
+    relayOrigin: String,
+    appProfile: String
+  ) throws -> BuzzPushPendingEnrollmentRecord?
+  func savePendingEnrollment(_ record: BuzzPushPendingEnrollmentRecord) throws
+  func removePendingEnrollment(relayOrigin: String, appProfile: String) throws
 }
 
 public enum BuzzDevPushEnrollmentError: Error, LocalizedError, Equatable {
@@ -379,6 +385,20 @@ public final class BuzzDevPushEnrollmentDriver {
     let storedForOrigin = storedRecords.first {
       $0.relayOrigin == relayOrigin.text && $0.appProfile == Self.appProfile
     }
+    var pendingEnrollment = try store.pendingEnrollment(
+      relayOrigin: relayOrigin.text,
+      appProfile: Self.appProfile
+    )
+    if let pending = pendingEnrollment,
+      pending.relayPubkey != relayPubkey || pending.endpointHash != endpointHash
+        || pending.expiresAt <= nowSeconds
+    {
+      try store.removePendingEnrollment(
+        relayOrigin: relayOrigin.text,
+        appProfile: Self.appProfile
+      )
+      pendingEnrollment = nil
+    }
     if let current = storedForOrigin,
       current.relayPubkey == relayPubkey,
       current.endpointHash == endpointHash,
@@ -386,6 +406,10 @@ public final class BuzzDevPushEnrollmentDriver {
       current.expiresAt > nowSeconds + 300
     {
       guard current.relayMetadataPubkey != relayKeys.metadataPubkey else {
+        try store.removePendingEnrollment(
+          relayOrigin: relayOrigin.text,
+          appProfile: Self.appProfile
+        )
         return current
       }
       let refreshed = BuzzPushEndpointGrantRecord(
@@ -402,6 +426,10 @@ public final class BuzzDevPushEnrollmentDriver {
         expiresAt: current.expiresAt
       )
       try store.save(refreshed)
+      try store.removePendingEnrollment(
+        relayOrigin: relayOrigin.text,
+        appProfile: Self.appProfile
+      )
       return refreshed
     }
 
@@ -429,6 +457,10 @@ public final class BuzzDevPushEnrollmentDriver {
         expiresAt: sharedGrant.expiresAt
       )
       try store.save(record)
+      try store.removePendingEnrollment(
+        relayOrigin: relayOrigin.text,
+        appProfile: Self.appProfile
+      )
       return record
     }
 
@@ -452,18 +484,29 @@ public final class BuzzDevPushEnrollmentDriver {
       throw BuzzDevPushEnrollmentError.invalidGatewayURL
     }
 
-    let installation: UUID
-    let expiresAt: Int64
-    if let reusableInstallation,
+    var pending: BuzzPushPendingEnrollmentRecord
+    if let existingPending = pendingEnrollment {
+      pending = existingPending
+    } else if let reusableInstallation,
       let handle = reusableInstallation.gatewayInstallationHandle,
       let existing = UUID(uuidString: handle)
     {
-      installation = existing
-      expiresAt = reusableInstallation.expiresAt > nowSeconds + 300
+      let expiresAt =
+        reusableInstallation.expiresAt > nowSeconds + 300
         ? reusableInstallation.expiresAt
         : renewedExpiration
+      pending = BuzzPushPendingEnrollmentRecord(
+        relayOrigin: relayOrigin.text,
+        relayPubkey: relayPubkey,
+        endpointHash: endpointHash,
+        appProfile: Self.appProfile,
+        expiresAt: expiresAt,
+        installationId: try storedForOrigin?.installationId ?? makeInstallationId(),
+        gatewayInstallationHandle: existing.uuidString.lowercased()
+      )
+      try store.savePendingEnrollment(pending)
     } else {
-      expiresAt = renewedExpiration
+      let expiresAt = renewedExpiration
       let enrollmentChallenge = try await challenge()
       let preparedAttestation = try await appAttest.prepareAttestation()
       let enrollmentClientData = try BuzzPushTranscript.enroll(
@@ -482,12 +525,73 @@ public final class BuzzDevPushEnrollmentDriver {
       guard attestation.keyId == preparedAttestation.keyId else {
         throw BuzzDevPushEnrollmentError.invalidResponse(route: "development attestation")
       }
-      installation = try await enrollInstallation(
-        challenge: enrollmentChallenge,
-        endpoint: endpoint,
+      pending = BuzzPushPendingEnrollmentRecord(
+        relayOrigin: relayOrigin.text,
+        relayPubkey: relayPubkey,
+        endpointHash: endpointHash,
+        appProfile: Self.appProfile,
         expiresAt: expiresAt,
-        attestation: attestation
+        installationId: try storedForOrigin?.installationId ?? makeInstallationId(),
+        challengeId: enrollmentChallenge.id.uuidString.lowercased(),
+        challenge: enrollmentChallenge.value,
+        keyId: attestation.keyId,
+        attestation: attestation.attestation
       )
+      // The exact signed request is durable before the first network attempt.
+      try store.savePendingEnrollment(pending)
+    }
+
+    let installation: UUID
+    if let handle = pending.gatewayInstallationHandle,
+      let existing = UUID(uuidString: handle),
+      handle == existing.uuidString.lowercased()
+    {
+      installation = existing
+    } else {
+      guard let challengeId = pending.challengeId,
+        let challengeUUID = UUID(uuidString: challengeId),
+        challengeId == challengeUUID.uuidString.lowercased(),
+        let challengeValue = pending.challenge,
+        let keyId = pending.keyId,
+        let attestation = pending.attestation
+      else {
+        throw BuzzDevPushEnrollmentError.invalidResponse(
+          route: "pending development enrollment"
+        )
+      }
+      do {
+        installation = try await enrollInstallation(
+          challenge: Challenge(id: challengeUUID, value: challengeValue),
+          endpoint: endpoint,
+          expiresAt: pending.expiresAt,
+          attestation: BuzzDevAttestation(keyId: keyId, attestation: attestation)
+        )
+      } catch BuzzDevPushEnrollmentError.unexpectedStatus(
+        route: "v1/installations", _, actual: 404, _
+      ) where pendingEnrollment != nil {
+        // No installation was committed and the original challenge expired.
+        // Discard the prepared request and start once with a fresh App Attest key.
+        try store.removePendingEnrollment(
+          relayOrigin: relayOrigin.text,
+          appProfile: Self.appProfile
+        )
+        return try await enroll(deviceToken: deviceToken, relayURL: relayURL)
+      }
+      pending = BuzzPushPendingEnrollmentRecord(
+        relayOrigin: pending.relayOrigin,
+        relayPubkey: pending.relayPubkey,
+        endpointHash: pending.endpointHash,
+        appProfile: pending.appProfile,
+        expiresAt: pending.expiresAt,
+        installationId: pending.installationId,
+        gatewayInstallationHandle: installation.uuidString.lowercased(),
+        challengeId: pending.challengeId,
+        challenge: pending.challenge,
+        keyId: pending.keyId,
+        attestation: pending.attestation,
+        delegationGeneration: pending.delegationGeneration
+      )
+      try store.savePendingEnrollment(pending)
     }
 
     let installationHandle = installation.uuidString.lowercased()
@@ -499,9 +603,10 @@ public final class BuzzDevPushEnrollmentDriver {
       }
       .map(\.generation)
       .max()
+    let generationBase = max(currentGeneration ?? 0, pending.delegationGeneration)
     let generation: Int64
-    if let currentGeneration {
-      let (next, overflow) = currentGeneration.addingReportingOverflow(1)
+    if generationBase > 0 {
+      let (next, overflow) = generationBase.addingReportingOverflow(1)
       guard !overflow, next > 0 else {
         throw BuzzDevPushEnrollmentError.generationExhausted
       }
@@ -509,6 +614,23 @@ public final class BuzzDevPushEnrollmentDriver {
     } else {
       generation = 1
     }
+    pending = BuzzPushPendingEnrollmentRecord(
+      relayOrigin: pending.relayOrigin,
+      relayPubkey: pending.relayPubkey,
+      endpointHash: pending.endpointHash,
+      appProfile: pending.appProfile,
+      expiresAt: pending.expiresAt,
+      installationId: pending.installationId,
+      gatewayInstallationHandle: installationHandle,
+      challengeId: pending.challengeId,
+      challenge: pending.challenge,
+      keyId: pending.keyId,
+      attestation: pending.attestation,
+      delegationGeneration: generation
+    )
+    // Reserve before delegation so a committed delegation followed by a local
+    // save failure is retried at a strictly higher generation.
+    try store.savePendingEnrollment(pending)
 
     let delegationChallenge = try await challenge()
     let delegationClientData = try BuzzPushTranscript.delegate(
@@ -519,7 +641,7 @@ public final class BuzzDevPushEnrollmentDriver {
       generation: generation,
       relayPubkey: relayPubkey,
       notBefore: nowSeconds,
-      expiresAt: expiresAt
+      expiresAt: pending.expiresAt
     )
     let assertion = try await appAttest.assertion(clientData: delegationClientData)
     let endpointGrant = try await delegate(
@@ -528,7 +650,7 @@ public final class BuzzDevPushEnrollmentDriver {
       relayPubkey: relayPubkey,
       generation: generation,
       notBefore: nowSeconds,
-      expiresAt: expiresAt,
+      expiresAt: pending.expiresAt,
       assertion: assertion
     )
 
@@ -537,15 +659,19 @@ public final class BuzzDevPushEnrollmentDriver {
       relayPubkey: relayPubkey,
       relayMetadataPubkey: relayKeys.metadataPubkey,
       gatewayInstallationHandle: installationHandle,
-      installationId: try storedForOrigin?.installationId ?? makeInstallationId(),
+      installationId: pending.installationId,
       endpointGrant: endpointGrant,
       endpointHash: endpointHash,
       appProfile: Self.appProfile,
       endpointEpoch: Self.endpointEpoch,
       generation: generation,
-      expiresAt: expiresAt
+      expiresAt: pending.expiresAt
     )
     try store.save(record)
+    try store.removePendingEnrollment(
+      relayOrigin: relayOrigin.text,
+      appProfile: Self.appProfile
+    )
     return record
   }
 

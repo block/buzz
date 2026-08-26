@@ -182,16 +182,18 @@ Future<void> registerBuzzPushCommunitySnapshot(
   try {
     final snapshots = [
       for (final community in communities)
-        BuzzPushCommunitySnapshot(
-          id: community.id,
-          name: community.name,
-          relayUrl: community.relayUrl,
-          pubkey: community.pubkey ?? pubkeyFromNsec(community.nsec),
-          subscriptions: community.pushSubscriptionState.authoritative,
-        ),
+        if (community.pushNotificationsEnabled)
+          BuzzPushCommunitySnapshot(
+            id: community.id,
+            name: community.name,
+            relayUrl: community.relayUrl,
+            pubkey: community.pubkey ?? pubkeyFromNsec(community.nsec),
+            subscriptions: community.pushSubscriptionState.authoritative,
+          ),
     ];
     final signingKeys = <String, String>{};
     for (final community in communities) {
+      if (!community.pushNotificationsEnabled) continue;
       final nsec = community.nsec;
       if (nsec == null || nsec.isEmpty) continue;
       try {

@@ -54,7 +54,7 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
               "keys": [
                 ["id": "current", "pubkey": Self.relayPubkey, "current": true]
               ]
-            ]
+            ],
           ]
         )
       case ("POST", "http://push.example/v1/installations/challenges"):
@@ -158,6 +158,164 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
     XCTAssertEqual(store.saved, [record])
   }
 
+  func testCommittedInstallationRecoversAfterFinalGrantSaveFailure() async throws {
+    let store = MemoryGrantStore(grantSaveFailuresRemaining: 1)
+    let driver = try makeDriver(store: store, appAttest: RecordingAppAttest())
+    var challengeCount = 0
+    var installationCount = 0
+    var delegationCount = 0
+    URLProtocolStub.handler = { request in
+      switch (request.httpMethod, request.url?.absoluteString) {
+      case ("GET", "https://relay.example/"):
+        return Self.response(
+          request,
+          status: 200,
+          json: [
+            "self": Self.relayPubkey,
+            "push": ["keys": [["pubkey": Self.relayPubkey, "current": true]]],
+          ]
+        )
+      case ("POST", "http://push.example/v1/installations/challenges"):
+        challengeCount += 1
+        return Self.response(
+          request,
+          status: 200,
+          json: [
+            "challenge_id": challengeCount == 1 ? Self.firstChallengeId : Self.secondChallengeId,
+            "challenge": Self.challenge,
+            "expires_at": Self.now + 300,
+          ]
+        )
+      case ("POST", "http://push.example/v1/installations"):
+        installationCount += 1
+        return Self.response(
+          request,
+          status: 201,
+          json: [
+            "installation_handle": Self.installationHandle,
+            "endpoint_epoch": 1,
+            "expires_at": Self.expiresAt,
+          ]
+        )
+      case ("POST", "http://push.example/v1/delegations"):
+        delegationCount += 1
+        let body = try Self.body(request)
+        XCTAssertEqual(body["generation"] as? Int, delegationCount)
+        return Self.response(
+          request,
+          status: 201,
+          json: ["endpoint_grant": "opaque-grant-\(delegationCount)"]
+        )
+      default:
+        XCTFail("Unexpected request \(request.url?.absoluteString ?? "nil")")
+        return Self.response(request, status: 500, json: [:])
+      }
+    }
+
+    do {
+      _ = try await driver.enroll(
+        deviceToken: Data((1...32).map(UInt8.init)),
+        relayURL: Self.relayURL
+      )
+      XCTFail("Expected the injected local save failure")
+    } catch {
+      XCTAssertEqual((error as NSError).domain, "MemoryGrantStore")
+    }
+    XCTAssertEqual(store.pending.first?.delegationGeneration, 1)
+
+    let recovered = try await driver.enroll(
+      deviceToken: Data((1...32).map(UInt8.init)),
+      relayURL: Self.relayURL
+    )
+
+    XCTAssertEqual(installationCount, 1)
+    XCTAssertEqual(delegationCount, 2)
+    XCTAssertEqual(recovered.generation, 2)
+    XCTAssertEqual(recovered.endpointGrant, "opaque-grant-2")
+    XCTAssertTrue(store.pending.isEmpty)
+  }
+
+  func testCommittedInstallationRecoversAfterResponseLoss() async throws {
+    let store = MemoryGrantStore()
+    let driver = try makeDriver(store: store, appAttest: RecordingAppAttest())
+    var challengeCount = 0
+    var installationCount = 0
+    var firstInstallationBody: [String: Any]?
+    URLProtocolStub.handler = { request in
+      switch (request.httpMethod, request.url?.absoluteString) {
+      case ("GET", "https://relay.example/"):
+        return Self.response(
+          request,
+          status: 200,
+          json: [
+            "self": Self.relayPubkey,
+            "push": ["keys": [["pubkey": Self.relayPubkey, "current": true]]],
+          ]
+        )
+      case ("POST", "http://push.example/v1/installations/challenges"):
+        challengeCount += 1
+        return Self.response(
+          request,
+          status: 200,
+          json: [
+            "challenge_id": challengeCount == 1 ? Self.firstChallengeId : Self.secondChallengeId,
+            "challenge": Self.challenge,
+            "expires_at": Self.now + 300,
+          ]
+        )
+      case ("POST", "http://push.example/v1/installations"):
+        installationCount += 1
+        let body = try Self.body(request)
+        if installationCount == 1 {
+          firstInstallationBody = body
+          throw URLError(.networkConnectionLost)
+        }
+        XCTAssertTrue(
+          NSDictionary(dictionary: body).isEqual(to: try XCTUnwrap(firstInstallationBody))
+        )
+        return Self.response(
+          request,
+          status: 201,
+          json: [
+            "installation_handle": Self.installationHandle,
+            "endpoint_epoch": 1,
+            "expires_at": Self.expiresAt,
+          ]
+        )
+      case ("POST", "http://push.example/v1/delegations"):
+        return Self.response(
+          request,
+          status: 201,
+          json: ["endpoint_grant": "opaque-grant"]
+        )
+      default:
+        XCTFail("Unexpected request \(request.url?.absoluteString ?? "nil")")
+        return Self.response(request, status: 500, json: [:])
+      }
+    }
+
+    do {
+      _ = try await driver.enroll(
+        deviceToken: Data((1...32).map(UInt8.init)),
+        relayURL: Self.relayURL
+      )
+      XCTFail("Expected the simulated lost installation response")
+    } catch {
+      XCTAssertEqual((error as NSError).domain, NSURLErrorDomain)
+    }
+    XCTAssertNil(store.pending.first?.gatewayInstallationHandle)
+
+    let recovered = try await driver.enroll(
+      deviceToken: Data((1...32).map(UInt8.init)),
+      relayURL: Self.relayURL
+    )
+
+    XCTAssertEqual(challengeCount, 2)
+    XCTAssertEqual(installationCount, 2)
+    XCTAssertEqual(recovered.endpointGrant, "opaque-grant")
+    XCTAssertTrue(store.pending.isEmpty)
+  }
+
   func testRelayOriginPreservesNonDefaultPortWithoutTrailingSlash() async throws {
     let relayURL = URL(string: "wss://relay.example:8443/")!
     let store = MemoryGrantStore()
@@ -217,7 +375,8 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
 
   func testLegacyGrantDecodesWithoutMetadataAuthority() throws {
     let data = Data(
-      #"{"relayOrigin":"wss://relay.example","relayPubkey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","installationId":"000102030405060708090a0b0c0d0e0f","endpointGrant":"opaque","endpointHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","appProfile":"buzz-ios-dogfood","endpointEpoch":1,"generation":1,"expiresAt":1752624000}"#.utf8
+      #"{"relayOrigin":"wss://relay.example","relayPubkey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","installationId":"000102030405060708090a0b0c0d0e0f","endpointGrant":"opaque","endpointHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","appProfile":"buzz-ios-dogfood","endpointEpoch":1,"generation":1,"expiresAt":1752624000}"#
+        .utf8
     )
 
     let record = try JSONDecoder().decode(BuzzPushEndpointGrantRecord.self, from: data)
@@ -700,7 +859,7 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
               ["pubkey": Self.relayPubkey, "current": true],
               ["pubkey": String(repeating: "b", count: 64), "current": true],
             ]
-          ]
+          ],
         ]
       )
     }
@@ -987,13 +1146,44 @@ final class BuzzDevPushEnrollmentDriverTests: XCTestCase {
 
 private final class MemoryGrantStore: BuzzPushEndpointGrantStore {
   var saved: [BuzzPushEndpointGrantRecord]
-  init(records: [BuzzPushEndpointGrantRecord] = []) { saved = records }
+  var pending: [BuzzPushPendingEnrollmentRecord] = []
+  var grantSaveFailuresRemaining: Int
+  init(
+    records: [BuzzPushEndpointGrantRecord] = [],
+    grantSaveFailuresRemaining: Int = 0
+  ) {
+    saved = records
+    self.grantSaveFailuresRemaining = grantSaveFailuresRemaining
+  }
   func records() throws -> [BuzzPushEndpointGrantRecord] { saved }
   func save(_ record: BuzzPushEndpointGrantRecord) throws {
+    if grantSaveFailuresRemaining > 0 {
+      grantSaveFailuresRemaining -= 1
+      throw NSError(domain: "MemoryGrantStore", code: 1)
+    }
     saved.removeAll {
       $0.relayOrigin == record.relayOrigin && $0.appProfile == record.appProfile
     }
     saved.append(record)
+  }
+  func pendingEnrollment(
+    relayOrigin: String,
+    appProfile: String
+  ) throws -> BuzzPushPendingEnrollmentRecord? {
+    pending.first {
+      $0.relayOrigin == relayOrigin && $0.appProfile == appProfile
+    }
+  }
+  func savePendingEnrollment(_ record: BuzzPushPendingEnrollmentRecord) throws {
+    pending.removeAll {
+      $0.relayOrigin == record.relayOrigin && $0.appProfile == record.appProfile
+    }
+    pending.append(record)
+  }
+  func removePendingEnrollment(relayOrigin: String, appProfile: String) throws {
+    pending.removeAll {
+      $0.relayOrigin == relayOrigin && $0.appProfile == appProfile
+    }
   }
 }
 

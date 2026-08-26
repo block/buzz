@@ -150,7 +150,7 @@ Each subscription carries exactly one `class`:
 
 The descriptor's `class_support` is authoritative: a lease naming an unsupported class MUST be rejected at acceptance (`invalid: class not supported`), never silently downgraded. The public Buzz APNs profile sends the one fixed reconnect alert and does not expose relay-selected notification classes to the transport boundary.
 
-Clients MUST NOT register any lease or subscription as a side effect of joining a channel or surface — absent explicit user opt-in the notifiable set is empty.
+Clients MUST NOT register any lease or subscription as a side effect of joining a channel or surface — absent explicit persisted user opt-in the notifiable set is empty. Opt-out MUST stop renewal and publish the higher-generation inactive replacement defined below; platform display authorization is separate state and MUST NOT be treated as the user's Buzz opt-in.
 
 ### Quotas
 
@@ -224,6 +224,8 @@ A future FCM profile MUST define one gateway-owned constant data message with id
 ## Lease and Key Lifecycle
 
 A lease is identified by `(author, kind, d)`. A replacement supersedes the prior lease at the same address only by passing the full acceptance sequence, including winning both NIP-01 addressable ordering and the strictly-increasing generation watermark (check 8). Any rejected replacement — stale by either ordering, or invalid for any other reason — MUST leave the stored event, effective push state, and watermark unchanged.
+
+Before publishing any active replacement or inactive tombstone, a client MUST durably reserve its next generation. A failed or indeterminate publication consumes that local generation; retries advance again. This prevents a successful relay commit followed by a local persistence failure from trapping the client on a generation the relay has already accepted.
 
 An active lease becomes ineffective when its `expiration` passes. Executors MUST NOT match, enqueue, or deliver wakes for an expired lease. Clients SHOULD refresh active leases before expiry; failure to refresh MUST NOT extend the prior lease. Expiry is a safety backstop, not evidence that a platform endpoint has been deleted.
 
@@ -313,6 +315,8 @@ The gateway verifies Apple's attestation chain, configured application identifie
 ```json
 {"installation_handle":"<uuid>","endpoint_epoch":1,"expires_at":<unix-seconds>}
 ```
+
+The client MUST durably journal the exact attested enrollment request before its first send and retain it until delegation state is durable. If that exact request is replayed after the installation commit, the gateway MUST return the same success response after re-verifying the attestation, even though the challenge was already consumed. Idempotency requires exact equality of attested key, profile, endpoint fingerprint, epoch, and expiration, and the recovered public key MUST equal the committed key; any mismatch remains indistinguishable from other authority rejection. This recovery rule grants no authority beyond replaying the already authenticated request.
 
 Invalid attestation is `401 invalid_attestation`; a consumed/expired challenge or a key/token owned by a live installation is `404 not_authorized`. A fresh verified enrollment may replace expired or revoked ownership so an app that missed its renewal window can recover.
 

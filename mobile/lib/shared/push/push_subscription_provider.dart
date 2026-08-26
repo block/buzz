@@ -17,7 +17,12 @@ final pushSubscriptionSyncProvider = Provider<void>((ref) {
   final active = ref.watch(activeCommunityProvider).value;
   final channels = ref.watch(channelsProvider).value;
   final mutes = ref.watch(channelMutesProvider);
-  if (active == null || channels == null || !mutes.isReady) return;
+  if (active == null ||
+      !active.pushNotificationsEnabled ||
+      channels == null ||
+      !mutes.isReady) {
+    return;
+  }
 
   final subscriptions = desiredBuzzPushSubscriptions(
     community: active,

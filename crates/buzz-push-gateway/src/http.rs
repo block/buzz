@@ -208,6 +208,34 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
             Ok(value) => value,
             Err(_) => return error(StatusCode::UNAUTHORIZED, "invalid_attestation"),
         };
+    let fingerprint = endpoint_fingerprint(r.app_profile, &token);
+    match s
+        .authority
+        .matching_installation(
+            &verified.key_id,
+            r.app_profile,
+            fingerprint,
+            r.endpoint_epoch,
+            r.expires_at,
+            now,
+        )
+        .await
+    {
+        Ok(Some(existing)) if existing.app_attest_public_key == verified.public_key => {
+            return (
+                StatusCode::CREATED,
+                Json(InstallationEnrollResponse {
+                    installation_handle: existing.id,
+                    endpoint_epoch: existing.endpoint_epoch,
+                    expires_at: existing.expires_at,
+                }),
+            )
+                .into_response();
+        }
+        Ok(Some(_)) => return error(StatusCode::NOT_FOUND, "not_authorized"),
+        Ok(None) => {}
+        Err(e) => return authority_error(e),
+    }
     if let Err(e) = s
         .authority
         .consume_challenge(r.challenge_id, challenge, now)
@@ -227,7 +255,7 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         assertion_counter: 0,
         profile: r.app_profile,
         token_ciphertext: ciphertext,
-        token_fingerprint: endpoint_fingerprint(r.app_profile, &token),
+        token_fingerprint: fingerprint,
         endpoint_epoch: 1,
         expires_at: r.expires_at,
     };

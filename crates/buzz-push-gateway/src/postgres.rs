@@ -230,6 +230,45 @@ impl AuthorityStore for PostgresAuthorityStore {
             revoked: false,
         })
     }
+    async fn matching_installation(
+        &self,
+        key_id: &[u8],
+        app_profile: AppProfile,
+        token_fingerprint: [u8; 32],
+        endpoint_epoch: i64,
+        expires_at: i64,
+        now: i64,
+    ) -> Result<Option<Installation>, AuthorityError> {
+        let r = sqlx::query("SELECT * FROM push_gateway_installations WHERE app_attest_key_id=$1 AND app_profile=$2 AND token_fingerprint=$3 AND endpoint_epoch=$4 AND expires_at=$5 AND revoked_at IS NULL AND expires_at >= $6")
+            .bind(key_id)
+            .bind(app_profile.as_str())
+            .bind(token_fingerprint.to_vec())
+            .bind(endpoint_epoch)
+            .bind(at(expires_at)?)
+            .bind(at(now)?)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(db)?;
+        r.map(|r| {
+            let id = r.try_get("id").map_err(db)?;
+            Ok(Installation {
+                id,
+                app_attest_key_id: r.try_get("app_attest_key_id").map_err(db)?,
+                app_attest_public_key: r.try_get("app_attest_public_key").map_err(db)?,
+                assertion_counter: u32::try_from(
+                    r.try_get::<i64, _>("assertion_counter").map_err(db)?,
+                )
+                .map_err(|_| AuthorityError::Unavailable)?,
+                profile: profile(r.try_get("app_profile").map_err(db)?)?,
+                token_ciphertext: r.try_get("token_ciphertext").map_err(db)?,
+                token_fingerprint: bytes32(r.try_get("token_fingerprint").map_err(db)?)?,
+                endpoint_epoch: r.try_get("endpoint_epoch").map_err(db)?,
+                expires_at: ts(r.try_get("expires_at").map_err(db)?),
+                revoked: false,
+            })
+        })
+        .transpose()
+    }
     async fn advance_assertion_counter(
         &self,
         id: Uuid,

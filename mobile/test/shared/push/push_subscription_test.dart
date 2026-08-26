@@ -43,15 +43,32 @@ void main() {
     );
   });
 
-  test('persists only the relay-accepted lease generation', () {
+  test('persists accepted and reserved relay lease generations', () {
     final subscription = buildDesiredBuzzPushSubscriptions(myPubkey: me).single;
-    final state = BuzzPushLeaseSubscriptionState.desired(
-      desired: [subscription],
-    ).withAccepted(subscriptions: [subscription], generation: 9);
+    final state =
+        BuzzPushLeaseSubscriptionState.desired(desired: [subscription])
+            .withAccepted(subscriptions: [subscription], generation: 9)
+            .withReservedGeneration(10);
 
     final decoded = BuzzPushLeaseSubscriptionState.fromJson(state.toJson());
     expect(decoded.acceptedGeneration, 9);
+    expect(decoded.generationCursor, 10);
     expect(decoded.toJson(), state.toJson());
+  });
+
+  test('a retry reserves beyond a committed but unrecorded generation', () {
+    final subscription = buildDesiredBuzzPushSubscriptions(myPubkey: me).single;
+    final accepted = BuzzPushLeaseSubscriptionState.desired(
+      desired: [subscription],
+    ).withAccepted(subscriptions: [subscription], generation: 4);
+    final committed = accepted.withReservedGeneration(5);
+
+    final recovered = BuzzPushLeaseSubscriptionState.fromJson(
+      committed.toJson(),
+    ).withReservedGeneration(6);
+
+    expect(recovered.acceptedGeneration, 4);
+    expect(recovered.generationCursor, 6);
   });
 
   test('builds aligned self and unmuted channel subscriptions', () {

@@ -6,6 +6,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
+import 'package:buzz/shared/push/push_subscription.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import 'community_storage_test.dart';
@@ -16,12 +17,14 @@ void main() {
   late ProviderContainer container;
   late List<List<Community>> snapshots;
   late List<String> deactivatedCommunityIds;
+  late List<int?> deactivationGenerations;
 
   setUp(() {
     fakeSecure = FakeSecureStorage();
     communityStorage = CommunityStorage(secure: fakeSecure);
     snapshots = [];
     deactivatedCommunityIds = [];
+    deactivationGenerations = [];
   });
 
   tearDown(() => container.dispose());
@@ -34,9 +37,11 @@ void main() {
           snapshots.add(List.of(communities));
         }),
         communityPushLeaseDeactivatorProvider.overrideWithValue((
-          community,
-        ) async {
+          community, {
+          generation,
+        }) async {
           deactivatedCommunityIds.add(community.id);
+          deactivationGenerations.add(generation);
         }),
       ],
     );
@@ -96,6 +101,178 @@ void main() {
       final communities = await container.read(communityListProvider.future);
       expect(communities, hasLength(1));
       expect(communities.first.name, 'Test');
+    });
+
+    test(
+      'push notifications default off and opt-in survives restart',
+      () async {
+        container = createContainer();
+        await container.read(communityListProvider.future);
+        final community = Community.create(
+          name: 'Test',
+          relayUrl: 'https://test.example.com',
+        );
+        await container
+            .read(communityListProvider.notifier)
+            .addCommunity(community);
+        expect(
+          (await container.read(
+            communityListProvider.future,
+          )).single.pushNotificationsEnabled,
+          isFalse,
+        );
+
+        await container
+            .read(communityListProvider.notifier)
+            .setPushNotificationsEnabled(community.id, true);
+        container.dispose();
+        container = createContainer();
+
+        expect(
+          (await container.read(
+            communityListProvider.future,
+          )).single.pushNotificationsEnabled,
+          isTrue,
+        );
+      },
+    );
+
+    test(
+      'lease retry reserves beyond a locally unaccepted generation',
+      () async {
+        container = createContainer();
+        await container.read(communityListProvider.future);
+        final subscription = BuzzPushSubscription(
+          filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+          notificationClass: 'default',
+        );
+        final subscriptionState = BuzzPushLeaseSubscriptionState.desired(
+          desired: [subscription],
+        ).withAccepted(subscriptions: [subscription], generation: 4);
+        final community =
+            Community.create(
+              name: 'Test',
+              relayUrl: 'https://test.example.com',
+            ).copyWith(
+              pushNotificationsEnabled: true,
+              pushSubscriptionState: subscriptionState,
+            );
+        final notifier = container.read(communityListProvider.notifier);
+        await notifier.addCommunity(community);
+
+        expect(await notifier.reservePushLeaseGeneration(community.id), 5);
+        expect(await notifier.reservePushLeaseGeneration(community.id), 6);
+        final stored = (await communityStorage.loadAll()).single;
+        expect(stored.pushSubscriptionState.acceptedGeneration, 4);
+        expect(stored.pushSubscriptionState.generationCursor, 6);
+      },
+    );
+
+    test('older lease success cannot regress accepted generation', () async {
+      container = createContainer();
+      await container.read(communityListProvider.future);
+      final subscription = BuzzPushSubscription(
+        filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+        notificationClass: 'default',
+      );
+      final community =
+          Community.create(
+            name: 'Test',
+            relayUrl: 'https://test.example.com',
+          ).copyWith(
+            pushNotificationsEnabled: true,
+            pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+              desired: [subscription],
+            ).withAccepted(subscriptions: [subscription], generation: 6),
+          );
+      final notifier = container.read(communityListProvider.notifier);
+      await notifier.addCommunity(community);
+
+      await notifier.markPushLeaseAccepted(
+        community.id,
+        subscriptions: const [],
+        generation: 5,
+      );
+
+      final stored = (await communityStorage.loadAll()).single;
+      expect(stored.pushSubscriptionState.acceptedGeneration, 6);
+      expect(
+        stored.pushSubscriptionState.accepted!.single.toJson(),
+        subscription.toJson(),
+      );
+    });
+
+    test('opt-out tombstones an in-flight first publication', () async {
+      container = createContainer();
+      await container.read(communityListProvider.future);
+      final subscription = BuzzPushSubscription(
+        filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+        notificationClass: 'default',
+      );
+      final community =
+          Community.create(
+            name: 'Test',
+            relayUrl: 'https://test.example.com',
+          ).copyWith(
+            pushNotificationsEnabled: true,
+            pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+              desired: [subscription],
+            ),
+          );
+      final notifier = container.read(communityListProvider.notifier);
+      await notifier.addCommunity(community);
+
+      expect(await notifier.reservePushLeaseGeneration(community.id), 1);
+      await notifier.setPushNotificationsEnabled(community.id, false);
+      await notifier.markPushLeaseAccepted(
+        community.id,
+        subscriptions: [subscription],
+        generation: 1,
+      );
+
+      final stored = (await communityStorage.loadAll()).single;
+      expect(stored.pushNotificationsEnabled, isFalse);
+      expect(stored.pushSubscriptionState.acceptedGeneration, isNull);
+      expect(stored.pushSubscriptionState.generationCursor, 2);
+      expect(deactivationGenerations, [2]);
+    });
+
+    test('opt-out persists first and publishes a higher tombstone', () async {
+      container = createContainer();
+      await container.read(communityListProvider.future);
+      final subscription = BuzzPushSubscription(
+        filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+        notificationClass: 'default',
+      );
+      final community =
+          Community.create(
+            name: 'Test',
+            relayUrl: 'https://test.example.com',
+          ).copyWith(
+            pushNotificationsEnabled: true,
+            pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+              desired: [subscription],
+            ).withAccepted(subscriptions: [subscription], generation: 7),
+          );
+      final notifier = container.read(communityListProvider.notifier);
+      await notifier.addCommunity(community);
+
+      await notifier.setPushNotificationsEnabled(community.id, false);
+
+      final stored = (await communityStorage.loadAll()).single;
+      expect(stored.pushNotificationsEnabled, isFalse);
+      expect(stored.pushSubscriptionState.generationCursor, 8);
+      expect(deactivatedCommunityIds, [community.id]);
+      expect(deactivationGenerations, [8]);
+
+      container.dispose();
+      container = createContainer();
+      expect(
+        (await container.read(
+          communityListProvider.future,
+        )).single.pushNotificationsEnabled,
+        isFalse,
+      );
     });
 
     test('removeCommunity removes from list', () async {

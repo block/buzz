@@ -14,6 +14,7 @@ class Community {
   final String? pubkey;
   final String? nsec;
   final SensitiveActionPolicy sensitiveActionPolicy;
+  final bool pushNotificationsEnabled;
   final BuzzPushLeaseSubscriptionState pushSubscriptionState;
 
   /// Whether invite-created starter channels still need to be recovered.
@@ -27,6 +28,7 @@ class Community {
     this.pubkey,
     this.nsec,
     this.sensitiveActionPolicy = SensitiveActionPolicy.disabledByUser,
+    this.pushNotificationsEnabled = false,
     this.pushSubscriptionState = const BuzzPushLeaseSubscriptionState.desired(),
     this.starterSetupIncomplete = false,
     required this.addedAt,
@@ -59,6 +61,7 @@ class Community {
     Object? pubkey = _sentinel,
     Object? nsec = _sentinel,
     SensitiveActionPolicy? sensitiveActionPolicy,
+    bool? pushNotificationsEnabled,
     BuzzPushLeaseSubscriptionState? pushSubscriptionState,
     bool? starterSetupIncomplete,
   }) {
@@ -70,6 +73,8 @@ class Community {
       nsec: nsec == _sentinel ? this.nsec : nsec as String?,
       sensitiveActionPolicy:
           sensitiveActionPolicy ?? this.sensitiveActionPolicy,
+      pushNotificationsEnabled:
+          pushNotificationsEnabled ?? this.pushNotificationsEnabled,
       pushSubscriptionState:
           pushSubscriptionState ?? this.pushSubscriptionState,
       starterSetupIncomplete:
@@ -85,6 +90,7 @@ class Community {
     if (pubkey != null) 'pubkey': pubkey,
     if (nsec != null) 'nsec': nsec,
     'sensitiveActionPolicy': sensitiveActionPolicy.name,
+    'pushNotificationsEnabled': pushNotificationsEnabled,
     'pushSubscriptionState': pushSubscriptionState.toJson(),
     'starterSetupIncomplete': starterSetupIncomplete,
     'addedAt': addedAt.toIso8601String(),
@@ -100,6 +106,8 @@ class Community {
       (value) => value.name == json['sensitiveActionPolicy'],
       orElse: () => SensitiveActionPolicy.disabledByUser,
     ),
+    pushNotificationsEnabled:
+        json['pushNotificationsEnabled'] as bool? ?? false,
     pushSubscriptionState: json['pushSubscriptionState'] == null
         ? const BuzzPushLeaseSubscriptionState.desired()
         : BuzzPushLeaseSubscriptionState.fromJson(

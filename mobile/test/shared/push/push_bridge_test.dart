@@ -120,6 +120,7 @@ void main() {
             name: 'Community',
             relayUrl: 'wss://relay.example/',
             pubkey: 'd' * 64,
+            pushNotificationsEnabled: true,
             addedAt: DateTime.fromMillisecondsSinceEpoch(0),
           ),
         ],

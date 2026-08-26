@@ -127,6 +127,18 @@ pub trait AuthorityStore: Send + Sync {
         installation: NewInstallation,
         now: i64,
     ) -> Result<(), AuthorityError>;
+    /// Return an exact live installation previously committed for the same
+    /// attested enrollment request. This is the idempotency seam used when a
+    /// client loses the successful response and replays the signed request.
+    async fn matching_installation(
+        &self,
+        app_attest_key_id: &[u8],
+        profile: AppProfile,
+        token_fingerprint: [u8; 32],
+        endpoint_epoch: i64,
+        expires_at: i64,
+        now: i64,
+    ) -> Result<Option<Installation>, AuthorityError>;
     async fn installation(&self, id: Uuid, now: i64) -> Result<Installation, AuthorityError>;
     async fn advance_assertion_counter(
         &self,
@@ -309,6 +321,30 @@ impl AuthorityStore for MemoryAuthorityStore {
             .filter(|i| !i.revoked && i.expires_at >= now)
             .ok_or(AuthorityError::Rejected)?;
         Ok(i.clone())
+    }
+
+    async fn matching_installation(
+        &self,
+        key_id: &[u8],
+        profile: AppProfile,
+        fingerprint: [u8; 32],
+        epoch: i64,
+        expires_at: i64,
+        now: i64,
+    ) -> Result<Option<Installation>, AuthorityError> {
+        let s = self.0.lock().map_err(|_| AuthorityError::Unavailable)?;
+        Ok(s.installations
+            .values()
+            .find(|installation| {
+                !installation.revoked
+                    && installation.expires_at >= now
+                    && installation.app_attest_key_id == key_id
+                    && installation.profile == profile
+                    && installation.token_fingerprint == fingerprint
+                    && installation.endpoint_epoch == epoch
+                    && installation.expires_at == expires_at
+            })
+            .cloned())
     }
 
     async fn advance_assertion_counter(
@@ -600,6 +636,24 @@ mod tests {
             .await
             .unwrap();
         store
+    }
+
+    #[tokio::test]
+    async fn exact_enrollment_replay_recovers_committed_installation() {
+        let store = store().await;
+
+        let recovered = store
+            .matching_installation(&[1], AppProfile::BuzzIosDogfood, [4; 32], 1, 2_000, 1_001)
+            .await
+            .unwrap()
+            .expect("exact replay finds the committed installation");
+
+        assert_eq!(recovered.id, Uuid::from_u128(1));
+        assert!(store
+            .matching_installation(&[1], AppProfile::BuzzIosDogfood, [5; 32], 1, 2_000, 1_001,)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
