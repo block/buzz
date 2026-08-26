@@ -18,6 +18,7 @@ import { toast } from "sonner";
 
 import { buildMessageLink } from "@/features/messages/lib/messageLink";
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
+import { useCustomEmoji } from "@/features/custom-emoji/hooks";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { ReportMessageDialog } from "@/features/moderation/ui/ReportMessageDialog";
 import { MessageModerationMenuItems } from "@/features/moderation/ui/MessageModerationMenuItems";
@@ -25,9 +26,15 @@ import type {
   TimelineMessage,
   TimelineReaction,
 } from "@/features/messages/types";
-import { recordQuickReactionEmoji } from "@/features/messages/ui/useQuickReactionEmojis";
+import {
+  recordQuickReactionEmoji,
+  useQuickReactionEmojis,
+} from "@/features/messages/ui/useQuickReactionEmojis";
+import { reactionEmojiUrl } from "@/shared/api/customEmoji";
 import { cn } from "@/shared/lib/cn";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
+import { emojiDisplayName } from "@/shared/lib/emojiName";
+import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import { KIND_HUDDLE_STARTED } from "@/shared/constants/kinds";
 import { Button } from "@/shared/ui/button";
 import { HashArrowIn } from "@/shared/ui/icons";
@@ -329,6 +336,51 @@ function MoreActionsMenu({
   );
 }
 
+function QuickReactionButton({
+  customEmojiUrl,
+  emoji,
+  onSelect,
+}: {
+  customEmojiUrl?: string;
+  emoji: string;
+  onSelect: (emoji: string) => void;
+}) {
+  const displayName = emojiDisplayName(emoji);
+  const mediaUrl = customEmojiUrl ? rewriteRelayUrl(customEmojiUrl) : null;
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          aria-label={`React with ${displayName}`}
+          className="flex h-8 w-8 items-center justify-center rounded-full text-base leading-none text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+          onClick={() => onSelect(emoji)}
+          title={displayName}
+          type="button"
+        >
+          {mediaUrl ? (
+            <img
+              alt={emoji}
+              className="h-5 w-5 object-contain"
+              draggable={false}
+              src={mediaUrl}
+            />
+          ) : (
+            <span aria-hidden="true" className="translate-y-px">
+              {emoji}
+            </span>
+          )}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent>{displayName}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function isCustomEmojiShortcode(emoji: string) {
+  return emoji.startsWith(":") && emoji.endsWith(":");
+}
+
 export const MessageActionBar = React.memo(function MessageActionBar({
   channelId,
   message,
@@ -372,6 +424,20 @@ export const MessageActionBar = React.memo(function MessageActionBar({
 }) {
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
+  const customEmoji = useCustomEmoji();
+  const quickReactionEmojis = useQuickReactionEmojis(3, customEmoji);
+  const quickReactionItems = React.useMemo(
+    () =>
+      quickReactionEmojis
+        .map((emoji) => ({
+          customEmojiUrl: reactionEmojiUrl(emoji, customEmoji),
+          emoji,
+        }))
+        .filter(
+          (item) => !isCustomEmojiShortcode(item.emoji) || item.customEmojiUrl,
+        ),
+    [customEmoji, quickReactionEmojis],
+  );
   const hasReplyAction = Boolean(onReply);
   const hasReactionAction = Boolean(onReactionSelect);
 
@@ -436,6 +502,19 @@ export const MessageActionBar = React.memo(function MessageActionBar({
     >
       <div className="overflow-hidden rounded-full border border-border/70 bg-background/95 shadow-xs backdrop-blur-sm supports-[backdrop-filter]:bg-background/85">
         <div className="flex items-center gap-0.5 p-1">
+          {hasReactionAction && quickReactionItems.length > 0 ? (
+            <div className="hidden items-center gap-0.5 sm:flex">
+              {quickReactionItems.map(({ customEmojiUrl, emoji }) => (
+                <QuickReactionButton
+                  customEmojiUrl={customEmojiUrl}
+                  emoji={emoji}
+                  key={emoji}
+                  onSelect={handleReactionSelection}
+                />
+              ))}
+            </div>
+          ) : null}
+
           {hasReactionAction ? (
             <Popover
               onOpenChange={setIsReactionPickerOpen}
@@ -481,6 +560,14 @@ export const MessageActionBar = React.memo(function MessageActionBar({
                 />
               </PopoverContent>
             </Popover>
+          ) : null}
+
+          {hasReactionAction && quickReactionItems.length > 0 ? (
+            <div
+              aria-hidden="true"
+              className="mx-0.5 hidden h-4 w-px bg-border/70 sm:block"
+              data-testid="message-action-divider"
+            />
           ) : null}
 
           {hasReplyAction ? (

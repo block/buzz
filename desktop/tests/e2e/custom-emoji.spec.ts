@@ -285,6 +285,30 @@ async function quickReactionStorageContains(
   }, emoji);
 }
 
+test("message quick reaction stays neutral after selecting a shortcut", async ({
+  page,
+}) => {
+  await openGeneral(page);
+
+  const row = reactionTargetRow(page);
+  await expect(row).toBeVisible();
+  await row.hover();
+
+  const quickReactionButton = row.getByRole("button", {
+    name: "React with :+1:",
+  });
+  await expect(quickReactionButton).toBeVisible();
+  await quickReactionButton.click();
+
+  await expect(row.getByLabel("Toggle 👍 reaction")).toBeVisible();
+  await row.hover();
+  await expect(quickReactionButton).not.toHaveAttribute("aria-pressed", "true");
+  await expect(quickReactionButton).not.toHaveClass(SELECTED_ACTION_CLASS);
+  await expect(messageReactionTrigger(row)).not.toHaveClass(
+    SELECTED_ACTION_CLASS,
+  );
+});
+
 test("message reaction action stays neutral after selecting from the picker", async ({
   page,
 }) => {
