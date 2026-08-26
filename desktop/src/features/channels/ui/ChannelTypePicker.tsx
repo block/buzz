@@ -1,6 +1,8 @@
 import { ChevronDown, ClockFading, Hash } from "lucide-react";
 import * as React from "react";
 
+import type { ChannelLifecycle } from "@/features/channels/lib/channelLifecycle";
+import { ProjectChannelIcon } from "@/features/projects/ui/ProjectChannelIcon";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import {
@@ -11,37 +13,57 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 
+const LIFECYCLE_LABEL: Record<ChannelLifecycle, string> = {
+  ongoing: "Ongoing",
+  project: "Project",
+  temporary: "Temporary",
+};
+
+const LIFECYCLE_ICON = {
+  ongoing: Hash,
+  temporary: ClockFading,
+} as const;
+
 export function ChannelTypePicker({
   align = "start",
+  allowProject = false,
   ariaLabel,
   className,
   disabled,
+  lifecycle,
+  onLifecycleChange,
   onOpenChange,
-  onTemporaryChange,
   open,
-  temporary,
   temporaryOptionAriaLabel = "Temporary channel",
   testId,
 }: {
   align?: React.ComponentProps<typeof DropdownMenuContent>["align"];
+  allowProject?: boolean;
   ariaLabel?: string;
   className?: string;
   disabled?: boolean;
+  lifecycle: ChannelLifecycle;
+  onLifecycleChange: (lifecycle: Exclude<ChannelLifecycle, "project">) => void;
   onOpenChange?: (open: boolean) => void;
-  onTemporaryChange: (temporary: boolean) => void;
   open?: boolean;
-  temporary: boolean;
   temporaryOptionAriaLabel?: string;
   testId?: string;
 }) {
   const [internalOpen, setInternalOpen] = React.useState(false);
   const pickerOpen = open ?? internalOpen;
   const setPickerOpen = onOpenChange ?? setInternalOpen;
-  const label = temporary ? "Temporary" : "Ongoing";
-  const Icon = temporary ? ClockFading : Hash;
+  const label = LIFECYCLE_LABEL[lifecycle];
+  const Icon = lifecycle === "project" ? null : LIFECYCLE_ICON[lifecycle];
+  const projectLocked = lifecycle === "project";
 
   function selectType(nextType: string) {
-    onTemporaryChange(nextType === "temporary");
+    if (nextType === "project" || projectLocked) {
+      setPickerOpen(false);
+      return;
+    }
+    if (nextType === "temporary" || nextType === "ongoing") {
+      onLifecycleChange(nextType);
+    }
     setPickerOpen(false);
   }
 
@@ -59,7 +81,11 @@ export function ChannelTypePicker({
           type="button"
           variant="ghost"
         >
-          <Icon className="h-4 w-4" />
+          {Icon ? (
+            <Icon className="h-4 w-4" />
+          ) : (
+            <ProjectChannelIcon className="h-4 w-4" />
+          )}
           {label}
           <ChevronDown className="h-4 w-4 text-muted-foreground/70" />
         </Button>
@@ -71,15 +97,22 @@ export function ChannelTypePicker({
           minWidth: "var(--radix-dropdown-menu-trigger-width)",
         }}
       >
-        <DropdownMenuRadioGroup
-          onValueChange={selectType}
-          value={temporary ? "temporary" : "ongoing"}
-        >
-          <DropdownMenuRadioItem aria-label="Ongoing channel" value="ongoing">
+        <DropdownMenuRadioGroup onValueChange={selectType} value={lifecycle}>
+          {allowProject ? (
+            <DropdownMenuRadioItem aria-label="Project channel" value="project">
+              Project
+            </DropdownMenuRadioItem>
+          ) : null}
+          <DropdownMenuRadioItem
+            aria-label="Ongoing channel"
+            disabled={projectLocked}
+            value="ongoing"
+          >
             Ongoing
           </DropdownMenuRadioItem>
           <DropdownMenuRadioItem
             aria-label={temporaryOptionAriaLabel}
+            disabled={projectLocked}
             value="temporary"
           >
             Temporary

@@ -174,6 +174,28 @@ test("listSidebarProjects owned filter hides contributed projects", () => {
   );
 });
 
+test("listSidebarProjects excludes repository-only legacy read models", () => {
+  const legacy = makeProject({
+    dtag: "legacy-repo",
+    id: `30617:${VIEWER}:legacy-repo`,
+    legacy: true,
+    name: "Legacy repo",
+    owner: VIEWER,
+    projectAddress: `30617:${VIEWER}:legacy-repo`,
+  });
+
+  for (const filter of ["added", "owned"]) {
+    const listed = listSidebarProjects({
+      addedProjectAddresses: new Set([legacy.projectAddress]),
+      currentPubkey: VIEWER,
+      filter,
+      projects: [legacy],
+      sort: "name",
+    });
+    assert.deepEqual(listed, []);
+  }
+});
+
 test("listSidebarProjects owned filter surfaces owned projects never added", () => {
   const owned = makeProject({
     dtag: "owned",

@@ -579,10 +579,7 @@ test("reopening the same entity link reapplies its workspace state", async ({
     name: "Project breadcrumb",
   });
   await breadcrumb.getByRole("button").nth(1).click();
-  await expect(page.getByRole("tab", { name: "Overview" })).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
+  await expect(page.getByTestId("project-channel-home")).toBeVisible();
 
   await emitEntityLink(repoLink);
   await expect(pullRequestsTab).toHaveAttribute("aria-selected", "true");

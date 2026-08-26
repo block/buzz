@@ -1,9 +1,12 @@
+import type { ReactNode } from "react";
+
 import type {
   Channel,
   Identity,
   Profile,
   RelayEvent,
 } from "@/shared/api/types";
+import type { IdleAuxiliaryHeaderControls } from "./IdleAuxiliaryPanel";
 
 export type ChannelScreenProps = {
   activeChannel: Channel | null;
@@ -16,6 +19,13 @@ export type ChannelScreenProps = {
   autoSendDraftKey: string | null;
   currentIdentity?: Identity;
   currentProfile?: Profile;
+  idleAuxiliaryPanel?: ReactNode;
+  idleAuxiliaryHeaderActions?: IdleAuxiliaryHeaderControls;
+  idleAuxiliaryOverridesThread?: boolean;
+  idleAuxiliaryTitle?: string;
+  headerEndActions?: ReactNode;
+  onAddFiles?: () => void;
+  onCloseIdleAuxiliaryPanel?: () => void;
   onCloseForumPost: () => void;
   onSelectForumPost: (postId: string) => void;
   selectedForumPostId: string | null;
