@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 import { after, afterEach, before, test } from "node:test";
 
 import { JSDOM } from "jsdom";
+import { find as findLinks } from "linkifyjs";
 
 const dom = new JSDOM("<!doctype html><html><body></body></html>", {
   url: "http://localhost",
@@ -69,7 +70,7 @@ after(() => dom.window.close());
  */
 async function mountComposerEditor() {
   const React = await import("react");
-  const { act, render } = await import("@testing-library/react");
+  const { act, render, waitFor } = await import("@testing-library/react");
   const { EditorContent } = await import("@tiptap/react");
   const { useRichTextEditor } = await import("./useRichTextEditor.ts");
 
@@ -90,11 +91,19 @@ async function mountComposerEditor() {
   // Tiptap emits `create` from a `setTimeout(…, 0)`, and Link's `onCreate` is
   // what teaches linkify the `buzz` protocol. Paste before that lands and a
   // `buzz://` assertion passes for the wrong reason.
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 30));
-  });
+  await waitFor(() =>
+    assert.ok(editor?.isInitialized, "composer editor never emitted `create`"),
+  );
 
-  assert.ok(editor, "expected the composer editor to be created");
+  // Check that precondition rather than trust the wait. It has to be checked
+  // *after* `create`, never as the poll itself: `find` initialises linkify's
+  // scanner on first call, and `registerCustomProtocol` after that only warns,
+  // so polling on `find` would break the registration it is watching for.
+  assert.equal(
+    findLinks(CHANNEL_HREF)[0]?.href,
+    CHANNEL_HREF,
+    "expected Link's onCreate to register the buzz protocol with linkify",
+  );
   return editor;
 }
 
