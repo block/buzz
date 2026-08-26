@@ -899,6 +899,7 @@ mod request_limit_tests {
     #[tokio::test]
     async fn maximum_valid_enrollment_envelope_reaches_the_handler() {
         let body = maximum_enrollment_body();
+        assert_eq!(MAX_ENROLL_REQUEST_BYTES, 23_896);
         assert!(body.len() > MAX_REQUEST_BYTES);
         assert!(body.len() <= MAX_ENROLL_REQUEST_BYTES);
         let (public, _) = router(state());

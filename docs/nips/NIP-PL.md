@@ -17,7 +17,7 @@ Push Leases
 
 ## Abstract
 
-This NIP defines the **push lease**: a stored, installation-scoped, expiring authorization asking a **push executor** (usually the user's relay) to keep a constrained Nostr filter active after the client's socket closes, and to *wake* a specific application installation through a platform push transport (APNs or FCM) when the filter matches.
+This NIP defines the **push lease**: a stored, installation-scoped, expiring authorization asking a **push executor** (usually the user's relay) to keep a constrained Nostr filter active after the client's socket closes, and to *wake* a specific application installation through a platform push transport (APNs, FCM, optionally UnifiedPush) when the filter matches.
 
 The push payload is a **wake signal** authored entirely by the configured transport service: a fixed reconnect instruction, never relay-supplied bytes, event ids, event content, URLs, ciphertext, or extensible custom data. On wake, the client reconnects and fetches authoritative events over normal `REQ`. Push delivery is lossy and best-effort — duplicates and omissions are both possible; the relay remains the single source of truth. Platform transports are execution profiles for the lease, not the protocol's content plane.
 
@@ -51,8 +51,8 @@ This document uses MUST, MUST NOT, SHOULD, SHOULD NOT, MAY, and RECOMMENDED as d
 - **origin**: the canonical origin identifier the descriptor advertises for a relay/community; the tenant key (see Acceptance and Origin Binding).
 - **wake signal**: the fixed, transport-authored reconnect payload defined in Wake Delivery. It contains no relay-supplied application data.
 - **subscription**: one `{filter, class, ignore?, suppress?}` entry inside a lease.
-- **priority class**: `default` in this profile.
-- **transport profile**: the APNs/FCM-specific execution rules for a lease.
+- **priority class**: one of `silent`, `default`, `time_sensitive`, `urgent`.
+- **transport profile**: the APNs/FCM/UnifiedPush-specific execution rules for a lease.
 
 ## The Lease Event
 
@@ -73,7 +73,7 @@ This document uses MUST, MUST NOT, SHOULD, SHOULD NOT, MAY, and RECOMMENDED as d
 }
 ```
 
-- `d` MUST be generated from at least 128 bits of randomness by the installation, and MUST be distinct per origin — cross-origin unlinkability is a guarantee of this NIP, not a nicety. It MUST NOT contain or be derived from a hardware identifier, advertising identifier, APNs token, FCM registration token, or other transport identifier. Reinstalling the application MUST create a new `d`; transport-token rotation within the same installation MUST retain `d` and replace the existing lease.
+- `d` MUST be generated from at least 128 bits of randomness by the installation, and MUST be distinct per origin — cross-origin unlinkability is a guarantee of this NIP, not a nicety. It MUST NOT contain or be derived from a hardware identifier, advertising identifier, APNs token, FCM registration token, UnifiedPush endpoint, or other transport identifier. Reinstalling the application MUST create a new `d`; transport-token rotation within the same installation MUST retain `d` and replace the existing lease.
 - `expiration` (NIP-40) is REQUIRED and MUST satisfy `now − allowed_skew < expiration ≤ now + max_lease_ttl` at acceptance (`invalid: lease ttl too long` / `invalid: lease already expired`; `max_lease_ttl` descriptor-advertised, default 30 days; RECOMMENDED `allowed_skew` 15 minutes). The executor MUST stop matching once it passes. Inactive (tombstone) replacements carry a public `expiration` under the same bound; it dates the tombstone, not any matching. Expiry is the self-healing backstop for every abuse and leak below.
 - `exec` names the descriptor encryption key the content was produced for (see Executor Discovery).
 - Public tags are exactly one `d`, one `expiration`, one `exec`, and at most one `alt`, each with exactly one value; duplicated tags, extra tags, or extra tag values MUST be rejected. The executor MUST reject a lease carrying filter, kind, author, endpoint, or platform data in public tags.
@@ -87,12 +87,12 @@ This document uses MUST, MUST NOT, SHOULD, SHOULD NOT, MAY, and RECOMMENDED as d
   "v": 1,
   "origin": "<origin id, byte-for-byte from the descriptor>", // tenant binding, verified — never routed on
   "app_profile": "com.example.app/ios",      // selects transport credentials
-  "transport": "apns",                       // "apns" | "fcm"
-  "endpoint": "<opaque transport endpoint>", // APNs or FCM token/capability
+  "transport": "apns",                       // "apns" | "fcm" | "unifiedpush"
+  "endpoint": "<opaque transport endpoint>", // APNs token / FCM token / UP URL
   "generation": 3,                           // strictly increasing per lease address
   "active": true,                            // false = revocation tombstone
   "subscriptions": [
-    { "filter": { "kinds": [9], "#p": ["<self>"] }, "class": "default" },
+    { "filter": { "kinds": [9], "#p": ["<self>"] }, "class": "time_sensitive" },
     { "filter": { "kinds": [9], "#h": ["<channel-uuid>"] }, "class": "default",
       "ignore": [ { "kinds": [9], "authors": ["<noisy-bot>"], "#h": ["<channel-uuid>"] } ],
       "suppress": { "p_tags_max": 20 } }
@@ -146,11 +146,18 @@ Each subscription carries exactly one `class`:
 
 | Class | Meaning | APNs `interruption-level` | Android importance |
 |---|---|---|---|
+| `silent` | Sync-only wake, no alert | not user-visible; see APNs profile | `IMPORTANCE_MIN` |
 | `default` | Standard notification | `active` | `IMPORTANCE_DEFAULT` |
+| `time_sensitive` | Breaks through Focus/DND within OS policy | `time-sensitive` | `IMPORTANCE_HIGH` |
+| `urgent` | Reserved: approval gates | `critical` if entitled, else `time-sensitive` | `IMPORTANCE_HIGH` + full-screen intent where policy allows |
 
-The descriptor's `class_support` is authoritative: a lease naming an unsupported class MUST be rejected at acceptance (`invalid: class not supported`), never silently downgraded. The public Buzz APNs profile sends the one fixed reconnect alert and does not expose relay-selected notification classes to the transport boundary.
+Classes are strictly ordered: `silent` < `default` < `time_sensitive` < `urgent`. When one deduplicated wake covers matches from multiple subscriptions or leases targeting the same endpoint (see Coalescing), the wake's effective class is the highest eligible class among those matches. The descriptor's `class_support` is authoritative: a lease naming a class unsupported for its transport MUST be rejected at acceptance (`invalid: class not supported`), never silently downgraded.
 
-Clients MUST NOT register any lease or subscription as a side effect of joining a channel or surface — absent explicit persisted user opt-in the notifiable set is empty. Opt-out MUST stop renewal and publish the higher-generation inactive replacement defined below; platform display authorization is separate state and MUST NOT be treated as the user's Buzz opt-in.
+The executor MUST restrict `urgent` to the descriptor-advertised allow-list of approval-request kinds whose eligibility is decidable from the public event envelope (`invalid: class not permitted for kind`). Urgent DMs are explicitly out of scope for v1: gift-wrapped DM content is opaque to the executor, so no privacy-safe urgency marker exists yet; a future revision may add one.
+
+`silent` remains a matching preference only. The public Buzz APNs profile sends the one fixed reconnect alert and does not expose relay-selected notification classes to the transport boundary.
+
+Clients MUST NOT register any lease or subscription as a side effect of joining a channel or surface — absent explicit user opt-in the notifiable set is empty.
 
 ### Quotas
 
@@ -169,8 +176,10 @@ Until this draft has an upstream NIP number, executors MUST NOT advertise it in 
     "app_profiles": [ { "id": "com.example.app/ios", "transport": "apns" },
                       { "id": "com.example.app/android", "transport": "fcm" } ],
     "push_kinds": [9, 1059, 40007, 46010, 7],
+    "urgent_kinds": [46010],
     "h_grammar": "uuid-v4-lowercase",
-    "class_support": { "apns": ["default"], "fcm": ["default"] },
+    "class_support": { "apns": ["silent","default","time_sensitive","urgent"],
+                       "fcm": ["silent","default","time_sensitive","urgent"] },
     "limitation": {
       "max_lease_ttl": 2592000,
       "max_leases_per_pubkey": 16,
@@ -183,9 +192,9 @@ Until this draft has an upstream NIP number, executors MUST NOT advertise it in 
 }
 ```
 
-A descriptor is valid only if: exactly one key is marked `current` and key ids are unique; app-profile ids are unique; `endpoint` is an `https://` URL; and every `class_support` value comes from the class registry in this NIP. Clients MUST treat a descriptor failing these checks as absence of push support.
+A descriptor is valid only if: exactly one key is marked `current` and key ids are unique; app-profile ids are unique; `endpoint` is an `https://` URL; `urgent_kinds ⊆ push_kinds`; and every `class_support` value comes from the class registry in this NIP. Clients MUST treat a descriptor failing these checks as absence of push support.
 
-The executor URL and credentials come from the descriptor, never from the lease. A lease cannot point the executor at an arbitrary HTTP endpoint; this removes the callback-amplification class of attack entirely.
+The executor URL and credentials come from the descriptor, never from the lease. A lease cannot point the executor at an arbitrary HTTP endpoint; this removes the callback-amplification class of attack entirely. Executors MUST NOT dereference a client-supplied `endpoint` URL except as the selected transport profile explicitly defines (UnifiedPush is the only profile whose endpoint is a URL, and it is validated per that profile before use).
 
 Leases MUST be author-only reads, as specified in Acceptance and Origin Binding, following the NIP-ER access pattern.
 
@@ -221,11 +230,13 @@ The APNs application body is the exact UTF-8 byte constant `{"aps":{"alert":{"bo
 
 A future FCM profile MUST define one gateway-owned constant data message with identical noninterference semantics. Until that constant and its wire tests are registered, FCM is not a conforming v1 public-gateway profile.
 
+### UnifiedPush (optional)
+
+UnifiedPush is not a conforming public-gateway profile in v1 because arbitrary distributor endpoints and message bodies do not meet the fixed-payload authority boundary. A future profile requires a separately registered constant body and hostile-endpoint analysis.
+
 ## Lease and Key Lifecycle
 
 A lease is identified by `(author, kind, d)`. A replacement supersedes the prior lease at the same address only by passing the full acceptance sequence, including winning both NIP-01 addressable ordering and the strictly-increasing generation watermark (check 8). Any rejected replacement — stale by either ordering, or invalid for any other reason — MUST leave the stored event, effective push state, and watermark unchanged.
-
-Before publishing any active replacement or inactive tombstone, a client MUST durably reserve its next generation. A failed or indeterminate publication consumes that local generation; retries advance again. This prevents a successful relay commit followed by a local persistence failure from trapping the client on a generation the relay has already accepted.
 
 An active lease becomes ineffective when its `expiration` passes. Executors MUST NOT match, enqueue, or deliver wakes for an expired lease. Clients SHOULD refresh active leases before expiry; failure to refresh MUST NOT extend the prior lease. Expiry is a safety backstop, not evidence that a platform endpoint has been deleted.
 
@@ -266,9 +277,9 @@ The opaque string returned as `endpoint_grant` by `POST /v1/delegations` is the 
 
 ### Common HTTP and value rules
 
-All routes below accept only `POST`. Clients MUST send `Content-Type: application/json`; bodies are UTF-8 JSON and MUST be at most 8192 bytes. Every request object is closed: unknown members, duplicate members at any depth, missing or incorrectly typed members, trailing non-whitespace data, or a `v` other than integer `1` are `400 {"error":"invalid_request"}`. Integers are signed JSON integers in the ranges stated below. Unix times are integer seconds. UUIDs use the canonical lowercase hyphenated representation. Relay pubkeys are exactly 64 lowercase hexadecimal characters. APNs endpoints are non-empty, even-length lowercase hexadecimal strings encoding at most 512 bytes. Challenges are exactly 32 bytes encoded as unpadded URL-safe base64. `key_id`, `attestation`, and `assertion` use padded or unpadded standard base64 as accepted by Apple's App Attest API; decoded key ids are exactly 32 bytes, attestations are 1..16384 bytes, and assertions are 1..1024 bytes. An `endpoint_grant`, including its key-id prefix, MUST be at most 4096 bytes.
+All routes below accept only `POST`. Clients MUST send `Content-Type: application/json`; bodies are UTF-8 JSON and MUST be at most 8192 bytes, except `POST /v1/installations`, whose body MUST be at most 23896 bytes. That installation-only ceiling is derived from the maximum permitted base64-encoded 16384-byte App Attest object, the maximum 512-byte APNs endpoint encoded as hex, and 1024 bytes for the remaining closed envelope. A body over its applicable limit is rejected with HTTP `413` before JSON parsing. Every request object is closed: unknown members, duplicate members at any depth, missing or incorrectly typed members, trailing non-whitespace data, or a `v` other than integer `1` are `400 {"error":"invalid_request"}`. Integers are signed JSON integers in the ranges stated below. Unix times are integer seconds. UUIDs use the canonical lowercase hyphenated representation. Relay pubkeys are exactly 64 lowercase hexadecimal characters. APNs endpoints are non-empty, even-length lowercase hexadecimal strings encoding at most 512 bytes. Challenges are exactly 32 bytes encoded as unpadded URL-safe base64. `key_id`, `attestation`, and `assertion` use padded or unpadded standard base64 as accepted by Apple's App Attest API; decoded key ids are exactly 32 bytes, attestations are 1..16384 bytes, and assertions are 1..1024 bytes. An `endpoint_grant`, including its key-id prefix, MUST be at most 4096 bytes.
 
-Successful and error responses are UTF-8 `application/json`. Closed error bodies are `{"error":"invalid_request"}`, `{"error":"invalid_attestation"}`, `{"error":"not_authorized"}`, `{"error":"invalid_auth"}`, `{"error":"invalid_grant"}`, `{"error":"temporarily_unavailable"}`, `{"error":"configuration_fault"}`, or `{"error":"not_ready"}`. Authority/custody/quota rejection MUST NOT reveal whether an installation, delegation, or endpoint exists. In particular, delivery grant/authority/replay/quota failures collapse to `404 invalid_grant`; storage failures use `503 temporarily_unavailable`.
+Handler responses are UTF-8 `application/json`. Closed error bodies are `{"error":"invalid_request"}`, `{"error":"invalid_attestation"}`, `{"error":"not_authorized"}`, `{"error":"invalid_auth"}`, `{"error":"invalid_grant"}`, `{"error":"rate_limited"}`, `{"error":"temporarily_unavailable"}`, `{"error":"configuration_fault"}`, or `{"error":"not_ready"}`. Authority, custody, and quota rejection MUST NOT reveal whether an installation, delegation, or endpoint exists. Delivery grant, authority, and replay failures collapse to `404 invalid_grant`; endpoint quota exhaustion uses `429 rate_limited`; storage failures use `503 temporarily_unavailable`.
 
 ### Exact App Attest transcript construction
 
@@ -366,7 +377,7 @@ Transcript domain `buzz.push.revoke-delegation.v1`; ordered object:
 {"v":1,"audience":"https://push.buzz.xyz/v1/delegations/revoke","challenge_id":"<uuid>","challenge":"<challenge>","installation_handle":"<uuid>","relay_pubkey":"<hex>","generation":<integer>}
 ```
 
-The supplied generation MUST equal the current delegation generation. The gateway atomically compares it against the locked delegation row, marks that delegation revoked, and retains the same generation as its watermark. A stale or future generation is rejected without changing the delegation. Any later delegation for the same `(installation_handle, relay_pubkey)` MUST use a strictly greater generation. Success is `200 {"status":"revoked"}`.
+The generation identifies the current delegation generation. Success is `200 {"status":"revoked"}`.
 
 `POST /v1/installations/revoke` request:
 
@@ -402,12 +413,11 @@ Responses:
 - `503 {"error":"configuration_fault"}` — provider configuration fault; request reservation released after processing.
 - `400 {"error":"invalid_request"}` — malformed request or permanent APNs request fault; a provider-reached permanent fault is terminal.
 - `401 {"error":"invalid_auth"}` — absent or invalid NIP-98 authorization.
-- `404 {"error":"invalid_grant"}` — capability, signer, authority, replay, expiry, or quota rejection.
+- `404 {"error":"invalid_grant"}` — capability, signer, authority, replay, or expiry rejection.
+- `429 {"error":"rate_limited"}` — endpoint delivery quota exhausted.
 - `503 {"error":"temporarily_unavailable"}` — durable authority/custody/disposition failure.
 
-The gateway performs one APNs request per admitted delivery attempt. The
-application body is always the exact constant registered in the APNs transport
-profile above; no request or grant field enters it.
+The gateway performs one APNs request, except that an APNs expired-provider-token response permits one credential refresh and one retry. The application body is always the exact constant registered in the APNs transport profile above; no request or grant field enters it.
 
 ## Implementation Notes (Buzz, non-normative)
 
@@ -437,6 +447,6 @@ Zombie leases (e.g. `#h` after leaving a channel) are neutralized by match-time 
 - `kind:30350`: push lease (addressable)
 - `exec` tag: executor encryption-key identifier for `kind:30350`
 - NIP-11 `supported_extensions`: contains `"nip-pl"` pre-numbering; descriptor object `push` as specified in Executor Discovery
-- Classes: `default`
+- Classes: `silent`, `default`, `time_sensitive`, `urgent`
 - `h_grammar` values: `"uuid-v4-lowercase"` (initial entry; origins may register additional grammars with this NIP)
 - Public APNs gateway profile: base URL `https://push.buzz.xyz`; app profile `buzz-ios-dogfood`; wire version `1`
