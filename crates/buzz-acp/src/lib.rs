@@ -13,6 +13,10 @@ mod queue;
 mod relay;
 mod setup_mode;
 mod usage;
+// Isolated workflow-delivery verifier (node E). Pure verification only; no
+// production caller exists yet — the capability-gated runtime (node F) wires
+// it. `pub` so the module is part of the crate's checked/tested surface.
+pub mod verifier;
 
 pub use usage::TurnUsage;
 
