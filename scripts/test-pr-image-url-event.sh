@@ -27,4 +27,16 @@ GITHUB_EVENT_PATH="$test_tmp/good-event.json" "$checker"
 jq -n '{pull_request: {body: null}}' >"$test_tmp/empty-event.json"
 GITHUB_EVENT_PATH="$test_tmp/empty-event.json" "$checker"
 
+jq -n '{workflow_dispatch: {}}' >"$test_tmp/non-pr-event.json"
+if GITHUB_EVENT_PATH="$test_tmp/non-pr-event.json" "$checker" \
+  >"$test_tmp/non-pr-output" 2>&1; then
+  echo "PR event checker accepted an event without a pull_request object" >&2
+  exit 1
+fi
+expected_non_pr_error="error: event does not contain a pull_request object"
+if [[ "$(<"$test_tmp/non-pr-output")" != "$expected_non_pr_error" ]]; then
+  echo "PR event checker did not emit the expected non-PR event error" >&2
+  exit 1
+fi
+
 echo "PR image URL event test passed"

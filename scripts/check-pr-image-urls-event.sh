@@ -10,10 +10,14 @@ script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 markdown_file=$(mktemp)
 trap 'rm -f "$markdown_file"' EXIT
 
+if ! jq -e '(.pull_request | type) == "object"' "$GITHUB_EVENT_PATH" \
+  >/dev/null 2>&1; then
+  echo "error: event does not contain a pull_request object" >&2
+  exit 1
+fi
+
 jq -er '
-  if (.pull_request | type) != "object" then
-    error("event does not contain a pull_request object")
-  elif .pull_request.body == null then
+  if .pull_request.body == null then
     ""
   elif (.pull_request.body | type) == "string" then
     .pull_request.body

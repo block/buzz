@@ -2,7 +2,7 @@ name: PR Image URLs
 
 on:
   pull_request_target:
-    types: [opened, edited, reopened, synchronize]
+    types: [opened, edited, reopened]
 
 permissions:
   contents: read
