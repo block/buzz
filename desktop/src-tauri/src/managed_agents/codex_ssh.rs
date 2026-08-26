@@ -1,10 +1,10 @@
 use std::{
-    collections::HashMap,
-    io::Read,
+    collections::{HashMap, VecDeque},
+    io::{Read, Write},
     net::{TcpListener, TcpStream},
     path::PathBuf,
     process::{Child, Command, Stdio},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::Duration,
 };
@@ -12,7 +12,19 @@ use std::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use super::codex_tasks::CodexTaskSummary;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSshConfigHost {
+    pub alias: String,
+    pub hostname: String,
+    pub username: String,
+    pub port: u16,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,7 +33,8 @@ pub struct CodexSshConnectRequest {
     #[serde(default = "default_ssh_port")]
     pub port: u16,
     pub username: String,
-    pub identity_file: PathBuf,
+    #[serde(default)]
+    pub identity_file: Option<PathBuf>,
     #[serde(default = "default_remote_app_server_port")]
     pub remote_app_server_port: u16,
     #[serde(default)]
@@ -45,7 +58,8 @@ pub struct CodexSshTaskQueryRequest {
     #[serde(default = "default_ssh_port")]
     pub port: u16,
     pub username: String,
-    pub identity_file: PathBuf,
+    #[serde(default)]
+    pub identity_file: Option<PathBuf>,
     #[serde(default)]
     pub remote_shell: String,
 }
@@ -75,11 +89,140 @@ fn default_remote_app_server_port() -> u16 {
     51919
 }
 
+pub fn list_config_hosts() -> Result<Vec<CodexSshConfigHost>, String> {
+    let home =
+        dirs::home_dir().ok_or_else(|| "could not find the user home directory".to_string())?;
+    let config_path = home.join(".ssh").join("config");
+    let config = match std::fs::read_to_string(&config_path) {
+        Ok(config) => config,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("failed to read {}: {error}", config_path.display())),
+    };
+    let mut aliases = Vec::new();
+    for raw_line in config.lines() {
+        let line = raw_line.split('#').next().unwrap_or_default().trim();
+        let mut parts = line.split_whitespace();
+        if !parts
+            .next()
+            .is_some_and(|key| key.eq_ignore_ascii_case("host"))
+        {
+            continue;
+        }
+        for alias in parts {
+            if !alias.contains(['*', '!', '?']) && !aliases.iter().any(|value| value == alias) {
+                aliases.push(alias.to_string());
+            }
+        }
+    }
+    let ssh = if cfg!(windows) { "ssh.exe" } else { "ssh" };
+    let mut hosts = Vec::new();
+    for alias in aliases {
+        let mut command = Command::new(ssh);
+        hide_console_window(&mut command);
+        let output = command
+            .args(["-G", &alias])
+            .output()
+            .map_err(|error| format!("failed to inspect SSH config: {error}"))?;
+        if !output.status.success() {
+            continue;
+        }
+        let resolved = String::from_utf8_lossy(&output.stdout);
+        let value = |name: &str| {
+            resolved.lines().find_map(|line| {
+                let (key, value) = line.split_once(' ')?;
+                key.eq_ignore_ascii_case(name)
+                    .then(|| value.trim().to_string())
+            })
+        };
+        hosts.push(CodexSshConfigHost {
+            hostname: value("hostname").unwrap_or_else(|| alias.clone()),
+            username: value("user").unwrap_or_default(),
+            port: value("port")
+                .and_then(|port| port.parse().ok())
+                .unwrap_or(22),
+            alias,
+        });
+    }
+    Ok(hosts)
+}
+
 fn is_powershell(shell: &str) -> bool {
     matches!(
         shell.trim().to_ascii_lowercase().as_str(),
         "powershell" | "pwsh" | "windows"
     )
+}
+
+fn hide_console_window(command: &mut Command) {
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+}
+
+fn usable_identity_file(path: Option<&PathBuf>) -> Option<&PathBuf> {
+    path.filter(|value| !value.as_os_str().is_empty())
+}
+
+fn app_server_ready(local_port: u16) -> bool {
+    let address = format!("127.0.0.1:{local_port}");
+    let Ok(address) = address.parse() else {
+        return false;
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(300)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    if stream
+        .write_all(b"GET /readyz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut response = [0_u8; 256];
+    let Ok(read) = stream.read(&mut response) else {
+        return false;
+    };
+    let response = String::from_utf8_lossy(&response[..read]);
+    response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200")
+}
+
+const SSH_STDERR_LIMIT: usize = 16 * 1024;
+
+fn capture_stderr(stderr: std::process::ChildStderr) -> Arc<Mutex<VecDeque<u8>>> {
+    let captured = Arc::new(Mutex::new(VecDeque::with_capacity(SSH_STDERR_LIMIT)));
+    let writer = Arc::clone(&captured);
+    thread::spawn(move || {
+        let mut stderr = stderr;
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let Ok(read) = stderr.read(&mut chunk) else {
+                break;
+            };
+            if read == 0 {
+                break;
+            }
+            let Ok(mut buffer) = writer.lock() else {
+                break;
+            };
+            buffer.extend(&chunk[..read]);
+            while buffer.len() > SSH_STDERR_LIMIT {
+                buffer.pop_front();
+            }
+        }
+    });
+    captured
+}
+
+fn captured_stderr_text(captured: Option<&Arc<Mutex<VecDeque<u8>>>>) -> String {
+    let Some(captured) = captured else {
+        return String::new();
+    };
+    let Ok(mut buffer) = captured.lock() else {
+        return String::new();
+    };
+    String::from_utf8_lossy(buffer.make_contiguous())
+        .trim()
+        .to_string()
 }
 
 fn tunnels() -> &'static Mutex<HashMap<String, (CodexSshRuntimeStatus, Child)>> {
@@ -92,11 +235,13 @@ fn validate(request: &CodexSshConnectRequest) -> Result<(), String> {
     if request.host.trim().is_empty() || request.username.trim().is_empty() {
         return Err("SSH host and username are required".to_string());
     }
-    if !request.identity_file.is_file() {
-        return Err(format!(
-            "SSH identity file does not exist: {}",
-            request.identity_file.display()
-        ));
+    if let Some(identity_file) = usable_identity_file(request.identity_file.as_ref()) {
+        if !identity_file.is_file() {
+            return Err(format!(
+                "SSH identity file does not exist: {}",
+                identity_file.display()
+            ));
+        }
     }
     Ok(())
 }
@@ -105,18 +250,24 @@ fn ssh_capture(request: &CodexSshTaskQueryRequest, remote_command: &str) -> Resu
     if request.host.trim().is_empty() || request.username.trim().is_empty() {
         return Err("SSH host and username are required".to_string());
     }
-    if !request.identity_file.is_file() {
-        return Err(format!(
-            "SSH identity file does not exist: {}",
-            request.identity_file.display()
-        ));
+    if let Some(identity_file) = usable_identity_file(request.identity_file.as_ref()) {
+        if !identity_file.is_file() {
+            return Err(format!(
+                "SSH identity file does not exist: {}",
+                identity_file.display()
+            ));
+        }
     }
-    let output = Command::new(if cfg!(windows) { "ssh.exe" } else { "ssh" })
+    let mut command = Command::new(if cfg!(windows) { "ssh.exe" } else { "ssh" });
+    hide_console_window(&mut command);
+    command
         .args(["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"])
         .arg("-p")
-        .arg(request.port.to_string())
-        .arg("-i")
-        .arg(&request.identity_file)
+        .arg(request.port.to_string());
+    if let Some(identity_file) = usable_identity_file(request.identity_file.as_ref()) {
+        command.arg("-i").arg(identity_file);
+    }
+    let output = command
         .arg(format!(
             "{}@{}",
             request.username.trim(),
@@ -210,10 +361,11 @@ pub fn connect(request: CodexSshConnectRequest) -> Result<CodexSshRuntimeStatus,
         .map_err(|error| error.to_string())?
         .port();
     let key = format!(
-        "{}@{}:{}",
+        "{}@{}:{}->{}",
         request.username.trim(),
         request.host.trim(),
         request.port,
+        request.remote_app_server_port,
     );
     if let Ok(mut active) = tunnels().lock() {
         if let Some((status, child)) = active.get_mut(&key) {
@@ -232,11 +384,13 @@ pub fn connect(request: CodexSshConnectRequest) -> Result<CodexSshRuntimeStatus,
         local_port, request.remote_app_server_port
     );
     let mut command = Command::new(if cfg!(windows) { "ssh.exe" } else { "ssh" });
+    hide_console_window(&mut command);
     command
         .args([
             "-T",
             "-o",
             "ExitOnForwardFailure=yes",
+            "-o",
             "BatchMode=yes",
             "-o",
             "ServerAliveInterval=30",
@@ -244,9 +398,11 @@ pub fn connect(request: CodexSshConnectRequest) -> Result<CodexSshRuntimeStatus,
             "ServerAliveCountMax=3",
         ])
         .arg("-p")
-        .arg(request.port.to_string())
-        .arg("-i")
-        .arg(&request.identity_file)
+        .arg(request.port.to_string());
+    if let Some(identity_file) = usable_identity_file(request.identity_file.as_ref()) {
+        command.arg("-i").arg(identity_file);
+    }
+    command
         .arg("-L")
         .arg(target)
         .arg(format!(
@@ -256,12 +412,12 @@ pub fn connect(request: CodexSshConnectRequest) -> Result<CodexSshRuntimeStatus,
         ))
         .arg(if is_powershell(&request.remote_shell) {
             format!(
-                "powershell -NoProfile -Command \"codex app-server --listen ws://127.0.0.1:{}\"",
+                "powershell -NoProfile -Command \"$c=Get-Command codex -ErrorAction SilentlyContinue; if (-not $c) {{ Write-Error 'codex is not on the remote PowerShell PATH'; exit 127 }}; & $c.Source app-server --listen ws://127.0.0.1:{}\"",
                 request.remote_app_server_port
             )
         } else {
             format!(
-                "codex app-server --listen ws://127.0.0.1:{}",
+                "bash -lic 'source ~/.profile >/dev/null 2>&1 || true; source ~/.bashrc >/dev/null 2>&1 || true; command -v codex >/dev/null 2>&1 || {{ echo \"codex is not on the remote login PATH; install Codex or add it to ~/.profile or ~/.bashrc\" >&2; exit 127; }}; exec codex app-server --listen ws://127.0.0.1:{}'",
                 request.remote_app_server_port
             )
         })
@@ -271,38 +427,46 @@ pub fn connect(request: CodexSshConnectRequest) -> Result<CodexSshRuntimeStatus,
     let mut child = command
         .spawn()
         .map_err(|error| format!("failed to start ssh: {error}"))?;
+    let stderr = child.stderr.take().map(capture_stderr);
     thread::sleep(Duration::from_millis(700));
     if let Some(status) = child
         .try_wait()
         .map_err(|error| format!("failed to inspect ssh: {error}"))?
     {
-        let mut detail = String::new();
-        if let Some(mut stderr) = child.stderr.take() {
-            let _ = stderr.read_to_string(&mut detail);
-        }
+        let detail = captured_stderr_text(stderr.as_ref());
         return Err(format!(
             "SSH remote Codex app-server exited with {status}: {}",
             detail.trim()
         ));
     }
-    let tunnel_addr = format!("127.0.0.1:{local_port}")
-        .parse()
-        .map_err(|error| format!("invalid tunnel address: {error}"))?;
     let mut tunnel_ready = false;
-    for _ in 0..20 {
-        if TcpStream::connect_timeout(&tunnel_addr, Duration::from_millis(250)).is_ok() {
+    for _ in 0..40 {
+        if app_server_ready(local_port) {
             tunnel_ready = true;
             break;
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("failed to inspect ssh: {error}"))?
+        {
+            thread::sleep(Duration::from_millis(20));
+            let detail = captured_stderr_text(stderr.as_ref());
+            return Err(format!(
+                "SSH remote Codex app-server exited with {status}: {detail}"
+            ));
         }
         thread::sleep(Duration::from_millis(250));
     }
     if !tunnel_ready {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(
-            "SSH tunnel started but the remote Codex app-server did not become reachable"
-                .to_string(),
-        );
+        let detail = captured_stderr_text(stderr.as_ref());
+        let suffix = (!detail.is_empty())
+            .then(|| format!(": {detail}"))
+            .unwrap_or_default();
+        return Err(format!(
+            "SSH tunnel started but the remote Codex app-server did not become reachable{suffix}"
+        ));
     }
     let status = CodexSshRuntimeStatus {
         host: request.host,
@@ -319,13 +483,19 @@ pub fn connect(request: CodexSshConnectRequest) -> Result<CodexSshRuntimeStatus,
 }
 
 pub fn stop(key: &str) -> Result<(), String> {
-    if let Some((_, mut child)) = tunnels()
+    let mut active = tunnels()
         .lock()
-        .map_err(|_| "SSH tunnel state is unavailable".to_string())?
-        .remove(key)
-    {
-        let _ = child.kill();
-        let _ = child.wait();
+        .map_err(|_| "SSH tunnel state is unavailable".to_string())?;
+    let keys = active
+        .keys()
+        .filter(|candidate| *candidate == key || candidate.starts_with(&format!("{key}->")))
+        .cloned()
+        .collect::<Vec<_>>();
+    for key in keys {
+        if let Some((_, mut child)) = active.remove(&key) {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
     Ok(())
 }

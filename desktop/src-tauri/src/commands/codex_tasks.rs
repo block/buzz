@@ -1,5 +1,5 @@
 use crate::managed_agents::{
-    CodexSharedRuntimeStatus, CodexSshConnectRequest, CodexSshRuntimeStatus,
+    CodexSharedRuntimeStatus, CodexSshConfigHost, CodexSshConnectRequest, CodexSshRuntimeStatus,
     CodexSshTaskQueryRequest, CodexTaskHistory, CodexTaskSummary,
 };
 use tauri::AppHandle;
@@ -57,6 +57,13 @@ pub async fn connect_codex_ssh(
     request: CodexSshConnectRequest,
 ) -> Result<CodexSshRuntimeStatus, String> {
     tokio::task::spawn_blocking(move || crate::managed_agents::connect(request))
+        .await
+        .map_err(|error| format!("spawn_blocking failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn list_codex_ssh_config_hosts() -> Result<Vec<CodexSshConfigHost>, String> {
+    tokio::task::spawn_blocking(crate::managed_agents::list_config_hosts)
         .await
         .map_err(|error| format!("spawn_blocking failed: {error}"))?
 }

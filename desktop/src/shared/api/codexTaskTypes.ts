@@ -57,6 +57,13 @@ export type CodexSshRuntimeStatus = {
   appServerUrl: string;
 };
 
+export type CodexSshConfigHost = {
+  alias: string;
+  hostname: string;
+  username: string;
+  port: number;
+};
+
 export type RawCodexSharedRuntimeStatus = {
   enabled: boolean;
   state: CodexSharedRuntimeState;

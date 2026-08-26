@@ -445,6 +445,11 @@ pub struct CliArgs {
     )]
     pub codex_task_workspace: Option<PathBuf>,
 
+    /// Whether the Codex task workspace belongs to a remote app-server.
+    /// Remote workspaces must not be canonicalized on the local machine.
+    #[arg(long, env = "BUZZ_ACP_CODEX_TASK_REMOTE")]
+    pub codex_task_remote: bool,
+
     /// Permission mode for agents that support `session/set_config_option`
     /// with `configId: "mode"` (e.g. `claude-agent-acp`).
     ///
@@ -524,6 +529,7 @@ pub struct ChannelFilter {
 pub struct CodexTaskBinding {
     pub task_id: String,
     pub workspace: String,
+    pub remote: bool,
 }
 
 #[derive(Debug)]
@@ -964,21 +970,27 @@ impl Config {
                 let task_id = Uuid::parse_str(task_id.trim())
                     .map_err(|_| ConfigError::ConfigFile("Codex task ID must be a UUID".into()))?
                     .to_string();
-                let workspace = workspace.canonicalize().map_err(|error| {
-                    ConfigError::ConfigFile(format!(
-                        "Codex task workspace {} is unavailable: {error}",
-                        workspace.display()
-                    ))
-                })?;
-                if !workspace.is_dir() {
-                    return Err(ConfigError::ConfigFile(format!(
-                        "Codex task workspace is not a directory: {}",
-                        workspace.display()
-                    )));
-                }
+                let workspace = if args.codex_task_remote {
+                    workspace.to_string_lossy().to_string()
+                } else {
+                    let workspace = workspace.canonicalize().map_err(|error| {
+                        ConfigError::ConfigFile(format!(
+                            "Codex task workspace {} is unavailable: {error}",
+                            workspace.display()
+                        ))
+                    })?;
+                    if !workspace.is_dir() {
+                        return Err(ConfigError::ConfigFile(format!(
+                            "Codex task workspace is not a directory: {}",
+                            workspace.display()
+                        )));
+                    }
+                    workspace.to_string_lossy().to_string()
+                };
                 Some(CodexTaskBinding {
                     task_id,
-                    workspace: workspace.to_string_lossy().to_string(),
+                    workspace,
+                    remote: args.codex_task_remote,
                 })
             }
             (None, None) => None,
@@ -2889,6 +2901,30 @@ channels = "ALL"
             PathBuf::from(binding.workspace),
             workspace.path().canonicalize().unwrap()
         );
+        assert!(!binding.remote);
+    }
+
+    #[test]
+    fn remote_codex_task_binding_preserves_non_local_workspace() {
+        let task_id = "019eca9a-beb9-7902-8ce6-527b2ba56020";
+        let remote_workspace = "/home/hl/feishu-codex-bridge";
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--codex-task-id",
+            task_id,
+            "--codex-task-workspace",
+            remote_workspace,
+            "--codex-task-remote",
+        ])
+        .expect("clap should parse remote task binding");
+
+        let config = Config::from_args(args).expect("remote task binding should be valid");
+        let binding = config.codex_task_binding.expect("binding should be set");
+        assert_eq!(binding.task_id, task_id);
+        assert_eq!(binding.workspace, remote_workspace);
+        assert!(binding.remote);
     }
 
     #[test]

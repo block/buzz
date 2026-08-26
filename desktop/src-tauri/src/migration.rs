@@ -187,10 +187,89 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
     // before event sync republishes — the backfilled link is what flips the
     // 30177 projection to its slim shape.
     backfill_standalone_agents(app);
+    deduplicate_backfilled_agent_instances(app);
     detach_directory_backed_teams(app);
     reconcile_provider_mcp_commands(app);
     reconcile_databricks_v1_to_v2(app);
     materialize_agent_runtimes(app);
+}
+
+/// Remove stale keyed instances left behind when the unified-agent backfill
+/// manufactured a persona from an existing standalone agent and a later
+/// create minted a replacement instance from that persona.
+///
+/// The backfill's durable marker is `persona_id == pubkey` on the old record.
+/// We only retire that marker record when a different instance of the same
+/// persona has a usable identity key. This deliberately leaves legitimate
+/// multiple instances alone, and refuses to guess while the keyring is down.
+fn deduplicate_backfilled_agent_instances(app: &tauri::AppHandle) {
+    let Ok(mut records) = crate::managed_agents::load_managed_agents(app) else {
+        return;
+    };
+    let mut retired = Vec::new();
+
+    for index in 0..records.len() {
+        let old = &records[index];
+        let Some(persona_id) = old.persona_id.as_deref() else {
+            continue;
+        };
+        if persona_id != old.pubkey
+            || crate::managed_agents::agent_key_availability(old)
+                != crate::managed_agents::AgentKeyAvailability::Missing
+        {
+            continue;
+        }
+        let Some(replacement) = records.iter().find(|candidate| {
+            candidate.pubkey != old.pubkey
+                && candidate.persona_id.as_deref() == Some(persona_id)
+                && crate::managed_agents::agent_key_availability(candidate)
+                    == crate::managed_agents::AgentKeyAvailability::Available
+        }) else {
+            continue;
+        };
+        retired.push((old.pubkey.clone(), replacement.pubkey.clone()));
+    }
+
+    if retired.is_empty() {
+        return;
+    }
+
+    if let Ok(path) = crate::managed_agents::managed_agents_store_path(app) {
+        if let Ok(content) = std::fs::read(&path) {
+            let backup =
+                crate::util::resolved_backup_path(&path, "managed-agents.json.pre-dedup.bak");
+            let _ = crate::util::create_restricted_backup_once(&backup, &content);
+        }
+    }
+
+    for (old_pubkey, replacement_pubkey) in retired {
+        let binding = crate::managed_agents::load_codex_task_binding(app, &old_pubkey)
+            .ok()
+            .flatten();
+        records.retain(|record| record.pubkey != old_pubkey);
+        let result = if let Some(binding) = binding {
+            crate::managed_agents::save_agents_with_replaced_codex_task_binding(
+                app,
+                &records,
+                &old_pubkey,
+                &replacement_pubkey,
+                binding,
+            )
+        } else {
+            crate::managed_agents::save_managed_agents(app, &records)
+        };
+        match result {
+            Ok(()) => {
+                crate::managed_agents::delete_agent_key(&old_pubkey);
+                eprintln!(
+                "buzz-desktop: agent-dedup: retired stale backfilled instance {old_pubkey} in favor of {replacement_pubkey}"
+                )
+            }
+            Err(error) => {
+                eprintln!("buzz-desktop: agent-dedup: failed to retire {old_pubkey}: {error}")
+            }
+        }
+    }
 }
 
 /// Copy one-time app state from the legacy app identifier directory to

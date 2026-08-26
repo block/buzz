@@ -4,6 +4,7 @@ import type {
   CodexTaskHistory,
   CodexTaskSummary,
   CodexSshRuntimeStatus,
+  CodexSshConfigHost,
 } from "@/shared/api/codexTaskTypes";
 import { fromRawCodexSharedRuntimeStatus } from "@/shared/api/codexTaskTypes";
 import { invokeTauri } from "@/shared/api/tauri";
@@ -17,16 +18,20 @@ type RawCodexTaskSummary = {
   model?: string | null;
 };
 
-export async function listCodexTasks(): Promise<CodexTaskSummary[]> {
-  const tasks = await invokeTauri<RawCodexTaskSummary[]>("list_codex_tasks");
-  return tasks.map((task) => ({
+function fromRawCodexTaskSummary(task: RawCodexTaskSummary): CodexTaskSummary {
+  return {
     id: task.id,
     threadName: task.thread_name,
     workspace: task.workspace,
     updatedAt: task.updated_at,
     archived: task.archived,
     model: task.model ?? null,
-  }));
+  };
+}
+
+export async function listCodexTasks(): Promise<CodexTaskSummary[]> {
+  const tasks = await invokeTauri<RawCodexTaskSummary[]>("list_codex_tasks");
+  return tasks.map(fromRawCodexTaskSummary);
 }
 
 type RawCodexTaskHistory = {
@@ -91,11 +96,20 @@ export function connectCodexSsh(input: {
   host: string;
   port?: number;
   username: string;
-  identityFile: string;
+  identityFile?: string;
   remoteAppServerPort?: number;
   remoteShell?: "posix" | "powershell";
 }) {
-  return invokeTauri<CodexSshRuntimeStatus>("connect_codex_ssh", input);
+  const request = { ...input };
+  if (request.identityFile) {
+    request.identityFile = request.identityFile.trim();
+    if (!request.identityFile) delete request.identityFile;
+  }
+  return invokeTauri<CodexSshRuntimeStatus>("connect_codex_ssh", { request });
+}
+
+export function listCodexSshConfigHosts() {
+  return invokeTauri<CodexSshConfigHost[]>("list_codex_ssh_config_hosts");
 }
 
 export function stopCodexSsh(input: {
@@ -110,8 +124,15 @@ export function listCodexSshTasks(input: {
   host: string;
   port?: number;
   username: string;
-  identityFile: string;
+  identityFile?: string;
   remoteShell?: "posix" | "powershell";
 }) {
-  return invokeTauri<CodexTaskSummary[]>("list_codex_ssh_tasks", input);
+  const request = { ...input };
+  if (request.identityFile) {
+    request.identityFile = request.identityFile.trim();
+    if (!request.identityFile) delete request.identityFile;
+  }
+  return invokeTauri<RawCodexTaskSummary[]>("list_codex_ssh_tasks", {
+    request,
+  }).then((tasks) => tasks.map(fromRawCodexTaskSummary));
 }

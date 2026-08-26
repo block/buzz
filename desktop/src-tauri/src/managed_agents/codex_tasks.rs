@@ -385,8 +385,7 @@ pub fn prepare_remote_codex_task_binding(
     let identity_file = input
         .codex_ssh_identity_file
         .clone()
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "SSH identity file is required for a remote Codex task".to_string())?;
+        .filter(|value| !value.trim().is_empty());
     Uuid::parse_str(task_id.trim()).map_err(|_| "Codex task ID must be a UUID".to_string())?;
     Ok(Some(CodexTaskBinding {
         task_id: task_id.trim().to_lowercase(),
@@ -404,7 +403,7 @@ pub fn prepare_remote_codex_task_binding(
         ssh_host: Some(host),
         ssh_port: Some(input.codex_ssh_port.unwrap_or(22)),
         ssh_username: Some(username),
-        ssh_identity_file: Some(identity_file),
+        ssh_identity_file: identity_file,
         ssh_remote_app_server_port: Some(input.codex_ssh_remote_app_server_port.unwrap_or(51919)),
         ssh_remote_shell: Some(
             input
@@ -486,16 +485,14 @@ pub fn task_binding_for_spawn(
                 binding.workspace
             ));
         }
-        let url = if let (Some(host), Some(username), Some(identity_file)) = (
-            binding.ssh_host.clone(),
-            binding.ssh_username.clone(),
-            binding.ssh_identity_file.clone(),
-        ) {
+        let url = if let (Some(host), Some(username)) =
+            (binding.ssh_host.clone(), binding.ssh_username.clone())
+        {
             let status = super::connect(super::CodexSshConnectRequest {
                 host,
                 port: binding.ssh_port.unwrap_or(22),
                 username,
-                identity_file: PathBuf::from(identity_file),
+                identity_file: binding.ssh_identity_file.clone().map(PathBuf::from),
                 remote_shell: binding
                     .ssh_remote_shell
                     .clone()
@@ -527,12 +524,18 @@ pub fn configure_task_bound_command(
         }
         command.env("BUZZ_ACP_CODEX_TASK_ID", &binding.task_id);
         command.env("BUZZ_ACP_CODEX_TASK_WORKSPACE", &binding.workspace);
+        if binding.ssh_host.is_some() {
+            command.env("BUZZ_ACP_CODEX_TASK_REMOTE", "true");
+        } else {
+            command.env_remove("BUZZ_ACP_CODEX_TASK_REMOTE");
+        }
     } else {
         if let Some(home) = super::default_agent_workdir() {
             command.current_dir(home);
         }
         command.env_remove("BUZZ_ACP_CODEX_TASK_ID");
         command.env_remove("BUZZ_ACP_CODEX_TASK_WORKSPACE");
+        command.env_remove("BUZZ_ACP_CODEX_TASK_REMOTE");
     }
     command.env(
         "BUZZ_ACP_LAZY_POOL",
@@ -653,17 +656,13 @@ pub fn get_codex_task_history(
 ) -> Result<CodexTaskHistory, String> {
     let binding = load_codex_task_binding(app, agent_pubkey)?
         .ok_or_else(|| "This agent is not bound to a Codex task".to_string())?;
-    if let (Some(host), Some(username), Some(identity_file)) = (
-        binding.ssh_host.clone(),
-        binding.ssh_username.clone(),
-        binding.ssh_identity_file.clone(),
-    ) {
+    if let (Some(host), Some(username)) = (binding.ssh_host.clone(), binding.ssh_username.clone()) {
         let raw = super::read_codex_ssh_task_history(
             super::CodexSshTaskQueryRequest {
                 host,
                 port: binding.ssh_port.unwrap_or(22),
                 username,
-                identity_file: PathBuf::from(identity_file),
+                identity_file: binding.ssh_identity_file.clone().map(PathBuf::from),
                 remote_shell: binding
                     .ssh_remote_shell
                     .clone()

@@ -774,6 +774,7 @@ pub fn run() {
             launch_codex_desktop_shared,
             take_over_codex_desktop_shared,
             connect_codex_ssh,
+            list_codex_ssh_config_hosts,
             stop_codex_ssh,
             list_codex_ssh_tasks,
             list_managed_agent_runtimes,
