@@ -419,10 +419,10 @@ export const ChannelPane = React.memo(function ChannelPane({
   const isOverlay = useIsThreadPanelOverlay();
   const useSplitAuxiliaryPane = !isSinglePanelView && !isOverlay;
   const threadViewMode = useThreadViewMode();
+  const hasThreadSurface =
+    Boolean(threadHeadMessage) || shouldShowThreadSkeleton;
   const useFocusThreadDrawer =
-    threadViewMode === "focus" &&
-    useSplitAuxiliaryPane &&
-    (Boolean(threadHeadMessage) || shouldShowThreadSkeleton);
+    threadViewMode === "focus" && useSplitAuxiliaryPane && hasThreadSurface;
   const selectedAgent = React.useMemo(
     () =>
       agentSessionSelection.resolveSelectedAgentSession({
@@ -435,19 +435,26 @@ export const ChannelPane = React.memo(function ChannelPane({
   );
   const hasIdleAuxiliary =
     Boolean(idleAuxiliaryPanel) && Boolean(onCloseIdleAuxiliaryPanel);
+  const priorityIdleAuxiliary = shouldPrioritizeIdleAuxiliary(
+    idleAuxiliaryOverridesThread,
+    hasIdleAuxiliary,
+  );
+  const overlayIdleAuxiliaryOverThread =
+    priorityIdleAuxiliary && hasThreadSurface && !isOverlay;
+  const replaceThreadWithIdleAuxiliary =
+    priorityIdleAuxiliary && hasThreadSurface && isOverlay;
   const useFocusIdleDrawer = shouldUseFocusIdleDrawer({
     channelManagementOpen,
     hasAgentSession: Boolean(activeChannel && selectedAgent),
     hasIdleAuxiliaryPanel: Boolean(idleAuxiliaryPanel),
     hasIdlePanelCloseHandler: Boolean(onCloseIdleAuxiliaryPanel),
     hasProfilePanel: Boolean(profilePanelPubkey),
-    hasThreadSurface: Boolean(threadHeadMessage) || shouldShowThreadSkeleton,
+    hasThreadSurface,
+    overrideThread: overlayIdleAuxiliaryOverThread,
     useSplitAuxiliaryPane,
   });
-  const priorityIdleAuxiliary = shouldPrioritizeIdleAuxiliary(
-    idleAuxiliaryOverridesThread,
-    hasIdleAuxiliary,
-  );
+  const showIdleAuxiliaryOverThread =
+    overlayIdleAuxiliaryOverThread && useFocusIdleDrawer;
   const { channelIsCovered, markExitComplete } = useFocusDrawerPresence(
     useFocusThreadDrawer || useFocusIdleDrawer,
     priorityIdleAuxiliary
@@ -510,6 +517,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     useFocusThreadDrawer ? (
       <FocusThreadDrawer
         channelName={activeChannel?.name ?? "channel"}
+        escapeEnabled={!showIdleAuxiliaryOverThread}
         hasActiveEdit={threadEditTarget !== null}
         key={THREAD_SURFACE_KEY}
         onClose={onCloseThread}
@@ -821,7 +829,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             useSplitAuxiliaryPane={useSplitAuxiliaryPane}
             transparentChrome={hasSplitAuxiliaryPane}
           />
-        ) : priorityIdleAuxiliary && idleAuxiliarySurface ? (
+        ) : replaceThreadWithIdleAuxiliary && idleAuxiliarySurface ? (
           idleAuxiliarySurface
         ) : threadHeadMessage ? (
           (() => {
@@ -976,6 +984,9 @@ export const ChannelPane = React.memo(function ChannelPane({
         ) : (
           idleAuxiliarySurface
         )}
+      </AnimatePresence>
+      <AnimatePresence onExitComplete={markExitComplete}>
+        {showIdleAuxiliaryOverThread ? idleAuxiliarySurface : null}
       </AnimatePresence>
     </div>
   );

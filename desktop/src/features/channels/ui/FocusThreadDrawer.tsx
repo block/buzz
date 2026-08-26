@@ -11,6 +11,8 @@ import { cn } from "@/shared/lib/cn";
 type FocusThreadDrawerProps = {
   channelName: string;
   children: React.ReactNode;
+  /** Prevent a covered drawer from handling Escape before its overlay. */
+  escapeEnabled?: boolean;
   /** Accessible name for the drawer. Channel threads leave the default. */
   label?: string;
   hasActiveEdit?: boolean;
@@ -142,6 +144,7 @@ const REDUCED_MOTION_TRANSITION = { duration: 0.12, ease: "linear" } as const;
 export function FocusThreadDrawer({
   channelName,
   children,
+  escapeEnabled = true,
   label = "Thread",
   hasActiveEdit = false,
   onClose,
@@ -152,6 +155,8 @@ export function FocusThreadDrawer({
   const previousFocusRef = React.useRef<HTMLElement | null>(null);
 
   React.useEffect(() => {
+    if (!escapeEnabled) return;
+
     function handleEscape(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
       const target = event.target;
@@ -171,7 +176,7 @@ export function FocusThreadDrawer({
     return () => {
       window.removeEventListener("keydown", handleEscape, { capture: true });
     };
-  }, [hasActiveEdit, onClose]);
+  }, [escapeEnabled, hasActiveEdit, onClose]);
 
   React.useLayoutEffect(() => {
     previousFocusRef.current =
