@@ -2,13 +2,36 @@
 //!
 //! One reaction per user per emoji per event. Soft-delete via removed_at.
 
+use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
+use nostr::Event;
 use sqlx::{PgPool, Postgres, Row, Transaction};
+use uuid::Uuid;
 
-use crate::error::Result;
-use crate::CommunityId;
+use crate::{
+    error::Result,
+    event::{insert_event_with_thread_metadata_tx, ThreadMetadataParams},
+    Db,
+};
+use buzz_core::{CommunityId, StoredEvent};
 
 // -- Public structs -----------------------------------------------------------
+
+/// Result of atomically inserting a kind:7 reaction event and its reaction row.
+#[derive(Debug)]
+pub enum ReactionEventInsertOutcome {
+    /// Target event was absent in this community, or was soft-deleted. No writes committed.
+    TargetMissing,
+    /// The active `(target, actor, emoji)` reaction already exists. No event was stored.
+    Duplicate,
+    /// Reaction row and event transaction committed.
+    Inserted {
+        /// Stored reaction event.
+        stored_event: Box<StoredEvent>,
+        /// Whether the event row itself was newly inserted.
+        was_inserted: bool,
+    },
+}
 
 /// A grouped set of reactions for a single emoji on an event.
 #[derive(Debug, Clone)]
@@ -132,6 +155,74 @@ pub(crate) async fn add_reaction_tx(
         .await?;
 
     Ok(result.rows_affected() != 0)
+}
+
+/// Atomically insert a kind:7 reaction event and its reaction row.
+///
+/// Ordering is load-bearing: resolve target, upsert/reactivate the reaction row,
+/// check `rows_affected`, then insert the kind:7 event. Active duplicates return
+/// before event insertion so duplicate reactions never store a duplicate kind:7.
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_reaction_event_with_thread_metadata(
+    pool: &PgPool,
+    community_id: CommunityId,
+    reaction_event: &Event,
+    channel_id: Option<Uuid>,
+    thread_meta: Option<ThreadMetadataParams<'_>>,
+    target_event_id: &[u8],
+    actor_pubkey: &[u8],
+    emoji: &str,
+) -> Result<ReactionEventInsertOutcome> {
+    let mut tx = pool.begin().await?;
+
+    let target_row = sqlx::query(
+        "SELECT created_at FROM events \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(target_event_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(target_row) = target_row else {
+        tx.rollback().await?;
+        return Ok(ReactionEventInsertOutcome::TargetMissing);
+    };
+    let target_created_at: DateTime<Utc> = target_row.get("created_at");
+
+    // Preserve add_reaction's exact new / re-activate / active-duplicate semantics.
+    let reaction_inserted = add_reaction_tx(
+        &mut tx,
+        community_id,
+        target_event_id,
+        target_created_at,
+        actor_pubkey,
+        emoji,
+        Some(reaction_event.id.as_bytes()),
+    )
+    .await?;
+
+    if !reaction_inserted {
+        tx.rollback().await?;
+        return Ok(ReactionEventInsertOutcome::Duplicate);
+    }
+
+    let (stored_event, was_inserted) = insert_event_with_thread_metadata_tx(
+        &mut tx,
+        community_id,
+        reaction_event,
+        channel_id,
+        thread_meta,
+    )
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(ReactionEventInsertOutcome::Inserted {
+        stored_event: Box::new(stored_event),
+        was_inserted,
+    })
 }
 
 /// Soft-delete a reaction by setting `removed_at`.
@@ -415,4 +506,644 @@ pub async fn get_reactions_bulk(
     }
 
     Ok(entries)
+}
+
+// -- Db API -------------------------------------------------------------------
+
+impl Db {
+    /// Atomically insert a kind:7 reaction event and its reaction row.
+    #[allow(clippy::too_many_arguments)]
+    #[datastore_span(
+        name = "insert_reaction_event_with_thread_metadata",
+        system = "postgresql"
+    )]
+    pub async fn insert_reaction_event_with_thread_metadata(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+        thread_meta: Option<ThreadMetadataParams<'_>>,
+        target_event_id: &[u8],
+        actor_pubkey: &[u8],
+        emoji: &str,
+    ) -> Result<ReactionEventInsertOutcome> {
+        let outcome = crate::reaction::insert_reaction_event_with_thread_metadata(
+            &self.pool,
+            community_id,
+            event,
+            channel_id,
+            thread_meta,
+            target_event_id,
+            actor_pubkey,
+            emoji,
+        )
+        .await?;
+        if let ReactionEventInsertOutcome::Inserted {
+            was_inserted: true, ..
+        } = &outcome
+        {
+            if let Err(e) =
+                crate::insert_mentions(&self.pool, community_id, event, channel_id).await
+            {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// Add (or re-activate) a reaction.
+    #[datastore_span(name = "add_reaction", system = "postgresql")]
+    pub async fn add_reaction(
+        &self,
+        community: CommunityId,
+        event_id: &[u8],
+        event_created_at: DateTime<Utc>,
+        pubkey: &[u8],
+        emoji: &str,
+        reaction_event_id: Option<&[u8]>,
+    ) -> Result<bool> {
+        crate::reaction::add_reaction(
+            &self.pool,
+            community,
+            event_id,
+            event_created_at,
+            pubkey,
+            emoji,
+            reaction_event_id,
+        )
+        .await
+    }
+
+    /// Soft-delete a reaction.
+    #[datastore_span(name = "remove_reaction", system = "postgresql")]
+    pub async fn remove_reaction(
+        &self,
+        community: CommunityId,
+        event_id: &[u8],
+        event_created_at: DateTime<Utc>,
+        pubkey: &[u8],
+        emoji: &str,
+    ) -> Result<bool> {
+        crate::reaction::remove_reaction(
+            &self.pool,
+            community,
+            event_id,
+            event_created_at,
+            pubkey,
+            emoji,
+        )
+        .await
+    }
+
+    /// Soft-delete a reaction by its source event ID.
+    #[datastore_span(name = "remove_reaction_by_source_event_id", system = "postgresql")]
+    pub async fn remove_reaction_by_source_event_id(
+        &self,
+        community: CommunityId,
+        reaction_event_id: &[u8],
+    ) -> Result<bool> {
+        crate::reaction::remove_reaction_by_source_event_id(
+            &self.pool,
+            community,
+            reaction_event_id,
+        )
+        .await
+    }
+
+    /// Look up the active reaction row for one actor + emoji + target tuple.
+    #[datastore_span(name = "get_active_reaction_record", system = "postgresql")]
+    pub async fn get_active_reaction_record(
+        &self,
+        community: CommunityId,
+        event_id: &[u8],
+        event_created_at: DateTime<Utc>,
+        pubkey: &[u8],
+        emoji: &str,
+    ) -> Result<Option<crate::reaction::ActiveReactionRecord>> {
+        crate::reaction::get_active_reaction_record(
+            &self.pool,
+            community,
+            event_id,
+            event_created_at,
+            pubkey,
+            emoji,
+        )
+        .await
+    }
+
+    /// Backfill the source event ID on an active reaction row.
+    #[datastore_span(name = "set_reaction_event_id", system = "postgresql")]
+    pub async fn set_reaction_event_id(
+        &self,
+        community: CommunityId,
+        event_id: &[u8],
+        event_created_at: DateTime<Utc>,
+        pubkey: &[u8],
+        emoji: &str,
+        reaction_event_id: &[u8],
+    ) -> Result<bool> {
+        crate::reaction::set_reaction_event_id(
+            &self.pool,
+            community,
+            event_id,
+            event_created_at,
+            pubkey,
+            emoji,
+            reaction_event_id,
+        )
+        .await
+    }
+
+    /// Get all active reactions for an event, grouped by emoji.
+    #[datastore_span(name = "get_reactions", system = "postgresql")]
+    pub async fn get_reactions(
+        &self,
+        community: CommunityId,
+        event_id: &[u8],
+        event_created_at: DateTime<Utc>,
+        limit: u32,
+        cursor: Option<&str>,
+    ) -> Result<Vec<crate::reaction::ReactionGroup>> {
+        crate::reaction::get_reactions(
+            &self.pool,
+            community,
+            event_id,
+            event_created_at,
+            limit,
+            cursor,
+        )
+        .await
+    }
+
+    /// Batch-fetch emoji counts for a set of (event_id, event_created_at) pairs.
+    #[datastore_span(name = "get_reactions_bulk", system = "postgresql")]
+    pub async fn get_reactions_bulk(
+        &self,
+        community: CommunityId,
+        event_ids: &[(&[u8], DateTime<Utc>)],
+    ) -> Result<Vec<crate::reaction::BulkReactionEntry>> {
+        crate::reaction::get_reactions_bulk(&self.pool, community, event_ids).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        error::DbError,
+        event::{get_event_by_id, insert_event},
+    };
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
+
+    async fn setup_pool() -> PgPool {
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
+
+        PgPool::connect(&database_url)
+            .await
+            .expect("connect to test DB")
+    }
+
+    async fn make_test_community(pool: &PgPool) -> Uuid {
+        let id = Uuid::new_v4();
+        let host = format!("reaction-test-{}.example", id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(host)
+            .execute(pool)
+            .await
+            .expect("insert test community");
+        id
+    }
+
+    fn make_text_event(content: &str) -> nostr::Event {
+        EventBuilder::new(Kind::Custom(9), content)
+            .sign_with_keys(&Keys::generate())
+            .expect("sign text event")
+    }
+
+    fn make_reaction_event(keys: &Keys, target_id_hex: &str, emoji: &str) -> nostr::Event {
+        let nonce = Uuid::new_v4().to_string();
+        EventBuilder::new(Kind::Custom(7), emoji)
+            .tags(vec![
+                Tag::parse(["e", target_id_hex]).expect("reaction e tag"),
+                Tag::parse(["nonce", nonce.as_str()]).expect("nonce tag"),
+            ])
+            .sign_with_keys(keys)
+            .expect("sign reaction event")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reaction_single_tx_stores_wrapped_max_shortcode() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let target = make_text_event("long custom emoji target");
+        insert_event(&pool, community, &target, None)
+            .await
+            .expect("insert target");
+
+        let actor = Keys::generate();
+        let emoji = format!(":{}:", "a".repeat(64));
+        let reaction = make_reaction_event(&actor, &target.id.to_hex(), &emoji);
+        let outcome = insert_reaction_event_with_thread_metadata(
+            &pool,
+            community,
+            &reaction,
+            None,
+            None,
+            target.id.as_bytes(),
+            &actor.public_key().to_bytes(),
+            &emoji,
+        )
+        .await
+        .expect("store wrapped 64-character shortcode");
+
+        assert!(matches!(
+            outcome,
+            ReactionEventInsertOutcome::Inserted {
+                was_inserted: true,
+                ..
+            }
+        ));
+        assert_eq!(emoji.chars().count(), 66);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reaction_single_tx_duplicate_short_circuit_stores_no_event() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let target = make_text_event("reaction target");
+        insert_event(&pool, community, &target, None)
+            .await
+            .expect("insert target");
+
+        let actor = Keys::generate();
+        let actor_pubkey = actor.public_key().to_bytes();
+        let target_hex = target.id.to_hex();
+        let first = make_reaction_event(&actor, &target_hex, "👍");
+        let second = make_reaction_event(&actor, &target_hex, "👍");
+
+        let first_outcome = insert_reaction_event_with_thread_metadata(
+            &pool,
+            community,
+            &first,
+            None,
+            None,
+            target.id.as_bytes(),
+            &actor_pubkey,
+            "👍",
+        )
+        .await
+        .expect("first reaction insert");
+        assert!(matches!(
+            first_outcome,
+            ReactionEventInsertOutcome::Inserted {
+                was_inserted: true,
+                ..
+            }
+        ));
+
+        let duplicate = insert_reaction_event_with_thread_metadata(
+            &pool,
+            community,
+            &second,
+            None,
+            None,
+            target.id.as_bytes(),
+            &actor_pubkey,
+            "👍",
+        )
+        .await
+        .expect("duplicate reaction insert");
+        assert!(matches!(duplicate, ReactionEventInsertOutcome::Duplicate));
+
+        let duplicate_event = get_event_by_id(&pool, community, second.id.as_bytes())
+            .await
+            .expect("lookup duplicate reaction event");
+        assert!(
+            duplicate_event.is_none(),
+            "active duplicate reaction must short-circuit before storing kind:7 event"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reaction_single_tx_cross_community_target_rejected() {
+        let pool = setup_pool().await;
+        let community_a = CommunityId::from_uuid(make_test_community(&pool).await);
+        let community_b = CommunityId::from_uuid(make_test_community(&pool).await);
+        let target = make_text_event("community A target only");
+        insert_event(&pool, community_a, &target, None)
+            .await
+            .expect("insert target in A");
+
+        let actor = Keys::generate();
+        let actor_pubkey = actor.public_key().to_bytes();
+        let reaction = make_reaction_event(&actor, &target.id.to_hex(), "👍");
+
+        let outcome = insert_reaction_event_with_thread_metadata(
+            &pool,
+            community_b,
+            &reaction,
+            None,
+            None,
+            target.id.as_bytes(),
+            &actor_pubkey,
+            "👍",
+        )
+        .await
+        .expect("cross-community reaction attempt");
+        assert!(matches!(outcome, ReactionEventInsertOutcome::TargetMissing));
+
+        assert!(
+            get_event_by_id(&pool, community_b, reaction.id.as_bytes())
+                .await
+                .expect("lookup B reaction event")
+                .is_none(),
+            "reaction event must not store when target exists only in another community"
+        );
+        assert!(
+            crate::reaction::get_active_reaction_record(
+                &pool,
+                community_b,
+                target.id.as_bytes(),
+                DateTime::from_timestamp(target.created_at.as_secs() as i64, 0).unwrap(),
+                &actor_pubkey,
+                "👍",
+            )
+            .await
+            .expect("lookup B reaction row")
+            .is_none(),
+            "reaction row must not be inserted for cross-community target miss"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reaction_single_tx_event_insert_failure_rolls_back_reaction() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let target = make_text_event("rollback target");
+        insert_event(&pool, community, &target, None)
+            .await
+            .expect("insert target");
+
+        let actor = Keys::generate();
+        let actor_pubkey = actor.public_key().to_bytes();
+        let target_hex = target.id.to_hex();
+        let bad_reaction = EventBuilder::new(Kind::Custom(20000), "👍")
+            .tags(vec![
+                Tag::parse(["e", target_hex.as_str()]).expect("reaction e tag")
+            ])
+            .sign_with_keys(&actor)
+            .expect("sign ephemeral reaction-shaped event");
+        let target_created_at = DateTime::from_timestamp(target.created_at.as_secs() as i64, 0)
+            .expect("target timestamp");
+
+        let err = insert_reaction_event_with_thread_metadata(
+            &pool,
+            community,
+            &bad_reaction,
+            None,
+            None,
+            target.id.as_bytes(),
+            &actor_pubkey,
+            "👍",
+        )
+        .await
+        .expect_err("ephemeral event insert must fail after reaction upsert attempt");
+        assert!(matches!(err, DbError::EphemeralEventRejected(20000)));
+
+        assert!(
+            crate::reaction::get_active_reaction_record(
+                &pool,
+                community,
+                target.id.as_bytes(),
+                target_created_at,
+                &actor_pubkey,
+                "👍",
+            )
+            .await
+            .expect("lookup reaction row after rollback")
+            .is_none(),
+            "transaction rollback must remove the reaction row when event insert fails"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reaction_single_tx_reactivates_soft_deleted_reaction() {
+        let pool = setup_pool().await;
+        let community = CommunityId::from_uuid(make_test_community(&pool).await);
+        let target = make_text_event("reactivation target");
+        insert_event(&pool, community, &target, None)
+            .await
+            .expect("insert target");
+
+        let actor = Keys::generate();
+        let actor_pubkey = actor.public_key().to_bytes();
+        let target_hex = target.id.to_hex();
+        let target_created_at = DateTime::from_timestamp(target.created_at.as_secs() as i64, 0)
+            .expect("target timestamp");
+        let first = make_reaction_event(&actor, &target_hex, "👍");
+        let second = make_reaction_event(&actor, &target_hex, "👍");
+
+        assert!(matches!(
+            insert_reaction_event_with_thread_metadata(
+                &pool,
+                community,
+                &first,
+                None,
+                None,
+                target.id.as_bytes(),
+                &actor_pubkey,
+                "👍",
+            )
+            .await
+            .expect("first reaction insert"),
+            ReactionEventInsertOutcome::Inserted { .. }
+        ));
+        assert!(crate::reaction::remove_reaction(
+            &pool,
+            community,
+            target.id.as_bytes(),
+            target_created_at,
+            &actor_pubkey,
+            "👍",
+        )
+        .await
+        .expect("soft delete reaction"));
+
+        let outcome = insert_reaction_event_with_thread_metadata(
+            &pool,
+            community,
+            &second,
+            None,
+            None,
+            target.id.as_bytes(),
+            &actor_pubkey,
+            "👍",
+        )
+        .await
+        .expect("reactivate reaction");
+        assert!(matches!(
+            outcome,
+            ReactionEventInsertOutcome::Inserted {
+                was_inserted: true,
+                ..
+            }
+        ));
+
+        let active = crate::reaction::get_active_reaction_record(
+            &pool,
+            community,
+            target.id.as_bytes(),
+            target_created_at,
+            &actor_pubkey,
+            "👍",
+        )
+        .await
+        .expect("active record after reactivation")
+        .expect("reaction active after reactivation");
+        assert_eq!(
+            active.reaction_event_id.as_deref(),
+            Some(second.id.as_bytes().as_slice()),
+            "reactivation through the tx path must preserve add_reaction's source-id update semantics"
+        );
+    }
+
+    /// BUG-5 regression: the `reactions` table is community-scoped
+    /// (`PK (community_id, event_created_at, event_id, pubkey, emoji)`), so a
+    /// reaction added under community A must be invisible and unremovable from
+    /// community B — even for the *identical* `(event_id, pubkey, emoji)` shape.
+    /// Before the fix, `add_reaction` omitted `community_id` (NOT NULL → 500) and
+    /// every read/remove filtered `event_id` only (latent cross-tenant bleed).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reactions_are_scoped_to_community() {
+        let pool = setup_pool().await;
+        let db = Db::from_pool(pool.clone());
+        let community_a = CommunityId::from_uuid(make_test_community(&pool).await);
+        let community_b = CommunityId::from_uuid(make_test_community(&pool).await);
+
+        // Identical referenced-event shape across both tenants.
+        let event_id = [0xABu8; 32];
+        let event_created_at = Utc::now();
+        let pubkey = [7u8; 32];
+        let emoji = "👍";
+
+        // (1) Add succeeds under A (this INSERT 500'd before the fix).
+        assert!(
+            db.add_reaction(
+                community_a,
+                &event_id,
+                event_created_at,
+                &pubkey,
+                emoji,
+                None
+            )
+            .await
+            .expect("add reaction under A"),
+            "first reaction under A must be inserted"
+        );
+        // Idempotent: re-adding the same active reaction is a no-op.
+        assert!(
+            !db.add_reaction(
+                community_a,
+                &event_id,
+                event_created_at,
+                &pubkey,
+                emoji,
+                None
+            )
+            .await
+            .expect("duplicate reaction under A"),
+            "active duplicate under A must not re-insert"
+        );
+
+        // (2) Visible on A, invisible on B (grouped read path).
+        let groups_a = db
+            .get_reactions(community_a, &event_id, event_created_at, 100, None)
+            .await
+            .expect("get reactions A");
+        assert_eq!(groups_a.len(), 1, "A must see its own reaction group");
+        assert_eq!(groups_a[0].emoji, emoji);
+        assert_eq!(groups_a[0].count, 1);
+
+        let groups_b = db
+            .get_reactions(community_b, &event_id, event_created_at, 100, None)
+            .await
+            .expect("get reactions B");
+        assert!(
+            groups_b.is_empty(),
+            "B must NOT see A's reaction for the same event shape, got {groups_b:?}"
+        );
+
+        // (3) Active-record lookup is scoped: present on A, absent on B.
+        assert!(
+            db.get_active_reaction_record(community_a, &event_id, event_created_at, &pubkey, emoji)
+                .await
+                .expect("active record A")
+                .is_some(),
+            "A's active reaction record must be present"
+        );
+        assert!(
+            db.get_active_reaction_record(community_b, &event_id, event_created_at, &pubkey, emoji)
+                .await
+                .expect("active record B")
+                .is_none(),
+            "B must not find A's active reaction record"
+        );
+
+        // (4) B can add the identical shape independently (no PK collision).
+        assert!(
+            db.add_reaction(
+                community_b,
+                &event_id,
+                event_created_at,
+                &pubkey,
+                emoji,
+                None
+            )
+            .await
+            .expect("add reaction under B"),
+            "B must be able to add the same shape as its own scoped row"
+        );
+
+        // (5) Removing from B does not touch A's row.
+        assert!(
+            db.remove_reaction(community_b, &event_id, event_created_at, &pubkey, emoji)
+                .await
+                .expect("remove under B"),
+            "B remove must affect B's own row"
+        );
+        assert!(
+            db.get_active_reaction_record(community_a, &event_id, event_created_at, &pubkey, emoji)
+                .await
+                .expect("active record A after B remove")
+                .is_some(),
+            "A's reaction must survive a B-side removal"
+        );
+
+        // (6) A remove affects only A; A's read now empty.
+        assert!(
+            db.remove_reaction(community_a, &event_id, event_created_at, &pubkey, emoji)
+                .await
+                .expect("remove under A"),
+            "A remove must affect A's row"
+        );
+        let groups_a_after = db
+            .get_reactions(community_a, &event_id, event_created_at, 100, None)
+            .await
+            .expect("get reactions A after remove");
+        assert!(
+            groups_a_after.is_empty(),
+            "A's reaction must be gone after A removes it"
+        );
+    }
 }
