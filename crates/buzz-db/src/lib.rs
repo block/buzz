@@ -96,11 +96,12 @@ pub use error::{DbError, Result};
 pub use event::{EventQuery, DEFAULT_MAX_PAGE_LIMIT};
 pub use reaction::ReactionEventInsertOutcome;
 pub use reminder::DueReminder;
+pub use usage::UsageMetricsLeader;
 
 use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
-use sqlx::postgres::{PgConnection, PgPoolOptions};
-use sqlx::{Connection, PgPool, QueryBuilder};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgPool, QueryBuilder};
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -514,27 +515,6 @@ pub struct DbPoolStats {
     pub idle: u32,
     /// Pool ceiling — the `max_connections` value set at construction.
     pub max: u32,
-}
-
-/// Owns the detached Postgres session holding the relay usage-metrics advisory lock.
-///
-/// The connection deliberately does not return to the main pool: session advisory
-/// locks must remain bound to this exact physical connection, and the poller
-/// pings it before each leader-only collection tick.
-pub struct UsageMetricsLeader {
-    connection: PgConnection,
-}
-
-impl UsageMetricsLeader {
-    /// Returns whether the lock-owning session is still reachable.
-    ///
-    /// Bounded to 5 seconds — a blackholed connection (no RST) would otherwise
-    /// stall the entire poller tick until the OS TCP timeout.
-    pub async fn is_live(&mut self) -> bool {
-        tokio::time::timeout(std::time::Duration::from_secs(5), self.connection.ping())
-            .await
-            .is_ok_and(|r| r.is_ok())
-    }
 }
 
 /// Configuration for the Postgres connection pool.
@@ -1016,32 +996,6 @@ impl Db {
         })
     }
 
-    /// Try to acquire the detached session advisory lock for relay usage metrics.
-    ///
-    /// The returned guard owns the exact connection that acquired the lock. It is
-    /// detached from the shared pool so a stable leader neither returns a locked
-    /// session to other callers nor permanently consumes a pool slot. Dropping the
-    /// guard closes the connection and releases the session-scoped lock.
-    #[datastore_span(name = "try_lock_usage_metrics", system = "postgresql")]
-    pub async fn try_lock_usage_metrics(
-        &self,
-        lock_key: i64,
-    ) -> Result<Option<UsageMetricsLeader>> {
-        let mut connection =
-            observability::acquire(&self.pool, observability::PoolRole::Writer).await?;
-        let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
-            .bind(lock_key)
-            .fetch_one(&mut *connection)
-            .await?;
-        if acquired {
-            Ok(Some(UsageMetricsLeader {
-                connection: connection.detach(),
-            }))
-        } else {
-            Ok(None)
-        }
-    }
-
     /// List reports for the deployment-global read-only admin plane.
     #[allow(clippy::too_many_arguments)]
     #[datastore_span(name = "admin_list_reports", system = "postgresql")]
@@ -1095,74 +1049,6 @@ impl Db {
         id: Uuid,
     ) -> Result<Option<admin_moderation::AdminFeedback>> {
         admin_moderation::get_feedback(&self.pool, id).await
-    }
-
-    /// Return total number of communities on this relay.
-    #[datastore_span(name = "usage_community_count", system = "postgresql")]
-    pub async fn usage_community_count(&self) -> Result<i64> {
-        usage::community_count(&self.pool).await
-    }
-
-    /// Return per-community user counts split by human/agent.
-    #[datastore_span(name = "usage_user_counts", system = "postgresql")]
-    pub async fn usage_user_counts(&self) -> Result<Vec<usage::CommunityUserCounts>> {
-        usage::user_counts(&self.pool).await
-    }
-
-    /// Return per-community channel counts by type.
-    #[datastore_span(name = "usage_channel_counts", system = "postgresql")]
-    pub async fn usage_channel_counts(&self) -> Result<Vec<usage::CommunityChannelCount>> {
-        usage::channel_counts(&self.pool).await
-    }
-
-    /// Return per-community kind=9 message counts.
-    #[datastore_span(name = "usage_message_counts", system = "postgresql")]
-    pub async fn usage_message_counts(&self) -> Result<Vec<usage::CommunityMessageCount>> {
-        usage::message_counts(&self.pool).await
-    }
-
-    /// Return per-community relay-member counts by role.
-    #[datastore_span(name = "usage_relay_member_counts", system = "postgresql")]
-    pub async fn usage_relay_member_counts(&self) -> Result<Vec<usage::CommunityMemberCount>> {
-        usage::relay_member_counts(&self.pool).await
-    }
-
-    /// Return per-community workflow counts by status.
-    #[datastore_span(name = "usage_workflow_counts", system = "postgresql")]
-    pub async fn usage_workflow_counts(&self) -> Result<Vec<usage::CommunityWorkflowCount>> {
-        usage::workflow_counts(&self.pool).await
-    }
-
-    /// Return per-community git-repo counts.
-    #[datastore_span(name = "usage_git_repo_counts", system = "postgresql")]
-    pub async fn usage_git_repo_counts(&self) -> Result<Vec<usage::CommunityGitRepoCount>> {
-        usage::git_repo_counts(&self.pool).await
-    }
-
-    /// Return per-community distinct active-user counts for a given SQL interval.
-    ///
-    /// `interval_sql` must be a trusted literal such as `"1 day"` or `"7 days"`.
-    #[datastore_span(name = "usage_active_user_counts", system = "postgresql")]
-    pub async fn usage_active_user_counts(
-        &self,
-        interval_sql: &'static str,
-    ) -> Result<Vec<usage::CommunityActiveUsers>> {
-        usage::active_user_counts(&self.pool, interval_sql).await
-    }
-
-    /// Return per-community active-channel counts for a given SQL interval.
-    #[datastore_span(name = "usage_active_channel_counts", system = "postgresql")]
-    pub async fn usage_active_channel_counts(
-        &self,
-        interval_sql: &'static str,
-    ) -> Result<Vec<usage::CommunityActiveChannels>> {
-        usage::active_channel_counts(&self.pool, interval_sql).await
-    }
-
-    /// Return all community id → host mappings.
-    #[datastore_span(name = "usage_community_hosts", system = "postgresql")]
-    pub async fn usage_community_hosts(&self) -> Result<Vec<usage::CommunityHost>> {
-        usage::community_hosts(&self.pool).await
     }
 
     /// Return the shared durable whole-community deletion adapter.
@@ -1772,7 +1658,6 @@ impl Db {
 mod tests {
     use super::*;
     use buzz_core::CommunityId;
-    use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
     use uuid::Uuid;
 
@@ -2107,57 +1992,6 @@ mod tests {
         .expect("read C watermark");
         assert_eq!(watermark.0.timestamp(), base as i64 + 3);
         assert_eq!(watermark.1, c.id.as_bytes().as_slice());
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn test_usage_metrics_lock_has_single_owner_and_releases_on_drop() {
-        // Use a private scratch database — not the shared TEST_DATABASE_URL.
-        // Postgres advisory locks are per-database; hardcoding the production
-        // USAGE_METRICS_LOCK_KEY (0x4255_5A5A_4D45_5452) on the shared test DB
-        // races any live buzz-relay on the same database (see #3619).
-        let admin_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&admin_url)
-            .await
-            .expect("connect admin to create scratch db");
-        let (pool, scratch_name) = create_scratch_db(&admin, "usage_metrics_lock").await;
-        let first = Db::from_pool(pool.clone());
-        let second = Db::from_pool(pool.clone());
-        // Same key as production (`buzz-relay` USAGE_METRICS_LOCK_KEY) — safe here
-        // because the scratch DB is empty of other holders.
-        let key = 0x4255_5A5A_4D45_5452;
-
-        let mut leader = first
-            .try_lock_usage_metrics(key)
-            .await
-            .expect("first lock attempt")
-            .expect("first database handle becomes leader");
-        assert!(leader.is_live().await, "lock owner remains reachable");
-        assert!(
-            second
-                .try_lock_usage_metrics(key)
-                .await
-                .expect("second lock attempt")
-                .is_none(),
-            "another session cannot become leader while the guard exists"
-        );
-
-        drop(leader);
-        assert!(
-            second
-                .try_lock_usage_metrics(key)
-                .await
-                .expect("lock attempt after leader drop")
-                .is_some(),
-            "dropping the detached session releases its advisory lock"
-        );
-
-        // Release any remaining session state before DROP DATABASE.
-        drop(first);
-        drop(second);
-        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 
     // ---- Read-replica routing ------------------------------------------------
