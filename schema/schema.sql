@@ -31,6 +31,7 @@ CREATE TYPE member_role AS ENUM ('owner', 'admin', 'member', 'guest', 'bot');
 CREATE TYPE workflow_status AS ENUM ('active', 'disabled', 'archived');
 CREATE TYPE run_status AS ENUM ('pending', 'running', 'waiting_approval', 'completed', 'failed', 'cancelled');
 CREATE TYPE approval_status AS ENUM ('pending', 'granted', 'denied', 'expired');
+CREATE TYPE workflow_agent_delivery_status AS ENUM ('pending', 'claimed', 'finished', 'failed');
 CREATE TYPE delivery_method AS ENUM ('webhook', 'websocket');
 CREATE TYPE subscription_status AS ENUM ('active', 'paused', 'deleted');
 CREATE TYPE pause_reason AS ENUM ('user', 'system', 'rate_limit');
@@ -474,6 +475,66 @@ CREATE TABLE scheduled_workflow_fires (
 -- The interval anchor reads MAX(scheduled_for) per workflow; the janitor prunes
 -- by claimed_at globally (operator concern). See plan §5 retention coupling.
 CREATE INDEX idx_scheduled_fires_claimed_at ON scheduled_workflow_fires (claimed_at);
+
+-- ── Workflow agent deliveries ───────────────────────────────────────────────
+-- Durable, target-scoped delivery inbox and complete transition state machine
+-- for workflow messages addressed to managed agents. Persists exactly one
+-- canonical binding per (community, run, step, target) and owns the lifecycle
+-- pending -> claimed -> finished | failed, with fenced leases reclaimed by a
+-- fleet-wide reaper. See migration 0035 for the full contract.
+
+CREATE TABLE workflow_agent_deliveries (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    id UUID NOT NULL,
+    workflow_id UUID NOT NULL,
+    run_id UUID NOT NULL,
+    step_id VARCHAR(64) NOT NULL CHECK (length(btrim(step_id)) > 0),
+    target_pubkey BYTEA NOT NULL CHECK (octet_length(target_pubkey) = 32),
+    definition_event_id BYTEA NOT NULL CHECK (octet_length(definition_event_id) = 32),
+    message_event_id BYTEA NOT NULL CHECK (octet_length(message_event_id) = 32),
+    message_event_created_at TIMESTAMPTZ NOT NULL,
+    cause_kind TEXT NOT NULL CHECK (cause_kind IN ('event', 'schedule', 'webhook')),
+    cause_event_id BYTEA CHECK (cause_event_id IS NULL OR octet_length(cause_event_id) = 32),
+    cause_scheduled_for TIMESTAMPTZ,
+    cause_webhook_invocation_id UUID,
+    status workflow_agent_delivery_status NOT NULL DEFAULT 'pending',
+    lease_generation BIGINT NOT NULL DEFAULT 0 CHECK (lease_generation >= 0),
+    lease_until TIMESTAMPTZ,
+    claimed_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (community_id, id),
+    UNIQUE (community_id, run_id, step_id, target_pubkey),
+    FOREIGN KEY (community_id, workflow_id) REFERENCES workflows (community_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (community_id, run_id) REFERENCES workflow_runs (community_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (community_id, message_event_created_at, message_event_id)
+        REFERENCES events (community_id, created_at, id) ON DELETE CASCADE,
+    CHECK (
+        (cause_kind = 'event'
+            AND cause_event_id IS NOT NULL
+            AND cause_scheduled_for IS NULL
+            AND cause_webhook_invocation_id IS NULL)
+     OR (cause_kind = 'schedule'
+            AND cause_event_id IS NULL
+            AND cause_scheduled_for IS NOT NULL
+            AND cause_webhook_invocation_id IS NULL)
+     OR (cause_kind = 'webhook'
+            AND cause_event_id IS NULL
+            AND cause_scheduled_for IS NULL
+            AND cause_webhook_invocation_id IS NOT NULL)
+    ),
+    CHECK ((status = 'claimed') = (lease_until IS NOT NULL)),
+    CHECK ((status = 'claimed') = (claimed_at IS NOT NULL)),
+    CHECK ((status IN ('finished', 'failed')) = (finished_at IS NOT NULL))
+);
+
+CREATE INDEX idx_workflow_agent_deliveries_pending
+    ON workflow_agent_deliveries (community_id, target_pubkey, created_at)
+    WHERE status = 'pending';
+
+CREATE INDEX idx_workflow_agent_deliveries_lease
+    ON workflow_agent_deliveries (lease_until)
+    WHERE status = 'claimed';
 
 -- ── API tokens ────────────────────────────────────────────────────────────────
 -- Conformance: "API tokens and NIP-98 replay". token_hash uniqueness scoped to
@@ -1752,6 +1813,7 @@ SELECT attach_community_write_fence('scheduled_workflow_fires');
 SELECT attach_community_write_fence('subscriptions');
 SELECT attach_community_write_fence('thread_metadata');
 SELECT attach_community_write_fence('users');
+SELECT attach_community_write_fence('workflow_agent_deliveries');
 SELECT attach_community_write_fence('workflow_approvals');
 SELECT attach_community_write_fence('workflow_runs');
 SELECT attach_community_write_fence('workflows');

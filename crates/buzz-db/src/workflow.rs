@@ -11,10 +11,14 @@ use std::fmt;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
+use nostr::{EventId, PublicKey};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
+use buzz_core::workflow_delivery::{
+    WorkflowDeliveryBinding, WorkflowDeliveryCause, WorkflowDeliveryId,
+};
 use buzz_core::CommunityId;
 
 use crate::error::{DbError, Result};
@@ -1339,6 +1343,665 @@ pub async fn find_by_owner_and_name(
         Some(r) => Ok(Some(row_to_workflow_record(r)?)),
         None => Ok(None),
     }
+}
+
+// -- Workflow agent deliveries ------------------------------------------------
+//
+// Durable, target-scoped delivery inbox and the complete transition state
+// machine for workflow messages addressed to managed agents. This is the
+// DB-layer complement of the zero-I/O `buzz_core::workflow_delivery` protocol
+// vocabulary: it persists exactly B's canonical `WorkflowDeliveryBinding`
+// (never a duplicate tuple spelling) and owns only the lifecycle around it.
+//
+//     pending --claim--> claimed --finish--> finished | failed
+//        ^                   |
+//        +------- reap -------+   (expired lease reclaimed; prior holder fenced)
+//
+// Leases are fenced by a monotonic `lease_generation`: every claim and every
+// reap bumps it, and renew/finish only advance a row whose generation still
+// matches the caller's token, so a reaped or superseded holder always fails
+// closed. The reaper is a fleet-wide scan filtered through
+// `community_write_allowed`, exactly like the scheduler prune scan, so a
+// quiescing/fenced/deleted tenant is skipped before its write-fence trigger
+// can abort healthy tenants in the same statement.
+//
+// Producer, runtime, API, and ACP reachability are intentionally absent: this
+// node is dormant by contract.
+
+/// Terminal outcome recorded on a workflow agent delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowDeliveryOutcome {
+    /// The managed agent completed the delivery successfully.
+    Finished,
+    /// The managed agent failed the delivery permanently.
+    Failed,
+}
+
+impl WorkflowDeliveryOutcome {
+    fn as_status(self) -> &'static str {
+        match self {
+            WorkflowDeliveryOutcome::Finished => "finished",
+            WorkflowDeliveryOutcome::Failed => "failed",
+        }
+    }
+}
+
+/// Lifecycle state of a durable workflow agent delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowDeliveryStatus {
+    /// Created and awaiting a claim.
+    Pending,
+    /// Claimed under a live, fenced lease.
+    Claimed,
+    /// Terminally finished (success).
+    Finished,
+    /// Terminally failed (permanent).
+    Failed,
+}
+
+impl fmt::Display for WorkflowDeliveryStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            WorkflowDeliveryStatus::Pending => "pending",
+            WorkflowDeliveryStatus::Claimed => "claimed",
+            WorkflowDeliveryStatus::Finished => "finished",
+            WorkflowDeliveryStatus::Failed => "failed",
+        })
+    }
+}
+
+impl FromStr for WorkflowDeliveryStatus {
+    type Err = DbError;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "pending" => Ok(WorkflowDeliveryStatus::Pending),
+            "claimed" => Ok(WorkflowDeliveryStatus::Claimed),
+            "finished" => Ok(WorkflowDeliveryStatus::Finished),
+            "failed" => Ok(WorkflowDeliveryStatus::Failed),
+            other => Err(DbError::InvalidData(format!(
+                "unknown workflow delivery status: {other}"
+            ))),
+        }
+    }
+}
+
+/// The fenced lease a caller holds after winning a claim.
+///
+/// `lease_generation` is the fence token: any renew or finish that does not
+/// present the row's current generation matches zero rows and fails closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkflowDeliveryLease {
+    /// Owning community (server provenance).
+    pub community_id: CommunityId,
+    /// Durable delivery identifier.
+    pub delivery_id: WorkflowDeliveryId,
+    /// Managed-agent recipient that holds the lease.
+    pub target_pubkey: PublicKey,
+    /// Fence token: the generation this lease was granted under.
+    pub lease_generation: i64,
+    /// When the current lease expires and becomes reclaimable.
+    pub lease_until: DateTime<Utc>,
+}
+
+/// A durable delivery row, decoded back into B's canonical binding plus its
+/// lifecycle state.
+#[derive(Debug, Clone)]
+pub struct WorkflowAgentDeliveryRecord {
+    /// Durable delivery identifier.
+    pub id: WorkflowDeliveryId,
+    /// Canonical protocol binding persisted verbatim from B.
+    pub binding: WorkflowDeliveryBinding,
+    /// Current lifecycle state.
+    pub status: WorkflowDeliveryStatus,
+    /// Current fence generation.
+    pub lease_generation: i64,
+    /// Expiry of the current claim, if claimed.
+    pub lease_until: Option<DateTime<Utc>>,
+    /// When the current claim was taken, if claimed.
+    pub claimed_at: Option<DateTime<Utc>>,
+    /// When the delivery reached a terminal state, if terminal.
+    pub finished_at: Option<DateTime<Utc>>,
+    /// Creation time for ordered polling.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Result of a terminal `finish` transition, giving callers a deterministic
+/// convergence point for uncertain completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowDeliveryFinishOutcome {
+    /// This call performed the once-only terminal transition.
+    Settled(WorkflowDeliveryOutcome),
+    /// The delivery was already terminal; the recorded status is returned so a
+    /// retry after an uncertain crash converges idempotently to one terminal.
+    AlreadyTerminal(WorkflowDeliveryStatus),
+    /// The caller's lease was stale (reaped or superseded): fail closed.
+    LeaseLost,
+}
+
+/// Result of a `renew` transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowDeliveryRenewOutcome {
+    /// The lease was extended; the new expiry is returned.
+    Renewed(DateTime<Utc>),
+    /// The caller's lease was stale (reaped, superseded, or already terminal):
+    /// fail closed.
+    LeaseLost,
+}
+
+/// One canonical delivery to persist for a target, decomposed from B's binding.
+///
+/// The delivery identifier is caller-supplied (it must equal the identifier the
+/// wake hint and claim request will carry), and the binding is B's canonical,
+/// pre-validated tuple. `message_event_created_at` is the persistence key that
+/// completes the events foreign key; it is not part of the protocol identity.
+#[derive(Debug, Clone)]
+pub struct WorkflowAgentDelivery {
+    /// Stable durable identifier for this delivery.
+    pub id: WorkflowDeliveryId,
+    /// Canonical protocol binding (community/run/step/target/definition/message/cause).
+    pub binding: WorkflowDeliveryBinding,
+}
+
+/// The persisted column decomposition of a `WorkflowDeliveryCause`:
+/// `(cause_kind, cause_event_id, cause_scheduled_for, cause_webhook_invocation_id)`.
+type CauseColumns = (
+    &'static str,
+    Option<Vec<u8>>,
+    Option<DateTime<Utc>>,
+    Option<Uuid>,
+);
+
+/// Decompose a `WorkflowDeliveryCause` into its persisted column triple.
+fn cause_columns(cause: &WorkflowDeliveryCause) -> CauseColumns {
+    match cause {
+        WorkflowDeliveryCause::Event(event_id) => {
+            ("event", Some(event_id.as_bytes().to_vec()), None, None)
+        }
+        WorkflowDeliveryCause::Schedule {
+            scheduled_for_unix_seconds,
+        } => (
+            "schedule",
+            None,
+            Some(
+                DateTime::<Utc>::from_timestamp(*scheduled_for_unix_seconds, 0)
+                    .unwrap_or_else(|| DateTime::<Utc>::from_timestamp_nanos(0)),
+            ),
+            None,
+        ),
+        WorkflowDeliveryCause::Webhook { invocation_id } => {
+            ("webhook", None, None, Some(*invocation_id))
+        }
+    }
+}
+
+/// Reconstruct a `WorkflowDeliveryCause` from its persisted columns.
+fn cause_from_columns(
+    kind: &str,
+    event_id: Option<Vec<u8>>,
+    scheduled_for: Option<DateTime<Utc>>,
+    webhook_invocation_id: Option<Uuid>,
+) -> Result<WorkflowDeliveryCause> {
+    match kind {
+        "event" => {
+            let bytes =
+                event_id.ok_or_else(|| DbError::InvalidData("event cause missing id".into()))?;
+            let id = EventId::from_slice(&bytes)
+                .map_err(|_| DbError::InvalidData("event cause id malformed".into()))?;
+            Ok(WorkflowDeliveryCause::Event(id))
+        }
+        "schedule" => {
+            let at = scheduled_for
+                .ok_or_else(|| DbError::InvalidData("schedule cause missing instant".into()))?;
+            Ok(WorkflowDeliveryCause::Schedule {
+                scheduled_for_unix_seconds: at.timestamp(),
+            })
+        }
+        "webhook" => {
+            let invocation_id = webhook_invocation_id
+                .ok_or_else(|| DbError::InvalidData("webhook cause missing invocation".into()))?;
+            Ok(WorkflowDeliveryCause::Webhook { invocation_id })
+        }
+        other => Err(DbError::InvalidData(format!(
+            "unknown delivery cause kind: {other}"
+        ))),
+    }
+}
+
+/// Decode one delivery row back into a record with its canonical binding.
+///
+/// Read queries must project `status` via `status::text AS status`: `status`
+/// is the native `workflow_agent_delivery_status` enum, which the sqlx runtime
+/// cannot decode into a Rust `String` — matching how every other native enum
+/// column is read in this module.
+fn row_to_delivery_record(row: &sqlx::postgres::PgRow) -> Result<WorkflowAgentDeliveryRecord> {
+    let community_id = CommunityId::from_uuid(row.try_get("community_id")?);
+    let id: Uuid = row.try_get("id")?;
+    let workflow_id: Uuid = row.try_get("workflow_id")?;
+    let run_id: Uuid = row.try_get("run_id")?;
+    let step_id: String = row.try_get("step_id")?;
+    let target_bytes: Vec<u8> = row.try_get("target_pubkey")?;
+    let definition_bytes: Vec<u8> = row.try_get("definition_event_id")?;
+    let message_bytes: Vec<u8> = row.try_get("message_event_id")?;
+    let cause_kind: String = row.try_get("cause_kind")?;
+    let cause_event_id: Option<Vec<u8>> = row.try_get("cause_event_id")?;
+    let cause_scheduled_for: Option<DateTime<Utc>> = row.try_get("cause_scheduled_for")?;
+    let cause_webhook_invocation_id: Option<Uuid> = row.try_get("cause_webhook_invocation_id")?;
+    let status: String = row.try_get("status")?;
+
+    let target_pubkey = PublicKey::from_slice(&target_bytes)
+        .map_err(|_| DbError::InvalidData("delivery target pubkey malformed".into()))?;
+    let definition_event_id = EventId::from_slice(&definition_bytes)
+        .map_err(|_| DbError::InvalidData("delivery definition event id malformed".into()))?;
+    let message_event_id = EventId::from_slice(&message_bytes)
+        .map_err(|_| DbError::InvalidData("delivery message event id malformed".into()))?;
+    let cause = cause_from_columns(
+        &cause_kind,
+        cause_event_id,
+        cause_scheduled_for,
+        cause_webhook_invocation_id,
+    )?;
+
+    let binding = WorkflowDeliveryBinding::new(
+        community_id,
+        workflow_id,
+        run_id,
+        step_id,
+        target_pubkey,
+        definition_event_id,
+        message_event_id,
+        cause,
+    )
+    .map_err(|error| DbError::InvalidData(format!("stored delivery binding invalid: {error}")))?;
+
+    Ok(WorkflowAgentDeliveryRecord {
+        id: WorkflowDeliveryId::from_uuid(id),
+        binding,
+        status: status.parse()?,
+        lease_generation: row.try_get("lease_generation")?,
+        lease_until: row.try_get("lease_until")?,
+        claimed_at: row.try_get("claimed_at")?,
+        finished_at: row.try_get("finished_at")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+/// Serialize one `(community, run, step)` delivery identity.
+///
+/// The returned transaction holds an advisory lock until every target row for
+/// this step commits together, preventing duplicate producer retries from
+/// racing two canonical deliveries for the same step. Returns whether any
+/// delivery already exists for this identity so the caller can reuse the
+/// already-signed visible message instead of signing a second one.
+pub async fn lock_workflow_agent_delivery_identity(
+    pool: &PgPool,
+    community_id: CommunityId,
+    run_id: Uuid,
+    step_id: &str,
+) -> Result<(Transaction<'static, Postgres>, bool)> {
+    let mut transaction = pool.begin().await?;
+    let identity = format!("{}:{run_id}:{step_id}", community_id.as_uuid());
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(identity)
+        .execute(&mut *transaction)
+        .await?;
+    let existing = sqlx::query(
+        "SELECT 1 FROM workflow_agent_deliveries \
+         WHERE community_id = $1 AND run_id = $2 AND step_id = $3 LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .bind(step_id)
+    .fetch_optional(&mut *transaction)
+    .await?
+    .is_some();
+    Ok((transaction, existing))
+}
+
+/// Atomically persist all canonical deliveries for one workflow step.
+///
+/// This is the ONLY insert path into `workflow_agent_deliveries`. Callers hold
+/// the identity lock from [`lock_workflow_agent_delivery_identity`] and pass the
+/// same transaction so the visible message insert (owned by the producer node)
+/// and every delivery row commit or roll back together. Duplicate producer
+/// retries collapse via the `(community, run, step, target)` uniqueness with
+/// `ON CONFLICT DO NOTHING`; the returned vector lists only rows this call
+/// actually created.
+pub async fn commit_workflow_agent_deliveries(
+    mut transaction: Transaction<'static, Postgres>,
+    community_id: CommunityId,
+    message_event_created_at: DateTime<Utc>,
+    deliveries: &[WorkflowAgentDelivery],
+) -> Result<Vec<WorkflowDeliveryId>> {
+    let mut created = Vec::new();
+    for delivery in deliveries {
+        let binding = &delivery.binding;
+        if binding.community_id() != community_id {
+            return Err(DbError::InvalidData(
+                "delivery binding community does not match committing community".into(),
+            ));
+        }
+        let (cause_kind, cause_event_id, cause_scheduled_for, cause_webhook_invocation_id) =
+            cause_columns(binding.cause());
+        let affected = sqlx::query(
+            "INSERT INTO workflow_agent_deliveries \
+             (community_id, id, workflow_id, run_id, step_id, target_pubkey, \
+              definition_event_id, message_event_id, message_event_created_at, \
+              cause_kind, cause_event_id, cause_scheduled_for, cause_webhook_invocation_id) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) \
+             ON CONFLICT (community_id, run_id, step_id, target_pubkey) DO NOTHING",
+        )
+        .bind(community_id.as_uuid())
+        .bind(delivery.id.as_uuid())
+        .bind(binding.workflow_id())
+        .bind(binding.run_id())
+        .bind(binding.step_id())
+        .bind(binding.target_pubkey().to_bytes().to_vec())
+        .bind(binding.definition_event_id().as_bytes().to_vec())
+        .bind(binding.message_event_id().as_bytes().to_vec())
+        .bind(message_event_created_at)
+        .bind(cause_kind)
+        .bind(cause_event_id)
+        .bind(cause_scheduled_for)
+        .bind(cause_webhook_invocation_id)
+        .execute(&mut *transaction)
+        .await?
+        .rows_affected();
+        if affected == 1 {
+            created.push(delivery.id);
+        }
+    }
+    transaction.commit().await?;
+    Ok(created)
+}
+
+/// Atomically claim one specific pending delivery, or the oldest pending
+/// delivery for a target, under a fresh fenced lease.
+///
+/// Selection and update are scoped to the authenticated target and community.
+/// An optional expected binding turns a forged or stale wake hint into a miss
+/// rather than an alternate authority path: the candidate must match every
+/// supplied binding field — workflow, run, step, definition, message, and the
+/// full decomposed cause identity — so a claim can never settle against a row
+/// whose binding disagrees with the caller's. The winning row's
+/// `lease_generation` is bumped and returned as the fence token in
+/// [`WorkflowDeliveryLease`]; `lease_seconds` sets the initial lease window.
+pub async fn claim_workflow_agent_delivery(
+    pool: &PgPool,
+    community_id: CommunityId,
+    target_pubkey: &PublicKey,
+    delivery_id: Option<WorkflowDeliveryId>,
+    expected: Option<&WorkflowDeliveryBinding>,
+    lease_seconds: i64,
+) -> Result<Option<(WorkflowDeliveryLease, WorkflowAgentDeliveryRecord)>> {
+    if lease_seconds <= 0 {
+        return Err(DbError::InvalidData(
+            "delivery lease_seconds must be positive".into(),
+        ));
+    }
+    // The expected binding is an authority claim about which row may be
+    // consumed; the (community, target) request scope is where the row is
+    // looked up. If they disagree, a foreign binding could authorize a row
+    // selected under a different scope, so reject the mismatch before SQL
+    // rather than letting the scope arguments silently override the binding.
+    if let Some(expected) = expected {
+        if expected.community_id() != community_id || expected.target_pubkey() != *target_pubkey {
+            return Ok(None);
+        }
+    }
+    let target_bytes = target_pubkey.to_bytes().to_vec();
+    // Decompose the expected cause so a mismatch on any cause identity — not
+    // only the shared columns — makes the claim a miss.
+    let expected_cause = expected.map(|b| cause_columns(b.cause()));
+    let row = sqlx::query(
+        r#"
+        WITH candidate AS (
+            SELECT community_id, id
+            FROM workflow_agent_deliveries
+            WHERE community_id = $1 AND target_pubkey = $2
+              AND ($3::uuid IS NULL OR id = $3)
+              AND ($4::uuid IS NULL OR workflow_id = $4)
+              AND ($5::uuid IS NULL OR run_id = $5)
+              AND ($6::text IS NULL OR step_id = $6)
+              AND ($7::bytea IS NULL OR definition_event_id = $7)
+              AND ($8::bytea IS NULL OR message_event_id = $8)
+              AND ($9::text IS NULL OR cause_kind = $9)
+              AND ($10::bytea IS NULL OR cause_event_id = $10)
+              AND ($11::timestamptz IS NULL OR cause_scheduled_for = $11)
+              AND ($12::uuid IS NULL OR cause_webhook_invocation_id = $12)
+              AND status = 'pending'
+            ORDER BY created_at, id
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        )
+        UPDATE workflow_agent_deliveries delivery
+        SET status = 'claimed',
+            lease_generation = delivery.lease_generation + 1,
+            lease_until = NOW() + make_interval(secs => $13),
+            claimed_at = NOW()
+        FROM candidate
+        WHERE delivery.community_id = candidate.community_id
+          AND delivery.id = candidate.id
+        RETURNING delivery.community_id, delivery.id, delivery.workflow_id,
+            delivery.run_id, delivery.step_id, delivery.target_pubkey,
+            delivery.definition_event_id, delivery.message_event_id,
+            delivery.message_event_created_at, delivery.cause_kind,
+            delivery.cause_event_id, delivery.cause_scheduled_for,
+            delivery.cause_webhook_invocation_id, delivery.status::text AS status,
+            delivery.lease_generation, delivery.lease_until, delivery.claimed_at,
+            delivery.finished_at, delivery.created_at
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(&target_bytes)
+    .bind(delivery_id.map(WorkflowDeliveryId::as_uuid))
+    .bind(expected.map(WorkflowDeliveryBinding::workflow_id))
+    .bind(expected.map(WorkflowDeliveryBinding::run_id))
+    .bind(expected.map(|b| b.step_id().to_owned()))
+    .bind(expected.map(|b| b.definition_event_id().as_bytes().to_vec()))
+    .bind(expected.map(|b| b.message_event_id().as_bytes().to_vec()))
+    .bind(expected_cause.as_ref().map(|(kind, ..)| *kind))
+    .bind(expected_cause.as_ref().and_then(|(_, id, ..)| id.clone()))
+    .bind(expected_cause.as_ref().and_then(|(_, _, at, _)| *at))
+    .bind(expected_cause.as_ref().and_then(|(.., webhook)| *webhook))
+    .bind(lease_seconds as f64)
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let record = row_to_delivery_record(&row)?;
+    let lease = WorkflowDeliveryLease {
+        community_id: record.binding.community_id(),
+        delivery_id: record.id,
+        target_pubkey: record.binding.target_pubkey(),
+        lease_generation: record.lease_generation,
+        lease_until: record
+            .lease_until
+            .ok_or_else(|| DbError::InvalidData("claimed delivery missing lease_until".into()))?,
+    };
+    Ok(Some((lease, record)))
+}
+
+/// Extend a live lease, fenced by the caller's generation and target.
+///
+/// Advances `lease_until` only for a still-claimed row whose current generation
+/// matches the lease token, whose target matches the lease's held recipient,
+/// and whose lease has not yet expired on the DB clock. A reaped, superseded,
+/// already-terminal, expired, or wrong-target holder matches zero rows and
+/// receives [`WorkflowDeliveryRenewOutcome::LeaseLost`]; a lease that has
+/// passed its deadline cannot resurrect itself before the reaper runs.
+pub async fn renew_workflow_agent_delivery(
+    pool: &PgPool,
+    lease: &WorkflowDeliveryLease,
+    lease_seconds: i64,
+) -> Result<WorkflowDeliveryRenewOutcome> {
+    if lease_seconds <= 0 {
+        return Err(DbError::InvalidData(
+            "delivery lease_seconds must be positive".into(),
+        ));
+    }
+    let row = sqlx::query(
+        r#"
+        UPDATE workflow_agent_deliveries
+        SET lease_until = NOW() + make_interval(secs => $5)
+        WHERE community_id = $1
+          AND id = $2
+          AND target_pubkey = $4
+          AND status = 'claimed'
+          AND lease_generation = $3
+          AND lease_until >= NOW()
+        RETURNING lease_until
+        "#,
+    )
+    .bind(lease.community_id.as_uuid())
+    .bind(lease.delivery_id.as_uuid())
+    .bind(lease.lease_generation)
+    .bind(lease.target_pubkey.to_bytes().to_vec())
+    .bind(lease_seconds as f64)
+    .fetch_optional(pool)
+    .await?;
+
+    match row {
+        Some(row) => Ok(WorkflowDeliveryRenewOutcome::Renewed(
+            row.try_get("lease_until")?,
+        )),
+        None => Ok(WorkflowDeliveryRenewOutcome::LeaseLost),
+    }
+}
+
+/// Perform the once-only terminal transition, fenced by the caller's lease, and
+/// reconcile uncertain completion.
+///
+/// If the caller's full capability (target + generation) still holds a claimed,
+/// unexpired row, it is settled to the requested terminal outcome exactly once.
+/// If the row is already terminal under the caller's own target and generation,
+/// status is returned so a retry after a crash between the agent's work and the
+/// durable finish converges idempotently to the same terminal rather than
+/// reopening the delivery. Any other state — reaped, superseded, expired, a
+/// lost race, a wrong-target lease, or a terminal written by a newer holder at
+/// a different generation — fails closed with
+/// [`WorkflowDeliveryFinishOutcome::LeaseLost`].
+pub async fn finish_workflow_agent_delivery(
+    pool: &PgPool,
+    lease: &WorkflowDeliveryLease,
+    outcome: WorkflowDeliveryOutcome,
+) -> Result<WorkflowDeliveryFinishOutcome> {
+    let mut transaction = pool.begin().await?;
+
+    // Fence + terminal-once guard in one statement: only a still-claimed row
+    // under the caller's generation transitions, and it can only do so from a
+    // non-terminal state.
+    let settled = sqlx::query(
+        r#"
+        UPDATE workflow_agent_deliveries
+        SET status = $4::workflow_agent_delivery_status,
+            lease_until = NULL,
+            claimed_at = NULL,
+            finished_at = NOW()
+        WHERE community_id = $1
+          AND id = $2
+          AND target_pubkey = $5
+          AND status = 'claimed'
+          AND lease_generation = $3
+          AND lease_until >= NOW()
+        RETURNING status::text AS status
+        "#,
+    )
+    .bind(lease.community_id.as_uuid())
+    .bind(lease.delivery_id.as_uuid())
+    .bind(lease.lease_generation)
+    .bind(outcome.as_status())
+    .bind(lease.target_pubkey.to_bytes().to_vec())
+    .fetch_optional(&mut *transaction)
+    .await?;
+
+    if settled.is_some() {
+        transaction.commit().await?;
+        return Ok(WorkflowDeliveryFinishOutcome::Settled(outcome));
+    }
+
+    // No transition happened. Distinguish "already terminal under THIS lease"
+    // (idempotent convergence for an uncertain-completion retry) from "lease
+    // lost" (fail closed) by reading current state inside the same transaction.
+    // The terminal read is fenced by the caller's FULL lease capability
+    // (target + generation): finish never bumps the generation, so a genuine
+    // retry by the true holder still matches, but a terminal written by a NEWER
+    // holder (after this lease was reaped and re-claimed at a higher
+    // generation) or a lease reconstituted with the wrong target must not be
+    // laundered back as its own success. Any target or generation mismatch is
+    // therefore LeaseLost.
+    let current = sqlx::query(
+        "SELECT status::text AS status FROM workflow_agent_deliveries \
+         WHERE community_id = $1 AND id = $2 AND target_pubkey = $4 AND lease_generation = $3",
+    )
+    .bind(lease.community_id.as_uuid())
+    .bind(lease.delivery_id.as_uuid())
+    .bind(lease.lease_generation)
+    .bind(lease.target_pubkey.to_bytes().to_vec())
+    .fetch_optional(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+
+    match current {
+        Some(row) => {
+            let status: WorkflowDeliveryStatus = row.try_get::<String, _>("status")?.parse()?;
+            match status {
+                WorkflowDeliveryStatus::Finished | WorkflowDeliveryStatus::Failed => {
+                    Ok(WorkflowDeliveryFinishOutcome::AlreadyTerminal(status))
+                }
+                _ => Ok(WorkflowDeliveryFinishOutcome::LeaseLost),
+            }
+        }
+        None => Ok(WorkflowDeliveryFinishOutcome::LeaseLost),
+    }
+}
+
+/// Reclaim expired delivery leases across the fleet, fencing prior holders out.
+///
+/// Every candidate row is filtered through `community_write_allowed`, so a
+/// quiescing, fenced, or tombstoned tenant is skipped inside the mutating
+/// statement — identical to the scheduler prune scan — before its per-row write
+/// fence could abort healthy tenants. Each reclaimed row returns to `pending`
+/// with `lease_generation` bumped, so the previous holder's later renew or
+/// finish (which still presents the old generation) fails closed. Returns the
+/// number of rows reclaimed.
+pub async fn reap_expired_workflow_agent_deliveries(pool: &PgPool) -> Result<u64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE workflow_agent_deliveries
+        SET status = 'pending',
+            lease_generation = lease_generation + 1,
+            lease_until = NULL,
+            claimed_at = NULL
+        WHERE status = 'claimed'
+          AND lease_until < NOW()
+          AND community_write_allowed(community_id)
+        "#,
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Fetch one delivery record by identifier, scoped to its community.
+pub async fn get_workflow_agent_delivery(
+    pool: &PgPool,
+    community_id: CommunityId,
+    delivery_id: WorkflowDeliveryId,
+) -> Result<Option<WorkflowAgentDeliveryRecord>> {
+    let row = sqlx::query(
+        "SELECT community_id, id, workflow_id, run_id, step_id, target_pubkey, \
+         definition_event_id, message_event_id, message_event_created_at, cause_kind, \
+         cause_event_id, cause_scheduled_for, cause_webhook_invocation_id, \
+         status::text AS status, lease_generation, lease_until, claimed_at, finished_at, \
+         created_at FROM workflow_agent_deliveries WHERE community_id = $1 AND id = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(delivery_id.as_uuid())
+    .fetch_optional(pool)
+    .await?;
+    row.as_ref().map(row_to_delivery_record).transpose()
 }
 
 // -- Tests --------------------------------------------------------------------
@@ -2701,5 +3364,980 @@ mod tests {
             enabled_b.iter().any(|w| w.id == wf_departing_b),
             "same owner's workflow in a different channel must be untouched"
         );
+    }
+
+    // -- Workflow agent delivery state machine --------------------------------
+    //
+    // These fresh-Postgres proofs exercise the complete transition system:
+    // create-idempotency, community/target claim isolation, fenced leases,
+    // reap, terminal-once finish, uncertain-completion convergence, the
+    // fleet-wide lifecycle fence, deletion cascade, and commit rollback. Each
+    // requires a disposable Postgres and is `#[ignore]` by default.
+
+    use nostr::Keys;
+
+    /// Scaffold under one community: workflow + run + a real message event, and
+    /// return a canonical binding for `target` plus the identifiers needed to
+    /// commit and claim it.
+    async fn make_delivery_scaffold(
+        pool: &PgPool,
+        community: CommunityId,
+        target: &PublicKey,
+    ) -> (WorkflowAgentDelivery, DateTime<Utc>) {
+        let owner = vec![0xc3; 32];
+        ensure_user(pool, community, &owner)
+            .await
+            .expect("ensure owner");
+        let channel_id = make_channel(pool, community, &owner).await;
+        let definition_event_id = EventId::from_byte_array([0x11; 32]);
+        let workflow_id = create_workflow(
+            pool,
+            community,
+            Some(channel_id),
+            &owner,
+            "delivery-wf",
+            r#"{"trigger":{"on":"webhook"},"steps":[]}"#,
+            &[0u8; 32],
+        )
+        .await
+        .expect("create workflow");
+        let run_id = create_workflow_run(
+            pool,
+            community,
+            workflow_id,
+            definition_event_id.as_bytes(),
+            None,
+            None,
+        )
+        .await
+        .expect("create run");
+
+        // A real message event row so the delivery's events FK is satisfiable.
+        let message = EventBuilderKeys::signed_kind9(&owner, channel_id);
+        let message_event_created_at = message.created_at;
+        insert_test_event(pool, community, channel_id, &message).await;
+
+        let binding = WorkflowDeliveryBinding::new(
+            community,
+            workflow_id,
+            run_id,
+            "notify",
+            *target,
+            definition_event_id,
+            message.id,
+            WorkflowDeliveryCause::Event(EventId::from_byte_array([0x33; 32])),
+        )
+        .expect("valid binding");
+
+        (
+            WorkflowAgentDelivery {
+                id: WorkflowDeliveryId::from_uuid(Uuid::new_v4()),
+                binding,
+            },
+            message_event_created_at,
+        )
+    }
+
+    /// Minimal event fixture: id, pubkey, created_at, kind.
+    struct TestEvent {
+        id: EventId,
+        pubkey: Vec<u8>,
+        created_at: DateTime<Utc>,
+    }
+
+    struct EventBuilderKeys;
+    impl EventBuilderKeys {
+        fn signed_kind9(pubkey: &[u8], _channel_id: Uuid) -> TestEvent {
+            // A unique 32-byte id: the fresh UUID's 16 bytes written twice.
+            let uuid = Uuid::new_v4().into_bytes();
+            let mut id = [0u8; 32];
+            id[..16].copy_from_slice(&uuid);
+            id[16..].copy_from_slice(&uuid);
+            TestEvent {
+                id: EventId::from_byte_array(id),
+                pubkey: pubkey.to_vec(),
+                created_at: Utc::now(),
+            }
+        }
+    }
+
+    async fn insert_test_event(
+        pool: &PgPool,
+        community: CommunityId,
+        channel_id: Uuid,
+        event: &TestEvent,
+    ) {
+        sqlx::query(
+            "INSERT INTO events \
+             (community_id, id, pubkey, created_at, kind, tags, content, sig, channel_id) \
+             VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9)",
+        )
+        .bind(community.as_uuid())
+        .bind(event.id.as_bytes().to_vec())
+        .bind(&event.pubkey)
+        .bind(event.created_at)
+        .bind(9i32)
+        .bind("[]")
+        .bind("")
+        .bind(vec![0u8; 64])
+        .bind(channel_id)
+        .execute(pool)
+        .await
+        .expect("insert message event");
+    }
+
+    async fn commit_one(
+        pool: &PgPool,
+        community: CommunityId,
+        delivery: &WorkflowAgentDelivery,
+        message_created_at: DateTime<Utc>,
+    ) -> Vec<WorkflowDeliveryId> {
+        let run_id = delivery.binding.run_id();
+        let step = delivery.binding.step_id().to_owned();
+        let (tx, _existing) = lock_workflow_agent_delivery_identity(pool, community, run_id, &step)
+            .await
+            .expect("lock identity");
+        commit_workflow_agent_deliveries(
+            tx,
+            community,
+            message_created_at,
+            std::slice::from_ref(delivery),
+        )
+        .await
+        .expect("commit deliveries")
+    }
+
+    /// Fence a community so its `deletion_state` is no longer `active`, exactly
+    /// as the deletion control plane would.
+    ///
+    /// The `enforce_community_tombstone` trigger only admits a lifecycle
+    /// transition when the transaction-local executor GUCs name this community
+    /// and its new fence generation, so mirror `set_executor_gucs`: set both
+    /// GUCs and perform the bump in a single transaction.
+    async fn fence_community(pool: &PgPool, community: CommunityId) {
+        let mut tx = pool.begin().await.expect("begin fence tx");
+        sqlx::query(
+            "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+                    set_config('buzz.deletion_fence_generation', $2, true)",
+        )
+        .bind(community.as_uuid().to_string())
+        .bind("1")
+        .execute(&mut *tx)
+        .await
+        .expect("set executor gucs");
+        sqlx::query(
+            "UPDATE communities \
+             SET deletion_state = 'quiescing', deletion_fence_generation = 1 \
+             WHERE id = $1",
+        )
+        .bind(community.as_uuid())
+        .execute(&mut *tx)
+        .await
+        .expect("fence community");
+        tx.commit().await.expect("commit fence tx");
+    }
+
+    /// A duplicate producer retry for the same (community, run, step, target)
+    /// must collapse to exactly one row.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn create_is_idempotent_across_producer_retries() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let target = Keys::generate().public_key();
+        let (delivery, created_at) = make_delivery_scaffold(&pool, community, &target).await;
+
+        let first = commit_one(&pool, community, &delivery, created_at).await;
+        assert_eq!(first, vec![delivery.id], "first commit creates the row");
+
+        // Retry with the same identity but a different delivery id: the unique
+        // (community, run, step, target) collapses it to a no-op.
+        let retry = WorkflowAgentDelivery {
+            id: WorkflowDeliveryId::from_uuid(Uuid::new_v4()),
+            binding: delivery.binding.clone(),
+        };
+        let second = commit_one(&pool, community, &retry, created_at).await;
+        assert!(second.is_empty(), "duplicate producer retry must collapse");
+
+        let stored = get_workflow_agent_delivery(&pool, community, delivery.id)
+            .await
+            .expect("get")
+            .expect("original row survives");
+        assert_eq!(stored.status, WorkflowDeliveryStatus::Pending);
+        assert_eq!(
+            stored.binding, delivery.binding,
+            "binding persisted verbatim"
+        );
+    }
+
+    /// Same delivery UUID in two communities must claim independently, and one
+    /// target cannot consume another target's row.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn claim_is_community_and_target_isolated() {
+        let pool = setup_pool().await;
+        let community_a = make_community(&pool).await;
+        let community_b = make_community(&pool).await;
+        let target = Keys::generate().public_key();
+        let other_target = Keys::generate().public_key();
+
+        let (mut da, ca) = make_delivery_scaffold(&pool, community_a, &target).await;
+        let (mut db, cb) = make_delivery_scaffold(&pool, community_b, &target).await;
+        // Force the same delivery UUID across communities: PK is (community, id).
+        let shared = WorkflowDeliveryId::from_uuid(Uuid::new_v4());
+        da.id = shared;
+        db.id = shared;
+        commit_one(&pool, community_a, &da, ca).await;
+        commit_one(&pool, community_b, &db, cb).await;
+
+        // A wrong target cannot claim A's row.
+        let wrong = claim_workflow_agent_delivery(
+            &pool,
+            community_a,
+            &other_target,
+            Some(shared),
+            None,
+            30,
+        )
+        .await
+        .expect("claim");
+        assert!(wrong.is_none(), "another target must not claim the row");
+
+        // Claiming A does not consume B's identical UUID.
+        let claim_a =
+            claim_workflow_agent_delivery(&pool, community_a, &target, Some(shared), None, 30)
+                .await
+                .expect("claim a")
+                .expect("A claimable");
+        assert_eq!(claim_a.0.community_id, community_a);
+        let claim_b =
+            claim_workflow_agent_delivery(&pool, community_b, &target, Some(shared), None, 30)
+                .await
+                .expect("claim b")
+                .expect("B still claimable — A's claim must not consume it");
+        assert_eq!(claim_b.0.community_id, community_b);
+
+        // A second claim in A now loses (the row is claimed).
+        let again =
+            claim_workflow_agent_delivery(&pool, community_a, &target, Some(shared), None, 30)
+                .await
+                .expect("claim a again");
+        assert!(again.is_none(), "claimed row must not be claimable twice");
+    }
+
+    /// A forged/stale wake binding that disagrees with the row makes the claim a
+    /// miss rather than an alternate authority path.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn claim_rejects_mismatched_expected_binding() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let target = Keys::generate().public_key();
+        let (delivery, created_at) = make_delivery_scaffold(&pool, community, &target).await;
+        commit_one(&pool, community, &delivery, created_at).await;
+
+        // Build an expected binding with a different step_id.
+        let bad = WorkflowDeliveryBinding::new(
+            community,
+            delivery.binding.workflow_id(),
+            delivery.binding.run_id(),
+            "different-step",
+            target,
+            delivery.binding.definition_event_id(),
+            delivery.binding.message_event_id(),
+            delivery.binding.cause().clone(),
+        )
+        .expect("binding");
+        let miss = claim_workflow_agent_delivery(
+            &pool,
+            community,
+            &target,
+            Some(delivery.id),
+            Some(&bad),
+            30,
+        )
+        .await
+        .expect("claim");
+        assert!(miss.is_none(), "mismatched binding must not claim");
+
+        // A binding that disagrees only on the cause identity is also a miss:
+        // the full decomposed cause is load-bearing, not just the shared cols.
+        let bad_cause = WorkflowDeliveryBinding::new(
+            community,
+            delivery.binding.workflow_id(),
+            delivery.binding.run_id(),
+            delivery.binding.step_id(),
+            target,
+            delivery.binding.definition_event_id(),
+            delivery.binding.message_event_id(),
+            WorkflowDeliveryCause::Webhook {
+                invocation_id: Uuid::new_v4(),
+            },
+        )
+        .expect("binding");
+        let miss_cause = claim_workflow_agent_delivery(
+            &pool,
+            community,
+            &target,
+            Some(delivery.id),
+            Some(&bad_cause),
+            30,
+        )
+        .await
+        .expect("claim");
+        assert!(
+            miss_cause.is_none(),
+            "a binding disagreeing only on cause must not claim"
+        );
+
+        // A binding that disagrees only on workflow_id is likewise a miss.
+        let bad_workflow = WorkflowDeliveryBinding::new(
+            community,
+            Uuid::new_v4(),
+            delivery.binding.run_id(),
+            delivery.binding.step_id(),
+            target,
+            delivery.binding.definition_event_id(),
+            delivery.binding.message_event_id(),
+            delivery.binding.cause().clone(),
+        )
+        .expect("binding");
+        let miss_workflow = claim_workflow_agent_delivery(
+            &pool,
+            community,
+            &target,
+            Some(delivery.id),
+            Some(&bad_workflow),
+            30,
+        )
+        .await
+        .expect("claim");
+        assert!(
+            miss_workflow.is_none(),
+            "a binding disagreeing only on workflow_id must not claim"
+        );
+
+        // The matching binding claims.
+        let hit = claim_workflow_agent_delivery(
+            &pool,
+            community,
+            &target,
+            Some(delivery.id),
+            Some(&delivery.binding),
+            30,
+        )
+        .await
+        .expect("claim")
+        .expect("matching binding claims");
+        assert_eq!(hit.1.status, WorkflowDeliveryStatus::Claimed);
+    }
+
+    /// renew and finish under a stale (superseded) lease generation fail closed.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn lease_is_fenced_by_generation() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let target = Keys::generate().public_key();
+        let (delivery, created_at) = make_delivery_scaffold(&pool, community, &target).await;
+        commit_one(&pool, community, &delivery, created_at).await;
+
+        let (lease, _) =
+            claim_workflow_agent_delivery(&pool, community, &target, Some(delivery.id), None, 30)
+                .await
+                .expect("claim")
+                .expect("claimable");
+
+        // A fabricated stale lease with the wrong generation must fail closed.
+        let stale = WorkflowDeliveryLease {
+            lease_generation: lease.lease_generation - 1,
+            ..lease
+        };
+        assert_eq!(
+            renew_workflow_agent_delivery(&pool, &stale, 30)
+                .await
+                .expect("renew"),
+            WorkflowDeliveryRenewOutcome::LeaseLost
+        );
+        assert_eq!(
+            finish_workflow_agent_delivery(&pool, &stale, WorkflowDeliveryOutcome::Finished)
+                .await
+                .expect("finish"),
+            WorkflowDeliveryFinishOutcome::LeaseLost
+        );
+
+        // The current lease renews and finishes.
+        assert!(matches!(
+            renew_workflow_agent_delivery(&pool, &lease, 30)
+                .await
+                .expect("renew"),
+            WorkflowDeliveryRenewOutcome::Renewed(_)
+        ));
+    }
+
+    /// An expired lease is reclaimed by the reaper, its generation bumped, and
+    /// the prior holder's finish/renew then fails closed.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reap_reclaims_expired_and_fences_prior_holder() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let target = Keys::generate().public_key();
+        let (delivery, created_at) = make_delivery_scaffold(&pool, community, &target).await;
+        commit_one(&pool, community, &delivery, created_at).await;
+
+        // Claim with a lease so short it is already expiring; force expiry.
+        let (lease, _) =
+            claim_workflow_agent_delivery(&pool, community, &target, Some(delivery.id), None, 1)
+                .await
+                .expect("claim")
+                .expect("claimable");
+        sqlx::query(
+            "UPDATE workflow_agent_deliveries SET lease_until = NOW() - INTERVAL '1 minute' \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(delivery.id.as_uuid())
+        .execute(&pool)
+        .await
+        .expect("force expiry");
+
+        let reclaimed = reap_expired_workflow_agent_deliveries(&pool)
+            .await
+            .expect("reap");
+        assert_eq!(reclaimed, 1, "expired lease reclaimed");
+
+        let after = get_workflow_agent_delivery(&pool, community, delivery.id)
+            .await
+            .expect("get")
+            .expect("row")
+            .clone();
+        assert_eq!(after.status, WorkflowDeliveryStatus::Pending);
+        assert!(
+            after.lease_generation > lease.lease_generation,
+            "generation bumped"
+        );
+        assert!(after.lease_until.is_none());
+
+        // Prior holder's finish now fails closed (its generation is stale).
+        assert_eq!(
+            finish_workflow_agent_delivery(&pool, &lease, WorkflowDeliveryOutcome::Finished)
+                .await
+                .expect("finish"),
+            WorkflowDeliveryFinishOutcome::LeaseLost
+        );
+
+        // The row is claimable again under a fresh lease.
+        let reclaim =
+            claim_workflow_agent_delivery(&pool, community, &target, Some(delivery.id), None, 30)
+                .await
+                .expect("claim")
+                .expect("re-claimable after reap");
+        assert!(reclaim.0.lease_generation > after.lease_generation - 1);
+    }
+
+    /// finish is once-only and an uncertain-completion retry converges to the
+    /// same terminal.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn finish_is_terminal_once_and_reconciles_idempotently() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let target = Keys::generate().public_key();
+        let (delivery, created_at) = make_delivery_scaffold(&pool, community, &target).await;
+        commit_one(&pool, community, &delivery, created_at).await;
+
+        let (lease, _) =
+            claim_workflow_agent_delivery(&pool, community, &target, Some(delivery.id), None, 30)
+                .await
+                .expect("claim")
+                .expect("claimable");
+
+        assert_eq!(
+            finish_workflow_agent_delivery(&pool, &lease, WorkflowDeliveryOutcome::Failed)
+                .await
+                .expect("finish"),
+            WorkflowDeliveryFinishOutcome::Settled(WorkflowDeliveryOutcome::Failed)
+        );
+
+        // A retry (uncertain completion) under the same lease converges to the
+        // recorded terminal rather than reopening or flipping it — even if the
+        // retry requests a different outcome.
+        assert_eq!(
+            finish_workflow_agent_delivery(&pool, &lease, WorkflowDeliveryOutcome::Finished)
+                .await
+                .expect("finish retry"),
+            WorkflowDeliveryFinishOutcome::AlreadyTerminal(WorkflowDeliveryStatus::Failed)
+        );
+
+        let stored = get_workflow_agent_delivery(&pool, community, delivery.id)
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(stored.status, WorkflowDeliveryStatus::Failed);
+        assert!(stored.finished_at.is_some());
+        assert!(stored.lease_until.is_none());
+    }
+
+    /// The reaper is a fleet-wide scan that must skip a non-active tenant, and
+    /// the write fence must block any direct mutation on a fenced tenant.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reaper_and_fence_respect_community_lifecycle() {
+        let pool = setup_pool().await;
+        let healthy = make_community(&pool).await;
+        let fenced = make_community(&pool).await;
+        let target = Keys::generate().public_key();
+
+        let (dh, ch) = make_delivery_scaffold(&pool, healthy, &target).await;
+        let (df, cf) = make_delivery_scaffold(&pool, fenced, &target).await;
+        commit_one(&pool, healthy, &dh, ch).await;
+        commit_one(&pool, fenced, &df, cf).await;
+
+        // Both claimed and both expired.
+        for (community, delivery) in [(healthy, &dh), (fenced, &df)] {
+            claim_workflow_agent_delivery(&pool, community, &target, Some(delivery.id), None, 1)
+                .await
+                .expect("claim")
+                .expect("claimable");
+        }
+        // Expire only this test's two tenants' leases: the reaper scan is
+        // fleet-wide by contract, so expiring every claimed row would sweep in
+        // sibling tests' rows and make the count non-deterministic.
+        sqlx::query(
+            "UPDATE workflow_agent_deliveries SET lease_until = NOW() - INTERVAL '1 minute' \
+             WHERE status = 'claimed' AND community_id IN ($1, $2)",
+        )
+        .bind(healthy.as_uuid())
+        .bind(fenced.as_uuid())
+        .execute(&pool)
+        .await
+        .expect("force expiry");
+
+        // Fence one tenant, then reap. Only the healthy tenant's row is reclaimed.
+        fence_community(&pool, fenced).await;
+        let reclaimed = reap_expired_workflow_agent_deliveries(&pool)
+            .await
+            .expect("reap");
+        assert_eq!(reclaimed, 1, "reaper must skip the non-active tenant");
+
+        let healthy_row = get_workflow_agent_delivery(&pool, healthy, dh.id)
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(healthy_row.status, WorkflowDeliveryStatus::Pending);
+        let fenced_row = get_workflow_agent_delivery(&pool, fenced, df.id)
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(
+            fenced_row.status,
+            WorkflowDeliveryStatus::Claimed,
+            "fenced tenant's delivery is untouched by the reaper"
+        );
+
+        // A direct mutation on the fenced tenant is rejected by the write fence.
+        let direct = sqlx::query(
+            "UPDATE workflow_agent_deliveries SET status = 'pending' WHERE community_id = $1",
+        )
+        .bind(fenced.as_uuid())
+        .execute(&pool)
+        .await;
+        assert!(
+            direct.is_err(),
+            "write fence must block a fenced-tenant mutation"
+        );
+    }
+
+    /// A terminal written by a NEWER holder must not be laundered back to a
+    /// stale prior holder as its own successful reconciliation. Reproduce the
+    /// exact interleaving Larry flagged: gen-1 claims and expires, the reaper
+    /// bumps to a fresh generation, gen-2 claims and finishes, then gen-1 calls
+    /// `finish`. The gen-1 UPDATE correctly misses, and the generation-fenced
+    /// terminal read must return `LeaseLost` rather than `AlreadyTerminal`.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn stale_holder_finish_after_newer_holder_settles_fails_closed() {
+        // Exercise both the same-outcome and conflicting-outcome interleavings:
+        // neither may attribute the newer holder's terminal to the stale one.
+        for (gen2_outcome, gen1_retry) in [
+            (
+                WorkflowDeliveryOutcome::Finished,
+                WorkflowDeliveryOutcome::Finished,
+            ),
+            (
+                WorkflowDeliveryOutcome::Finished,
+                WorkflowDeliveryOutcome::Failed,
+            ),
+        ] {
+            let pool = setup_pool().await;
+            let community = make_community(&pool).await;
+            let target = Keys::generate().public_key();
+            let (delivery, created_at) = make_delivery_scaffold(&pool, community, &target).await;
+            commit_one(&pool, community, &delivery, created_at).await;
+
+            // gen-1 claims, then its lease is expired and reaped.
+            let (gen1, _) = claim_workflow_agent_delivery(
+                &pool,
+                community,
+                &target,
+                Some(delivery.id),
+                None,
+                1,
+            )
+            .await
+            .expect("claim")
+            .expect("claimable");
+            sqlx::query(
+                "UPDATE workflow_agent_deliveries SET lease_until = NOW() - INTERVAL '1 minute' \
+                 WHERE community_id = $1 AND id = $2",
+            )
+            .bind(community.as_uuid())
+            .bind(delivery.id.as_uuid())
+            .execute(&pool)
+            .await
+            .expect("force expiry");
+            assert_eq!(
+                reap_expired_workflow_agent_deliveries(&pool)
+                    .await
+                    .expect("reap"),
+                1
+            );
+
+            // gen-2 claims the reaped row (higher generation) and finishes it.
+            let (gen2, _) = claim_workflow_agent_delivery(
+                &pool,
+                community,
+                &target,
+                Some(delivery.id),
+                None,
+                30,
+            )
+            .await
+            .expect("claim")
+            .expect("re-claimable");
+            assert!(gen2.lease_generation > gen1.lease_generation, "reap bumped");
+            assert_eq!(
+                finish_workflow_agent_delivery(&pool, &gen2, gen2_outcome)
+                    .await
+                    .expect("gen2 finish"),
+                WorkflowDeliveryFinishOutcome::Settled(gen2_outcome)
+            );
+
+            // gen-1's finish must fail closed, NOT converge to gen-2's terminal.
+            assert_eq!(
+                finish_workflow_agent_delivery(&pool, &gen1, gen1_retry)
+                    .await
+                    .expect("gen1 finish"),
+                WorkflowDeliveryFinishOutcome::LeaseLost,
+                "a stale holder must not be credited with a newer holder's terminal"
+            );
+        }
+    }
+
+    /// A lease cannot depend on the reaper running first to become invalid: once
+    /// the deadline passes, neither renew nor finish may resurrect authority or
+    /// settle out-of-lease work, even before the reaper wins.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn expired_lease_cannot_renew_or_finish_before_reap() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let target = Keys::generate().public_key();
+        let (delivery, created_at) = make_delivery_scaffold(&pool, community, &target).await;
+        commit_one(&pool, community, &delivery, created_at).await;
+
+        let (lease, _) =
+            claim_workflow_agent_delivery(&pool, community, &target, Some(delivery.id), None, 30)
+                .await
+                .expect("claim")
+                .expect("claimable");
+
+        // Expire the lease on the DB clock WITHOUT reaping: status is still
+        // 'claimed' and the generation is unchanged, so only the deadline gate
+        // can reject the expired holder.
+        sqlx::query(
+            "UPDATE workflow_agent_deliveries SET lease_until = NOW() - INTERVAL '1 minute' \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(delivery.id.as_uuid())
+        .execute(&pool)
+        .await
+        .expect("force expiry");
+
+        assert_eq!(
+            renew_workflow_agent_delivery(&pool, &lease, 30)
+                .await
+                .expect("renew"),
+            WorkflowDeliveryRenewOutcome::LeaseLost,
+            "an expired lease must not resurrect itself via renew"
+        );
+        assert_eq!(
+            finish_workflow_agent_delivery(&pool, &lease, WorkflowDeliveryOutcome::Finished)
+                .await
+                .expect("finish"),
+            WorkflowDeliveryFinishOutcome::LeaseLost,
+            "an expired lease must not settle out-of-lease work via finish"
+        );
+
+        // The row is untouched (still claimed at the same generation) and thus
+        // still reclaimable by the reaper — the deadline gate rejected the
+        // holder without mutating state.
+        let after = get_workflow_agent_delivery(&pool, community, delivery.id)
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(after.status, WorkflowDeliveryStatus::Claimed);
+        assert_eq!(after.lease_generation, lease.lease_generation);
+
+        // Reap this test's own expired row before returning: it proves the row
+        // was genuinely still reclaimable, and it clears the fleet-wide reaper's
+        // view so a sibling test's fleet-wide reap count stays deterministic.
+        assert_eq!(
+            reap_expired_workflow_agent_deliveries(&pool)
+                .await
+                .expect("reap"),
+            1,
+            "the expired-but-unmutated row is reclaimed by the reaper"
+        );
+    }
+
+    /// The lease is a target-scoped capability: renew, finish, and the terminal
+    /// reconciliation SELECT must all bind the held `target_pubkey`, or a lease
+    /// reconstituted with the wrong target but the right delivery id and
+    /// generation could renew, settle, or be credited with a terminal it never
+    /// earned. The DB owner boundary makes wrong-target authority unrepresentable.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn lease_is_fenced_by_target() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let target = Keys::generate().public_key();
+        let (delivery, created_at) = make_delivery_scaffold(&pool, community, &target).await;
+        commit_one(&pool, community, &delivery, created_at).await;
+
+        let (lease, _) =
+            claim_workflow_agent_delivery(&pool, community, &target, Some(delivery.id), None, 30)
+                .await
+                .expect("claim")
+                .expect("claimable");
+
+        // A lease with the correct id + generation but a foreign target must
+        // fail closed on renew and finish — the id/generation alone are not the
+        // capability.
+        let wrong_target = WorkflowDeliveryLease {
+            target_pubkey: Keys::generate().public_key(),
+            ..lease
+        };
+        assert_ne!(wrong_target.target_pubkey, lease.target_pubkey);
+        assert_eq!(
+            renew_workflow_agent_delivery(&pool, &wrong_target, 30)
+                .await
+                .expect("renew"),
+            WorkflowDeliveryRenewOutcome::LeaseLost,
+            "a wrong-target lease must not renew"
+        );
+        assert_eq!(
+            finish_workflow_agent_delivery(&pool, &wrong_target, WorkflowDeliveryOutcome::Finished)
+                .await
+                .expect("finish"),
+            WorkflowDeliveryFinishOutcome::LeaseLost,
+            "a wrong-target lease must not settle"
+        );
+
+        // The real target still holds full authority.
+        assert!(matches!(
+            renew_workflow_agent_delivery(&pool, &lease, 30)
+                .await
+                .expect("renew"),
+            WorkflowDeliveryRenewOutcome::Renewed(_)
+        ));
+        assert_eq!(
+            finish_workflow_agent_delivery(&pool, &lease, WorkflowDeliveryOutcome::Finished)
+                .await
+                .expect("finish"),
+            WorkflowDeliveryFinishOutcome::Settled(WorkflowDeliveryOutcome::Finished)
+        );
+
+        // Once the true holder has settled, a wrong-target retry must fail
+        // closed via the terminal reconciliation SELECT — it must NOT be
+        // laundered the real holder's terminal as `AlreadyTerminal`.
+        assert_eq!(
+            finish_workflow_agent_delivery(&pool, &wrong_target, WorkflowDeliveryOutcome::Finished)
+                .await
+                .expect("finish retry"),
+            WorkflowDeliveryFinishOutcome::LeaseLost,
+            "a wrong-target retry must not be credited the real holder's terminal"
+        );
+        // The true holder's own idempotent retry still converges to its terminal.
+        assert_eq!(
+            finish_workflow_agent_delivery(&pool, &lease, WorkflowDeliveryOutcome::Failed)
+                .await
+                .expect("finish retry"),
+            WorkflowDeliveryFinishOutcome::AlreadyTerminal(WorkflowDeliveryStatus::Finished)
+        );
+    }
+
+    /// The claim's expected binding is an authority claim, not a scope override:
+    /// its own community and target must equal the request scope, or a foreign
+    /// binding could authorize a row selected under a different scope.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn claim_rejects_expected_binding_scope_mismatch() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let other_community = make_community(&pool).await;
+        let target = Keys::generate().public_key();
+        let other_target = Keys::generate().public_key();
+        let (delivery, created_at) = make_delivery_scaffold(&pool, community, &target).await;
+        commit_one(&pool, community, &delivery, created_at).await;
+
+        // An expected binding whose community disagrees with the request scope
+        // must be rejected before SQL — never authorize the request-scope row.
+        let foreign_community = WorkflowDeliveryBinding::new(
+            other_community,
+            delivery.binding.workflow_id(),
+            delivery.binding.run_id(),
+            delivery.binding.step_id(),
+            target,
+            delivery.binding.definition_event_id(),
+            delivery.binding.message_event_id(),
+            delivery.binding.cause().clone(),
+        )
+        .expect("binding");
+        assert!(
+            claim_workflow_agent_delivery(
+                &pool,
+                community,
+                &target,
+                Some(delivery.id),
+                Some(&foreign_community),
+                30,
+            )
+            .await
+            .expect("claim")
+            .is_none(),
+            "an expected binding for another community must not claim this row"
+        );
+
+        // Likewise a binding whose target disagrees with the request scope.
+        let foreign_target = WorkflowDeliveryBinding::new(
+            community,
+            delivery.binding.workflow_id(),
+            delivery.binding.run_id(),
+            delivery.binding.step_id(),
+            other_target,
+            delivery.binding.definition_event_id(),
+            delivery.binding.message_event_id(),
+            delivery.binding.cause().clone(),
+        )
+        .expect("binding");
+        assert!(
+            claim_workflow_agent_delivery(
+                &pool,
+                community,
+                &target,
+                Some(delivery.id),
+                Some(&foreign_target),
+                30,
+            )
+            .await
+            .expect("claim")
+            .is_none(),
+            "an expected binding for another target must not claim this row"
+        );
+
+        // The row is untouched and still claimable under a scope-consistent
+        // binding.
+        assert!(
+            claim_workflow_agent_delivery(
+                &pool,
+                community,
+                &target,
+                Some(delivery.id),
+                Some(&delivery.binding),
+                30,
+            )
+            .await
+            .expect("claim")
+            .is_some(),
+            "a scope-consistent binding still claims"
+        );
+    }
+
+    /// Deleting the owning run cascades the delivery rows away.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn run_deletion_cascades_deliveries() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let target = Keys::generate().public_key();
+        let (delivery, created_at) = make_delivery_scaffold(&pool, community, &target).await;
+        commit_one(&pool, community, &delivery, created_at).await;
+
+        sqlx::query("DELETE FROM workflow_runs WHERE community_id = $1 AND id = $2")
+            .bind(community.as_uuid())
+            .bind(delivery.binding.run_id())
+            .execute(&pool)
+            .await
+            .expect("delete run");
+
+        let gone = get_workflow_agent_delivery(&pool, community, delivery.id)
+            .await
+            .expect("get");
+        assert!(gone.is_none(), "run deletion must cascade the delivery row");
+    }
+
+    /// A failure after a partial insert inside the commit transaction rolls back
+    /// every delivery row for the step together (all-or-nothing).
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn commit_rolls_back_all_targets_on_failure() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let target_a = Keys::generate().public_key();
+        let target_b = Keys::generate().public_key();
+        let (base, created_at) = make_delivery_scaffold(&pool, community, &target_a).await;
+
+        // Second delivery: same run/step, target B, but a bogus workflow_id so
+        // its FK insert fails — the whole transaction must roll back.
+        let good = WorkflowAgentDelivery {
+            id: WorkflowDeliveryId::from_uuid(Uuid::new_v4()),
+            binding: base.binding.clone(),
+        };
+        let bad_binding = WorkflowDeliveryBinding::new(
+            community,
+            Uuid::new_v4(), // nonexistent workflow_id -> FK violation
+            base.binding.run_id(),
+            base.binding.step_id(),
+            target_b,
+            base.binding.definition_event_id(),
+            base.binding.message_event_id(),
+            base.binding.cause().clone(),
+        )
+        .expect("binding");
+        let bad = WorkflowAgentDelivery {
+            id: WorkflowDeliveryId::from_uuid(Uuid::new_v4()),
+            binding: bad_binding,
+        };
+
+        let (tx, _existing) = lock_workflow_agent_delivery_identity(
+            &pool,
+            community,
+            base.binding.run_id(),
+            base.binding.step_id(),
+        )
+        .await
+        .expect("lock");
+        let result =
+            commit_workflow_agent_deliveries(tx, community, created_at, &[good.clone(), bad]).await;
+        assert!(result.is_err(), "FK violation must fail the commit");
+
+        // The good target's row must NOT be visible — the transaction rolled back.
+        let a = get_workflow_agent_delivery(&pool, community, good.id)
+            .await
+            .expect("get");
+        assert!(a.is_none(), "partial insert must not survive rollback");
     }
 }
