@@ -78,7 +78,7 @@ Output varies by command group — `--help` shows flags but not response shapes.
 
 ```bash
 buzz --format compact channels list          # [{channel_id, name}]
-buzz --format compact messages get --channel <UUID>  # [{id, content, created_at}]
+buzz --format compact messages get --channel <UUID>  # [{id, pubkey, channel, content, created_at}]
 buzz --format compact users get              # [{pubkey, display_name}]
 buzz --format compact feed get               # [{id, content, created_at}]
 ```

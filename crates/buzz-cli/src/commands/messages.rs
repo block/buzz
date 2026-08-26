@@ -332,7 +332,20 @@ fn parse_member_pubkeys(event: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
+/// Project events for output.
+///
+/// Compact drops event fields to keep agent context small, but it must not drop
+/// the fields a reader needs to ACT on a message. It previously kept only id,
+/// content and created_at, which made every message anonymous — a channel read
+/// back through `messages get --format compact` shows text with no author, and
+/// a `messages search` hit (results span channels) carries no channel, so there
+/// is nothing to reply to or open. `--format compact` is the documented default
+/// for agents, so this was the normal reading path.
+///
+/// `pubkey` and `channel` are therefore part of the compact projection. Both are
+/// small next to `content`, and without them the caller has to re-query in the
+/// full format to do anything with a result.
+pub(crate) fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     match format {
         crate::OutputFormat::Compact => {
             let events: Vec<serde_json::Value> =
@@ -340,11 +353,21 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
             let compact: Vec<serde_json::Value> = events
                 .iter()
                 .map(|e| {
-                    serde_json::json!({
+                    // NIP-29 scopes messages by `h`, not `e` — a channel read
+                    // from any other tag would be wrong rather than merely absent.
+                    let channel = crate::client::extract_tag_value(e, "h");
+                    let mut row = serde_json::json!({
                         "id": e.get("id").cloned().unwrap_or_default(),
+                        "pubkey": e.get("pubkey").cloned().unwrap_or_default(),
                         "content": e.get("content").cloned().unwrap_or_default(),
                         "created_at": e.get("created_at").cloned().unwrap_or_default(),
-                    })
+                    });
+                    // Omitted rather than emitted empty for events that carry no
+                    // channel (DMs), so absence stays distinguishable from "".
+                    if !channel.is_empty() {
+                        row["channel"] = serde_json::json!(channel);
+                    }
+                    row
                 })
                 .collect();
             serde_json::to_string(&compact).unwrap_or_default()
@@ -1542,5 +1565,83 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod compact_projection_tests {
+    use super::format_events;
+    use crate::client::normalize_events;
+    use crate::OutputFormat;
+
+    const AUTHOR: &str = "ff04bc24c4a5fd1b6450d3bf62c049b106bb701777adc8f1f51716fde45550c3";
+    const CHANNEL: &str = "fb298e44-68b0-46f9-988c-f994b938deb9";
+
+    fn event(with_channel: bool) -> serde_json::Value {
+        let tags = if with_channel {
+            serde_json::json!([["h", CHANNEL], ["e", "root-id"]])
+        } else {
+            serde_json::json!([])
+        };
+        serde_json::json!({
+            "id": "a".repeat(64),
+            "pubkey": AUTHOR,
+            "kind": 9,
+            "content": "flagging a token anomaly",
+            "created_at": 1_786_000_000_u64,
+            "tags": tags,
+        })
+    }
+
+    fn compact(with_channel: bool) -> serde_json::Value {
+        let normalized = normalize_events(&[event(with_channel)]);
+        let out = format_events(&normalized, &OutputFormat::Compact);
+        serde_json::from_str::<serde_json::Value>(&out).unwrap()[0].clone()
+    }
+
+    #[test]
+    fn compact_keeps_the_author() {
+        // Without this every message an agent reads is anonymous — the whole
+        // channel history comes back as text with no sender.
+        assert_eq!(compact(true)["pubkey"], AUTHOR);
+    }
+
+    #[test]
+    fn compact_keeps_the_channel() {
+        // Search results span channels; a hit with no channel cannot be replied
+        // to or opened, so the caller must re-query in the full format.
+        assert_eq!(compact(true)["channel"], CHANNEL);
+    }
+
+    #[test]
+    fn compact_still_carries_id_content_and_time() {
+        let row = compact(true);
+        assert_eq!(row["id"], "a".repeat(64));
+        assert_eq!(row["content"], "flagging a token anomaly");
+        assert_eq!(row["created_at"], 1_786_000_000_u64);
+    }
+
+    #[test]
+    fn channel_is_absent_not_empty_for_events_without_one() {
+        // DMs carry no `h`. An empty string would read as a real channel id of
+        // zero length; absence is the honest representation.
+        let row = compact(false);
+        assert!(
+            row.get("channel").is_none(),
+            "expected no channel key: {row}"
+        );
+    }
+
+    #[test]
+    fn channel_comes_from_the_h_tag_not_the_e_tag() {
+        // NIP-29 scopes by `h`; reading `e` would yield a thread root and look
+        // like a channel id, which is worse than having none.
+        assert_ne!(compact(true)["channel"], "root-id");
+    }
+
+    #[test]
+    fn json_format_is_unchanged() {
+        let normalized = normalize_events(&[event(true)]);
+        assert_eq!(format_events(&normalized, &OutputFormat::Json), normalized);
     }
 }
