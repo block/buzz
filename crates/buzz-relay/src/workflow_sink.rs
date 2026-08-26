@@ -259,6 +259,12 @@ impl ActionSink for RelayActionSink {
             //    - `buzz:workflow` tag prevents recursive workflow triggering
             //    - one `p` tag per `@Name` that resolves to a channel member,
             //      so mentioned agents are woken (wake is `p`-tag gated)
+            //    - the owner's `p` tag MUST stay first: `buzz-acp`'s
+            //      `workflow_author` (crates/buzz-acp/src/lib.rs) recovers the
+            //      owner identity for this relay-signed event by reading the
+            //      first `p` tag. Reordering it, or adding another `p` tag
+            //      ahead of it, silently changes who the agent gates the
+            //      message as. Do not reorder.
             let mut tags = vec![
                 Tag::parse(["p", &author_pubkey_hex])
                     .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,

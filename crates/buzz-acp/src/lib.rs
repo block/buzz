@@ -231,23 +231,6 @@ async fn is_owner_or_sibling(
     is_sibling
 }
 
-/// Inbound author gate decision: does this author's event fire a turn?
-///
-/// Coarse security policy applied before subscription rules. Both `OwnerOnly`
-/// and `Allowlist` accept the owner and same-owner siblings; `Allowlist`
-/// additionally accepts the explicit external pubkey list.
-///
-/// # DM hardening (`is_dm`)
-///
-/// Clients auto-p-tag every DM participant, so in a DM *any* participant's
-/// message looks like a mention and would fire a turn. Combined with
-/// agent-initiated DMs (the agent can be asked to DM a third party), that
-/// turns `anyone`/`allowlist` modes into transitive access grants: whoever
-/// lands in a DM with the agent can prompt it. To close that hole, when
-/// `is_dm` is true only the owner and cryptographically verified same-owner
-/// siblings may fire a turn — the explicit allowlist and `anyone` mode do
-/// NOT apply inside DMs. `Nobody` still drops everything. Callers must
-/// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
 /// Resolve the author a workflow-delivered event should be gated as.
 ///
 /// Workflow messages are signed by the relay keypair, not by the
@@ -259,22 +242,51 @@ async fn is_owner_or_sibling(
 /// agent, same words; only the signer differed. Five installed workflows were
 /// firing into that silence.
 ///
-/// `workflow_sink.rs` builds these events with the owner as the **first** `p`
-/// tag, and that ordering is the code's contract rather than an observation.
-/// So the owner can be recovered — but only when the event really came from the
-/// relay.
+/// `workflow_sink.rs:262-268` (buzz-relay) builds these events with the owner
+/// as the **first** `p` tag, then the channel `h` tag, then `buzz:workflow` —
+/// and that ordering is the code's contract rather than an observation, per
+/// the matching comment there. So the owner can be recovered — but only when
+/// the event really came from the relay.
 ///
-/// The signer check is not optional. The `buzz:workflow` tag is plain text any
-/// member could attach, so trusting the tag alone would let anyone who can post
-/// to a channel speak to the agent *as its owner*. The relay guards its own
-/// side the same way — `handlers/event.rs` pairs the tag with
-/// `pubkey == relay_keypair.public_key()` — and this mirrors it.
+/// The signer check is not optional, and nothing else stands in for it.
+/// `buzz:workflow` is plain text any member's client can attach to any event
+/// it sends — the relay does not validate the tag on ingest. The relay's own
+/// use of it, `handlers/event.rs:521-526,528-531`, only *skips re-triggering
+/// workflows* for events the relay itself signed; it never rejects a
+/// member-submitted event carrying the tag. So the tag alone proves nothing,
+/// and the signer equality below (`event.pubkey == signer`) is the *only*
+/// thing standing between a member and owner attribution — get that
+/// comparison wrong and the tag alone lets anyone who can post to a channel
+/// speak to the agent as its owner.
+///
+/// This does move the trust boundary, and that's worth stating plainly:
+/// before this function existed, "this event is from the owner" meant a
+/// signature by the owner's own key. For one configured signer, it now means
+/// "the relay said so." Today `workflow_sink.rs` is the only relay code path
+/// that emits `buzz:workflow`, but the relay signs other event kinds too
+/// (e.g. a relay-signed `KIND_PRESENCE_UPDATE`) — any future relay path that
+/// attaches this tag becomes an owner-impersonation vector without anyone
+/// touching this file. `workflow_sink.rs:263` carries a matching comment
+/// marking the first `p` tag as the identity this function gates the event
+/// as.
+///
+/// `BUZZ_ACP_WORKFLOW_SIGNER` is a second, independently-set trust anchor —
+/// deliberately not derived from the relay URL/connection the client already
+/// authenticates against, so a misconfigured or spoofed connection target
+/// cannot silently grant this power to whatever key answers there. The
+/// operator names the exact pubkey they trust to speak as the owner; leaving
+/// it unset keeps the feature off by default.
 ///
 /// Fail-closed: with `BUZZ_ACP_WORKFLOW_SIGNER` unset, or set to anything other
 /// than this event's signer, the event is gated as its signer exactly as
 /// before. Turning the feature off is the default.
 fn workflow_author(event: &nostr::Event) -> Option<String> {
-    workflow_author_for_signer(event, std::env::var("BUZZ_ACP_WORKFLOW_SIGNER").ok().as_deref())
+    // Read once: this cannot change during the process, and the ingest path
+    // runs per event — a `std::env::var` call there is a lock plus an
+    // allocation for a value that's fixed for the process's lifetime.
+    static SIGNER: std::sync::LazyLock<Option<String>> =
+        std::sync::LazyLock::new(|| std::env::var("BUZZ_ACP_WORKFLOW_SIGNER").ok());
+    workflow_author_for_signer(event, SIGNER.as_deref())
 }
 
 /// The decision itself, with the trusted signer passed in so it can be tested
@@ -295,6 +307,23 @@ fn workflow_author_for_signer(event: &nostr::Event, signer: Option<&str>) -> Opt
     })
 }
 
+/// Inbound author gate decision: does this author's event fire a turn?
+///
+/// Coarse security policy applied before subscription rules. Both `OwnerOnly`
+/// and `Allowlist` accept the owner and same-owner siblings; `Allowlist`
+/// additionally accepts the explicit external pubkey list.
+///
+/// # DM hardening (`is_dm`)
+///
+/// Clients auto-p-tag every DM participant, so in a DM *any* participant's
+/// message looks like a mention and would fire a turn. Combined with
+/// agent-initiated DMs (the agent can be asked to DM a third party), that
+/// turns `anyone`/`allowlist` modes into transitive access grants: whoever
+/// lands in a DM with the agent can prompt it. To close that hole, when
+/// `is_dm` is true only the owner and cryptographically verified same-owner
+/// siblings may fire a turn — the explicit allowlist and `anyone` mode do
+/// NOT apply inside DMs. `Nobody` still drops everything. Callers must
+/// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
 async fn author_allowed(
     respond_to: &RespondTo,
     allowlist: &HashSet<String>,
