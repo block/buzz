@@ -2,11 +2,13 @@
 //!
 //! Call `ensure_future_partitions` on startup and monthly via cron.
 
+use buzz_datastore_tracing::datastore_span;
 use chrono::{Datelike, TimeZone, Utc};
 use sqlx::{PgPool, Row};
 use tracing::info;
 
 use crate::error::{DbError, Result};
+use crate::Db;
 
 /// Tables that may be partition-managed. Allowlist prevents DDL injection.
 const PARTITIONED_TABLES: &[&str] = &["events", "delivery_log"];
@@ -53,6 +55,14 @@ pub async fn ensure_future_partitions(pool: &PgPool, months_ahead: u32) -> Resul
     }
 
     Ok(())
+}
+
+impl Db {
+    /// Ensures monthly partitions exist for the next N months.
+    #[datastore_span(name = "ensure_future_partitions", system = "postgresql")]
+    pub async fn ensure_future_partitions(&self, months_ahead: u32) -> Result<()> {
+        ensure_future_partitions(&self.pool, months_ahead).await
+    }
 }
 
 /// Validate that a partition suffix is digits and underscores only.
