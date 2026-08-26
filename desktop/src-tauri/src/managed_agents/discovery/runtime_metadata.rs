@@ -125,6 +125,10 @@ mod tests {
 
         let copilot = known_acp_runtime_exact("copilot").unwrap();
         assert_eq!(copilot.commands, &["copilot"]);
+        assert_eq!(
+            copilot.avatar_url,
+            "https://avatars.githubusercontent.com/u/9919?s=200&v=4"
+        );
         assert!(copilot.adapter_install_commands.is_empty());
         assert!(copilot.cli_install_hint.contains("built-in ACP server"));
         assert!(copilot

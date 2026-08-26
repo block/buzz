@@ -81,9 +81,10 @@ fn discover_acp_auth_methods_blocking(runtime_id: &str) -> Result<AcpAuthMethods
 /// Probe authentication by creating an ACP session and listing its models.
 ///
 /// GitHub Copilot CLI has no non-interactive status command. Its ACP
-/// `session/new` path is side-effect free and returns models only when the
-/// stored account is usable, so it provides a definitive readiness probe
-/// without spending a premium request.
+/// `session/new` path returns models only when the stored account is usable.
+/// Only forced catalog discovery runs this process; cheap discovery reuses the
+/// in-process auth cache until the next forced refresh. The probe sends no
+/// prompt.
 pub(crate) fn probe_acp_runtime_auth(runtime_id: &str) -> AuthStatus {
     match run_buzz_acp_auth_command(runtime_id, ["models", "--json"]) {
         Ok(output) if output.status.success() => AuthStatus::LoggedIn,
@@ -106,7 +107,14 @@ pub(crate) fn probe_acp_runtime_auth(runtime_id: &str) -> AuthStatus {
                 },
             }
         }
-        Err(_) => AuthStatus::Unknown,
+        Err(error) => {
+            tracing::debug!(
+                runtime_id,
+                error = %error,
+                "ACP runtime auth probe could not start"
+            );
+            AuthStatus::Unknown
+        }
     }
 }
 
