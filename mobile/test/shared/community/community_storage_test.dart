@@ -150,6 +150,53 @@ void main() {
       );
     });
 
+    test('round-trips a pending push tombstone journal', () async {
+      final subscription = BuzzPushSubscription(
+        filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+        notificationClass: 'default',
+      );
+      final state =
+          BuzzPushLeaseSubscriptionState.desired(desired: [subscription])
+              .withAccepted(subscriptions: [subscription], generation: 4)
+              .withPendingTombstone(5);
+      final community = Community.create(
+        name: 'Push',
+        relayUrl: 'https://relay.example.com',
+      ).copyWith(pushSubscriptionState: state);
+
+      await storage.save(community);
+      final loaded = (await storage.loadAll()).single;
+
+      expect(loaded.pushSubscriptionState.toJson(), state.toJson());
+      expect(loaded.pushSubscriptionState.pendingTombstoneGeneration, 5);
+    });
+
+    test(
+      'migrates a disabled reserved generation into a tombstone journal',
+      () {
+        final community =
+            Community.create(
+              name: 'Push',
+              relayUrl: 'https://relay.example.com',
+            ).copyWith(
+              pushNotificationsEnabled: false,
+              pushSubscriptionState:
+                  const BuzzPushLeaseSubscriptionState.desired(
+                    acceptedGeneration: 4,
+                    generationCursor: 5,
+                  ),
+            );
+        final json = community.toJson();
+        (json['pushSubscriptionState'] as Map<String, dynamic>).remove(
+          'pendingTombstoneGeneration',
+        );
+
+        final migrated = Community.fromJson(json);
+
+        expect(migrated.pushSubscriptionState.pendingTombstoneGeneration, 5);
+      },
+    );
+
     test('save updates existing community with same id', () async {
       final ws = Community.create(
         name: 'Original',

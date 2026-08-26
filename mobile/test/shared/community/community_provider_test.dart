@@ -18,6 +18,7 @@ void main() {
   late List<List<Community>> snapshots;
   late List<String> deactivatedCommunityIds;
   late List<int?> deactivationGenerations;
+  late CommunityPushLeaseDeactivator deactivator;
 
   setUp(() {
     fakeSecure = FakeSecureStorage();
@@ -25,6 +26,10 @@ void main() {
     snapshots = [];
     deactivatedCommunityIds = [];
     deactivationGenerations = [];
+    deactivator = (community, {generation}) async {
+      deactivatedCommunityIds.add(community.id);
+      deactivationGenerations.add(generation);
+    };
   });
 
   tearDown(() => container.dispose());
@@ -36,13 +41,7 @@ void main() {
         communitySnapshotWriterProvider.overrideWithValue((communities) async {
           snapshots.add(List.of(communities));
         }),
-        communityPushLeaseDeactivatorProvider.overrideWithValue((
-          community, {
-          generation,
-        }) async {
-          deactivatedCommunityIds.add(community.id);
-          deactivationGenerations.add(generation);
-        }),
+        communityPushLeaseDeactivatorProvider.overrideWithValue(deactivator),
       ],
     );
   }
@@ -232,8 +231,9 @@ void main() {
 
       final stored = (await communityStorage.loadAll()).single;
       expect(stored.pushNotificationsEnabled, isFalse);
-      expect(stored.pushSubscriptionState.acceptedGeneration, isNull);
+      expect(stored.pushSubscriptionState.acceptedGeneration, 2);
       expect(stored.pushSubscriptionState.generationCursor, 2);
+      expect(stored.pushSubscriptionState.pendingTombstoneGeneration, isNull);
       expect(deactivationGenerations, [2]);
     });
 
@@ -262,6 +262,8 @@ void main() {
       final stored = (await communityStorage.loadAll()).single;
       expect(stored.pushNotificationsEnabled, isFalse);
       expect(stored.pushSubscriptionState.generationCursor, 8);
+      expect(stored.pushSubscriptionState.acceptedGeneration, 8);
+      expect(stored.pushSubscriptionState.pendingTombstoneGeneration, isNull);
       expect(deactivatedCommunityIds, [community.id]);
       expect(deactivationGenerations, [8]);
 
@@ -274,6 +276,67 @@ void main() {
         isFalse,
       );
     });
+
+    test(
+      'failed opt-out tombstone retries after restart at a newer generation',
+      () async {
+        var failTombstone = true;
+        deactivator = (community, {generation}) async {
+          deactivatedCommunityIds.add(community.id);
+          deactivationGenerations.add(generation);
+          if (failTombstone) {
+            throw StateError('injected tombstone failure');
+          }
+        };
+        container = createContainer();
+        await container.read(communityListProvider.future);
+        final subscription = BuzzPushSubscription(
+          filter: BuzzPushFilter(kinds: const [9], pTags: ['a' * 64]),
+          notificationClass: 'default',
+        );
+        final community =
+            Community.create(
+              name: 'Test',
+              relayUrl: 'https://test.example.com',
+            ).copyWith(
+              pushNotificationsEnabled: true,
+              pushSubscriptionState: BuzzPushLeaseSubscriptionState.desired(
+                desired: [subscription],
+              ).withAccepted(subscriptions: [subscription], generation: 7),
+            );
+        await container
+            .read(communityListProvider.notifier)
+            .addCommunity(community);
+
+        await container
+            .read(communityListProvider.notifier)
+            .setPushNotificationsEnabled(community.id, false);
+
+        var stored = (await communityStorage.loadAll()).single;
+        expect(stored.pushNotificationsEnabled, isFalse);
+        expect(stored.pushSubscriptionState.acceptedGeneration, 7);
+        expect(stored.pushSubscriptionState.pendingTombstoneGeneration, 8);
+        expect(deactivationGenerations, [8]);
+
+        container.dispose();
+        failTombstone = false;
+        container = createContainer();
+        await container.read(communityListProvider.future);
+        await container
+            .read(communityListProvider.notifier)
+            .retryPendingPushLeaseTombstone(
+              community.id,
+              advanceGeneration: true,
+            );
+
+        stored = (await communityStorage.loadAll()).single;
+        expect(stored.pushNotificationsEnabled, isFalse);
+        expect(stored.pushSubscriptionState.acceptedGeneration, 9);
+        expect(stored.pushSubscriptionState.generationCursor, 9);
+        expect(stored.pushSubscriptionState.pendingTombstoneGeneration, isNull);
+        expect(deactivationGenerations, [8, 9]);
+      },
+    );
 
     test('removeCommunity removes from list', () async {
       container = createContainer();

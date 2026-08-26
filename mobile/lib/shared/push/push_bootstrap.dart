@@ -57,6 +57,13 @@ class BuzzPushAttemptGate {
     });
   }
 
+  void complete(String attempt) {
+    if (_attempt != attempt) return;
+    _retryTimer?.cancel();
+    _retryTimer = null;
+    _attempt = null;
+  }
+
   void dispose() => _retryTimer?.cancel();
 }
 
@@ -106,9 +113,12 @@ class BuzzPushBootstrap extends HookConsumerWidget {
     useListenable(apnsDeviceToken);
     final registrationAttempt = useMemoized(BuzzPushAttemptGate.new);
     final publicationAttempt = useMemoized(BuzzPushAttemptGate.new);
+    final tombstoneAttempt = useMemoized(BuzzPushAttemptGate.new);
     final registrationRetry = useState(0);
     final publicationRetry = useState(0);
+    final tombstoneRetry = useState(0);
     final session = ref.watch(relaySessionProvider);
+    final communities = ref.watch(communityListProvider).value ?? const [];
     final config = ref.watch(relayConfigProvider);
     final community = ref.watch(activeCommunityProvider).value;
     final memberPubkey = ref.watch(myPubkeyProvider);
@@ -118,8 +128,68 @@ class BuzzPushBootstrap extends HookConsumerWidget {
       () => () {
         registrationAttempt.dispose();
         publicationAttempt.dispose();
+        tombstoneAttempt.dispose();
       },
       const [],
+    );
+
+    useEffect(
+      () {
+        final pendingCommunities = communities
+            .where(
+              (candidate) =>
+                  !candidate.pushNotificationsEnabled &&
+                  candidate.pushSubscriptionState.pendingTombstoneGeneration !=
+                      null,
+            )
+            .toList();
+        if (session.status != SessionStatus.connected ||
+            pendingCommunities.isEmpty) {
+          return null;
+        }
+        const attempt = 'pending-tombstones';
+        if (!tombstoneAttempt.tryBegin(attempt)) return null;
+        unawaited(() async {
+          try {
+            Object? firstError;
+            StackTrace? firstStack;
+            for (final pendingCommunity in pendingCommunities) {
+              try {
+                await ref
+                    .read(communityListProvider.notifier)
+                    .retryPendingPushLeaseTombstone(
+                      pendingCommunity.id,
+                      advanceGeneration: true,
+                    );
+              } catch (error, stack) {
+                firstError ??= error;
+                firstStack ??= stack;
+              }
+            }
+            if (firstError != null) {
+              Error.throwWithStackTrace(firstError, firstStack!);
+            }
+            tombstoneAttempt.complete(attempt);
+          } catch (error, stack) {
+            tombstoneAttempt.failed(
+              attempt,
+              retry: () {
+                if (context.mounted) tombstoneRetry.value += 1;
+              },
+            );
+            debugPrint('Push lease tombstone retry failed: $error');
+            debugPrintStack(stackTrace: stack);
+          }
+        }());
+        return null;
+      },
+      [
+        session.status,
+        for (final candidate in communities)
+          '${candidate.id}|${candidate.pushNotificationsEnabled}|'
+              '${candidate.pushSubscriptionState.pendingTombstoneGeneration}',
+        tombstoneRetry.value,
+      ],
     );
 
     useEffect(

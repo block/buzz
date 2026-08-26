@@ -96,26 +96,35 @@ class Community {
     'addedAt': addedAt.toIso8601String(),
   };
 
-  factory Community.fromJson(Map<String, dynamic> json) => Community(
-    id: json['id'] as String,
-    name: json['name'] as String,
-    relayUrl: json['relayUrl'] as String,
-    pubkey: json['pubkey'] as String?,
-    nsec: json['nsec'] as String?,
-    sensitiveActionPolicy: SensitiveActionPolicy.values.firstWhere(
-      (value) => value.name == json['sensitiveActionPolicy'],
-      orElse: () => SensitiveActionPolicy.disabledByUser,
-    ),
-    pushNotificationsEnabled:
-        json['pushNotificationsEnabled'] as bool? ?? false,
-    pushSubscriptionState: json['pushSubscriptionState'] == null
+  factory Community.fromJson(Map<String, dynamic> json) {
+    final pushNotificationsEnabled =
+        json['pushNotificationsEnabled'] as bool? ?? false;
+    var pushSubscriptionState = json['pushSubscriptionState'] == null
         ? const BuzzPushLeaseSubscriptionState.desired()
         : BuzzPushLeaseSubscriptionState.fromJson(
             Map<String, dynamic>.from(json['pushSubscriptionState'] as Map),
-          ),
-    starterSetupIncomplete: json['starterSetupIncomplete'] as bool? ?? false,
-    addedAt: DateTime.parse(json['addedAt'] as String),
-  );
+          );
+    if (!pushNotificationsEnabled &&
+        pushSubscriptionState.pendingTombstoneGeneration == null) {
+      pushSubscriptionState = pushSubscriptionState
+          .withPendingTombstoneAtCursor();
+    }
+    return Community(
+      id: json['id'] as String,
+      name: json['name'] as String,
+      relayUrl: json['relayUrl'] as String,
+      pubkey: json['pubkey'] as String?,
+      nsec: json['nsec'] as String?,
+      sensitiveActionPolicy: SensitiveActionPolicy.values.firstWhere(
+        (value) => value.name == json['sensitiveActionPolicy'],
+        orElse: () => SensitiveActionPolicy.disabledByUser,
+      ),
+      pushNotificationsEnabled: pushNotificationsEnabled,
+      pushSubscriptionState: pushSubscriptionState,
+      starterSetupIncomplete: json['starterSetupIncomplete'] as bool? ?? false,
+      addedAt: DateTime.parse(json['addedAt'] as String),
+    );
+  }
 
   /// Derive a human-friendly community name from a relay URL.
   static String nameFromUrl(String url) {

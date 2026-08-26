@@ -107,59 +107,56 @@ Future<void> _deactivateCommunityPushLease(
   final state = community.pushSubscriptionState;
   final acceptedGeneration = state.acceptedGeneration;
   final nsec = community.nsec;
-  if ((acceptedGeneration == null && generation == null) ||
-      nsec == null ||
-      nsec.isEmpty) {
+  if (acceptedGeneration == null && generation == null) {
     return;
   }
-  try {
-    final decoded = nostr.Nip19.decode(payload: nsec);
-    final memberPubkey = community.pubkey ?? nostr.Keys(decoded.data).public;
-    final descriptor = await fetchBuzzPushLeaseDescriptor(community.relayUrl);
-    final installationId = (await readBuzzPushEndpointGrants())
-        .where(
-          (grant) =>
-              grant.relayOrigin == descriptor.origin &&
-              grant.appProfile == buzzDevPushAppProfile,
-        )
-        .map((grant) => grant.installationId)
-        .firstOrNull;
-    if (installationId == null) return;
-    final uri = Uri.parse(community.relayUrl);
-    final httpScheme = switch (uri.scheme) {
-      'wss' => 'https',
-      'ws' => 'http',
-      _ => uri.scheme,
-    };
-    final wsScheme = httpScheme == 'https' ? 'wss' : 'ws';
-    final wsUrl = uri.replace(scheme: wsScheme).toString();
-    // Skip over the one renewal generation that could already be in flight
-    // when removal begins. Strict relay monotonicity then makes any stale
-    // active publication lose to this tombstone.
-    final tombstoneGeneration =
-        generation ?? (state.generationCursor ?? acceptedGeneration!) + 2;
-    await publishBuzzPushLeaseTombstone(
-      descriptor: descriptor,
-      installationId: installationId,
-      generation: tombstoneGeneration,
-      nsec: nsec,
-      memberPubkey: memberPubkey,
-      submit: ({required kind, required content, required tags, createdAt}) =>
-          submitSignedEventOnce(
-            wsUrl: wsUrl,
-            nsec: nsec,
-            kind: kind,
-            content: content,
-            tags: tags,
-            createdAt: createdAt,
-          ),
-    );
-    pushLeaseCleanupError.value = null;
-  } catch (error, stackTrace) {
-    // Community removal remains local-first. A failed best-effort tombstone is
-    // observable here and the already-bounded relay lease expires naturally.
-    reportPushLeaseCleanupError(error, stackTrace);
+  if (nsec == null || nsec.isEmpty) {
+    throw StateError('Push lease tombstone requires community signing key.');
   }
+  final decoded = nostr.Nip19.decode(payload: nsec);
+  final memberPubkey = community.pubkey ?? nostr.Keys(decoded.data).public;
+  final descriptor = await fetchBuzzPushLeaseDescriptor(community.relayUrl);
+  final installationId = (await readBuzzPushEndpointGrants())
+      .where(
+        (grant) =>
+            grant.relayOrigin == descriptor.origin &&
+            grant.appProfile == buzzDevPushAppProfile,
+      )
+      .map((grant) => grant.installationId)
+      .firstOrNull;
+  if (installationId == null) {
+    throw StateError('No endpoint grant exists for push lease tombstone.');
+  }
+  final uri = Uri.parse(community.relayUrl);
+  final httpScheme = switch (uri.scheme) {
+    'wss' => 'https',
+    'ws' => 'http',
+    _ => uri.scheme,
+  };
+  final wsScheme = httpScheme == 'https' ? 'wss' : 'ws';
+  final wsUrl = uri.replace(scheme: wsScheme).toString();
+  // Skip over the one renewal generation that could already be in flight
+  // when removal begins. Strict relay monotonicity then makes any stale
+  // active publication lose to this tombstone.
+  final tombstoneGeneration =
+      generation ?? (state.generationCursor ?? acceptedGeneration!) + 2;
+  await publishBuzzPushLeaseTombstone(
+    descriptor: descriptor,
+    installationId: installationId,
+    generation: tombstoneGeneration,
+    nsec: nsec,
+    memberPubkey: memberPubkey,
+    submit: ({required kind, required content, required tags, createdAt}) =>
+        submitSignedEventOnce(
+          wsUrl: wsUrl,
+          nsec: nsec,
+          kind: kind,
+          content: content,
+          tags: tags,
+          createdAt: createdAt,
+        ),
+  );
+  pushLeaseCleanupError.value = null;
 }
 
 class _CommunitySnapshotSync {
@@ -207,6 +204,7 @@ Future<void> syncStoredCommunitySnapshot(Ref ref) async {
 
 class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   Future<void> _pushMutationTail = Future.value();
+  final Map<String, Future<void>> _tombstoneAttempts = {};
 
   Future<T> _serializePushMutation<T>(Future<T> Function() operation) {
     final result = _pushMutationTail.then((_) => operation());
@@ -269,9 +267,15 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         (community) => community.id == id,
       );
       if (removedIndex >= 0) {
-        await ref.read(communityPushLeaseDeactivatorProvider)(
-          current[removedIndex],
-        );
+        try {
+          await ref.read(communityPushLeaseDeactivatorProvider)(
+            current[removedIndex],
+          );
+        } catch (error, stackTrace) {
+          // Community removal remains local-first. Its already-bounded relay
+          // lease expires even if this best-effort final tombstone fails.
+          reportPushLeaseCleanupError(error, stackTrace);
+        }
       }
       await storage.remove(id);
 
@@ -398,8 +402,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   });
 
   Future<void> setPushNotificationsEnabled(String id, bool enabled) async {
-    Community? deactivation;
-    int? tombstoneGeneration;
+    var shouldDeactivate = false;
     await _serializePushMutation(() async {
       final storage = ref.read(communityStorageProvider);
       final current = state.value ?? await storage.loadAll();
@@ -414,8 +417,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
               pushState.generationCursor != null)) {
         final cursor =
             pushState.generationCursor ?? pushState.acceptedGeneration ?? 0;
-        tombstoneGeneration = cursor + 1;
-        pushState = pushState.withReservedGeneration(tombstoneGeneration!);
+        pushState = pushState.withPendingTombstone(cursor + 1);
       }
       final updated = community.copyWith(
         pushNotificationsEnabled: enabled,
@@ -425,15 +427,109 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       final updatedList = [...current]..[index] = updated;
       state = AsyncData(updatedList);
       await syncCommunitySnapshot(ref, updatedList);
-      if (!enabled && tombstoneGeneration != null) deactivation = updated;
+      shouldDeactivate =
+          !enabled && pushState.pendingTombstoneGeneration != null;
     });
-    if (deactivation != null) {
-      await ref.read(communityPushLeaseDeactivatorProvider)(
-        deactivation!,
-        generation: tombstoneGeneration,
-      );
+    if (shouldDeactivate) {
+      try {
+        await retryPendingPushLeaseTombstone(id);
+      } catch (_) {
+        // The durable journal remains pending. BuzzPushBootstrap retries it
+        // after reconnect while all registration/enrollment paths stay off.
+      }
     }
   }
+
+  /// Publishes a durably journaled opt-out tombstone.
+  ///
+  /// A retry advances the generation before network I/O. That makes an
+  /// ambiguous relay-commit/local-save failure idempotent in effect: the next
+  /// inactive replacement wins even if the prior tombstone already committed.
+  Future<void> retryPendingPushLeaseTombstone(
+    String id, {
+    bool advanceGeneration = false,
+  }) {
+    final existing = _tombstoneAttempts[id];
+    if (existing != null) return existing;
+    final attempt = _retryPendingPushLeaseTombstone(
+      id,
+      advanceGeneration: advanceGeneration,
+    );
+    _tombstoneAttempts[id] = attempt;
+    void clearAttempt() {
+      if (identical(_tombstoneAttempts[id], attempt)) {
+        _tombstoneAttempts.remove(id);
+      }
+    }
+
+    attempt.then<void>(
+      (_) => clearAttempt(),
+      onError: (_, _) => clearAttempt(),
+    );
+    return attempt;
+  }
+
+  Future<void> _retryPendingPushLeaseTombstone(
+    String id, {
+    required bool advanceGeneration,
+  }) async {
+    Community? pendingCommunity;
+    int? pendingGeneration;
+    await _serializePushMutation(() async {
+      final storage = ref.read(communityStorageProvider);
+      final current = state.value ?? await storage.loadAll();
+      final index = current.indexWhere((community) => community.id == id);
+      if (index < 0) return;
+      final community = current[index];
+      var pushState = community.pushSubscriptionState;
+      final pending = pushState.pendingTombstoneGeneration;
+      if (community.pushNotificationsEnabled || pending == null) return;
+      if (advanceGeneration) {
+        final cursor = pushState.generationCursor ?? pending;
+        pushState = pushState.withPendingTombstone(cursor + 1);
+      }
+      final updated = community.copyWith(pushSubscriptionState: pushState);
+      if (!identical(pushState, community.pushSubscriptionState)) {
+        await storage.save(updated);
+        final updatedList = [...current]..[index] = updated;
+        state = AsyncData(updatedList);
+        await syncCommunitySnapshot(ref, updatedList);
+      }
+      pendingCommunity = updated;
+      pendingGeneration = pushState.pendingTombstoneGeneration;
+    });
+    final community = pendingCommunity;
+    final generation = pendingGeneration;
+    if (community == null || generation == null) return;
+    try {
+      await ref.read(communityPushLeaseDeactivatorProvider)(
+        community,
+        generation: generation,
+      );
+      await _markPushLeaseTombstoneAccepted(id, generation);
+      pushLeaseCleanupError.value = null;
+    } catch (error, stackTrace) {
+      reportPushLeaseCleanupError(error, stackTrace);
+      rethrow;
+    }
+  }
+
+  Future<void> _markPushLeaseTombstoneAccepted(String id, int generation) =>
+      _serializePushMutation(() async {
+        final storage = ref.read(communityStorageProvider);
+        final current = state.value ?? await storage.loadAll();
+        final index = current.indexWhere((community) => community.id == id);
+        if (index < 0) return;
+        final community = current[index];
+        final updatedState = community.pushSubscriptionState
+            .withAcceptedTombstone(generation);
+        if (identical(updatedState, community.pushSubscriptionState)) return;
+        final updated = community.copyWith(pushSubscriptionState: updatedState);
+        await storage.save(updated);
+        final updatedList = [...current]..[index] = updated;
+        state = AsyncData(updatedList);
+        await syncCommunitySnapshot(ref, updatedList);
+      });
 
   Future<void> renameCommunity(String id, String name) async {
     final storage = ref.read(communityStorageProvider);

@@ -45,6 +45,15 @@ void main() {
     expect(gate.tryBegin('attempt'), isTrue);
   });
 
+  test('completed bootstrap attempt can run again for later work', () {
+    final gate = BuzzPushAttemptGate();
+    addTearDown(gate.dispose);
+
+    expect(gate.tryBegin('attempt'), isTrue);
+    gate.complete('attempt');
+    expect(gate.tryBegin('attempt'), isTrue);
+  });
+
   test('publication attempt changes when the relay executor rotates', () {
     final subscription = BuzzPushSubscription(
       filter: BuzzPushFilter(kinds: const [9], pTags: [_hex('a')]),
@@ -103,6 +112,32 @@ void main() {
     );
     expect(
       buzzPushLifecycleEnabled(community: enabled, descriptor: null),
+      isFalse,
+    );
+  });
+
+  test('pending opt-out tombstone keeps active push lifecycle disabled', () {
+    final subscription = BuzzPushSubscription(
+      filter: BuzzPushFilter(kinds: const [9], pTags: [_hex('a')]),
+      notificationClass: 'default',
+    );
+    final community =
+        Community.create(
+          name: 'Team',
+          relayUrl: 'wss://relay.example',
+        ).copyWith(
+          pushNotificationsEnabled: false,
+          pushSubscriptionState:
+              BuzzPushLeaseSubscriptionState.desired(desired: [subscription])
+                  .withAccepted(subscriptions: [subscription], generation: 3)
+                  .withPendingTombstone(4),
+        );
+
+    expect(
+      buzzPushLifecycleEnabled(
+        community: community,
+        descriptor: _descriptor(keyId: 'relay-v1', pubkey: _hex('b')),
+      ),
       isFalse,
     );
   });

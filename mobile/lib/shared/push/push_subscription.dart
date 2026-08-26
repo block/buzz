@@ -190,18 +190,33 @@ class BuzzPushLeaseSubscriptionState {
   /// cannot make the next retry reuse a stale generation.
   final int? generationCursor;
 
+  /// Higher-generation inactive lease that still needs relay acceptance.
+  ///
+  /// This is persisted before publication. Ambiguous retries reserve a newer
+  /// generation so a relay-accepted tombstone whose local acknowledgement was
+  /// lost is safely superseded without weakening strict relay monotonicity.
+  final int? pendingTombstoneGeneration;
+
   const BuzzPushLeaseSubscriptionState.desired({
     this.desired = const [],
     this.accepted,
     this.acceptedGeneration,
     this.generationCursor,
-  }) : authority = BuzzPushLeaseSubscriptionAuthority.desired;
+    this.pendingTombstoneGeneration,
+  }) : assert(
+         pendingTombstoneGeneration == null ||
+             (pendingTombstoneGeneration > (acceptedGeneration ?? 0) &&
+                 generationCursor != null &&
+                 pendingTombstoneGeneration <= generationCursor),
+       ),
+       authority = BuzzPushLeaseSubscriptionAuthority.desired;
 
   BuzzPushLeaseSubscriptionState.accepted({
     required Iterable<BuzzPushSubscription> desired,
     required Iterable<BuzzPushSubscription> acceptedSubscriptions,
     required this.acceptedGeneration,
     this.generationCursor,
+    this.pendingTombstoneGeneration,
   }) : authority = BuzzPushLeaseSubscriptionAuthority.accepted,
        desired = List.unmodifiable(desired),
        accepted = List.unmodifiable(acceptedSubscriptions) {
@@ -213,6 +228,19 @@ class BuzzPushLeaseSubscriptionState {
     if (generationCursor != null && generationCursor! < acceptedGeneration!) {
       throw const FormatException(
         'Push lease generation cursor cannot trail the accepted generation.',
+      );
+    }
+    _validatePendingTombstone();
+  }
+
+  void _validatePendingTombstone() {
+    final pending = pendingTombstoneGeneration;
+    if (pending == null) return;
+    if (pending <= (acceptedGeneration ?? 0) ||
+        generationCursor == null ||
+        pending > generationCursor!) {
+      throw const FormatException(
+        'Pending push tombstone must be newer than accepted state and durably reserved.',
       );
     }
   }
@@ -233,6 +261,7 @@ class BuzzPushLeaseSubscriptionState {
           accepted: accepted,
           acceptedGeneration: acceptedGeneration,
           generationCursor: generationCursor,
+          pendingTombstoneGeneration: pendingTombstoneGeneration,
         ),
       BuzzPushLeaseSubscriptionAuthority.accepted =>
         BuzzPushLeaseSubscriptionState.accepted(
@@ -240,6 +269,7 @@ class BuzzPushLeaseSubscriptionState {
           acceptedSubscriptions: accepted!,
           acceptedGeneration: acceptedGeneration,
           generationCursor: generationCursor,
+          pendingTombstoneGeneration: pendingTombstoneGeneration,
         ),
     };
   }
@@ -254,6 +284,11 @@ class BuzzPushLeaseSubscriptionState {
     generationCursor: generationCursor == null || generation > generationCursor!
         ? generation
         : generationCursor,
+    pendingTombstoneGeneration:
+        pendingTombstoneGeneration != null &&
+            generation < pendingTombstoneGeneration!
+        ? pendingTombstoneGeneration
+        : null,
   );
 
   BuzzPushLeaseSubscriptionState withReservedGeneration(int generation) {
@@ -269,6 +304,7 @@ class BuzzPushLeaseSubscriptionState {
           accepted: accepted,
           acceptedGeneration: acceptedGeneration,
           generationCursor: generation,
+          pendingTombstoneGeneration: pendingTombstoneGeneration,
         ),
       BuzzPushLeaseSubscriptionAuthority.accepted =>
         BuzzPushLeaseSubscriptionState.accepted(
@@ -276,8 +312,55 @@ class BuzzPushLeaseSubscriptionState {
           acceptedSubscriptions: accepted!,
           acceptedGeneration: acceptedGeneration,
           generationCursor: generation,
+          pendingTombstoneGeneration: pendingTombstoneGeneration,
         ),
     };
+  }
+
+  BuzzPushLeaseSubscriptionState withPendingTombstone(int generation) {
+    if (generation <= (generationCursor ?? acceptedGeneration ?? 0)) {
+      throw const FormatException(
+        'Pending push tombstone generation must advance monotonically.',
+      );
+    }
+    return BuzzPushLeaseSubscriptionState.desired(
+      desired: desired,
+      accepted: accepted,
+      acceptedGeneration: acceptedGeneration,
+      generationCursor: generation,
+      pendingTombstoneGeneration: generation,
+    );
+  }
+
+  /// Migrates a generation reserved by an older client before the explicit
+  /// tombstone journal field existed.
+  BuzzPushLeaseSubscriptionState withPendingTombstoneAtCursor() {
+    final generation = generationCursor;
+    if (generation == null || generation <= (acceptedGeneration ?? 0)) {
+      return this;
+    }
+    return BuzzPushLeaseSubscriptionState.desired(
+      desired: desired,
+      accepted: accepted,
+      acceptedGeneration: acceptedGeneration,
+      generationCursor: generation,
+      pendingTombstoneGeneration: generation,
+    );
+  }
+
+  BuzzPushLeaseSubscriptionState withAcceptedTombstone(int generation) {
+    if (generation != pendingTombstoneGeneration ||
+        generation < (acceptedGeneration ?? 0)) {
+      return this;
+    }
+    return BuzzPushLeaseSubscriptionState.desired(
+      desired: desired,
+      acceptedGeneration: generation,
+      generationCursor:
+          generationCursor == null || generation > generationCursor!
+          ? generation
+          : generationCursor,
+    );
   }
 
   Map<String, dynamic> toJson() => {
@@ -287,6 +370,8 @@ class BuzzPushLeaseSubscriptionState {
       'accepted': [for (final subscription in accepted!) subscription.toJson()],
     if (acceptedGeneration != null) 'acceptedGeneration': acceptedGeneration,
     if (generationCursor != null) 'generationCursor': generationCursor,
+    if (pendingTombstoneGeneration != null)
+      'pendingTombstoneGeneration': pendingTombstoneGeneration,
   };
 
   factory BuzzPushLeaseSubscriptionState.fromJson(Map<String, dynamic> json) {
@@ -296,6 +381,7 @@ class BuzzPushLeaseSubscriptionState {
       'accepted',
       'acceptedGeneration',
       'generationCursor',
+      'pendingTombstoneGeneration',
     }, 'push subscription state');
     final authority = json['authority'];
     final desired = _subscriptionList(
@@ -309,6 +395,7 @@ class BuzzPushLeaseSubscriptionState {
         : _subscriptionList(acceptedRaw, 'accepted');
     final acceptedGeneration = json['acceptedGeneration'];
     final generationCursor = json['generationCursor'];
+    final pendingTombstoneGeneration = json['pendingTombstoneGeneration'];
     if (acceptedGeneration != null && acceptedGeneration is! int) {
       throw const FormatException(
         'Accepted push lease generation must be an integer.',
@@ -319,12 +406,28 @@ class BuzzPushLeaseSubscriptionState {
         'Push lease generation cursor must be an integer.',
       );
     }
+    if (pendingTombstoneGeneration != null &&
+        pendingTombstoneGeneration is! int) {
+      throw const FormatException(
+        'Pending push tombstone generation must be an integer.',
+      );
+    }
+    if (authority == 'desired' &&
+        pendingTombstoneGeneration is int &&
+        (pendingTombstoneGeneration <= (acceptedGeneration as int? ?? 0) ||
+            generationCursor is! int ||
+            pendingTombstoneGeneration > generationCursor)) {
+      throw const FormatException(
+        'Pending push tombstone must be newer than accepted state and durably reserved.',
+      );
+    }
     return switch (authority) {
       'desired' => BuzzPushLeaseSubscriptionState.desired(
         desired: desired,
         accepted: accepted,
         acceptedGeneration: acceptedGeneration as int?,
         generationCursor: generationCursor as int?,
+        pendingTombstoneGeneration: pendingTombstoneGeneration as int?,
       ),
       'accepted' when accepted != null && acceptedGeneration is int =>
         BuzzPushLeaseSubscriptionState.accepted(
@@ -332,6 +435,7 @@ class BuzzPushLeaseSubscriptionState {
           acceptedSubscriptions: accepted,
           acceptedGeneration: acceptedGeneration,
           generationCursor: generationCursor as int?,
+          pendingTombstoneGeneration: pendingTombstoneGeneration as int?,
         ),
       'accepted' => throw const FormatException(
         'Accepted push authority requires accepted subscriptions and generations.',
