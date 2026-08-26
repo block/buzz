@@ -11,6 +11,10 @@ import {
   parseAgentManagementRequest,
   type AgentManagementRequest,
 } from "./agentManagement";
+import {
+  forwardBrokerFrameIsolated,
+  isBrokerRequestPayload,
+} from "./brokerFrameForwarding";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
 import { agentConfigSurfaceQueryKey } from "@/features/agents/hooks";
@@ -559,11 +563,25 @@ async function handleRelayObserverEvent(
   }
 
   try {
-    const parsed = (await decryptObserverEvent(event)) as ObserverEvent;
+    const parsed = await decryptObserverEvent(event);
     if (activeGeneration !== generation) {
       return;
     }
-    processLiveObserverEvents(agentPubkey, unwrapObserverBatch(parsed));
+    // Broker requests are not observer telemetry: the payload is a bare
+    // BrokerRequest, with no seq/timestamp/kind, so appending it to the session
+    // journal would file a mutation request as a transcript entry. Route it to
+    // the host instead, and forward the *signed event* rather than this
+    // plaintext — the host verifies and decrypts it again itself.
+    if (isBrokerRequestPayload(parsed)) {
+      // Isolated: a broker host fault must not be reported as — or tear down —
+      // the observer telemetry subscription. See forwardBrokerFrameIsolated.
+      await forwardBrokerFrameIsolated(event);
+      return;
+    }
+    processLiveObserverEvents(
+      agentPubkey,
+      unwrapObserverBatch(parsed as ObserverEvent),
+    );
   } catch (error) {
     if (activeGeneration !== generation) {
       return;
