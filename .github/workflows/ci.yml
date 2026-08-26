@@ -529,6 +529,7 @@ jobs:
             REDIS_URL=redis://localhost:6379 \
             RELAY_URL=ws://localhost:3000 \
             BUZZ_BIND_ADDR=0.0.0.0:3000 \
+            BUZZ_RELAY_PRIVATE_KEY="$(openssl rand -hex 32)" \
             BUZZ_REQUIRE_AUTH_TOKEN=false \
             BUZZ_RECONCILE_CHANNELS=true \
             BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN=100000 \
@@ -714,6 +715,7 @@ jobs:
             REDIS_URL=redis://localhost:6379 \
             RELAY_URL=ws://localhost:3000 \
             BUZZ_BIND_ADDR=0.0.0.0:3000 \
+            BUZZ_RELAY_PRIVATE_KEY="$(openssl rand -hex 32)" \
             BUZZ_REQUIRE_AUTH_TOKEN=false \
             BUZZ_RECONCILE_CHANNELS=true \
             BUZZ_GIT_PROBE_WRITERS=8 \

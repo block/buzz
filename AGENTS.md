@@ -226,7 +226,9 @@ channel and derives its containing root. An optional `thread` parameter is
 accepted only when it matches that derived root. The explicit
 `--channel <uuid> --event <hex>` form remains available.
 
-All reads return sig-stripped JSON arrays; all writes return
+All event reads return normalized JSON arrays. Normal output preserves the seven
+canonical signed Nostr event fields (`id`, `pubkey`, `kind`, `content`,
+`created_at`, `tags`, `sig`); all writes return
 `{event_id, accepted, message}`; creates add the entity ID. Exit codes:
 0=ok, 1=input error, 2=network/relay, 3=auth, 4=other, 5=write conflict (NIP-33 LWW).
 

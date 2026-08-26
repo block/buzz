@@ -34,6 +34,8 @@ type MockFeedWindow = Window & {
     content: string;
     createdAt?: number;
     id?: string;
+    kind?: number;
+    mentionPubkeys?: string[];
     parentEventId?: string;
     pubkey?: string;
   }) => {
@@ -1133,6 +1135,15 @@ test("drops an expanded DM after agent startup fails", async ({ page }) => {
 
   await input.fill(retryMessage);
   const retryBaseline = commandsAfterFailure.length;
+  // The first send left the cursor parked over the bottom-right error toast,
+  // which overlaps the send button. Sonner pauses its dismiss timer while the
+  // toaster is hovered, so move the cursor away and let the transient toast
+  // clear before retrying — otherwise the retry click is intercepted for the
+  // full timeout.
+  await page.mouse.move(0, 0);
+  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, {
+    timeout: 10_000,
+  });
   await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("chat-title")).toHaveText("charlie");
@@ -1572,12 +1583,78 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
     /Ephemeral channel\. Cleans up in 14 days\./,
   );
 
+  const channelRow = page.getByTestId(`channel-${channelName}`);
+  const channelId = await channelRow.getAttribute("data-channel-id");
+  if (!channelId) {
+    throw new Error("Created ephemeral channel is missing its channel id.");
+  }
+
+  await waitForMockLiveSubscription(page, channelName);
+  await page.getByTestId("channel-general").click();
+  await page.evaluate(
+    ({ agentPubkey, channelId: activeChannelId }) => {
+      (window as MockFeedWindow).__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey,
+        channelId: activeChannelId,
+        turnId: "ephemeral-sidebar-status",
+      });
+    },
+    { agentPubkey: OWNED_RELAY_AGENT_PUBKEY, channelId },
+  );
+
+  await expect(
+    page.getByTestId(`channel-working-${channelName}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`channel-ephemeral-${channelName}`),
+  ).toHaveCount(0);
+
+  await page.evaluate(
+    ({ agentPubkey, channelId: activeChannelId }) => {
+      (window as MockFeedWindow).__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey,
+        channelId: activeChannelId,
+        turnId: "ephemeral-sidebar-status",
+        kind: "turn_completed",
+      });
+    },
+    { agentPubkey: OWNED_RELAY_AGENT_PUBKEY, channelId },
+  );
+  await expect(
+    page.getByTestId(`channel-ephemeral-${channelName}`),
+  ).toBeVisible();
+
   await page
     .getByRole("button", { name: "Toggle Sidebar", exact: true })
     .click();
   await expect(
     page.getByTestId(`channel-ephemeral-${channelName}`),
   ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Toggle Sidebar", exact: true })
+    .click();
+
+  await page.evaluate(
+    ({ channelName: targetChannelName, mentionPubkey, senderPubkey }) => {
+      (window as MockFeedWindow).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: targetChannelName,
+        content: "Unread mention in an ephemeral channel",
+        kind: 40002,
+        mentionPubkeys: [mentionPubkey],
+        pubkey: senderPubkey,
+      });
+    },
+    {
+      channelName,
+      mentionPubkey: MOCK_IDENTITY_PUBKEY,
+      senderPubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  await expect(page.getByTestId(`channel-unread-${channelName}`)).toBeVisible();
+  await expect(
+    page.getByTestId(`channel-ephemeral-${channelName}`),
+  ).toHaveCount(0);
 });
 
 test("ephemeral countdown refreshes when switching channels after a clock jump", async ({

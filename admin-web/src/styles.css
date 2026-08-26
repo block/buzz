@@ -195,6 +195,7 @@ h1 {
 .feedback-filters label {
   display: grid;
   gap: 0.45rem;
+  min-width: 0;
 }
 
 .feedback-filters label > span {
@@ -221,6 +222,8 @@ h1 {
 }
 
 .feedback-filters select {
+  width: 100%;
+  min-width: 0;
   padding: 0 2.25rem 0 1rem;
 }
 

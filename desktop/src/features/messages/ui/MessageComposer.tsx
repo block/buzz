@@ -170,7 +170,7 @@ function MessageComposerImpl({
     media.queuedAttachmentsRef.current.length === 0;
   const ownsDropZone = mediaController === undefined;
   const backgroundUpload = useBackgroundMediaUpload();
-  useDraftPersistLifecycle({
+  const { trackAuthoredContent } = useDraftPersistLifecycle({
     effectiveDraftKey,
     channelId,
     loadDraft: drafts.loadDraft,
@@ -272,6 +272,8 @@ function MessageComposerImpl({
     onLinkSelectionChange: (info) => onLinkSelectionChangeRef.current?.(info),
     onLinkShortcut: () => onLinkShortcutRef.current?.() ?? false,
     onUpdate: ({ cursor, linkPreviewContent, text }) => {
+      trackAuthoredContent(text);
+      contentRef.current = text;
       setComposerContentFromText(text);
       setPreviewContent(linkPreviewContent);
       if (!isSubmitLockedRef.current && !editTargetRef.current) {
@@ -339,12 +341,11 @@ function MessageComposerImpl({
     drafts,
     emojiAutocomplete,
     mentions,
-    onAddressedAgentsSendStarted: addressPulse.pulseMany,
     onAddressedAgentsComposerCleared: (pubkeys) =>
       restoreAddressedAgentMentionsRef.current(pubkeys),
     onAddressedAgentsSendFailed: addressPulse.shakeMany,
     onAddressedAgentsSendSucceeded: (pubkeys, newlyPinnedPubkeys) => {
-      if (newlyPinnedPubkeys.length === 0) return;
+      if (!keepMentionedAgentsPinned || newlyPinnedPubkeys.length === 0) return;
       const sentChannelId = channelId;
       if (restoreAddressedAgentMentionsFrameRef.current !== null) {
         cancelAnimationFrame(restoreAddressedAgentMentionsFrameRef.current);
@@ -966,6 +967,7 @@ function MessageComposerImpl({
               editor={richText.editor}
               extraActions={toolbarExtraActions}
               formattingDisabled={composerDisabled}
+              gifMediaController={media}
               isEmojiPickerOpen={isEmojiPickerOpen}
               isFormattingOpen={isFormattingOpen}
               isSending={isSending || mentionSendFlow.isPreparingMentionSend}
