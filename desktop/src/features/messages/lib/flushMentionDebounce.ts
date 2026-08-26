@@ -26,12 +26,12 @@ export type FlushMentionDebounceResult =
 export function isPlainSpace(
   event: Pick<
     KeyboardEvent,
-    "altKey" | "ctrlKey" | "isComposing" | "key" | "metaKey"
+    "altKey" | "ctrlKey" | "isComposing" | "key" | "metaKey" | "shiftKey"
   >,
 ): boolean {
   return (
     event.key === " " &&
-    !(event.metaKey || event.ctrlKey || event.altKey) &&
+    !(event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) &&
     !event.isComposing
   );
 }

@@ -25,9 +25,11 @@ test("isPlainSpace accepts only an unmodified Space outside composition", () => 
     isComposing: false,
     key: " ",
     metaKey: false,
+    shiftKey: false,
   };
   assert.equal(isPlainSpace(event), true);
   assert.equal(isPlainSpace({ ...event, ctrlKey: true }), false);
+  assert.equal(isPlainSpace({ ...event, shiftKey: true }), false);
   assert.equal(isPlainSpace({ ...event, isComposing: true }), false);
   assert.equal(isPlainSpace({ ...event, key: "Enter" }), false);
 });

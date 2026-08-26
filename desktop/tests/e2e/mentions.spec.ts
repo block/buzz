@@ -567,6 +567,46 @@ test("typing an exact agent name and Space commits its chip and mention tag", as
     .toContain(TEST_IDENTITIES.alice.pubkey);
 });
 
+test("Shift+Space leaves an exact agent name plain and emits no mention tag", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: OUT_OF_CHANNEL_MANAGED_AGENT_PUBKEY,
+        name: "quinn",
+        status: "stopped",
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  // Plain in-channel member names are intentionally tagged at send time, so
+  // use an authorized non-member to isolate selection from text extraction.
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  await expect(
+    autocomplete(page).getByTestId(
+      `mention-suggestion-${OUT_OF_CHANNEL_MANAGED_AGENT_PUBKEY}`,
+    ),
+  ).toBeVisible();
+
+  await input.fill("Ask @quinn");
+  await input.press("Shift+Space");
+  await page.keyboard.type("please reply");
+
+  const content = "Ask @quinn please reply";
+  await expect(input).toHaveText(content);
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(0);
+
+  await page.getByTestId("send-message").click();
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, content))
+    .toEqual([]);
+});
+
 test("thread autocomplete keeps multiple long names readable in a narrow panel", async ({
   page,
 }) => {
