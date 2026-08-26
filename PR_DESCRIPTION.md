@@ -52,7 +52,22 @@ trim/empty-filter on `base` is a no-op there. With the empty provider list,
 the new call site produces the same output as the old
 `config.team_instructions.clone()` for every input it can receive today.
 
+## Review focus
+
+1. The RFC issue (#3351) describes generalizing an existing Agent
+   Guidelines fetch that doesn't exist in this repo. Should the issue text
+   itself be corrected to match, so future readers aren't confused by a
+   motivation section describing code that isn't there?
+2. Is landing the seam with an empty provider list (proven by
+   `empty_providers_is_identity_on_base`) an acceptable way to merge this
+   ahead of any real provider, or would you rather see it land together
+   with a first provider so the non-empty path is exercised in production
+   immediately?
+
 ## Testing
+
+At commit `af6c2f0dc` (the last code commit on this branch; later commits
+only touch this description):
 
 - `cargo test -p buzz-acp`: 805 passed, 0 failed, existing suite untouched.
 - New unit tests in `team_context.rs`:
