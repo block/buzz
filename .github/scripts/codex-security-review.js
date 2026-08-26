@@ -28,6 +28,16 @@ const completedMarker = (baseSha, headSha) =>
 
 const reviewCommand = (headSha) => `${REVIEW_COMMAND} ${headSha}`;
 
+const isOrganizationMember = (association) =>
+  association === "MEMBER" || association === "OWNER";
+
+const hasCurrentReviewLabel = (pullRequest) =>
+  pullRequest.labels?.some(
+    (label) =>
+      (typeof label === "string" ? label : label?.name) ===
+      CURRENT_REVIEW_LABEL,
+  ) ?? false;
+
 const isObject = (value) =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 
@@ -352,6 +362,15 @@ async function prepare({ github, context, core }) {
     );
     return;
   }
+  if (
+    context.eventName === "pull_request_target" &&
+    !isOrganizationMember(pullRequest.author_association)
+  ) {
+    core.info(
+      `Pull request #${prNumber} requires authorization from a Block organization member.`,
+    );
+    return;
+  }
   if (pullRequest.head.sha !== requestedHeadSha) {
     core.setFailed(
       `Pull request #${prNumber} moved after this review was authorized. ` +
@@ -362,6 +381,7 @@ async function prepare({ github, context, core }) {
 
   const baseSha = await getLiveMainSha({ github, context });
   const commitRange = `${baseSha}...${pullRequest.head.sha}`;
+  core.setOutput("authorized", "true");
   core.setOutput("pr_number", String(prNumber));
   core.setOutput("trigger_actor", context.actor);
   core.setOutput("base_sha", baseSha);
@@ -455,9 +475,12 @@ async function prepareBaseReconciliation({ github, context, core }) {
 }
 
 async function invalidatePullRequestUpdate({ github, context, core }) {
-  const association = context.payload.pull_request?.author_association || "";
-  const existingOnly = association === "MEMBER" || association === "OWNER";
-  await invalidate({ github, context, core, existingOnly });
+  await invalidate({
+    github,
+    context,
+    core,
+    existingOnlyForOrganizationMembers: true,
+  });
 }
 
 async function invalidate({
@@ -466,6 +489,7 @@ async function invalidate({
   core,
   prNumber: requestedPrNumber,
   existingOnly = false,
+  existingOnlyForOrganizationMembers = false,
 }) {
   const prNumber = Number(
     requestedPrNumber ?? context.payload.pull_request?.number,
@@ -482,8 +506,14 @@ async function invalidate({
   }
 
   const existing = await findReviewComment({ github, context, prNumber });
-  if (!existing && existingOnly) {
-    await clearCurrentReview({ github, context, prNumber });
+  const shouldOnlyUpdateExisting =
+    existingOnly ||
+    (existingOnlyForOrganizationMembers &&
+      isOrganizationMember(pullRequest.author_association));
+  if (!existing && shouldOnlyUpdateExisting) {
+    if (existingOnly || hasCurrentReviewLabel(pullRequest)) {
+      await clearCurrentReview({ github, context, prNumber });
+    }
     core.info(`PR #${prNumber} has no Codex security review to invalidate.`);
     return;
   }
