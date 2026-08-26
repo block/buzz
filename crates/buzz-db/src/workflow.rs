@@ -18,6 +18,8 @@ use uuid::Uuid;
 use buzz_core::CommunityId;
 
 use crate::error::{DbError, Result};
+use crate::Db;
+use buzz_datastore_tracing::datastore_span;
 
 // -- Token hashing ------------------------------------------------------------
 
@@ -1266,6 +1268,251 @@ pub async fn find_by_owner_and_name(
     }
 }
 
+// -- Db API -------------------------------------------------------------------
+
+impl Db {
+    /// Create a new workflow.
+    #[datastore_span(name = "create_workflow", system = "postgresql")]
+    pub async fn create_workflow(
+        &self,
+        community_id: CommunityId,
+        channel_id: Option<Uuid>,
+        owner_pubkey: &[u8],
+        name: &str,
+        definition_json: &str,
+        definition_hash: &[u8],
+    ) -> Result<Uuid> {
+        crate::workflow::create_workflow(
+            &self.pool,
+            community_id,
+            channel_id,
+            owner_pubkey,
+            name,
+            definition_json,
+            definition_hash,
+        )
+        .await
+    }
+
+    /// Insert or update a workflow using its NIP-33 `d`-tag UUID.
+    #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "upsert_workflow", system = "postgresql")]
+    pub async fn upsert_workflow(
+        &self,
+        community_id: CommunityId,
+        id: Uuid,
+        channel_id: Option<Uuid>,
+        owner_pubkey: &[u8],
+        name: &str,
+        definition_json: &str,
+        definition_hash: &[u8],
+    ) -> Result<()> {
+        crate::workflow::upsert_workflow(
+            &self.pool,
+            community_id,
+            id,
+            channel_id,
+            owner_pubkey,
+            name,
+            definition_json,
+            definition_hash,
+        )
+        .await
+    }
+
+    /// Fetch a single workflow by ID, scoped to its community.
+    #[datastore_span(name = "get_workflow", system = "postgresql")]
+    pub async fn get_workflow(
+        &self,
+        community_id: CommunityId,
+        id: Uuid,
+    ) -> Result<crate::workflow::WorkflowRecord> {
+        crate::workflow::get_workflow(&self.pool, community_id, id).await
+    }
+
+    /// List workflows for a channel.
+    #[datastore_span(name = "list_channel_workflows", system = "postgresql")]
+    pub async fn list_channel_workflows(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        limit: Option<i64>,
+        offset: Option<i64>,
+    ) -> Result<Vec<crate::workflow::WorkflowRecord>> {
+        crate::workflow::list_channel_workflows(&self.pool, community_id, channel_id, limit, offset)
+            .await
+    }
+
+    /// List active, enabled workflows for a channel.
+    #[datastore_span(name = "list_enabled_channel_workflows", system = "postgresql")]
+    pub async fn list_enabled_channel_workflows(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<Vec<crate::workflow::WorkflowRecord>> {
+        crate::workflow::list_enabled_channel_workflows(&self.pool, community_id, channel_id).await
+    }
+
+    /// List all active, enabled schedule-triggered workflows.
+    #[datastore_span(name = "list_all_enabled_workflows", system = "postgresql")]
+    pub async fn list_all_enabled_workflows(&self) -> Result<Vec<crate::workflow::WorkflowRecord>> {
+        crate::workflow::list_all_enabled_workflows(&self.pool).await
+    }
+
+    /// Claim a scheduled workflow fire for an authoritative schedule instant.
+    ///
+    /// Returns `Some` only for the first pod to claim `(community_id,
+    /// workflow_id, scheduled_for)`; all other pods must skip creating a run.
+    /// `community_id` is server provenance (the workflow row's own community
+    /// from the scheduler scan), never client-supplied — `workflows` is keyed
+    /// `(community_id, id)`, so the claim must bind both to avoid fanning
+    /// across communities that share the workflow UUID.
+    #[datastore_span(name = "claim_scheduled_workflow_fire", system = "postgresql")]
+    pub async fn claim_scheduled_workflow_fire(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        scheduled_for: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<crate::workflow::ScheduledWorkflowFireClaim>> {
+        crate::workflow::claim_scheduled_workflow_fire(
+            &self.pool,
+            community_id,
+            workflow_id,
+            scheduled_for,
+        )
+        .await
+    }
+
+    /// Fetch the latest claimed schedule instant for interval trigger anchoring.
+    #[datastore_span(name = "latest_scheduled_workflow_fire", system = "postgresql")]
+    pub async fn latest_scheduled_workflow_fire(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+        crate::workflow::latest_scheduled_workflow_fire(&self.pool, community_id, workflow_id).await
+    }
+
+    /// Attach the workflow run id created from a won scheduled-fire claim.
+    #[datastore_span(name = "attach_scheduled_workflow_run", system = "postgresql")]
+    pub async fn attach_scheduled_workflow_run(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        scheduled_for: chrono::DateTime<chrono::Utc>,
+        workflow_run_id: Uuid,
+    ) -> Result<bool> {
+        crate::workflow::attach_scheduled_workflow_run(
+            &self.pool,
+            community_id,
+            workflow_id,
+            scheduled_for,
+            workflow_run_id,
+        )
+        .await
+    }
+
+    /// Delete old scheduled workflow fire claims before a retention cutoff.
+    #[datastore_span(name = "prune_scheduled_workflow_fires_before", system = "postgresql")]
+    pub async fn prune_scheduled_workflow_fires_before(
+        &self,
+        older_than: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        crate::workflow::prune_scheduled_workflow_fires_before(&self.pool, older_than).await
+    }
+
+    /// Update a workflow's name, definition, and hash.
+    #[datastore_span(name = "update_workflow", system = "postgresql")]
+    pub async fn update_workflow(
+        &self,
+        community_id: CommunityId,
+        id: Uuid,
+        name: &str,
+        definition_json: &str,
+        definition_hash: &[u8],
+    ) -> Result<()> {
+        crate::workflow::update_workflow(
+            &self.pool,
+            community_id,
+            id,
+            name,
+            definition_json,
+            definition_hash,
+        )
+        .await
+    }
+
+    /// Update a workflow's status.
+    #[datastore_span(name = "update_workflow_status", system = "postgresql")]
+    pub async fn update_workflow_status(
+        &self,
+        community_id: CommunityId,
+        id: Uuid,
+        status: crate::workflow::WorkflowStatus,
+    ) -> Result<()> {
+        crate::workflow::update_workflow_status(&self.pool, community_id, id, status).await
+    }
+
+    /// Enable or disable a workflow.
+    #[datastore_span(name = "set_workflow_enabled", system = "postgresql")]
+    pub async fn set_workflow_enabled(
+        &self,
+        community_id: CommunityId,
+        id: Uuid,
+        enabled: bool,
+    ) -> Result<()> {
+        crate::workflow::set_workflow_enabled(&self.pool, community_id, id, enabled).await
+    }
+
+    /// Disable all of an owner's workflows in a channel (SEC-006, on
+    /// membership loss). Returns the number of workflows disabled.
+    #[datastore_span(name = "disable_workflows_for_owner_in_channel", system = "postgresql")]
+    pub async fn disable_workflows_for_owner_in_channel(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        owner_pubkey: &[u8],
+    ) -> Result<u64> {
+        crate::workflow::disable_workflows_for_owner_in_channel(
+            &self.pool,
+            community_id,
+            channel_id,
+            owner_pubkey,
+        )
+        .await
+    }
+
+    /// Delete a workflow and all its runs/approvals.
+    #[datastore_span(name = "delete_workflow", system = "postgresql")]
+    pub async fn delete_workflow(&self, community_id: CommunityId, id: Uuid) -> Result<()> {
+        crate::workflow::delete_workflow(&self.pool, community_id, id).await
+    }
+
+    /// Delete a workflow only when it belongs to the provided owner.
+    /// Returns the deleted workflow's `channel_id`.
+    #[datastore_span(name = "delete_workflow_for_owner", system = "postgresql")]
+    pub async fn delete_workflow_for_owner(
+        &self,
+        community_id: CommunityId,
+        id: Uuid,
+        owner_pubkey: &[u8],
+    ) -> Result<Option<Uuid>> {
+        crate::workflow::delete_workflow_for_owner(&self.pool, community_id, id, owner_pubkey).await
+    }
+
+    /// Find a workflow by owner pubkey and name within a community. Used for
+    /// NIP-09 a-tag deletion where the d-tag is the workflow name (not UUID).
+    #[datastore_span(name = "find_workflow_by_owner_and_name", system = "postgresql")]
+    pub async fn find_workflow_by_owner_and_name(
+        &self,
+        community_id: CommunityId,
+        owner_pubkey: &[u8],
+        name: &str,
+    ) -> Result<Option<crate::workflow::WorkflowRecord>> {
+        crate::workflow::find_by_owner_and_name(&self.pool, community_id, owner_pubkey, name).await
+    }
+}
+
 // -- Tests --------------------------------------------------------------------
 
 #[cfg(test)]
@@ -1774,7 +2021,7 @@ mod tests {
 
     use crate::user::ensure_user;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials
 
     async fn setup_pool() -> PgPool {
         let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
