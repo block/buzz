@@ -69,6 +69,15 @@ pub struct ManagedAgentEventContent {
     /// Human label for that device. Public, non-secret, user-editable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_label: Option<String>,
+    /// Owner-attested capability strings for the public agent directory.
+    /// Free-form, non-secret, human-readable labels (e.g. "web-search",
+    /// "code-review") following the risk-class vocabulary of the
+    /// owner-private capability manifest. Owner-attested, never verified:
+    /// consumers must render these as owner claims, not platform guarantees.
+    /// Absent on events published before this field shipped; empty is
+    /// equivalent to absent for consumers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 /// Project a `ManagedAgentRecord` onto the content fields published in
@@ -137,6 +146,11 @@ pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventCont
         respond_to_allowlist: record.respond_to_allowlist.clone(),
         device_id: device.as_ref().map(|d| d.device_id.clone()),
         device_label: device.as_ref().map(|d| d.device_label.clone()),
+        // v1 producer keeps the published capabilities empty: the directory
+        // field is being connected on the consumer side first so old
+        // publishers and new readers interoperate before any UI can author
+        // capability strings. Publishing real values is v2 scope.
+        capabilities: Vec::new(),
     }
 }
 

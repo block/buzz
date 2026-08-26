@@ -226,6 +226,12 @@ pub struct RelayAgentInfo {
     /// whose author matches the agent's signed NIP-OA owner.
     #[serde(default)]
     pub device_label: Option<String>,
+    /// LLM the agent runs, as published on its kind:30177 record.
+    /// Owner-attested, never verified. `None` on definition-linked instances
+    /// (the model lives on their kind:30175 definition), on legacy kind:10100
+    /// entries, and on records published before this field shipped.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedAgentRecord {
