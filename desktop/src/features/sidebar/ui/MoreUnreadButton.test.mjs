@@ -45,12 +45,28 @@ describe("MoreUnreadButton model", () => {
     );
   });
 
-  it("keeps navigation ordering independent from avatar eligibility", () => {
+  it("selects the first ordered DM independently from avatar eligibility", () => {
+    const dmChannelIds = new Set(["near-group", "far-previewable"]);
+
     assert.equal(
-      preferredUnreadTarget(["near-group", "far-previewable", "channel"]),
+      preferredUnreadTarget(
+        ["near-group", "far-previewable", "channel"],
+        dmChannelIds,
+      ),
       "near-group",
     );
-    assert.equal(preferredUnreadTarget([]), undefined);
+    assert.equal(
+      preferredUnreadTarget(
+        ["near-channel", "near-group", "far-previewable"],
+        dmChannelIds,
+      ),
+      "near-group",
+    );
+    assert.equal(
+      preferredUnreadTarget(["near-channel", "far-channel"], dmChannelIds),
+      "near-channel",
+    );
+    assert.equal(preferredUnreadTarget([], dmChannelIds), undefined);
   });
 
   it("announces a DM identity only when it matches the navigation target", () => {

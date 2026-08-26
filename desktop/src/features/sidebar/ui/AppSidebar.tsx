@@ -429,8 +429,13 @@ export function AppSidebar({
       unreadMessageBelowChannelIds,
     ],
   );
+  const unreadDmChannelIds = React.useMemo(
+    () => new Set(directMessages.map(({ id }) => id)),
+    [directMessages],
+  );
   const nextUnreadDmBelowId = preferredUnreadTarget(
     unreadMessageBelowChannelIds,
+    unreadDmChannelIds,
   );
   const sidebarLoadingShape = useSidebarLoadingShape({
     activeCommunityId: activeCommunity?.id,

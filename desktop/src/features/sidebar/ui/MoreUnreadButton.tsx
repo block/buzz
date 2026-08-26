@@ -43,8 +43,14 @@ export function unreadDmAccessibleLabel({
     : `${resolvedLabel} ${direction}`;
 }
 
-export function preferredUnreadTarget(unreadChannelIds: string[]) {
-  return unreadChannelIds[0];
+export function preferredUnreadTarget(
+  unreadChannelIds: string[],
+  dmChannelIds: ReadonlySet<string>,
+) {
+  return (
+    unreadChannelIds.find((channelId) => dmChannelIds.has(channelId)) ??
+    unreadChannelIds[0]
+  );
 }
 
 export function MoreUnreadButton({
