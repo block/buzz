@@ -526,6 +526,7 @@ export function ForumComposer({
                   ? channelLinks.channelSuggestions
                   : []
               }
+              isEditorFocused={richText.isFocused}
               mentionSelectedIndex={mentions.mentionSelectedIndex}
               mentionSuggestions={
                 mentions.isMentionOpen ? mentions.suggestions : []

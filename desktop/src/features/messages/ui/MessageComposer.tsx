@@ -783,8 +783,6 @@ function MessageComposerImpl({
   const handlePaperclipClick = React.useCallback(() => {
     void media.handlePaperclip();
   }, [media.handlePaperclip]);
-  const gate = <T,>(open: boolean, suggestions: T[]) =>
-    richText.isFocused && open ? suggestions : [];
   return (
     <>
       <footer
@@ -843,22 +841,27 @@ function MessageComposerImpl({
           >
             {ownsDropZone && media.isDragOver && <DropZoneOverlay />}
             <EmojiAutocomplete
+              isEditorFocused={richText.isFocused}
               onSelect={applyEmojiInsert}
               selectedIndex={emojiAutocomplete.emojiSelectedIndex}
-              suggestions={gate(
-                emojiAutocomplete.isEmojiAutocompleteOpen,
-                emojiAutocomplete.emojiSuggestions,
-              )}
+              suggestions={
+                emojiAutocomplete.isEmojiAutocompleteOpen
+                  ? emojiAutocomplete.emojiSuggestions
+                  : []
+              }
             />
             <ChannelAutocomplete
+              isEditorFocused={richText.isFocused}
               onSelect={applyChannelInsert}
               selectedIndex={channelLinks.channelSelectedIndex}
-              suggestions={gate(
-                channelLinks.isChannelOpen,
-                channelLinks.channelSuggestions,
-              )}
+              suggestions={
+                channelLinks.isChannelOpen
+                  ? channelLinks.channelSuggestions
+                  : []
+              }
             />
             <MentionAutocomplete
+              isEditorFocused={richText.isFocused}
               keepMentionedAgentsPinned={keepMentionedAgentsPinned}
               lockedAgentPubkeys={lockedAgentPubkeys}
               openOptionsRequest={openMentionOptionsRequest}
@@ -877,7 +880,7 @@ function MessageComposerImpl({
               onDismiss={mentions.cancelMentionAutocomplete}
               onSelect={selectMentionSuggestion}
               selectedIndex={mentions.mentionSelectedIndex}
-              suggestions={gate(mentions.isMentionOpen, mentions.suggestions)}
+              suggestions={mentions.isMentionOpen ? mentions.suggestions : []}
             />
             {media.uploadState.status === "error" ? (
               <div className="mb-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">

@@ -12,6 +12,11 @@ import {
 type ChannelAutocompleteProps = {
   suggestions: ChannelSuggestion[];
   selectedIndex: number;
+  /**
+   * Whether the owning composer's editor holds focus. Unfocused composers
+   * must not render suggestions — see MentionAutocomplete for the rationale.
+   */
+  isEditorFocused: boolean;
   onSelect: (suggestion: ChannelSuggestion) => void;
   position?: "above" | "below";
 };
@@ -19,6 +24,7 @@ type ChannelAutocompleteProps = {
 export const ChannelAutocomplete = React.memo(function ChannelAutocomplete({
   suggestions,
   selectedIndex,
+  isEditorFocused,
   onSelect,
   position = "above",
 }: ChannelAutocompleteProps) {
@@ -31,7 +37,7 @@ export const ChannelAutocomplete = React.memo(function ChannelAutocomplete({
     activeItem?.scrollIntoView({ block: "nearest" });
   }, [selectedIndex]);
 
-  if (suggestions.length === 0) {
+  if (!isEditorFocused || suggestions.length === 0) {
     return null;
   }
 

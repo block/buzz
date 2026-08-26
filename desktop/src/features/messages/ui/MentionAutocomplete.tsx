@@ -37,6 +37,13 @@ export type MentionSuggestion = {
 type MentionAutocompleteProps = {
   suggestions: MentionSuggestion[];
   selectedIndex: number;
+  /**
+   * Whether the owning composer's editor holds focus. The focus gate lives
+   * here rather than in each composer so a background composer replaying a
+   * stale update (e.g. a shared mid-send disabled toggle) can't resurrect
+   * its suggestion overlay.
+   */
+  isEditorFocused: boolean;
   onFetchMore?: () => void;
   onSelect: (suggestion: MentionSuggestion) => void;
   lockedAgentPubkeys?: ReadonlySet<string>;
@@ -59,6 +66,7 @@ export function showMentionAgentProvenanceMarker(
 export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   suggestions,
   selectedIndex,
+  isEditorFocused,
   onFetchMore,
   onSelect,
   lockedAgentPubkeys,
@@ -145,7 +153,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
     }
   }, [onFetchMore]);
 
-  if (suggestions.length === 0) {
+  if (!isEditorFocused || suggestions.length === 0) {
     return null;
   }
 
