@@ -207,10 +207,57 @@ pub struct RelayAgentInfo {
     pub channel_ids: Vec<String>,
     pub capabilities: Vec<String>,
     pub status: String,
-    #[serde(default)]
-    pub respond_to: Option<RespondTo>,
+    #[serde(default, deserialize_with = "lenient_directory_respond_to")]
+    pub respond_to: Option<DirectoryRespondTo>,
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
+}
+
+/// `respond_to` as it appears in kind:10100 directory records on the wire.
+///
+/// A superset of [`RespondTo`]: the harness also accepts `nobody`
+/// (heartbeat-only — every inbound event is dropped; see
+/// `buzz-acp/src/config.rs`). The desktop never writes `nobody`, but it must
+/// read it: the directory is an open, member-signed surface that other
+/// writers publish into, and the frontend uses this mode to keep
+/// never-responding entries out of the mention autocomplete.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum DirectoryRespondTo {
+    OwnerOnly,
+    Allowlist,
+    Anyone,
+    Nobody,
+}
+
+impl From<RespondTo> for DirectoryRespondTo {
+    /// Owner-written records carry only the three GUI modes; `nobody` is a
+    /// harness mode that reaches the directory from other writers. So this
+    /// direction is total and lossless, and the reverse deliberately does not
+    /// exist — narrowing `nobody` to a GUI mode would invent an answer.
+    fn from(value: RespondTo) -> Self {
+        match value {
+            RespondTo::OwnerOnly => DirectoryRespondTo::OwnerOnly,
+            RespondTo::Allowlist => DirectoryRespondTo::Allowlist,
+            RespondTo::Anyone => DirectoryRespondTo::Anyone,
+        }
+    }
+}
+
+/// Parse a directory record's `respond_to` without failing the batch.
+///
+/// `list_relay_agents` deserializes the whole directory as one `Vec`, so a
+/// strict parse here lets a single record with an unrecognized mode blank
+/// the agent list for every member. A mode this build does not know reads
+/// as "unset" for that record alone.
+fn lenient_directory_respond_to<'de, D>(
+    deserializer: D,
+) -> Result<Option<DirectoryRespondTo>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value::<DirectoryRespondTo>(value).ok())
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedAgentRecord {

@@ -271,7 +271,7 @@ export type RelayAgent = {
   channelIds: string[];
   capabilities: string[];
   status: "online" | "away" | "offline";
-  respondTo: RespondToMode | null;
+  respondTo: DirectoryRespondToMode | null;
   respondToAllowlist: string[];
 };
 
@@ -375,6 +375,14 @@ export type ManagedAgent = {
 
 /** Inbound author gate mode. Mirrors buzz-acp's --respond-to CLI flag. */
 export type RespondToMode = "owner-only" | "allowlist" | "anyone";
+
+/**
+ * `respond_to` as it appears in kind:10100 directory records. A superset of
+ * {@link RespondToMode}: the harness also accepts `nobody` (heartbeat-only —
+ * every inbound event is dropped), a mode the desktop never writes but must
+ * read, because the directory is an open surface other writers publish into.
+ */
+export type DirectoryRespondToMode = RespondToMode | "nobody";
 
 export type BackendProviderCandidate = {
   id: string;

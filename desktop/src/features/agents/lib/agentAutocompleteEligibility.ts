@@ -9,6 +9,24 @@ export function getSharedChannelIds(channels: readonly Channel[] | undefined) {
   );
 }
 
+/**
+ * True when a directory (kind:10100) record declares it never responds to
+ * mentions — `respond_to: "nobody"`, the harness's heartbeat-only mode
+ * (every inbound event is dropped; see `buzz-acp/src/config.rs`).
+ *
+ * Such records describe identities that publish into the directory but are
+ * not mention targets: proactive/heartbeat-only agents, and infrastructure
+ * identities some deployments announce alongside their agents. Offering one
+ * in the mention list is offering a mention that can never be answered, so
+ * callers building mention candidates must exclude these entries regardless
+ * of anything else the record carries.
+ */
+export function relayAgentRespondsToNobody(
+  agent: Pick<RelayAgent, "respondTo">,
+): boolean {
+  return agent.respondTo === "nobody";
+}
+
 export function relayAgentIsSharedWithUser(
   agent: Pick<
     RelayAgent,
@@ -17,6 +35,12 @@ export function relayAgentIsSharedWithUser(
   sharedChannelIds: ReadonlySet<string>,
   currentPubkey?: string | null,
 ) {
+  // Explicit, not fall-through: a never-responding record is not invocable
+  // even if it also carries a (stale) allowlist naming the current user.
+  if (relayAgentRespondsToNobody(agent)) {
+    return false;
+  }
+
   const normalizedCurrentPubkey = currentPubkey
     ? normalizePubkey(currentPubkey)
     : null;
