@@ -743,7 +743,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                   />
                 ) : isActiveWelcomeChannel ? (
                   <div className="relative">
-                    {welcomeKickoffStage}
+                    {/* {welcomeKickoffStage} Setting up your welcome team characters*/}
                     <WelcomeComposerBanner
                       settingUp={welcomeKickoffSettingUp}
                       state={welcomeComposerBannerState}

@@ -184,7 +184,7 @@ export function VoiceSettingsCard() {
     <section className="min-w-0" data-testid="settings-voice">
       <SettingsSectionHeader
         title="Voice"
-        description="Choose whether Buzz reads new agent responses aloud during an active huddle."
+        description="Choose whether Orbit reads new agent responses aloud during an active huddle."
       />
 
       <div className="flex flex-col gap-4">

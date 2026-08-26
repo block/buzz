@@ -310,7 +310,7 @@ test("Welcome failure retries once before allowing starter channel setup to be s
     );
   }
 
-  const enterButton = page.getByRole("button", { name: "Take me to Buzz" });
+  const enterButton = page.getByRole("button", { name: "Take me to Orbit" });
   await enterButton.click();
 
   await expect(page.getByText(`${welcomeError} Try again.`)).toBeVisible();

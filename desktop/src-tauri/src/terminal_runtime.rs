@@ -423,7 +423,7 @@ pub(crate) fn terminal_attach(
             buzz_terminal::shell::resolve_shell(std::env::var("ComSpec").ok().as_deref())
         }
     };
-    let mut command = CommandBuilder::new_default_prog();
+    let mut command = CommandBuilder::new(&shell);
     buzz_terminal::env_fence::fence_env(
         &mut command,
         &buzz_terminal::path::user_shell_path(),

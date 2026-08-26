@@ -15,7 +15,7 @@ import 'pairing_qr_scanner.dart';
 part 'pairing_page/onboarding_background.dart';
 part 'pairing_page/pairing_welcome_view.dart';
 
-const _onboardingChartreuse = Color(0xFFD7D72E);
+const _onboardingChartreuse = Color(0xFF99B1EF);
 const _onboardingShellBottom = Color(0xFFD7E7F6);
 const _onboardingCtaLabel = Color(0xFFD7E6F0);
 const _onboardingInk = Color(0xFF111111);
@@ -242,7 +242,7 @@ class _SasVerificationView extends StatelessWidget {
         const SizedBox(height: Grid.lg),
 
         Text(
-          'You are about to transfer your Buzz identity\nto this device. Only confirm if you initiated\nthis pairing from your desktop.',
+          'You are about to transfer your Orbit identity\nto this device. Only confirm if you initiated\nthis pairing from your desktop.',
           textAlign: TextAlign.center,
           style: context.textTheme.bodySmall?.copyWith(
             color: context.colors.onSurfaceVariant,

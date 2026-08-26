@@ -526,7 +526,7 @@ function ThemeSettingsCard() {
     >
       <SettingsSectionHeader
         title="Appearance"
-        description="Choose a theme for Buzz."
+        description="Choose a theme for Orbit."
       />
 
       {/* Mode selector: System / Light / Dark */}
