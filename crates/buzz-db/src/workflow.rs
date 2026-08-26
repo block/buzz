@@ -599,6 +599,32 @@ pub async fn latest_scheduled_workflow_fire(
     row.try_get("scheduled_for").map_err(Into::into)
 }
 
+/// Read the durable authority binding for one scheduled workflow fire.
+///
+/// Returns the linked run only from the tenant/workflow/slot primary key; a
+/// missing or not-yet-attached claim cannot authorize delivery.
+pub async fn get_scheduled_workflow_fire_run(
+    pool: &PgPool,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    scheduled_for: DateTime<Utc>,
+) -> Result<Option<Uuid>> {
+    sqlx::query_scalar(
+        r#"
+        SELECT workflow_run_id
+        FROM scheduled_workflow_fires
+        WHERE community_id = $1 AND workflow_id = $2 AND scheduled_for = $3
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(workflow_id)
+    .bind(scheduled_for)
+    .fetch_optional(pool)
+    .await
+    .map(|value| value.flatten())
+    .map_err(Into::into)
+}
+
 /// Link a won scheduled-fire claim to the workflow run it created.
 ///
 /// This is for ops/audit forensics only; the claim row remains the dedupe
@@ -630,6 +656,78 @@ pub async fn attach_scheduled_workflow_run(
     .await?;
 
     Ok(result.rows_affected() == 1)
+}
+
+/// Persist a payload-free webhook invocation authority before run creation.
+pub async fn create_workflow_webhook_invocation(
+    pool: &PgPool,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    invocation_id: Uuid,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO workflow_webhook_invocations
+            (community_id, invocation_id, workflow_id)
+        SELECT community_id, $3, id
+        FROM workflows
+        WHERE community_id = $1 AND id = $2
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(workflow_id)
+    .bind(invocation_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Link a durable webhook invocation to the run it caused.
+pub async fn attach_workflow_webhook_invocation_run(
+    pool: &PgPool,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    invocation_id: Uuid,
+    workflow_run_id: Uuid,
+) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE workflow_webhook_invocations
+        SET workflow_run_id = $4
+        WHERE community_id = $1 AND workflow_id = $2 AND invocation_id = $3
+          AND workflow_run_id IS NULL
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(workflow_id)
+    .bind(invocation_id)
+    .bind(workflow_run_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+/// Read a webhook invocation's durable tenant/workflow/run binding.
+pub async fn get_workflow_webhook_invocation_run(
+    pool: &PgPool,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    invocation_id: Uuid,
+) -> Result<Option<Uuid>> {
+    sqlx::query_scalar(
+        r#"
+        SELECT workflow_run_id
+        FROM workflow_webhook_invocations
+        WHERE community_id = $1 AND workflow_id = $2 AND invocation_id = $3
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(workflow_id)
+    .bind(invocation_id)
+    .fetch_optional(pool)
+    .await
+    .map(|value| value.flatten())
+    .map_err(Into::into)
 }
 
 /// Delete old scheduled workflow fire claims for retention.

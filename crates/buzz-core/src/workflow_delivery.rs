@@ -6,11 +6,15 @@
 
 use std::fmt;
 
-use nostr::{Event, EventBuilder, EventId, Kind, PublicKey, Tag};
+use nostr::{Event, EventBuilder, EventId, Keys, Kind, PublicKey, Tag};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{kind::KIND_WORKFLOW_AGENT_WAKE, tenant::CommunityId};
+use crate::{
+    kind::{KIND_WORKFLOW_AGENT_WAKE, KIND_WORKFLOW_DELIVERY_RECEIPT},
+    tenant::CommunityId,
+};
 
 /// The target class admitted by the durable workflow delivery protocol.
 pub const WORKFLOW_DELIVERY_TARGET: &str = "message-v1";
@@ -201,6 +205,135 @@ pub fn message_v1_targets(event: &Event) -> Result<Vec<PublicKey>, WorkflowDeliv
     Ok(targets)
 }
 
+/// Relay-signed proof that the relay produced one public workflow delivery.
+///
+/// The receipt contains references and hashes only. Trigger context, webhook
+/// fields, step outputs, execution traces, and secrets are deliberately absent.
+/// Its timestamp is copied from the visible message, making signing
+/// deterministic for one binding/message/key tuple.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowDeliveryReceipt {
+    delivery_id: WorkflowDeliveryId,
+    binding: WorkflowDeliveryBinding,
+    message_content_sha256: [u8; 32],
+}
+
+impl WorkflowDeliveryReceipt {
+    /// Construct a receipt after validating the visible event against the binding.
+    pub fn new(
+        delivery_id: WorkflowDeliveryId,
+        binding: WorkflowDeliveryBinding,
+        message: &Event,
+    ) -> Result<Self, WorkflowDeliveryError> {
+        binding.validate_message_event(message)?;
+        Ok(Self {
+            delivery_id,
+            binding,
+            message_content_sha256: Sha256::digest(message.content.as_bytes()).into(),
+        })
+    }
+
+    /// Return the durable delivery identity.
+    pub const fn delivery_id(&self) -> WorkflowDeliveryId {
+        self.delivery_id
+    }
+
+    /// Return the immutable delivery binding proved by this receipt.
+    pub const fn binding(&self) -> &WorkflowDeliveryBinding {
+        &self.binding
+    }
+
+    /// Return the SHA-256 identity of the visible message content.
+    pub const fn message_content_sha256(&self) -> [u8; 32] {
+        self.message_content_sha256
+    }
+
+    /// Sign the canonical receipt with the relay identity.
+    pub fn sign(&self, relay_keys: &Keys, message: &Event) -> Result<Event, WorkflowDeliveryError> {
+        self.binding.validate_message_event(message)?;
+        if <[u8; 32]>::from(Sha256::digest(message.content.as_bytes()))
+            != self.message_content_sha256
+        {
+            return Err(WorkflowDeliveryError::MessageContentHashMismatch);
+        }
+        EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DELIVERY_RECEIPT as u16), "")
+            .tags(self.canonical_tags()?)
+            .custom_created_at(message.created_at)
+            .sign_with_keys(relay_keys)
+            .map_err(|error| WorkflowDeliveryError::ReceiptSigning(error.to_string()))
+    }
+
+    /// Verify a receipt's relay signature, canonical shape, binding, and public message.
+    pub fn verify(
+        event: &Event,
+        relay_pubkey: PublicKey,
+        delivery_id: WorkflowDeliveryId,
+        binding: &WorkflowDeliveryBinding,
+        message: &Event,
+    ) -> Result<Self, WorkflowDeliveryError> {
+        if event.kind.as_u16() != KIND_WORKFLOW_DELIVERY_RECEIPT as u16 {
+            return Err(WorkflowDeliveryError::WrongReceiptKind(event.kind.as_u16()));
+        }
+        if event.pubkey != relay_pubkey || event.verify().is_err() {
+            return Err(WorkflowDeliveryError::InvalidReceiptSignature);
+        }
+        if !event.content.is_empty() {
+            return Err(WorkflowDeliveryError::ReceiptHasContent);
+        }
+        binding.validate_message_event(message)?;
+        if event.created_at != message.created_at {
+            return Err(WorkflowDeliveryError::NonCanonicalReceipt);
+        }
+        let expected = Self::new(delivery_id, binding.clone(), message)?;
+        let expected_tags = expected.canonical_tags()?;
+        if event.tags.as_slice() != expected_tags.as_slice() {
+            return Err(WorkflowDeliveryError::ReceiptBindingMismatch);
+        }
+        Ok(expected)
+    }
+
+    fn canonical_tags(&self) -> Result<Vec<Tag>, WorkflowDeliveryError> {
+        let mut tags = vec![
+            parse_tag(["delivery", &self.delivery_id.to_string()])?,
+            parse_tag(["community", &self.binding.community_id().to_string()])?,
+            parse_tag(["workflow", &self.binding.workflow_id().to_string()])?,
+            parse_tag(["run", &self.binding.run_id().to_string()])?,
+            parse_tag(["step", self.binding.step_id()])?,
+            parse_tag(["p", &self.binding.target_pubkey().to_hex()])?,
+            parse_tag(["definition", &self.binding.definition_event_id().to_hex()])?,
+            parse_tag([
+                "message",
+                &self.binding.message_event_id().to_hex(),
+                &sha256_hex(&self.message_content_sha256),
+            ])?,
+        ];
+        tags.push(cause_tag(self.binding.cause())?);
+        Ok(tags)
+    }
+}
+
+fn sha256_hex(digest: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn cause_tag(cause: &WorkflowDeliveryCause) -> Result<Tag, WorkflowDeliveryError> {
+    match cause {
+        WorkflowDeliveryCause::Event(event_id) => parse_tag(["cause", "event", &event_id.to_hex()]),
+        WorkflowDeliveryCause::Schedule {
+            scheduled_for_unix_seconds,
+        } => parse_tag(["cause", "schedule", &scheduled_for_unix_seconds.to_string()]),
+        WorkflowDeliveryCause::Webhook { invocation_id } => {
+            parse_tag(["cause", "webhook", &invocation_id.to_string()])
+        }
+    }
+}
+
 /// An ephemeral identifier-only wake hint for a durable delivery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowDeliveryWake {
@@ -300,6 +433,27 @@ pub enum WorkflowDeliveryError {
     /// A `message-v1` recipient appeared more than once.
     #[error("workflow delivery message has duplicate message-v1 target")]
     DuplicateMessageV1Target,
+    /// A receipt was not kind 24621.
+    #[error("workflow delivery receipt must be kind 24621, got {0}")]
+    WrongReceiptKind(u16),
+    /// A receipt was not signed by the expected relay or had an invalid signature.
+    #[error("workflow delivery receipt signature is invalid")]
+    InvalidReceiptSignature,
+    /// A receipt carried content rather than references only.
+    #[error("workflow delivery receipt content must be empty")]
+    ReceiptHasContent,
+    /// A receipt did not use the message timestamp.
+    #[error("workflow delivery receipt is not canonical")]
+    NonCanonicalReceipt,
+    /// A receipt's exact canonical tags disagreed with the expected binding.
+    #[error("workflow delivery receipt binding does not match")]
+    ReceiptBindingMismatch,
+    /// The visible message content did not match the receipt hash.
+    #[error("workflow delivery receipt message content hash does not match")]
+    MessageContentHashMismatch,
+    /// Nostr could not sign the receipt.
+    #[error("workflow delivery receipt signing failed: {0}")]
+    ReceiptSigning(String),
     /// A wake was not kind 24620.
     #[error("workflow delivery wake must be kind 24620, got {0}")]
     WrongWakeKind(u16),
@@ -640,6 +794,109 @@ mod tests {
         assert_eq!(
             WorkflowDeliveryWake::parse(&wrong_kind),
             Err(WorkflowDeliveryError::WrongWakeKind(1))
+        );
+    }
+
+    #[test]
+    fn receipt_binds_every_identity_and_contains_no_private_inputs() {
+        let relay = Keys::generate();
+        let original = binding();
+        let message = EventBuilder::new(Kind::Custom(9), "rendered secret result")
+            .tags([original.message_v1_target_tag().unwrap()])
+            .sign_with_keys(&relay)
+            .unwrap();
+        let binding = WorkflowDeliveryBinding::new(
+            original.community_id(),
+            original.workflow_id(),
+            original.run_id(),
+            original.step_id(),
+            original.target_pubkey(),
+            original.definition_event_id(),
+            message.id,
+            original.cause().clone(),
+        )
+        .unwrap();
+        let delivery_id = WorkflowDeliveryId::from_uuid(Uuid::new_v4());
+        let receipt = WorkflowDeliveryReceipt::new(delivery_id, binding.clone(), &message).unwrap();
+        let signed = receipt.sign(&relay, &message).unwrap();
+
+        assert!(signed.content.is_empty());
+        let wire = serde_json::to_string(&signed).unwrap();
+        assert!(!wire.contains("rendered secret result"));
+        assert!(!wire.contains("trigger_context"));
+        assert!(!wire.contains("execution_trace"));
+        assert_eq!(
+            WorkflowDeliveryReceipt::verify(
+                &signed,
+                relay.public_key(),
+                delivery_id,
+                &binding,
+                &message,
+            )
+            .unwrap(),
+            receipt
+        );
+
+        let other_target = Keys::generate().public_key();
+        let tampered = WorkflowDeliveryBinding::new(
+            binding.community_id(),
+            binding.workflow_id(),
+            binding.run_id(),
+            binding.step_id(),
+            other_target,
+            binding.definition_event_id(),
+            binding.message_event_id(),
+            binding.cause().clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            WorkflowDeliveryReceipt::verify(
+                &signed,
+                relay.public_key(),
+                delivery_id,
+                &tampered,
+                &message,
+            ),
+            Err(WorkflowDeliveryError::MissingMessageV1Target)
+        );
+        assert_eq!(
+            WorkflowDeliveryReceipt::verify(
+                &signed,
+                Keys::generate().public_key(),
+                delivery_id,
+                &binding,
+                &message,
+            ),
+            Err(WorkflowDeliveryError::InvalidReceiptSignature)
+        );
+    }
+
+    #[test]
+    fn receipt_rejects_message_content_and_signature_tampering() {
+        let relay = Keys::generate();
+        let original = binding();
+        let message = EventBuilder::new(Kind::Custom(9), "visible")
+            .tags([original.message_v1_target_tag().unwrap()])
+            .sign_with_keys(&relay)
+            .unwrap();
+        let binding = WorkflowDeliveryBinding::new(
+            original.community_id(),
+            original.workflow_id(),
+            original.run_id(),
+            original.step_id(),
+            original.target_pubkey(),
+            original.definition_event_id(),
+            message.id,
+            original.cause().clone(),
+        )
+        .unwrap();
+        let id = WorkflowDeliveryId::from_uuid(Uuid::new_v4());
+        let receipt = WorkflowDeliveryReceipt::new(id, binding.clone(), &message).unwrap();
+        let mut signed = receipt.sign(&relay, &message).unwrap();
+        signed.content = "private input".to_owned();
+        assert_eq!(
+            WorkflowDeliveryReceipt::verify(&signed, relay.public_key(), id, &binding, &message),
+            Err(WorkflowDeliveryError::InvalidReceiptSignature)
         );
     }
 

@@ -88,6 +88,22 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(api::workflows::run_approvals),
         )
         .route(
+            "/workflows/agent-deliveries/claim",
+            post(api::workflows::claim_agent_delivery),
+        )
+        .route(
+            "/workflows/agent-deliveries/{delivery_id}/read",
+            post(api::workflows::read_agent_delivery),
+        )
+        .route(
+            "/workflows/agent-deliveries/{delivery_id}/renew",
+            post(api::workflows::renew_agent_delivery),
+        )
+        .route(
+            "/workflows/agent-deliveries/{delivery_id}/finish",
+            post(api::workflows::finish_agent_delivery),
+        )
+        .route(
             "/operator/communities",
             get(api::operator::list_owned_communities).post(api::operator::provision_community),
         )

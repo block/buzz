@@ -440,6 +440,11 @@ pub const KIND_WINDOW_BOUNDS: u32 = 39006;
 
 /// Ephemeral, relay-authored hint that a durable workflow delivery is ready.
 pub const KIND_WORKFLOW_AGENT_WAKE: u32 = 24620;
+/// Relay-signed proof binding a durable workflow delivery to its public inputs.
+///
+/// Returned by the authenticated delivery API; not accepted as client-authored
+/// state and not stored in the event log.
+pub const KIND_WORKFLOW_DELIVERY_RECEIPT: u32 = 24621;
 
 /// Workflow definition (parameterized replaceable, d=workflow_uuid).
 pub const KIND_WORKFLOW_DEF: u32 = 30620;
@@ -696,6 +701,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_THREAD_SUMMARY,
     KIND_WINDOW_BOUNDS,
     KIND_WORKFLOW_AGENT_WAKE,
+    KIND_WORKFLOW_DELIVERY_RECEIPT,
     KIND_PRESENCE_UPDATE,
     KIND_TYPING_INDICATOR,
     KIND_HUDDLE_REACTION,

@@ -645,7 +645,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 35);
+        assert_eq!(migrations.len(), 36);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1105,6 +1105,16 @@ mod tests {
         assert!(
             desired_schema.contains("attach_community_write_fence('workflow_agent_deliveries')")
         );
+
+        // Payload-free durable authority binds each opaque webhook invocation
+        // to its tenant, workflow, and eventual run.
+        assert_eq!(migrations[35].version, 36);
+        let webhook_invocations = migrations[35].sql.as_str();
+        assert!(webhook_invocations.contains("CREATE TABLE workflow_webhook_invocations"));
+        assert!(webhook_invocations.contains("PRIMARY KEY (community_id, invocation_id)"));
+        assert!(webhook_invocations
+            .contains("attach_community_write_fence('workflow_webhook_invocations')"));
+        assert!(desired_schema.contains("CREATE TABLE workflow_webhook_invocations"));
 
         // Fresh desired-state bootstrap must install the identical executable
         // fence as migration 0032. CI and isolated relay startup use schema.sql
@@ -1584,6 +1594,9 @@ mod tests {
         // Migration 0035 attaches the fence to the durable managed-agent
         // delivery inbox after 0029; the desired-state schema carries it inline.
         expected_fences.insert("workflow_agent_deliveries".to_owned());
+        // Migration 0036 likewise adds the payload-free webhook invocation
+        // authority after 0029.
+        expected_fences.insert("workflow_webhook_invocations".to_owned());
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"

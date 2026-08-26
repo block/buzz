@@ -3437,6 +3437,23 @@ impl Db {
         workflow::latest_scheduled_workflow_fire(&self.pool, community_id, workflow_id).await
     }
 
+    /// Read the run linked by one durable scheduled-fire claim.
+    #[datastore_span(name = "get_scheduled_workflow_fire_run", system = "postgresql")]
+    pub async fn get_scheduled_workflow_fire_run(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        scheduled_for: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<Uuid>> {
+        workflow::get_scheduled_workflow_fire_run(
+            &self.pool,
+            community_id,
+            workflow_id,
+            scheduled_for,
+        )
+        .await
+    }
+
     /// Attach the workflow run id created from a won scheduled-fire claim.
     #[datastore_span(name = "attach_scheduled_workflow_run", system = "postgresql")]
     pub async fn attach_scheduled_workflow_run(
@@ -3452,6 +3469,56 @@ impl Db {
             workflow_id,
             scheduled_for,
             workflow_run_id,
+        )
+        .await
+    }
+
+    /// Persist a payload-free webhook invocation authority.
+    pub async fn create_workflow_webhook_invocation(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        invocation_id: Uuid,
+    ) -> Result<()> {
+        workflow::create_workflow_webhook_invocation(
+            &self.pool,
+            community_id,
+            workflow_id,
+            invocation_id,
+        )
+        .await
+    }
+
+    /// Link a webhook invocation authority to the run it caused.
+    pub async fn attach_workflow_webhook_invocation_run(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        invocation_id: Uuid,
+        workflow_run_id: Uuid,
+    ) -> Result<bool> {
+        workflow::attach_workflow_webhook_invocation_run(
+            &self.pool,
+            community_id,
+            workflow_id,
+            invocation_id,
+            workflow_run_id,
+        )
+        .await
+    }
+
+    /// Read the run linked by one opaque webhook invocation.
+    pub async fn get_workflow_webhook_invocation_run(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        invocation_id: Uuid,
+    ) -> Result<Option<Uuid>> {
+        workflow::get_workflow_webhook_invocation_run(
+            &self.pool,
+            community_id,
+            workflow_id,
+            invocation_id,
         )
         .await
     }
@@ -3618,6 +3685,62 @@ impl Db {
         id: Uuid,
     ) -> Result<workflow::WorkflowRunRecord> {
         workflow::get_workflow_run(&self.pool, community_id, id).await
+    }
+
+    /// Claim one pending workflow delivery for the authenticated target.
+    #[datastore_span(name = "claim_workflow_agent_delivery", system = "postgresql")]
+    pub async fn claim_workflow_agent_delivery(
+        &self,
+        community_id: CommunityId,
+        target_pubkey: &nostr::PublicKey,
+        delivery_id: Option<buzz_core::workflow_delivery::WorkflowDeliveryId>,
+        expected: Option<&buzz_core::workflow_delivery::WorkflowDeliveryBinding>,
+        lease_seconds: i64,
+    ) -> Result<
+        Option<(
+            workflow::WorkflowDeliveryLease,
+            workflow::WorkflowAgentDeliveryRecord,
+        )>,
+    > {
+        workflow::claim_workflow_agent_delivery(
+            &self.pool,
+            community_id,
+            target_pubkey,
+            delivery_id,
+            expected,
+            lease_seconds,
+        )
+        .await
+    }
+
+    /// Extend a live workflow delivery lease.
+    #[datastore_span(name = "renew_workflow_agent_delivery", system = "postgresql")]
+    pub async fn renew_workflow_agent_delivery(
+        &self,
+        lease: &workflow::WorkflowDeliveryLease,
+        lease_seconds: i64,
+    ) -> Result<workflow::WorkflowDeliveryRenewOutcome> {
+        workflow::renew_workflow_agent_delivery(&self.pool, lease, lease_seconds).await
+    }
+
+    /// Settle a workflow delivery under its current fenced lease.
+    #[datastore_span(name = "finish_workflow_agent_delivery", system = "postgresql")]
+    pub async fn finish_workflow_agent_delivery(
+        &self,
+        lease: &workflow::WorkflowDeliveryLease,
+        outcome: workflow::WorkflowDeliveryOutcome,
+    ) -> Result<workflow::WorkflowDeliveryFinishOutcome> {
+        workflow::finish_workflow_agent_delivery(&self.pool, lease, outcome).await
+    }
+
+    /// Fetch one workflow delivery within its server-resolved community.
+    #[datastore_span(name = "get_workflow_agent_delivery", system = "postgresql")]
+    pub async fn get_workflow_agent_delivery(
+        &self,
+        community_id: CommunityId,
+        delivery_id: buzz_core::workflow_delivery::WorkflowDeliveryId,
+    ) -> Result<Option<workflow::WorkflowAgentDeliveryRecord>> {
+        workflow::get_workflow_agent_delivery(&self.pool, community_id, delivery_id).await
     }
 
     /// List runs for a workflow.

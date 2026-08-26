@@ -536,6 +536,24 @@ CREATE INDEX idx_workflow_agent_deliveries_lease
     ON workflow_agent_deliveries (lease_until)
     WHERE status = 'claimed';
 
+-- ── Workflow webhook invocations ─────────────────────────────────────────────
+-- Payload-free durable authority linking an opaque webhook call to its run.
+CREATE TABLE workflow_webhook_invocations (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    invocation_id UUID NOT NULL,
+    workflow_id UUID NOT NULL,
+    workflow_run_id UUID,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (community_id, invocation_id),
+    FOREIGN KEY (community_id, workflow_id)
+        REFERENCES workflows (community_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (community_id, workflow_run_id)
+        REFERENCES workflow_runs (community_id, id) ON DELETE NO ACTION
+);
+
+CREATE INDEX idx_workflow_webhook_invocations_created_at
+    ON workflow_webhook_invocations (created_at);
+
 -- ── API tokens ────────────────────────────────────────────────────────────────
 -- Conformance: "API tokens and NIP-98 replay". token_hash uniqueness scoped to
 -- (community_id, token_hash); channel claims reference channels in same community.
@@ -1810,6 +1828,7 @@ SELECT attach_community_write_fence('reactions');
 SELECT attach_community_write_fence('relay_invites');
 SELECT attach_community_write_fence('relay_members');
 SELECT attach_community_write_fence('scheduled_workflow_fires');
+SELECT attach_community_write_fence('workflow_webhook_invocations');
 SELECT attach_community_write_fence('subscriptions');
 SELECT attach_community_write_fence('thread_metadata');
 SELECT attach_community_write_fence('users');

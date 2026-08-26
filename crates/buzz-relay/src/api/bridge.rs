@@ -2111,6 +2111,16 @@ pub async fn workflow_webhook(
         .await
         .map_err(|_| not_found("workflow not found"))?;
 
+    // Mint durable opaque authority before run creation. The record contains
+    // no request body or secret; a NULL run link remains honest if insertion
+    // of the run later fails.
+    let webhook_invocation_id = uuid::Uuid::new_v4();
+    state
+        .db
+        .create_workflow_webhook_invocation(community_id, id, webhook_invocation_id)
+        .await
+        .map_err(|e| super::internal_error(&format!("persist webhook invocation: {e}")))?;
+
     let definition_event_id = workflow
         .definition_event_id
         .as_deref()
@@ -2126,6 +2136,17 @@ pub async fn workflow_webhook(
         )
         .await
         .map_err(|e| super::internal_error(&format!("db error: {e}")))?;
+
+    let attached = state
+        .db
+        .attach_workflow_webhook_invocation_run(community_id, id, webhook_invocation_id, run_id)
+        .await
+        .map_err(|e| super::internal_error(&format!("attach webhook invocation: {e}")))?;
+    if !attached {
+        return Err(super::internal_error(
+            "webhook invocation authority was not attachable",
+        ));
+    }
 
     // Spawn workflow execution asynchronously.
     let engine = Arc::clone(&state.workflow_engine);
