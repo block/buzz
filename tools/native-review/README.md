@@ -70,10 +70,12 @@ cohorts because this tool measures the reviewer-visible workflow.
 ## iOS Simulator
 
 The iOS lane runs the pairing integration journey on a simulator created uniquely
-for that run. It records video, Flutter logs, and a final screenshot, writes the
-same schema-versioned receipt shape as Desktop, then shuts down and deletes only
-the simulator UDID it created. It never erases, boots, or deletes an existing
-simulator. Host credentials are removed from child environments.
+for that run. Build and installation happen before canonical capture: the journey
+must report its rendered initial state, and the harness must foreground Buzz,
+before recording begins. It records video, Flutter logs, and a final screenshot,
+writes the same schema-versioned receipt shape as Desktop, then shuts down and
+deletes only the simulator UDID it created. It never erases, boots, or deletes an
+existing simulator. Host credentials are removed from child environments.
 
 ```bash
 just native-review-ios 'iPhone 17 Pro'
