@@ -37,6 +37,14 @@ pub struct UpdateAgentDraft {
     pub respond_to: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptAgentDraft {
+    pub channel_id: String,
+    pub agent_pubkey: String,
+    pub display_name: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ManagementRequest<T> {
@@ -185,6 +193,25 @@ pub fn build_update(
     build(keys, owner, channel_id, "update", request)
 }
 
+pub fn build_adopt(
+    keys: &Keys,
+    owner: &PublicKey,
+    draft: AdoptAgentDraft,
+) -> Result<BuiltDraftRequest, CliError> {
+    let channel_id = required(draft.channel_id, "channel", 128)?;
+    uuid::Uuid::parse_str(&channel_id)
+        .map_err(|_| CliError::Usage(format!("invalid channel UUID: {channel_id}")))?;
+    let agent_pubkey = PublicKey::parse(draft.agent_pubkey.trim())
+        .map_err(|_| CliError::Usage("agent pubkey must be valid hex or npub".into()))?
+        .to_hex();
+    let request = AdoptAgentDraft {
+        channel_id: channel_id.clone(),
+        agent_pubkey,
+        display_name: required(draft.display_name, "display name", MAX_NAME_CHARS)?,
+    };
+    build(keys, owner, channel_id, "adopt", request)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +300,48 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("invalid channel UUID"));
+    }
+
+    #[test]
+    fn adopt_is_owner_encrypted_and_contains_only_public_registration_fields() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let external = Keys::generate();
+        let built = build_adopt(
+            &agent,
+            &owner.public_key(),
+            AdoptAgentDraft {
+                channel_id: CHANNEL.into(),
+                agent_pubkey: external.public_key().to_hex(),
+                display_name: "Remote helper".into(),
+            },
+        )
+        .unwrap();
+
+        let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
+        assert_eq!(payload["payload"]["action"], "adopt");
+        assert_eq!(
+            payload["payload"]["request"],
+            serde_json::json!({
+                "channelId": CHANNEL,
+                "agentPubkey": external.public_key().to_hex(),
+                "displayName": "Remote helper"
+            })
+        );
+    }
+
+    #[test]
+    fn adopt_rejects_an_invalid_agent_pubkey() {
+        let error = build_adopt(
+            &Keys::generate(),
+            &Keys::generate().public_key(),
+            AdoptAgentDraft {
+                channel_id: CHANNEL.into(),
+                agent_pubkey: "not-a-pubkey".into(),
+                display_name: "Remote helper".into(),
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("agent pubkey"));
     }
 }

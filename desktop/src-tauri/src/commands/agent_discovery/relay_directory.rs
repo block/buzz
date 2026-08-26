@@ -1,10 +1,14 @@
 //! Relay-backed shared-agent directory discovery.
 
-use tauri::State;
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, State};
 
 use crate::{
-    app_state::AppState, commands::identity_archive, managed_agents::RelayAgentInfo, nostr_convert,
-    relay::query_relay,
+    app_state::AppState,
+    commands::identity_archive,
+    managed_agents::RelayAgentInfo,
+    nostr_convert,
+    relay::{query_relay, query_relay_at_with_keys, submit_event_at_with_keys},
 };
 
 const RELAY_DIRECTORY_PAGE_SIZE: usize = 500;
@@ -242,6 +246,142 @@ pub async fn revalidate_relay_agents(
     list_relay_agents_for_selection(&state, Some(&requested_pubkeys), channel_id.as_deref()).await
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegisterExistingRelayAgentInput {
+    agent_pubkey: String,
+    display_name: String,
+    expected_owner_pubkey: String,
+    expected_relay_url: String,
+    expected_signer_pubkey: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisterExistingRelayAgentResult {
+    event_id: String,
+    agent_pubkey: String,
+    owner_pubkey: String,
+}
+
+fn verified_registration_owner(
+    profile: &nostr::Event,
+    agent_pubkey: &str,
+) -> Result<String, String> {
+    identity_archive::verified_oa_owner(profile, agent_pubkey)
+        .map(|(owner, _)| owner)
+        .ok_or_else(|| "agent profile or owner attestation failed verification".to_string())
+}
+
+/// Publish the owner-reviewed directory policy for an existing remote agent.
+/// No private key, runtime, provider, prompt, process, or local agent record is
+/// accepted or written by this command.
+#[tauri::command]
+pub async fn register_existing_relay_agent(
+    input: RegisterExistingRelayAgentInput,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RegisterExistingRelayAgentResult, String> {
+    let agent_pubkey = nostr::PublicKey::from_hex(input.agent_pubkey.trim())
+        .map_err(|error| format!("invalid agent pubkey: {error}"))?
+        .to_hex();
+    let display_name = input.display_name.trim();
+    if display_name.is_empty() || display_name.chars().count() > 120 {
+        return Err("display name must be between 1 and 120 characters".to_string());
+    }
+    crate::managed_agents::validate_managed_agent_definition_text(display_name, None, None)
+        .map_err(|error| format!("Agent name is unsafe to publish: {error}"))?;
+
+    let target = identity_archive::capture_relay_target(&state);
+    crate::relay::assert_expected_relay_scope(
+        Some(&input.expected_relay_url),
+        &target.api_base_url,
+    )?;
+    let signer = state.signing_keys()?;
+    let signer_pubkey = signer.public_key().to_hex();
+    crate::relay::assert_expected_signer(Some(&input.expected_signer_pubkey), &signer_pubkey)?;
+    if !input
+        .expected_owner_pubkey
+        .eq_ignore_ascii_case(&signer_pubkey)
+    {
+        return Err("verified agent owner does not match the active identity".to_string());
+    }
+    if agent_pubkey.eq_ignore_ascii_case(&signer_pubkey) {
+        return Err("an owner identity cannot be registered as its own agent".to_string());
+    }
+
+    let profiles = query_relay_at_with_keys(
+        &state,
+        &target.api_base_url,
+        &[serde_json::json!({
+            "kinds": [0],
+            "authors": [&agent_pubkey],
+            "limit": 1,
+        })],
+        &signer,
+        None,
+    )
+    .await?;
+    let profile = profiles
+        .first()
+        .ok_or_else(|| "agent has no signed profile on this relay".to_string())?;
+    let verified_owner = verified_registration_owner(profile, &agent_pubkey)?;
+    if !verified_owner.eq_ignore_ascii_case(&signer_pubkey)
+        || !verified_owner.eq_ignore_ascii_case(&input.expected_owner_pubkey)
+    {
+        return Err("agent profile is attested to a different owner".to_string());
+    }
+
+    let archived =
+        identity_archive::fetch_archived_pubkeys_strict_at(&state, &target, &signer).await?;
+    if archived.iter().any(|pubkey| pubkey == &agent_pubkey) {
+        return Err("archived agent identities cannot be registered".to_string());
+    }
+
+    // Re-check both mutable workspace boundaries after the network preflight,
+    // then use those exact snapshots for the only side effect.
+    let publish_target = identity_archive::capture_relay_target(&state);
+    crate::relay::assert_expected_relay_scope(
+        Some(&input.expected_relay_url),
+        &publish_target.api_base_url,
+    )?;
+    let publish_signer = state.signing_keys()?;
+    crate::relay::assert_expected_signer(
+        Some(&input.expected_signer_pubkey),
+        &publish_signer.public_key().to_hex(),
+    )?;
+
+    {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|error| error.to_string())?;
+        if crate::managed_agents::load_managed_agents(&app)?
+            .iter()
+            .any(|agent| agent.pubkey.eq_ignore_ascii_case(&agent_pubkey))
+        {
+            return Err(format!("agent {agent_pubkey} is already managed locally"));
+        }
+    }
+
+    let builder = crate::managed_agents::agent_events::build_existing_agent_registration(
+        &agent_pubkey,
+        display_name,
+    )?;
+    let response = submit_event_at_with_keys(
+        builder,
+        &state,
+        &publish_target.api_base_url,
+        &publish_signer,
+    )
+    .await?;
+    Ok(RegisterExistingRelayAgentResult {
+        event_id: response.event_id,
+        agent_pubkey,
+        owner_pubkey: verified_owner,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,6 +491,40 @@ mod tests {
             .collect();
 
         assert_eq!(batch_sizes, vec![10, 10, 5]);
+    }
+
+    #[test]
+    fn registration_input_rejects_secret_or_runtime_fields() {
+        for field in ["privateKeyNsec", "runtime", "provider", "systemPrompt"] {
+            let mut input = serde_json::json!({
+                "agentPubkey": "a".repeat(64),
+                "displayName": "Remote helper",
+                "expectedOwnerPubkey": "b".repeat(64),
+                "expectedRelayUrl": "wss://relay.example",
+                "expectedSignerPubkey": "b".repeat(64),
+            });
+            input[field] = serde_json::json!("forbidden");
+            assert!(serde_json::from_value::<RegisterExistingRelayAgentInput>(input).is_err());
+        }
+    }
+
+    #[test]
+    fn registration_profile_requires_the_agent_signature_and_owner_attestation() {
+        let owner = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let target = nostr::PublicKey::from_hex(&agent.public_key().to_hex()).unwrap();
+        let auth_json = buzz_sdk_pkg::nip_oa::compute_auth_tag(&owner, &target, "").unwrap();
+        let auth_parts: Vec<String> = serde_json::from_str(&auth_json).unwrap();
+        let profile = nostr::EventBuilder::new(nostr::Kind::Metadata, "{}")
+            .tags([nostr::Tag::parse(auth_parts).unwrap()])
+            .sign_with_keys(&agent)
+            .unwrap();
+
+        assert_eq!(
+            verified_registration_owner(&profile, &agent.public_key().to_hex()).unwrap(),
+            owner.public_key().to_hex()
+        );
+        assert!(verified_registration_owner(&profile, &owner.public_key().to_hex()).is_err());
     }
 }
 

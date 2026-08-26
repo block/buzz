@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   createInputFromRequest,
@@ -25,9 +25,17 @@ import {
 import { useCreatedAgentChannelAttachment } from "./useCreatedAgentChannelAttachment";
 import { classifyAgentManagementOrigin } from "./agentManagementBuffer";
 import { useChannelsQuery } from "@/features/channels/hooks";
+import { useCommunities } from "@/features/communities/useCommunities";
+import {
+  useArchivedIdentitiesQuery,
+  useOaOwnerQuery,
+} from "@/features/identity-archive/hooks";
 import { resolveManagedAgentAvatarUrl } from "./ui/managedAgentAvatar";
 import type { AgentCreateIntent } from "./ui/agentCreateIntent";
 import { editPersonaDialogState } from "./ui/personaDialogState";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import { registerExistingRelayAgent } from "@/shared/api/tauriManagedAgents";
+import { getUserProfile } from "@/shared/api/tauriProfiles";
 import type {
   CreatePersonaInput,
   UpdatePersonaInput,
@@ -59,6 +67,8 @@ function updateInputFromRequest(
 
 export function useAgentManagement() {
   const queryClient = useQueryClient();
+  const communities = useCommunities();
+  const identityQuery = useIdentityQuery();
   const personasQuery = usePersonasQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
   const channelsQuery = useChannelsQuery();
@@ -66,6 +76,9 @@ export function useAgentManagement() {
   const createPersonaMutation = useCreatePersonaMutation();
   const updatePersonaMutation = useUpdatePersonaMutation();
   const createAgentMutation = useCreateManagedAgentMutation();
+  const registerExistingMutation = useMutation({
+    mutationFn: registerExistingRelayAgent,
+  });
   const [request, setRequest] = React.useState<AgentManagementRequest | null>(
     null,
   );
@@ -79,6 +92,17 @@ export function useAgentManagement() {
   const bufferedRequestsRef = React.useRef<
     Array<{ agentPubkey: string; request: AgentManagementRequest }>
   >([]);
+  const adoptPubkey =
+    request?.action === "adopt" ? request.request.agentPubkey : "";
+  const adoptEnabled = request?.action === "adopt";
+  const adoptOwnerQuery = useOaOwnerQuery(adoptPubkey, adoptEnabled);
+  const adoptArchiveQuery = useArchivedIdentitiesQuery(adoptEnabled);
+  const adoptProfileQuery = useQuery({
+    enabled: adoptEnabled,
+    queryKey: ["agent-management-adopt-profile", adoptPubkey] as const,
+    queryFn: () => getUserProfile(adoptPubkey),
+    staleTime: 60_000,
+  });
 
   const acceptOwnedRequest = React.useEffectEvent(
     (agentPubkey: string, next: AgentManagementRequest) => {
@@ -155,7 +179,8 @@ export function useAgentManagement() {
   const isPending =
     createPersonaMutation.isPending ||
     updatePersonaMutation.isPending ||
-    createAgentMutation.isPending;
+    createAgentMutation.isPending ||
+    registerExistingMutation.isPending;
 
   function assertAgentCanActFromOrigin(channelId: string) {
     const targetChannel = (channelsQuery.data ?? []).find(
@@ -259,6 +284,46 @@ export function useAgentManagement() {
     }
   }
 
+  async function submitAdopt(): Promise<boolean> {
+    if (request?.action !== "adopt") return false;
+    setError(null);
+    try {
+      assertAgentCanActFromOrigin(request.request.channelId);
+      const owner = adoptOwnerQuery.data;
+      if (!owner?.isMe) {
+        throw new Error(
+          "This agent does not have a valid ownership attestation for your identity.",
+        );
+      }
+      if (
+        adoptArchiveQuery.data?.archived.includes(request.request.agentPubkey)
+      ) {
+        throw new Error("Archived agent identities cannot be registered.");
+      }
+      const expectedRelayUrl = communities.activeCommunity?.relayUrl;
+      const expectedSignerPubkey = identityQuery.data?.pubkey;
+      if (!expectedRelayUrl || !expectedSignerPubkey) {
+        throw new Error("The active community identity is unavailable.");
+      }
+      await registerExistingMutation.mutateAsync({
+        agentPubkey: request.request.agentPubkey,
+        displayName: request.request.displayName,
+        expectedOwnerPubkey: owner.owner,
+        expectedRelayUrl,
+        expectedSignerPubkey,
+      });
+      dismiss();
+      return true;
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Could not register this agent identity.",
+      );
+      return false;
+    }
+  }
+
   function dismiss() {
     pendingRequestId.current = null;
     sourceAgentPubkey.current = null;
@@ -292,11 +357,53 @@ export function useAgentManagement() {
     return null;
   }, [currentPersona, error, matchingPersonas.length, request]);
 
+  const adoptPreviewError = React.useMemo(() => {
+    if (request?.action !== "adopt") return null;
+    if (adoptOwnerQuery.isError || adoptProfileQuery.isError) {
+      return "Could not verify this agent on the active relay.";
+    }
+    if (!adoptOwnerQuery.isLoading && !adoptOwnerQuery.data) {
+      return "This agent has no valid ownership attestation.";
+    }
+    if (adoptArchiveQuery.isError) {
+      return "Could not verify this agent is not archived.";
+    }
+    if (adoptOwnerQuery.data && !adoptOwnerQuery.data.isMe) {
+      return "This agent is not attested to your identity.";
+    }
+    if (
+      adoptArchiveQuery.data?.archived.includes(request.request.agentPubkey)
+    ) {
+      return "This agent identity is archived.";
+    }
+    return error;
+  }, [
+    adoptArchiveQuery.data,
+    adoptArchiveQuery.isError,
+    adoptOwnerQuery.data,
+    adoptOwnerQuery.isError,
+    adoptOwnerQuery.isLoading,
+    adoptProfileQuery.isError,
+    error,
+    request,
+  ]);
+  const isAdoptPreviewPending =
+    adoptEnabled &&
+    (adoptOwnerQuery.isLoading ||
+      adoptArchiveQuery.isLoading ||
+      adoptProfileQuery.isLoading);
+
   return {
     request,
     createInitialValues,
     editInitialValues,
     editError,
+    adoptPreviewError,
+    adoptProfile: adoptProfileQuery.data ?? null,
+    verifiedAdoptOwner: adoptOwnerQuery.data?.isMe
+      ? adoptOwnerQuery.data.owner
+      : null,
+    isAdoptPreviewPending,
     error,
     ...createdAgentAttachment,
     isPending,
@@ -308,6 +415,7 @@ export function useAgentManagement() {
         : ("ready" as const),
     submitCreate,
     submitUpdate,
+    submitAdopt,
     dismiss,
   };
 }
