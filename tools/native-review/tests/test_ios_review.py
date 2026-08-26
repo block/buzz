@@ -34,6 +34,14 @@ class FakeRecorder:
         self.finalized = True
 
 
+class FakeFlutterProcess:
+    def __init__(self, returncode=0): self.returncode, self.running = returncode, True
+    def poll(self): return None if self.running else self.returncode
+    def wait(self, timeout=None): self.running = False; return self.returncode
+    def terminate(self): self.running = False
+    def kill(self): self.running = False
+
+
 class IosReviewTests(unittest.TestCase):
     DEVICE_PAYLOAD = {
         "devicetypes": [{"name": "iPhone Test", "identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-Test"}],
@@ -87,8 +95,24 @@ class IosReviewTests(unittest.TestCase):
         for name in sentinels:
             self.assertNotIn(name, environment)
 
+    def test_recording_readiness_fails_without_rendered_marker(self):
+        process = FakeFlutterProcess()
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(ios_review.time, "monotonic", side_effect=[0, 2]), \
+             mock.patch.object(ios_review.time, "sleep"):
+            with self.assertRaisesRegex(ios_review.ReviewError, "timed out waiting"):
+                ios_review.wait_for_recording_ready(process, pathlib.Path(directory) / "flutter.log", 1)
+
+    def test_recording_readiness_accepts_rendered_marker(self):
+        process = FakeFlutterProcess()
+        with tempfile.TemporaryDirectory() as directory:
+            log = pathlib.Path(directory) / "flutter.log"
+            log.write_text(ios_review.RECORDING_READY_MARKER)
+            ios_review.wait_for_recording_ready(process, log, 0.1)
+
     def test_flutter_failure_finalizes_recording_writes_receipt_and_cleans_device(self):
         recorder = FakeRecorder()
+        flutter = FakeFlutterProcess(1)
         commands = []
 
         def fake_run(command, **kwargs):
@@ -109,8 +133,9 @@ class IosReviewTests(unittest.TestCase):
                  "runtimeIdentifier": "runtime", "deviceType": "iPhone Test", "owned": True,
              }), \
              mock.patch.object(ios_review, "run", side_effect=fake_run), \
+             mock.patch.object(ios_review, "wait_for_recording_ready"), \
              mock.patch.object(ios_review, "wait_for_recording"), \
-             mock.patch.object(ios_review.subprocess, "Popen", return_value=recorder):
+             mock.patch.object(ios_review.subprocess, "Popen", side_effect=[flutter, recorder]):
             with self.assertRaisesRegex(ios_review.ReviewError, "exit 1"):
                 ios_review.run_review(ios_review.DEFAULT_TEST, "iPhone Test", pathlib.Path(directory))
             receipts = list(pathlib.Path(directory).rglob("receipt.json"))
@@ -141,6 +166,7 @@ class IosReviewTests(unittest.TestCase):
 
     def test_recorder_timeout_is_reported_and_device_is_cleaned(self):
         recorder = FakeRecorder()
+        flutter = FakeFlutterProcess()
         recorder.readline = mock.Mock(return_value="")
         commands = []
 
@@ -158,8 +184,9 @@ class IosReviewTests(unittest.TestCase):
                  "runtimeIdentifier": "runtime", "deviceType": "iPhone Test", "owned": True,
              }), \
              mock.patch.object(ios_review, "run", side_effect=fake_run), \
+             mock.patch.object(ios_review, "wait_for_recording_ready"), \
              mock.patch.object(ios_review, "wait_for_recording", side_effect=ios_review.ReviewError("timed out waiting for Simulator recording")), \
-             mock.patch.object(ios_review.subprocess, "Popen", return_value=recorder):
+             mock.patch.object(ios_review.subprocess, "Popen", side_effect=[flutter, recorder]):
             with self.assertRaisesRegex(ios_review.ReviewError, "timed out"):
                 ios_review.run_review(ios_review.DEFAULT_TEST, "iPhone Test", pathlib.Path(directory))
             receipt = json.loads(next(pathlib.Path(directory).rglob("receipt.json")).read_text())

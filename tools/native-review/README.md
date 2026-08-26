@@ -11,9 +11,11 @@ Supported lanes:
 - **macOS Desktop:** declarative journeys driven through Accessibility and
   CGEvent, with window-only MP4, screenshots, semantic/AX snapshots, app
   CPU/RSS sampling, and performance comparison.
-- **iOS Simulator:** Flutter integration journeys on an erased simulator, with
-  full-device MP4, screenshot, Flutter log, simulator provenance, and cleanup
-  receipt.
+- **iOS Simulator:** Flutter integration journeys on an erased simulator. Build
+  and installation finish before canonical capture; the journey reports its
+  rendered initial state and the harness foregrounds Buzz before recording. The
+  bundle includes full-device MP4, screenshot, Flutter log, simulator provenance,
+  and cleanup receipt.
 
 ## Safety contract
 

@@ -14,8 +14,12 @@ void main() {
       const ProviderScope(child: MaterialApp(home: PairingPage())),
     );
     await tester.pumpAndSettle();
-
     expect(find.text('Welcome to Buzz'), findsOneWidget);
+    debugPrint('BUZZ_NATIVE_REVIEW_RECORDING_READY');
+    // The host starts capture only after the marker reaches its log. Keep the
+    // initial state stable until the recorder is ready, then exercise the flow.
+    await tester.pump(const Duration(seconds: 10));
+
     expect(find.byKey(const Key('pairing-code-input')), findsNothing);
 
     await tester.tap(find.byKey(const Key('pairing-code-toggle')));

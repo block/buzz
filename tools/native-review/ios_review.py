@@ -25,6 +25,8 @@ from evidence_bundle import EvidenceError, relay_safe_video
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_TEST = ROOT / "mobile/integration_test/native_review_pairing_test.dart"
+IOS_BUNDLE_ID = "com.buzz.buzzMobile"
+RECORDING_READY_MARKER = "BUZZ_NATIVE_REVIEW_RECORDING_READY"
 SUBPROCESS_ENV_ALLOWLIST = {
     "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "SHELL", "USER", "LOGNAME",
     "TERM", "__CF_USER_TEXT_ENCODING", "DEVELOPER_DIR",
@@ -109,6 +111,32 @@ def wait_for_recording(recorder: subprocess.Popen[str], timeout_seconds: float =
         selector.close()
 
 
+def wait_for_recording_ready(process: subprocess.Popen[str], log: pathlib.Path,
+                             timeout_seconds: float = 180) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if log.is_file() and RECORDING_READY_MARKER in log.read_text(errors="replace"):
+            return
+        if process.poll() is not None:
+            raise ReviewError("Flutter integration journey exited before recording readiness")
+        time.sleep(0.1)
+    raise ReviewError("timed out waiting for Flutter recording readiness")
+
+
+def start_flutter_review(test: pathlib.Path, udid: str, log: pathlib.Path) -> tuple[subprocess.Popen[str], Any]:
+    log_handle = log.open("w")
+    command = ["flutter", "drive", "--driver", "test_driver/integration_test.dart",
+               "--target", str(test.relative_to(ROOT / "mobile")), "-d", udid,
+               "--keep-app-running", "--dart-define=BUZZ_NATIVE_REVIEW=true"]
+    try:
+        process = subprocess.Popen(command, cwd=ROOT / "mobile", stdout=log_handle,
+                                   stderr=subprocess.STDOUT, env=flutter_environment(), text=True)
+    except Exception:
+        log_handle.close()
+        raise
+    return process, log_handle
+
+
 def run_review(test: pathlib.Path, device_name: str, output_root: pathlib.Path) -> pathlib.Path:
     if sys.platform != "darwin" or not shutil.which("xcrun") or not shutil.which("flutter"):
         raise ReviewError("iOS native review requires macOS, Xcode simctl, and Flutter")
@@ -135,6 +163,8 @@ def run_review(test: pathlib.Path, device_name: str, output_root: pathlib.Path) 
     device: dict[str, Any] | None = None
     udid: str | None = None
     recorder: subprocess.Popen[str] | None = None
+    flutter_process: subprocess.Popen[str] | None = None
+    flutter_log: Any | None = None
     try:
         device = create_review_device(device_name, run_id)
         udid = device["udid"]
@@ -144,29 +174,40 @@ def run_review(test: pathlib.Path, device_name: str, output_root: pathlib.Path) 
         }
         run(["xcrun", "simctl", "boot", udid])
         run(["xcrun", "simctl", "bootstatus", udid, "-b"], capture=False)
+        log = run_dir / "flutter.log"
+        flutter_process, flutter_log = start_flutter_review(test, udid, log)
+        receipt["artifacts"]["log"] = "flutter.log"
+        wait_for_recording_ready(flutter_process, log)
+        run(["xcrun", "simctl", "launch", udid, IOS_BUNDLE_ID])
         video = run_dir / "video.mp4"
         recorder = subprocess.Popen(["xcrun", "simctl", "io", udid, "recordVideo", "--codec=h264", "--force", str(video)],
                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                     env=subprocess_environment(), text=True)
         wait_for_recording(recorder)
         receipt["artifacts"]["video"] = "video.mp4"
-        result = run(["flutter", "drive", "--driver", "test_driver/integration_test.dart",
-                      "--target", str(test.relative_to(ROOT / "mobile")), "-d", udid,
-                      "--keep-app-running", "--dart-define=BUZZ_NATIVE_REVIEW=true"],
-                     cwd=ROOT / "mobile", check=False, env=flutter_environment())
-        (run_dir / "flutter.log").write_text(result.stdout + result.stderr)
-        receipt["artifacts"]["log"] = "flutter.log"
+        returncode = flutter_process.wait()
+        flutter_log.close()
+        flutter_log = None
         screenshot = run_dir / "final.png"
         run(["xcrun", "simctl", "io", udid, "screenshot", str(screenshot)])
         receipt["artifacts"]["screenshot"] = "final.png"
         time.sleep(0.5)
-        if result.returncode:
-            raise ReviewError(f"Flutter integration journey failed with exit {result.returncode}")
+        if returncode:
+            raise ReviewError(f"Flutter integration journey failed with exit {returncode}")
         receipt["status"] = "passed"
     except Exception as exc:
         receipt["failure"] = str(exc)
     finally:
         errors = []
+        if flutter_process and flutter_process.poll() is None:
+            flutter_process.terminate()
+            try:
+                flutter_process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                flutter_process.kill()
+                flutter_process.wait(timeout=5)
+        if flutter_log:
+            flutter_log.close()
         if recorder and recorder.poll() is None:
             recorder.send_signal(signal.SIGINT)
             try:
