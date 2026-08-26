@@ -37,6 +37,10 @@ fn default_max_video_bytes() -> u64 {
     524_288_000 // 500 MB
 }
 
+fn default_max_video_duration_secs() -> u64 {
+    900 // 15 minutes
+}
+
 fn default_max_file_bytes() -> u64 {
     104_857_600 // 100 MB
 }
@@ -74,6 +78,13 @@ pub struct MediaConfig {
     /// Maximum upload size for video files (bytes). Default: 500 MB.
     #[serde(default = "default_max_video_bytes")]
     pub max_video_bytes: u64,
+    /// Maximum accepted video duration (seconds). Default: 900 (15 minutes).
+    ///
+    /// Override with `BUZZ_MAX_VIDEO_DURATION_SECS`. This is a DoS bound on
+    /// decoder work, not a product-length policy — operators running sales
+    /// demos or long recordings raise it; others can lower it.
+    #[serde(default = "default_max_video_duration_secs")]
+    pub max_video_duration_secs: u64,
     /// Maximum upload size for generic (non-image, non-video) files (bytes). Default: 100 MB.
     #[serde(default = "default_max_file_bytes")]
     pub max_file_bytes: u64,
@@ -120,6 +131,9 @@ impl MediaConfig {
         }
         if self.max_video_bytes == 0 {
             return Err("max_video_bytes must be > 0".to_string());
+        }
+        if self.max_video_duration_secs == 0 {
+            return Err("max_video_duration_secs must be > 0".to_string());
         }
         if self.max_file_bytes == 0 {
             return Err("max_file_bytes must be > 0".to_string());
@@ -173,6 +187,7 @@ mod tests {
             max_image_bytes: 1,
             max_gif_bytes: 1,
             max_video_bytes: 1,
+            max_video_duration_secs: 900,
             max_file_bytes: 1,
             public_base_url: "http://localhost:3000/media".to_string(),
             upload_records_enabled: false,

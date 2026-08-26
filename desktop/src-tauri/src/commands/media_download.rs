@@ -17,8 +17,9 @@ use crate::commands::{
 };
 use crate::relay::{classify_request_error, relay_api_base_url_with_override, relay_error_message};
 
-/// Maximum download size: 50 MiB. Prevents OOM from oversized responses.
-const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
+/// Maximum download size: 100 MiB. Prevents OOM from oversized responses.
+/// Sized to cover a 15-minute H.264 demo at the relay duration cap (~40–80 MiB).
+const MAX_DOWNLOAD_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Download request timeout.
 const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
@@ -190,7 +191,7 @@ pub async fn copy_image_to_clipboard(
         image::load_from_memory(&bytes).map_err(|e| format!("failed to decode image: {e}"))?;
 
     // Guard against decompression bombs: a small compressed file can decode to
-    // a huge RGBA buffer. Cap at 50 MiB (matching the download size cap).
+    // a huge RGBA buffer. Cap at the download size cap.
     let pixels = img.width() as u64 * img.height() as u64;
     if pixels * 4 > MAX_DOWNLOAD_BYTES {
         return Err("image too large to copy to clipboard".to_string());
