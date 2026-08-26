@@ -92,6 +92,41 @@ fn stop_managed_agent_pair(
     Ok(())
 }
 
+/// Enforce a single retained pair for a task-bound identity while preserving
+/// the requested pair if it is already live. This is deliberately narrower
+/// than [`stop_managed_agent_process`]: switching a Codex task between relay
+/// aliases must not tear down and recreate the pair the caller wants to keep.
+pub(crate) fn stop_other_managed_agent_pairs(
+    app: &AppHandle,
+    record: &mut ManagedAgentRecord,
+    runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
+    keep: &ManagedAgentRuntimeKey,
+) -> Result<(), String> {
+    use tauri::Manager;
+
+    let keys = managed_agent_runtime_keys(runtimes, &record.pubkey)
+        .into_iter()
+        .filter(|key| key != keep)
+        .collect::<Vec<_>>();
+    let mut errors = Vec::new();
+    for key in keys {
+        match stop_managed_agent_pair(app, record, runtimes, &key) {
+            Ok(()) => app
+                .state::<crate::app_state::AppState>()
+                .clear_agent_session_cache(&key),
+            Err(error) => errors.push(format!("{}: {error}", key.relay_url)),
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "failed to stop duplicate task-bound runtimes: {}",
+            errors.join("; ")
+        ))
+    }
+}
+
 /// Terminate a legacy scalar-PID child (pre-pair records) and remove the
 /// agent-scoped pid file. Pair receipts are restored separately.
 fn stop_legacy_scalar_pid(app: &AppHandle, record: &mut ManagedAgentRecord) -> Result<(), String> {

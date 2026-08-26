@@ -17,8 +17,9 @@ use crate::{
         start_managed_agent_process, stop_managed_agent_process, stop_managed_agent_workspace_pair,
         sync_managed_agent_processes, try_regenerate_nest, validate_provider_config,
         AgentKeyAvailability, AgentReadiness, BackendKind, CreateManagedAgentRequest,
-        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
-        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentRuntimeKey,
+        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
+        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -246,6 +247,30 @@ fn trim_to_optional_string(value: &str) -> Option<String> {
     }
 }
 
+fn restart_relay_urls(
+    pubkey: &str,
+    relay_urls: &[String],
+    workspace_relay_url: &str,
+    task_bound: bool,
+) -> Vec<String> {
+    if !task_bound {
+        return relay_urls.to_vec();
+    }
+    let workspace_key = ManagedAgentRuntimeKey::new(pubkey.to_string(), workspace_relay_url).ok();
+    relay_urls
+        .iter()
+        .find(|relay_url| {
+            workspace_key.as_ref().is_some_and(|workspace_key| {
+                ManagedAgentRuntimeKey::new(pubkey.to_string(), relay_url)
+                    .is_ok_and(|key| key == *workspace_key)
+            })
+        })
+        .or_else(|| relay_urls.first())
+        .cloned()
+        .into_iter()
+        .collect()
+}
+
 fn resolve_created_avatar_url(
     requested_avatar_url: Option<&str>,
     persona_avatar_url: Option<String>,
@@ -329,8 +354,11 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
         }
     }
 
+    let task_bound = crate::managed_agents::load_codex_task_binding(app, pubkey)?.is_some();
+    let workspace_relay_url = crate::relay::relay_ws_url_with_override(state);
+    let restart_relays = restart_relay_urls(pubkey, relay_urls, &workspace_relay_url, task_bound);
     let mut errors = Vec::new();
-    for relay_url in relay_urls {
+    for relay_url in &restart_relays {
         if let Err(error) = crate::managed_agents::start_managed_agent_runtime_pair_lazy(
             pubkey.to_string(),
             relay_url.clone(),

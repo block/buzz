@@ -1,6 +1,48 @@
 use super::*;
 use crate::managed_agents::AgentDefinition;
 
+#[test]
+fn task_bound_restart_prefers_the_active_workspace_pair() {
+    let pubkey = "aa".repeat(32);
+    let relays = vec![
+        "wss://old.example".to_string(),
+        "wss://active.example".to_string(),
+    ];
+
+    assert_eq!(
+        restart_relay_urls(&pubkey, &relays, "WSS://ACTIVE.EXAMPLE:443/", true,),
+        vec!["wss://active.example".to_string()]
+    );
+}
+
+#[test]
+fn task_bound_restart_falls_back_to_one_existing_pair() {
+    let pubkey = "aa".repeat(32);
+    let relays = vec![
+        "wss://first.example".to_string(),
+        "wss://second.example".to_string(),
+    ];
+
+    assert_eq!(
+        restart_relay_urls(&pubkey, &relays, "wss://missing.example", true),
+        vec!["wss://first.example".to_string()]
+    );
+}
+
+#[test]
+fn ordinary_restart_preserves_every_existing_pair() {
+    let pubkey = "aa".repeat(32);
+    let relays = vec![
+        "wss://first.example".to_string(),
+        "wss://second.example".to_string(),
+    ];
+
+    assert_eq!(
+        restart_relay_urls(&pubkey, &relays, "wss://first.example", false),
+        relays
+    );
+}
+
 fn bare_agent_record(
     persona_id: Option<&str>,
     model: Option<&str>,

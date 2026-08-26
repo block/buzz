@@ -51,6 +51,7 @@ fn resolve_acp_harness_command(command: &str) -> Option<std::path::PathBuf> {
 
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
+pub(crate) use stop::stop_other_managed_agent_pairs;
 pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
 
 mod sweep;
@@ -1008,6 +1009,17 @@ pub fn start_managed_agent_process(
         )
     };
     let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)?;
+    if super::load_codex_task_binding(app, &record.pubkey)?.is_some() {
+        stop_other_managed_agent_pairs(app, record, runtimes, &key)?;
+        use tauri::Manager;
+        let state = app.state::<crate::app_state::AppState>();
+        for (_, receipt) in super::read_all_agent_runtime_receipts(app) {
+            if receipt.key.pubkey == record.pubkey && receipt.key != key {
+                super::terminate_untracked_pair_runtime(app, &receipt.key)?;
+                state.clear_agent_session_cache(&receipt.key);
+            }
+        }
+    }
     if let Some(runtime) = runtimes.get_mut(&key) {
         if runtime
             .child

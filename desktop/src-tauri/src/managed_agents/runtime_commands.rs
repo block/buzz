@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::{collections::HashSet, sync::atomic::Ordering};
 
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -268,6 +268,28 @@ fn start_pair(
         .managed_agent_processes
         .lock()
         .map_err(|e| e.to_string())?;
+
+    // A Codex task is one mutable conversation, not an independently clonable
+    // agent runtime. Letting the same identity attach to that task once per
+    // relay means relay aliases (for example LAN + ngrok URLs for one relay)
+    // deliver the same message to multiple harnesses. Both then publish a
+    // reply and observer stream, producing duplicate Activity rows and stale
+    // working indicators. Switch the task-bound identity to the requested
+    // pair atomically; ordinary agents retain the existing multi-community
+    // fan-out behavior.
+    if super::load_codex_task_binding(&app, &record.pubkey)?.is_some() {
+        super::stop_other_managed_agent_pairs(&app, record, &mut runtimes, &key)?;
+
+        // A crash-recovery receipt can exist without an adopted in-memory
+        // runtime. Drain every other receipt for this task-bound identity too,
+        // otherwise the old harness survives and recreates the duplicate.
+        for (_, receipt) in super::read_all_agent_runtime_receipts(&app) {
+            if receipt.key.pubkey == record.pubkey && receipt.key != key {
+                super::terminate_untracked_pair_runtime(&app, &receipt.key)?;
+                state.clear_agent_session_cache(&receipt.key);
+            }
+        }
+    }
     if runtimes
         .get_mut(&key)
         .is_some_and(|runtime| runtime.child.try_wait().ok().flatten().is_none())
@@ -446,6 +468,14 @@ fn unkeyable_failed_status(
     }
 }
 
+fn should_schedule_reconcile_pair(
+    scheduled_task_bound: &mut HashSet<String>,
+    pubkey: &str,
+    task_bound: bool,
+) -> bool {
+    !task_bound || scheduled_task_bound.insert(pubkey.to_ascii_lowercase())
+}
+
 /// Spawn a lazy harness pair for every eligible (agent, community) pair.
 ///
 /// Eligibility is deliberately gated on `start_on_app_launch`: auto-start is
@@ -464,7 +494,14 @@ pub async fn reconcile_managed_agent_runtimes(
     use futures_util::{stream, StreamExt};
 
     let records = load_managed_agents(&app)?;
+    let mut task_bound_pubkeys = HashSet::new();
+    for record in &records {
+        if super::load_codex_task_binding(&app, &record.pubkey)?.is_some() {
+            task_bound_pubkeys.insert(record.pubkey.to_ascii_lowercase());
+        }
+    }
     let mut jobs = Vec::new();
+    let mut scheduled_task_bound = HashSet::new();
     for community in communities {
         for record in records
             .iter()
@@ -473,6 +510,14 @@ pub async fn reconcile_managed_agent_runtimes(
         // `effective_agent_relay_url`. Every local auto-start agent fans out
         // to every configured community.
         {
+            let task_bound = task_bound_pubkeys.contains(&record.pubkey.to_ascii_lowercase());
+            if !should_schedule_reconcile_pair(
+                &mut scheduled_task_bound,
+                &record.pubkey,
+                task_bound,
+            ) {
+                continue;
+            }
             jobs.push((record.clone(), community.relay_url.clone()));
         }
     }
@@ -620,6 +665,41 @@ mod tests {
                 "wss://two.example"
             );
         }
+    }
+
+    #[test]
+    fn task_bound_reconcile_schedules_only_one_pair_per_identity() {
+        let mut scheduled = HashSet::new();
+        let pubkey = "AA".repeat(32);
+
+        assert!(should_schedule_reconcile_pair(
+            &mut scheduled,
+            &pubkey,
+            true
+        ));
+        assert!(!should_schedule_reconcile_pair(
+            &mut scheduled,
+            &pubkey.to_ascii_lowercase(),
+            true
+        ));
+    }
+
+    #[test]
+    fn ordinary_agent_reconcile_keeps_multi_community_fan_out() {
+        let mut scheduled = HashSet::new();
+        let pubkey = "aa".repeat(32);
+
+        assert!(should_schedule_reconcile_pair(
+            &mut scheduled,
+            &pubkey,
+            false
+        ));
+        assert!(should_schedule_reconcile_pair(
+            &mut scheduled,
+            &pubkey,
+            false
+        ));
+        assert!(scheduled.is_empty());
     }
 
     #[test]
