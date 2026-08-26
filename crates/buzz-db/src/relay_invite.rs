@@ -21,11 +21,12 @@ use buzz_core::invite::{
     encode_v2_code, hash_v2_code, MAX_INVITE_TTL_SECS, MAX_INVITE_USES, MIN_INVITE_TTL_SECS,
     V2_SECRET_LEN,
 };
+use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row as _};
 
 use crate::error::Result;
-use crate::CommunityId;
+use crate::{CommunityId, Db};
 
 /// Outcome of a v2 invite claim. Expected invalid/expired/exhausted states are
 /// typed variants so the relay layer can map them to distinct HTTP responses
@@ -378,6 +379,53 @@ pub async fn claim_relay_invite(
         use_count: new_use_count,
         uses_remaining: new_uses_remaining,
     })
+}
+
+impl Db {
+    /// Mints a v2 use-limited relay invite. The plaintext code is returned
+    /// exactly once; only its SHA-256 hash is persisted.
+    ///
+    /// `max_uses` is `None` for unlimited or `Some(1..=10000)`.
+    /// `ttl_secs` must be in the shared invite lifetime range.
+    #[datastore_span(name = "mint_relay_invite", system = "postgresql")]
+    pub async fn mint_relay_invite(
+        &self,
+        community: CommunityId,
+        created_by: &str,
+        ttl_secs: u64,
+        max_uses: Option<i32>,
+    ) -> Result<MintedInvite> {
+        mint_relay_invite(&self.pool, community, created_by, ttl_secs, max_uses).await
+    }
+
+    /// Delete one bounded batch of invites expired before `cutoff`.
+    #[datastore_span(name = "reap_expired_relay_invites", system = "postgresql")]
+    pub async fn reap_expired_relay_invites(&self, cutoff: DateTime<Utc>) -> Result<u64> {
+        reap_expired_relay_invites(&self.pool, cutoff).await
+    }
+
+    /// Atomically claims a v2 relay invite. The full redemption (membership
+    /// insert, policy evidence, use_count increment) runs in one PostgreSQL
+    /// transaction with `FOR UPDATE` on the invite row.
+    ///
+    /// `token_hash` is the SHA-256 of the presented v2 code (32 bytes).
+    #[datastore_span(name = "claim_relay_invite", system = "postgresql")]
+    pub async fn claim_relay_invite(
+        &self,
+        community: CommunityId,
+        token_hash: &[u8; 32],
+        claimer_pubkey: &str,
+        policy_version: Option<&str>,
+    ) -> Result<ClaimOutcome> {
+        claim_relay_invite(
+            &self.pool,
+            community,
+            token_hash,
+            claimer_pubkey,
+            policy_version,
+        )
+        .await
+    }
 }
 
 #[cfg(test)]

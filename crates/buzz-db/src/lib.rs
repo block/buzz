@@ -1767,54 +1767,6 @@ impl Db {
         relay_admin_actions::update_feedback_status(&self.pool, id, status).await
     }
 
-    /// Mints a v2 use-limited relay invite. The plaintext code is returned
-    /// exactly once; only its SHA-256 hash is persisted.
-    ///
-    /// `max_uses` is `None` for unlimited or `Some(1..=10000)`.
-    /// `ttl_secs` must be in the shared invite lifetime range.
-    #[datastore_span(name = "mint_relay_invite", system = "postgresql")]
-    pub async fn mint_relay_invite(
-        &self,
-        community: CommunityId,
-        created_by: &str,
-        ttl_secs: u64,
-        max_uses: Option<i32>,
-    ) -> Result<relay_invite::MintedInvite> {
-        relay_invite::mint_relay_invite(&self.pool, community, created_by, ttl_secs, max_uses).await
-    }
-
-    /// Delete one bounded batch of invites expired before `cutoff`.
-    #[datastore_span(name = "reap_expired_relay_invites", system = "postgresql")]
-    pub async fn reap_expired_relay_invites(
-        &self,
-        cutoff: chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64> {
-        relay_invite::reap_expired_relay_invites(&self.pool, cutoff).await
-    }
-
-    /// Atomically claims a v2 relay invite. The full redemption (membership
-    /// insert, policy evidence, use_count increment) runs in one PostgreSQL
-    /// transaction with `FOR UPDATE` on the invite row.
-    ///
-    /// `token_hash` is the SHA-256 of the presented v2 code (32 bytes).
-    #[datastore_span(name = "claim_relay_invite", system = "postgresql")]
-    pub async fn claim_relay_invite(
-        &self,
-        community: CommunityId,
-        token_hash: &[u8; 32],
-        claimer_pubkey: &str,
-        policy_version: Option<&str>,
-    ) -> Result<relay_invite::ClaimOutcome> {
-        relay_invite::claim_relay_invite(
-            &self.pool,
-            community,
-            token_hash,
-            claimer_pubkey,
-            policy_version,
-        )
-        .await
-    }
-
     /// Sidecar an accepted product-feedback event, idempotent by event id.
     #[datastore_span(name = "insert_product_feedback", system = "postgresql")]
     pub async fn insert_product_feedback(
