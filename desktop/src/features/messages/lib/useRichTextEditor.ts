@@ -476,7 +476,13 @@ export function useRichTextEditor({
         }).configure({
           openOnClick: false,
           autolink: true,
-          linkOnPaste: true,
+          // The composer's own paste handler owns every selected-text link
+          // paste (`createComposerLinkPasteHandler`). TipTap's `linkOnPaste`
+          // recognises the same URLs one layer down, and when our handler
+          // declines a selection it can't link cleanly, `linkOnPaste` still
+          // fires and partially links it. No ordering trick removes a second
+          // handler — the only fix is not to register it.
+          linkOnPaste: false,
           // Allow Buzz message links through TipTap's URL sanitiser.
           // http(s) and mailto are accepted by default; non-listed protocols are
           // stripped on paste/typed input.

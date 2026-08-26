@@ -11,6 +11,7 @@ import {
   registerComposerMessageLinkMarkdownIt,
   resolveComposerMessageLinkAttributes,
   resolveExactLinkPaste,
+  resolveSelectionLinkPaste,
 } from "./composerMessageLinkNode.ts";
 
 const requireFromTiptap = createRequire(import.meta.resolve("tiptap-markdown"));
@@ -136,6 +137,40 @@ for (const input of [
   });
 }
 
+// The selection branch is the composer's alone now that `linkOnPaste` is off,
+// so it has to accept everything linkify accepted — otherwise turning the
+// second handler off would silently narrow which URLs preserve their label.
+for (const [label, input, expectedHref] of [
+  ["exact http", "https://example.com", "https://example.com"],
+  ["wrapped http", "<https://example.com>", "https://example.com"],
+  [
+    "canonical Buzz link",
+    CHANNEL_MESSAGE_HREF,
+    `buzz://message?channel=${CHANNEL_ID}&id=${CHANNEL_MESSAGE_ID}`,
+  ],
+  ["scheme-less host", "www.example.com", "http://www.example.com"],
+  ["bare host with path", "example.com/docs", "http://example.com/docs"],
+  ["email address", "foo@example.com", "mailto:foo@example.com"],
+  ["ftp", "ftp://example.com", "ftp://example.com"],
+]) {
+  test(`selection link paste resolves ${label}`, () => {
+    assert.deepEqual(resolveSelectionLinkPaste(input, resolveKnownChannel), {
+      href: expectedHref,
+    });
+  });
+}
+
+for (const input of [
+  "https://example.com and words",
+  " https://example.com",
+  "read this",
+  "",
+]) {
+  test(`selection link paste rejects ${JSON.stringify(input)}`, () => {
+    assert.equal(resolveSelectionLinkPaste(input, resolveKnownChannel), null);
+  });
+}
+
 const editorSchema = new Schema({
   nodes: {
     doc: { content: "block+" },
@@ -151,6 +186,10 @@ const editorSchema = new Schema({
     codeBlock: { content: "text*", group: "block", marks: "" },
   },
   marks: {
+    // `excludes: "_"` mirrors StarterKit's `code` mark: it silently drops any
+    // other mark added over it, so a link applied to code-marked text never
+    // lands even though the parent paragraph allows link marks.
+    code: { excludes: "_" },
     link: { attrs: { href: {} }, inclusive: false },
   },
 });
@@ -315,6 +354,66 @@ test("paste handler falls through when any selected text cannot carry link marks
   assert.equal(view.focusCalled, false);
   assert.deepEqual(toPlainJson(view.state.doc), initialDoc);
   assert.deepEqual(view.state.selection.toJSON(), initialSelection);
+});
+
+test("paste handler falls through when selected text mixes plain and inline code", () => {
+  const doc = document(
+    paragraph(
+      text("plain "),
+      text("inline", [editorSchema.marks.code.create()]),
+    ),
+  );
+  const view = createMockView(stateFromDocument(doc, 1, doc.content.size - 1));
+  const initialDoc = toPlainJson(view.state.doc);
+  const initialSelection = view.state.selection.toJSON();
+  const event = createPasteEvent("https://example.com");
+  const handled = createComposerLinkPasteHandler(resolveKnownChannel)(
+    view,
+    event,
+  );
+
+  assert.equal(handled, false);
+  assert.equal(event.defaultPrevented, false);
+  assert.equal(view.focusCalled, false);
+  assert.deepEqual(toPlainJson(view.state.doc), initialDoc);
+  assert.deepEqual(view.state.selection.toJSON(), initialSelection);
+});
+
+test("paste handler links selected text for linkify-only URL shapes", () => {
+  for (const [pasted, expectedHref] of [
+    ["www.example.com", "http://www.example.com"],
+    ["foo@example.com", "mailto:foo@example.com"],
+  ]) {
+    const doc = document(paragraph(text("read this")));
+    const view = createMockView(stateFromDocument(doc, 1, 10));
+    const handled = createComposerLinkPasteHandler(resolveKnownChannel)(
+      view,
+      createPasteEvent(pasted),
+    );
+
+    assert.equal(handled, true);
+    assert.equal(view.state.doc.textContent, "read this");
+    assert.deepEqual(toPlainJson(view.state.doc).content[0].content[0].marks, [
+      { attrs: { href: expectedHref }, type: "link" },
+    ]);
+  }
+});
+
+test("caret paste stays plain for linkify-only URL shapes", () => {
+  // Only the selection branch widened. A caret paste of `www.example.com` must
+  // still fall through so it arrives as text for `autolink` to pick up, rather
+  // than being inserted as a pre-linked node.
+  const doc = document(paragraph(text("go ")));
+  const view = createMockView(stateFromDocument(doc, 4));
+  const event = createPasteEvent("www.example.com");
+  const handled = createComposerLinkPasteHandler(resolveKnownChannel)(
+    view,
+    event,
+  );
+
+  assert.equal(handled, false);
+  assert.equal(event.defaultPrevented, false);
+  assert.equal(view.state.doc.textContent, "go ");
 });
 
 test("paste handler collapses an all-selection to inline content", () => {

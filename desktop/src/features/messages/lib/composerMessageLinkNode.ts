@@ -1,7 +1,8 @@
 import { mergeAttributes, Node } from "@tiptap/core";
-import type { MarkType, Node as ProseMirrorNode } from "@tiptap/pm/model";
+import type { Mark, Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { Selection, TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
+import { find as findLinks } from "linkifyjs";
 
 import {
   buildIssueLink,
@@ -143,6 +144,33 @@ export function resolveExactLinkPaste(
   return httpHref ? { href: httpHref } : null;
 }
 
+/**
+ * Resolves a clipboard payload for the *selected text* branch of paste
+ * handling, where this handler is the only one that runs.
+ *
+ * The exact Buzz/http matchers win first, so Buzz links keep their canonical
+ * form. Anything else falls back to linkify with `defaultProtocol: "http"` —
+ * the same matcher TipTap's `linkOnPaste` used before the composer took sole
+ * ownership of this branch, so `www.example.com`, `foo@example.com` and
+ * `ftp://…` still hyperlink the selection instead of replacing it.
+ *
+ * Deliberately scoped to the selection branch: broadening
+ * `resolveExactLinkPaste` would also change caret paste, where these shapes
+ * must keep arriving as plain text for `autolink` to pick up.
+ */
+export function resolveSelectionLinkPaste(
+  text: string,
+  resolveChannelName: ComposerMessageLinkNodeOptions["resolveChannelName"],
+): { href: string } | null {
+  const exactLinkPaste = resolveExactLinkPaste(text, resolveChannelName);
+  if (exactLinkPaste) return exactLinkPaste;
+
+  const link = findLinks(text, { defaultProtocol: "http" }).find(
+    (candidate) => candidate.isLink && candidate.value === text,
+  );
+  return link ? { href: link.href } : null;
+}
+
 function selectionContainsComposerMessageLinkNode(view: EditorView): boolean {
   const { from, to } = view.state.selection;
   let containsMessageLink = false;
@@ -157,27 +185,43 @@ function selectionContainsComposerMessageLinkNode(view: EditorView): boolean {
   return containsMessageLink;
 }
 
-function selectionCanCarryMark(view: EditorView, markType: MarkType): boolean {
-  const { from, to } = view.state.selection;
+/**
+ * Checks the *outcome* of an `addMark` rather than predicting it: every inline
+ * node in the range must have come out carrying `mark`. Predicting is what a
+ * parent-level `allowsMarkType` probe does, and it misses mark exclusion —
+ * `code`'s `excludes: "_"` makes `Mark.addToSet` silently drop a link, so a
+ * selection spanning plain text and an inline code span passes the prediction
+ * but only gets partially linked.
+ */
+function everyInlineNodeCarriesMark(
+  doc: ProseMirrorNode,
+  from: number,
+  to: number,
+  mark: Mark,
+): boolean {
   let containsInlineContent = false;
-  let allInlineContentCanCarryMark = true;
-  view.state.doc.nodesBetween(from, to, (node, _pos, parent) => {
+  let allInlineContentCarriesMark = true;
+  doc.nodesBetween(from, to, (node) => {
     if (!node.isInline) return true;
     containsInlineContent = true;
-    if (!parent?.type.allowsMarkType(markType)) {
-      allInlineContentCanCarryMark = false;
-    }
+    if (!mark.isInSet(node.marks)) allInlineContentCarriesMark = false;
     return true;
   });
-  return containsInlineContent && allInlineContentCanCarryMark;
+  return containsInlineContent && allInlineContentCarriesMark;
 }
 
 function applyLinkToSelection(view: EditorView, href: string): boolean {
   const { from, to } = view.state.selection;
   const linkMark = view.state.schema.marks.link;
-  if (!linkMark || !selectionCanCarryMark(view, linkMark)) return false;
+  if (!linkMark) return false;
 
-  let transaction = view.state.tr.addMark(from, to, linkMark.create({ href }));
+  const mark = linkMark.create({ href });
+  let transaction = view.state.tr.addMark(from, to, mark);
+  // Bail before dispatching, so the document and selection are untouched and
+  // the paste falls through to normal replacement.
+  if (!everyInlineNodeCarriesMark(transaction.doc, from, to, mark))
+    return false;
+
   transaction = transaction.setSelection(
     Selection.near(transaction.doc.resolve(transaction.mapping.map(to)), -1),
   );
@@ -205,15 +249,19 @@ export function createComposerLinkPasteHandler(
 ) {
   return (view: EditorView, event: ClipboardEvent): boolean => {
     const text = event.clipboardData?.getData("text/plain") ?? "";
-    const exactLinkPaste = resolveExactLinkPaste(text, resolveChannelName);
     if (
-      exactLinkPaste &&
       !view.state.selection.empty &&
       !selectionContainsComposerMessageLinkNode(view)
     ) {
-      if (!applyLinkToSelection(view, exactLinkPaste.href)) return false;
-      event.preventDefault();
-      return true;
+      const selectionLinkPaste = resolveSelectionLinkPaste(
+        text,
+        resolveChannelName,
+      );
+      if (selectionLinkPaste) {
+        if (!applyLinkToSelection(view, selectionLinkPaste.href)) return false;
+        event.preventDefault();
+        return true;
+      }
     }
 
     const buzzHref = unwrapExactBuzzLink(text);
