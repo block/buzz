@@ -1767,25 +1767,6 @@ impl Db {
         relay_admin_actions::update_feedback_status(&self.pool, id, status).await
     }
 
-    /// Sidecar an accepted product-feedback event, idempotent by event id.
-    #[datastore_span(name = "insert_product_feedback", system = "postgresql")]
-    pub async fn insert_product_feedback(
-        &self,
-        community: CommunityId,
-        feedback: product_feedback::NewProductFeedback<'_>,
-    ) -> Result<Uuid> {
-        product_feedback::insert(&self.pool, community, feedback).await
-    }
-
-    /// List product feedback across the deployment, newest first.
-    #[datastore_span(name = "list_product_feedback", system = "postgresql")]
-    pub async fn list_product_feedback(
-        &self,
-        limit: i64,
-    ) -> Result<Vec<product_feedback::ProductFeedbackRecord>> {
-        product_feedback::list(&self.pool, limit).await
-    }
-
     /// Insert a tenant-scoped NIP-56 report row, idempotent by report event id.
     #[datastore_span(name = "insert_moderation_report", system = "postgresql")]
     pub async fn insert_moderation_report(
