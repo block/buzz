@@ -81,11 +81,16 @@ where
     F: FnOnce(PgConnection) -> Fut,
     Fut: Future<Output = (PgConnection, Result<T>)>,
 {
-    let mut lock_conn = pool.acquire().await?.detach();
-    sqlx::query("SELECT pg_advisory_lock($1)")
-        .bind(SCHEMA_DESTRUCTION_LOCK_KEY)
-        .execute(&mut lock_conn)
-        .await?;
+    let mut lock_conn = crate::observability::acquire(pool, crate::observability::PoolRole::Writer)
+        .await?
+        .detach();
+    crate::observability::observe_advisory_lock(
+        crate::observability::LockType::MigrationSchemaSafety,
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(SCHEMA_DESTRUCTION_LOCK_KEY)
+            .execute(&mut lock_conn),
+    )
+    .await?;
     let (mut lock_conn, outcome) = op(lock_conn).await;
     let unlock = sqlx::query("SELECT pg_advisory_unlock($1)")
         .bind(SCHEMA_DESTRUCTION_LOCK_KEY)

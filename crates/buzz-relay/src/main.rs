@@ -35,6 +35,16 @@ fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
     })
 }
 
+fn relay_keypair_from_config(relay_private_key: Option<&str>) -> anyhow::Result<nostr::Keys> {
+    let hex = relay_private_key.ok_or_else(|| {
+        anyhow::anyhow!(
+            "BUZZ_RELAY_PRIVATE_KEY must be set. Run `just bootstrap` for local \
+             development or configure a stable 32-byte hex private key."
+        )
+    })?;
+    nostr::Keys::parse(hex).map_err(|e| anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY: {e}"))
+}
+
 /// Controls how many per-community gauge series the usage poller emits.
 ///
 /// Datadog cost is proportional to the number of unique time-series.  With ~25
@@ -143,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
         error!("Invalid configuration: {e}");
         anyhow::anyhow!("Configuration error: {e}")
     })?;
+    let relay_keypair = relay_keypair_from_config(config.relay_private_key.as_deref())?;
     info!(
         bind_addr = %config.bind_addr,
         relay_url = %config.relay_url,
@@ -421,29 +432,6 @@ async fn main() -> anyhow::Result<()> {
 
     let workflow_config = buzz_workflow::WorkflowConfig::default();
     let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), workflow_config));
-
-    let relay_keypair = if let Some(hex) = &config.relay_private_key {
-        nostr::Keys::parse(hex)
-            .map_err(|e| anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY: {e}"))?
-    } else if !config.require_auth_token {
-        // Dev mode: use a deterministic keypair so addressable events (kind:39000/39001/39002)
-        // replace correctly across restarts. Without this, each restart generates a new pubkey
-        // and replace_addressable_event inserts duplicates instead of replacing.
-        const DEV_RELAY_PRIVKEY: &str =
-            "0000000000000000000000000000000000000000000000000000000000000001";
-        let keys = nostr::Keys::parse(DEV_RELAY_PRIVKEY).expect("hardcoded dev key is valid");
-        tracing::warn!(
-            pubkey = %keys.public_key().to_hex(),
-            "Using hardcoded dev relay keypair (BUZZ_REQUIRE_AUTH_TOKEN=false). \
-             Set BUZZ_RELAY_PRIVATE_KEY for production."
-        );
-        keys
-    } else {
-        panic!(
-            "BUZZ_RELAY_PRIVATE_KEY must be set when BUZZ_REQUIRE_AUTH_TOKEN=true. \
-             A stable relay identity is required for production."
-        );
-    };
 
     config
         .media
@@ -2037,8 +2025,8 @@ mod tests {
 
     use super::{
         buzz_auto_migrate_enabled, dropped_in_memory_keys, idle_timeout_secs,
-        refresh_legacy_active_gauge_recency, run_periodic_until_cancelled, EmissionScope,
-        InMemoryMetricKey,
+        refresh_legacy_active_gauge_recency, relay_keypair_from_config,
+        run_periodic_until_cancelled, EmissionScope, InMemoryMetricKey,
     };
     use metrics::GaugeFn;
     use metrics_util::{
@@ -2084,6 +2072,23 @@ mod tests {
         assert!(buzz_auto_migrate_enabled(Some(" 1 ")));
         assert!(buzz_auto_migrate_enabled(Some("yes")));
         assert!(buzz_auto_migrate_enabled(Some("on")));
+    }
+
+    #[test]
+    fn configured_relay_identity_is_preserved() {
+        let configured = nostr::Keys::generate();
+        let secret = configured.secret_key().to_secret_hex();
+
+        let selected = relay_keypair_from_config(Some(&secret)).expect("configured key");
+
+        assert_eq!(selected.public_key(), configured.public_key());
+    }
+
+    #[test]
+    fn missing_relay_identity_is_rejected() {
+        let result = relay_keypair_from_config(None);
+
+        assert!(result.is_err());
     }
 
     #[test]

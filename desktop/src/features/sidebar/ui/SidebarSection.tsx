@@ -83,7 +83,10 @@ function UnreadCountBadge({
       data-testid={`channel-unread-${channelName}`}
     >
       {formatUnreadCount(count)}
-      <span className="sr-only"> new comment{count === 1 ? "" : "s"}</span>
+      <span className="sr-only">
+        {" "}
+        unread notification{count === 1 ? "" : "s"}
+      </span>
     </span>
   );
 }
@@ -281,6 +284,7 @@ export function ChannelMenuButton({
   label,
   isActive,
   hasUnread,
+  unreadCount = 0,
   activeWorking,
   isMuted,
   dmParticipants,

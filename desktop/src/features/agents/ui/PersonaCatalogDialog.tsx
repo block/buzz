@@ -592,7 +592,7 @@ function PersonaCatalogDetail({ persona }: { persona: AgentPersona }) {
 
       <div className="min-w-0 max-w-full pt-3">
         <p className="text-base font-semibold text-foreground">
-          Agent instruction
+          Agent instructions
         </p>
         <AgentInstructionReview instructions={persona.systemPrompt} />
       </div>

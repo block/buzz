@@ -353,3 +353,22 @@ test("reconcileRefreshedCachedChannel_preservesRefreshedDmRecency", () => {
     ownerPubkey,
   ]);
 });
+
+test("invalidateChannelMembersRosters dedupes and targets member keys", async () => {
+  const { invalidateChannelMembersRosters } = await import(
+    "./rosterFreshness.ts"
+  );
+  const invalidated = [];
+  const queryClient = {
+    invalidateQueries: async ({ queryKey }) => {
+      invalidated.push(queryKey);
+    },
+  };
+
+  await invalidateChannelMembersRosters(queryClient, ["ch-a", "ch-b", "ch-a"]);
+
+  assert.deepEqual(invalidated, [
+    ["channels", "ch-a", "members"],
+    ["channels", "ch-b", "members"],
+  ]);
+});

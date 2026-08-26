@@ -1,13 +1,12 @@
 import type * as React from "react";
 import type { BotActivityAgent } from "@/features/channels/ui/BotActivityBar";
 import type { ChannelAgentSessionAgent } from "@/features/channels/ui/useChannelAgentSessions";
-import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
+import type { MessageComposerEditTarget } from "@/features/messages/ui/MessageComposer.types";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
-import type { DraftMentionRef } from "@/features/messages/lib/useDrafts";
 import type {
   ProfilePanelTab,
   ProfilePanelView,
@@ -37,13 +36,7 @@ export type ChannelPaneProps = {
   botTypingEntries: TypingIndicatorEntry[];
   channelManagementOpen?: boolean;
   currentPubkey?: string;
-  editTarget?: {
-    author: string;
-    body: string;
-    id: string;
-    imetaMedia?: ImetaMedia[];
-    mentionRefs?: DraftMentionRef[];
-  } | null;
+  editTarget?: MessageComposerEditTarget | null;
   fetchOlder?: () => Promise<void>;
   header?: React.ReactNode;
   hasOlderMessages?: boolean;
@@ -65,6 +58,14 @@ export type ChannelPaneProps = {
   welcomeKickoffSettingUp?: boolean;
   messages: TimelineMessage[];
   threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
+  /**
+   * A Huddle transcript flattens summarized reply subtrees into the chat
+   * timeline. When one of those subtree loads fails, this reports the aggregate
+   * failure so the transcript can surface a non-destructive retry alert instead
+   * of silently presenting a partial conversation as complete.
+   */
+  huddleThreadRepliesError?: boolean;
+  onRetryHuddleThreadReplies?: () => void;
   firstUnreadMessageId?: string | null;
   unreadCount?: number;
   canResetThreadPanelWidth: boolean;
@@ -170,6 +171,8 @@ export type ChannelPaneProps = {
   threadAllMessages: TimelineMessage[];
   threadMessages: MainTimelineEntry[];
   threadMessagesPending?: boolean;
+  threadMessagesError?: boolean;
+  onRetryThreadReplies?: () => void;
   threadPanelWidthPx: number;
   threadTypingPubkeys: string[];
   threadReplyTargetMessage: TimelineMessage | null;
@@ -178,6 +181,10 @@ export type ChannelPaneProps = {
   threadReplyUnreadCounts?: ReadonlyMap<string, number>;
   threadFirstUnreadReplyId?: string | null;
   targetMessageId: string | null;
+  /** Exact clicked result id, including a reply routed into the thread panel. */
+  targetSearchMessageId?: string | null;
+  /** Search text to highlight within the clicked result. */
+  targetSearchQuery?: string;
   typingPubkeys: string[];
   isFollowingThread?: boolean;
   onFollowThread?: () => void;

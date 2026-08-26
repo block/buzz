@@ -72,6 +72,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/events", post(api::bridge::submit_event))
         .route("/query", post(api::bridge::query_events))
         .route("/count", post(api::bridge::count_events))
+        // Relay-owned third-party GIF metadata proxy (NIP-98 auth).
+        .route(api::gifs::SEARCH_PATH, post(api::gifs::search))
+        .route(api::gifs::SHARE_PATH, post(api::gifs::share))
         .route(
             "/workflows/{workflow_id}/runs",
             get(api::workflows::workflow_runs),
@@ -413,14 +416,22 @@ async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     }
 }
 
-/// Status endpoint — service name, version, uptime.
-async fn status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let uptime_secs = state.started_at.elapsed().as_secs();
-    Json(json!({
+fn status_payload(uptime_secs: u64) -> serde_json::Value {
+    json!({
         "service": "buzz-relay",
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_seconds": uptime_secs,
-    }))
+        "build": {
+            "source_sha": crate::build_info::source_sha(),
+            "id": crate::build_info::build_id(),
+            "url": crate::build_info::build_url(),
+        },
+    })
+}
+
+/// Status endpoint — service name, version, uptime, and intrinsic build identity.
+async fn status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(status_payload(state.started_at.elapsed().as_secs()))
 }
 
 /// `/_mesh` — live mesh status: peer table, connection/phi state, per-peer
@@ -504,6 +515,23 @@ mod tests {
         assert!(should_serve_spa("/", true));
         assert!(should_serve_spa("/repos/example", true));
         assert!(!should_serve_spa("/arbitrary", true));
+    }
+
+    #[test]
+    fn status_payload_exposes_source_and_build_identity() {
+        let payload = status_payload(42);
+
+        assert_eq!(payload["service"], "buzz-relay");
+        assert_eq!(payload["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(payload["uptime_seconds"], 42);
+        for field in ["source_sha", "id", "url"] {
+            assert!(
+                payload["build"][field]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty()),
+                "build.{field} must be a non-empty string"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

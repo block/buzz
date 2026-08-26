@@ -18,11 +18,15 @@
 //! == agent) is applied fail-closed.
 
 mod agent_usage;
+mod archive_db;
 mod metric_store;
 mod pipeline;
+pub mod retention;
 pub mod store;
 mod store_migrations;
 pub mod sync;
+
+pub use archive_db::ArchiveDb;
 
 use pipeline::{commit_archive, plan_archive, query_buckets};
 
@@ -32,7 +36,6 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::app_state::AppState;
-use crate::managed_agents::nest_dir;
 use crate::relay::{query_relay, relay_ws_url_with_override};
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -43,10 +46,20 @@ const OBSERVER_FRAME_TELEMETRY: &str = "telemetry";
 
 // ── DB helpers ───────────────────────────────────────────────────────────────
 
-fn open_db() -> Result<Connection, String> {
-    let nest = nest_dir().ok_or("cannot resolve nest directory for archive")?;
-    let db_path = nest.join("archive").join("archive.db");
-    store::open_archive_db(&db_path)
+/// Warm the archive DB init barrier on a background task, now that the nest
+/// exists, so the first-open schema migration cost (M4's index build over a
+/// large archive) is paid at startup rather than blocking a user's first
+/// archive command. The globally-mounted observer archive producer also
+/// `await`s this barrier before its first write, so warming it early avoids a
+/// stall on the first observer frame. Non-fatal: the first real archive command
+/// retries and surfaces any error.
+pub fn spawn_warm_init(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        use tauri::Manager;
+        if let Err(error) = app.state::<AppState>().archive_db.warm_init().await {
+            eprintln!("buzz-desktop: archive DB init deferred: {error}");
+        }
+    });
 }
 
 fn identity_pubkey(state: &AppState) -> Result<String, String> {
@@ -59,19 +72,6 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
-}
-
-async fn run_archive_db_task<T, F>(task: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce(&Connection) -> Result<T, String> + Send + 'static,
-{
-    tokio::task::spawn_blocking(move || {
-        let conn = open_db()?;
-        task(&conn)
-    })
-    .await
-    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 // ── Scope type ───────────────────────────────────────────────────────────────
@@ -170,10 +170,10 @@ pub(crate) async fn archive_candidates(
     // ── Phase 1: plan (blocking SQLite) ─────────────────────────────────────
     let plan_identity_pk = identity_pk.clone();
     let plan_relay_url = relay_url.clone();
-    let plan = run_archive_db_task(move |conn| {
-        plan_archive(candidates, &plan_identity_pk, &plan_relay_url, conn)
-    })
-    .await?;
+    let plan = state
+        .archive_db
+        .with_conn(move |conn| plan_archive(candidates, &plan_identity_pk, &plan_relay_url, conn))
+        .await?;
 
     // ── Phase 2: relay queries (async) ───────────────────────────────────────
     let bucket_results = query_buckets(plan.buckets, state).await;
@@ -186,19 +186,21 @@ pub(crate) async fn archive_candidates(
     };
     let commit_identity_pk = identity_pk.clone();
     let commit_relay_url = relay_url.clone();
-    run_archive_db_task(move |conn| {
-        commit_archive(
-            bucket_results,
-            plan.ephemeral,
-            plan.pre_dropped,
-            &commit_identity_pk,
-            &commit_relay_url,
-            &owner_keys,
-            now,
-            conn,
-        )
-    })
-    .await
+    state
+        .archive_db
+        .with_conn(move |conn| {
+            commit_archive(
+                bucket_results,
+                plan.ephemeral,
+                plan.pre_dropped,
+                &commit_identity_pk,
+                &commit_relay_url,
+                &owner_keys,
+                now,
+                conn,
+            )
+        })
+        .await
 }
 
 /// Validate an ephemeral observer frame (kind 24200) against ALL local rules.
@@ -337,16 +339,21 @@ pub async fn create_save_subscription(
     let kinds_json =
         serde_json::to_string(&kinds).map_err(|e| format!("failed to serialize kinds: {e}"))?;
 
-    let conn = open_db()?;
-    store::upsert_save_subscription(
-        &conn,
-        &identity_pk,
-        &relay_url,
-        scope_type.as_str(),
-        &scope_value,
-        &kinds_json,
-        now,
-    )?;
+    let scope_type_str = scope_type.as_str().to_string();
+    state
+        .archive_db
+        .with_conn(move |conn| {
+            store::upsert_save_subscription(
+                conn,
+                &identity_pk,
+                &relay_url,
+                &scope_type_str,
+                &scope_value,
+                &kinds_json,
+                now,
+            )
+        })
+        .await?;
     sync_state.notify_subscriptions_changed().await;
     Ok(())
 }
@@ -452,10 +459,12 @@ pub async fn merge_save_subscription_kinds(
     let relay_url = relay_ws_url_with_override(&state);
     let now = now_secs();
     let owner_pk = identity_pk.clone();
-    run_archive_db_task(move |conn| {
-        store::merge_owner_p_kinds(conn, &identity_pk, &relay_url, &owner_pk, kind, now)
-    })
-    .await?;
+    state
+        .archive_db
+        .with_conn(move |conn| {
+            store::merge_owner_p_kinds(conn, &identity_pk, &relay_url, &owner_pk, kind, now)
+        })
+        .await?;
     sync_state.notify_subscriptions_changed().await;
     Ok(())
 }
@@ -487,10 +496,12 @@ pub async fn remove_save_subscription_kind(
     let identity_pk = identity_pubkey(&state)?;
     let relay_url = relay_ws_url_with_override(&state);
     let owner_pk = identity_pk.clone();
-    run_archive_db_task(move |conn| {
-        store::remove_owner_p_kind(conn, &identity_pk, &relay_url, &owner_pk, kind)
-    })
-    .await?;
+    state
+        .archive_db
+        .with_conn(move |conn| {
+            store::remove_owner_p_kind(conn, &identity_pk, &relay_url, &owner_pk, kind)
+        })
+        .await?;
     sync_state.notify_subscriptions_changed().await;
     Ok(())
 }
@@ -504,7 +515,9 @@ pub async fn list_save_subscriptions(
 ) -> Result<Vec<store::SaveSubscription>, String> {
     let identity_pk = identity_pubkey(&state)?;
     let relay_url = relay_ws_url_with_override(&state);
-    run_archive_db_task(move |conn| store::list_save_subscriptions(conn, &identity_pk, &relay_url))
+    state
+        .archive_db
+        .with_conn(move |conn| store::list_save_subscriptions(conn, &identity_pk, &relay_url))
         .await
 }
 
@@ -523,16 +536,18 @@ pub async fn delete_save_subscription(
 ) -> Result<bool, String> {
     let identity_pk = identity_pubkey(&state)?;
     let relay_url = relay_ws_url_with_override(&state);
-    let removed = run_archive_db_task(move |conn| {
-        store::delete_save_subscription(
-            conn,
-            &identity_pk,
-            &relay_url,
-            scope_type.as_str(),
-            &scope_value,
-        )
-    })
-    .await?;
+    let removed = state
+        .archive_db
+        .with_conn(move |conn| {
+            store::delete_save_subscription(
+                conn,
+                &identity_pk,
+                &relay_url,
+                scope_type.as_str(),
+                &scope_value,
+            )
+        })
+        .await?;
     if removed {
         sync_state.notify_subscriptions_changed().await;
     }
@@ -564,18 +579,20 @@ pub async fn read_archived_observer_events_for_channel(
 ) -> Result<Vec<String>, String> {
     let identity_pk = identity_pubkey(&state)?;
     let relay_url = relay_ws_url_with_override(&state);
-    run_archive_db_task(move |conn| {
-        store::read_archived_observer_events_for_channel(
-            conn,
-            &identity_pk,
-            &relay_url,
-            &channel_id,
-            before_created_at,
-            before_id.as_deref(),
-            limit.unwrap_or(DEFAULT_READ_LIMIT),
-        )
-    })
-    .await
+    state
+        .archive_db
+        .with_conn(move |conn| {
+            store::read_archived_observer_events_for_channel(
+                conn,
+                &identity_pk,
+                &relay_url,
+                &channel_id,
+                before_created_at,
+                before_id.as_deref(),
+                limit.unwrap_or(DEFAULT_READ_LIMIT),
+            )
+        })
+        .await
 }
 
 // ── index_observer_channel_id ─────────────────────────────────────────────────
@@ -595,20 +612,22 @@ pub async fn index_observer_channel_id(
 ) -> Result<(), String> {
     let identity_pk = identity_pubkey(&state)?;
     let relay_url = relay_ws_url_with_override(&state);
-    run_archive_db_task(move |conn| {
-        for entry in &entries {
-            store::upsert_observer_channel_index(
-                conn,
-                &identity_pk,
-                &relay_url,
-                &entry.event_id,
-                entry.channel_id.as_deref(),
-                entry.created_at,
-            )?;
-        }
-        Ok(())
-    })
-    .await
+    state
+        .archive_db
+        .with_conn(move |conn| {
+            for entry in &entries {
+                store::upsert_observer_channel_index(
+                    conn,
+                    &identity_pk,
+                    &relay_url,
+                    &entry.event_id,
+                    entry.channel_id.as_deref(),
+                    entry.created_at,
+                )?;
+            }
+            Ok(())
+        })
+        .await
 }
 
 /// A single (event_id, channel_id?, created_at) record used by
@@ -639,18 +658,20 @@ pub async fn read_unindexed_observer_rows(
 ) -> Result<Vec<RawObserverRow>, String> {
     let identity_pk = identity_pubkey(&state)?;
     let relay_url = relay_ws_url_with_override(&state);
-    run_archive_db_task(move |conn| {
-        let rows = store::read_unindexed_observer_rows(conn, &identity_pk, &relay_url)?;
-        Ok(rows
-            .into_iter()
-            .map(|(id, raw_json, created_at)| RawObserverRow {
-                id,
-                raw_json,
-                created_at,
-            })
-            .collect())
-    })
-    .await
+    state
+        .archive_db
+        .with_conn(move |conn| {
+            let rows = store::read_unindexed_observer_rows(conn, &identity_pk, &relay_url)?;
+            Ok(rows
+                .into_iter()
+                .map(|(id, raw_json, created_at)| RawObserverRow {
+                    id,
+                    raw_json,
+                    created_at,
+                })
+                .collect())
+        })
+        .await
 }
 
 /// Wire type returned by `read_unindexed_observer_rows`.
@@ -695,20 +716,22 @@ pub async fn read_archived_events(
     let relay_url = relay_ws_url_with_override(&state);
     let scope_type_str = scope_type.as_str().to_string();
     let read_limit = limit.unwrap_or(DEFAULT_READ_LIMIT);
-    run_archive_db_task(move |conn| {
-        store::read_archived_events(
-            conn,
-            &identity_pk,
-            &relay_url,
-            &scope_type_str,
-            &scope_value,
-            kinds.as_deref(),
-            before_created_at,
-            before_id.as_deref(),
-            read_limit,
-        )
-    })
-    .await
+    state
+        .archive_db
+        .with_conn(move |conn| {
+            store::read_archived_events(
+                conn,
+                &identity_pk,
+                &relay_url,
+                &scope_type_str,
+                &scope_value,
+                kinds.as_deref(),
+                before_created_at,
+                before_id.as_deref(),
+                read_limit,
+            )
+        })
+        .await
 }
 
 // ── get_agent_usage_series ───────────────────────────────────────────────────
@@ -797,8 +820,46 @@ pub async fn get_agent_usage_series(
 ) -> Result<agent_usage::AgentUsageSeries, String> {
     let identity_pk = identity_pubkey(&state)?;
     let relay_url = relay_ws_url_with_override(&state);
-    run_archive_db_task(move |conn| agent_usage_series(conn, &identity_pk, &relay_url, &request))
+    state
+        .archive_db
+        .with_conn(move |conn| agent_usage_series(conn, &identity_pk, &relay_url, &request))
         .await
+}
+
+// ── Retention configuration commands ──────────────────────────────────────────
+
+/// Read the global observer-frame (kind 24200) retention window, in days. Every
+/// other archived kind — NIP-AM metrics and any custom subscription — is kept
+/// indefinitely and has no setting.
+#[tauri::command]
+pub async fn get_observer_retention_days(state: State<'_, AppState>) -> Result<i64, String> {
+    state
+        .archive_db
+        .with_conn(retention::get_observer_retention_days)
+        .await
+}
+
+/// Set the global observer-frame retention window, in days. Fail-closed: the
+/// store layer rejects zero, negative, or out-of-range values (see
+/// [`retention::validate_days`]).
+#[tauri::command]
+pub async fn set_observer_retention_days(
+    state: State<'_, AppState>,
+    days: i64,
+) -> Result<(), String> {
+    state
+        .archive_db
+        .with_conn(move |conn| retention::set_observer_retention_days(conn, days))
+        .await
+}
+
+/// Physical (file) and logical (page) size accounting for the archive DB, for
+/// the Settings size readout. PRAGMAs + file metadata only — no payload scans.
+#[tauri::command]
+pub async fn archive_size_stats(
+    state: State<'_, AppState>,
+) -> Result<retention::ArchiveSizeStats, String> {
+    state.archive_db.with_conn(retention::size_stats).await
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

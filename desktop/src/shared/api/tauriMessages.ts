@@ -15,15 +15,17 @@ export async function sendChannelMessage(
   sentFromThreadTag?: string[],
   expectedRelayUrl?: string,
   expectedSignerPubkey?: string,
+  // 0.5.20 added rootEventId at this slot; fork params follow it (below) so
+  // upstream call sites that pass rootEventId positionally stay valid.
+  rootEventId?: string | null,
   /**
    * `["e", "<id>", "", "supersedes"]` tags — one per attachment the user
    * opted into linking as a new version of an earlier upload. Rides its own
    * Tauri arg (not `mediaTags`) because the Rust `imeta_tags` validator
    * rejects any non-`imeta`-prefixed tag.
    *
-   * Positioned after upstream's params, not before: 0.5.18 claimed slots 11
-   * and 12 for the tenant-scope guard, and upstream call sites pass those
-   * positionally.
+   * Positioned after upstream's params, not before: upstream call sites pass
+   * the slots above positionally.
    */
   supersedesTags?: string[][],
   /**
@@ -40,6 +42,7 @@ export async function sendChannelMessage(
       channelId,
       content,
       parentEventId,
+      rootEventId: rootEventId ?? null,
       mediaTags: mediaTags ?? null,
       emojiTags: emojiTags ?? null,
       mentionTags: mentionTags ?? null,

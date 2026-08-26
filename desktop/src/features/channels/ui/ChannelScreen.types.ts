@@ -22,4 +22,8 @@ export type ChannelScreenProps = {
   targetForumReplyId: string | null;
   targetMessageEvents: RelayEvent[];
   targetMessageId: string | null;
+  /** Exact clicked result id, retained after route target cleanup. */
+  targetSearchMessageId?: string;
+  /** Search text to highlight within the opened result message. */
+  targetSearchQuery?: string;
 };

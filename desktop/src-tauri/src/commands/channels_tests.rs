@@ -490,3 +490,26 @@ fn last_message_filters_stay_within_relay_channel_cap() {
     );
     assert_eq!(batches.concat(), filters);
 }
+
+fn member(pubkey: &str) -> crate::models::ChannelMemberInfo {
+    crate::models::ChannelMemberInfo {
+        pubkey: pubkey.to_string(),
+        role: "member".to_string(),
+        is_agent: false,
+        joined_at: None,
+        display_name: None,
+    }
+}
+
+#[test]
+fn profile_join_pubkeys_caps_in_roster_order() {
+    let members = vec![member(PK_A), member(PK_B), member(PK_C)];
+
+    assert_eq!(
+        profile_join_pubkeys(&members, 2),
+        vec![PK_A.to_string(), PK_B.to_string()]
+    );
+    assert_eq!(profile_join_pubkeys(&members, 3).len(), 3);
+    assert_eq!(profile_join_pubkeys(&members, 10).len(), 3);
+    assert!(profile_join_pubkeys(&[], 10).is_empty());
+}

@@ -99,12 +99,12 @@ export function imetaMediaFromTags(
  * Shared by the send path (initial post) and the edit path (full new tag set
  * on the edit event), so the two stay perfectly symmetric.
  *
- * `url` and `m` are always emitted (NIP-92's only de-facto required fields;
- * `m` carries a fallback in `imetaMediaFromTags`). All other fields are
- * conditional — including `x` and `size` — because legacy and cross-client
- * imeta entries can land without a sha256 or size, and our relay validator
- * rejects literal `"x "` / `"size 0"` empties. NIP-92 itself treats every
- * field except `url` as optional, so dropping them is spec-clean.
+ * `url`, `m`, and `x` are emitted for verified relay-hosted media. Entries
+ * without a hash represent external content (for example KLIPY GIFs); their
+ * markdown URL remains in the message body, but they are omitted from imeta
+ * because Buzz's relay validator requires a hash-backed local `/media/` path.
+ * Other fields remain conditional so legacy entries do not emit invalid
+ * literal `"size 0"` values.
  */
 export function buildImetaTags(
   imetaMedia: ReadonlyArray<ImetaMedia>,
@@ -115,12 +115,14 @@ export function buildImetaTags(
       // there is nothing honest to put in an imeta tag — no sha256, no
       // relay-served url. It travels as the markdown link in the body instead,
       // which is also what makes the Files tab list it with its real filename.
-      .filter((d) => !d.external)
+      // Upstream additionally requires a real sha256 before emitting imeta;
+      // external uploads have an empty one, so this filter covers both intents.
+      .filter((d) => !d.external && d.sha256.length > 0)
       .map((d) => [
         "imeta",
         `url ${d.url}`,
         `m ${d.type}`,
-        ...(d.sha256 ? [`x ${d.sha256}`] : []),
+        `x ${d.sha256}`,
         ...(typeof d.size === "number" && d.size > 0 ? [`size ${d.size}`] : []),
         ...(d.dim ? [`dim ${d.dim}`] : []),
         ...(d.blurhash ? [`blurhash ${d.blurhash}`] : []),
@@ -391,10 +393,13 @@ export function buildOutgoingMessage(
       spoiler: spoileredMediaUrls.has(d.url),
     });
   }
-  const mediaTags =
-    pendingImeta.length > 0 ? buildImetaTags(pendingImeta) : undefined;
+  const mediaTags = buildImetaTags(pendingImeta);
   const supersedesTags = buildSupersedesTags(pendingImeta);
-  return { content, mediaTags, supersedesTags };
+  return {
+    content,
+    mediaTags: mediaTags.length > 0 ? mediaTags : undefined,
+    supersedesTags,
+  };
 }
 
 /**

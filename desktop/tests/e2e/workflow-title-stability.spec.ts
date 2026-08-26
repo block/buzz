@@ -62,6 +62,20 @@ async function addStepAfterTrigger(page: Page, dialog: Locator) {
   await page.getByRole("menuitem", { name: "Send Message" }).click();
 }
 
+async function finishRiskyActivationIfShown(page: Page, dialog: Locator) {
+  const confirmation = page.getByRole("alertdialog", {
+    name: "This workflow may run often",
+  });
+  await Promise.race([
+    confirmation.waitFor({ state: "visible" }),
+    dialog.waitFor({ state: "hidden" }),
+  ]);
+  if (await confirmation.isVisible()) {
+    await confirmation.getByRole("button", { name: "Turn on" }).click();
+  }
+  await expect(dialog).toBeHidden();
+}
+
 async function createNamedWorkflow(page: Page, name: string) {
   await page.getByRole("button", { name: "Create Workflow" }).click();
   const dialog = page.getByRole("dialog", { name: "Create workflow" });
@@ -73,8 +87,17 @@ async function createNamedWorkflow(page: Page, name: string) {
   await dialog.getByRole("button", { name: "Save workflow name" }).click();
 
   await dialog.getByRole("button", { name: "Add first step" }).click();
-  await dialog.getByLabel("Message text").fill("Workflow notification");
+  await dialog.getByRole("tab", { name: "YAML" }).click();
+  const yamlEditor = dialog.getByRole("textbox", { name: "Workflow YAML" });
+  const yaml = await yamlEditor.inputValue();
+  await yamlEditor.fill(
+    yaml.replace(
+      "    action: send_message",
+      '    action: send_message\n    text: "Workflow notification"',
+    ),
+  );
   await dialog.getByRole("button", { name: "Create workflow" }).click();
+  await finishRiskyActivationIfShown(page, dialog);
 
   await expect(page.getByTestId("workflows-view")).toContainText(name);
 }
@@ -154,10 +177,14 @@ test("renames stay visible across pane navigation before the step is filled in",
   // Completing the step re-serializes the definition from the builder's form
   // state, which must have picked the rename up rather than writing back the
   // generated name it was holding when the rename happened.
-  await dialog.getByLabel("Message text").fill("Workflow notification");
+  await dialog
+    .getByTestId("workflow-node-inspector")
+    .getByLabel("Message text")
+    .fill("Workflow notification");
   expect(await readWorkflowName(dialog)).toBe(name);
 
   await dialog.getByRole("button", { name: "Create workflow" }).click();
+  await finishRiskyActivationIfShown(page, dialog);
   await expect(page.getByTestId("workflows-view")).toContainText(name);
 });
 
@@ -174,6 +201,7 @@ test("keeps a header disable across a later form edit", async ({ page }) => {
 
   const dialog = page.getByRole("dialog", { name: "Edit workflow" });
   await expect(dialog).toBeVisible();
+  await dialog.getByRole("tab", { name: "Form" }).click();
 
   const enableItem = page.getByRole("menuitemcheckbox", { name: "Enable" });
   // The open menu aria-hides the dialog behind it, so it has to be dismissed
@@ -223,6 +251,7 @@ test("keeps the saved name while editing an existing workflow", async ({
 
   const dialog = page.getByRole("dialog", { name: "Edit workflow" });
   await expect(dialog).toBeVisible();
+  await dialog.getByRole("tab", { name: "Form" }).click();
   expect(await readWorkflowName(dialog)).toBe(name);
 
   await openTriggerPane(dialog);
@@ -259,6 +288,7 @@ test("keeps the copy name while duplicating an existing workflow", async ({
 
   const dialog = page.getByRole("dialog", { name: "Duplicate workflow" });
   await expect(dialog).toBeVisible();
+  await dialog.getByRole("tab", { name: "Form" }).click();
   expect(await readWorkflowName(dialog)).toBe(`${name} (copy)`);
 
   await openStepPane(dialog, 1);

@@ -50,6 +50,98 @@ use crate::conformance::{
     state_for_request, EmitGuard, TraceAction, Verdict,
 };
 
+fn huddle_backing_channel_id(event: &Event) -> Result<Uuid, IngestError> {
+    let content: serde_json::Value = serde_json::from_str(&event.content).map_err(|_| {
+        IngestError::Rejected("invalid: Huddle event content must be a JSON object".into())
+    })?;
+    let channel_id = content
+        .get("ephemeral_channel_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            IngestError::Rejected("invalid: Huddle event must name an ephemeral_channel_id".into())
+        })?;
+    channel_id.parse::<Uuid>().map_err(|_| {
+        IngestError::Rejected("invalid: Huddle ephemeral_channel_id must be a UUID".into())
+    })
+}
+
+fn map_huddle_backing_channel_error(error: buzz_db::DbError) -> IngestError {
+    match error {
+        buzz_db::DbError::ChannelNotFound(_) => {
+            IngestError::Rejected("invalid: Huddle backing channel not found".into())
+        }
+        error => IngestError::Internal(format!("error: loading Huddle backing channel: {error}")),
+    }
+}
+
+fn expected_huddle_backing_ttl(ephemeral_ttl_override: Option<i32>) -> i32 {
+    ephemeral_ttl_override.unwrap_or(3600)
+}
+
+async fn validate_huddle_lifecycle_event(
+    tenant: &TenantContext,
+    state: &AppState,
+    event: &Event,
+    kind: u32,
+) -> Result<(), IngestError> {
+    if kind != KIND_HUDDLE_STARTED && kind != KIND_HUDDLE_ENDED {
+        return Ok(());
+    }
+
+    let backing_channel_id = huddle_backing_channel_id(event)?;
+    let backing = state
+        .db
+        .get_channel(tenant.community(), backing_channel_id)
+        .await
+        .map_err(map_huddle_backing_channel_error)?;
+    let signer = event.pubkey.to_bytes();
+    let relay = state.relay_keypair.public_key().to_bytes();
+    let signer_created_backing = backing.created_by.as_slice() == signer.as_slice();
+
+    if kind == KIND_HUDDLE_STARTED {
+        let expected_ttl = expected_huddle_backing_ttl(state.config.ephemeral_ttl_override);
+        if !signer_created_backing
+            || backing.channel_type != "stream"
+            || backing.visibility != "private"
+            || backing.ttl_seconds != Some(expected_ttl)
+            || backing.archived_at.is_some()
+        {
+            return Err(IngestError::Rejected(
+                "invalid: Huddle start must reference the signer's active private ephemeral stream"
+                    .into(),
+            ));
+        }
+    } else {
+        if !signer_created_backing && signer.as_slice() != relay.as_slice() {
+            return Err(IngestError::Rejected(
+                "invalid: only the Huddle creator or relay may end it".into(),
+            ));
+        }
+        let parent_channel_id = extract_channel_id(event).ok_or_else(|| {
+            IngestError::Rejected("invalid: Huddle end must name its parent channel".into())
+        })?;
+        let linked = state
+            .db
+            .huddle_started_link_exists(
+                tenant.community(),
+                parent_channel_id,
+                backing_channel_id,
+                &backing.created_by,
+            )
+            .await
+            .map_err(|error| {
+                IngestError::Internal(format!("error: checking Huddle start linkage: {error}"))
+            })?;
+        if !linked {
+            return Err(IngestError::Rejected(
+                "invalid: Huddle end does not match a creator-signed start in this channel".into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_custom_emoji_tags(event: &Event) -> Result<(), IngestError> {
     for tag in event.tags.iter() {
         let parts = tag.as_slice();
@@ -2560,6 +2652,8 @@ async fn ingest_event_inner(
         });
     }
 
+    validate_huddle_lifecycle_event(tenant, state, &event, kind_u32).await?;
+
     if crate::handlers::side_effects::is_admin_kind(kind_u32) {
         crate::handlers::side_effects::validate_admin_event(tenant, kind_u32, &event, state)
             .await
@@ -3192,6 +3286,61 @@ mod tests {
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
+
+    #[test]
+    fn missing_huddle_backing_channel_is_a_client_rejection() {
+        let channel_id = Uuid::new_v4();
+        assert!(matches!(
+            map_huddle_backing_channel_error(buzz_db::DbError::ChannelNotFound(channel_id)),
+            IngestError::Rejected(message) if message.contains("backing channel not found")
+        ));
+    }
+
+    #[test]
+    fn huddle_backing_channel_lookup_outage_is_internal() {
+        let error = sqlx::Error::Io(std::io::Error::other("database unavailable"));
+        assert!(matches!(
+            map_huddle_backing_channel_error(buzz_db::DbError::Sqlx(error)),
+            IngestError::Internal(message) if message.contains("loading Huddle backing channel")
+        ));
+    }
+
+    #[test]
+    fn huddle_backing_ttl_honors_the_ephemeral_override() {
+        assert_eq!(expected_huddle_backing_ttl(None), 3600);
+        assert_eq!(expected_huddle_backing_ttl(Some(60)), 60);
+    }
+
+    #[test]
+    fn huddle_lifecycle_requires_a_uuid_backing_channel() {
+        let event = EventBuilder::new(
+            Kind::Custom(KIND_HUDDLE_STARTED as u16),
+            r#"{"ephemeral_channel_id":"not-a-uuid"}"#,
+        )
+        .sign_with_keys(&nostr::Keys::generate())
+        .expect("sign Huddle event");
+
+        assert!(matches!(
+            huddle_backing_channel_id(&event),
+            Err(IngestError::Rejected(message)) if message.contains("must be a UUID")
+        ));
+    }
+
+    #[test]
+    fn huddle_lifecycle_extracts_the_backing_channel() {
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(
+            Kind::Custom(KIND_HUDDLE_ENDED as u16),
+            serde_json::json!({"ephemeral_channel_id": channel_id}).to_string(),
+        )
+        .sign_with_keys(&nostr::Keys::generate())
+        .expect("sign Huddle event");
+
+        assert_eq!(
+            huddle_backing_channel_id(&event).expect("channel id"),
+            channel_id
+        );
+    }
 
     #[test]
     fn reaction_validation_accepts_wrapped_max_shortcode() {

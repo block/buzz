@@ -245,3 +245,31 @@ test("buildProjectsFromFetcher still suppresses deleted heads via the scoped fet
   const projects = await buildProjectsFromFetcher(fetchExhaustively);
   assert.deepEqual(projects, [], "deleted repo must not surface as a project");
 });
+
+test("enumerateProjectEvents stops paginating once its signal aborts", async () => {
+  // 3 full pages of 2 → without an abort the enumeration would fetch all of
+  // them plus boundary drains. Abort after the first page: the loop must
+  // throw before requesting another page.
+  const events = [
+    relayEvent("a", 1_000),
+    relayEvent("b", 900),
+    relayEvent("c", 800),
+    relayEvent("d", 700),
+    relayEvent("e", 600),
+    relayEvent("f", 500),
+  ];
+  const controller = new AbortController();
+  let pageFetches = 0;
+  const fetchPage = async (filter) => {
+    pageFetches += 1;
+    const page = await fetcherFor(events)(filter);
+    controller.abort();
+    return page;
+  };
+
+  await assert.rejects(
+    enumerateProjectEvents(fetchPage, [30617], 2, undefined, controller.signal),
+    (error) => error.name === "AbortError",
+  );
+  assert.equal(pageFetches, 1);
+});

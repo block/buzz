@@ -34,6 +34,8 @@ dependencies:
   file_selector: ^1.1.0
   camera: ^0.12.0+2
   image_picker: ^1.1.2
+  image: ^4.8.0
+  google_mlkit_selfie_segmentation: ^0.10.1
   photo_manager: ^3.11.0
   video_player: ^2.10.1
   package_info_plus: ^10.0.0
@@ -49,6 +51,7 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  camera_platform_interface: ^2.13.1
   crypto: ^3.0.7
   custom_lint: ^0.8.0
   riverpod_lint: ^3.1.0

@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { parse as parseYaml } from "yaml";
 
 import { installMockBridge } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
@@ -74,9 +75,6 @@ async function createWorkflow(
     );
     await dialog.getByRole("tab", { name: "Form" }).click();
   }
-  if (options?.enabled === false) {
-    await dialog.getByRole("switch", { name: "Enable" }).click();
-  }
   if (options?.trigger) {
     await dialog
       .getByRole("button", { name: "Trigger: Message Posted" })
@@ -116,6 +114,16 @@ async function createWorkflow(
   }
 
   await dialog.getByRole("button", { name: "Create" }).click();
+  if (!options?.trigger || options.trigger === "message_posted") {
+    const activationConfirmation = page.getByRole("alertdialog", {
+      name: "This workflow may run often",
+    });
+    await activationConfirmation
+      .getByRole("button", {
+        name: options?.enabled === false ? "Keep off" : "Turn on",
+      })
+      .click();
+  }
 
   await expect(
     page.getByRole("heading", { name: "Create Workflow" }),
@@ -129,6 +137,27 @@ test("navigates to workflows view and shows the empty create tile", async ({
 
   await expect(page.getByTestId("new-workflow-card")).toBeVisible();
   await expect(page.locator('[data-testid^="workflow-card-"]')).toHaveCount(0);
+});
+
+test("creates a narrowly triggered workflow without an activation warning", async ({
+  page,
+}) => {
+  await navigateToWorkflows(page);
+  await createWorkflow(page, `safe_webhook_${Date.now()}`, {
+    trigger: "webhook",
+  });
+
+  await expect(
+    page.getByTestId("workflow-activation-confirmation"),
+  ).toHaveCount(0);
+  const yaml = await page.evaluate(() => {
+    const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
+      .reverse()
+      .find((candidate) => candidate.command === "create_workflow");
+    return (call?.payload as { yamlDefinition?: string } | undefined)
+      ?.yamlDefinition;
+  });
+  expect(parseYaml(yaml ?? "").enabled).not.toBe(false);
 });
 
 test("creation reveals the trigger pane only after a one-shot channel pick", async ({
@@ -211,6 +240,10 @@ test("accepts the generated name through the first form mutation", async ({
 
   await dialog.getByRole("button", { name: "Add first step" }).click();
   await dialog.getByRole("button", { name: "Create workflow" }).click();
+  const activationConfirmation = page.getByRole("alertdialog", {
+    name: "This workflow may run often",
+  });
+  await activationConfirmation.getByRole("button", { name: "Turn on" }).click();
 
   await expect(page.getByTestId("workflows-view")).toContainText(generatedName);
 });
@@ -249,9 +282,9 @@ test("shows executable guidance for diff trigger conditions", async ({
     .getByRole("menuitem", { name: "Diff Posted", exact: true })
     .click();
 
-  await expect(dialog.getByLabel("Condition (optional)")).toHaveAttribute(
+  await expect(dialog.getByLabel("Diff text")).toHaveAttribute(
     "placeholder",
-    'e.g. str_contains(trigger_text, "deploy")',
+    "e.g. deploy",
   );
 });
 
@@ -300,11 +333,9 @@ test("captures workflow library across responsive viewports", async ({
 
 test("captures disabled diff workflows in the list UI", async ({ page }) => {
   const workflowName = `diff_workflow_${Date.now()}`;
-  const description = "Watches diff events for src/ changes";
 
   await navigateToWorkflows(page);
   await createWorkflow(page, workflowName, {
-    description,
     enabled: false,
     trigger: "diff_posted",
     stepName: "Notify reviewers",
@@ -316,13 +347,18 @@ test("captures disabled diff workflows in the list UI", async ({ page }) => {
     .locator('[data-testid^="workflow-card-"]')
     .filter({ hasText: workflowName })
     .first();
-  await expect(card.getByText("Diff Posted", { exact: true })).toBeVisible();
-  await expect(card.locator("h3")).toHaveText(workflowName);
-  await expect(card.getByText(description, { exact: true })).toBeVisible();
-  await expect(card).toContainText("disabled");
+  await expect(card.locator("h3")).toHaveText(
+    "When a diff is posted, send “Workflow notification”",
+  );
+  await expect(card).toContainText(workflowName);
+  await expect(
+    card.getByRole("switch", { name: "Disable workflow" }),
+  ).toBeChecked();
 });
 
-test("enables and disables a workflow from its card menu", async ({ page }) => {
+test("enables and disables a workflow from its card status toggle", async ({
+  page,
+}) => {
   const workflowName = `toggle_workflow_${Date.now()}`;
 
   await navigateToWorkflows(page);
@@ -333,26 +369,32 @@ test("enables and disables a workflow from its card menu", async ({ page }) => {
       .locator('[data-testid^="workflow-card-"]')
       .filter({ hasText: workflowName })
       .first();
-  const workflowActions = () =>
-    workflowCard().getByRole("button", { name: "Workflow actions" });
 
-  const enableItem = page.getByRole("menuitemcheckbox", { name: "Enable" });
+  const disable = workflowCard().getByRole("switch", {
+    name: "Disable workflow",
+  });
+  await expect(disable).toBeChecked();
+  await disable.click();
+  const enable = workflowCard().getByRole("switch", {
+    name: "Enable workflow",
+  });
+  await expect(enable).not.toBeChecked();
+  await enable.click();
+  const activationConfirmation = page.getByRole("alertdialog", {
+    name: "This workflow may run often",
+  });
+  await expect(activationConfirmation).toBeVisible();
+  await activationConfirmation.getByRole("button", { name: "Turn on" }).click();
+  await expect(
+    workflowCard().getByRole("switch", { name: "Disable workflow" }),
+  ).toBeChecked();
 
-  await workflowActions().click();
-  await expect(enableItem).toHaveAttribute("aria-checked", "true");
-  await expect(enableItem.locator("button")).toHaveCount(0);
+  await workflowCard()
+    .getByRole("button", { name: "Workflow actions" })
+    .click();
   await expect(
-    enableItem.getByTestId("workflow-enabled-switch-visual"),
-  ).toHaveAttribute("aria-hidden", "true");
-  await enableItem.click();
-  await expect(
-    workflowCard().getByText("disabled", { exact: true }),
-  ).toBeVisible();
-
-  await enableItem.click();
-  await expect(
-    workflowCard().getByText("active", { exact: true }),
-  ).toBeVisible();
+    page.getByRole("menuitemcheckbox", { name: "Enable" }),
+  ).toHaveCount(0);
 });
 
 test("rejects a stale card toggle without overwriting a newer edit", async ({
@@ -395,8 +437,7 @@ test("rejects a stale card toggle without overwriting a newer edit", async ({
     });
   }, workflowName);
 
-  await workflowCard.getByRole("button", { name: "Workflow actions" }).click();
-  await page.getByRole("menuitemcheckbox", { name: "Enable" }).click();
+  await workflowCard.getByRole("switch", { name: "Disable workflow" }).click();
 
   await expect(
     page
@@ -436,14 +477,15 @@ test("reports a rejected workflow status change", async ({ page }) => {
     .locator('[data-testid^="workflow-card-"]')
     .filter({ hasText: workflowName })
     .first();
-  await workflowCard.getByRole("button", { name: "Workflow actions" }).click();
-  await page.getByRole("menuitemcheckbox", { name: "Enable" }).click();
+  await workflowCard.getByRole("switch", { name: "Disable workflow" }).click();
 
   const errorToast = page
     .locator("[data-sonner-toast][data-removed='false']")
     .filter({ hasText: "Couldn’t change workflow status" });
   await expect(errorToast).toContainText("relay refused the update");
-  await expect(workflowCard.getByText("active", { exact: true })).toBeVisible();
+  await expect(
+    workflowCard.getByRole("switch", { name: "Disable workflow" }),
+  ).toBeChecked();
 });
 
 test("shows the webhook secret dialog after saving a webhook workflow", async ({
@@ -528,7 +570,36 @@ test("duplicates a workflow", async ({ page }) => {
   const dialog = page.getByRole("dialog", { name: "Duplicate workflow" });
   await selectWorkflowChannel(page, dialog);
   await dialog.getByRole("button", { name: "Create copy" }).click();
+  const activationConfirmation = page.getByRole("alertdialog", {
+    name: "This workflow may run often",
+  });
+  await expect(activationConfirmation).toBeVisible();
+  await activationConfirmation.getByRole("button", { name: "Back" }).click();
+  await expect(dialog).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+            (call) => call.command === "create_workflow",
+          ).length,
+      ),
+    )
+    .toBe(1);
+  await dialog.getByRole("button", { name: "Create copy" }).click();
+  await activationConfirmation
+    .getByRole("button", { name: "Keep off" })
+    .click();
   await expect(page.getByRole("dialog")).not.toBeVisible();
+
+  const copiedYaml = await page.evaluate(() => {
+    const calls = (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+      (call) => call.command === "create_workflow",
+    );
+    return (calls.at(-1)?.payload as { yamlDefinition?: string } | undefined)
+      ?.yamlDefinition;
+  });
+  expect(parseYaml(copiedYaml ?? "").enabled).toBe(false);
 
   // Both the original and copy should exist
   await expect(page.getByTestId("workflows-view")).toContainText(originalName);
@@ -742,7 +813,7 @@ test("pane routes use stable IDs and Form/YAML changes stay synchronized", async
   await dialog.getByLabel("Duration").fill("5m");
   await expect(page).toHaveURL(/pane=step%3Astep_2/);
 
-  await dialog.getByRole("button", { name: "Step 1: Send Message" }).click();
+  await dialog.getByRole("button", { name: /^Step 1:/ }).click();
   await expect(page).toHaveURL(/pane=step%3Astep_1/);
   await dialog
     .getByTestId("workflow-node-inspector")
@@ -757,7 +828,7 @@ test("pane routes use stable IDs and Form/YAML changes stay synchronized", async
   const yaml = await yamlEditor.inputValue();
   await yamlEditor.fill(yaml.replace("duration: 5m", "duration: 10m"));
   await dialog.getByRole("tab", { name: "Form" }).click();
-  await dialog.getByRole("button", { name: "Step 1: Delay" }).click();
+  await dialog.getByRole("button", { name: /^Step 1:/ }).click();
   await expect(dialog.getByLabel("Duration")).toHaveValue("10m");
 });
 
