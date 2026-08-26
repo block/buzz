@@ -54,7 +54,8 @@ fn run_in_login_shell(args: &[&str]) -> Option<String> {
         let mut cmd = Command::new(&shell);
         cmd.args(args);
         crate::util::configure_no_window(&mut cmd);
-        let Some(output) = super::output_with_timeout(cmd, LOGIN_SHELL_TIMEOUT) else {
+        let Some(output) = super::bounded_command::output_with_timeout(cmd, LOGIN_SHELL_TIMEOUT)
+        else {
             continue;
         };
         if !output.status.success() {
