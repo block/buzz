@@ -878,6 +878,24 @@ test("project workspace sheet stays independent from an open thread", async ({
   }
 
   await workspaceClose.click();
+  const exitingWorkspaceState = await page.evaluate(() => {
+    const workspaceSheet = document.querySelector(
+      '[data-testid="project-home-workspace-sheet"]',
+    );
+    const threadSurface = document.querySelector(
+      '[data-testid="thread-surface"]',
+    );
+    return {
+      threadAriaHidden: threadSurface?.getAttribute("aria-hidden"),
+      threadInert: threadSurface?.hasAttribute("inert") ?? false,
+      workspaceSheetMounted: workspaceSheet !== null,
+    };
+  });
+  expect(exitingWorkspaceState).toEqual({
+    threadAriaHidden: "true",
+    threadInert: true,
+    workspaceSheetMounted: true,
+  });
   await expect(page.getByTestId("project-home-workspace-sheet")).toHaveCount(0);
   await expect(page.getByTestId("message-thread-panel")).toBeVisible();
   const threadClose = coveredThreadSurface.getByTestId("auxiliary-panel-close");

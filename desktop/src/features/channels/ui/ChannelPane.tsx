@@ -186,7 +186,6 @@ export const ChannelPane = React.memo(function ChannelPane({
   const timelineScrollRef = React.useRef<HTMLDivElement>(null);
   const messageTimelineRef = React.useRef<MessageTimelineHandle>(null);
   const composerWrapperRef = React.useRef<HTMLDivElement>(null);
-  const { ref: threadSurfaceRef, restoreFocusTarget } = useThreadPanelSurface();
   const { goChannel } = useAppNavigation();
   const prepareDmSendChannel = usePrepareDmSendChannel(
     activeChannel,
@@ -468,6 +467,10 @@ export const ChannelPane = React.memo(function ChannelPane({
         ? onCloseThread
         : (onCloseIdleAuxiliaryPanel ?? onCloseThread),
   );
+  const threadSurface = useThreadPanelSurface(
+    showIdleAuxiliaryOverThread,
+    markExitComplete,
+  );
   const { changeThreadViewMode, layoutScrollTargetId, resolveScrollTarget } =
     useThreadViewModeSwitch({
       activeThreadHeadId: threadHeadMessage?.id ?? null,
@@ -521,12 +524,12 @@ export const ChannelPane = React.memo(function ChannelPane({
   const wrapThreadPanel = (panel: React.ReactNode) => (
     <ThreadPanelSurface
       channelName={activeChannel?.name ?? "channel"}
-      covered={showIdleAuxiliaryOverThread}
+      covered={threadSurface.covered}
       hasActiveEdit={threadEditTarget !== null}
       isFocusDrawer={useFocusThreadDrawer}
       key={THREAD_SURFACE_KEY}
       onClose={onCloseThread}
-      ref={threadSurfaceRef}
+      ref={threadSurface.ref}
     >
       {useFocusThreadDrawer ? panel : wrapAux(panel, "message-thread-panel")}
     </ThreadPanelSurface>
@@ -538,7 +541,7 @@ export const ChannelPane = React.memo(function ChannelPane({
         key="idle-auxiliary-surface"
         label={idleAuxiliaryTitle || "Panel"}
         onClose={onCloseIdleAuxiliaryPanel}
-        restoreFocusTarget={restoreFocusTarget}
+        restoreFocusTarget={threadSurface.restoreFocusTarget}
       >
         {panel}
       </FocusThreadDrawer>
@@ -792,10 +795,8 @@ export const ChannelPane = React.memo(function ChannelPane({
                     }
                     showTopBorder={false}
                   />
-                  {/* The activity accessory is anchored in the dock's reserved
-                    bottom rail, so fading it cannot change the observed
-                    overlay height or move the conversation. Its natural
-                    content height remains responsive. */}
+                  {/* The reserved bottom rail keeps accessory fades from moving
+                    the conversation while content remains responsive. */}
                   <ChannelComposerActivityAccessory
                     agents={activityAgents}
                     channel={activeChannel}
@@ -990,7 +991,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           idleAuxiliarySurface
         )}
       </AnimatePresence>
-      <AnimatePresence onExitComplete={markExitComplete}>
+      <AnimatePresence onExitComplete={threadSurface.markExitComplete}>
         {showIdleAuxiliaryOverThread ? idleAuxiliarySurface : null}
       </AnimatePresence>
     </div>

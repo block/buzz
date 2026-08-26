@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { FocusThreadDrawer } from "@/features/channels/ui/FocusThreadDrawer";
+import { usePresenceCoverage } from "@/features/channels/ui/useFocusDrawerPresence";
 
 type ThreadPanelSurfaceProps = {
   channelName: string;
@@ -43,9 +44,17 @@ export const ThreadPanelSurface = React.forwardRef<
   );
 });
 
-/** Supplies a stable covered-thread focus target for an overlay drawer. */
-export function useThreadPanelSurface() {
+/** Supplies covered-thread lifecycle and focus ownership for an overlay drawer. */
+export function useThreadPanelSurface(
+  open: boolean,
+  onExitComplete: () => void,
+) {
   const ref = React.useRef<HTMLDivElement>(null);
+  const coverage = usePresenceCoverage(open);
+  const markExitComplete = React.useCallback(() => {
+    coverage.markExitComplete();
+    onExitComplete();
+  }, [coverage.markExitComplete, onExitComplete]);
   const restoreFocusTarget = React.useCallback(
     () =>
       ref.current?.querySelector<HTMLElement>(
@@ -53,5 +62,5 @@ export function useThreadPanelSurface() {
       ) ?? null,
     [],
   );
-  return { ref, restoreFocusTarget };
+  return { ...coverage, markExitComplete, ref, restoreFocusTarget };
 }
