@@ -6,7 +6,9 @@ use nostr::Event;
 
 use crate::managed_agents::{agent_events::managed_agent_content_from_event, RelayAgentInfo};
 
-use super::{agents_from_events, first_tag_value, profile_valid_oa_owner_pubkey, tags_named};
+use super::{
+    agents_from_events, first_tag_value, has_tag, profile_valid_oa_owner_pubkey, tags_named,
+};
 
 /// Collect valid agent pubkeys from kind:30177 `d` tags for follow-up relay
 /// queries. Malformed tags are ignored so one hostile event cannot invalidate
@@ -181,6 +183,73 @@ pub fn member_agent_channel_ids_from_events(
                 .entry(pubkey.clone())
                 .or_default()
                 .insert(channel_id.to_string());
+        }
+    }
+
+    channel_ids
+        .into_iter()
+        .map(|(pubkey, ids)| (pubkey, ids.into_iter().collect()))
+        .collect()
+}
+
+/// Build a pubkey-to-channel-id candidate map from relay-signed DM metadata.
+///
+/// Stream and forum agent membership carries an explicit `bot` role in
+/// kind:39002. DM creation deliberately records every participant as an
+/// ordinary member instead, while the current relay-signed kind:39000 head
+/// carries the authoritative participant list in `p` tags. Only a current DM
+/// head that includes the viewer can admit its other participants as agent
+/// candidates; downstream signed runtime-directory and managed-policy checks
+/// still decide which candidates are actually agents and whether they may
+/// respond to that viewer.
+pub fn dm_participant_channel_ids_from_events(
+    events: &[Event],
+    relay_pubkey: &str,
+    viewer_pubkey: &str,
+) -> HashMap<String, Vec<String>> {
+    let Ok(viewer_pubkey) = nostr::PublicKey::from_hex(viewer_pubkey) else {
+        return HashMap::new();
+    };
+    let viewer_pubkey = viewer_pubkey.to_hex();
+
+    // Fail closed on stale replacement heads: choose exactly one current
+    // relay-signed metadata event per channel before reading participants.
+    let mut latest_by_channel: HashMap<String, &Event> = HashMap::new();
+    for event in events {
+        if !event.pubkey.to_hex().eq_ignore_ascii_case(relay_pubkey) {
+            continue;
+        }
+        if first_tag_value(event, "t") != Some("dm") && !has_tag(event, "hidden") {
+            continue;
+        }
+        let Some(channel_id) = first_tag_value(event, "d") else {
+            continue;
+        };
+        if latest_by_channel
+            .get(channel_id)
+            .is_none_or(|previous| event_is_newer(event, previous))
+        {
+            latest_by_channel.insert(channel_id.to_string(), event);
+        }
+    }
+
+    let mut channel_ids: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for (channel_id, event) in latest_by_channel {
+        let participants: Vec<String> = tags_named(event, "p")
+            .filter_map(|tag| tag.get(1))
+            .filter_map(|pubkey| nostr::PublicKey::from_hex(pubkey).ok())
+            .map(|pubkey| pubkey.to_hex())
+            .collect();
+        if !participants.contains(&viewer_pubkey) {
+            continue;
+        }
+        for pubkey in participants {
+            if pubkey != viewer_pubkey {
+                channel_ids
+                    .entry(pubkey)
+                    .or_default()
+                    .insert(channel_id.clone());
+            }
         }
     }
 

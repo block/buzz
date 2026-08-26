@@ -1428,29 +1428,6 @@ test("an existing remote agent in a DM is mentioned without creating a local run
   });
   await page.goto("/");
   await expect(page.getByTestId("channel-alice-tyler")).toBeVisible();
-  await page.evaluate(
-    async ({ channelId, pubkey }) => {
-      const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
-      if (!invoke) throw new Error("Mock bridge is not installed.");
-      await invoke("add_channel_members", {
-        channelId,
-        pubkeys: [pubkey],
-        role: "bot",
-      });
-      await Promise.all([
-        window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
-          queryKey: ["channels"],
-        }),
-        window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
-          queryKey: ["relay-agents"],
-        }),
-      ]);
-    },
-    {
-      channelId: "f48efb06-0c93-5025-aac9-2e646bb6bfa8",
-      pubkey: remoteAgentPubkey,
-    },
-  );
   await page.getByTestId("channel-alice-tyler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
 

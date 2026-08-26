@@ -521,6 +521,89 @@ fn managed_agent_candidates_use_only_relay_signed_bot_membership() {
 }
 
 #[test]
+fn managed_agent_candidates_include_relay_signed_dm_participants() {
+    let relay_keys = Keys::generate();
+    let viewer_pubkey = Keys::generate().public_key().to_hex();
+    let agent_pubkey = Keys::generate().public_key().to_hex();
+    let stranger = Keys::generate().public_key().to_hex();
+    let dm = EventBuilder::new(Kind::Custom(39000), "")
+        .tags([
+            Tag::parse(["d", "pm-dm"]).expect("parse d tag"),
+            Tag::parse(["t", "dm"]).expect("parse type tag"),
+            Tag::parse(["p", &viewer_pubkey]).expect("parse viewer tag"),
+            Tag::parse(["p", &agent_pubkey]).expect("parse agent tag"),
+        ])
+        .sign_with_keys(&relay_keys)
+        .expect("sign DM metadata");
+    let forged = ev(
+        39000,
+        "",
+        vec![
+            vec!["d", "forged-dm"],
+            vec!["t", "dm"],
+            vec!["p", &viewer_pubkey],
+            vec!["p", &stranger],
+        ],
+    );
+    let stream = EventBuilder::new(Kind::Custom(39000), "")
+        .tags([
+            Tag::parse(["d", "general"]).expect("parse d tag"),
+            Tag::parse(["t", "stream"]).expect("parse type tag"),
+            Tag::parse(["p", &viewer_pubkey]).expect("parse viewer tag"),
+            Tag::parse(["p", &stranger]).expect("parse stranger tag"),
+        ])
+        .sign_with_keys(&relay_keys)
+        .expect("sign stream metadata");
+
+    let channel_ids = dm_participant_channel_ids_from_events(
+        &[forged, stream, dm],
+        &relay_keys.public_key().to_hex(),
+        &viewer_pubkey,
+    );
+
+    assert_eq!(
+        channel_ids.get(&agent_pubkey),
+        Some(&vec!["pm-dm".to_string()])
+    );
+    assert!(!channel_ids.contains_key(&viewer_pubkey));
+    assert!(!channel_ids.contains_key(&stranger));
+}
+
+#[test]
+fn managed_agent_dm_candidates_follow_only_the_latest_metadata_head() {
+    let relay_keys = Keys::generate();
+    let viewer_pubkey = Keys::generate().public_key().to_hex();
+    let removed_agent_pubkey = Keys::generate().public_key().to_hex();
+    let old_head = EventBuilder::new(Kind::Custom(39000), "")
+        .tags([
+            Tag::parse(["d", "pm-dm"]).expect("parse d tag"),
+            Tag::parse(["hidden"]).expect("parse hidden tag"),
+            Tag::parse(["p", &viewer_pubkey]).expect("parse viewer tag"),
+            Tag::parse(["p", &removed_agent_pubkey]).expect("parse agent tag"),
+        ])
+        .custom_created_at(nostr::Timestamp::from(10))
+        .sign_with_keys(&relay_keys)
+        .expect("sign old DM metadata");
+    let new_head = EventBuilder::new(Kind::Custom(39000), "")
+        .tags([
+            Tag::parse(["d", "pm-dm"]).expect("parse d tag"),
+            Tag::parse(["t", "dm"]).expect("parse type tag"),
+            Tag::parse(["p", &viewer_pubkey]).expect("parse viewer tag"),
+        ])
+        .custom_created_at(nostr::Timestamp::from(20))
+        .sign_with_keys(&relay_keys)
+        .expect("sign new DM metadata");
+
+    let channel_ids = dm_participant_channel_ids_from_events(
+        &[old_head, new_head],
+        &relay_keys.public_key().to_hex(),
+        &viewer_pubkey,
+    );
+
+    assert!(channel_ids.is_empty());
+}
+
+#[test]
 fn managed_agent_directory_query_pubkeys_reject_malformed_d_tags() {
     let valid_pubkey = Keys::generate().public_key().to_hex();
     let valid = ev(30177, "{}", vec![vec!["d", &valid_pubkey]]);
