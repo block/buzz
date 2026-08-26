@@ -27,6 +27,7 @@ jobs:
       desktop-rust: ${{ steps.filter.outputs.desktop-rust }}
       web: ${{ steps.filter.outputs.web }}
       mobile: ${{ steps.filter.outputs.mobile }}
+      mobile-ios: ${{ steps.filter.outputs.mobile-ios }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -72,6 +73,18 @@ jobs:
               - 'scripts/test-mobile-release-candidate-publisher.sh'
               - 'scripts/test-mobile-worktree-overrides.sh'
               - '.github/workflows/mobile-release-candidate.yml'
+              - '.github/workflows/ci.yml'
+            mobile-ios:
+              - 'mobile/ios/**'
+              - 'mobile/assets/**'
+              - 'mobile/pubspec.yaml'
+              - 'mobile/pubspec.lock'
+              - 'mobile/.metadata'
+              - 'Justfile'
+              - 'scripts/mobile-worktree-overrides.sh'
+              - 'bin/flutter'
+              - 'bin/dart'
+              - 'bin/.flutter-*.pkg'
               - '.github/workflows/ci.yml'
       - name: Release workflow source contract
         run: scripts/test-release-ref-contract.sh
@@ -933,6 +946,73 @@ jobs:
         run: cd mobile && flutter test
       - name: Build Android debug APK
         run: just mobile-build-android
+
+  mobile-ios-build:
+    name: Mobile iOS Build
+    runs-on: macos-latest
+    timeout-minutes: 10
+    needs: [changes]
+    # Deliberately gated on the path filter for push as well as pull_request.
+    # Unlike the sibling `mobile` job, this does NOT use
+    # `github.event_name == 'push' ||`: that disjunct bypasses the filter and
+    # would run this macOS job on every push to main.
+    if: needs.changes.outputs.mobile-ios == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      - name: Install locked CocoaPods
+        shell: bash
+        run: |
+          set -euo pipefail
+          readonly lockfile='mobile/ios/Podfile.lock'
+          versions=()
+          while IFS= read -r version; do
+            versions+=("$version")
+          done < <(sed -nE 's/^COCOAPODS: ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' "$lockfile")
+          if [[ ${#versions[@]} -ne 1 ]]; then
+            echo "::error file=$lockfile::Expected exactly one semantic COCOAPODS version, found ${#versions[@]}"
+            exit 1
+          fi
+
+          readonly version="${versions[0]}"
+          readonly gem_home="$RUNNER_TEMP/cocoapods-$version"
+          readonly bin_dir="$RUNNER_TEMP/cocoapods-bin"
+          rm -rf "$gem_home" "$bin_dir"
+          mkdir -p "$gem_home" "$bin_dir"
+          GEM_HOME="$gem_home" GEM_PATH="$gem_home" \
+            gem install cocoapods --version "$version" --no-document
+          printf '%s\n' \
+            "#!$(command -v ruby)" \
+            "require 'rubygems'" \
+            "gem 'cocoapods', '$version'" \
+            "load Gem.bin_path('cocoapods', 'pod', '$version')" \
+            > "$bin_dir/pod"
+          chmod +x "$bin_dir/pod"
+          {
+            echo "GEM_HOME=$gem_home"
+            echo "GEM_PATH=$gem_home"
+            echo 'LANG=en_US.UTF-8'
+          } >> "$GITHUB_ENV"
+          echo "$bin_dir" >> "$GITHUB_PATH"
+      - name: Verify CocoaPods version
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="$(sed -nE 's/^COCOAPODS: ([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' mobile/ios/Podfile.lock)"
+          actual="$(pod --version)"
+          echo "CocoaPods $actual at $(command -v pod)"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "::error::Expected CocoaPods $expected, got $actual"
+            exit 1
+          fi
+      - name: Install dependencies
+        run: cd mobile && flutter pub get
+      - name: Build unsigned iOS debug app
+        run: just mobile-build-ios
+      - name: Verify CocoaPods lockfile is unchanged
+        run: git diff --exit-code -- mobile/ios/Podfile.lock
 
   security:
     name: Security
