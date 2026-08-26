@@ -63,20 +63,51 @@ export type MentionTextInsertion = {
   text: string;
 };
 
+const SPACE_RUN = /^[ \u00A0]+$/;
+const OUTER_SPACES = /^[ \u00A0]+|[ \u00A0]+$/g;
+
+/**
+ * Position just after the trailing space of the mention token that `pos` is
+ * adjacent to, or `null` when `pos` is nowhere near one.
+ *
+ * `pos` may sit at the token end (before the space) or already past the
+ * space: when Chromium rewrites the whitespace run around the caret it
+ * anchors the replacement at either edge, and both mean the same boundary.
+ */
+function mentionTrailingSpaceBoundary(
+  doc: ProseMirrorNode,
+  pos: number,
+): number | null {
+  const afterSpace = selectionAfterMentionTrailingSpace(doc, pos);
+  if (afterSpace !== pos) return afterSpace;
+  if (pos > 0 && selectionAfterMentionTrailingSpace(doc, pos - 1) === pos) {
+    return pos;
+  }
+  return null;
+}
+
 /**
  * Where (and what) to insert when typed text arrives at the trailing space
  * after an `@name` / `#channel` token.
  *
  * - Caret on the space: insert after it, so the next keystroke lands after
  *   the token (`@bobhello` fix).
- * - One-character selection of the space: insert after it — replacing the
- *   selected space would produce `@bobhello`.
- * - Whitespace-run rewrite: when typing between the mention's trailing
- *   space and a pre-existing draft space, Chromium may re-emit the whole
- *   run as `replace("  " → " a")` — usually with a non-breaking space.
- *   Applying that verbatim deletes the draft's space
- *   (`hello @bob abcworld`), so keep the document's spaces and insert only
- *   the typed remainder after the trailing space.
+ * - Whitespace replaced next to that space: keep every space the document
+ *   already has and insert only the typed characters after the token's
+ *   trailing space.
+ *
+ * The second rule matters because typing between the mention's trailing
+ * space and a pre-existing draft space makes Chromium re-emit the whole
+ * whitespace run — `replace("  " -> " a")`, usually with a non-breaking
+ * space, and anchored at either edge of the run. Applying any of those
+ * verbatim deletes the draft's space (`hello @bob abcworld`).
+ *
+ * Only whitespace is ever redirected, and only while autocomplete is
+ * settling — a window in which the user cannot have selected anything,
+ * because a selection cancels settlement. So a replacement arriving here
+ * is the browser normalizing whitespace, never an intentional delete, and
+ * preserving the document's spaces is the whole invariant. Recognizing one
+ * specific rewrite shape instead is what left the draft space exposed.
  */
 export function insertionForMentionTextInput(
   doc: ProseMirrorNode,
@@ -84,19 +115,14 @@ export function insertionForMentionTextInput(
   to: number,
   text: string,
 ): MentionTextInsertion | null {
-  const next = selectionAfterMentionTrailingSpace(doc, from);
   if (from === to) {
+    const next = selectionAfterMentionTrailingSpace(doc, from);
     return next === from ? null : { insertAt: next, text };
   }
-  if (next !== from + 1) return null;
-  if (to === next) {
-    return { insertAt: next, text };
-  }
-  const replaced = doc.textBetween(from, to, "\n", "\0");
-  if (/^[ \u00A0]+$/.test(replaced) && /^[ \u00A0]/.test(text)) {
-    return { insertAt: next, text: text.replace(/^[ \u00A0]+/, "") };
-  }
-  return null;
+  const boundary = mentionTrailingSpaceBoundary(doc, from);
+  if (boundary === null) return null;
+  if (!SPACE_RUN.test(doc.textBetween(from, to, "\n", "\0"))) return null;
+  return { insertAt: boundary, text: text.replace(OUTER_SPACES, "") };
 }
 
 /**

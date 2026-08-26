@@ -12,6 +12,7 @@ import {
   findHighlightMatches,
   insertionForMentionTextInput,
   MentionHighlightExtension,
+  mentionHighlightKey,
   mentionTextInputInsertion,
   positionAfterArrowLeftThroughMentionSpace,
   selectionAfterMentionTrailingSpace,
@@ -277,21 +278,40 @@ test("insertionForMentionTextInput keeps a selected trailing space", () => {
 test("insertionForMentionTextInput keeps the draft space in a whitespace-run rewrite", () => {
   // Chromium can rewrite the whole space run when typing between the
   // mention's trailing space and a pre-existing draft space, emitting
-  // replace("  " → " a") — usually with a non-breaking space. The draft's
-  // space must survive either way.
+  // replace("  " -> " a") — usually with a non-breaking space, and anchored
+  // at either edge of the run. The draft's space must survive every shape.
   const doc = document(paragraph(text("hello @bob  world")));
   const spacePos = 1 + "hello @bob".length;
+  const kept = { insertAt: spacePos + 1, text: "a" };
+  // Anchored at the chip edge, replacing the whole run.
   assert.deepEqual(
     insertionForMentionTextInput(doc, spacePos, spacePos + 2, " a"),
-    { insertAt: spacePos + 1, text: "a" },
+    kept,
   );
   assert.deepEqual(
     insertionForMentionTextInput(doc, spacePos, spacePos + 2, "\u00A0a"),
-    { insertAt: spacePos + 1, text: "a" },
+    kept,
   );
-  // A rewrite that is not space-led is a real replacement — leave it alone.
-  assert.equal(
+  // Anchored past the trailing space, rewriting only the draft's own space.
+  // This shape used to fall through to the destructive default and produce
+  // "hello @bob abcworld" — the failure CI caught.
+  assert.deepEqual(
+    insertionForMentionTextInput(doc, spacePos + 1, spacePos + 2, "\u00A0a"),
+    kept,
+  );
+  // Trailing whitespace is the run being re-emitted on the other side.
+  assert.deepEqual(
+    insertionForMentionTextInput(doc, spacePos, spacePos + 2, "a\u00A0"),
+    kept,
+  );
+  // Whatever the shape, replaced whitespace is never dropped while settling.
+  assert.deepEqual(
     insertionForMentionTextInput(doc, spacePos, spacePos + 2, "x"),
+    { insertAt: spacePos + 1, text: "x" },
+  );
+  // Replacing something other than whitespace is a real edit — leave it.
+  assert.equal(
+    insertionForMentionTextInput(doc, spacePos, spacePos + 3, " a"),
     null,
   );
 });
@@ -402,4 +422,86 @@ test("typing after a completed mention keeps the separator intact", () => {
   const state = editorStateWithMentionHighlight("@quinn world", ["quinn"]);
   const typed = typeAt(state, 1 + "@quinn world".length, "!");
   assert.equal(typed.doc.textContent, "@quinn world!");
+});
+
+// ── the browser branch: Chromium's whitespace-run rewrite ─────────────
+//
+// The helper tests above model the payload. These drive the plugin's real
+// `handleTextInput` prop and fall back to ProseMirror's default insertion
+// when it declines, exactly as the browser does with the return value — so
+// the assertion is sensitive to the production branch itself rather than to
+// winning a timing race in a headless browser.
+
+/** Apply an autocomplete pick: replace the typed token and settle the caret. */
+function pickMentionAt(state, tokenFrom, tokenTo, inserted) {
+  const tr = state.tr.insertText(inserted, tokenFrom, tokenTo);
+  tr.setSelection(TextSelection.create(tr.doc, tokenFrom + inserted.length));
+  tr.setMeta(mentionHighlightKey, true);
+  return state.apply(tr);
+}
+
+/** Route a text-input event through the plugin, then the default handling. */
+function textInput(state, from, to, text) {
+  let current = state;
+  const view = {
+    get state() {
+      return current;
+    },
+    dispatch(tr) {
+      current = current.apply(tr);
+    },
+    domAtPos: () => ({ node: {}, offset: 0 }),
+    root: undefined,
+  };
+  const handled = current.plugins.some(
+    (plugin) => plugin.props?.handleTextInput?.(view, from, to, text) === true,
+  );
+  return handled
+    ? current
+    : current.apply(current.tr.insertText(text, from, to));
+}
+
+test("a whitespace-run rewrite after a mention pick keeps the draft space", () => {
+  // The CI failure: with "hello world" drafted, the caret placed after
+  // "hello", " @bo" typed and the "bob" suggestion picked, the document is
+  // "hello @bob  world" — the mention's trailing space followed by the
+  // draft's own space. The next keystroke arrives as one of these shapes
+  // depending on how Chromium reconciles that whitespace run, and all of
+  // them have to keep both spaces.
+  const tokenFrom = 1 + "hello ".length;
+  const spacePos = 1 + "hello @bob".length;
+  const shapes = [
+    { name: "caret at the chip edge", from: spacePos, to: spacePos, text: "a" },
+    {
+      name: "caret past the trailing space",
+      from: spacePos + 1,
+      to: spacePos + 1,
+      text: "a",
+    },
+    {
+      name: "run rewritten from the chip edge",
+      from: spacePos,
+      to: spacePos + 2,
+      text: "\u00A0a",
+    },
+    {
+      name: "draft space rewritten on its own",
+      from: spacePos + 1,
+      to: spacePos + 2,
+      text: "\u00A0a",
+    },
+  ];
+
+  for (const shape of shapes) {
+    // A fresh editor per shape: settlement is per-plugin closure state.
+    const picked = pickMentionAt(
+      editorStateWithMentionHighlight("hello @bo world", ["bob"]),
+      tokenFrom,
+      tokenFrom + "@bo".length,
+      "@bob ",
+    );
+    assert.equal(picked.doc.textContent, "hello @bob  world", shape.name);
+    const typed = textInput(picked, shape.from, shape.to, shape.text);
+    assert.equal(typed.doc.textContent, "hello @bob a world", shape.name);
+  }
 });
