@@ -160,8 +160,8 @@ test("agent-style Buzz links stay chip-only with metadata tooltips", async ({
   const tooltipSemanticColors = await prTooltip.evaluate((element) => {
     const styles = getComputedStyle(element);
     const probe = document.createElement("span");
-    probe.style.backgroundColor = "hsl(var(--secondary))";
-    probe.style.color = "hsl(var(--secondary-foreground))";
+    probe.style.backgroundColor = "hsl(var(--popover))";
+    probe.style.color = "hsl(var(--popover-foreground))";
     document.body.append(probe);
     const semanticStyles = getComputedStyle(probe);
     const result = {
