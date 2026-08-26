@@ -9,6 +9,8 @@
 //! - `tombstone`: publish an admin-deletion system message in the target channel.
 //! - `system_message`: publish a kick notification system message.
 //! - `reporter_notice`: send a moderation DM to the reporter.
+//! - `affected_user_notice`: send a moderation DM to the actioned user (the
+//!   author whose content was deleted, or the kicked/banned/timed-out user).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,6 +74,7 @@ pub(crate) async fn deliver_one(state: &Arc<AppState>, row: &OutboxRecord) {
         "tombstone" => deliver_tombstone(state, row).await,
         "system_message" => deliver_system_message(state, row).await,
         "reporter_notice" => deliver_reporter_notice(state, row).await,
+        "affected_user_notice" => deliver_affected_user_notice(state, row).await,
         other => Err(format!("unknown task_type: {other}")),
     };
 
@@ -150,6 +153,14 @@ async fn resolve_tenant(
 }
 
 /// Deliver a tombstone: publish an admin-deletion system message in the channel.
+///
+/// The emitted system message matches the channel-moderation tombstone schema
+/// (`side_effects.rs` NIP-29 DELETE_EVENT: `type: "message_deleted"` with
+/// `target_event_id` and an optional sanitized reason) so the room renders it
+/// identically. Without `target_event_id` the room cannot tell which message
+/// was removed, and without a reason it renders as a bare self-delete rather
+/// than a moderator removal — `SystemMessageRow` keys "Removed by community
+/// moderators" on `public_reason`.
 async fn deliver_tombstone(state: &Arc<AppState>, row: &OutboxRecord) -> Result<(), String> {
     let payload = &row.payload;
     let community_uuid: Uuid = payload["community_id"]
@@ -162,18 +173,31 @@ async fn deliver_tombstone(state: &Arc<AppState>, row: &OutboxRecord) -> Result<
         .ok_or("tombstone: missing channel_id")?
         .parse()
         .map_err(|_| "tombstone: invalid channel_id")?;
+    let target_event_id = payload["target_event_id"]
+        .as_str()
+        .ok_or("tombstone: missing target_event_id")?;
 
     let community_id = buzz_core::CommunityId::from_uuid(community_uuid);
     let tenant = resolve_tenant(state, community_id, "tombstone").await?;
+
+    // `reason_code` is the operator's `reason` string (see `finalize_success`).
+    // Forward it as the room-facing sanitized reason; the room renders the
+    // moderator-removal template only when a non-empty reason is present.
+    let mut content = serde_json::json!({
+        "type": "message_deleted",
+        "target_event_id": target_event_id,
+        "action_id": row.action_id.to_string(),
+    });
+    if let Some(reason_code) = payload["reason_code"].as_str().filter(|r| !r.is_empty()) {
+        content["reason_code"] = serde_json::Value::String(reason_code.to_string());
+        content["public_reason"] = serde_json::Value::String(reason_code.to_string());
+    }
 
     crate::handlers::side_effects::emit_system_message(
         &tenant,
         state,
         channel_id,
-        serde_json::json!({
-            "type": "admin_delete",
-            "action_id": row.action_id.to_string(),
-        }),
+        content,
         row.created_at,
     )
     .await
@@ -270,4 +294,59 @@ async fn deliver_reporter_notice(state: &Arc<AppState>, row: &OutboxRecord) -> R
     )
     .await
     .map_err(|e| format!("reporter_notice: send failed: {e}"))
+}
+
+/// Deliver a moderation DM to the actioned user. `delete`/`kick` map to the
+/// `ContentActioned` notice, `ban`/`timeout` to `Restriction`. The recipient
+/// pubkey and sanitized reason travel in the payload (enqueued in the same
+/// finalization transaction as the enforcement), so no extra DB lookup is
+/// needed here.
+async fn deliver_affected_user_notice(
+    state: &Arc<AppState>,
+    row: &OutboxRecord,
+) -> Result<(), String> {
+    let payload = &row.payload;
+    let community_uuid: Uuid = payload["community_id"]
+        .as_str()
+        .ok_or("affected_user_notice: missing community_id")?
+        .parse()
+        .map_err(|_| "affected_user_notice: invalid community_id")?;
+    let recipient = hex::decode(
+        payload["recipient"]
+            .as_str()
+            .ok_or("affected_user_notice: missing recipient")?,
+    )
+    .map_err(|_| "affected_user_notice: invalid recipient hex")?;
+    let notice_kind = payload["notice_kind"]
+        .as_str()
+        .ok_or("affected_user_notice: missing notice_kind")?;
+    let public_reason = payload["public_reason"].as_str().unwrap_or("").to_string();
+
+    use crate::handlers::moderation_notices::{send_moderation_notice, ModerationNotice};
+    let notice = match notice_kind {
+        "content_actioned" => ModerationNotice::ContentActioned {
+            action_id: row.action_id,
+            public_reason,
+        },
+        "restriction" => ModerationNotice::Restriction {
+            action_id: row.action_id,
+            kind: payload["restriction_kind"]
+                .as_str()
+                .ok_or("affected_user_notice: missing restriction_kind")?
+                .to_string(),
+            public_reason,
+        },
+        other => {
+            return Err(format!(
+                "affected_user_notice: unknown notice_kind: {other}"
+            ))
+        }
+    };
+
+    let community_id = buzz_core::CommunityId::from_uuid(community_uuid);
+    let tenant = resolve_tenant(state, community_id, "affected_user_notice").await?;
+
+    send_moderation_notice(&tenant, state, &recipient, notice, row.created_at)
+        .await
+        .map_err(|e| format!("affected_user_notice: send failed: {e}"))
 }

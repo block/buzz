@@ -4264,8 +4264,13 @@ impl Db {
     }
 
     /// Record a pre-mutation enforcement failure (keeps report in 'processing').
-    pub async fn record_action_failure(&self, action_id: uuid::Uuid, error: &str) -> Result<()> {
-        relay_admin_actions::record_failure(&self.pool, action_id, error).await
+    pub async fn record_action_failure(
+        &self,
+        action_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        error: &str,
+    ) -> Result<bool> {
+        relay_admin_actions::record_failure(&self.pool, action_id, lease_token, error).await
     }
 
     /// Cancel a pre-mutation failed action (returns report to 'open'),

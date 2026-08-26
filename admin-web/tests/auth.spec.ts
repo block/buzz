@@ -12,7 +12,10 @@ declare global {
 }
 
 /// Injects a minimal window.nostr stub that returns a fake signed event, so a
-/// test can drive nip98 mode without a real NIP-07 extension.
+/// test can drive nip98 mode without a real NIP-07 extension. The stub derives
+/// the event `id` from the signed fields (tags + created_at + content), so two
+/// signings collide iff their signed payloads are byte-identical — exactly the
+/// property the relay's replay guard keys on.
 async function seedNip98(page: Page) {
   await page.addInitScript(() => {
     (window as Window & { nostr?: unknown }).nostr = {
@@ -21,14 +24,33 @@ async function seedNip98(page: Page) {
         created_at: number;
         tags: string[][];
         content: string;
-      }) => ({
-        ...event,
-        id: "a".repeat(64),
-        pubkey: "b".repeat(64),
-        sig: "c".repeat(128),
-      }),
+      }) => {
+        const serialized = JSON.stringify([
+          event.kind,
+          event.created_at,
+          event.tags,
+          event.content,
+        ]);
+        // Cheap non-crypto digest of the signed fields, hex-padded to 64 chars.
+        let h = 0;
+        for (let i = 0; i < serialized.length; i++) {
+          h = (Math.imul(31, h) + serialized.charCodeAt(i)) | 0;
+        }
+        const id = (h >>> 0).toString(16).padStart(8, "0").repeat(8);
+        return {
+          ...event,
+          id,
+          pubkey: "b".repeat(64),
+          sig: "c".repeat(128),
+        };
+      },
     };
   });
+}
+
+/// Decode an `Authorization: Nostr <base64>` header to the signed event.
+function decodeNostrHeader(header: string): { id: string; tags: string[][] } {
+  return JSON.parse(atob(header.replace(/^Nostr /, "")));
 }
 
 test("nip98 mode: attachments are fetched with a signed credential and rendered from blob urls", async ({
@@ -325,6 +347,78 @@ test("probe: nip98 mode with a mocked NIP-07 extension signs requests and render
   for (const h of authenticatedHeaders) {
     expect(h).toMatch(/^Nostr /);
   }
+});
+
+test("nip98 mode: same-second retry re-signs with a distinct event id", async ({
+  page,
+}) => {
+  // Freeze the clock so both signings share created_at (1s resolution). With
+  // only u+method+created_at signed, the two events would be byte-identical
+  // and collide in the relay's replay guard, so the 401 retry could never
+  // recover. The per-signing random nonce tag must make the second event's id
+  // distinct despite the frozen clock.
+  await page.addInitScript(() => {
+    const FROZEN = 1_760_000_000_000;
+    const RealDate = Date;
+    // biome-ignore lint/suspicious/noExplicitAny: minimal Date shim for the test
+    (globalThis as any).Date = class extends RealDate {
+      constructor(...args: unknown[]) {
+        // biome-ignore lint/suspicious/noExplicitAny: forward constructor args
+        super(...(args.length ? (args as any) : [FROZEN]));
+      }
+      static now() {
+        return FROZEN;
+      }
+    };
+  });
+  await seedNip98(page);
+
+  const authCalls: string[] = [];
+  let signCount = 0;
+  await page.route("**/api/admin/v1/**", async (route) => {
+    const headers = route.request().headers();
+    if (!headers.authorization) {
+      await route.fulfill({
+        status: 401,
+        headers: { "www-authenticate": "Nostr" },
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: { code: "unauthorized", message: "nip98 required" },
+        }),
+      });
+      return;
+    }
+    authCalls.push(headers.authorization);
+    signCount++;
+    // First authenticated attempt → reject, forcing the re-sign + retry.
+    await route.fulfill(
+      signCount === 1
+        ? {
+            status: 401,
+            headers: { "www-authenticate": "Nostr" },
+            contentType: "application/json",
+            body: JSON.stringify({
+              error: { code: "unauthorized", message: "rejected" },
+            }),
+          }
+        : { contentType: "application/json", body: "[]" },
+    );
+  });
+
+  await page.goto("/reports");
+  await expect(
+    page.getByRole("heading", { name: "Open reports" }),
+  ).toBeVisible();
+  await page.waitForLoadState("networkidle");
+
+  expect(authCalls).toHaveLength(2);
+  const [first, second] = authCalls.map(decodeNostrHeader);
+  // Same frozen created_at, yet distinct ids — the nonce tag did its job.
+  expect(first.id).not.toBe(second.id);
+  const nonceOf = (tags: string[][]) => tags.find((t) => t[0] === "nonce")?.[1];
+  expect(nonceOf(first.tags)).toBeTruthy();
+  expect(nonceOf(second.tags)).toBeTruthy();
+  expect(nonceOf(first.tags)).not.toBe(nonceOf(second.tags));
 });
 
 test("nip98 mode: first-401-then-200 retries once and renders the dashboard", async ({

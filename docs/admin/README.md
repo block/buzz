@@ -272,7 +272,6 @@ set; the **Acted on** checkbox is stored in that browser's local storage.
 - `GET /api/admin/v1/feedback`
 - `GET /api/admin/v1/feedback/:id`
 - `GET /api/admin/v1/feedback/:id/attachments/:sha256`
-- `GET /api/admin/v1/operators`
 
 ### Action routes (Operator and Moderator)
 
@@ -303,6 +302,9 @@ set; the **Acted on** checkbox is stored in that browser's local storage.
 
 ### Staffing routes (Operator only)
 
+- `GET /api/admin/v1/operators`
+  Returns every effective principal with its `effectiveRole` and all
+  contributing `sources` (`config`, `owner_fallback`, `db`).
 - `PUT /api/admin/v1/operators/:pubkey`
   Body: `{"role": "operator|moderator"}`
   Returns `409` if the target is config-backed.

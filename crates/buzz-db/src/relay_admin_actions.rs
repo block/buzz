@@ -943,26 +943,84 @@ pub async fn finalize_success(
     .execute(&mut *tx)
     .await?;
 
+    // Enqueue a recipient-specific notice to the actioned user so the restricted
+    // party hears the truth (VISION_MODERATION: "Reasons travel … to the
+    // restricted user"). Mapped onto the existing notice variants:
+    //   delete/kick → ContentActioned (action taken on their content/presence)
+    //   ban/timeout → Restriction (terms of the restriction)
+    // Best-effort like the reporter notice: enqueued in this same transaction,
+    // delivered asynchronously; a delivery failure never undoes enforcement. When
+    // the target pubkey is absent (a purged event with no derivable author on a
+    // `delete`), there is no one to notify, so the notice is simply skipped.
+    let affected_notice: Option<(&str, Option<&str>)> = match action_name {
+        "delete" | "kick" => Some(("content_actioned", None)),
+        "ban" => Some(("restriction", Some("ban"))),
+        "timeout" => Some(("restriction", Some("timeout"))),
+        _ => None,
+    };
+    if let (Some((notice_kind, restriction_kind)), Some(recipient)) =
+        (affected_notice, target_pubkey)
+    {
+        let mut affected_payload = serde_json::json!({
+            "community_id": community_str,
+            "recipient": hex::encode(recipient),
+            "notice_kind": notice_kind,
+            "public_reason": reason.unwrap_or(""),
+        });
+        if let Some(rk) = restriction_kind {
+            affected_payload["restriction_kind"] = serde_json::Value::String(rk.to_string());
+        }
+        sqlx::query(
+            r#"
+            INSERT INTO relay_admin_outbox (action_id, task_type, payload, dedup_key)
+            VALUES ($1, 'affected_user_notice', $2, $3)
+            ON CONFLICT (dedup_key) DO NOTHING
+            "#,
+        )
+        .bind(action_id)
+        .bind(affected_payload)
+        .bind(format!("affected_user_notice:{action_str}"))
+        .execute(&mut *tx)
+        .await?;
+    }
+
     tx.commit().await?;
     Ok(true)
 }
 
-/// Record a failure on an action. The report remains 'processing' with active_action_id set.
-/// Only legal before 'mutation_committed' step marker (post-mutation failures are
-/// delivery states, not enforcement failures — handled separately).
-pub async fn record_failure(pool: &PgPool, action_id: Uuid, error: &str) -> Result<()> {
-    sqlx::query(
+/// Record a failure on an action, fenced by the caller's lease token. The report
+/// remains 'processing' with active_action_id set. Only legal before
+/// 'mutation_committed' step marker (post-mutation failures are delivery states,
+/// not enforcement failures — handled separately).
+///
+/// The lease fence (`action_lease_token` match AND unexpired lease) prevents a
+/// stale worker — one whose lease already expired and whose action was reclaimed
+/// by a new owner — from marking the reclaimed action `failed`. Without it, that
+/// late write races the new owner's fenced mutation: the mutation rolls back on
+/// the ownership check and the report is stranded in `processing` with no live
+/// action to drive it. Returns `true` iff a row was updated; `false` means the
+/// lease was lost (log and stop — do not treat as a terminal failure).
+pub async fn record_failure(
+    pool: &PgPool,
+    action_id: Uuid,
+    lease_token: Uuid,
+    error: &str,
+) -> Result<bool> {
+    let result = sqlx::query(
         r#"
         UPDATE relay_admin_actions
         SET state = 'failed', error_message = $2, updated_at = now()
         WHERE id = $1 AND state = 'enforcing' AND step_marker IS NULL
+          AND action_lease_token = $3
+          AND action_lease_expires_at > now()
         "#,
     )
     .bind(action_id)
     .bind(error)
+    .bind(lease_token)
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(result.rows_affected() > 0)
 }
 
 /// Cancel a failed action (pre-mutation only) and return its report to 'open'.
@@ -2000,6 +2058,175 @@ mod tests {
             rows_after.iter().any(|r| r.task_type == "reporter_notice"),
             "finalize_success must create reporter_notice outbox row; got: {rows_after:?}"
         );
+    }
+
+    // ── Affected-user notice: actioned user hears the truth ───────────────────
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn finalize_enqueues_affected_user_notice_for_restriction() {
+        // A `ban` must enqueue an `affected_user_notice` addressed to the target
+        // pubkey, carrying the sanitized reason and restriction kind — so the
+        // restricted user is told what happened (VISION_MODERATION).
+        let pool = setup_pool().await;
+        let community_id = make_community(&pool).await;
+        let report_id = make_report(&pool, community_id).await;
+
+        let claimed = match do_claim(&pool, community_id, report_id, Uuid::new_v4()).await {
+            ClaimResult::Claimed(a) => a,
+            other => panic!("expected Claimed, got {other:?}"),
+        };
+        let action_id = claimed.id;
+        let _ = begin_enforcing(&pool, action_id)
+            .await
+            .expect("begin_enforcing");
+        let _ = commit_mutation_step(&pool, action_id)
+            .await
+            .expect("commit_mutation_step");
+
+        // do_finalize uses action "ban", target [1u8; 32], reason "test reason".
+        assert!(do_finalize(&pool, action_id, community_id, report_id).await);
+
+        let rows = list_pending_outbox(&pool, action_id)
+            .await
+            .expect("list_pending_outbox");
+        let notice = rows
+            .iter()
+            .find(|r| r.task_type == "affected_user_notice")
+            .expect("finalize_success must enqueue an affected_user_notice for ban");
+        assert_eq!(
+            notice.payload["recipient"].as_str(),
+            Some(hex::encode([1u8; 32]).as_str()),
+            "notice must be addressed to the actioned target pubkey"
+        );
+        assert_eq!(notice.payload["notice_kind"].as_str(), Some("restriction"));
+        assert_eq!(notice.payload["restriction_kind"].as_str(), Some("ban"));
+        assert_eq!(
+            notice.payload["public_reason"].as_str(),
+            Some("test reason")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn finalize_skips_affected_user_notice_when_no_target_pubkey() {
+        // A `delete` with no derivable author (purged event) has no one to
+        // notify: no affected_user_notice row is enqueued, but the reporter
+        // notice still is.
+        let pool = setup_pool().await;
+        let community_id = make_community(&pool).await;
+        let report_id = make_report(&pool, community_id).await;
+
+        let claimed = match do_claim(&pool, community_id, report_id, Uuid::new_v4()).await {
+            ClaimResult::Claimed(a) => a,
+            other => panic!("expected Claimed, got {other:?}"),
+        };
+        let action_id = claimed.id;
+        let _ = begin_enforcing(&pool, action_id)
+            .await
+            .expect("begin_enforcing");
+        let _ = commit_mutation_step(&pool, action_id)
+            .await
+            .expect("commit_mutation_step");
+
+        // Finalize a `delete` with target_pubkey = None.
+        let finalized = finalize_success(
+            &pool,
+            action_id,
+            CommunityId::from_uuid(community_id),
+            report_id,
+            "resolved",
+            &actor(),
+            "delete",
+            None,
+            None,
+            None,
+            Some("test reason"),
+        )
+        .await
+        .expect("finalize_success");
+        assert!(finalized);
+
+        let rows = list_pending_outbox(&pool, action_id)
+            .await
+            .expect("list_pending_outbox");
+        assert!(
+            rows.iter().any(|r| r.task_type == "reporter_notice"),
+            "reporter notice must still be enqueued"
+        );
+        assert!(
+            !rows.iter().any(|r| r.task_type == "affected_user_notice"),
+            "no affected_user_notice when there is no target pubkey; got: {rows:?}"
+        );
+    }
+
+    // ── record_failure lease fence: stale worker cannot strand the report ─────
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn record_failure_is_a_no_op_after_lease_reclaim() {
+        // Worker A leases the action, its lease expires, worker B reclaims it,
+        // then A's late failure write must be a no-op (0 rows) rather than
+        // marking the reclaimed action `failed` and stranding the report.
+        let pool = setup_pool().await;
+        let community_id = make_community(&pool).await;
+        let report_id = make_report(&pool, community_id).await;
+
+        let claimed = match do_claim(&pool, community_id, report_id, Uuid::new_v4()).await {
+            ClaimResult::Claimed(a) => a,
+            other => panic!("expected Claimed, got {other:?}"),
+        };
+        let action_id = claimed.id;
+        let _ = begin_enforcing(&pool, action_id)
+            .await
+            .expect("begin_enforcing");
+
+        // Worker A leases with an ALREADY-EXPIRED expiry (simulates lease loss).
+        let expired = chrono::Utc::now() - chrono::Duration::seconds(1);
+        let token_a = match acquire_action_lease(&pool, action_id, expired)
+            .await
+            .expect("acquire A")
+        {
+            LeaseResult::Acquired(t) => t,
+            other => panic!("expected Acquired, got {other:?}"),
+        };
+
+        // Worker B reclaims (A's lease is expired, so this succeeds).
+        let lease_until = chrono::Utc::now() + chrono::Duration::seconds(60);
+        let token_b = match acquire_action_lease(&pool, action_id, lease_until)
+            .await
+            .expect("acquire B")
+        {
+            LeaseResult::Acquired(t) => t,
+            other => panic!("expected Acquired for B, got {other:?}"),
+        };
+        assert_ne!(token_a, token_b);
+
+        // A's late failure write must be a no-op.
+        let a_wrote = record_failure(&pool, action_id, token_a, "A late failure")
+            .await
+            .expect("record_failure A");
+        assert!(!a_wrote, "stale worker A must not record the failure");
+
+        let rec = get_action(&pool, action_id)
+            .await
+            .expect("get_action")
+            .expect("action exists");
+        assert_eq!(
+            rec.state, "enforcing",
+            "action must remain enforcing (owned by B), not failed"
+        );
+
+        // B, holding the live lease, can record a failure.
+        let b_wrote = record_failure(&pool, action_id, token_b, "B failure")
+            .await
+            .expect("record_failure B");
+        assert!(b_wrote, "live owner B must be able to record the failure");
+        let rec = get_action(&pool, action_id)
+            .await
+            .expect("get_action")
+            .expect("action exists");
+        assert_eq!(rec.state, "failed");
     }
 
     // ── Finalize fences: requires step_marker + active_action_id ─────────────

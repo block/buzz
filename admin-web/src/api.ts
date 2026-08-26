@@ -16,16 +16,29 @@ export type AuthMode = "nip98" | "disabled";
 
 /// Sign a NIP-98 kind-27235 event for the given URL + method via window.nostr.
 /// Throws if window.nostr is not available or signing fails.
+///
+/// A fresh random `nonce` tag is generated on every call. Without it, two
+/// same-URL requests in the same second produce byte-identical events (the
+/// signed fields are only `u`, `method`, and `created_at` at 1-second
+/// resolution), so their event IDs collide — the relay's NIP-98 replay guard
+/// rejects the second, and the 401 retry re-signs the same fields and can
+/// never recover. The verifier ignores unknown tags, so the nonce is inert to
+/// verification and serves only to make each signed event unique.
 async function signNip98(url: string, method: string): Promise<string> {
   const nostr = (window as Window & typeof globalThis & { nostr?: Nostr98 })
     .nostr;
   if (!nostr) throw new Error("No NIP-07 extension available");
+  const nonce = crypto.getRandomValues(new Uint8Array(16));
+  const nonceHex = Array.from(nonce, (b) =>
+    b.toString(16).padStart(2, "0"),
+  ).join("");
   const event = await nostr.signEvent({
     kind: 27235,
     created_at: Math.floor(Date.now() / 1000),
     tags: [
       ["u", url],
       ["method", method],
+      ["nonce", nonceHex],
     ],
     content: "",
   });

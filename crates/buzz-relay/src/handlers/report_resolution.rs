@@ -497,6 +497,34 @@ async fn drive_enforcement(
             };
             let mutation_result = run_atomic_mutation(state, action_id, lease_token, &ctx).await;
 
+            // On enforcement error, record the failure while we STILL hold the
+            // lease — `record_action_failure` is fenced on the live token, so it
+            // must run before the release below. A `false` return means the lease
+            // was lost (our lease expired and another pod reclaimed the action);
+            // that is not a terminal failure — the new owner will converge it, so
+            // we surface a retryable error rather than marking the report failed.
+            let mut failure_lease_lost = false;
+            if let Err(e) = &mutation_result {
+                match state
+                    .db
+                    .record_action_failure(action_id, lease_token, &e.to_string())
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        failure_lease_lost = true;
+                        warn!(
+                            action_id = %action_id,
+                            "enforcement failed but action lease was lost; \
+                             recovery worker will converge"
+                        );
+                    }
+                    Err(db_err) => {
+                        warn!(action_id = %action_id, error = %db_err, "record_action_failure failed");
+                    }
+                }
+            }
+
             // Release lease regardless of outcome so the action worker
             // can pick up a failed action. Skip if we were given the lease
             // from a batch claim (caller manages its own lease lifecycle).
@@ -537,10 +565,14 @@ async fn drive_enforcement(
                     // Marker committed. Fall through to finalization below.
                 }
                 Err(e) => {
-                    let _ = state
-                        .db
-                        .record_action_failure(action_id, &e.to_string())
-                        .await;
+                    if failure_lease_lost {
+                        // The failure could not be recorded because the lease was
+                        // lost; the reclaiming owner drives the action. Retryable,
+                        // not terminal.
+                        return Err(ResolutionError::Internal(format!(
+                            "action {action_id} failed but lease lost; recovery worker will complete"
+                        )));
+                    }
                     return Err(ResolutionError::EnforcementFailed {
                         action_id,
                         error: e.to_string(),

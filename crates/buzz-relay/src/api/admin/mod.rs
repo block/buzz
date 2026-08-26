@@ -4198,10 +4198,21 @@ mod tests {
         buzz_db::relay_admin_actions::begin_enforcing(&pool, action_id)
             .await
             .expect("begin_enforcing");
-        buzz_db::relay_admin_actions::record_failure(&pool, action_id, "boom")
-            .await
-            .expect("record_failure");
-
+        let lease_until = chrono::Utc::now() + chrono::Duration::seconds(60);
+        let lease_token =
+            match buzz_db::relay_admin_actions::acquire_action_lease(&pool, action_id, lease_until)
+                .await
+                .expect("acquire_action_lease")
+            {
+                buzz_db::relay_admin_actions::LeaseResult::Acquired(t) => t,
+                other => panic!("expected Acquired, got {other:?}"),
+            };
+        assert!(
+            buzz_db::relay_admin_actions::record_failure(&pool, action_id, lease_token, "boom")
+                .await
+                .expect("record_failure"),
+            "record_failure must update the row while the lease is held"
+        );
         let body = serde_json::json!({ "actionId": action_id }).to_string();
         let path = format!("/reports/{report_id}/cancel");
         let auth = make_nostr_auth_post(&keys, &path, body.as_bytes());
@@ -4314,7 +4325,19 @@ mod tests {
                 buzz_db::relay_admin_actions::begin_enforcing(&pool, action_id)
                     .await
                     .expect("begin_enforcing");
-                buzz_db::relay_admin_actions::record_failure(&pool, action_id, "boom")
+                let lease_until = chrono::Utc::now() + chrono::Duration::seconds(60);
+                let lease_token = match buzz_db::relay_admin_actions::acquire_action_lease(
+                    &pool,
+                    action_id,
+                    lease_until,
+                )
+                .await
+                .expect("acquire_action_lease")
+                {
+                    buzz_db::relay_admin_actions::LeaseResult::Acquired(t) => t,
+                    other => panic!("expected Acquired, got {other:?}"),
+                };
+                buzz_db::relay_admin_actions::record_failure(&pool, action_id, lease_token, "boom")
                     .await
                     .expect("record_failure");
                 action_id
