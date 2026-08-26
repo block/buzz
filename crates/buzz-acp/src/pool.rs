@@ -373,17 +373,16 @@ pub enum ControlSignal {
     },
 }
 
-/// Goose-native non-cancelling steer request, sent from the main loop to an
-/// in-flight prompt task's read loop via a capacity-1 mpsc channel.
+/// Non-cancelling steer request, sent from the main loop to an in-flight prompt
+/// task's read loop via a capacity-1 mpsc channel.
 ///
 /// The read loop owns the `AcpClient`'s reader/writer for the duration of the
 /// turn, so we cannot drive a steer write from the main thread directly. The
-/// main loop carries the steer prompt body (already framed by
-/// `queue::native_steer_framing()` + `queue::format_event_block`); the read
-/// loop completes `sessionId` (lexical) and `expectedRunId`
-/// (`AcpClient::active_run_id` at write time) when it actually emits the
-/// JSON-RPC request. The main loop awaits a `SteerAck` on the `ack_tx`
-/// oneshot.
+/// main loop carries the steer prompt body (already built by
+/// `queue::format_native_steer_prompt`); the read loop completes `sessionId`
+/// (lexical) and `expectedRunId` (`AcpClient::active_run_id` at write time) when
+/// it actually emits the JSON-RPC request. The main loop awaits a `SteerAck` on
+/// the `ack_tx` oneshot.
 ///
 /// ## Why the read loop fills params, not the main loop
 ///
@@ -412,8 +411,9 @@ pub enum ControlSignal {
 pub struct SteerRequest {
     /// Prompt body text blocks. Each entry becomes one `text` content
     /// block in `params.prompt`. Built by the main loop via
-    /// `queue::native_steer_framing()` + `queue::format_event_block` so
-    /// the wording cannot drift from the cancel+merge fallback path.
+    /// `queue::format_native_steer_prompt` — see that function for what a steer
+    /// body carries, what it omits, and where it diverges from the cancel+merge
+    /// fallback.
     pub prompt_blocks: Vec<String>,
     /// Oneshot for the read loop to report the outcome.
     pub ack_tx: tokio::sync::oneshot::Sender<SteerAck>,

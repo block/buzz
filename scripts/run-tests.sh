@@ -120,6 +120,40 @@ run_unit_tests() {
   # `just test-unit` — the two lists must stay in step.
   run_test_step "buzz-agent unit tests" \
     cargo test -p buzz-agent --lib -- --nocapture
+
+  # buzz-acp harness: ACP prompt formatting, the event queue, and the pool
+  # lifecycle state machine. No infra. Mirrors the nextest path in
+  # `just test-unit` — the two lists must stay in step.
+  run_test_step "buzz-acp unit tests" run_buzz_acp_unit_tests
+}
+
+# buzz-acp's tests, with the `BUZZ_*` family cleared. `just test-unit` scrubs the
+# same family before its nextest path.
+#
+# `config.rs` asserts clap defaults through `CliArgs::parse_from`, which reads
+# `#[arg(env)]` unconditionally, so those tests assume a fixed environment — and
+# a buzz-acp-hosted agent sets the very variables the package under test reads.
+# The whole family goes rather than a list of names: a list only approximates a
+# no-Buzz-config environment, and it drifts as tests are added. Today
+# `BUZZ_ACP_LAZY_POOL` and `BUZZ_ACP_MULTIPLE_EVENT_HANDLING` break default
+# assertions and `BUZZ_ACP_ALLOWED_RESPOND_TO` breaks a test whose premise is that
+# the option is unset. Subshell so the other steps keep their environment.
+# shellcheck disable=SC2329  # invoked indirectly, via run_test_step "$@"
+run_buzz_acp_unit_tests() {
+  (
+    while IFS= read -r var; do
+      unset "$var"
+    done < <(env | sed -n 's/^\(BUZZ_[A-Za-z0-9_]*\)=.*/\1/p')
+    # `run_test_step` invokes this from an `if`, which suppresses `errexit` for
+    # the whole call, so a failed `unset` — a readonly variable — would leak and
+    # still report the step as passed. Assert the outcome, not each `unset`.
+    leaked="$(env | sed -n 's/^\(BUZZ_[A-Za-z0-9_]*\)=.*/\1/p' | tr '\n' ' ')"
+    if [ -n "${leaked}" ]; then
+      error "BUZZ_* survived the scrub: ${leaked}"
+      exit 1
+    fi
+    cargo test -p buzz-acp -- --nocapture
+  )
 }
 
 # ---- DB / integration tests (infra required) --------------------------------
