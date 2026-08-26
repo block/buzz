@@ -1,7 +1,7 @@
 import * as React from "react";
 import { getVersion } from "@tauri-apps/api/app";
 
-import { STARTUP_CHANGELOG } from "@/app/startupChangelog";
+import { RECENT_STARTUP_CHANGELOG } from "@/app/startupChangelog";
 import {
   Dialog,
   DialogClose,
@@ -35,12 +35,12 @@ export function StartupChangelogDialog() {
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>更新日志{version ? ` · v${version}` : ""}</DialogTitle>
-          <DialogDescription>本次启动的 Buzz 更新内容</DialogDescription>
+          <DialogDescription>最近 10 日的 Buzz 修改记录</DialogDescription>
         </DialogHeader>
         <div className="grid gap-5 py-2">
-          {STARTUP_CHANGELOG.map((section) => (
-            <section className="grid gap-2" key={section.title}>
-              <h3 className="text-sm font-semibold">{section.title}</h3>
+          {RECENT_STARTUP_CHANGELOG.map((section) => (
+            <section className="grid gap-2" key={section.date}>
+              <h3 className="text-sm font-semibold">{section.date}</h3>
               <ul className="grid list-disc gap-1.5 pl-5 text-sm text-muted-foreground">
                 {section.items.map((item) => (
                   <li key={item}>{item}</li>
