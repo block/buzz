@@ -1,11 +1,13 @@
 """just benchmark must default to leaderboard-eligible settings."""
 
+import asyncio
 import importlib.util
 import json
 import sys
 from pathlib import Path
 
 import pytest
+from harbor.models.job.config import DatasetConfig
 
 _SCRIPT = Path(__file__).parents[2] / "scripts" / "benchmark.py"
 _spec = importlib.util.spec_from_file_location("benchmark", _SCRIPT)
@@ -116,8 +118,25 @@ def test_layer_selects_metadata_and_uses_its_default_attempts(layer, attempts):
     selected = benchmark.buzz_tasks_for_path(benchmark.BUZZ_DATASET_ROOT)
     assert selected is not None
     assert set(run.include_task) == {
-        task.name for task in selected if task.layer == layer
+        task.path.name for task in selected if task.layer == layer
     }
+
+
+@pytest.mark.parametrize("layer", benchmark.EVALUATION_LAYERS)
+def test_layer_selectors_resolve_through_harbor_local_dataset_filter(layer):
+    args = benchmark.parse_args(
+        ["--path", str(benchmark.BUZZ_DATASET_ROOT), "--layer", layer]
+    )
+    (run,) = benchmark.plan_benchmark_runs(args)
+
+    configs = asyncio.run(
+        DatasetConfig(
+            path=benchmark.BUZZ_DATASET_ROOT,
+            task_names=run.include_task,
+        ).get_task_configs(disable_verification=True)
+    )
+
+    assert {config.path.name for config in configs} == set(run.include_task)
 
 
 def test_omitted_layer_splits_buzz_dataset_into_two_jobs():
@@ -138,7 +157,7 @@ def test_single_buzz_task_infers_its_layer_default():
     (run,) = benchmark.plan_benchmark_runs(args)
 
     assert run.attempts == 3
-    assert run.include_task == ["buzz-native/cross-thread-requests"]
+    assert run.include_task == ["cross-thread-requests"]
 
 
 def test_explicit_attempts_override_keeps_one_mixed_buzz_job():
@@ -208,7 +227,12 @@ def test_layer_dry_run_constructs_exact_task_selectors_and_attempts():
         if part == "--include-task-name"
     ]
     assert set(selected) == set(run.include_task)
-    assert all(name.startswith("buzz-native/") for name in selected)
+    assert set(selected) == {
+        "ambiguous-user-mention",
+        "cross-thread-requests",
+        "create-channel-invite-users",
+        "interleaved-agent-reports",
+    }
 
 
 def test_state_is_generated_once_and_reused(state_dir):

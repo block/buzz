@@ -269,9 +269,9 @@ def _copy_run_args(
     run_args.attempts = attempts
     run_args.job_name = args.job_name if job_name is None else job_name
     if tasks is not None:
-        # Exact task identities are derived from evaluation_layer metadata.
-        # The identities themselves remain unchanged.
-        run_args.include_task = [task.name for task in tasks]
+        # Harbor filters local-path datasets by directory basename. Keep the
+        # canonical task.toml identity for metadata, but pass Harbor its key.
+        run_args.include_task = [task.path.name for task in tasks]
         run_args.exclude_task = []
     return run_args
 
