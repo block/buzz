@@ -1,7 +1,5 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
-// TEMPORARY diagnostic import — remove with the DM-notify logging below.
-import { invoke } from "@tauri-apps/api/core";
 
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { updateChannelLastMessageAt } from "@/features/channels/lib/channelRecency";
@@ -201,12 +199,6 @@ export function useLiveChannelUpdates(
 
   const handleDmEvent = React.useEffectEvent(
     (event: RelayEvent, isFirstNotificationDelivery: boolean) => {
-      // TEMPORARY diagnostic — remove before release.
-      const dmLog = (reason: string) =>
-        void invoke("debug_append_relay_log", {
-          line: `DM-EVENT kind=${event.kind} ${reason}`,
-        }).catch(() => {});
-
       // Only human-visible message kinds should fire DM notifications.
       if (!isDmNotifiableKind(event.kind) || !isFirstNotificationDelivery) {
         return;
@@ -215,37 +207,29 @@ export function useLiveChannelUpdates(
       // Suppress backlog events that predate our subscription — these are
       // historical replays, not live messages.
       if (event.created_at < dmSubscriptionStartedAtRef.current) {
-        dmLog(
-          `BAIL backlog created_at=${event.created_at} < startedAt=${dmSubscriptionStartedAtRef.current}`,
-        );
         return;
       }
 
       const channelId = getChannelIdFromTags(event.tags);
       if (!channelId) {
-        dmLog("BAIL no-channel-id");
         return;
       }
 
       if (!isExternalMentionEvent(event, normalizedCurrentPubkey)) {
-        dmLog(`BAIL not-external-mention channel=${channelId}`);
         return;
       }
 
       const dmChannel = dmChannelMap.get(channelId);
       if (!dmChannel) {
-        dmLog(`BAIL unknown-dm-channel channel=${channelId}`);
         return;
       }
 
       // Don't fire a notification for the channel the user is already viewing,
       // unless the notify-while-viewing setting opts in.
       if (channelId === activeChannelId && !options.notifyForActiveChannel) {
-        dmLog(`BAIL active-channel channel=${channelId}`);
         return;
       }
 
-      dmLog(`REACHED onDmMessage channel=${channelId}`);
       options.onDmMessage?.(event, dmChannel);
     },
   );

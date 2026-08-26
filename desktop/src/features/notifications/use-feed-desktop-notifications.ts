@@ -1,6 +1,4 @@
 import * as React from "react";
-// TEMPORARY diagnostic import — remove with the toast logging below.
-import { invoke } from "@tauri-apps/api/core";
 
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import {
@@ -173,19 +171,6 @@ export function useFeedDesktopNotifications(
               item.category === "mention",
           )
       : [];
-
-    // TEMPORARY diagnostic — trace the toast decision. Remove before release.
-    const unseenMentions = feed.feed.mentions.filter(
-      (item) => !nextSeenItemIds.has(item.id),
-    );
-    void invoke("debug_append_relay_log", {
-      line:
-        `NOTIFY-FEED init=${hasInitializedFeedRef.current} desktopEnabled=${settings.desktopEnabled}` +
-        ` mentionSlot=${settings.slotAlertsEnabled.mention} naSlot=${settings.slotAlertsEnabled.needs_action}` +
-        ` mentionsInFeed=${feed.feed.mentions.length} needsActionInFeed=${feed.feed.needsAction.length}` +
-        ` unseenMentions=${unseenMentions.length} unseenMentionTypes=[${unseenMentions.map((m) => m.channelType ?? "?").join(",")}]` +
-        ` eligibleNew=${newItems.length}`,
-    }).catch(() => {});
 
     for (const item of currentFeedItems) {
       nextSeenItemIds.add(item.id);

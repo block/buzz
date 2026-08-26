@@ -443,16 +443,8 @@ export async function revealDesktopAppWindow(): Promise<void> {
 export async function sendDesktopNotification(
   payload: DesktopNotificationPayload,
 ): Promise<boolean> {
-  // TEMPORARY diagnostic — trace why the toast doesn't fire. Remove before
-  // release.
   const permissionState = await getDesktopNotificationPermissionState();
-  void invoke("debug_append_relay_log", {
-    line: `NOTIFY sendDesktopNotification title="${payload.title}" permission=${permissionState} tauri=${isTauri()} win=${isWindowsPlatform()}`,
-  }).catch(() => {});
   if (permissionState !== "granted") {
-    void invoke("debug_append_relay_log", {
-      line: `NOTIFY blocked: permission=${permissionState}`,
-    }).catch(() => {});
     return false;
   }
 
@@ -465,19 +457,13 @@ export async function sendDesktopNotification(
     (isLinuxPlatform() || isMacPlatform() || isWindowsPlatform())
   ) {
     try {
-      void invoke("debug_append_relay_log", {
-        line: "NOTIFY invoking show_native_notification",
-      }).catch(() => {});
       await invoke("show_native_notification", {
         title: payload.title,
         body: payload.body,
         target: payload.target ?? null,
       });
       return true;
-    } catch (notifyError) {
-      void invoke("debug_append_relay_log", {
-        line: `NOTIFY show_native_notification threw: ${String(notifyError)}`,
-      }).catch(() => {});
+    } catch {
       if (!isMacPlatform()) {
         return false;
       }

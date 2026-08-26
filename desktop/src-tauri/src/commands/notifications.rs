@@ -207,10 +207,6 @@ pub(crate) mod windows {
         ensure_process_mta();
 
         std::thread::spawn(move || {
-            crate::relay_debug_log::append_line(
-                &app,
-                &format!("TOAST show() thread entered, app_id={app_id}, title={title}"),
-            );
             let mut toast = tauri_winrt_notification::Toast::new(&app_id).text1(&title);
             if let Some(body_text) = body.as_deref() {
                 toast = toast.text2(body_text);
@@ -234,17 +230,8 @@ pub(crate) mod windows {
                 Ok(())
             });
 
-            match toast.show() {
-                Ok(_) => {
-                    crate::relay_debug_log::append_line(&app, "TOAST show() OK");
-                }
-                Err(error) => {
-                    crate::relay_debug_log::append_line(
-                        &app,
-                        &format!("TOAST show() ERR: {error}"),
-                    );
-                    eprintln!("buzz-desktop: failed to post Windows native notification: {error}");
-                }
+            if let Err(error) = toast.show() {
+                eprintln!("buzz-desktop: failed to post Windows native notification: {error}");
             }
         });
     }
