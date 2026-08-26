@@ -22,6 +22,52 @@ fn extract_channel_metadata(e: &serde_json::Value) -> serde_json::Value {
     })
 }
 
+fn extract_channel_visibility(e: &serde_json::Value) -> Result<&'static str, CliError> {
+    let tags = e
+        .get("tags")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| CliError::Other("channel metadata is missing a tags array".into()))?;
+
+    let mut visibility = None;
+    for tag in tags {
+        let Some(parts) = tag.as_array() else {
+            continue;
+        };
+        let Some(marker) = parts.first().and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if marker != "public" && marker != "private" {
+            continue;
+        }
+        if parts.len() != 1 {
+            return Err(CliError::Other(format!(
+                "channel metadata has malformed {marker} visibility tag"
+            )));
+        }
+
+        let projected = if marker == "public" {
+            "open"
+        } else {
+            "private"
+        };
+        if visibility.replace(projected).is_some() {
+            return Err(CliError::Other(
+                "channel metadata has ambiguous visibility tags".into(),
+            ));
+        }
+    }
+
+    visibility.ok_or_else(|| CliError::Other("channel metadata is missing visibility".into()))
+}
+
+fn extract_exact_channel_metadata(e: &serde_json::Value) -> Result<serde_json::Value, CliError> {
+    let mut normalized = extract_channel_metadata(e);
+    normalized["pubkey"] =
+        serde_json::json!(e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""));
+    normalized["visibility"] = serde_json::json!(extract_channel_visibility(e)?);
+    Ok(normalized)
+}
+
 pub async fn cmd_list_channels(
     client: &BuzzClient,
     visibility: Option<&str>,
@@ -235,10 +281,7 @@ pub async fn cmd_get_channel(client: &BuzzClient, channel_id: &str) -> Result<()
     let resp = client.query(&filter).await?;
     let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     if let Some(e) = events.first() {
-        let mut normalized = extract_channel_metadata(e);
-        normalized["pubkey"] =
-            serde_json::json!(e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""));
-        println!("{normalized}");
+        println!("{}", extract_exact_channel_metadata(e)?);
     } else {
         println!("null");
     }
@@ -1197,9 +1240,9 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 mod tests {
     use super::{
         apply_cardinality_rule, build_template_report, cmd_set_add_policy,
-        finalize_roster_resolution, name_matches, resolve_roster_with_archive_filter,
-        validate_ttl_seconds, validate_update_channel_fields, ArchivedExclusion, ChannelSummary,
-        ResolvedAgent, RosterResolution, SkippedSlug,
+        extract_exact_channel_metadata, finalize_roster_resolution, name_matches,
+        resolve_roster_with_archive_filter, validate_ttl_seconds, validate_update_channel_fields,
+        ArchivedExclusion, ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
     };
     use crate::client::BuzzClient;
     use crate::CliError;
@@ -1207,6 +1250,82 @@ mod tests {
 
     fn event(tags: serde_json::Value) -> serde_json::Value {
         json!({ "tags": tags })
+    }
+
+    fn metadata_event(visibility_tags: serde_json::Value) -> serde_json::Value {
+        let mut tags = vec![
+            json!(["d", "11111111-1111-1111-1111-111111111111"]),
+            json!(["name", "adapter-evidence"]),
+            json!(["about", "Exact channel metadata"]),
+        ];
+        tags.extend(
+            visibility_tags
+                .as_array()
+                .expect("visibility tags")
+                .iter()
+                .cloned(),
+        );
+        json!({
+            "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "created_at": 1_787_171_107_u64,
+            "tags": tags,
+        })
+    }
+
+    #[test]
+    fn exact_metadata_projects_open_visibility_with_existing_fields() {
+        let output = extract_exact_channel_metadata(&metadata_event(json!([["public"]])))
+            .expect("valid open metadata");
+        assert_eq!(
+            output,
+            json!({
+                "channel_id": "11111111-1111-1111-1111-111111111111",
+                "name": "adapter-evidence",
+                "description": "Exact channel metadata",
+                "created_at": 1_787_171_107_u64,
+                "pubkey": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "visibility": "open",
+            })
+        );
+    }
+
+    #[test]
+    fn exact_metadata_projects_private_visibility_with_existing_fields() {
+        let output = extract_exact_channel_metadata(&metadata_event(json!([["private"]])))
+            .expect("valid private metadata");
+        assert_eq!(output["visibility"], "private");
+        assert_eq!(output["channel_id"], "11111111-1111-1111-1111-111111111111");
+        assert_eq!(output["name"], "adapter-evidence");
+        assert_eq!(output["description"], "Exact channel metadata");
+        assert_eq!(output["created_at"], 1_787_171_107_u64);
+        assert_eq!(
+            output["pubkey"],
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+    }
+
+    #[test]
+    fn exact_metadata_rejects_missing_visibility() {
+        let error = extract_exact_channel_metadata(&metadata_event(json!([])))
+            .expect_err("missing visibility must fail closed");
+        assert!(error.to_string().contains("missing visibility"));
+    }
+
+    #[test]
+    fn exact_metadata_rejects_malformed_visibility() {
+        let error = extract_exact_channel_metadata(&metadata_event(json!([["private", "true"]])))
+            .expect_err("non-singleton visibility tag must fail closed");
+        assert!(error
+            .to_string()
+            .contains("malformed private visibility tag"));
+    }
+
+    #[test]
+    fn exact_metadata_rejects_contradictory_visibility() {
+        let error =
+            extract_exact_channel_metadata(&metadata_event(json!([["public"], ["private"]])))
+                .expect_err("contradictory visibility must fail closed");
+        assert!(error.to_string().contains("ambiguous visibility"));
     }
 
     #[test]
