@@ -33,10 +33,14 @@ const KILL_GRACE: Duration = Duration::from_millis(500);
 ///   no background drain threads to join, so no drain-thread hang exists.
 /// - **No wait hang.** The child is polled with [`Child::try_wait`] against the
 ///   deadline rather than blocked on with `wait()`.
-/// - **Hard termination.** On timeout the child's whole process group is torn
-///   down (see [`terminate`]) — `SIGTERM` then an escalating `SIGKILL` on Unix,
-///   `Child::kill` on Windows — so a `SIGTERM`-trapping child or a forked
-///   descendant cannot outlive the deadline.
+/// - **Hard termination on every exit path.** The child runs as its own process
+///   group leader (Unix) / tree root (Windows), and that group/tree is torn down
+///   whether the child times out, errors, *or exits successfully* — see
+///   [`kill_tree`]. Success is not an exemption: a login-shell rc file or an
+///   auth CLI can legitimately background a descendant (`worker &`), which would
+///   otherwise outlive discovery still holding the captured-output descriptors.
+///   The timeout path additionally sends a graceful `SIGTERM` and a bounded
+///   grace period before the final `SIGKILL` (see [`terminate_timed_out`]).
 pub(crate) fn output_with_timeout(mut command: Command, timeout: Duration) -> Option<Output> {
     let mut stdout_file = tempfile::tempfile().ok()?;
     let mut stderr_file = tempfile::tempfile().ok()?;
@@ -46,8 +50,8 @@ pub(crate) fn output_with_timeout(mut command: Command, timeout: Duration) -> Op
         .stdout(stdout_file.try_clone().ok()?)
         .stderr(stderr_file.try_clone().ok()?);
 
-    // Run the child in its own process group so a timeout can terminate the
-    // whole tree, not just a direct child that may have forked workers.
+    // Run the child in its own process group so the whole tree can be torn
+    // down as a unit, not just a direct child that may have forked workers.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
@@ -55,6 +59,10 @@ pub(crate) fn output_with_timeout(mut command: Command, timeout: Duration) -> Op
     }
 
     let mut child = command.spawn().ok()?;
+    // Cache the id: `try_wait` reaps the leader, but the group/tree id stays
+    // valid as long as any descendant keeps it alive — which is exactly the
+    // survivor we must reap.
+    let pid = child.id();
 
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -62,17 +70,24 @@ pub(crate) fn output_with_timeout(mut command: Command, timeout: Duration) -> Op
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    terminate(&mut child);
+                    terminate_timed_out(pid);
+                    let _ = child.wait();
                     return None;
                 }
                 std::thread::sleep(POLL_INTERVAL);
             }
             Err(_) => {
-                terminate(&mut child);
+                kill_tree(pid);
+                let _ = child.wait();
                 return None;
             }
         }
     };
+
+    // Leader exited within the deadline. Reap any descendant it backgrounded
+    // before reading — otherwise a survivor keeps the captured-output fds (and
+    // whatever it is writing) alive after discovery reports success.
+    kill_tree(pid);
 
     Some(Output {
         status,
@@ -93,46 +108,88 @@ fn read_captured(file: &mut std::fs::File) -> Vec<u8> {
     buf
 }
 
-/// Tear down a timed-out child and its process group with a bounded return.
-///
-/// The child is a group leader (`process_group(0)`), so its PID is also the
-/// group ID. `SIGTERM` the whole group for a clean shutdown, wait the fixed
-/// [`KILL_GRACE`], then unconditionally `SIGKILL` the group so a signal-ignoring
-/// child or descendant cannot survive. `wait` then reaps the (now-killed) direct
-/// child. Every step is time-bounded, so this returns in at most `KILL_GRACE`.
-#[cfg(unix)]
-fn terminate(child: &mut std::process::Child) {
-    let pgid = child.id() as i32;
-    // SAFETY: `killpg` with a valid PID/PGID; unused result is intentional —
-    // the group may already be gone.
-    unsafe {
-        libc::killpg(pgid, libc::SIGTERM);
+/// Terminate a timed-out child's whole group/tree with a graceful-then-forced
+/// sequence. `SIGTERM` the group, wait the fixed [`KILL_GRACE`] for a clean
+/// shutdown, then hand off to [`kill_tree`] for the unconditional `SIGKILL`.
+/// Bounded by `KILL_GRACE` on Unix; on Windows there is no group signal, so it
+/// is a direct forced tree kill. Every step is time-bounded.
+fn terminate_timed_out(pid: u32) {
+    #[cfg(unix)]
+    {
+        // SAFETY: `killpg` on the group led by `pid`; the child was spawned
+        // with `process_group(0)`. An unused result is intentional — the group
+        // may already be gone (ESRCH), which is the success case.
+        unsafe {
+            libc::killpg(pid as i32, libc::SIGTERM);
+        }
+        std::thread::sleep(KILL_GRACE);
     }
-    std::thread::sleep(KILL_GRACE);
-    unsafe {
-        libc::killpg(pgid, libc::SIGKILL);
-    }
-    let _ = child.wait();
+    kill_tree(pid);
 }
 
-/// Windows teardown: `Child::kill` maps to `TerminateProcess`, a guaranteed kill
-/// of the child (not mere PID consumption). `wait` reaps it so no handle leaks.
-#[cfg(not(unix))]
-fn terminate(child: &mut std::process::Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+/// Unconditionally reap the process group/tree rooted at `pid`, forcibly and
+/// without grace. Runs on **every** exit path — timeout, spawn/wait error, and
+/// successful exit — because a login shell or auth CLI can background a
+/// descendant that outlives the leader while still holding the captured-output
+/// descriptors. A signal to an already-dead group is `ESRCH`, a harmless no-op.
+///
+/// On Unix this `SIGKILL`s the whole group (the child is its leader). On Windows
+/// it delegates to [`taskkill_tree`](crate::managed_agents::taskkill_tree)
+/// (`taskkill /T /F`), which kills the tree — a direct `Child::kill` would leave
+/// descendants alive, exactly the leak this guards against.
+fn kill_tree(pid: u32) {
+    #[cfg(unix)]
+    // SAFETY: `killpg` on the group led by `pid`; unused result is intentional.
+    unsafe {
+        libc::killpg(pid as i32, libc::SIGKILL);
+    }
+    #[cfg(windows)]
+    {
+        let _ = crate::managed_agents::taskkill_tree(pid);
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
+
+    /// Run `output_with_timeout` under an independent wall-clock watchdog. The
+    /// helper is driven on its own thread; if it fails to return within `bound`
+    /// the test fails instead of hanging forever. This is the real outer bound —
+    /// an inline `elapsed() < bound` assertion is never reached if the helper
+    /// itself hangs.
+    #[cfg(unix)]
+    fn run_watchdogged(cmd: Command, timeout: Duration, bound: Duration) -> Option<Output> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(output_with_timeout(cmd, timeout));
+        });
+        match rx.recv_timeout(bound) {
+            Ok(result) => result,
+            Err(_) => panic!("output_with_timeout did not return within {bound:?}"),
+        }
+    }
+
+    /// True while a Unix process (or a reaped-but-not-waited zombie under this
+    /// test process) still exists. `kill(pid, 0)` probes existence without
+    /// signalling. Descendants reparent to init on exit, so a survivor stays
+    /// probeable; once `kill_tree` reaps it, the pid is gone (ESRCH).
+    #[cfg(unix)]
+    fn pid_alive(pid: i32) -> bool {
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
 
     #[cfg(unix)]
     #[test]
     fn returns_output_for_fast_command() {
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", "printf hi; printf oops 1>&2"]);
-        let out = output_with_timeout(cmd, Duration::from_secs(5))
+        let out = run_watchdogged(cmd, Duration::from_secs(5), Duration::from_secs(10))
             .expect("a fast command must complete within the timeout");
         assert!(out.status.success());
         assert_eq!(out.stdout, b"hi");
@@ -142,41 +199,94 @@ mod tests {
     // Adversarial: a child that traps and ignores SIGTERM. The old
     // wait-thread + lone-SIGTERM helper never returned for this input; the
     // process-group SIGKILL escalation must reap it inside the grace period.
+    // The watchdog thread is the real bound — the helper hanging fails the
+    // test rather than hanging it.
     #[cfg(unix)]
     #[test]
     fn kills_sigterm_ignoring_child_within_bound() {
-        let start = Instant::now();
         let mut cmd = Command::new("/bin/sh");
         cmd.args(["-c", "trap '' TERM; while :; do sleep 1; done"]);
-        let result = output_with_timeout(cmd, Duration::from_millis(200));
+        let result = run_watchdogged(cmd, Duration::from_millis(200), Duration::from_secs(5));
         assert!(result.is_none(), "a timed-out child must yield None");
+    }
+
+    // Adversarial (success path): the direct child exits 0 but backgrounds a
+    // descendant that keeps writing to the inherited stdout/stderr forever.
+    // Two guarantees under test: (1) the temp-file capture returns at EOF
+    // rather than blocking on the descendant, and (2) `kill_tree` reaps that
+    // descendant before returning, so no survivor keeps consuming disk/CPU
+    // after discovery reports success. This is the pass-2 leak Thufir proved
+    // with `(yes) & exit 0`.
+    #[cfg(unix)]
+    #[test]
+    fn reaps_backgrounded_descendant_on_success() {
+        let pid_file = tempfile::NamedTempFile::new().expect("temp file for descendant pid");
+        let pid_path = pid_file
+            .path()
+            .to_str()
+            .expect("utf-8 temp path")
+            .to_string();
+        // The descendant records its PID, then becomes `yes` (the unbounded
+        // writer from the pass-2 reproducer, holding the inherited fds). The
+        // leader waits until the PID is recorded before exiting 0, so the test
+        // can read it deterministically even though the success path kills the
+        // group immediately on return.
+        let script = format!(
+            "(echo $$ > '{pid_path}'; exec yes) & \
+             until [ -s '{pid_path}' ]; do :; done; printf done; exit 0"
+        );
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", &script]);
+        let out = run_watchdogged(cmd, Duration::from_secs(5), Duration::from_secs(10))
+            .expect("the direct child exits, so this must return its output");
+        assert!(out.status.success());
+
+        let descendant_pid: i32 = std::fs::read_to_string(&pid_path)
+            .expect("descendant must have recorded its PID")
+            .trim()
+            .parse()
+            .expect("descendant PID must be numeric");
+        // Give the reaped group a moment to fully disappear, then assert dead.
+        std::thread::sleep(Duration::from_millis(200));
         assert!(
-            start.elapsed() < Duration::from_secs(5),
-            "must return promptly after the deadline even when SIGTERM is ignored, \
-             took {:?}",
-            start.elapsed()
+            !pid_alive(descendant_pid),
+            "backgrounded descendant {descendant_pid} must be reaped on success, but it survived"
         );
     }
 
-    // Adversarial: the direct child exits immediately but leaves a background
-    // descendant holding the inherited stdout/stderr descriptors open. A pipe
-    // read would block on that descendant; the temp-file capture must return at
-    // EOF regardless, so the call cannot hang.
+    // Adversarial (timeout path): a SIGTERM-ignoring leader that backgrounds a
+    // descendant, both looping forever. The leader's process group is killed on
+    // timeout, so the descendant (same group) must die too. The descendant
+    // writes its PID to a known file before looping, so the test can prove it.
     #[cfg(unix)]
     #[test]
-    fn returns_when_descendant_retains_pipes() {
-        let start = Instant::now();
+    fn reaps_descendant_on_timeout() {
+        let pid_file = tempfile::NamedTempFile::new().expect("temp file for descendant pid");
+        let pid_path = pid_file
+            .path()
+            .to_str()
+            .expect("utf-8 temp path")
+            .to_string();
+        // Leader ignores TERM and loops; it backgrounds a descendant that
+        // records its own PID then loops. Both share the leader's process group.
+        let script = format!(
+            "trap '' TERM; (echo $$ > '{pid_path}'; while :; do sleep 1; done) & \
+             while :; do sleep 1; done"
+        );
         let mut cmd = Command::new("/bin/sh");
-        // Fork a grandchild that survives the parent and keeps fd 1/2 open.
-        cmd.args(["-c", "printf done; (sleep 30) & exit 0"]);
-        let out = output_with_timeout(cmd, Duration::from_secs(5))
-            .expect("the direct child exits, so this must return its output");
-        assert!(out.status.success());
-        assert_eq!(out.stdout, b"done");
+        cmd.args(["-c", &script]);
+        let result = run_watchdogged(cmd, Duration::from_millis(300), Duration::from_secs(5));
+        assert!(result.is_none(), "a timed-out tree must yield None");
+
+        let descendant_pid: i32 = std::fs::read_to_string(&pid_path)
+            .expect("descendant must have written its PID")
+            .trim()
+            .parse()
+            .expect("descendant PID must be numeric");
+        std::thread::sleep(Duration::from_millis(200));
         assert!(
-            start.elapsed() < Duration::from_secs(5),
-            "must not block on a descendant holding the output descriptors, took {:?}",
-            start.elapsed()
+            !pid_alive(descendant_pid),
+            "backgrounded descendant {descendant_pid} must be group-killed on timeout, but it survived"
         );
     }
 }
