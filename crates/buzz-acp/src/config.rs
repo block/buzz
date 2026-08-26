@@ -170,6 +170,37 @@ impl std::fmt::Display for PermissionMode {
     }
 }
 
+/// Reviewer for Codex approval requests that cross the active sandbox boundary.
+///
+/// This is separate from [`PermissionMode`]: Codex Auto-review keeps an
+/// interactive approval policy and changes who reviews eligible requests,
+/// while ACP session modes select broader approval/sandbox presets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum CodexApprovalsReviewer {
+    /// Surface eligible approval requests to the user.
+    #[value(alias = "user")]
+    User,
+    /// Route eligible approval requests to Codex's automatic reviewer.
+    #[value(name = "auto-review", alias = "auto_review")]
+    AutoReview,
+}
+
+impl CodexApprovalsReviewer {
+    /// Return the Codex config value used by `approvals_reviewer`.
+    pub fn as_config_str(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::AutoReview => "auto_review",
+        }
+    }
+}
+
+impl std::fmt::Display for CodexApprovalsReviewer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_config_str())
+    }
+}
+
 /// CLI args for `buzz-acp models` — query available models from an agent.
 ///
 /// This is a standalone `Parser` (not a subcommand variant) because the
@@ -457,6 +488,14 @@ pub struct CliArgs {
     )]
     pub permission_mode: PermissionMode,
 
+    /// Reviewer for eligible Codex approval requests.
+    ///
+    /// `auto-review` enables Codex's "Approve for me" behavior without
+    /// widening its sandbox. Omit this option to preserve Codex's configured
+    /// default. Ignored by non-Codex agents.
+    #[arg(long, env = "BUZZ_ACP_CODEX_APPROVALS_REVIEWER", value_enum)]
+    pub codex_approvals_reviewer: Option<CodexApprovalsReviewer>,
+
     /// Inbound author gate: which authors' events the harness forwards.
     /// Modes: owner-only (default), allowlist, anyone, nobody.
     #[arg(
@@ -565,6 +604,9 @@ pub struct Config {
     pub session_title: Option<String>,
     /// Permission mode to apply after session creation. `Default` = skip.
     pub permission_mode: PermissionMode,
+    /// Codex approval reviewer injected through generated `CODEX_CONFIG`.
+    /// `None` preserves the adapter's configured default.
+    pub codex_approvals_reviewer: Option<CodexApprovalsReviewer>,
     /// Inbound author gate mode.
     pub respond_to: RespondTo,
     /// Validated allowlist of pubkey hex strings (used when respond_to == Allowlist).
@@ -763,8 +805,9 @@ pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'sta
 /// that blocks all outbound network by default. Without this env var, `buzz-cli`
 /// requests are blocked before they can reach the relay WebSocket.
 ///
-/// Returns `Some(("CODEX_CONFIG", "{\"sandbox_workspace_write\":{\"network_access\":true}}"))` for
-/// Codex agents, or `None` for non-Codex agents or when the relay URL cannot be parsed.
+/// Returns a generated `CODEX_CONFIG` entry for Codex agents, optionally including
+/// `approvals_reviewer`, or `None` for non-Codex agents or when the relay URL cannot
+/// be parsed.
 ///
 /// The env var is forwarded by the `@agentclientprotocol/codex-acp` adapter (1.x) as a
 /// session-level config override (via `CODEX_CONFIG` → `thread/start config`), which is
@@ -776,7 +819,11 @@ pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'sta
 /// be parsed, avoiding accidental sandbox widening for malformed configs.
 ///
 /// Handles `ws://`, `wss://`, `http://`, and `https://` schemes.
-pub fn codex_network_env(agent_command: &str, relay_url: &str) -> Option<(String, String)> {
+pub fn codex_network_env(
+    agent_command: &str,
+    relay_url: &str,
+    approvals_reviewer: Option<CodexApprovalsReviewer>,
+) -> Option<(String, String)> {
     match normalize_agent_command_identity(agent_command).as_str() {
         "codex" | "codex-acp" => {}
         _ => return None,
@@ -801,11 +848,27 @@ pub fn codex_network_env(agent_command: &str, relay_url: &str) -> Option<(String
         }
     };
 
-    tracing::debug!(host, "injecting CODEX_CONFIG network_access for relay host");
+    tracing::debug!(
+        host,
+        approvals_reviewer = approvals_reviewer.map(|reviewer| reviewer.as_config_str()),
+        "injecting generated CODEX_CONFIG for relay host"
+    );
+
+    let mut generated = serde_json::Map::new();
+    generated.insert(
+        "sandbox_workspace_write".into(),
+        serde_json::json!({"network_access": true}),
+    );
+    if let Some(reviewer) = approvals_reviewer {
+        generated.insert(
+            "approvals_reviewer".into(),
+            serde_json::Value::String(reviewer.as_config_str().into()),
+        );
+    }
 
     Some((
         "CODEX_CONFIG".into(),
-        "{\"sandbox_workspace_write\":{\"network_access\":true}}".into(),
+        serde_json::Value::Object(generated).to_string(),
     ))
 }
 
@@ -1081,13 +1144,16 @@ impl Config {
         // Inject CODEX_CONFIG so the @agentclientprotocol/codex-acp adapter (1.x)
         // opens the Seatbelt network sandbox for buzz-cli (an MCP subprocess). No-op
         // for non-Codex agents or unparseable relay URLs.
-        let has_generated_codex_config =
-            if let Some(network_env) = codex_network_env(&agent_command, &args.relay_url) {
-                persona_env_vars.push(network_env);
-                true
-            } else {
-                false
-            };
+        let has_generated_codex_config = if let Some(network_env) = codex_network_env(
+            &agent_command,
+            &args.relay_url,
+            args.codex_approvals_reviewer,
+        ) {
+            persona_env_vars.push(network_env);
+            true
+        } else {
+            false
+        };
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
@@ -1131,6 +1197,7 @@ impl Config {
                 .as_deref()
                 .and_then(sanitize_session_title),
             permission_mode: args.permission_mode,
+            codex_approvals_reviewer: args.codex_approvals_reviewer,
             respond_to: args.respond_to,
             respond_to_allowlist,
             allowed_respond_to,
@@ -1164,7 +1231,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} codex_approvals_reviewer={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1185,6 +1252,9 @@ impl Config {
             self.memory_enabled,
             self.model.as_deref().unwrap_or("(agent default)"),
             self.permission_mode,
+            self.codex_approvals_reviewer
+                .map(|reviewer| reviewer.as_config_str())
+                .unwrap_or("(codex default)"),
             respond_to_detail,
             allowed_respond_to_detail,
         )
@@ -1504,6 +1574,7 @@ mod tests {
             effort_level: None,
             session_title: None,
             permission_mode: PermissionMode::BypassPermissions,
+            codex_approvals_reviewer: None,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
@@ -1713,7 +1784,7 @@ mod tests {
 
     #[test]
     fn codex_network_env_wss_url() {
-        let result = codex_network_env("codex-acp", "wss://sprout-oss.stage.blox.sqprod.co");
+        let result = codex_network_env("codex-acp", "wss://sprout-oss.stage.blox.sqprod.co", None);
         assert_eq!(
             result,
             Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
@@ -1722,7 +1793,7 @@ mod tests {
 
     #[test]
     fn codex_network_env_ws_url() {
-        let result = codex_network_env("codex-acp", "ws://localhost:3000");
+        let result = codex_network_env("codex-acp", "ws://localhost:3000", None);
         assert_eq!(
             result,
             Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
@@ -1731,7 +1802,7 @@ mod tests {
 
     #[test]
     fn codex_network_env_https_url() {
-        let result = codex_network_env("codex-acp", "https://relay.example.com/path");
+        let result = codex_network_env("codex-acp", "https://relay.example.com/path", None);
         assert_eq!(
             result,
             Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
@@ -1740,7 +1811,7 @@ mod tests {
 
     #[test]
     fn codex_network_env_http_url_with_port() {
-        let result = codex_network_env("codex-acp", "http://relay.example.com:8080/query");
+        let result = codex_network_env("codex-acp", "http://relay.example.com:8080/query", None);
         assert_eq!(
             result,
             Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
@@ -1750,7 +1821,7 @@ mod tests {
     #[test]
     fn codex_network_env_bare_codex_command() {
         // "codex" (not "codex-acp") should also get the env var.
-        let result = codex_network_env("codex", "wss://relay.example.com");
+        let result = codex_network_env("codex", "wss://relay.example.com", None);
         assert_eq!(
             result,
             Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
@@ -1760,7 +1831,7 @@ mod tests {
     #[test]
     fn codex_network_env_full_path_codex_command() {
         // Full path like /usr/local/bin/codex-acp should be normalized.
-        let result = codex_network_env("/usr/local/bin/codex-acp", "wss://relay.example.com");
+        let result = codex_network_env("/usr/local/bin/codex-acp", "wss://relay.example.com", None);
         assert_eq!(
             result,
             Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
@@ -1769,16 +1840,21 @@ mod tests {
 
     #[test]
     fn codex_network_env_non_codex_agent_returns_none() {
-        assert!(codex_network_env("goose", "wss://relay.example.com").is_none());
-        assert!(codex_network_env("claude-agent-acp", "wss://relay.example.com").is_none());
-        assert!(codex_network_env("buzz-agent", "wss://relay.example.com").is_none());
+        assert!(codex_network_env("goose", "wss://relay.example.com", None).is_none());
+        assert!(codex_network_env(
+            "claude-agent-acp",
+            "wss://relay.example.com",
+            Some(CodexApprovalsReviewer::AutoReview),
+        )
+        .is_none());
+        assert!(codex_network_env("buzz-agent", "wss://relay.example.com", None).is_none());
     }
 
     #[test]
     fn codex_network_env_includes_sandbox_network_access() {
         // The JSON value must set sandbox_workspace_write.network_access=true — without
         // it, the Seatbelt sandbox blocks outbound connections in the 1.x adapter.
-        let result = codex_network_env("codex-acp", "wss://relay.example.com");
+        let result = codex_network_env("codex-acp", "wss://relay.example.com", None);
         let (key, val) = result.expect("expected Some for valid codex + valid url");
         assert_eq!(key, "CODEX_CONFIG");
         assert!(
@@ -1792,15 +1868,49 @@ mod tests {
     }
 
     #[test]
+    fn codex_network_env_includes_auto_review_reviewer() {
+        let (_, value) = codex_network_env(
+            "codex-acp",
+            "wss://relay.example.com",
+            Some(CodexApprovalsReviewer::AutoReview),
+        )
+        .expect("valid Codex configuration should produce an environment entry");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&value).expect("generated CODEX_CONFIG should be valid JSON");
+
+        assert_eq!(parsed["approvals_reviewer"], "auto_review");
+        assert_eq!(
+            parsed["sandbox_workspace_write"]["network_access"],
+            serde_json::Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn codex_network_env_includes_explicit_user_reviewer() {
+        let (_, value) = codex_network_env(
+            "codex",
+            "wss://relay.example.com",
+            Some(CodexApprovalsReviewer::User),
+        )
+        .expect("valid Codex configuration should produce an environment entry");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&value).expect("generated CODEX_CONFIG should be valid JSON");
+
+        assert_eq!(parsed["approvals_reviewer"], "user");
+    }
+
+    #[test]
     fn codex_network_env_empty_relay_url_returns_none() {
         // Empty string fails Url::parse — graceful None return.
-        assert!(codex_network_env("codex-acp", "").is_none());
+        assert!(
+            codex_network_env("codex-acp", "", Some(CodexApprovalsReviewer::AutoReview),).is_none()
+        );
     }
 
     #[test]
     fn codex_network_env_schemeless_string_returns_none() {
         // A bare string with no scheme fails Url::parse — graceful None return.
-        assert!(codex_network_env("codex-acp", "not-a-url").is_none());
+        assert!(codex_network_env("codex-acp", "not-a-url", None).is_none());
     }
 
     #[test]
@@ -2387,6 +2497,60 @@ channels = "ALL"
     fn test_default_config_uses_bypass_permissions() {
         let config = test_config(SubscribeMode::Mentions);
         assert_eq!(config.permission_mode, PermissionMode::BypassPermissions);
+    }
+
+    #[test]
+    fn test_codex_approvals_reviewer_values_and_alias() {
+        use clap::ValueEnum;
+
+        assert_eq!(
+            CodexApprovalsReviewer::from_str("auto-review", true).unwrap(),
+            CodexApprovalsReviewer::AutoReview
+        );
+        assert_eq!(
+            CodexApprovalsReviewer::from_str("auto_review", true).unwrap(),
+            CodexApprovalsReviewer::AutoReview
+        );
+        assert_eq!(
+            CodexApprovalsReviewer::from_str("user", true).unwrap(),
+            CodexApprovalsReviewer::User
+        );
+        assert_eq!(
+            CodexApprovalsReviewer::AutoReview.as_config_str(),
+            "auto_review"
+        );
+    }
+
+    #[test]
+    fn test_codex_approvals_reviewer_cli_is_optional() {
+        let key = "0".repeat(64);
+        let default_args = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert_eq!(default_args.codex_approvals_reviewer, None);
+
+        let auto_review_args = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--codex-approvals-reviewer",
+            "auto_review",
+        ]);
+        assert_eq!(
+            auto_review_args.codex_approvals_reviewer,
+            Some(CodexApprovalsReviewer::AutoReview)
+        );
+    }
+
+    #[test]
+    fn test_summary_includes_codex_approvals_reviewer() {
+        let mut config = test_config(SubscribeMode::Mentions);
+        assert!(config
+            .summary()
+            .contains("codex_approvals_reviewer=(codex default)"));
+
+        config.codex_approvals_reviewer = Some(CodexApprovalsReviewer::AutoReview);
+        assert!(config
+            .summary()
+            .contains("codex_approvals_reviewer=auto_review"));
     }
 
     #[test]

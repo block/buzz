@@ -4806,6 +4806,8 @@ mod tests {
     }
 
     const GENERATED: &str = r#"{"sandbox_workspace_write":{"network_access":true}}"#;
+    const GENERATED_AUTO_REVIEW: &str =
+        r#"{"approvals_reviewer":"auto_review","sandbox_workspace_write":{"network_access":true}}"#;
 
     #[test]
     fn build_codex_config_env_returns_none_when_no_codex_config_in_extra_env() {
@@ -4896,6 +4898,45 @@ mod tests {
         assert_eq!(
             v["sandbox_workspace_write"]["network_access"], true,
             "network_access must be forced true"
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_merges_auto_review_with_persona_and_parent_precedence() {
+        let persona = r#"{"approvals_reviewer":"user","some_feature":{"enabled":true}}"#;
+        let extra = env(&[
+            ("CODEX_CONFIG", persona),
+            ("CODEX_CONFIG", GENERATED_AUTO_REVIEW),
+        ]);
+
+        let merged = build_codex_config_env(&extra, None, true).unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(
+            value["approvals_reviewer"], "auto_review",
+            "generated reviewer must overlay the persona value"
+        );
+        assert_eq!(
+            value["some_feature"]["enabled"], true,
+            "unrelated persona config must survive"
+        );
+        assert_eq!(
+            value["sandbox_workspace_write"]["network_access"], true,
+            "generated relay network access must survive"
+        );
+
+        let parent = r#"{"approvals_reviewer":"user","parent_key":"keep"}"#;
+        let merged = build_codex_config_env(&extra, Some(parent), true)
+            .unwrap()
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(
+            value["approvals_reviewer"], "user",
+            "parent CODEX_CONFIG must retain its established collision precedence"
+        );
+        assert_eq!(value["parent_key"], "keep");
+        assert_eq!(
+            value["sandbox_workspace_write"]["network_access"], true,
+            "forced relay network access remains the final invariant"
         );
     }
 
