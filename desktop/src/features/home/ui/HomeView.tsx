@@ -260,6 +260,7 @@ export function HomeView({
     markThreadRead,
     recordThreadInteraction,
     readStateVersion,
+    isReadStateReady,
   } = useAppShell();
   const { doneSet, markDone, markUnread, undoDone, undoUnread, unreadSet } =
     feedItemState;
@@ -392,6 +393,7 @@ export function HomeView({
       getThreadReadAt,
       getMessageReadAt,
       readStateVersion,
+      isReadStateReady,
       localDoneSet: doneSet,
       localUnreadSet: unreadSet,
       clearChannelUnreadSource,

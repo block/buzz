@@ -18,6 +18,10 @@ type UseHomeInboxReadStateOptions = {
   getMessageReadAt?: (messageId: string) => number | null;
   /** Invalidation signal for the channel-marker projection. */
   readStateVersion: number;
+  /** Whether NIP-RS read markers have loaded. Until true, every resolver
+   * returns null, so a missing marker cannot be distinguished from "unread" —
+   * treat all items as read/hidden to avoid flashing already-read items. */
+  isReadStateReady: boolean;
   /** Local fallback "done" set (used only for items with no channelId). */
   localDoneSet: ReadonlySet<string>;
   /** Per-item local unread override for inbox rows. */
@@ -150,6 +154,7 @@ export function useHomeInboxReadState({
   getThreadReadAt,
   getMessageReadAt,
   readStateVersion,
+  isReadStateReady,
   localDoneSet,
   localUnreadSet = EMPTY_ITEM_SET,
   markChannelRead,
@@ -169,6 +174,15 @@ export function useHomeInboxReadState({
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion invalidates getChannelReadAt
   const effectiveDoneSet = React.useMemo<ReadonlySet<string>>(() => {
+    // Read markers not loaded yet: every resolver returns null, so a missing
+    // marker is indistinguishable from genuinely-unread. Treat everything as
+    // done (hidden from the unread-only Inbox) until markers load, rather than
+    // flashing already-read items as unread. Mirrors the sidebar's
+    // `!isReadStateReady` gate in useUnreadChannels.
+    if (!isReadStateReady) {
+      return new Set(items.map((item) => item.id));
+    }
+
     const result = new Set<string>();
     for (const item of items) {
       if (hasGroupedUnreadOverride(item, localUnreadSet)) {
@@ -201,6 +215,7 @@ export function useHomeInboxReadState({
     getChannelReadAt,
     getThreadReadAt,
     getMessageReadAt,
+    isReadStateReady,
     items,
     localDoneSet,
     localUnreadSet,

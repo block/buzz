@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   buildChannelAuxDeletionFilter,
-  buildChannelAuxFilter,
   buildChannelReactionAuxFilter,
   buildChannelStructuralAuxFilter,
   buildHuddleTtsLiveFilter,
@@ -28,12 +27,6 @@ test("huddle TTS filter includes a bounded startup replay for both message kinds
 // an `e` tag, no channel `h` tag. An `#h`-scoped aux query never matches them,
 // so removed historical reactions reappear. The aux filters must key on `#e`
 // only.
-test("buildChannelAuxFilter keys on #e only, no #h", () => {
-  const filter = buildChannelAuxFilter(CHANNEL, IDS);
-  assert.deepEqual(filter["#e"], IDS);
-  assert.equal("#h" in filter, false);
-});
-
 test("buildChannelAuxDeletionFilter keys on #e only, no #h", () => {
   const filter = buildChannelAuxDeletionFilter(CHANNEL, IDS);
   assert.deepEqual(filter["#e"], IDS);

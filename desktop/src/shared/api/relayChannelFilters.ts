@@ -1,5 +1,4 @@
 import {
-  CHANNEL_AUX_EVENT_KINDS,
   CHANNEL_EVENT_KINDS,
   CHANNEL_TIMELINE_CONTENT_KINDS,
   HOME_MENTION_EVENT_KINDS,
@@ -90,19 +89,6 @@ export function buildChannelHistoryFilter(
 }
 
 /**
- * Aux-backfill filter for one chunk of loaded message ids: pulls auxiliary
- * events ({@link CHANNEL_AUX_EVENT_KINDS}) that reference those ids by `#e`.
- * Keyed by reference, not time, so a late edit/deletion for an old visible
- * message still applies — see {@link buildChannelHistoryFilter}.
- */
-export function buildChannelAuxFilter(
-  _channelId: string,
-  messageIds: string[],
-): RelaySubscriptionFilter {
-  return buildChannelAuxKindFilter(messageIds, [...CHANNEL_AUX_EVENT_KINDS]);
-}
-
-/**
  * Structural aux filter for history backfill: edits/deletions only. Reactions
  * are hydrated from the rows the GUI actually renders, so the slow kind:5 scan
  * never shares a request with first-paint reaction pills.
@@ -163,13 +149,13 @@ export function buildGlobalStreamFilter(
 }
 
 export function buildChannelMentionFilter(
-  channelId: string,
+  channelId: string | string[],
   pubkey: string,
   limit: number,
 ): RelaySubscriptionFilter {
   return {
     kinds: [...HOME_MENTION_EVENT_KINDS],
-    "#h": [channelId],
+    "#h": Array.isArray(channelId) ? channelId : [channelId],
     "#p": [pubkey],
     limit,
     since: Math.floor(Date.now() / 1_000),

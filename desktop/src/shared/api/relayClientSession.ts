@@ -425,6 +425,19 @@ export class RelayClient {
       onEvent,
     );
   }
+
+  /** One subscription covering mentions across many channels at once, so the
+   * mention subscriptions don't churn per-channel (see useLiveChannelUpdates). */
+  async subscribeToChannelMentionEventsMulti(
+    channelIds: string[],
+    pubkey: string,
+    onEvent: (event: RelayEvent) => void,
+  ) {
+    return this.subscribe(
+      buildChannelMentionFilter(channelIds, pubkey, 50),
+      onEvent,
+    );
+  }
   async preconnect() {
     // Explicit re-engagement (reconnect card / community switch): clears the
     // terminal latch and AUTH rejection streak, and bypasses backoff once.
@@ -625,12 +638,14 @@ export class RelayClient {
       resolveReady,
     });
 
+    this.logDebug(`REQ live sub=${subId} filter=${JSON.stringify(filter)}`);
     try {
       await this.sendRawWithReconnectRetry(
         ["REQ", subId, filter],
         "Failed to restore relay subscription.",
       );
     } catch (error) {
+      this.logDebug(`REQ FAILED sub=${subId} err=${String(error)}`);
       window.clearTimeout(fallbackTimeout);
       this.subscriptions.delete(subId);
       throw error;
@@ -661,6 +676,22 @@ export class RelayClient {
         data: JSON.stringify(payload),
       },
     });
+  }
+
+  // TEMPORARY diagnostic — writes to <app_data_dir>/buzz-relay-debug.log via a
+  // Rust command, because this socket is native (invisible to devtools) and
+  // release builds swallow console output. Remove before release.
+  private logDebug(line: string): void {
+    // Stamp the build tag as the first line of every session's log, so we can
+    // tell exactly which build produced a log. Bump the tag each debug build.
+    const g = globalThis as { __buzzRelayBuildLogged?: boolean };
+    if (!g.__buzzRelayBuildLogged) {
+      g.__buzzRelayBuildLogged = true;
+      void invoke("debug_append_relay_log", {
+        line: "BUILD=dm-notify-diag-v9 (0.5.18-9)",
+      }).catch(() => {});
+    }
+    void invoke("debug_append_relay_log", { line }).catch(() => {});
   }
 
   private normalizeRelayError(error: unknown, fallbackMessage: string) {
@@ -787,6 +818,22 @@ export class RelayClient {
     }
 
     const [type, ...rest] = data;
+    // TEMPORARY diagnostic — log every inbound frame per subscription. Remove
+    // before release.
+    if (type === "EVENT") {
+      const event = rest[1] as { id?: string; kind?: number } | undefined;
+      this.logDebug(
+        `EVENT sub=${String(rest[0])} id=${event?.id ?? "?"} kind=${event?.kind ?? "?"}`,
+      );
+    } else if (type === "EOSE") {
+      this.logDebug(`EOSE sub=${String(rest[0])}`);
+    } else if (type === "CLOSED") {
+      this.logDebug(`CLOSED sub=${String(rest[0])} msg=${String(rest[1] ?? "")}`);
+    } else if (type === "AUTH") {
+      this.logDebug("AUTH challenge received");
+    } else if (type === "NOTICE") {
+      this.logDebug(`NOTICE ${String(rest[0] ?? "")}`);
+    }
     if (type === "AUTH" && typeof rest[0] === "string") {
       await this.handleAuthChallenge(rest[0], generation);
       return;

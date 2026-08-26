@@ -49,6 +49,9 @@ type AppShellContextValue = {
   // Bump-counter that invalidates whenever the read marker changes. Include
   // in memo deps that consume getChannelReadAt.
   readStateVersion: number;
+  // Whether NIP-RS read markers have finished loading. Surfaces deriving unread
+  // state must wait for this before treating a missing marker as "unread".
+  isReadStateReady: boolean;
   // Inject the thread→channel parent resolver derived from the event graph
   // (NIP-RS hierarchical frontier). Set by the active channel surface.
   setContextParentResolver: (resolver: ContextParentResolver | null) => void;
@@ -102,6 +105,7 @@ const AppShellContext = React.createContext<AppShellContextValue>({
   getChannelActivityItemReadAt: () => null,
   markMessageRead: () => {},
   readStateVersion: 0,
+  isReadStateReady: false,
   setContextParentResolver: () => {},
   followThread: () => {},
   unfollowThread: () => {},

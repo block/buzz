@@ -207,6 +207,10 @@ pub(crate) mod windows {
         ensure_process_mta();
 
         std::thread::spawn(move || {
+            crate::relay_debug_log::append_line(
+                &app,
+                &format!("TOAST show() thread entered, app_id={app_id}, title={title}"),
+            );
             let mut toast = tauri_winrt_notification::Toast::new(&app_id).text1(&title);
             if let Some(body_text) = body.as_deref() {
                 toast = toast.text2(body_text);
@@ -231,8 +235,14 @@ pub(crate) mod windows {
             });
 
             match toast.show() {
-                Ok(_) => {}
+                Ok(_) => {
+                    crate::relay_debug_log::append_line(&app, "TOAST show() OK");
+                }
                 Err(error) => {
+                    crate::relay_debug_log::append_line(
+                        &app,
+                        &format!("TOAST show() ERR: {error}"),
+                    );
                     eprintln!("buzz-desktop: failed to post Windows native notification: {error}");
                 }
             }
@@ -288,25 +298,42 @@ pub(crate) mod windows {
         }
     }
 
+    /// Pre-seeds the per-app notification Settings key so Buzz appears in
+    /// Settings > System > Notifications immediately on a clean install,
+    /// instead of only after the first toast is delivered.
+    ///
+    /// Create-if-absent by design. Windows owns the `Enabled` value under this
+    /// key: once the key exists, its value reflects either Windows' own state
+    /// or a choice the user made in Settings > Notifications. Rewriting
+    /// `Enabled=1` on every launch (as the first version of this did) would
+    /// silently turn Buzz notifications back on every time the app starts,
+    /// overriding a user who had deliberately turned them off. So we only write
+    /// the seed values when we are the ones creating the key for the first
+    /// time; if it already exists we leave it entirely untouched.
     fn write_notification_settings_entry(app_id: &str) -> Result<(), String> {
         use windows_sys::Win32::System::Registry::{
-            RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_WRITE,
-            REG_DWORD, REG_OPTION_NON_VOLATILE,
+            RegCloseKey, RegCreateKeyExW, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+            KEY_READ, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE,
         };
 
         let subkey = to_wide(&format!(
             "Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings\\{app_id}"
         ));
-        let show_in_action_center_value = to_wide("ShowInActionCenter");
-        let show_in_action_center_data: u32 = 1;
-        let enabled_value = to_wide("Enabled");
-        let enabled_data: u32 = 1;
 
-        // SAFETY: every buffer passed below is a NUL-terminated UTF-16
-        // string that outlives the corresponding call, `hkey` is only used
-        // after a successful `RegCreateKeyExW`, and it is closed exactly
-        // once before returning.
+        // SAFETY: `subkey` is a NUL-terminated UTF-16 buffer that outlives
+        // every call below; each key handle we obtain is closed exactly once
+        // on every path.
         unsafe {
+            // If the key already exists, respect whatever state is there —
+            // never re-seed. See the doc comment above.
+            let mut existing: HKEY = std::ptr::null_mut();
+            let open_status =
+                RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut existing);
+            if open_status == 0 {
+                RegCloseKey(existing);
+                return Ok(());
+            }
+
             let mut hkey: HKEY = std::ptr::null_mut();
             let create_status = RegCreateKeyExW(
                 HKEY_CURRENT_USER,
@@ -325,7 +352,12 @@ pub(crate) mod windows {
                 ));
             }
 
-            let _ = RegSetValueExW(
+            let show_in_action_center_value = to_wide("ShowInActionCenter");
+            let show_in_action_center_data: u32 = 1;
+            let enabled_value = to_wide("Enabled");
+            let enabled_data: u32 = 1;
+
+            let show_status = RegSetValueExW(
                 hkey,
                 show_in_action_center_value.as_ptr(),
                 0,
@@ -333,7 +365,7 @@ pub(crate) mod windows {
                 (&show_in_action_center_data as *const u32).cast::<u8>(),
                 std::mem::size_of::<u32>() as u32,
             );
-            let _ = RegSetValueExW(
+            let enabled_status = RegSetValueExW(
                 hkey,
                 enabled_value.as_ptr(),
                 0,
@@ -343,6 +375,17 @@ pub(crate) mod windows {
             );
 
             RegCloseKey(hkey);
+
+            if enabled_status != 0 {
+                return Err(format!(
+                    "RegSetValueExW(Enabled) failed with status {enabled_status}"
+                ));
+            }
+            if show_status != 0 {
+                return Err(format!(
+                    "RegSetValueExW(ShowInActionCenter) failed with status {show_status}"
+                ));
+            }
         }
 
         Ok(())

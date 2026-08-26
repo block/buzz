@@ -964,6 +964,10 @@ export function useUnreadChannels(
     unreadChannelCounts,
     highPriorityUnreadChannelIds,
     unreadChannelNotificationCount,
+    // Whether the NIP-RS read markers have finished loading. Surfaces that
+    // derive unread state (the Home Inbox) must wait for this before treating a
+    // missing marker as "unread", or already-read items flash on launch.
+    isReadStateReady,
     markAllChannelsRead,
     markChannelRead,
     markChannelUnread,

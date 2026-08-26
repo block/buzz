@@ -1,5 +1,7 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
+// TEMPORARY diagnostic import — remove with the DM-notify logging below.
+import { invoke } from "@tauri-apps/api/core";
 
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { updateChannelLastMessageAt } from "@/features/channels/lib/channelRecency";
@@ -113,6 +115,11 @@ function isExternalMentionEvent(event: RelayEvent, currentPubkey: string) {
 
 const SEEN_NOTIFICATION_EVENT_LIMIT = 5_000;
 
+/** Channels per multiplexed live subscription filter. The relay caps explicit
+ * `#h` values per filter at 128 (buzz-relay MAX_EXPLICIT_CHANNEL_VALUES); stay
+ * safely under it and chunk when a user is in more channels than this. */
+const LIVE_SUB_CHANNELS_PER_FILTER = 100;
+
 export function trackSeenEvent(
   seenEventIds: Set<string>,
   eventId: string,
@@ -194,6 +201,12 @@ export function useLiveChannelUpdates(
 
   const handleDmEvent = React.useEffectEvent(
     (event: RelayEvent, isFirstNotificationDelivery: boolean) => {
+      // TEMPORARY diagnostic — remove before release.
+      const dmLog = (reason: string) =>
+        void invoke("debug_append_relay_log", {
+          line: `DM-EVENT kind=${event.kind} ${reason}`,
+        }).catch(() => {});
+
       // Only human-visible message kinds should fire DM notifications.
       if (!isDmNotifiableKind(event.kind) || !isFirstNotificationDelivery) {
         return;
@@ -202,29 +215,37 @@ export function useLiveChannelUpdates(
       // Suppress backlog events that predate our subscription — these are
       // historical replays, not live messages.
       if (event.created_at < dmSubscriptionStartedAtRef.current) {
+        dmLog(
+          `BAIL backlog created_at=${event.created_at} < startedAt=${dmSubscriptionStartedAtRef.current}`,
+        );
         return;
       }
 
       const channelId = getChannelIdFromTags(event.tags);
       if (!channelId) {
+        dmLog("BAIL no-channel-id");
         return;
       }
 
       if (!isExternalMentionEvent(event, normalizedCurrentPubkey)) {
+        dmLog(`BAIL not-external-mention channel=${channelId}`);
         return;
       }
 
       const dmChannel = dmChannelMap.get(channelId);
       if (!dmChannel) {
+        dmLog(`BAIL unknown-dm-channel channel=${channelId}`);
         return;
       }
 
       // Don't fire a notification for the channel the user is already viewing,
       // unless the notify-while-viewing setting opts in.
       if (channelId === activeChannelId && !options.notifyForActiveChannel) {
+        dmLog(`BAIL active-channel channel=${channelId}`);
         return;
       }
 
+      dmLog(`REACHED onDmMessage channel=${channelId}`);
       options.onDmMessage?.(event, dmChannel);
     },
   );
@@ -361,7 +382,26 @@ export function useLiveChannelUpdates(
     });
   }, [queryClient]);
 
-  const liveSubsRef = React.useRef(new Map<string, () => Promise<void>>());
+  // ONE multiplexed live subscription covers every joined channel at once
+  // (chunked only if there are more channels than the relay's per-filter cap),
+  // instead of one subscription per channel.
+  //
+  // Per-channel subscriptions churned catastrophically: any change to the
+  // channel set — including the transient flicker a channels refetch produces
+  // on every relay reconnect — tore down and recreated ALL of them. The relay
+  // frame log showed ~40 re-subscribes per channel (839 REQs in 100s), which
+  // flooded the relay's WS rate limit (default 50 frames / 5s), got the
+  // subscriptions CLOSED, and dropped live events — so background channels
+  // never lit up (dead unread / Inbox / tray / toast). Collapsing to a single
+  // subscription makes a set-change cost one frame instead of N, so the
+  // flicker can't overwhelm the budget. Events route by their own `h` tag in
+  // handleIncomingMessage, so which subscription delivered one is irrelevant.
+  // Relay caps explicit channels per filter at 128
+  // (buzz-relay MAX_EXPLICIT_CHANNEL_VALUES); chunk safely under that.
+  const liveSubsRef = React.useRef<{
+    key: string;
+    disposers: Array<() => Promise<void>>;
+  } | null>(null);
 
   React.useEffect(() => {
     let isCancelled = false;
@@ -369,52 +409,79 @@ export function useLiveChannelUpdates(
     let retryAttempt = 0;
 
     const syncSubs = async (): Promise<boolean> => {
-      const activeSubs = liveSubsRef.current;
-      const targetIds = new Set(channelIdsKey ? channelIdsKey.split(",") : []);
+      const current = liveSubsRef.current;
+      // Channel set unchanged and already subscribed: do nothing, so a refetch
+      // that yields an identical set never churns the socket.
+      if (
+        current &&
+        current.key === channelIdsKey &&
+        current.disposers.length > 0
+      ) {
+        return true;
+      }
 
-      for (const [channelId, dispose] of activeSubs) {
-        if (!targetIds.has(channelId)) {
-          activeSubs.delete(channelId);
+      // Tear down the previous multiplexed subscription(s) before opening the
+      // new set.
+      if (current) {
+        liveSubsRef.current = null;
+        for (const dispose of current.disposers) {
           void dispose().catch(() => {});
         }
       }
 
-      if (targetIds.size > 0) {
-        // Record the subscription start time so handleDmEvent can distinguish
-        // backlog replays (created_at < startedAt) from live messages.
-        dmSubscriptionStartedAtRef.current = Math.floor(Date.now() / 1000);
+      const channelIds = channelIdsKey ? channelIdsKey.split(",") : [];
+      if (channelIds.length === 0) {
+        liveSubsRef.current = { key: channelIdsKey, disposers: [] };
+        return true;
       }
 
+      // Record the subscription start time so handleDmEvent can distinguish
+      // backlog replays (created_at < startedAt) from live messages.
+      dmSubscriptionStartedAtRef.current = Math.floor(Date.now() / 1000);
+
+      const since = Math.floor(Date.now() / 1_000);
+      const disposers: Array<() => Promise<void>> = [];
       let anyFailed = false;
-      const additions = Array.from(targetIds)
-        .filter((channelId) => !activeSubs.has(channelId))
-        .map(async (channelId) => {
-          try {
-            const dispose = await relayClient.subscribeLive(
-              {
-                kinds: [...CHANNEL_EVENT_KINDS],
-                "#h": [channelId],
-                limit: 1000,
-                since: Math.floor(Date.now() / 1_000),
-              },
-              (event) =>
-                handleIncomingMessage(withChannelTagFallback(event, channelId)),
-            );
-            if (isCancelled) {
-              void dispose().catch(() => {});
-              return;
-            }
-            activeSubs.set(channelId, dispose);
-          } catch (err) {
-            anyFailed = true;
-            console.error(
-              "Failed to subscribe to live channel updates",
-              channelId,
-              err,
-            );
+      for (
+        let offset = 0;
+        offset < channelIds.length;
+        offset += LIVE_SUB_CHANNELS_PER_FILTER
+      ) {
+        const chunk = channelIds.slice(
+          offset,
+          offset + LIVE_SUB_CHANNELS_PER_FILTER,
+        );
+        try {
+          const dispose = await relayClient.subscribeLive(
+            {
+              kinds: [...CHANNEL_EVENT_KINDS],
+              "#h": chunk,
+              limit: 1000,
+              since,
+            },
+            // Events carry their own `h` tag (they matched this filter's `#h`)
+            // and handleIncomingMessage routes by it, so no per-channel
+            // fallback is needed.
+            (event) => handleIncomingMessage(event),
+          );
+          if (isCancelled) {
+            void dispose().catch(() => {});
+            return true;
           }
-        });
-      await Promise.allSettled(additions);
+          disposers.push(dispose);
+        } catch (err) {
+          anyFailed = true;
+          console.error("Failed to subscribe to live channel updates", err);
+        }
+      }
+
+      if (isCancelled) {
+        for (const dispose of disposers) {
+          void dispose().catch(() => {});
+        }
+        return true;
+      }
+      liveSubsRef.current = { key: channelIdsKey, disposers };
       return !anyFailed;
     };
 
@@ -446,11 +513,13 @@ export function useLiveChannelUpdates(
     };
   }, [channelIdsKey]);
 
-  // Subscribe to mention events per channel with a diff-based manager: only
-  // subscribe newly-added channels and unsubscribe removed ones on each sync.
-  // The ref survives re-renders so churn-with-identical-IDs does zero work.
-  const mentionSubsRef = React.useRef(new Map<string, () => Promise<void>>());
-  const mentionSubsPubkeyRef = React.useRef<string | null>(null);
+  // One multiplexed mention subscription (chunked) instead of one per channel —
+  // the same churn fix as the live channel subscription above. Keyed by pubkey
+  // too, so an identity change re-subscribes.
+  const mentionSubsRef = React.useRef<{
+    key: string;
+    disposers: Array<() => Promise<void>>;
+  } | null>(null);
 
   React.useEffect(() => {
     if (!options.onLiveMention || normalizedCurrentPubkey.length === 0) {
@@ -461,59 +530,62 @@ export function useLiveChannelUpdates(
     let retryTimeout: number | undefined;
     let retryAttempt = 0;
 
+    const subsKey = `${normalizedCurrentPubkey}|${channelIdsKey}`;
+
     const syncSubs = async (): Promise<boolean> => {
-      const activeSubs = mentionSubsRef.current;
-
-      if (
-        mentionSubsPubkeyRef.current !== null &&
-        mentionSubsPubkeyRef.current !== normalizedCurrentPubkey
-      ) {
-        const stale = Array.from(activeSubs.values());
-        activeSubs.clear();
-        await Promise.allSettled(stale.map((dispose) => dispose()));
-        if (isCancelled) return true;
+      const current = mentionSubsRef.current;
+      if (current && current.key === subsKey && current.disposers.length > 0) {
+        return true;
       }
-      mentionSubsPubkeyRef.current = normalizedCurrentPubkey;
-
-      const targetIds = new Set(channelIdsKey ? channelIdsKey.split(",") : []);
-
-      for (const [channelId, dispose] of activeSubs) {
-        if (!targetIds.has(channelId)) {
-          activeSubs.delete(channelId);
+      if (current) {
+        mentionSubsRef.current = null;
+        for (const dispose of current.disposers) {
           void dispose().catch(() => {});
         }
       }
 
+      const channelIds = channelIdsKey ? channelIdsKey.split(",") : [];
+      if (channelIds.length === 0) {
+        mentionSubsRef.current = { key: subsKey, disposers: [] };
+        return true;
+      }
+
+      const disposers: Array<() => Promise<void>> = [];
       let anyFailed = false;
-      // Pass handleMentionEvent directly — it's a stable useEffectEvent
-      // callback. Do NOT wrap in an isCancelled check here: subs persist
-      // across effect runs (that's the point of the diff manager), so a
-      // stale isCancelled flag from a prior run would silently drop events
-      // on long-lived subs.
-      const additions = Array.from(targetIds)
-        .filter((channelId) => !activeSubs.has(channelId))
-        .map(async (channelId) => {
-          try {
-            const dispose = await relayClient.subscribeToChannelMentionEvents(
-              channelId,
+      for (
+        let offset = 0;
+        offset < channelIds.length;
+        offset += LIVE_SUB_CHANNELS_PER_FILTER
+      ) {
+        const chunk = channelIds.slice(
+          offset,
+          offset + LIVE_SUB_CHANNELS_PER_FILTER,
+        );
+        try {
+          const dispose =
+            await relayClient.subscribeToChannelMentionEventsMulti(
+              chunk,
               normalizedCurrentPubkey,
               handleMentionEvent,
             );
-            if (isCancelled) {
-              void dispose().catch(() => {});
-              return;
-            }
-            activeSubs.set(channelId, dispose);
-          } catch (err) {
-            anyFailed = true;
-            console.error(
-              "Failed to subscribe to mention events",
-              channelId,
-              err,
-            );
+          if (isCancelled) {
+            void dispose().catch(() => {});
+            return true;
           }
-        });
-      await Promise.allSettled(additions);
+          disposers.push(dispose);
+        } catch (err) {
+          anyFailed = true;
+          console.error("Failed to subscribe to mention events", err);
+        }
+      }
+
+      if (isCancelled) {
+        for (const dispose of disposers) {
+          void dispose().catch(() => {});
+        }
+        return true;
+      }
+      mentionSubsRef.current = { key: subsKey, disposers };
       return !anyFailed;
     };
 
@@ -549,17 +621,19 @@ export function useLiveChannelUpdates(
     return () => {
       channelsInvalidateRef.current?.cancel();
 
-      for (const dispose of liveSubsRef.current.values()) {
-        void dispose().catch(() => {});
+      if (liveSubsRef.current) {
+        for (const dispose of liveSubsRef.current.disposers) {
+          void dispose().catch(() => {});
+        }
+        liveSubsRef.current = null;
       }
-      liveSubsRef.current.clear();
 
-      const subs = mentionSubsRef.current;
-      for (const dispose of subs.values()) {
-        void dispose().catch(() => {});
+      if (mentionSubsRef.current) {
+        for (const dispose of mentionSubsRef.current.disposers) {
+          void dispose().catch(() => {});
+        }
+        mentionSubsRef.current = null;
       }
-      subs.clear();
-      mentionSubsPubkeyRef.current = null;
     };
   }, []);
 }
