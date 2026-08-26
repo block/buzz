@@ -48,6 +48,9 @@ export const CLI_ACP_INTERNAL_ERROR_COPY =
 export const CODEX_TASK_LOAD_FAILED_COPY =
   "The Codex task did not load before the 60-second timeout. It may be busy in Codex Desktop, or the shared app-server may be unresponsive. Wait for the task to become idle, then retry.";
 
+export const CODEX_TASK_FRAME_TOO_LARGE_COPY =
+  "This Codex task produced more history than this Buzz build can load in one ACP frame. Update Buzz, or compact/fork the Codex task, then retry.";
+
 export const CODEX_WRITER_CONFLICT_COPY =
   "This Codex task is open in a separate Codex Desktop runtime. Open Codex shared runtime settings, take over Desktop, then retry the agent.";
 
@@ -94,6 +97,10 @@ export function friendlyAgentLastError(
   // before the unknown-code pass-through so automatic retries can stop.
   if (isCodexWriterConflictError(trimmed)) {
     return { severity: "generic", copy: CODEX_WRITER_CONFLICT_COPY };
+  }
+
+  if (trimmed.toLocaleLowerCase().includes("stdout line exceeded")) {
+    return { severity: "generic", copy: CODEX_TASK_FRAME_TOO_LARGE_COPY };
   }
 
   // Structured code first; a code embedded in the message string is the

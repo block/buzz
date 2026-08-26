@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CODEX_TASK_FRAME_TOO_LARGE_COPY,
   CODEX_TASK_LOAD_FAILED_COPY,
   CODEX_WRITER_CONFLICT_COPY,
   friendlyAgentLastError,
@@ -37,6 +38,19 @@ test("maps Codex task load timeouts to actionable retry guidance", () => {
     {
       severity: "generic",
       copy: CODEX_TASK_LOAD_FAILED_COPY,
+    },
+  );
+});
+
+test("distinguishes oversized ACP task history from a timeout", () => {
+  assert.deepEqual(
+    friendlyAgentLastError(
+      "Codex task load failed: Protocol error: agent stdout line exceeded 64 MiB limit",
+      -32004,
+    ),
+    {
+      severity: "generic",
+      copy: CODEX_TASK_FRAME_TOO_LARGE_COPY,
     },
   );
 });
