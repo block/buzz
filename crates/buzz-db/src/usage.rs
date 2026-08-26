@@ -343,11 +343,16 @@ pub struct CommunityHost {
     pub host: String,
 }
 
-/// Fetch all community id → host mappings in one query.
+/// Fetch active community id → host mappings in one query.
 pub async fn community_hosts(pool: &PgPool) -> Result<Vec<CommunityHost>> {
-    let rows = sqlx::query_as::<_, (Uuid, String)>("SELECT id, host FROM communities")
-        .fetch_all(pool)
-        .await?;
+    let rows = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT id, host FROM communities \
+         WHERE archived_at IS NULL \
+           AND deletion_state = 'active' \
+           AND deleted_at IS NULL",
+    )
+    .fetch_all(pool)
+    .await?;
     Ok(rows
         .into_iter()
         .map(|(id, host)| CommunityHost { id, host })
@@ -364,7 +369,9 @@ mod tests {
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
 
     async fn get_pool() -> PgPool {
-        PgPool::connect(TEST_DB_URL)
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_owned());
+        PgPool::connect(&database_url)
             .await
             .expect("connect to test DB")
     }
@@ -570,6 +577,77 @@ mod tests {
         let found = hosts.iter().find(|h| h.id == id);
         assert!(found.is_some(), "inserted community not found");
         assert_eq!(found.unwrap().host, host);
+    }
+
+    /// community_hosts excludes every lifecycle state that must no longer be polled.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_community_hosts_excludes_inactive_lifecycle_states() {
+        let pool = get_pool().await;
+        let (active_id, _, active_host) = make_community(&pool).await;
+        let (archived_id, _, _) = make_community(&pool).await;
+        let (quiescing_id, _, _) = make_community(&pool).await;
+        let (fenced_id, _, _) = make_community(&pool).await;
+        let (tombstone_id, _, _) = make_community(&pool).await;
+        let (deleted_id, _, _) = make_community(&pool).await;
+
+        sqlx::query("UPDATE communities SET archived_at = NOW() WHERE id = $1")
+            .bind(archived_id)
+            .execute(&pool)
+            .await
+            .expect("archive fixture");
+
+        for (id, state, generation, deleted) in [
+            (quiescing_id, "quiescing", 0_i64, false),
+            (fenced_id, "fenced", 1_i64, false),
+            (tombstone_id, "tombstone", 1_i64, false),
+            (deleted_id, "active", 1_i64, true),
+        ] {
+            let mut lifecycle = pool.begin().await.expect("begin lifecycle fixture");
+            sqlx::query(
+                "SELECT set_config('buzz.deletion_executor_community', $1, true), \
+                        set_config('buzz.deletion_fence_generation', $2, true)",
+            )
+            .bind(id.to_string())
+            .bind(generation.to_string())
+            .execute(&mut *lifecycle)
+            .await
+            .expect("authorize lifecycle fixture");
+            sqlx::query(
+                "UPDATE communities SET deletion_state = $2, \
+                        deletion_fence_generation = $3, \
+                        deleted_at = CASE WHEN $4 THEN NOW() ELSE NULL END \
+                 WHERE id = $1",
+            )
+            .bind(id)
+            .bind(state)
+            .bind(generation)
+            .bind(deleted)
+            .execute(&mut *lifecycle)
+            .await
+            .expect("set lifecycle fixture");
+            lifecycle.commit().await.expect("commit lifecycle fixture");
+        }
+
+        let hosts = community_hosts(&pool).await.expect("community_hosts");
+        assert!(
+            hosts
+                .iter()
+                .any(|host| host.id == active_id && host.host == active_host),
+            "active community must be polled"
+        );
+        for excluded in [
+            archived_id,
+            quiescing_id,
+            fenced_id,
+            tombstone_id,
+            deleted_id,
+        ] {
+            assert!(
+                !hosts.iter().any(|host| host.id == excluded),
+                "inactive community {excluded} must not be polled"
+            );
+        }
     }
 
     /// community_count reflects newly inserted communities.
