@@ -29,6 +29,18 @@ fn legacy_app_data_dir_maps_release_identifier() {
 }
 
 #[test]
+fn codex_lab_upstream_data_dir_maps_without_becoming_reset_legacy() {
+    let current =
+        PathBuf::from("/Users/me/Library/Application Support/xyz.chemyibinjiang.buzz.codexlab");
+    let upstream = codex_lab_upstream_data_dir(&current).unwrap();
+    assert_eq!(
+        upstream,
+        PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.app")
+    );
+    assert!(legacy_app_data_dir(&current).is_none());
+}
+
+#[test]
 fn legacy_app_data_dir_maps_dev_worktree_identifier() {
     let current =
         PathBuf::from("/Users/me/Library/Application Support/xyz.block.buzz.app.dev.my-branch");
@@ -60,6 +72,131 @@ fn copy_dir_all_preserves_nested_files_without_overwriting() {
         std::fs::read_to_string(dst.join("agents/managed-agents.json")).unwrap(),
         "old-agents"
     );
+}
+
+#[test]
+fn merge_legacy_managed_agents_restores_only_missing_records() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join("legacy");
+    let current = dir.path().join("current");
+    write_agents_json(
+        &legacy,
+        &serde_json::json!([
+            {"pubkey": "", "slug": "builtin:fizz", "name": "Old Fizz"},
+            {"pubkey": "", "slug": "custom:task", "name": "Restored task"},
+            {"pubkey": "old-agent", "name": "Restored task"}
+        ]),
+    );
+    write_agents_json(
+        &current,
+        &serde_json::json!([
+            {"pubkey": "", "slug": "builtin:fizz", "name": "Current Fizz"},
+            {"pubkey": "current-agent", "name": "Current task"}
+        ]),
+    );
+
+    assert_eq!(merge_legacy_managed_agents(&legacy, &current).unwrap(), 2);
+    let records = read_agents_json(&current);
+    assert_eq!(records.len(), 4);
+    assert_eq!(records[0]["name"], "Current Fizz");
+    assert!(records.iter().any(|record| record["slug"] == "custom:task"));
+    assert!(records.iter().any(|record| record["pubkey"] == "old-agent"));
+    assert!(current
+        .join("agents/managed-agents.json.pre-legacy-merge.bak")
+        .is_file());
+    assert_eq!(merge_legacy_managed_agents(&legacy, &current).unwrap(), 0);
+}
+
+#[test]
+fn merge_legacy_codex_task_bindings_preserves_current_conflicts() {
+    let dir = tempfile::tempdir().unwrap();
+    let legacy = dir.path().join("legacy");
+    let current = dir.path().join("current");
+    std::fs::create_dir_all(legacy.join("agents")).unwrap();
+    std::fs::create_dir_all(current.join("agents")).unwrap();
+    std::fs::write(
+        legacy.join("agents/codex-task-bindings.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 4,
+            "bindings": {
+                "same": {"task_id": "legacy-task"},
+                "restored": {"task_id": "restored-task"}
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        current.join("agents/codex-task-bindings.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "version": 4,
+            "bindings": {"same": {"task_id": "current-task"}}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        merge_legacy_codex_task_bindings(&legacy, &current).unwrap(),
+        1
+    );
+    let merged: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(current.join("agents/codex-task-bindings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(merged["bindings"]["same"]["task_id"], "current-task");
+    assert_eq!(merged["bindings"]["restored"]["task_id"], "restored-task");
+    assert_eq!(
+        merge_legacy_codex_task_bindings(&legacy, &current).unwrap(),
+        0
+    );
+}
+
+#[test]
+fn codex_lab_upstream_migration_runs_once_and_does_not_resurrect_deleted_agents() {
+    let dir = tempfile::tempdir().unwrap();
+    let upstream = dir.path().join(BUZZ_RELEASE_IDENTIFIER);
+    let current = dir.path().join(CODEX_LAB_RELEASE_IDENTIFIER);
+    write_agents_json(
+        &upstream,
+        &serde_json::json!([{"pubkey": "legacy-agent", "name": "Legacy task"}]),
+    );
+    write_agents_json(
+        &current,
+        &serde_json::json!([{"pubkey": "current-agent", "name": "Current task"}]),
+    );
+
+    assert!(migrate_codex_lab_upstream_data_at(&upstream, &current, false).unwrap());
+    assert!(read_agents_json(&current)
+        .iter()
+        .any(|record| record["pubkey"] == "legacy-agent"));
+    assert!(current
+        .join(CODEX_LAB_UPSTREAM_MIGRATION_SENTINEL)
+        .is_file());
+
+    write_agents_json(
+        &current,
+        &serde_json::json!([{"pubkey": "current-agent", "name": "Current task"}]),
+    );
+    assert!(!migrate_codex_lab_upstream_data_at(&upstream, &current, false).unwrap());
+    assert!(!read_agents_json(&current)
+        .iter()
+        .any(|record| record["pubkey"] == "legacy-agent"));
+}
+
+#[test]
+fn codex_lab_reset_suppresses_future_upstream_import() {
+    let dir = tempfile::tempdir().unwrap();
+    let upstream = dir.path().join(BUZZ_RELEASE_IDENTIFIER);
+    let current = dir.path().join(CODEX_LAB_RELEASE_IDENTIFIER);
+    write_agents_json(
+        &upstream,
+        &serde_json::json!([{"pubkey": "legacy-agent", "name": "Legacy task"}]),
+    );
+
+    assert!(!migrate_codex_lab_upstream_data_at(&upstream, &current, true).unwrap());
+    assert!(!migrate_codex_lab_upstream_data_at(&upstream, &current, false).unwrap());
+    assert!(!current.join("agents/managed-agents.json").exists());
 }
 
 /// Helper: create a temp dir structure mimicking canonical + worktree layout.

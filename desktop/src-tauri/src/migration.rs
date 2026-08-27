@@ -16,7 +16,10 @@
 //! `mcp_command`; unknown/custom agents are left untouched.
 
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 use tauri::Manager;
 
 use crate::util::replace_with_symlink;
@@ -24,6 +27,9 @@ use crate::util::replace_with_symlink;
 const CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.buzz.app.dev";
 const LEGACY_CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.sprout.app.dev";
 const LEGACY_RELEASE_IDENTIFIER: &str = "xyz.block.sprout.app";
+const CODEX_LAB_RELEASE_IDENTIFIER: &str = "xyz.chemyibinjiang.buzz.codexlab";
+const BUZZ_RELEASE_IDENTIFIER: &str = "xyz.block.buzz.app";
+const CODEX_LAB_UPSTREAM_MIGRATION_SENTINEL: &str = ".upstream-buzz-migration-v1";
 
 /// JSON files symlinked from worktree data directories to the canonical
 /// dev data directory. Only data files — never `agent-pids/` or `logs/`.
@@ -60,12 +66,21 @@ pub(crate) fn legacy_app_data_dir(current: &Path) -> Option<PathBuf> {
     let name = current.file_name()?.to_str()?;
     let legacy_name = if name.starts_with(CANONICAL_DEV_IDENTIFIER) {
         name.replacen(CANONICAL_DEV_IDENTIFIER, LEGACY_CANONICAL_DEV_IDENTIFIER, 1)
-    } else if name.starts_with("xyz.block.buzz.app") {
-        name.replacen("xyz.block.buzz.app", LEGACY_RELEASE_IDENTIFIER, 1)
+    } else if name.starts_with(BUZZ_RELEASE_IDENTIFIER) {
+        name.replacen(BUZZ_RELEASE_IDENTIFIER, LEGACY_RELEASE_IDENTIFIER, 1)
     } else {
         return None;
     };
     current.parent().map(|parent| parent.join(legacy_name))
+}
+
+fn codex_lab_upstream_data_dir(current: &Path) -> Option<PathBuf> {
+    if current.file_name()?.to_str()? != CODEX_LAB_RELEASE_IDENTIFIER {
+        return None;
+    }
+    current
+        .parent()
+        .map(|parent| parent.join(BUZZ_RELEASE_IDENTIFIER))
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -100,6 +115,128 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn agent_record_migration_key(record: &serde_json::Value) -> String {
+    let string_field = |name: &str| {
+        record
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+
+    if let Some(pubkey) = string_field("pubkey") {
+        return format!("instance:{pubkey}");
+    }
+    if let Some(slug) = string_field("slug") {
+        return format!("definition:{slug}");
+    }
+    if let Some(name) = string_field("name") {
+        return format!("definition-name:{}", name.to_lowercase());
+    }
+
+    format!("record:{record}")
+}
+
+/// Merge agent records after the generic absent-only directory copy. Current
+/// records win; the legacy store contributes only missing identities and
+/// definitions.
+fn merge_legacy_managed_agents(legacy_dir: &Path, current_dir: &Path) -> Result<usize, String> {
+    let legacy_path = legacy_dir.join("agents").join("managed-agents.json");
+    let current_path = current_dir.join("agents").join("managed-agents.json");
+    if !legacy_path.is_file() || !current_path.is_file() {
+        return Ok(0);
+    }
+
+    let legacy_bytes = std::fs::read(&legacy_path)
+        .map_err(|error| format!("failed to read {}: {error}", legacy_path.display()))?;
+    let current_bytes = std::fs::read(&current_path)
+        .map_err(|error| format!("failed to read {}: {error}", current_path.display()))?;
+    let legacy: Vec<serde_json::Value> = serde_json::from_slice(&legacy_bytes)
+        .map_err(|error| format!("failed to parse {}: {error}", legacy_path.display()))?;
+    let mut current: Vec<serde_json::Value> = serde_json::from_slice(&current_bytes)
+        .map_err(|error| format!("failed to parse {}: {error}", current_path.display()))?;
+    let mut seen = current
+        .iter()
+        .map(agent_record_migration_key)
+        .collect::<HashSet<_>>();
+    let before = current.len();
+
+    for record in legacy {
+        if seen.insert(agent_record_migration_key(&record)) {
+            current.push(record);
+        }
+    }
+
+    let imported = current.len() - before;
+    if imported == 0 {
+        return Ok(0);
+    }
+
+    let backup = crate::util::resolved_backup_path(
+        &current_path,
+        "managed-agents.json.pre-legacy-merge.bak",
+    );
+    crate::util::create_restricted_backup_once(&backup, &current_bytes)
+        .map_err(|error| format!("failed to back up {}: {error}", current_path.display()))?;
+    let payload = serde_json::to_vec_pretty(&current)
+        .map_err(|error| format!("failed to serialize merged agent store: {error}"))?;
+    crate::managed_agents::atomic_write_json_restricted(&current_path, &payload)?;
+    Ok(imported)
+}
+
+/// Merge bindings separately from agent identities. Otherwise a restored card
+/// can remain detached from the Codex task it represented before reinstall.
+fn merge_legacy_codex_task_bindings(
+    legacy_dir: &Path,
+    current_dir: &Path,
+) -> Result<usize, String> {
+    let legacy_path = legacy_dir.join("agents").join("codex-task-bindings.json");
+    let current_path = current_dir.join("agents").join("codex-task-bindings.json");
+    if !legacy_path.is_file() || !current_path.is_file() {
+        return Ok(0);
+    }
+
+    let legacy_bytes = std::fs::read(&legacy_path)
+        .map_err(|error| format!("failed to read {}: {error}", legacy_path.display()))?;
+    let current_bytes = std::fs::read(&current_path)
+        .map_err(|error| format!("failed to read {}: {error}", current_path.display()))?;
+    let legacy: serde_json::Value = serde_json::from_slice(&legacy_bytes)
+        .map_err(|error| format!("failed to parse {}: {error}", legacy_path.display()))?;
+    let mut current: serde_json::Value = serde_json::from_slice(&current_bytes)
+        .map_err(|error| format!("failed to parse {}: {error}", current_path.display()))?;
+    let legacy_bindings = legacy
+        .get("bindings")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| format!("{} has no bindings object", legacy_path.display()))?;
+    let current_bindings = current
+        .get_mut("bindings")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| format!("{} has no bindings object", current_path.display()))?;
+    let mut imported = 0;
+
+    for (pubkey, binding) in legacy_bindings {
+        if !current_bindings.contains_key(pubkey) {
+            current_bindings.insert(pubkey.clone(), binding.clone());
+            imported += 1;
+        }
+    }
+
+    if imported == 0 {
+        return Ok(0);
+    }
+
+    let backup = crate::util::resolved_backup_path(
+        &current_path,
+        "codex-task-bindings.json.pre-legacy-merge.bak",
+    );
+    crate::util::create_restricted_backup_once(&backup, &current_bytes)
+        .map_err(|error| format!("failed to back up {}: {error}", current_path.display()))?;
+    let payload = serde_json::to_vec_pretty(&current)
+        .map_err(|error| format!("failed to serialize merged task bindings: {error}"))?;
+    crate::managed_agents::atomic_write_json_restricted(&current_path, &payload)?;
+    Ok(imported)
 }
 
 /// Run every data migration that must complete before identity resolution and
@@ -156,6 +293,7 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
     }
 
     migrate_legacy_app_data_dir(app);
+    migrate_codex_lab_upstream_data(app, reset_completed);
     sync_shared_agent_data(app);
     // Dev-build-only: copy any agent keys that exist in the production
     // keyring ("buzz-desktop") into the dev service ("buzz-desktop-dev")
@@ -301,6 +439,60 @@ pub fn migrate_legacy_app_data_dir(app: &tauri::AppHandle) {
             legacy_dir.display(),
             current_dir.display()
         ),
+    }
+}
+
+/// Import upstream Buzz data into the separately identified Codex Lab app once.
+/// This is intentionally separate from `legacy_app_data_dir`: resetting Codex
+/// Lab must never remove or rename the upstream app's live data directory.
+fn migrate_codex_lab_upstream_data_at(
+    upstream_dir: &Path,
+    current_dir: &Path,
+    reset_completed: bool,
+) -> Result<bool, String> {
+    if let Err(error) = std::fs::create_dir_all(&current_dir) {
+        return Err(format!("cannot create app data dir: {error}"));
+    }
+    let sentinel = current_dir.join(CODEX_LAB_UPSTREAM_MIGRATION_SENTINEL);
+    if reset_completed {
+        std::fs::write(&sentinel, b"reset\n")
+            .map_err(|error| format!("failed to suppress import after reset: {error}"))?;
+        return Ok(false);
+    }
+    if sentinel.exists() || !upstream_dir.exists() {
+        return Ok(false);
+    }
+
+    copy_dir_all(upstream_dir, current_dir)
+        .map_err(|error| format!("failed to copy upstream data: {error}"))
+        .and_then(|()| merge_legacy_managed_agents(upstream_dir, current_dir).map(|_| ()))
+        .and_then(|()| merge_legacy_codex_task_bindings(upstream_dir, current_dir).map(|_| ()))
+        .and_then(|()| {
+            std::fs::write(&sentinel, b"complete\n")
+                .map_err(|error| format!("failed to write migration sentinel: {error}"))
+        })?;
+    Ok(true)
+}
+
+fn migrate_codex_lab_upstream_data(app: &tauri::AppHandle, reset_completed: bool) {
+    let current_dir = match app.path().app_data_dir() {
+        Ok(dir) => dir,
+        Err(error) => {
+            eprintln!("buzz-desktop: codex-lab-migration: cannot resolve app data dir: {error}");
+            return;
+        }
+    };
+    let Some(upstream_dir) = codex_lab_upstream_data_dir(&current_dir) else {
+        return;
+    };
+
+    match migrate_codex_lab_upstream_data_at(&upstream_dir, &current_dir, reset_completed) {
+        Ok(true) => eprintln!(
+            "buzz-desktop: codex-lab-migration: imported missing data from {}",
+            upstream_dir.display()
+        ),
+        Ok(false) => {}
+        Err(error) => eprintln!("buzz-desktop: codex-lab-migration: {error}"),
     }
 }
 

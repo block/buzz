@@ -28,6 +28,7 @@ import {
 } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { CodexSharedRuntimePanel } from "./CodexSharedRuntimePanel";
+import { CodexSshDisclosure } from "./CodexSshDisclosure";
 
 function taskLabel(task: CodexTaskSummary) {
   return task.threadName.trim() || `Codex task ${task.id.slice(0, 8)}`;
@@ -61,6 +62,7 @@ export function CodexTaskAgentDialog({
   const [name, setName] = React.useState("");
   const [channelId, setChannelId] = React.useState("");
   const [sshHost, setSshHost] = React.useState("");
+  const [sshExpanded, setSshExpanded] = React.useState(false);
   const [sshConfigAlias, setSshConfigAlias] = React.useState("");
   const [sshConfigHosts, setSshConfigHosts] = React.useState<
     Awaited<ReturnType<typeof listCodexSshConfigHosts>>
@@ -114,13 +116,13 @@ export function CodexTaskAgentDialog({
   }, [open, remoteTaskId, taskId, tasks]);
 
   React.useEffect(() => {
-    if (!open) return;
+    if (!open || !sshExpanded) return;
     void listCodexSshConfigHosts()
       .then(setSshConfigHosts)
       .catch((cause) =>
         setSshError(cause instanceof Error ? cause.message : String(cause)),
       );
-  }, [open]);
+  }, [open, sshExpanded]);
 
   React.useEffect(() => {
     // Selecting a remote task intentionally clears the local task id. Do not
@@ -147,6 +149,7 @@ export function CodexTaskAgentDialog({
     setTaskId("");
     setName("");
     setChannelId("");
+    setSshExpanded(false);
     setSshConfigAlias("");
     setSshRuntime(null);
     setSshError(null);
@@ -344,17 +347,16 @@ export function CodexTaskAgentDialog({
                 {!sharedRuntimeReady ? (
                   <CodexSharedRuntimePanel enabled={open} />
                 ) : null}
-                <div className="space-y-3 rounded-md border border-border/60 p-3">
-                  <div>
-                    <p className="text-sm font-medium">
-                      Remote Codex computer (SSH)
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      Buzz starts <code>codex app-server</code> on the remote
-                      computer through SSH and creates a local tunnel; private
-                      key contents never leave your computer.
-                    </p>
-                  </div>
+                <CodexSshDisclosure
+                  connected={sshRuntime !== null}
+                  expanded={sshExpanded}
+                  onExpandedChange={setSshExpanded}
+                >
+                  <p className="text-xs text-muted-foreground">
+                    Buzz starts <code>codex app-server</code> on the remote
+                    computer through SSH and creates a local tunnel; private key
+                    contents never leave your computer.
+                  </p>
                   <select
                     aria-label="SSH config host"
                     className="h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
@@ -480,7 +482,7 @@ export function CodexTaskAgentDialog({
                   {sshError ? (
                     <p className="text-xs text-destructive">{sshError}</p>
                   ) : null}
-                </div>
+                </CodexSshDisclosure>
                 {sharedRuntimeReady ? (
                   <div className="rounded-md border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-sm leading-5">
                     <span>Connected through the Codex shared runtime</span>
