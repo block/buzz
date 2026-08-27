@@ -6,18 +6,20 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../../shared/animated_avatar.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/utils/string_utils.dart';
 import '../../shared/widgets/avatar_image.dart';
-import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/buzz_action_tile.dart';
 import '../../shared/widgets/modal_presentation.dart';
+import '../../shared/widgets/progressive_animated_avatar.dart';
 import '../channels/channel.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/message_content.dart';
 import 'presence_cache_provider.dart';
-import 'user_cache_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
 import 'user_status_cache_provider.dart';
 
 /// Show a user profile bottom sheet for the given [pubkey].
@@ -216,7 +218,7 @@ class UserProfileSheet extends HookConsumerWidget {
                       children: [
                         if (pk != currentPubkey) ...[
                           Expanded(
-                            child: _ProfileActionTile(
+                            child: BuzzActionTile(
                               icon: isOpeningDirectMessage.value
                                   ? null
                                   : LucideIcons.messageSquare,
@@ -224,13 +226,14 @@ class UserProfileSheet extends HookConsumerWidget {
                                   ? 'Opening…'
                                   : 'Message',
                               isLoading: isOpeningDirectMessage.value,
+                              loadingSemanticLabel: 'Opening direct message',
                               onTap: openDirectMessage,
                             ),
                           ),
                           const SizedBox(width: Grid.twelve),
                         ],
                         Expanded(
-                          child: _ProfileActionTile(
+                          child: BuzzActionTile(
                             icon: copied.value
                                 ? LucideIcons.check
                                 : LucideIcons.key,
@@ -371,60 +374,7 @@ class _ProfilePresenceChip extends StatelessWidget {
   }
 }
 
-class _ProfileActionTile extends StatelessWidget {
-  const _ProfileActionTile({
-    required this.icon,
-    required this.label,
-    required this.onTap,
-    this.isLoading = false,
-  });
-
-  final IconData? icon;
-  final String label;
-  final VoidCallback onTap;
-  final bool isLoading;
-
-  @override
-  Widget build(BuildContext context) => GestureDetector(
-    onTap: isLoading
-        ? null
-        : () {
-            unawaited(HapticFeedback.lightImpact());
-            onTap();
-          },
-    behavior: HitTestBehavior.opaque,
-    child: Container(
-      width: double.infinity,
-      height: 68 + (Grid.xxs * 2),
-      decoration: BoxDecoration(
-        color: context.colors.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(Radii.dialog),
-      ),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          if (isLoading)
-            BuzzLoadingIndicator(
-              size: 22,
-              color: context.colors.onSurface,
-              semanticLabel: 'Opening direct message',
-            )
-          else
-            Icon(icon, size: 22, color: context.colors.onSurface),
-          const SizedBox(height: Grid.xxs),
-          Text(
-            label,
-            style: context.textTheme.labelMedium?.copyWith(
-              color: context.colors.onSurface,
-            ),
-          ),
-        ],
-      ),
-    ),
-  );
-}
-
-class _ProfileAvatar extends StatelessWidget {
+class _ProfileAvatar extends HookWidget {
   final String? avatarUrl;
   final String initial;
 
@@ -432,12 +382,33 @@ class _ProfileAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final animatedAvatar = parseAnimatedAvatarUrl(avatarUrl);
+    final stoppedAnimationUrl = useState<String?>(null);
+    final isPlaying =
+        animatedAvatar != null &&
+        stoppedAnimationUrl.value != animatedAvatar.animationUrl;
+
     return AspectRatio(
       aspectRatio: 1,
-      child: ClipOval(
-        child: AvatarImageContent(
-          imageUrl: avatarUrl,
-          fallback: _AvatarFallback(initial: initial),
+      child: GestureDetector(
+        key: const ValueKey('selected-profile-avatar'),
+        onTap: animatedAvatar == null
+            ? null
+            : () => stoppedAnimationUrl.value =
+                  stoppedAnimationUrl.value == animatedAvatar.animationUrl
+                  ? null
+                  : animatedAvatar.animationUrl,
+        child: ClipOval(
+          child: isPlaying
+              ? ProgressiveAnimatedAvatar(
+                  key: ValueKey(animatedAvatar.animationUrl),
+                  descriptor: animatedAvatar,
+                  fallback: _AvatarFallback(initial: initial),
+                )
+              : AvatarImageContent(
+                  imageUrl: animatedAvatar?.posterUrl ?? avatarUrl,
+                  fallback: _AvatarFallback(initial: initial),
+                ),
         ),
       ),
     );

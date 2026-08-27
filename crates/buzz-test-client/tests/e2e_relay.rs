@@ -72,8 +72,9 @@ fn nip98_post_header(keys: &Keys, url: &str, body: &str) -> String {
 }
 
 async fn e2e_db_pool() -> sqlx::Pool<sqlx::Postgres> {
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string() // sadscan:disable np.postgres.1
+    });
     sqlx::postgres::PgPoolOptions::new()
         .max_connections(1)
         .connect(&database_url)
@@ -120,7 +121,12 @@ async fn seed_relay_member(host: &str, keys: &Keys, role: &str) {
 }
 
 async fn seed_relay_owner(keys: &Keys) {
-    seed_relay_member("localhost:3000", keys, "owner").await;
+    seed_relay_member(&relay_authority(), keys, "owner").await;
+}
+
+fn relay_authority() -> String {
+    let url = url::Url::parse(&relay_http_url()).expect("relay HTTP URL");
+    url[url::Position::BeforeHost..url::Position::AfterPort].to_string()
 }
 
 fn http_origin_for_host(host: &str) -> String {
@@ -315,7 +321,7 @@ async fn test_invite_claim_rejects_invalid_code() {
 #[ignore]
 async fn test_invite_mint_requires_owner_or_admin() {
     let member = Keys::generate();
-    seed_relay_member("localhost:3000", &member, "member").await;
+    seed_relay_member(&relay_authority(), &member, "member").await;
 
     let response = invite_post(&member, "/api/invites", "{}").await;
     assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
@@ -716,6 +722,81 @@ async fn test_stored_events_returned_before_eose() {
     client.disconnect().await.expect("disconnect");
 }
 
+/// An explicit `#h` branch that cannot match must not cancel a valid OR sibling.
+/// The valid channel remains usable for historical delivery and live fan-out;
+/// malformed-only requests still close because no authorized UUID survives.
+#[tokio::test]
+#[ignore]
+async fn test_valid_channel_survives_malformed_or_empty_h_sibling() {
+    let url = relay_url();
+    let kind: u16 = 9;
+    let keys = Keys::generate();
+    let channel = create_test_channel(&keys).await;
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    for (label, sibling) in [
+        (
+            "malformed",
+            serde_json::json!({"kinds": [kind], "#h": ["not-a-uuid"]}),
+        ),
+        ("empty", serde_json::json!({"kinds": [kind], "#h": []})),
+    ] {
+        let historical = format!("{label}-historical-{}", Uuid::new_v4());
+        let ok = client
+            .send_text_message(&keys, &channel, &historical, kind)
+            .await
+            .expect("send historical event");
+        assert!(ok.accepted, "historical event rejected: {}", ok.message);
+
+        let valid = Filter::new()
+            .kind(Kind::Custom(kind))
+            .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+        let sibling: Filter = serde_json::from_value(sibling).expect("parse sibling filter");
+        let sid = sub_id(label);
+        client
+            .subscribe(&sid, vec![valid, sibling])
+            .await
+            .expect("subscribe");
+
+        let events = client
+            .collect_until_eose(&sid, Duration::from_secs(5))
+            .await
+            .expect("valid sibling history followed by EOSE");
+        assert!(
+            events.iter().any(|event| event.content == historical),
+            "valid sibling history missing for {label} #h branch: {events:?}",
+        );
+
+        let live = format!("{label}-live-{}", Uuid::new_v4());
+        let ok = client
+            .send_text_message(&keys, &channel, &live, kind)
+            .await
+            .expect("send live event");
+        assert!(ok.accepted, "live event rejected: {}", ok.message);
+        let message = client
+            .recv_event(Duration::from_secs(5))
+            .await
+            .expect("receive post-EOSE live event");
+        match message {
+            RelayMessage::Event {
+                subscription_id,
+                event,
+            } => {
+                assert_eq!(subscription_id, sid);
+                assert_eq!(event.content, live);
+            }
+            other => panic!("expected live EVENT for {label} sibling, got {other:?}"),
+        }
+
+        client
+            .close_subscription(&sid)
+            .await
+            .expect("close subscription");
+    }
+
+    client.disconnect().await.expect("disconnect");
+}
+
 /// Ephemeral events (kind 20000–29999) must be accepted but not persisted.
 #[tokio::test]
 #[ignore]
@@ -791,10 +872,10 @@ async fn test_auth_event_kind_rejected() {
 
 /// NIP-11 max_subscriptions must be enforced; (limit+1)th REQ gets CLOSED.
 ///
-/// The relay's MAX_SUBSCRIPTIONS is 1024. Opening 1024 subs in a test is slow,
-/// so we open a smaller batch and verify the NIP-11 advertised limit matches
-/// the actual enforcement constant. The full-limit test is covered by the
-/// NIP-11 assertion below (which verifies the advertised value is 1024).
+/// This is a protocol-cap test, not an admission-throughput test. Open one REQ
+/// at a time and wait out any shared fixed-window quota before retrying a REQ
+/// rejected specifically as `rate-limited`, so production admission remains
+/// enabled while the test deterministically reaches the independent 1024 cap.
 #[tokio::test]
 #[ignore]
 async fn test_subscription_limit_enforced() {
@@ -802,58 +883,73 @@ async fn test_subscription_limit_enforced() {
     let keys = Keys::generate();
     let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
 
-    // Open 1024 subscriptions (the relay's MAX_SUBSCRIPTIONS).
     for i in 0..1024 {
         let sid = format!("limit-sub-{i}");
-        let filter = Filter::new().kind(Kind::Custom(9));
-        client
-            .subscribe(&sid, vec![filter])
-            .await
-            .expect("subscribe");
-        // Drain EOSE to avoid buffer buildup.
-        client
-            .collect_until_eose(&sid, Duration::from_secs(5))
-            .await
-            .expect("EOSE");
+        let filter = Filter::new().kind(Kind::Custom(49_999));
+        subscribe_until_eose(&mut client, &sid, filter).await;
     }
 
     let overflow_sid = sub_id("overflow");
-    // Use a kind that no other test writes, so we don't receive stale events.
-    let filter = Filter::new().kind(Kind::Custom(49999));
-    client
-        .subscribe(&overflow_sid, vec![filter])
-        .await
-        .expect("send REQ");
-
-    // Drain EOSE and stale events from the 100 earlier subscriptions
-    // until we receive the CLOSED for the overflow subscription.
-    let msg = loop {
-        let m = client
-            .recv_event(Duration::from_secs(5))
+    let filter = Filter::new().kind(Kind::Custom(49_999));
+    loop {
+        client
+            .subscribe(&overflow_sid, vec![filter.clone()])
             .await
-            .expect("recv CLOSED (or timeout)");
-        match &m {
-            RelayMessage::Eose { .. } => continue,
-            RelayMessage::Event { .. } => continue, // stale event from earlier subs
-            _ => break m,
-        }
-    };
+            .expect("send overflow REQ");
 
-    match msg {
-        RelayMessage::Closed {
-            subscription_id,
-            message,
-        } => {
-            assert_eq!(subscription_id, overflow_sid);
-            assert!(
-                message.to_lowercase().contains("too many"),
-                "Expected 'too many' in CLOSED message, got: {message}"
-            );
+        match client
+            .recv_event(Duration::from_secs(6))
+            .await
+            .expect("recv overflow CLOSED")
+        {
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == overflow_sid && message.starts_with("rate-limited:") => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } => {
+                assert_eq!(subscription_id, overflow_sid);
+                assert!(
+                    message.to_lowercase().contains("too many"),
+                    "Expected 'too many' in CLOSED message, got: {message}"
+                );
+                break;
+            }
+            other => panic!("Expected CLOSED for overflow subscription, got {other:?}"),
         }
-        other => panic!("Expected CLOSED for overflow subscription, got {other:?}"),
     }
 
     client.disconnect().await.expect("disconnect");
+}
+
+async fn subscribe_until_eose(client: &mut BuzzTestClient, sid: &str, filter: Filter) {
+    loop {
+        client
+            .subscribe(sid, vec![filter.clone()])
+            .await
+            .expect("subscribe");
+        match client
+            .recv_event(Duration::from_secs(6))
+            .await
+            .expect("EOSE or rate-limit CLOSED")
+        {
+            RelayMessage::Eose { subscription_id } => {
+                assert_eq!(subscription_id, sid);
+                return;
+            }
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == sid && message.starts_with("rate-limited:") => {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            other => panic!("unexpected response while opening {sid}: {other:?}"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -2563,6 +2659,112 @@ async fn test_reply_ingest_pushes_live_thread_summary() {
     assert_eq!(content["reply_count"], 0, "reply counted down: {content}");
 
     client.disconnect().await.expect("disconnect");
+}
+
+/// F3 (workflow path): a `message_posted` workflow whose `send_message` action
+/// has `reply_in_thread: true` posts a threaded reply to the triggering
+/// top-level message — and that relay-built reply must push the same live
+/// kind:39005 thread-summary overlay the human ingest path does, so desktops
+/// update the root's badge without refetching. Also exercises F2's semantics:
+/// the `trigger_is_reply == false` filter must fire on the top-level message.
+#[tokio::test]
+#[ignore]
+async fn test_workflow_reply_in_thread_pushes_live_thread_summary() {
+    let url = relay_url();
+    let http = relay_http_url();
+    let keys = Keys::generate();
+    let pubkey_hex = keys.public_key().to_hex();
+    let channel = create_test_channel(&keys).await;
+
+    // A message_posted workflow that replies in-thread, but only to NEW
+    // top-level messages (`trigger_is_reply == false`) — so it cannot recurse
+    // on the reply it just posted.
+    let yaml = "name: reply-bot\n\
+         description: F3 live probe\n\
+         trigger:\n\
+         \x20 on: message_posted\n\
+         \x20 filter: \"trigger_is_reply == false\"\n\
+         steps:\n\
+         \x20 - id: step1\n\
+         \x20   name: Reply\n\
+         \x20   action: send_message\n\
+         \x20   text: \"auto-reply\"\n\
+         \x20   reply_in_thread: true\n"
+        .to_string();
+    let def = EventBuilder::new(Kind::Custom(30620), yaml)
+        .tags([
+            Tag::parse(["d", &Uuid::new_v4().to_string()]).unwrap(),
+            Tag::parse(["h", channel.as_str()]).unwrap(),
+            Tag::parse(["name", "reply-bot"]).unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .expect("sign workflow def");
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{http}/events"))
+        .header("X-Pubkey", &pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&def).unwrap())
+        .send()
+        .await
+        .expect("submit workflow def");
+    let body: serde_json::Value = resp.json().await.expect("parse def response");
+    assert!(
+        body["accepted"].as_bool().unwrap_or(false),
+        "workflow def not accepted: {body}"
+    );
+
+    // Live 39005 subscription for the channel, shaped like the desktop window
+    // store's.
+    let mut ws = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+    let sid = sub_id("wf-live-summary");
+    let filter = Filter::new()
+        .kind(Kind::Custom(39005))
+        .custom_tags(SingleLetterTag::lowercase(Alphabet::H), [channel.as_str()]);
+    ws.subscribe(&sid, vec![filter]).await.expect("subscribe");
+    ws.collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("EOSE");
+
+    // Post a top-level message — the workflow fires and posts a threaded reply.
+    let root = EventBuilder::new(Kind::Custom(9), "trigger me")
+        .tags([Tag::parse(["h", channel.as_str()]).unwrap()])
+        .sign_with_keys(&keys)
+        .expect("sign root");
+    let root_id = root.id;
+    let ok = ws.send_event(root).await.expect("send root");
+    assert!(ok.accepted, "root rejected: {}", ok.message);
+
+    // The workflow reply's 39005 overlay must arrive and target the root with a
+    // reply_count of 1 — proving the relay-built reply pushed the live summary.
+    let summary = loop {
+        match ws
+            .recv_event(Duration::from_secs(10))
+            .await
+            .expect("recv 39005 for workflow reply")
+        {
+            RelayMessage::Event { event, .. } if event.kind == Kind::Custom(39005) => break *event,
+            _ => continue,
+        }
+    };
+    let root_tag_val = summary
+        .tags
+        .iter()
+        .find(|t| t.as_slice().first().map(String::as_str) == Some("e"))
+        .and_then(|t| t.content().map(str::to_string))
+        .expect("summary carries root e-tag");
+    assert_eq!(
+        root_tag_val,
+        root_id.to_hex(),
+        "workflow-reply summary targets the triggering top-level message as root"
+    );
+    let content: serde_json::Value = serde_json::from_str(&summary.content).expect("JSON");
+    assert_eq!(
+        content["reply_count"], 1,
+        "workflow threaded reply counted up: {content}"
+    );
+
+    ws.disconnect().await.expect("disconnect");
 }
 
 /// Read a member's authoritative role from the relay-signed kind:39002 member

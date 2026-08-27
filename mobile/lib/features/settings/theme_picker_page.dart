@@ -73,7 +73,7 @@ class ThemePickerPage extends HookConsumerWidget {
     }, const []);
 
     return FrostedScaffold(
-      appBar: const FrostedAppBar(title: Text('Theme')),
+      appBar: const FrostedAppBar(centerTitle: true, title: Text('Theme')),
       body: Column(
         children: [
           SizedBox(height: frostedAppBarHeight(context)),

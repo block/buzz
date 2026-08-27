@@ -136,6 +136,8 @@ use crate::config::ChannelFilter;
 pub struct ChannelInfo {
     pub name: String,
     pub channel_type: String,
+    /// Channel description from the kind-39000 `about` tag, if present.
+    pub description: Option<String>,
 }
 
 pub(crate) fn channel_type_from_tags(tags: &[serde_json::Value]) -> String {
@@ -175,7 +177,7 @@ pub(crate) fn merge_discovered_channels(
     channel_uuids: Vec<Uuid>,
     meta_events: &serde_json::Value,
 ) -> HashMap<Uuid, ChannelInfo> {
-    let mut meta_map: HashMap<Uuid, (String, String)> = HashMap::new();
+    let mut meta_map: HashMap<Uuid, (String, String, Option<String>)> = HashMap::new();
     let mut archived: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
     if let Some(arr) = meta_events.as_array() {
         for ev in arr {
@@ -186,11 +188,13 @@ pub(crate) fn merge_discovered_channels(
             let mut d_val = None;
             let mut name = None;
             let mut is_archived = false;
+            let mut description = None;
             for tag in tags {
                 if let Some(arr) = tag.as_array() {
                     match arr.first().and_then(|v| v.as_str()) {
                         Some("d") => d_val = arr.get(1).and_then(|v| v.as_str()),
                         Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
+                        Some("about") => description = arr.get(1).and_then(|v| v.as_str()),
                         Some("archived") => {
                             is_archived = arr.get(1).and_then(|v| v.as_str()) == Some("true")
                         }
@@ -206,7 +210,11 @@ pub(crate) fn merge_discovered_channels(
                     }
                     let ch_name = name.unwrap_or("unknown").to_string();
                     let ch_type = channel_type_from_tags(tags);
-                    meta_map.insert(uuid, (ch_name, ch_type));
+                    let ch_desc = description
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    meta_map.insert(uuid, (ch_name, ch_type, ch_desc));
                 }
             }
         }
@@ -217,10 +225,17 @@ pub(crate) fn merge_discovered_channels(
         if archived.contains(&uuid) {
             continue;
         }
-        let (name, channel_type) = meta_map
+        let (name, channel_type, description) = meta_map
             .remove(&uuid)
-            .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
-        map.insert(uuid, ChannelInfo { name, channel_type });
+            .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string(), None));
+        map.insert(
+            uuid,
+            ChannelInfo {
+                name,
+                channel_type,
+                description,
+            },
+        );
     }
     map
 }
@@ -406,6 +421,64 @@ impl RestClient {
         resp.json()
             .await
             .map_err(|e| RelayError::Http(e.to_string()))
+    }
+
+    /// Query events via `POST /query` with a raw NIP-01 filter document.
+    ///
+    /// `nostr::Filter` only encodes single-letter generic tags. Project home
+    /// lookup needs `#buzz-channel`, which this path serializes verbatim.
+    pub async fn query_raw(&self, filters: &[Value]) -> Result<Value, RelayError> {
+        let body_bytes = serde_json::to_vec(filters)
+            .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
+        let resp = self.bridge_post("/query", &body_bytes).await?;
+        resp.json()
+            .await
+            .map_err(|e| RelayError::Http(e.to_string()))
+    }
+
+    /// Query every historical event matching one raw filter across bounded pages.
+    ///
+    /// Uses the bridge's composite `(until, before_id)` cursor so a full page
+    /// never becomes evidence that older project metadata is absent.
+    pub async fn query_raw_all(&self, mut filter: Value) -> Result<Vec<Value>, RelayError> {
+        const PAGE_SIZE: usize = 500;
+        const EVENT_BOUND: usize = 10_000;
+        let mut events = Vec::new();
+        loop {
+            let remaining_probe = EVENT_BOUND + 1 - events.len();
+            let page_limit = PAGE_SIZE.min(remaining_probe);
+            filter["limit"] = serde_json::json!(page_limit);
+            let page = self.query_raw(std::slice::from_ref(&filter)).await?;
+            let page = page
+                .as_array()
+                .ok_or_else(|| RelayError::Http("query response is not an array".into()))?;
+            let done = page.len() < page_limit;
+            if events.len() + page.len() > EVENT_BOUND {
+                return Err(RelayError::Http(format!(
+                    "query exceeded the exhaustive {EVENT_BOUND}-event bound"
+                )));
+            }
+            if !done {
+                let last = page
+                    .last()
+                    .ok_or_else(|| RelayError::Http("full query page is empty".into()))?;
+                let created_at = last
+                    .get("created_at")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| RelayError::Http("query page event lacks created_at".into()))?;
+                let id = last
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| id.len() == 64 && id.chars().all(|ch| ch.is_ascii_hexdigit()))
+                    .ok_or_else(|| RelayError::Http("query page event has invalid id".into()))?;
+                filter["until"] = serde_json::json!(created_at);
+                filter["before_id"] = serde_json::json!(id);
+            }
+            events.extend(page.iter().cloned());
+            if done {
+                return Ok(events);
+            }
+        }
     }
 
     /// Count events via the HTTP bridge: `POST /count` with NIP-98 auth.
@@ -4161,6 +4234,46 @@ mod tests {
         let map = merge_discovered_channels(vec![ch], &meta);
 
         assert!(map.contains_key(&ch), "archived=false is treated as live");
+    }
+
+    #[test]
+    fn merge_discovered_channels_parses_about_as_description() {
+        let ch = Uuid::new_v4();
+        let meta = serde_json::json!([meta_event(
+            ch,
+            "team",
+            &["t", "stream", "about", "Engineering discussions"]
+        )]);
+
+        let map = merge_discovered_channels(vec![ch], &meta);
+
+        assert_eq!(
+            map[&ch].description.as_deref(),
+            Some("Engineering discussions")
+        );
+    }
+
+    #[test]
+    fn merge_discovered_channels_blank_about_is_none() {
+        let ch = Uuid::new_v4();
+        let meta = serde_json::json!([meta_event(ch, "team", &["about", "   "])]);
+
+        let map = merge_discovered_channels(vec![ch], &meta);
+
+        assert_eq!(
+            map[&ch].description, None,
+            "a whitespace-only about tag is trimmed away to None"
+        );
+    }
+
+    #[test]
+    fn merge_discovered_channels_missing_about_is_none() {
+        let ch = Uuid::new_v4();
+        let meta = serde_json::json!([meta_event(ch, "team", &["t", "stream"])]);
+
+        let map = merge_discovered_channels(vec![ch], &meta);
+
+        assert_eq!(map[&ch].description, None);
     }
 
     #[test]

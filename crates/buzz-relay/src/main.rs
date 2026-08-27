@@ -35,6 +35,16 @@ fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
     })
 }
 
+fn relay_keypair_from_config(relay_private_key: Option<&str>) -> anyhow::Result<nostr::Keys> {
+    let hex = relay_private_key.ok_or_else(|| {
+        anyhow::anyhow!(
+            "BUZZ_RELAY_PRIVATE_KEY must be set. Run `just bootstrap` for local \
+             development or configure a stable 32-byte hex private key."
+        )
+    })?;
+    nostr::Keys::parse(hex).map_err(|e| anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY: {e}"))
+}
+
 /// Controls how many per-community gauge series the usage poller emits.
 ///
 /// Datadog cost is proportional to the number of unique time-series.  With ~25
@@ -143,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
         error!("Invalid configuration: {e}");
         anyhow::anyhow!("Configuration error: {e}")
     })?;
+    let relay_keypair = relay_keypair_from_config(config.relay_private_key.as_deref())?;
     info!(
         bind_addr = %config.bind_addr,
         relay_url = %config.relay_url,
@@ -200,6 +211,12 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = db.ensure_future_partitions(3).await {
         error!("Failed to ensure partitions: {e}");
     }
+
+    db.validate_deletion_serving_catalog().await.map_err(|e| {
+        error!("Community deletion serving-fence validation failed: {e}");
+        anyhow::anyhow!("Community deletion serving fence is unsafe: {e}")
+    })?;
+    info!("Community deletion serving fences verified");
 
     // Freshness fence probe: cursor pages route to the replica only for
     // history the probe has verified as fully replayed. Deliberately AFTER
@@ -416,29 +433,6 @@ async fn main() -> anyhow::Result<()> {
     let workflow_config = buzz_workflow::WorkflowConfig::default();
     let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), workflow_config));
 
-    let relay_keypair = if let Some(hex) = &config.relay_private_key {
-        nostr::Keys::parse(hex)
-            .map_err(|e| anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY: {e}"))?
-    } else if !config.require_auth_token {
-        // Dev mode: use a deterministic keypair so addressable events (kind:39000/39001/39002)
-        // replace correctly across restarts. Without this, each restart generates a new pubkey
-        // and replace_addressable_event inserts duplicates instead of replacing.
-        const DEV_RELAY_PRIVKEY: &str =
-            "0000000000000000000000000000000000000000000000000000000000000001";
-        let keys = nostr::Keys::parse(DEV_RELAY_PRIVKEY).expect("hardcoded dev key is valid");
-        tracing::warn!(
-            pubkey = %keys.public_key().to_hex(),
-            "Using hardcoded dev relay keypair (BUZZ_REQUIRE_AUTH_TOKEN=false). \
-             Set BUZZ_RELAY_PRIVATE_KEY for production."
-        );
-        keys
-    } else {
-        panic!(
-            "BUZZ_RELAY_PRIVATE_KEY must be set when BUZZ_REQUIRE_AUTH_TOKEN=true. \
-             A stable relay identity is required for production."
-        );
-    };
-
     config
         .media
         .validate()
@@ -469,6 +463,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(handle) = buzz_relay::mesh_boot::boot_mesh(
         &state.config,
         state.redis_pool.clone(),
+        state.db.clone(),
         &state.relay_keypair,
         Arc::clone(&state.shutting_down),
     )
@@ -525,6 +520,31 @@ async fn main() -> anyhow::Result<()> {
             transport_drops = report.transport_drops,
             "git object-store backend admitted: A3 conformance probe passed"
         );
+    }
+
+    match state.db.verify_channel_roster_fence().await {
+        Ok(()) => {
+            info!("Channel roster fence verified");
+        }
+        Err(error) => {
+            error!(%error, "Channel roster fence validation failed");
+            return Err(anyhow::anyhow!(
+                "Channel roster fence is unsafe; apply or repair migration 0032 before starting this relay: {error}"
+            ));
+        }
+    }
+
+    // Repair legacy NIP-29 channel rosters that were persisted while the
+    // canonical member query still truncated at 1,000 rows. Validation above
+    // makes migration 0032 a code/schema compatibility gate before the new
+    // replacement protocol or listener can serve traffic.
+    match buzz_relay::handlers::side_effects::reconcile_large_channel_member_snapshots(&state).await
+    {
+        Ok(count) if count > 0 => info!(count, "large channel member snapshots repaired"),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, "large channel member snapshot startup reconciliation failed")
+        }
     }
 
     // NIP-43: reconcile the event-backed roster for every provisioned
@@ -1018,6 +1038,24 @@ async fn main() -> anyhow::Result<()> {
                 metrics::gauge!("buzz_redis_pool_size").set(rs.size as f64);
                 metrics::gauge!("buzz_redis_pool_max").set(rs.max_size as f64);
                 metrics::gauge!("buzz_redis_pool_waiting").set(rs.waiting as f64);
+
+                let deletion_store = pool_state.db.deletion_store();
+                match deletion_store.reap_expired_serving_write_leases(1000).await {
+                    Ok(reaped) => metrics::counter!("buzz_deletion_serving_leases_reaped_total")
+                        .increment(reaped),
+                    Err(error) => tracing::warn!(%error, "serving-lease reaper failed"),
+                }
+                match deletion_store.serving_lease_stats().await {
+                    Ok(stats) => {
+                        metrics::gauge!("buzz_deletion_serving_leases_active")
+                            .set(stats.active as f64);
+                        metrics::gauge!("buzz_deletion_serving_leases_expired")
+                            .set(stats.expired as f64);
+                        metrics::gauge!("buzz_deletion_serving_leases_dead_tuples")
+                            .set(stats.dead_tuples as f64);
+                    }
+                    Err(error) => tracing::warn!(%error, "serving-lease metrics failed"),
+                }
             }
         });
     }
@@ -1987,8 +2025,8 @@ mod tests {
 
     use super::{
         buzz_auto_migrate_enabled, dropped_in_memory_keys, idle_timeout_secs,
-        refresh_legacy_active_gauge_recency, run_periodic_until_cancelled, EmissionScope,
-        InMemoryMetricKey,
+        refresh_legacy_active_gauge_recency, relay_keypair_from_config,
+        run_periodic_until_cancelled, EmissionScope, InMemoryMetricKey,
     };
     use metrics::GaugeFn;
     use metrics_util::{
@@ -2034,6 +2072,23 @@ mod tests {
         assert!(buzz_auto_migrate_enabled(Some(" 1 ")));
         assert!(buzz_auto_migrate_enabled(Some("yes")));
         assert!(buzz_auto_migrate_enabled(Some("on")));
+    }
+
+    #[test]
+    fn configured_relay_identity_is_preserved() {
+        let configured = nostr::Keys::generate();
+        let secret = configured.secret_key().to_secret_hex();
+
+        let selected = relay_keypair_from_config(Some(&secret)).expect("configured key");
+
+        assert_eq!(selected.public_key(), configured.public_key());
+    }
+
+    #[test]
+    fn missing_relay_identity_is_rejected() {
+        let result = relay_keypair_from_config(None);
+
+        assert!(result.is_err());
     }
 
     #[test]

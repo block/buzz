@@ -25,6 +25,7 @@ quickstart: false
 image:
   repository: ghcr.io/block/buzz
   tag: ""                        # empty → .Chart.AppVersion
+  digest: ""                     # optional sha256:...; when set, overrides tag
   pullPolicy: IfNotPresent
   pullSecrets: []
 
@@ -93,6 +94,7 @@ ownerPubkey: ""
 #   REDIS_URL                     — full Redis URL with auth
 #   BUZZ_S3_ACCESS_KEY            — S3 access key
 #   BUZZ_S3_SECRET_KEY            — S3 secret key
+#   BUZZ_KLIPY_API_KEY            — KLIPY GIF search key; omit to disable GIF search
 secrets:
   existingSecret: ""
   # Inline overrides (NOT recommended for production; they land in values).
@@ -333,6 +335,15 @@ externalRedis:
 # first sweep fails AccessDenied and buzz_storage_sweep_ok stays 0 — no other
 # media functionality is affected. Set BUZZ_STORAGE_METRICS=off to disable
 # the sweep entirely on a deployment that can't grant it.
+#
+# Whole-community deletion (`buzz-admin deletions ...`) permanently removes
+# tenant-owned object versions through the v5 deletion path. In addition to the
+# ordinary media permissions, every deployment that enables community deletion
+# needs bucket-level `s3:ListBucketVersions` and object-level
+# `s3:DeleteObjectVersion` on this bucket before exercising deletion — including
+# never-versioned buckets, which S3 exposes through `ListObjectVersions` with the
+# `null` version id.
+#
 # Note: buzz_storage_sweep_failures is a process-local gauge — on leader
 # failover it resets to the new leader's local count, not a global total.
 # Note: on a failed sweep attempt, the next retry fires on the next usage tick
@@ -342,9 +353,10 @@ externalRedis:
 s3:
   endpoint: ""
   bucket: "buzz-media"
-  # Optional SigV4 signing region. Leave empty to preserve the relay's
-  # AWS_REGION fallback; set the provider's credential value when needed.
-  region: ""
+  # SigV4 signing region shared by the relay and `buzz-admin deletions`.
+  # Keep the MinIO/local default operable; production providers should set
+  # their credential region explicitly when it differs.
+  region: "us-east-1"
   # path: https://endpoint/bucket/key (bundled MinIO-compatible default)
   # virtual: https://bucket.endpoint/key (standard S3; required by new Railway buckets)
   addressingStyle: path

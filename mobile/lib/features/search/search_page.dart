@@ -9,6 +9,7 @@ import '../../shared/mentions/mention_tags.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/buzz_search_field.dart';
 import '../../shared/widgets/filter_chip_bar.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
@@ -22,12 +23,10 @@ import '../channels/message_content.dart';
 import '../channels/date_formatters.dart';
 import '../forum/forum_thread_page.dart';
 import '../profile/profile_provider.dart';
-import '../profile/user_cache_provider.dart';
-import '../profile/user_profile.dart';
+import '../../shared/profile/user_cache_provider.dart';
+import '../../shared/profile/user_profile.dart';
 import 'recent_searches_provider.dart';
 import 'search_provider.dart';
-
-part 'search_page/motion_field.dart';
 
 enum _SearchFilter { all, messages, channels, people }
 
@@ -40,9 +39,7 @@ const _searchTitleReturnDuration = Duration(milliseconds: 80);
 const _searchCancelEnterDuration = Duration(milliseconds: 80);
 const _searchCancelExitDuration = Duration(milliseconds: 60);
 const _searchIdleFieldTopInset = Grid.half;
-const _searchActiveFieldTopOffset = 42.0;
-const _searchBottomOverlap =
-    _searchActiveFieldTopOffset + _searchIdleFieldTopInset;
+const _searchControlsToFiltersGap = Grid.xxs;
 const _searchFilterChipVerticalPadding = Grid.xxs;
 const _searchFilterBarVerticalPadding = Grid.xxs;
 const _searchHeaderFiltersMinHeight = Grid.xl;
@@ -131,15 +128,17 @@ class SearchPage extends HookConsumerWidget {
     final idleSearchFieldHeight = _idleSearchFieldHeight(context);
     final searchHeaderFiltersHeight = _searchHeaderFiltersHeight(context);
     final searchActiveFieldRightInset = _searchActiveFieldRightInset(context);
+    final searchBottomOverlap =
+        _searchIdleFieldTopInset +
+        compactSearchFieldHeight +
+        _searchControlsToFiltersGap;
     // Cancel remains an accessible target without giving the text action a
     // visual button treatment.
     final searchControlHeight = compactSearchFieldHeight > Grid.xl
         ? compactSearchFieldHeight
         : Grid.xl;
     final searchHeaderBottomHeight = isSearchEditing.value
-        ? _searchIdleFieldTopInset +
-              compactSearchFieldHeight +
-              searchHeaderFiltersHeight
+        ? searchHeaderFiltersHeight + _searchControlsToFiltersGap
         : idleSearchFieldHeight + _searchIdleFieldTopInset + Grid.xxs;
     final topSectionHeight = frostedAppBarHeight(
       context,
@@ -215,7 +214,7 @@ class SearchPage extends HookConsumerWidget {
         automaticallyImplyLeading: false,
         horizontalInset: Grid.twelve,
         showBottomDivider: true,
-        bottomDividerOpacity: 0.06,
+        bottomDividerOpacity: 0.07,
         titleStyle: headerTitleStyle,
         // Keep this mounted through the search-field morph so it can fade in
         // beneath the returning field rather than popping in afterward.
@@ -296,7 +295,7 @@ class SearchPage extends HookConsumerWidget {
           ),
         ],
         bottomHeight: searchHeaderBottomHeight,
-        bottomOverlap: _searchBottomOverlap,
+        bottomOverlap: searchBottomOverlap,
         bottom: Stack(
           clipBehavior: Clip.none,
           children: [
@@ -309,7 +308,7 @@ class SearchPage extends HookConsumerWidget {
                   : Grid.gutter,
               top: isSearchEditing.value
                   ? _searchIdleFieldTopInset
-                  : _searchBottomOverlap + _searchIdleFieldTopInset,
+                  : searchBottomOverlap + _searchIdleFieldTopInset,
               height: isSearchEditing.value
                   ? compactSearchFieldHeight
                   : idleSearchFieldHeight,
@@ -318,14 +317,15 @@ class SearchPage extends HookConsumerWidget {
               // native input connection before the keyboard is shown.
               child: SizedBox(
                 key: const Key('search-field-container'),
-                child: _SearchMotionField(
+                child: BuzzSearchField(
                   controller: textController,
                   focusNode: focusNode,
+                  hintText: 'Search messages, channels, and people',
                   iconColor: searchPrimaryColor,
                   inputColor: searchPrimaryColor,
                   placeholderColor: searchPlaceholderColor,
                   surfaceColor: searchSurfaceColor,
-                  isSearchEditing: isSearchEditing.value,
+                  isEditing: isSearchEditing.value,
                   reduceMotion: reduceMotion,
                   motionDuration: _searchFieldMoveDuration,
                   onTap: activateSearch,
@@ -360,7 +360,7 @@ class SearchPage extends HookConsumerWidget {
                     ? Align(
                         alignment: Alignment.topCenter,
                         child: Padding(
-                          padding: EdgeInsets.only(top: _searchBottomOverlap),
+                          padding: EdgeInsets.only(top: searchBottomOverlap),
                           child: SizedBox(
                             key: const ValueKey('search-header-filters'),
                             height: searchHeaderFiltersHeight,
@@ -644,12 +644,10 @@ class _RecentSearches extends StatelessWidget {
 class _ChannelsSection extends StatelessWidget {
   final List<Channel> channels;
   final VoidCallback onResultSelected;
-
   const _ChannelsSection({
     required this.channels,
     required this.onResultSelected,
   });
-
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -670,12 +668,14 @@ class _ChannelsSection extends StatelessWidget {
               key: ValueKey('search-channel-title-${channel.id}'),
               style: contentListTitleTextStyle,
             ),
-            subtitle: Text(
-              '${channel.memberCount} member${channel.memberCount == 1 ? '' : 's'}',
-              style: contentListBodyTextStyle.copyWith(
-                color: context.colors.onSurfaceVariant,
-              ),
-            ),
+            subtitle: channel.isMember
+                ? Text(
+                    '${channel.memberCount} member${channel.memberCount == 1 ? '' : 's'}',
+                    style: contentListBodyTextStyle.copyWith(
+                      color: context.colors.onSurfaceVariant,
+                    ),
+                  )
+                : null,
             trailing: !channel.isMember && !channel.isDm
                 ? Container(
                     padding: const EdgeInsets.symmetric(

@@ -5,6 +5,7 @@ import {
   KIND_HUDDLE_STARTED,
   KIND_TYPING_INDICATOR,
 } from "../../src/shared/constants/kinds";
+import { FEATURE_OVERRIDES_STORAGE_KEY } from "../helpers/features";
 import {
   TEST_IDENTITIES,
   installMockBridge,
@@ -14,6 +15,7 @@ import {
 } from "../helpers/bridge";
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+const RANDOM_CHANNEL_ID = "9dae0116-799b-5071-a0a8-fdd30a91a35d";
 const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301";
 const MOCK_IDENTITY_PUBKEY = "deadbeef".repeat(8);
 const CACHED_PROFILE_LABELS_TAG = "@cached-profile-labels";
@@ -32,6 +34,8 @@ type MockFeedWindow = Window & {
     content: string;
     createdAt?: number;
     id?: string;
+    kind?: number;
+    mentionPubkeys?: string[];
     parentEventId?: string;
     pubkey?: string;
   }) => {
@@ -448,9 +452,9 @@ async function expectIntroActionCardLayout(
   }
 
   expect(actionBox.height).toBeGreaterThan(actionBox.width);
-  expect(Math.round(actionBox.width)).toBe(220);
-  expect(Math.round(iconBox.width)).toBe(48);
-  expect(Math.round(iconBox.height)).toBe(48);
+  expect(Math.round(actionBox.width)).toBe(192);
+  expect(Math.round(iconBox.width)).toBe(40);
+  expect(Math.round(iconBox.height)).toBe(40);
   const introIconRadius = await page
     .getByTestId("message-channel-intro-icon")
     .evaluate((element) => window.getComputedStyle(element).borderRadius);
@@ -780,33 +784,18 @@ test("creates the DM before preparing a persona mention", async ({ page }) => {
   expect(expandedOpenIndex).toBeLessThan(startIndex);
   expect(sendCommands).not.toContain("add_channel_members");
 
-  const sentMessageCommand = sendCommandPayloads.find((entry) => {
-    if (entry.command !== "plugin:websocket|send") {
-      return false;
-    }
-    const data = (entry.payload as { message?: { data?: string } } | undefined)
-      ?.message?.data;
-    if (!data) {
-      return false;
-    }
-    const frame = JSON.parse(data) as unknown[];
-    return (
-      frame[0] === "EVENT" &&
-      (frame[1] as { content?: string } | undefined)?.content.includes(
-        "for a hand",
-      )
-    );
-  });
-  const sentMessageData = (
-    sentMessageCommand?.payload as { message?: { data?: string } } | undefined
-  )?.message?.data;
-  expect(sentMessageData).toBeTruthy();
-  const sentMessageEvent = (
-    JSON.parse(sentMessageData ?? "[]") as [string, { tags?: string[][] }]
-  )[1];
-  const sentChannelId = sentMessageEvent.tags?.find(
-    (tag) => tag[0] === "h",
-  )?.[1];
+  const sentMessageCommand = sendCommandPayloads.find(
+    (entry) =>
+      entry.command === "send_channel_message" &&
+      (
+        entry.payload as { content?: string; channelId?: string } | undefined
+      )?.content?.includes("for a hand"),
+  );
+  const sentChannelId = (
+    sentMessageCommand?.payload as
+      | { content?: string; channelId?: string }
+      | undefined
+  )?.channelId;
   expect(sentChannelId).toBeTruthy();
   await expect(
     page.locator("[data-active='true'][data-channel-id]"),
@@ -1047,7 +1036,15 @@ test("drops an expanded DM after the first message fails", async ({ page }) => {
   await expect(input).toContainText("Fizz");
 
   const commandsAfterFailure = await readCommandPayloadLog(page);
-  const failedSendChannelId = await readOutgoingChannelId(page, "for a hand");
+  const failedSendChannelId = (
+    commandsAfterFailure.find(
+      (entry) =>
+        entry.command === "send_channel_message" &&
+        (
+          entry.payload as { content?: string; channelId?: string } | undefined
+        )?.content?.includes("for a hand"),
+    )?.payload as { content?: string; channelId?: string } | undefined
+  )?.channelId;
   expect(failedSendChannelId).toBeTruthy();
   expect(commandsAfterFailure.map((entry) => entry.command)).not.toContain(
     "add_channel_members",
@@ -1074,29 +1071,15 @@ test("drops an expanded DM after the first message fails", async ({ page }) => {
     ),
   ).toBe(baselineOpenDmCount + 1);
   const retryCommands = allCommands.slice(retryBaseline);
-  const retrySend = retryCommands.find((entry) => {
-    if (entry.command !== "plugin:websocket|send") {
-      return false;
-    }
-    const data = (entry.payload as { message?: { data?: string } } | undefined)
-      ?.message?.data;
-    if (!data) {
-      return false;
-    }
-    const frame = JSON.parse(data) as unknown[];
-    return (
-      frame[0] === "EVENT" &&
-      (frame[1] as { content?: string } | undefined)?.content === retryMessage
-    );
-  });
-  const retrySendData = (
-    retrySend?.payload as { message?: { data?: string } } | undefined
-  )?.message?.data;
-  expect(retrySendData).toBeTruthy();
-  const retryEvent = (
-    JSON.parse(retrySendData ?? "[]") as [string, { tags?: string[][] }]
-  )[1];
-  const retryChannelId = retryEvent.tags?.find((tag) => tag[0] === "h")?.[1];
+  const retrySend = retryCommands.find(
+    (entry) =>
+      entry.command === "send_channel_message" &&
+      (entry.payload as { content?: string; channelId?: string } | undefined)
+        ?.content === retryMessage,
+  );
+  const retryChannelId = (
+    retrySend?.payload as { content?: string; channelId?: string } | undefined
+  )?.channelId;
   expect(retryChannelId).toBeTruthy();
   expect(retryChannelId).not.toBe(failedSendChannelId);
   await expect(
@@ -1152,6 +1135,15 @@ test("drops an expanded DM after agent startup fails", async ({ page }) => {
 
   await input.fill(retryMessage);
   const retryBaseline = commandsAfterFailure.length;
+  // The first send left the cursor parked over the bottom-right error toast,
+  // which overlaps the send button. Sonner pauses its dismiss timer while the
+  // toaster is hovered, so move the cursor away and let the transient toast
+  // clear before retrying — otherwise the retry click is intercepted for the
+  // full timeout.
+  await page.mouse.move(0, 0);
+  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, {
+    timeout: 10_000,
+  });
   await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("chat-title")).toHaveText("charlie");
@@ -1230,7 +1222,7 @@ test("does not reopen a direct message after leaving the composer", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 });
 
-test("does not reopen a sent direct message after leaving during cache reseed", async ({
+test("opens a sent direct message without waiting for a channel-list refresh", async ({
   page,
 }) => {
   await page.goto("/");
@@ -1240,29 +1232,37 @@ test("does not reopen a sent direct message after leaving during cache reseed", 
   await page
     .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
     .click();
-  const staleMessage = "Stay on the channel after cache reseed";
-  await page.getByTestId("message-input").fill(staleMessage);
+  const message = "Open without a channel-list refresh";
+  await page.getByTestId("message-input").fill(message);
+  const baselineChannelsReads = commandCount(
+    await readCommandLog(page),
+    "get_channels",
+  );
+  const baselineHttpSends = commandCount(
+    await readCommandLog(page),
+    "send_channel_message",
+  );
   await page.evaluate(() => {
     const testWindow = window as Window & {
       __BUZZ_E2E__?: { mock?: { channelsReadDelayMs?: number } };
     };
     testWindow.__BUZZ_E2E__ ??= {};
     testWindow.__BUZZ_E2E__.mock ??= {};
-    testWindow.__BUZZ_E2E__.mock.channelsReadDelayMs = 1_000;
+    testWindow.__BUZZ_E2E__.mock.channelsReadDelayMs = 3_000;
   });
 
   await page.getByTestId("send-message").click();
-  await expect
-    .poll(async () => hasOutgoingEventWithContent(page, staleMessage))
-    .toBe(true);
-
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
-  await page.waitForTimeout(1_250);
-  await expect(page).toHaveURL(
-    new RegExp(`/channels/${GENERAL_CHANNEL_ID}(?:\\?|$)`),
+  await expect(page.getByTestId("chat-title")).toHaveText("charlie", {
+    timeout: 1_000,
+  });
+  await expect(page.getByTestId("message-timeline")).toContainText(message);
+  expect(commandCount(await readCommandLog(page), "get_channels")).toBe(
+    baselineChannelsReads,
   );
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  expect(commandCount(await readCommandLog(page), "send_channel_message")).toBe(
+    baselineHttpSends + 1,
+  );
+  await expect(page).toHaveURL(/\/channels\/[0-9a-f-]+(?:\?|$)/);
 });
 
 test("shows capped participant stack in group direct message header", async ({
@@ -1364,6 +1364,55 @@ test("create stream with name and description", async ({ page }) => {
 
   await expect(page.getByTestId("stream-list")).toContainText(channelName);
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
+});
+
+test("channel name values stay primary after their inputs blur", async ({
+  page,
+}) => {
+  async function expectPrimaryValueAfterBlur(
+    input: import("@playwright/test").Locator,
+    blurTarget: import("@playwright/test").Locator,
+  ) {
+    const placeholder = await input.getAttribute("placeholder");
+    const placeholderColor = placeholder
+      ? await input.evaluate(
+          (element) => window.getComputedStyle(element, "::placeholder").color,
+        )
+      : null;
+
+    await input.fill("primary-channel-name");
+    const focusedColor = await input.evaluate(
+      (element) => window.getComputedStyle(element).color,
+    );
+    await blurTarget.click();
+    const valueColor = await input.evaluate(
+      (element) => window.getComputedStyle(element).color,
+    );
+
+    expect(valueColor).toBe(focusedColor);
+    if (placeholderColor) {
+      expect(valueColor).not.toBe(placeholderColor);
+    }
+  }
+
+  await page.goto("/");
+  await openCreateChannelDialog(page);
+  const createDialog = page.getByTestId("create-channel-dialog");
+  await expectPrimaryValueAfterBlur(
+    createDialog.getByTestId("create-channel-name"),
+    createDialog.getByTestId("create-channel-description"),
+  );
+  await createDialog.getByRole("button", { name: "Close" }).click();
+
+  await openChannelManagement(page, "general");
+  await openChannelEditDialog(page);
+  const editDialog = page.getByRole("dialog", {
+    name: /Edit (?:public|private) channel/,
+  });
+  await expectPrimaryValueAfterBlur(
+    editDialog.getByTestId("channel-management-name"),
+    editDialog.getByTestId("channel-management-description"),
+  );
 });
 
 test("create channel template selector matches the lifecycle controls", async ({
@@ -1534,12 +1583,78 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
     /Ephemeral channel\. Cleans up in 14 days\./,
   );
 
+  const channelRow = page.getByTestId(`channel-${channelName}`);
+  const channelId = await channelRow.getAttribute("data-channel-id");
+  if (!channelId) {
+    throw new Error("Created ephemeral channel is missing its channel id.");
+  }
+
+  await waitForMockLiveSubscription(page, channelName);
+  await page.getByTestId("channel-general").click();
+  await page.evaluate(
+    ({ agentPubkey, channelId: activeChannelId }) => {
+      (window as MockFeedWindow).__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey,
+        channelId: activeChannelId,
+        turnId: "ephemeral-sidebar-status",
+      });
+    },
+    { agentPubkey: OWNED_RELAY_AGENT_PUBKEY, channelId },
+  );
+
+  await expect(
+    page.getByTestId(`channel-working-${channelName}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`channel-ephemeral-${channelName}`),
+  ).toHaveCount(0);
+
+  await page.evaluate(
+    ({ agentPubkey, channelId: activeChannelId }) => {
+      (window as MockFeedWindow).__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey,
+        channelId: activeChannelId,
+        turnId: "ephemeral-sidebar-status",
+        kind: "turn_completed",
+      });
+    },
+    { agentPubkey: OWNED_RELAY_AGENT_PUBKEY, channelId },
+  );
+  await expect(
+    page.getByTestId(`channel-ephemeral-${channelName}`),
+  ).toBeVisible();
+
   await page
     .getByRole("button", { name: "Toggle Sidebar", exact: true })
     .click();
   await expect(
     page.getByTestId(`channel-ephemeral-${channelName}`),
   ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Toggle Sidebar", exact: true })
+    .click();
+
+  await page.evaluate(
+    ({ channelName: targetChannelName, mentionPubkey, senderPubkey }) => {
+      (window as MockFeedWindow).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: targetChannelName,
+        content: "Unread mention in an ephemeral channel",
+        kind: 40002,
+        mentionPubkeys: [mentionPubkey],
+        pubkey: senderPubkey,
+      });
+    },
+    {
+      channelName,
+      mentionPubkey: MOCK_IDENTITY_PUBKEY,
+      senderPubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  await expect(page.getByTestId(`channel-unread-${channelName}`)).toBeVisible();
+  await expect(
+    page.getByTestId(`channel-ephemeral-${channelName}`),
+  ).toHaveCount(0);
 });
 
 test("ephemeral countdown refreshes when switching channels after a clock jump", async ({
@@ -1708,8 +1823,15 @@ test("empty channel shows intro actions", async ({ page }) => {
   await expect(
     page.getByTestId("channel-intro-action-create-channel"),
   ).toHaveCount(0);
+  const addAgentsAction = page.getByTestId("channel-intro-action-create-agent");
+  await expect(addAgentsAction).toBeVisible();
   await expect(
-    page.getByTestId("channel-intro-action-create-agent"),
+    addAgentsAction.getByText("Add agent", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    addAgentsAction.getByText("Add an agent here.", {
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(
     page.getByTestId("channel-intro-action-add-people"),
@@ -1729,7 +1851,7 @@ test("empty channel shows intro actions", async ({ page }) => {
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("members-sidebar")).not.toBeVisible();
 
-  await page.getByTestId("channel-intro-action-create-agent").click();
+  await addAgentsAction.click();
   await expect(page.getByRole("heading", { name: "Add agents" })).toBeVisible();
 
   await page.keyboard.press("Escape");
@@ -1832,9 +1954,13 @@ test("channel with messages shows content", async ({ page }) => {
   await expect(page.getByTestId("welcome-composer-guide-banner")).toHaveCount(
     0,
   );
-  await expect(page.getByTestId("message-timeline-day-divider")).toBeVisible();
+  // `.first()`: backdated seeds can straddle midnight UTC and render two
+  // dividers (Yesterday + Today); a bare locator fails Playwright strict mode.
+  await expect(
+    page.getByTestId("message-timeline-day-divider").first(),
+  ).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Welcome to #general",
+    "Welcome to general",
   );
 });
 
@@ -2347,7 +2473,7 @@ test("sidebar shows unread indicator for newly active channels", async ({
   await page.getByTestId("channel-random").click();
   await expect(page.getByTestId("chat-title")).toHaveText("random");
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Unread update for #random",
+    "Unread update for random",
   );
   await expect(page.getByTestId("channel-unread-random")).toHaveCount(0);
 });
@@ -2404,7 +2530,11 @@ test("sidebar clears unread indicator after opening a DM", async ({ page }) => {
   await expect(page.getByTestId("message-dm-intro")).toContainText(
     "This is the beginning of your direct message with",
   );
-  await expect(page.getByTestId("message-timeline-day-divider")).toBeVisible();
+  // `.first()`: backdated seeds can straddle midnight UTC and render two
+  // dividers (Yesterday + Today); a bare locator fails Playwright strict mode.
+  await expect(
+    page.getByTestId("message-timeline-day-divider").first(),
+  ).toBeVisible();
   await expect(page.getByTestId("message-timeline")).toContainText(
     "Unread update for the DM",
   );
@@ -2491,6 +2621,324 @@ test("manage channel updates details", async ({ page }) => {
   await expect(
     reopenedEditDialog.getByTestId("channel-management-purpose"),
   ).toHaveCount(0);
+});
+
+test("channel management keeps both description paragraphs visible for editors and readers", async ({
+  page,
+}) => {
+  const description =
+    "Post deploy requests here before 3pm.\n\nFor emergencies, ping the on-call directly.\nInclude the service name and rollback plan.";
+  const visibleFragment = "Include the service name and rollback plan.";
+
+  await page.goto("/");
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_MUTATE_CHANNEL__ === "function" &&
+      typeof window.__BUZZ_E2E_INVALIDATE_CHANNELS__ === "function",
+  );
+  await page.evaluate(
+    async ({ generalChannelId, randomChannelId, description }) => {
+      const bridge = window as Window & {
+        __BUZZ_E2E_INVALIDATE_CHANNELS__: () => Promise<void>;
+        __BUZZ_E2E_MUTATE_CHANNEL__: (options: {
+          channelId: string;
+          description?: string;
+        }) => void;
+      };
+      for (const channelId of [generalChannelId, randomChannelId]) {
+        bridge.__BUZZ_E2E_MUTATE_CHANNEL__({ channelId, description });
+      }
+      await bridge.__BUZZ_E2E_INVALIDATE_CHANNELS__();
+    },
+    {
+      generalChannelId: GENERAL_CHANNEL_ID,
+      randomChannelId: RANDOM_CHANNEL_ID,
+      description,
+    },
+  );
+
+  for (const [channelName, editable] of [
+    ["general", true],
+    ["random", false],
+  ] as const) {
+    await openChannelManagement(page, channelName);
+    const summary = page.getByTestId("channel-management-description");
+    await expect(summary).toHaveText(description);
+    await expect(page.getByTestId("channel-management-edit")).toHaveCount(
+      editable ? 1 : 0,
+    );
+
+    const fragmentBounds = await summary.evaluate((element, fragment) => {
+      const textNode = Array.from(element.childNodes).find(
+        (node) => node.nodeType === Node.TEXT_NODE,
+      );
+      if (!textNode?.textContent) {
+        throw new Error("channel summary text node is missing");
+      }
+      const start = textNode.textContent.indexOf(fragment);
+      if (start < 0) {
+        throw new Error(`channel summary is missing fragment: ${fragment}`);
+      }
+      const range = document.createRange();
+      range.setStart(textNode, start);
+      range.setEnd(textNode, start + fragment.length);
+      const textRect = range.getBoundingClientRect();
+      const containerRect = element.getBoundingClientRect();
+      return {
+        containerBottom: containerRect.bottom,
+        containerTop: containerRect.top,
+        textBottom: textRect.bottom,
+        textTop: textRect.top,
+      };
+    }, visibleFragment);
+    expect(fragmentBounds.textTop).toBeGreaterThanOrEqual(
+      fragmentBounds.containerTop - 1,
+    );
+    expect(fragmentBounds.textBottom).toBeLessThanOrEqual(
+      fragmentBounds.containerBottom + 1,
+    );
+
+    await closeChannelManagement(page);
+  }
+});
+
+test("manage channel shows member avatars and owner-only row controls", async ({
+  page,
+}) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await page.goto("/");
+  await openChannelManagement(page, "general");
+
+  await expect(
+    page.getByTestId("channel-management-member-avatar-stack"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("channel-management-member-avatar"),
+  ).toHaveCount(3);
+  await expect(
+    page.getByTestId("channel-management-member-avatar-overflow"),
+  ).toHaveText("+1");
+  await expect(page.getByTestId("channel-management-hero")).toBeVisible();
+  await expect(
+    page.getByTestId("channel-management-sheet").locator(".space-y-6").first(),
+  ).toBeVisible();
+  const detailsSection = page.getByTestId("channel-management-details");
+  const detailsTitle = detailsSection.getByRole("heading", {
+    exact: true,
+    level: 2,
+    name: "Details",
+  });
+  await expect(detailsTitle).toHaveClass(/text-xs/);
+  await expect(detailsTitle).toHaveClass(/text-muted-foreground\/70/);
+  await expect(
+    detailsSection.locator('[data-slot="panel-section-header"]'),
+  ).toHaveClass(/px-4/);
+  await expect(
+    detailsSection
+      .locator('[data-slot="panel-section-card"]')
+      .getByRole("heading", { exact: true, name: "Details" }),
+  ).toHaveCount(0);
+  const untitledChannelSections = [
+    page.getByTestId("channel-canvas-ingress-section"),
+    page.getByTestId("channel-management-actions"),
+  ];
+  for (const section of untitledChannelSections) {
+    await expect(
+      section.locator('[data-slot="panel-section-header"]'),
+    ).toHaveCount(0);
+  }
+  for (const rowTestId of [
+    "channel-management-type",
+    "channel-management-visibility",
+    "channel-management-member-count",
+    "channel-management-channel-id",
+  ]) {
+    await expect(
+      page
+        .getByTestId(rowTestId)
+        .locator(":scope > [data-slot='field-row-icon']"),
+    ).toHaveCount(0);
+  }
+  const leaveChannelRow = page.getByTestId("channel-management-leave");
+  await expect(
+    leaveChannelRow.locator(":scope > svg[data-slot='field-row-icon']"),
+  ).toHaveCount(1);
+  await expect(
+    leaveChannelRow.locator(":scope > span.rounded-full"),
+  ).toHaveCount(0);
+  const canvasInfo = page.getByTestId("channel-canvas-ingress-info");
+  await canvasInfo.hover();
+  await expect(page.getByRole("tooltip")).toHaveText(
+    "Use the canvas as a shared space for notes, plans, and other channel information.",
+  );
+  const nameEdit = page.getByTestId("channel-management-edit");
+  await expect(nameEdit).toBeVisible();
+  const nameEditIcon = page.getByTestId("channel-management-edit-icon");
+  await expect(nameEditIcon).toHaveCSS("opacity", "0");
+  await nameEdit.hover();
+  await expect(nameEditIcon).toHaveCSS("opacity", "1");
+  await expect(
+    page.getByTestId("channel-management-edit-description"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("channel-management-edit-channel-type"),
+  ).toHaveCSS("opacity", "0");
+  await expect(
+    page.getByTestId("channel-management-edit-visibility"),
+  ).toHaveCSS("opacity", "0");
+  await expect(page.getByTestId("channel-management-archive")).toBeVisible();
+  await expect(page.getByTestId("channel-management-delete")).toBeVisible();
+  await expect(
+    page.getByTestId("channel-management-copy-id-action"),
+  ).toHaveCount(0);
+  const layoutOrder = await page
+    .getByTestId("channel-management-sheet")
+    .locator(
+      "[data-testid='channel-management-member-count'], [data-testid='channel-management-channel-id'], [data-testid='channel-canvas-ingress'], [data-testid='channel-management-leave']",
+    )
+    .evaluateAll((elements) =>
+      elements.map((element) => element.getAttribute("data-testid")),
+    );
+  expect(layoutOrder).toEqual([
+    "channel-management-member-count",
+    "channel-management-channel-id",
+    "channel-canvas-ingress",
+    "channel-management-leave",
+  ]);
+
+  const channelIdRow = page.getByTestId("channel-management-channel-id");
+  const channelIdCopyStatus = page.getByTestId(
+    "channel-management-channel-id-copy-status",
+  );
+  await expect(channelIdRow.getByTitle(GENERAL_CHANNEL_ID)).toHaveText(
+    "9a1657ac…fb50",
+  );
+  await expect(channelIdCopyStatus).toHaveCSS("opacity", "0");
+  await channelIdRow.hover();
+  await expect(channelIdCopyStatus).toHaveCSS("opacity", "1");
+  await channelIdRow.click();
+  await expect(channelIdRow).toHaveAttribute("aria-label", "Channel ID copied");
+  await expect(channelIdCopyStatus).toHaveAttribute("data-copied", "true");
+
+  for (const editTrigger of [
+    nameEdit,
+    page.getByTestId("channel-management-description"),
+    page.getByTestId("channel-management-type"),
+    page.getByTestId("channel-management-visibility"),
+  ]) {
+    await editTrigger.click();
+    const editDialog = page.getByRole("dialog", {
+      name: /Edit (?:public|private) channel/,
+    });
+    await expect(editDialog).toBeVisible();
+    await expect(editDialog).toHaveClass(/data-\[state=open\]:animate-in/);
+    await expect(editDialog).toHaveClass(/data-\[state=open\]:fade-in-0/);
+    await expect(editDialog).toHaveClass(/data-\[state=open\]:zoom-in-95/);
+    await editDialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(editDialog).not.toBeVisible();
+  }
+
+  await page.getByTestId("channel-management-member-count").click();
+  await expect(page.getByTestId("channel-management-sheet")).toBeVisible();
+  const membersDialog = page.getByTestId("members-sidebar");
+  await expect(membersDialog).toBeVisible();
+  await expect(membersDialog).toHaveClass(/data-\[state=open\]:animate-in/);
+  await expect(membersDialog).toHaveClass(/data-\[state=open\]:fade-in-0/);
+  await expect(membersDialog).toHaveClass(/data-\[state=open\]:zoom-in-95/);
+  await membersDialog.getByRole("button", { name: "Close" }).click();
+  await expect(membersDialog).not.toBeVisible();
+  await expect(page.getByTestId("channel-management-sheet")).toBeVisible();
+
+  await page
+    .getByTestId("channel-management-sheet")
+    .getByTestId("auxiliary-panel-close")
+    .click();
+  await expect(page.getByTestId("channel-management-sheet")).not.toBeVisible();
+
+  await openChannelManagement(page, "random");
+
+  await expect(page.getByTestId("channel-management-edit")).toHaveCount(0);
+  await expect(
+    page.getByTestId("channel-management-edit-description"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("channel-management-edit-channel-type"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("channel-management-edit-visibility"),
+  ).toHaveCount(0);
+  await expect(page.getByTestId("channel-management-archive")).toHaveCount(0);
+  await expect(page.getByTestId("channel-management-delete")).toHaveCount(0);
+  await expect(page.getByTestId("channel-management-leave")).toBeVisible();
+});
+
+test("direct message settings omit the channel name and empty actions card", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await openChannelManagement(page, "alice-tyler");
+
+  await expect(page.getByTestId("channel-management-hero")).toBeVisible();
+  await expect(page.getByTestId("channel-management-name-row")).toHaveCount(0);
+  await expect(page.getByTestId("channel-management-description")).toHaveCount(
+    0,
+  );
+  await expect(page.getByTestId("channel-management-actions")).toHaveCount(0);
+  await expect(
+    page
+      .getByTestId("channel-management-details")
+      .locator('[data-slot="panel-section-card"]')
+      .getByRole("heading", { exact: true, name: "Details" }),
+  ).toHaveCount(0);
+});
+
+test("channel settings only prompt editors to add an empty description", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_MUTATE_CHANNEL__ === "function" &&
+      typeof window.__BUZZ_E2E_INVALIDATE_CHANNELS__ === "function",
+  );
+  await page.evaluate(
+    async ({ generalChannelId, randomChannelId }) => {
+      const bridge = window as Window & {
+        __BUZZ_E2E_INVALIDATE_CHANNELS__: () => Promise<void>;
+        __BUZZ_E2E_MUTATE_CHANNEL__: (options: {
+          channelId: string;
+          description?: string;
+        }) => void;
+      };
+      bridge.__BUZZ_E2E_MUTATE_CHANNEL__({
+        channelId: generalChannelId,
+        description: "",
+      });
+      bridge.__BUZZ_E2E_MUTATE_CHANNEL__({
+        channelId: randomChannelId,
+        description: "",
+      });
+      await bridge.__BUZZ_E2E_INVALIDATE_CHANNELS__();
+    },
+    {
+      generalChannelId: GENERAL_CHANNEL_ID,
+      randomChannelId: RANDOM_CHANNEL_ID,
+    },
+  );
+
+  await openChannelManagement(page, "general");
+  await expect(page.getByTestId("channel-management-edit")).toBeVisible();
+  await expect(page.getByTestId("channel-management-description")).toHaveText(
+    "Add a description",
+  );
+  await closeChannelManagement(page);
+
+  await openChannelManagement(page, "random");
+
+  await expect(page.getByTestId("channel-management-edit")).toHaveCount(0);
+  await expect(page.getByTestId("channel-management-description")).toHaveCount(
+    0,
+  );
 });
 
 test("manage channel updates visibility and ephemeral lifecycle independently", async ({
@@ -2621,7 +3069,7 @@ test("manage channel updates visibility and ephemeral lifecycle independently", 
   await expect(page.getByTestId("channel-management-ttl")).toHaveCount(0);
 });
 
-test("manage channel keeps canvas near the top of the sheet", async ({
+test("manage channel places canvas between channel info and actions", async ({
   page,
 }) => {
   await page.goto("/");
@@ -2631,12 +3079,15 @@ test("manage channel keeps canvas near the top of the sheet", async ({
   const sheetBox = await sheet.boundingBox();
   const timelineBox = await page.getByTestId("message-timeline").boundingBox();
 
-  // Canvas ingress should appear before the channel metadata rows in the DOM.
+  // Canvas ingress separates the channel information from channel actions.
   const canvasBox = await sheet
     .getByTestId("channel-canvas-ingress")
     .boundingBox();
-  const nameBox = await sheet
-    .getByTestId("channel-management-name-row")
+  const channelIdBox = await sheet
+    .getByTestId("channel-management-channel-id")
+    .boundingBox();
+  const leaveBox = await sheet
+    .getByTestId("channel-management-leave")
     .boundingBox();
 
   expect(sheetBox).not.toBeNull();
@@ -2659,16 +3110,155 @@ test("manage channel keeps canvas near the top of the sheet", async ({
   }
   expect(narrowSheetBox.width).toBeGreaterThan(500);
   expect(canvasBox).not.toBeNull();
-  expect(nameBox).not.toBeNull();
-  expect(canvasBox?.y).toBeLessThan(nameBox?.y);
+  expect(channelIdBox).not.toBeNull();
+  expect(leaveBox).not.toBeNull();
+  expect(channelIdBox?.y).toBeLessThan(canvasBox?.y);
+  expect(canvasBox?.y).toBeLessThan(leaveBox?.y);
+});
+
+test("channel settings hides workflows and skips its query when the experiment is disabled", async ({
+  page,
+}) => {
+  await page.addInitScript((key) => {
+    const overrides = JSON.parse(
+      window.localStorage.getItem(key) ?? "{}",
+    ) as Record<string, boolean>;
+    overrides.workflows = false;
+    window.localStorage.setItem(key, JSON.stringify(overrides));
+  }, FEATURE_OVERRIDES_STORAGE_KEY);
+
+  await page.goto("/");
+  await openChannelManagement(page, "general");
+
+  await expect(page.getByTestId("channel-management-sheet")).toBeVisible();
+  await expect(page.getByTestId("channel-workflows-ingress")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (
+          window as Window & {
+            __BUZZ_E2E_COMMAND_LOG__?: Array<{ command: string }>;
+          }
+        ).__BUZZ_E2E_COMMAND_LOG__?.some(
+          ({ command }) => command === "get_channel_workflows",
+        ),
+      ),
+    )
+    .toBe(false);
+});
+
+test("channel settings opens and creates channel workflows over the channel", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await invokeMockCommand(page, "create_workflow", {
+    channelId: GENERAL_CHANNEL_ID,
+    yamlDefinition:
+      "name: Welcome responder\ntrigger:\n  on: message_posted\nsteps:\n  - id: reply\n    run: send_message\n    with:\n      text: Welcome\n",
+  });
+  await openChannelManagement(page, "general");
+
+  const sheet = page.getByTestId("channel-management-sheet");
+  const canvasBox = await sheet
+    .getByTestId("channel-canvas-ingress")
+    .boundingBox();
+  const workflowsBox = await sheet
+    .getByTestId("channel-workflows-ingress")
+    .boundingBox();
+  expect(canvasBox).not.toBeNull();
+  expect(workflowsBox).not.toBeNull();
+  expect(canvasBox?.y).toBeLessThan(workflowsBox?.y);
+
+  await sheet.getByTestId("channel-workflows-ingress").click();
+  await expect(sheet.getByText("Workflows", { exact: true })).toBeVisible();
+  await expect(sheet.getByTestId("channel-workflows-list")).toContainText(
+    "Welcome responder",
+  );
+
+  // Opening a workflow keeps the settings Workflows view mounted beneath the
+  // shared editor; the channel route stays put behind both layers.
+  const channelUrl = new RegExp(`/channels/${GENERAL_CHANNEL_ID}(?:\\?|$)`);
+  await sheet.getByTestId("channel-workflow-mock-wf-1").click();
+  await expect(
+    page.getByRole("dialog", { name: "Edit workflow" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(channelUrl);
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByText("Workflows", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("message-timeline")).toBeVisible();
+
+  const overlayEditor = page.getByRole("dialog", { name: "Edit workflow" });
+  await overlayEditor.getByRole("tab", { name: "YAML" }).click();
+  const overlayYaml = overlayEditor.getByRole("textbox", {
+    name: "Workflow YAML",
+  });
+  await overlayYaml.fill(
+    (await overlayYaml.inputValue()).replace(
+      "Welcome responder",
+      "Unsaved welcome responder",
+    ),
+  );
+  await overlayEditor.getByRole("button", { name: "Workflow actions" }).click();
+  await page.getByRole("menuitem", { name: "Duplicate" }).click();
+  const discardConfirmation = page.getByRole("alertdialog", {
+    name: "Discard changes?",
+  });
+  await expect(discardConfirmation).toBeVisible();
+  await discardConfirmation
+    .getByRole("button", { name: "Keep editing" })
+    .click();
+  await expect(overlayEditor).toBeVisible();
+  await expect(overlayYaml).toContainText("Unsaved welcome responder");
+  await expect(
+    page.getByRole("dialog", { name: "Duplicate workflow" }),
+  ).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Close" }).click();
+  await page
+    .getByRole("alertdialog", { name: "Discard changes?" })
+    .getByRole("button", { name: "Discard changes" })
+    .click();
+  await expect(page.getByRole("dialog", { name: "Edit workflow" })).toHaveCount(
+    0,
+  );
+  await expect(page).toHaveURL(channelUrl);
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByText("Workflows", { exact: true })).toBeVisible();
+  await expect(sheet.getByTestId("channel-workflows-list")).toContainText(
+    "Welcome responder",
+  );
+
+  await page.getByTestId("channel-workflows-new").click();
+
+  await expect(
+    page.getByRole("dialog", { name: "Create workflow" }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(channelUrl);
+  await expect(
+    page.getByRole("combobox", { exact: true, name: "Channel" }),
+  ).toContainText("general");
+
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(
+    page.getByRole("dialog", { name: "Create workflow" }),
+  ).toHaveCount(0);
+  await expect(page).toHaveURL(channelUrl);
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByText("Workflows", { exact: true })).toBeVisible();
+  await expect(sheet.getByTestId("channel-workflows-new")).toBeVisible();
 });
 
 async function seedHomeInboxMention(
   page: import("@playwright/test").Page,
   itemId: string,
   tags?: string[][],
+  { navigate = true }: { navigate?: boolean } = {},
 ) {
-  await page.goto("/");
+  if (navigate) {
+    await page.goto("/");
+  }
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
   await page.waitForFunction(
     () =>
@@ -2773,6 +3363,109 @@ test("Inbox All excludes generic channel traffic", async ({ page }) => {
   await expect(
     page.getByTestId("home-inbox-item-inbox-generic-channel-message"),
   ).toHaveCount(0);
+});
+
+test("Inbox type labels keep the same height with and without a channel chip", async ({
+  page,
+}) => {
+  const dmId = "inbox-type-label-dm";
+  const mentionId = "inbox-type-label-mention";
+  const dmChannelId = "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
+
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await page.waitForFunction(() => {
+    const win = window as MockFeedWindow;
+    return (
+      typeof win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ === "function"
+    );
+  });
+
+  await page.evaluate(
+    ({
+      channelId,
+      currentPubkey,
+      dmChannelId: directChannelId,
+      dmId: directId,
+      mentionId: channelMentionId,
+      senderPubkey,
+    }) => {
+      const win = window as MockFeedWindow;
+      const emitMessage = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      const pushFeedItem = win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!emitMessage || !pushFeedItem) {
+        throw new Error("Mock bridge helpers are not installed.");
+      }
+
+      const createdAt = Math.floor(Date.now() / 1_000);
+      const directMessage = emitMessage({
+        channelName: "alice-tyler",
+        content: "A direct message without a channel chip",
+        createdAt,
+        id: directId,
+        pubkey: senderPubkey,
+      });
+      pushFeedItem({
+        category: "activity",
+        channel_id: directChannelId,
+        channel_name: "alice-tyler",
+        channel_type: null,
+        content: directMessage.content,
+        created_at: directMessage.created_at,
+        id: directMessage.id,
+        kind: directMessage.kind,
+        pubkey: directMessage.pubkey,
+        tags: directMessage.tags,
+      });
+      pushFeedItem({
+        category: "mention",
+        channel_id: channelId,
+        channel_name: "general",
+        channel_type: "stream",
+        content: "A channel mention with a channel chip",
+        created_at: createdAt + 1,
+        id: channelMentionId,
+        kind: 9,
+        pubkey: senderPubkey,
+        tags: [
+          ["h", channelId],
+          ["p", currentPubkey],
+        ],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      currentPubkey: MOCK_IDENTITY_PUBKEY,
+      dmChannelId,
+      dmId,
+      mentionId,
+      senderPubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  const dmLabel = page
+    .getByTestId(`home-inbox-item-${dmId}`)
+    .locator('[data-inbox-type-label=""]');
+  const mentionLabel = page
+    .getByTestId(`home-inbox-item-${mentionId}`)
+    .locator('[data-inbox-type-label=""]');
+  await expect(dmLabel).toContainText("DM from alice");
+  await expect(dmLabel.locator('[data-channel-link=""]')).toHaveCount(0);
+  await expect(mentionLabel).toContainText("Mentioned in");
+  await expect(mentionLabel.locator('[data-channel-link=""]')).toHaveText(
+    "#general",
+  );
+
+  const [dmBox, mentionBox] = await Promise.all([
+    dmLabel.boundingBox(),
+    mentionLabel.boundingBox(),
+  ]);
+  expect(dmBox).not.toBeNull();
+  expect(mentionBox).not.toBeNull();
+  expect(
+    Math.abs((dmBox?.height ?? 0) - (mentionBox?.height ?? 0)),
+  ).toBeLessThan(0.5);
 });
 
 test("Inbox All never lists drafts and unread-only hides reminders", async ({
@@ -3394,6 +4087,58 @@ test("home inbox manage affordance opens management without leaving home", async
   await expect(page).not.toHaveURL(/#\/channels\//);
 });
 
+test("home channel settings keeps agent lifecycle actions scoped to the active community", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const agentPubkey = await addGenericAgent(
+    page,
+    "general",
+    `home-sidebar-agent-${Date.now()}`,
+  );
+  const baselineCommands = await readCommandLog(page);
+  const baselineRuntimeStopCount = commandCount(
+    baselineCommands,
+    "stop_managed_agent_runtime",
+  );
+  const baselineLegacyStopCount = commandCount(
+    baselineCommands,
+    "stop_managed_agent",
+  );
+
+  await page.getByRole("button", { exact: true, name: "Inbox" }).click();
+  await seedHomeInboxMention(
+    page,
+    "mock-feed-home-agent-lifecycle",
+    undefined,
+    { navigate: false },
+  );
+  await page
+    .getByTestId("home-inbox-detail")
+    .getByTestId("channel-management-trigger")
+    .click();
+  await page.getByTestId("channel-management-member-count").click();
+  await expect(page.getByTestId("members-sidebar")).toBeVisible();
+
+  const agentStatus = page.getByTestId(
+    `sidebar-managed-agent-status-${agentPubkey}`,
+  );
+  const agentAction = page.getByTestId(`sidebar-agent-action-${agentPubkey}`);
+  await expect(agentStatus).toContainText("Here");
+  await openMemberMenu(page, agentPubkey);
+  await expect(agentAction).toContainText("Stop");
+  await agentAction.click();
+  await expect(agentStatus).toContainText("Unavailable");
+
+  const commands = await readCommandLog(page);
+  expect(commandCount(commands, "stop_managed_agent_runtime")).toBe(
+    baselineRuntimeStopCount + 1,
+  );
+  expect(commandCount(commands, "stop_managed_agent")).toBe(
+    baselineLegacyStopCount,
+  );
+});
+
 test("members sidebar virtualizes large channel rosters", async ({ page }) => {
   await page.goto("/");
   const channelId = await page
@@ -3418,7 +4163,40 @@ test("members sidebar virtualizes large channel rosters", async ({ page }) => {
   await expect(memberRows.first()).toBeVisible();
   expect(await memberRows.count()).toBeLessThan(50);
 
+  const firstGeneratedRow = memberList.getByTestId(
+    `sidebar-member-${pubkeys[0]}`,
+  );
+  await expect
+    .poll(() =>
+      firstGeneratedRow.evaluate(
+        (row) =>
+          getComputedStyle(row.parentElement as HTMLElement).contentVisibility,
+      ),
+    )
+    .toBe("visible");
+
   const virtualizedList = memberList.locator(".overflow-y-auto");
+  await page.evaluate(() => document.fonts.ready);
+
+  const heights: number[] = [];
+  for (const ratio of [0, 0.1, 0.25, 0.5, 0.75, 1]) {
+    heights.push(
+      await virtualizedList.evaluate(async (element, ratio) => {
+        element.scrollTop =
+          (element.scrollHeight - element.clientHeight) * ratio;
+        element.dispatchEvent(new Event("scroll"));
+
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        );
+
+        return element.scrollHeight;
+      }, ratio),
+    );
+  }
+
+  expect(Math.max(...heights) - Math.min(...heights)).toBeLessThan(120);
+
   await virtualizedList.evaluate((element) => {
     element.scrollTop = element.scrollHeight;
     element.dispatchEvent(new Event("scroll"));
@@ -3426,6 +4204,25 @@ test("members sidebar virtualizes large channel rosters", async ({ page }) => {
   await expect(
     memberList.getByTestId(`sidebar-member-${pubkeys.at(-1)}`),
   ).toBeVisible();
+});
+
+test("opening a human-only members sidebar skips managed runtime discovery", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const baselineCommands = await readCommandLog(page);
+  const baselineRuntimeListCount = commandCount(
+    baselineCommands,
+    "list_managed_agent_runtimes",
+  );
+
+  await openMembersSidebar(page, "random");
+  await expect(page.getByTestId("members-sidebar-people")).toBeVisible();
+
+  const commands = await readCommandLog(page);
+  expect(commandCount(commands, "list_managed_agent_runtimes")).toBe(
+    baselineRuntimeListCount,
+  );
 });
 
 test("members sidebar can invite relay-authorized agents", async ({ page }) => {
@@ -3939,8 +4736,17 @@ test("members sidebar can stop and start a managed bot in this community", async
     baselineCommands,
     "stop_managed_agent",
   );
+  const baselineRuntimeListCount = commandCount(
+    baselineCommands,
+    "list_managed_agent_runtimes",
+  );
 
   await openMembersSidebar(page, "general");
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "list_managed_agent_runtimes"),
+    )
+    .toBe(baselineRuntimeListCount + 1);
 
   const agentStatus = page.getByTestId(
     `sidebar-managed-agent-status-${agentPubkey}`,

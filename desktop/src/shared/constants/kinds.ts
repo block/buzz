@@ -10,6 +10,7 @@ export const KIND_NIP29_DELETE_EVENT = 9005;
 // Tag shapes are pinned by buzz-sdk builders + relay moderation_commands.rs.
 export const KIND_REPORT = 1984;
 export const KIND_PRODUCT_FEEDBACK = 42000;
+export const KIND_IA_ARCHIVE_REQUEST = 9035;
 export const KIND_MODERATION_BAN = 9040;
 export const KIND_MODERATION_UNBAN = 9041;
 export const KIND_MODERATION_TIMEOUT = 9042;
@@ -34,18 +35,21 @@ export const KIND_APPROVAL_REQUEST = 46010;
 export const KIND_MEMBER_ADDED_NOTIFICATION = 44100;
 export const KIND_MEMBER_REMOVED_NOTIFICATION = 44101;
 export const KIND_TYPING_INDICATOR = 20002;
+export const KIND_PRESENCE_UPDATE = 20001;
 export const KIND_HUDDLE_REACTION = 24810;
 export const KIND_HUDDLE_STARTED = 48100;
 export const KIND_HUDDLE_PARTICIPANT_JOINED = 48101;
 export const KIND_HUDDLE_PARTICIPANT_LEFT = 48102;
 export const KIND_HUDDLE_ENDED = 48103;
 // NIP-78 application-specific data. All use kind 30078; the relay
-// differentiates them by d-tag ("read-state:<slotId>", "channel-sections", "channel-mutes", "channel-stars", "channel-sort").
+// differentiates them by d-tag ("read-state:<slotId>", "channel-sections",
+// "channel-mutes", "channel-stars", "channel-sort", "project-sidebar-membership").
 export const KIND_READ_STATE = 30078;
 export const KIND_CHANNEL_SECTIONS = 30078;
 export const KIND_CHANNEL_MUTES = 30078;
 export const KIND_CHANNEL_STARS = 30078;
 export const KIND_CHANNEL_SORT = 30078;
+export const KIND_PROJECT_SIDEBAR_MEMBERSHIP = 30078;
 export const KIND_COMMUNITY_THEME = 30078;
 // NIP-33 persona/team/managed-agent projection events (d-tag keyed). Published
 // backend-side as secrets-stripped snapshots; the inbound sync hook subscribes

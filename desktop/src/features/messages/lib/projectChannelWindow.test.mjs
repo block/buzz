@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
+import { reconcileFetchedChannelWindow } from "../hooks.ts";
 import { channelMessagesKey, channelWindowKey } from "./messageQueryKeys.ts";
 import {
   appendOlderChannelWindow,
@@ -26,6 +27,18 @@ function event(id, createdAt) {
     content: id,
     sig: "b".repeat(128),
   };
+}
+
+function wirePage(rows) {
+  return [
+    ...rows,
+    {
+      ...event("bounds", 0),
+      kind: 39006,
+      tags: [["d", "channel:head"]],
+      content: JSON.stringify({ has_more: false, next_cursor: null }),
+    },
+  ];
 }
 
 function newestPage(rows) {
@@ -272,4 +285,134 @@ test("test_live_projection_retains_pending_send_and_non_broadcast_thread_reply",
     "thread-reply",
     "live",
   ]);
+});
+
+test("test_canceled_stale_fetch_cannot_overwrite_catch_up_window", async () => {
+  const harness = createHarness();
+  const requests = [];
+  let resolveRequestStarted;
+  let requestStarted = new Promise((resolve) => {
+    resolveRequestStarted = resolve;
+  });
+  const observer = new QueryObserver(harness.client, {
+    queryKey: harness.messagesKey,
+    queryFn: async ({ signal }) => {
+      const previousMessages = harness.client.getQueryData(harness.messagesKey);
+      let resolveFetch;
+      const fetch = new Promise((resolve) => {
+        resolveFetch = resolve;
+      });
+      requests.push({ resolveFetch, signal });
+      resolveRequestStarted();
+      const events = await fetch;
+      return reconcileFetchedChannelWindow(
+        harness.client,
+        harness.channelId,
+        events,
+        previousMessages,
+        signal,
+      );
+    },
+  });
+  const unsubscribe = observer.subscribe(() => {});
+
+  await requestStarted;
+  requestStarted = new Promise((resolve) => {
+    resolveRequestStarted = resolve;
+  });
+  const catchUp = refreshChannelWindowMessages(
+    harness.client,
+    harness.channelId,
+  );
+  await requestStarted;
+
+  assert.equal(requests[0].signal.aborted, true);
+  requests[1].resolveFetch(
+    wirePage([event("gap", 110), event("initial", 100)]),
+  );
+  await catchUp;
+  assert.deepEqual(contents(harness), ["initial", "gap"]);
+
+  requests[0].resolveFetch(wirePage([event("initial", 100)]));
+  await new Promise((resolve) => setImmediate(resolve));
+  appendLiveEvent(harness, event("live", 120));
+
+  assert.deepEqual(contents(harness), ["initial", "gap", "live"]);
+  assert.deepEqual(
+    flattenChannelWindowEvents(
+      harness.client.getQueryData(harness.windowKey),
+    ).map((item) => item.content),
+    ["initial", "gap", "live"],
+  );
+  unsubscribe();
+});
+
+test("test_pageless_live_projection_preserves_cached_timeline", () => {
+  const harness = createHarness();
+  const cached = harness.client.getQueryData(harness.messagesKey);
+  const pageless = emptyChannelWindowStore();
+  harness.client.setQueryData(harness.windowKey, pageless);
+
+  const next = mergeLiveChannelWindowEvent(
+    harness.client.getQueryData(harness.windowKey),
+    event("live", 110),
+  );
+  harness.client.setQueryData(harness.windowKey, next);
+  projectChannelWindowMessages(harness.client, harness.channelId);
+
+  assert.deepEqual(contents(harness), ["initial", "live"]);
+  assert.equal(harness.client.getQueryData(harness.messagesKey)[0], cached[0]);
+});
+
+test("test_concurrent_refreshes_after_seeded_snapshot_share_one_authoritative_fetch", async () => {
+  // Subscribe settlement and a reconnect can both call the helper while the
+  // channel query is still parked on its hydration-seeded snapshot. Both wake
+  // on the same promise; the second invalidation must join the first
+  // authoritative fetch, not cancel and replace it (Max/Wren, #6572 review).
+  const harness = createHarness();
+  const seeded = event("seeded", 100);
+  harness.client.setQueryData(harness.messagesKey, [seeded], { updatedAt: 0 });
+  const requests = [];
+  const observer = new QueryObserver(harness.client, {
+    queryKey: harness.messagesKey,
+    queryFn: async ({ signal }) => {
+      const previousMessages = harness.client.getQueryData(harness.messagesKey);
+      let resolveFetch;
+      const fetch = new Promise((resolve) => {
+        resolveFetch = resolve;
+      });
+      requests.push({ resolveFetch, signal });
+      const events = await fetch;
+      return reconcileFetchedChannelWindow(
+        harness.client,
+        harness.channelId,
+        events,
+        previousMessages,
+        signal,
+      );
+    },
+  });
+  const unsubscribe = observer.subscribe(() => {});
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(requests.length, 1);
+    const first = refreshChannelWindowMessages(
+      harness.client,
+      harness.channelId,
+    );
+    const second = refreshChannelWindowMessages(
+      harness.client,
+      harness.channelId,
+    );
+    requests[0].resolveFetch(wirePage([seeded]));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(requests.length, 2);
+    requests[1].resolveFetch(wirePage([event("gap", 110), seeded]));
+    await Promise.all([first, second]);
+    assert.equal(requests.length, 2);
+    assert.equal(requests[1].signal.aborted, false);
+    assert.deepEqual(contents(harness), ["seeded", "gap"]);
+  } finally {
+    unsubscribe();
+  }
 });

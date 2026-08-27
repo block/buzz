@@ -1,6 +1,10 @@
 import type { ManagedAgent } from "@/shared/api/types";
-import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
+import {
+  type ImetaMedia,
+  mergeOutgoingTags,
+} from "@/features/messages/lib/imetaMediaMarkdown";
 import type { QueuedMediaAttachment } from "@/features/messages/lib/backgroundMediaUploadStore";
+import type { PreparedBackgroundLinkPreviews } from "@/features/messages/lib/linkPreviewPreparationStore";
 import type { DraftMentionRef } from "@/features/messages/lib/useDrafts";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { MENTION_REFERENCE_TAG } from "@/shared/lib/resolveMentionNames";
@@ -8,6 +12,8 @@ import { MENTION_REFERENCE_TAG } from "@/shared/lib/resolveMentionNames";
 export { MENTION_REFERENCE_TAG };
 
 export type PendingNonMemberMentionSend = {
+  addressedAgentPubkeys: string[];
+  inlineAgentMentionPubkeys: string[];
   capturedChannelId: string | null;
   capturedThreadContext: {
     parentEventId: string | null;
@@ -17,6 +23,7 @@ export type PendingNonMemberMentionSend = {
   mentionPubkeys: string[];
   nonMemberPubkeys: string[];
   outgoingTags?: string[][];
+  preparedLinkPreviews?: PreparedBackgroundLinkPreviews | null;
   preparedManagedAgents?: ManagedAgent[];
   readyAgentPubkeys?: string[];
   savedContent: string;
@@ -26,24 +33,36 @@ export type PendingNonMemberMentionSend = {
   sentDraftKey: string | null | undefined;
   recoveryDraftKey: string | null | undefined;
   savedMentionRefs: DraftMentionRef[];
-  audienceGeneration: number;
-  audienceRevision: number | null;
-  explicitAgentPubkeys: string[];
 };
 
 export type SendMessageWithMentionFlowInput = {
+  addressedAgentPubkeys?: readonly string[];
   capturedChannelId: string | null;
   capturedThreadContext?: PendingNonMemberMentionSend["capturedThreadContext"];
   pendingImeta: ImetaMedia[];
   queuedAttachments?: QueuedMediaAttachment[];
   linkPreviewTags?: string[][];
+  preparedLinkPreviews?: PreparedBackgroundLinkPreviews | null;
   sentDraftKey: string | null | undefined;
   recoveryDraftKey: string | null | undefined;
   spoileredAttachmentUrls?: ReadonlySet<string>;
   trimmed: string;
-  audienceGeneration?: number;
-  audienceRevision?: number | null;
 };
+
+export async function resolvePreviewTags(
+  draft: Pick<PendingNonMemberMentionSend, "preparedLinkPreviews">,
+  mediaTags: string[][] | undefined,
+  outgoingTags: string[][] | undefined,
+): Promise<string[][] | null> {
+  const result = await draft.preparedLinkPreviews?.promise;
+  if (result?.status === "cancelled") return null;
+  return (
+    mergeOutgoingTags(mediaTags, [
+      ...(outgoingTags ?? []),
+      ...(result?.tags ?? []),
+    ]) ?? []
+  );
+}
 
 export function mergeOutgoingTagsWithReferenceMentions(
   outgoingTags: string[][] | undefined,
@@ -66,6 +85,16 @@ export function getErrorMessage(error: unknown, fallback: string) {
 
 export function uniqueNormalizedPubkeys(pubkeys: Iterable<string>) {
   return [...new Set([...pubkeys].map(normalizePubkey))].filter(Boolean);
+}
+
+export function mergeMentionRecipients(
+  explicitMentionPubkeys: Iterable<string>,
+  addressedAgentPubkeys: Iterable<string>,
+) {
+  return uniqueNormalizedPubkeys([
+    ...explicitMentionPubkeys,
+    ...addressedAgentPubkeys,
+  ]);
 }
 
 export function isManagedAgentRunning(agent: ManagedAgent) {

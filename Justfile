@@ -43,6 +43,7 @@ bootstrap:
         cp .env.example .env
         echo "Created .env from .env.example — review it before running just dev."
     fi
+    ./scripts/ensure-local-relay-key.sh .env
 
 # Start Docker services, run migrations, install desktop deps
 setup: bootstrap
@@ -91,8 +92,22 @@ build:
 build-release:
     cargo build --workspace --release
 
-# Run repo lint and formatting checks
-check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check
+# Run repo lint, formatting, and repository policy checks
+check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check security-review-check file-size-check
+
+# Validate the trusted security-review workflow support and renderer contract.
+security-review-check:
+    node --check .github/scripts/codex-security-review.js
+    node --test .github/scripts/codex-security-review.test.js
+
+# Run the repository-wide differential file-size ratchet and its policy tests.
+# The ratchet inspects only files changed from the merge base, so this stays
+# cheap enough to run unconditionally without duplicating path filters.
+file-size-check:
+    node --test scripts/check-file-sizes-core.test.mjs
+    node desktop/scripts/check-file-sizes.mjs
+    node web/scripts/check-file-sizes.mjs
+    node mobile/scripts/check-file-sizes.mjs
 
 # Format all Rust code
 fmt:
@@ -120,7 +135,7 @@ desktop-check:
 
 # Fix desktop lint and format issues
 desktop-fix:
-    cd {{desktop_dir}} && pnpm exec biome check --write . && pnpm check:file-sizes
+    cd {{desktop_dir}} && pnpm exec biome check --write .
 
 # Run desktop TS helper unit tests
 desktop-test:
@@ -276,6 +291,10 @@ desktop-e2e-smoke:
 desktop-e2e-integration: _ensure-migrations
     cd {{desktop_dir}} && pnpm test:e2e:integration
 
+# Run the deterministic desktop correctness smoke against an isolated local relay
+desktop-release-smoke:
+    ./scripts/run-desktop-release-smoke.sh
+
 # Run only the e2e specs changed vs origin/main (both projects) before pushing
 desktop-e2e-pre-push: _ensure-migrations
     git fetch origin main
@@ -294,6 +313,7 @@ test:
 test-unit:
     #!/usr/bin/env bash
     set -euo pipefail
+    ./scripts/test-ensure-local-relay-key.sh
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
         cargo nextest run -p buzz-voice --lib
@@ -319,6 +339,14 @@ test-unit:
         # because nothing in CI runs `cargo test --workspace` — workspace
         # membership alone buys clippy/check, not a single executed test.
         cargo nextest run -p buzz-backend-kubernetes
+        # buzz-agent model-capabilities corpus: the Rust half of the
+        # cross-language drift guard. `model_capabilities.rs` embeds
+        # scripts/model-capabilities.json + scripts/normative-corpus.json via
+        # include_str! and replays the full locked corpus as pure in-process tests (no
+        # infra). Enumerated explicitly because nothing in CI runs
+        # `cargo test --workspace`; without this step a manifest edit that
+        # diverges Rust from the corpus ships green.
+        cargo nextest run -p buzz-agent --lib
     else
         ./scripts/run-tests.sh unit
     fi
@@ -326,6 +354,15 @@ test-unit:
 # Run integration tests only (starts services if needed)
 test-integration:
     ./scripts/run-tests.sh integration
+
+# Regenerate the model-capability normative corpus from the production Rust
+# resolver. The corpus is a golden snapshot, never hand-edited: this runs the
+# `#[ignore]`d writer test in buzz-agent, which serializes `resolve()` over the
+# inputs-only question table to scripts/normative-corpus.json. Run this after
+# any model-capabilities.json edit, then commit the regenerated file. The
+# `corpus_matches_generated_snapshot` gate fails CI if the committed file drifts.
+regen-model-corpus:
+    cargo test -p buzz-agent --lib model_capabilities::tests::regen_corpus_file -- --ignored --exact
 
 # Buzz shared compute e2e: current desktop discovery/admission logic and
 # Playwright UI coverage.
@@ -355,7 +392,6 @@ mesh-dev-fresh:
 mesh-e2e-hardware:
     #!/usr/bin/env bash
     set -euo pipefail
-    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     cargo run -p buzz-relay --example mesh_serve_client_smoke
 
 # Three isolated node processes: trusted member joins and infers; stranger is rejected.
@@ -363,14 +399,12 @@ mesh-e2e-hardware:
 mesh-e2e-admission:
     #!/usr/bin/env bash
     set -euo pipefail
-    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     cargo run -p buzz-relay --example mesh_admission_smoke
 
 # Full hardware confidence suite: routing, owner admission, and real agent inference.
 mesh-e2e-confidence:
     #!/usr/bin/env bash
     set -euo pipefail
-    export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     cargo build --release -p buzz-agent -p buzz-dev-mcp
     cargo run -p buzz-relay --example mesh_serve_client_smoke
     cargo run -p buzz-relay --example mesh_admission_smoke
@@ -396,6 +430,9 @@ relay: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     cargo run -p buzz-relay
 
 # Start the relay with the built web UI served from it
@@ -403,6 +440,9 @@ relay-web: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     [[ -d node_modules ]] || pnpm install
     pnpm -C web build
     BUZZ_WEB_DIR=./web/dist cargo run -p buzz-relay
@@ -412,6 +452,9 @@ admin: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     [[ -d node_modules ]] || pnpm install
     pnpm -C admin-web build
     export BUZZ_ADMIN_HOST="${BUZZ_ADMIN_HOST:-admin.localhost:3000}"
@@ -432,7 +475,12 @@ admin-check: fmt-check
     pnpm -C admin-web exec playwright test
 
 # Start the relay server in release mode
-relay-release: _ensure-migrations
+relay-release: bootstrap _ensure-migrations
+    #!/usr/bin/env bash
+    set -euo pipefail
+    set -o allexport
+    source .env
+    set +o allexport
     cargo run -p buzz-relay --release
 
 
@@ -441,6 +489,9 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     bind_addr="${BUZZ_BIND_ADDR:-0.0.0.0:3000}"
     relay_port="${bind_addr##*:}"; [[ -n "$relay_port" ]] || relay_port=3000
     health_port="${BUZZ_HEALTH_PORT:-8080}"
@@ -457,9 +508,6 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
         done
     fi
     cargo build -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
-    if [[ -n "{{mesh}}" ]]; then
-        export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
-    fi
     # Docker Desktop's forwarded MinIO port can stall under the deployment
     # probe's 32 concurrent writers. Keep the gate enabled in local dev, using
     # the bounded profile already used by the relay test launcher.
@@ -536,7 +584,6 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
     FEATURES=()
     if [[ -n "{{mesh}}" ]]; then
         FEATURES=(--features mesh-llm)
-        export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     fi
     # Replace 0-byte sidecar stubs with real binaries so tauri dev picks them up.
     # buzz: the CLI sidecar. buzz-backend-kubernetes: provider discovery scans the
@@ -572,7 +619,6 @@ production *ARGS: bootstrap _ensure-sidecar-stubs
     FEATURES=()
     if [[ -n "{{mesh}}" ]]; then
         FEATURES=(--features mesh-llm)
-        export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     fi
     # Replace 0-byte sidecar stubs with real binaries so tauri dev picks them up.
     # buzz: the CLI sidecar. buzz-backend-kubernetes: provider discovery scans the
@@ -628,7 +674,7 @@ web-check:
 
 # Fix web lint and format issues
 web-fix:
-    cd {{web_dir}} && pnpm exec biome check --write . && pnpm check:file-sizes
+    cd {{web_dir}} && pnpm exec biome check --write .
 
 # Run web TypeScript checks
 web-typecheck:
@@ -660,7 +706,7 @@ mobile-fix:
 
 # Run mobile lint and format checks
 mobile-check:
-    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format --output=none --set-exit-if-changed . && flutter analyze && node ./scripts/check-file-sizes.mjs
+    unset GIT_DIR GIT_WORK_TREE; cd {{mobile_dir}} && dart format --output=none --set-exit-if-changed . && flutter analyze
 
 # Run mobile tests
 mobile-test:
@@ -966,13 +1012,38 @@ goose-bg relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BU
 
 # ─── Benchmarking ─────────────────────────────────────────────────────────────
 
-# Run the Buzz orchestra benchmark — leaderboard-eligible by default (TB 2.1, k=5, Sonnet+Haiku). Stands up its own Docker stack; --gui opens a live spectator desktop app; other flags pass to benchmark.py (--dataset/--path, --include-task, --attempts, --manifest, --dry-run, ...)
+# Run the Buzz orchestra benchmark — TB defaults to leaderboard-eligible k=5; Buzz task layers default to regression k=1 and workflow k=3. Stands up its own Docker stack; --gui opens a live spectator desktop app; other flags pass to benchmark.py (--dataset/--path, --layer, --include-task, --attempts, --manifest, --dry-run, ...)
 benchmark *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
     uv run --project benchmarks/harbor-buzz-orchestra/testbed \
         benchmarks/harbor-buzz-orchestra/scripts/benchmark.py {{ARGS}}
+
+# Run the benchmark adapter + testbed gate exactly as CI does (pytest + ruff, pinned ruff from pyproject)
+benchmark-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}/benchmarks/harbor-buzz-orchestra"
+    # CI installs the dev extra with pip, so pyproject — not uv.lock — decides
+    # which ruff lints. Read the pin from there so this recipe cannot drift
+    # from the workflow (a floating specifier once meant CI failed on RUF100
+    # while the locked local ruff passed).
+    ruff_pin="$(grep -oE 'ruff==[0-9.]+' pyproject.toml | head -1 | cut -d= -f3)"
+    for project in . testbed; do
+        (
+            cd "$project"
+            echo "── harbor-buzz-orchestra/$project (ruff $ruff_pin)"
+            uv run --frozen pytest -q
+            uvx "ruff@$ruff_pin" check .
+            uvx "ruff@$ruff_pin" format --check .
+        )
+    done
+    # The task verifiers live in the sibling benchmarks/buzz-dataset, so they
+    # need the harness config passed explicitly to stay linted.
+    echo "── buzz-dataset (ruff $ruff_pin)"
+    uvx "ruff@$ruff_pin" check --config pyproject.toml ../buzz-dataset
+    uvx "ruff@$ruff_pin" format --check --config pyproject.toml ../buzz-dataset
 
 # Stop the benchmark Docker stack (state and channels are kept)
 benchmark-down:

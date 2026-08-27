@@ -346,6 +346,171 @@ test("opens sidebar search with the shortcut and loads the exact result", async 
   );
 });
 
+test("highlights the query in search results and the opened message", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-engineering").click();
+  await page.keyboard.press("ControlOrMeta+f");
+  await page.getByTestId("search-dialog-input").fill("SHIPPED");
+
+  const result = page.getByTestId("search-result-mock-engineering-shipped");
+  await expect(result).toBeVisible();
+  await expect(result.locator("mark")).toHaveText("shipped");
+  await expect(result.locator("mark")).toHaveClass(/bg-yellow-300/);
+
+  await result.click();
+
+  const message = page
+    .getByTestId("message-timeline")
+    .locator('[data-message-id="mock-engineering-shipped"]');
+  await expect(message).toBeVisible();
+  await expect(message.locator('[data-search-match="true"]')).toHaveText(
+    "shipped",
+  );
+});
+
+test("highlights the clicked forum post when its route is already open", async ({
+  page,
+}) => {
+  await page.goto(
+    "/#/channels/a27e1ee9-76a6-5bdf-a5d5-1d85610dad11/posts/mock-forum-release-thread",
+  );
+  await expect(
+    page.locator('[data-forum-event-id="mock-forum-release-thread"]'),
+  ).toBeVisible();
+  await page.keyboard.press("ControlOrMeta+f");
+  await page.getByTestId("search-dialog-input").fill("checklist");
+
+  const result = page.getByTestId("search-result-mock-forum-release-thread");
+  await expect(result).toBeVisible();
+  await result.click();
+
+  const post = page.locator(
+    '[data-forum-event-id="mock-forum-release-thread"]',
+  );
+  await expect(post.locator('[data-search-match="true"]')).toHaveText(
+    "checklist",
+  );
+});
+
+test("ordinary same-channel activation clears a prior search highlight", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-engineering").click();
+  await page.keyboard.press("ControlOrMeta+f");
+  await page.getByTestId("search-dialog-input").fill("shipped");
+  await page.getByTestId("search-result-mock-engineering-shipped").click();
+
+  const message = page
+    .getByTestId("message-timeline")
+    .locator('[data-message-id="mock-engineering-shipped"]');
+  await expect(message.locator('[data-search-match="true"]')).toHaveText(
+    "shipped",
+  );
+  await expect(page).toHaveURL(
+    /#\/channels\/1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9(?:\?thread=mock-engineering-shipped)?$/,
+  );
+
+  await page.getByTestId("channel-engineering").click();
+
+  await expect(message.locator('[data-search-match="true"]')).toHaveCount(0);
+});
+
+test("ordinary rendered channel link clears a prior search highlight", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.keyboard.press("ControlOrMeta+f");
+  await page.getByTestId("search-dialog-input").fill("welcome");
+  await page.getByTestId("search-result-mock-general-welcome").click();
+
+  const message = page
+    .getByTestId("message-timeline")
+    .locator('[data-message-id="mock-general-welcome"]');
+  await expect(message.locator('[data-search-match="true"]')).toHaveText(
+    "Welcome",
+  );
+
+  await message.locator('[data-channel-link=""]').click();
+
+  await expect(message.locator('[data-search-match="true"]')).toHaveCount(0);
+});
+
+test("ordinary same-forum activation clears a prior search highlight", async ({
+  page,
+}) => {
+  await page.goto(
+    "/#/channels/a27e1ee9-76a6-5bdf-a5d5-1d85610dad11/posts/mock-forum-release-thread",
+  );
+  await page.getByTestId("open-search").click();
+  await page.getByTestId("search-dialog-input").fill("checklist");
+  await page.getByTestId("search-result-mock-forum-release-thread").click();
+
+  const post = page.locator(
+    '[data-forum-event-id="mock-forum-release-thread"]',
+  );
+  await expect(post.locator('[data-search-match="true"]')).toHaveText(
+    "checklist",
+  );
+
+  await page.getByTestId("channel-watercooler").click();
+  await page.getByText("Release checklist: async feedback thread.").click();
+
+  await expect(post.locator('[data-search-match="true"]')).toHaveCount(0);
+});
+
+test("ordinary forum navigation clears a prior search highlight", async ({
+  page,
+}) => {
+  await page.goto(
+    "/#/channels/a27e1ee9-76a6-5bdf-a5d5-1d85610dad11/posts/mock-forum-release-thread",
+  );
+  await page.getByTestId("open-search").click();
+  await page.getByTestId("search-dialog-input").fill("checklist");
+  await page.getByTestId("search-result-mock-forum-release-thread").click();
+
+  const releasePost = page.locator(
+    '[data-forum-event-id="mock-forum-release-thread"]',
+  );
+  await expect(releasePost.locator('[data-search-match="true"]')).toHaveText(
+    "checklist",
+  );
+
+  await page.getByTestId("channel-watercooler").click();
+  await page.getByText("Team offsite planning and travel notes.").click();
+  await expect(
+    page.locator('[data-forum-event-id="mock-forum-offsite-thread"]'),
+  ).toBeVisible();
+  await page.getByTestId("channel-watercooler").click();
+  await page.getByText("Release checklist: async feedback thread.").click();
+
+  await expect(releasePost).toBeVisible();
+  await expect(releasePost.locator('[data-search-match="true"]')).toHaveCount(
+    0,
+  );
+});
+
+test("does not expose stale search results with a newly typed query", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-engineering").click();
+  await page.keyboard.press("ControlOrMeta+f");
+  const input = page.getByTestId("search-dialog-input");
+  await input.fill("shipped");
+  await expect(
+    page.getByTestId("search-result-mock-engineering-shipped"),
+  ).toBeVisible();
+
+  await input.fill("mentions");
+  await expect(
+    page.getByTestId("search-result-mock-engineering-shipped"),
+  ).toHaveCount(0);
+});
+
 test("opens channel matches from search", async ({ page }) => {
   await page.goto("/");
 
@@ -377,6 +542,293 @@ test("opens channel matches from search", async ({ page }) => {
     /#\/channels\/1c7e1c02-87bb-5e88-b2da-5a7a9432d0c9$/,
   );
   await expect(page.getByTestId("chat-title")).toHaveText("engineering");
+});
+
+test("global search offers an optional current-channel scope", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(page).toHaveURL(
+    /#\/channels\/9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50$/,
+  );
+
+  await focusSidebarSearchWithShortcut(page);
+
+  const scopeControl = page.getByTestId("search-current-channel-control");
+  const input = page.getByTestId("search-dialog-input");
+  await expect
+    .poll(() =>
+      scopeControl
+        .getByTestId("search-current-scope-label")
+        .evaluate((element) => element.textContent),
+    )
+    .toBe("Search in #general");
+  await expect(scopeControl).toContainText("Search in");
+  await expect(scopeControl).toContainText("#general");
+  await expect(scopeControl).toContainText("Search messages in this channel");
+  await expect(page.getByTestId("search-dialog-input-row")).toHaveCSS(
+    "border-bottom-width",
+    "1px",
+  );
+  await expect(scopeControl.locator("..")).toHaveCSS(
+    "border-bottom-width",
+    "0px",
+  );
+  await expect(scopeControl.locator("..")).toHaveCSS("padding-top", "14px");
+  await expect(scopeControl.locator("..")).toHaveCSS("padding-bottom", "14px");
+  const [controlBox, dialogBox] = await Promise.all([
+    scopeControl.boundingBox(),
+    page.getByTestId("search-results").boundingBox(),
+  ]);
+  expect(controlBox).not.toBeNull();
+  expect(dialogBox).not.toBeNull();
+  expect(controlBox?.width ?? 0).toBeGreaterThan((dialogBox?.width ?? 0) * 0.9);
+  expect(controlBox?.width ?? 0).toBeLessThan(dialogBox?.width ?? 0);
+  await expect(scopeControl).toHaveAttribute("aria-selected", "true");
+  const firstRecentResult = page.locator(".search-result-row").first();
+  await input.press("ArrowDown");
+  await expect(firstRecentResult).toHaveAttribute("aria-selected", "true");
+  await input.press("ArrowUp");
+  await expect(scopeControl).toHaveAttribute("aria-selected", "true");
+  await input.press("Enter");
+
+  const scopeChip = page.getByTestId("search-channel-scope-chip");
+  await expect(scopeChip).toHaveText(/#general/);
+  await expect(input).toBeFocused();
+  await input.fill("w");
+  const relevantHeader = page.getByText("Most relevant", { exact: true });
+  const firstScopedResult = page
+    .locator('[data-search-section="messages"] .search-result-row')
+    .first();
+  await expect(page.getByText("Welcome to general")).toBeVisible();
+  await expect(page.getByText(/Searching messages in/)).toHaveCount(0);
+  await expect(relevantHeader).toBeVisible();
+  await expect(firstScopedResult).toBeVisible();
+  const contentStart = (element: HTMLElement) => {
+    const styles = window.getComputedStyle(element);
+    return (
+      element.getBoundingClientRect().left +
+      Number.parseFloat(styles.paddingLeft)
+    );
+  };
+  const [inputStart, headerStart, resultStart] = await Promise.all([
+    page.getByTestId("search-dialog-input-row").evaluate(contentStart),
+    relevantHeader.evaluate(contentStart),
+    firstScopedResult.evaluate(contentStart),
+  ]);
+  expect(Math.abs(inputStart - headerStart)).toBeLessThanOrEqual(1);
+  expect(Math.abs(inputStart - resultStart)).toBeLessThanOrEqual(1);
+
+  await input.fill("x");
+  await expect(page.getByTestId("search-results")).toContainText(
+    "No messages for x in #general.",
+  );
+
+  await scopeChip.click();
+  await expect(scopeChip).toHaveCount(0);
+  await expect(input).toBeFocused();
+  await input.fill("shipped");
+  await expect(page.getByTestId("search-results")).toContainText(
+    "Engineering shipped the desktop build.",
+  );
+});
+
+test("global search offers a conversation-specific scope in direct messages", async ({
+  page,
+}) => {
+  const directMessageId = "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
+
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+  await expect(page).toHaveURL(
+    new RegExp(`#\\/channels\\/${directMessageId}$`),
+  );
+
+  await focusSidebarSearchWithShortcut(page);
+
+  const scopeControl = page.getByTestId("search-current-channel-control");
+  await expect
+    .poll(() =>
+      scopeControl
+        .getByTestId("search-current-scope-label")
+        .evaluate((element) => element.textContent),
+    )
+    .toBe("Search conversation with alice");
+  await expect(scopeControl).toContainText("Search conversation with alice");
+  await expect(scopeControl).toContainText(
+    "Search messages in this conversation.",
+  );
+  await expect(scopeControl).not.toContainText("channel");
+  await expect(page.getByTestId("search-dialog-input-row")).toHaveCSS(
+    "border-bottom-width",
+    "1px",
+  );
+  await expect(scopeControl.locator("..")).toHaveCSS(
+    "border-bottom-width",
+    "0px",
+  );
+  await expect(scopeControl.locator("..")).toHaveCSS("padding-top", "14px");
+  await expect(scopeControl.locator("..")).toHaveCSS("padding-bottom", "14px");
+
+  await scopeControl.click();
+
+  const scopeChip = page.getByTestId("search-channel-scope-chip");
+  const input = page.getByTestId("search-dialog-input");
+  await expect(scopeChip).toHaveText(/^alice$/);
+  await expect(scopeChip).not.toContainText("#");
+  await expect(input).toBeFocused();
+  await input.fill("a");
+  await expect(page.getByTestId("search-results")).toContainText(
+    "No messages for a in alice.",
+  );
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const calls =
+          (
+            window as Window & {
+              __BUZZ_E2E_COMMAND_LOG__?: Array<{
+                command: string;
+                payload: unknown;
+              }>;
+            }
+          ).__BUZZ_E2E_COMMAND_LOG__ ?? [];
+
+        return calls.findLast((entry) => entry.command === "search_messages")
+          ?.payload;
+      }),
+    )
+    .toMatchObject({
+      channelId: directMessageId,
+      q: "a",
+    });
+
+  await page.keyboard.press("Escape");
+  await page.keyboard.press("ControlOrMeta+f");
+  await expect(page.getByTestId("search-results")).toBeVisible();
+  await expect(page.getByTestId("search-channel-scope-chip")).toHaveText(
+    /^alice$/,
+  );
+  await expect(page.getByTestId("search-current-channel-control")).toHaveCount(
+    0,
+  );
+});
+
+test("channel find shortcut opens unified search with scope selected", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page).toHaveURL(
+    /#\/channels\/9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50$/,
+  );
+
+  await page.keyboard.press("ControlOrMeta+f");
+
+  await expect(page.getByTestId("search-results")).toBeVisible();
+  await expect(page.getByTestId("search-channel-scope-chip")).toHaveText(
+    /#general/,
+  );
+  await expect(page.getByTestId("search-current-channel-control")).toHaveCount(
+    0,
+  );
+  await expect(page.getByTestId("search-dialog-input")).toBeFocused();
+});
+
+test("global search omits channel scoping when no channel is active", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await expectHomeView(page);
+
+  await focusSidebarSearchWithShortcut(page);
+
+  await expect(page.getByTestId("search-current-channel-control")).toHaveCount(
+    0,
+  );
+  await expect(page.getByTestId("search-channel-scope-chip")).toHaveCount(0);
+});
+
+test("global one-character search does not query the relay", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await focusSidebarSearchWithShortcut(page);
+
+  await page.getByTestId("search-dialog-input").fill("x");
+  await page.waitForTimeout(400);
+
+  const messageSearchCalls = await page.evaluate(() => {
+    const calls =
+      (
+        window as Window & {
+          __BUZZ_E2E_COMMAND_LOG__?: Array<{ command: string }>;
+        }
+      ).__BUZZ_E2E_COMMAND_LOG__ ?? [];
+    return calls.filter((entry) => entry.command === "search_messages").length;
+  });
+  expect(messageSearchCalls).toBe(0);
+});
+
+test("global search tolerates small channel and people typos", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await focusSidebarSearchWithShortcut(page);
+
+  const input = page.getByTestId("search-dialog-input");
+  const results = page.getByTestId("search-results");
+  await input.fill("engneering");
+  await expect(results).toContainText("Engineering discussions");
+
+  await input.fill("alcie");
+  await expect(results).toContainText("alice");
+});
+
+test("global search exposes a larger scrollable result window", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-deep-history").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("deep-history");
+  await expect(
+    page.locator('[data-message-id^="mock-deep-history-"]').first(),
+  ).toBeVisible();
+
+  await focusSidebarSearchWithShortcut(page);
+  await page.getByTestId("search-dialog-input").fill("deep history message");
+
+  const resultRows = page.locator(
+    '[data-search-section="messages"] .search-result-row',
+  );
+  await expect(resultRows).toHaveCount(40);
+  const resultList = page.getByTestId("search-results-list");
+  await expect(resultList).toBeVisible();
+  const scopeControl = page.getByTestId("search-current-channel-control");
+  await expect(
+    resultList.getByTestId("search-current-channel-control"),
+  ).toBeVisible();
+  const dimensions = await resultList.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+  }));
+  expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight);
+  await resultList.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect(scopeControl).not.toBeInViewport();
+  await resultList.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+
+  for (let index = 0; index < 14; index += 1) {
+    await page.keyboard.press("ArrowDown");
+  }
+  await expect(resultRows.nth(13)).toHaveAttribute("aria-selected", "true");
+  await expect(resultRows.nth(13)).toBeInViewport();
 });
 
 test("closes sidebar search with Escape", async ({ page }) => {
@@ -469,7 +921,7 @@ test("replaces the channel pane when switching channels", async ({ page }) => {
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Welcome to #general",
+    "Welcome to general",
   );
 
   await page.getByTestId("channel-random").click();
@@ -479,7 +931,7 @@ test("replaces the channel pane when switching channels", async ({ page }) => {
     "This is the beginning of the regular channel.",
   );
   await expect(page.getByTestId("message-timeline")).not.toContainText(
-    "Welcome to #general",
+    "Welcome to general",
   );
   await expect(page.getByTestId("message-timeline")).toHaveCount(1);
   await expect(page.getByTestId("message-timeline-day-divider")).toHaveCount(0);
@@ -604,4 +1056,56 @@ test("does not shift the timeline when the composer grows", async ({
   expect(after.clientHeight).toBeLessThanOrEqual(before.clientHeight);
   expect(Math.abs(after.scrollTop - before.scrollTop)).toBeLessThanOrEqual(2);
   expect(after.distanceFromBottom).toBeGreaterThan(160);
+});
+
+test("lifts Jump to latest when the composer grows", async ({ page }) => {
+  const input = page.getByTestId("message-input");
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  await ensureTimelineScrollable(page, `Jump pill growth ${Date.now()}`);
+  await page.waitForTimeout(400);
+  const timeline = page.getByTestId("message-timeline");
+  await timeline.evaluate((element) => {
+    element.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+
+  const jumpToLatest = page.getByTestId("message-scroll-to-latest");
+  const composer = page.getByTestId("message-composer");
+  await expect(jumpToLatest).toBeVisible();
+  const initialPillBox = await jumpToLatest.boundingBox();
+  const initialComposerBox = await composer.boundingBox();
+
+  await input.fill(
+    [
+      "Composer growth line one",
+      "Composer growth line two",
+      "Composer growth line three",
+      "Composer growth line four",
+    ].join("\n"),
+  );
+
+  await expect
+    .poll(async () => (await composer.boundingBox())?.height ?? 0)
+    .toBeGreaterThan((initialComposerBox?.height ?? 0) + 40);
+  await page.waitForTimeout(250);
+
+  const expandedPillBox = await jumpToLatest.boundingBox();
+  const expandedComposerBox = await composer.boundingBox();
+  expect(initialPillBox).not.toBeNull();
+  expect(initialComposerBox).not.toBeNull();
+  expect(expandedPillBox).not.toBeNull();
+  expect(expandedComposerBox).not.toBeNull();
+
+  const composerGrowth =
+    (expandedComposerBox?.height ?? 0) - (initialComposerBox?.height ?? 0);
+  const pillLift = (initialPillBox?.y ?? 0) - (expandedPillBox?.y ?? 0);
+  expect(pillLift).toBeGreaterThanOrEqual(composerGrowth - 2);
+  expect(
+    (expandedPillBox?.y ?? 0) + (expandedPillBox?.height ?? 0),
+  ).toBeLessThanOrEqual(expandedComposerBox?.y ?? 0);
 });

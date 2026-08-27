@@ -16,6 +16,19 @@ const DEFAULT_RELAY_WS_URL: &str = "ws://localhost:3000";
 // classifier keys on. Extracted to a const so a test can pin that contract.
 const MALFORMED_RESPONSE_MESSAGE: &str = "relay returned malformed response: not valid JSON";
 
+// Per-request deadline for the `POST /query` HTTP bridge, covering both the
+// header exchange and full body consumption. The shared `http_client` sets no
+// client-level timeout — deliberately, because it is also used for long-running
+// STT/TTS model downloads, builderlab auth, and the media proxy — so a stalled
+// or half-open `/query` connection would otherwise leave the request pending
+// forever, hanging the caller (e.g. a thread-history load that never resolves
+// and shows a permanent skeleton). A per-request timeout scoped to `/query`
+// bounds that without affecting the client's other users. A timeout surfaces
+// through `classify_request_error` as the stable `"relay unreachable: request
+// timed out"` string. Set above the 25s WS history timeout so a slow-but-live
+// relay is not cut off before the WebSocket path would be.
+const QUERY_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 fn configured_env_var(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
@@ -31,7 +44,7 @@ pub fn relay_ws_url() -> String {
 
 /// Read the workspace relay URL override, if set. Returns `None` when no
 /// override is active or when the mutex is poisoned (best-effort).
-fn workspace_relay_override(state: &AppState) -> Option<String> {
+pub(crate) fn workspace_relay_override(state: &AppState) -> Option<String> {
     state
         .relay_url_override
         .lock()
@@ -83,6 +96,12 @@ pub fn relay_http_base_url(relay_url: &str) -> String {
 
     trimmed.to_string()
 }
+
+mod scope;
+pub use scope::{
+    assert_expected_relay_scope, assert_expected_signer, bind_expected_relay_scope,
+    bind_expected_signer, ScopedWorkspaceRelay,
+};
 
 pub fn relay_api_base_url() -> String {
     if let Some(base) = configured_env_var("BUZZ_RELAY_HTTP") {
@@ -161,6 +180,22 @@ pub(crate) fn classify_request_error(e: &reqwest::Error) -> String {
     }
 }
 
+/// Preserve a body-consumption timeout as the stable connectivity classification.
+///
+/// `send()` resolves once response headers arrive, so a body that stalls past
+/// the request deadline trips the timeout during body consumption rather than
+/// at `send()`. That is a connectivity failure, not a malformed body or a plain
+/// status error. Both body-consumption paths — the 2xx `parse_json_response`
+/// and the non-2xx `relay_error_message` — route their consumption error
+/// through this one helper so a stalled body can never be classified as
+/// "request timed out" on one path while the other buries it under a malformed
+/// or status label. Returns `Some("relay unreachable: request timed out")` for
+/// a timeout; `None` otherwise, leaving the caller to apply its own non-timeout
+/// label.
+fn classify_body_timeout(e: &reqwest::Error) -> Option<String> {
+    e.is_timeout().then(|| classify_request_error(e))
+}
+
 /// Detect responses that were intercepted by a captive portal or auth proxy.
 ///
 /// Returns `Some(msg)` when the response clearly did not come from the relay:
@@ -224,10 +259,16 @@ pub(crate) async fn parse_json_response<T: DeserializeOwned>(
     // "relay unreachable:" bucket so it surfaces loudly instead of being treated
     // as a transient unreachable-relay condition. The reqwest error detail is
     // dropped because it contains the raw URL.
-    response
-        .json::<T>()
-        .await
-        .map_err(|_| MALFORMED_RESPONSE_MESSAGE.to_string())
+    //
+    // A body-consumption timeout is the exception: `send()` resolves once
+    // headers arrive, so a body that stalls past the request deadline trips the
+    // timeout HERE rather than at send(). That is a connectivity failure, not a
+    // malformed body, so route it through `classify_body_timeout` — the same
+    // helper the non-2xx error-body path uses — to preserve the stable
+    // "relay unreachable: request timed out" label.
+    response.json::<T>().await.map_err(|e| {
+        classify_body_timeout(&e).unwrap_or_else(|| MALFORMED_RESPONSE_MESSAGE.to_string())
+    })
 }
 
 /// Extract the `retry in Ns` hint from a rate-limit error string.
@@ -258,7 +299,21 @@ pub async fn relay_error_message(response: reqwest::Response) -> String {
     }
 
     // Real relay error: extract the structured message field if available.
-    let body = response.text().await.unwrap_or_default();
+    // `text()` consumes the body, which — like the 2xx path — can trip the
+    // request deadline if the relay sends status headers then stalls the body.
+    // Preserve that timeout as the stable connectivity classification via the
+    // shared helper instead of letting `unwrap_or_default` swallow it into a
+    // bare status label. A non-timeout body error still degrades to an empty
+    // body → status-only message, exactly as before.
+    let body = match response.text().await {
+        Ok(body) => body,
+        Err(e) => {
+            if let Some(timeout) = classify_body_timeout(&e) {
+                return timeout;
+            }
+            String::new()
+        }
+    };
 
     // 429 Too Many Requests → typed `relay rate-limited:` prefix so the TS
     // client can activate the rate-limit gate without confusing it with a
@@ -322,22 +377,15 @@ pub async fn query_relay_at(
     let body_bytes =
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
     let auth = build_nip98_auth_header(&Method::POST, &url, &body_bytes, state)?;
-
-    let response = state
-        .http_client
-        .post(&url)
-        .header("Authorization", auth)
-        .header("Content-Type", "application/json")
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
-
-    if !response.status().is_success() {
-        return Err(relay_error_message(response).await);
-    }
-
-    parse_json_response(response).await
+    send_query_request(
+        &state.http_client,
+        &url,
+        &auth,
+        None,
+        body_bytes,
+        QUERY_REQUEST_TIMEOUT,
+    )
+    .await
 }
 
 pub async fn query_relay_at_with_keys(
@@ -352,11 +400,38 @@ pub async fn query_relay_at_with_keys(
     let body_bytes =
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
     let auth = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
-    let mut request = state
-        .http_client
-        .post(&url)
+    send_query_request(
+        &state.http_client,
+        &url,
+        &auth,
+        auth_tag,
+        body_bytes,
+        QUERY_REQUEST_TIMEOUT,
+    )
+    .await
+}
+
+/// Issue an authenticated `POST /query` and parse the response, applying the
+/// per-request `timeout` that bounds a stalled or half-open relay connection.
+///
+/// Both `/query` builders funnel through this one helper so the timeout can
+/// never be applied to one builder and dropped from the other, and so a test
+/// can drive the real send/timeout/classify path with a short deadline against
+/// a stalled loopback. A timeout surfaces through `classify_request_error` as
+/// the stable `"relay unreachable: request timed out"` string.
+async fn send_query_request(
+    http_client: &reqwest::Client,
+    url: &str,
+    auth: &str,
+    auth_tag: Option<&str>,
+    body_bytes: Vec<u8>,
+    timeout: std::time::Duration,
+) -> Result<Vec<nostr::Event>, String> {
+    let mut request = http_client
+        .post(url)
         .header("Authorization", auth)
-        .header("Content-Type", "application/json");
+        .header("Content-Type", "application/json")
+        .timeout(timeout);
     if let Some(tag) = auth_tag {
         request = request.header("x-auth-tag", tag);
     }
@@ -532,9 +607,13 @@ pub struct AgentProfileInfo {
 
 // ── Signed-event submission ─────────────────────────────────────────────────
 
+mod get;
+pub use get::get_relay_json;
+
 mod submit;
 pub use submit::{
-    submit_event, submit_event_at_with_keys, submit_signed_event_at_with_keys, SubmitEventResponse,
+    submit_event, submit_event_at_created_at, submit_event_at_with_keys,
+    submit_event_with_keys_created_at, submit_signed_event_at_with_keys, SubmitEventResponse,
 };
 
 /// Sign an event with explicit keys and POST it to `/events` with NIP-98 auth.
@@ -601,384 +680,4 @@ pub async fn submit_signed_event_with_keys(
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        build_profile_event, classify_intercepted_response, effective_agent_relay_url,
-        extract_retry_in_hint, parse_command_response, relay_http_base_url,
-        MALFORMED_RESPONSE_MESSAGE,
-    };
-    use serde::Deserialize;
-
-    // ── extract_retry_in_hint ────────────────────────────────────────────────
-
-    #[test]
-    fn extracts_hint_from_429_body() {
-        assert_eq!(
-            extract_retry_in_hint(r#"{"error":"rate-limited: quota exceeded; retry in 4s"}"#),
-            Some(4)
-        );
-    }
-
-    #[test]
-    fn extracts_hint_when_no_json_wrapper() {
-        assert_eq!(extract_retry_in_hint("retry in 30s"), Some(30));
-    }
-
-    #[test]
-    fn returns_none_when_no_hint_present() {
-        assert_eq!(
-            extract_retry_in_hint(r#"{"error":"rate-limited: quota exceeded"}"#),
-            None
-        );
-        assert_eq!(extract_retry_in_hint(""), None);
-    }
-
-    #[test]
-    fn overlong_digit_string_returns_none() {
-        // A digit sequence that exceeds u64::MAX cannot be parsed; the function
-        // must return None (→ caller uses the default) rather than panicking.
-        assert_eq!(
-            extract_retry_in_hint("retry in 99999999999999999999999s"),
-            None
-        );
-    }
-
-    // ── relay_error_message: hint capping ────────────────────────────────────
-    //
-    // Verify that an oversized relay hint is capped in the returned message
-    // string, not just inside `activate_rate_limit()`. This guarantees every
-    // consumer — including the TS gate via `applyTauriRateLimitIfNeeded` —
-    // receives the capped value rather than the raw untrusted relay value.
-
-    #[tokio::test]
-    async fn oversized_hint_is_capped_in_relay_error_message_string() {
-        use crate::relay_admission::{reset_rate_limit_gate, MAX_HINT_SECONDS, TEST_SERIAL};
-        use std::io::{Read as _, Write as _};
-
-        let _serial = TEST_SERIAL.lock().await;
-        reset_rate_limit_gate();
-
-        // Use a std::net listener on a std::thread — the same pattern as the
-        // relay_admission loopback tests. This avoids two races that cause CI
-        // failures with tokio::net + into_std():
-        //  1. No request read: the client is still sending when the response
-        //     arrives → hyper `UnexpectedMessage`/`Canceled` under load.
-        //  2. into_std() leaves the socket in nonblocking mode → write_all
-        //     may return WouldBlock and silently drop the response.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        // Serve a 429 with a hint far exceeding MAX_HINT_SECONDS (300).
-        let oversized = 1_000_000u64;
-        let body = format!(r#"{{"error":"rate-limited: quota exceeded; retry in {oversized}s"}}"#);
-        let body_len = body.len();
-        std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                // Read the request first so the client finishes sending before
-                // we write the response — mirrors relay_admission.rs pattern.
-                let mut buf = [0u8; 4096];
-                let _ = stream.read(&mut buf);
-                let response = format!(
-                    "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {body_len}\r\nConnection: close\r\n\r\n{body}"
-                );
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
-            }
-        });
-
-        let client = reqwest::Client::new();
-        let response = client
-            .get(format!("http://{addr}/"))
-            .send()
-            .await
-            .expect("request must succeed");
-
-        let msg = super::relay_error_message(response).await;
-
-        // The message must embed the CAPPED hint, not the raw 1 000 000.
-        assert_eq!(
-            msg,
-            format!("relay rate-limited: retry in {MAX_HINT_SECONDS}s"),
-            "relay_error_message must embed the capped hint, not the raw untrusted value"
-        );
-        assert!(
-            !msg.contains(&oversized.to_string()),
-            "raw oversized hint must not appear in the message string"
-        );
-        reset_rate_limit_gate();
-    }
-
-    // ── effective_agent_relay_url: legacy pin ignored ─────────────────────────
-
-    #[test]
-    fn stored_relay_pin_is_ignored() {
-        // Zero-touch cutover (#2122): a creation-era per-record relay pin is
-        // parsed and persisted but never consulted — the workspace relay wins.
-        assert_eq!(
-            effective_agent_relay_url("wss://relay.other.com", "wss://staging.example.com"),
-            "wss://staging.example.com"
-        );
-    }
-
-    #[test]
-    fn empty_relay_resolves_to_workspace() {
-        // A never-set record resolves to the active workspace relay at read-time,
-        // so a stale stored default can never make it load-bearing.
-        assert_eq!(
-            effective_agent_relay_url("", "wss://staging.example.com"),
-            "wss://staging.example.com"
-        );
-    }
-
-    #[test]
-    fn whitespace_only_relay_resolves_to_workspace() {
-        // Whitespace-only behaves identically — no value survives.
-        assert_eq!(
-            effective_agent_relay_url("   ", "wss://staging.example.com"),
-            "wss://staging.example.com"
-        );
-    }
-
-    // ── relay_http_base_url scheme conversion ────────────────────────────────
-
-    #[test]
-    fn loopback_ws_localhost_preserves_authority() {
-        // Tenant host-binding keys off the HTTP Host/authority. The desktop must
-        // not rewrite localhost to 127.0.0.1, or local dev HTTP calls target a
-        // different unmapped community than the WebSocket URL.
-        assert_eq!(
-            relay_http_base_url("ws://localhost:3000"),
-            "http://localhost:3000"
-        );
-    }
-
-    #[test]
-    fn loopback_trailing_slash_removed_authority_preserved() {
-        assert_eq!(
-            relay_http_base_url("ws://localhost:3000/"),
-            "http://localhost:3000"
-        );
-    }
-
-    #[test]
-    fn remote_wss_host_unchanged() {
-        assert_eq!(
-            relay_http_base_url("wss://relay.example.com"),
-            "https://relay.example.com"
-        );
-    }
-
-    #[test]
-    fn loopback_ipv4_literal_unchanged() {
-        assert_eq!(
-            relay_http_base_url("ws://127.0.0.1:3000"),
-            "http://127.0.0.1:3000"
-        );
-    }
-
-    #[test]
-    fn localhost_substring_host_unchanged() {
-        assert_eq!(
-            relay_http_base_url("ws://localhost.evil.com:3000"),
-            "http://localhost.evil.com:3000"
-        );
-    }
-
-    #[test]
-    fn loopback_wss_localhost_preserves_authority() {
-        assert_eq!(
-            relay_http_base_url("wss://localhost:3000"),
-            "https://localhost:3000"
-        );
-    }
-
-    // ── classify_intercepted_response ────────────────────────────────────────
-
-    #[test]
-    fn intercepted_cloudflare_host_returns_some() {
-        let result = classify_intercepted_response("sqprod.cloudflareaccess.com", "text/html");
-        assert!(result.is_some());
-        let msg = result.unwrap();
-        assert!(
-            msg.starts_with("relay unreachable:"),
-            "should have unreachable prefix"
-        );
-        assert!(msg.contains("Cloudflare"), "should mention Cloudflare");
-    }
-
-    #[test]
-    fn intercepted_cloudflare_apex_host_returns_some() {
-        // The apex domain itself should also match.
-        let result = classify_intercepted_response("cloudflareaccess.com", "application/json");
-        assert!(result.is_some());
-        let msg = result.unwrap();
-        assert!(msg.starts_with("relay unreachable:"));
-        assert!(msg.contains("Cloudflare"));
-    }
-
-    #[test]
-    fn intercepted_non_cloudflare_html_returns_some() {
-        let result =
-            classify_intercepted_response("proxy.corporate.example", "text/html; charset=utf-8");
-        assert!(result.is_some());
-        let msg = result.unwrap();
-        assert!(msg.starts_with("relay unreachable:"));
-    }
-
-    #[test]
-    fn normal_relay_json_returns_none() {
-        let result = classify_intercepted_response("relay.myapp.example.com", "application/json");
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn content_type_case_insensitive() {
-        // Uppercase content-type must still be detected.
-        let result = classify_intercepted_response("proxy.example.com", "TEXT/HTML");
-        assert!(result.is_some());
-        assert!(result.unwrap().starts_with("relay unreachable:"));
-    }
-
-    #[test]
-    fn evil_suffix_does_not_match_cloudflare() {
-        // A host whose suffix happens to contain the Cloudflare string but is
-        // not actually a subdomain must NOT match.
-        let result = classify_intercepted_response(
-            "notcloudflareaccess.com.evil.example",
-            "application/json",
-        );
-        assert!(
-            result.is_none(),
-            "false suffix match should not trigger Cloudflare branch"
-        );
-    }
-
-    // classify_request_error requires a real reqwest::Error (not publicly
-    // constructable) — tested indirectly through integration; skipped here.
-
-    // ── parse_json_response malformed-body contract ──────────────────────────
-
-    #[test]
-    fn malformed_response_message_stays_off_unreachable_bucket() {
-        // A reached-but-malformed 2xx body is not a connectivity failure. If this
-        // message ever regains the "relay unreachable:" prefix, the frontend
-        // classifier would misroute it as unreachable — pin that it never does.
-        assert!(
-            !MALFORMED_RESPONSE_MESSAGE.starts_with("relay unreachable:"),
-            "malformed-response message must not match the unreachable prefix"
-        );
-    }
-
-    // ── parse_command_response ───────────────────────────────────────────────
-
-    #[derive(Debug, Deserialize, PartialEq)]
-    struct ChannelCreated {
-        channel_id: String,
-    }
-
-    #[test]
-    fn parse_command_response_decodes_typed_payload() {
-        let msg = r#"response:{"channel_id":"abc123"}"#;
-        let parsed: ChannelCreated = parse_command_response(msg).expect("should parse");
-        assert_eq!(
-            parsed,
-            ChannelCreated {
-                channel_id: "abc123".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn parse_command_response_accepts_raw_json_fallback() {
-        // Backward-compat: relays that emit raw JSON (no prefix) still work.
-        let msg = r#"{"channel_id":"abc"}"#;
-        let parsed: ChannelCreated = parse_command_response(msg).expect("fallback parse");
-        assert_eq!(
-            parsed,
-            ChannelCreated {
-                channel_id: "abc".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn parse_command_response_rejects_invalid_prefixed_json() {
-        let msg = "response:not-json";
-        let result: Result<ChannelCreated, _> = parse_command_response(msg);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("response parse failed"));
-    }
-
-    #[test]
-    fn parse_command_response_rejects_garbage() {
-        let msg = "totally not json or response";
-        let result: Result<ChannelCreated, _> = parse_command_response(msg);
-        assert!(result.is_err());
-    }
-
-    // ── build_profile_event ──────────────────────────────────────────────────
-
-    /// Generate a valid NIP-OA auth tag JSON string signed by a fresh owner key
-    /// and addressed to `agent_keys`.
-    ///
-    /// Uses `nostr_compat` (nostr 0.36) for the owner keys because
-    /// `buzz_sdk_pkg::nip_oa::compute_auth_tag` expects nostr 0.36 types.
-    /// The agent pubkey is bridged via hex encoding.
-    fn make_valid_auth_tag(agent_keys: &nostr::Keys) -> String {
-        let owner_keys = nostr::Keys::generate();
-        let agent_pubkey_hex = agent_keys.public_key().to_hex();
-        let agent_compat_pubkey =
-            nostr::PublicKey::from_hex(&agent_pubkey_hex).expect("valid hex pubkey should parse");
-        buzz_sdk_pkg::nip_oa::compute_auth_tag(&owner_keys, &agent_compat_pubkey, "")
-            .expect("compute_auth_tag should not fail with distinct keys")
-    }
-
-    #[test]
-    fn profile_event_with_valid_auth_tag() {
-        let agent_keys = nostr::Keys::generate();
-        let tag_json = make_valid_auth_tag(&agent_keys);
-        let event = build_profile_event(&agent_keys, "TestBot", None, Some(&tag_json))
-            .expect("should succeed with a valid auth tag");
-
-        // Exactly one "auth" tag must be present.
-        let auth_tags: Vec<_> = event
-            .tags
-            .iter()
-            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("auth"))
-            .collect();
-        assert_eq!(auth_tags.len(), 1, "expected exactly 1 auth tag");
-
-        // Must be a kind:0 (Metadata) event.
-        assert_eq!(event.kind, nostr::Kind::Metadata);
-    }
-
-    #[test]
-    fn profile_event_without_auth_tag() {
-        let agent_keys = nostr::Keys::generate();
-        let event = build_profile_event(&agent_keys, "TestBot", None, None)
-            .expect("should succeed without an auth tag");
-
-        // No "auth" tags should be present.
-        let auth_tags: Vec<_> = event
-            .tags
-            .iter()
-            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("auth"))
-            .collect();
-        assert_eq!(auth_tags.len(), 0, "expected no auth tags");
-
-        assert_eq!(event.kind, nostr::Kind::Metadata);
-    }
-
-    #[test]
-    fn profile_event_rejects_invalid_auth_tag() {
-        let agent_keys = nostr::Keys::generate();
-        // Structurally valid JSON array but with a bogus signature — verification must fail.
-        let bad_json = format!(r#"["auth","{}","","{}"]"#, "a".repeat(64), "b".repeat(128));
-        let result = build_profile_event(&agent_keys, "TestBot", None, Some(&bad_json));
-        assert!(result.is_err(), "should reject an invalid auth tag");
-        assert!(
-            result.unwrap_err().contains("verification failed"),
-            "error message should mention verification failure"
-        );
-    }
-}
+mod tests;

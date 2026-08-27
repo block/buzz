@@ -10,6 +10,10 @@ import UserNotifications
   private var inlinePhotoPickerSupportChannel: FlutterMethodChannel?
   private var concentricSheetSurfaceChannel: FlutterMethodChannel?
   private var nativeAttachmentPopoverCoordinator: NativeAttachmentPopoverCoordinator?
+  private var nativeEmojiPickerCoordinator: NativeEmojiPickerCoordinator?
+  private var nativeProfileTextEditorCoordinator: NativeProfileTextEditorCoordinator?
+  private var nativeMessageActionSurfaceSupportChannel: FlutterMethodChannel?
+  private var huddleMediaPlugin: HuddleMediaPlugin?
 
   override func application(
     _ application: UIApplication,
@@ -22,6 +26,7 @@ import UserNotifications
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
     let messenger = engineBridge.applicationRegistrar.messenger()
+    huddleMediaPlugin = HuddleMediaPlugin(messenger: messenger)
     mediaUploadChannel = FlutterMethodChannel(
       name: "buzz/media_upload",
       binaryMessenger: messenger
@@ -68,7 +73,7 @@ import UserNotifications
       forPlugin: "BuzzConcentricSheetSurface"
     ) {
       concentricSheetRegistrar.register(
-        ConcentricSheetSurfaceFactory(),
+        ConcentricSheetSurfaceFactory(messenger: messenger),
         withId: "buzz/concentric_sheet_surface"
       )
       concentricSheetSurfaceChannel = FlutterMethodChannel(
@@ -88,6 +93,51 @@ import UserNotifications
       }
     }
 
+    if let jumpToLatestGlassRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzJumpToLatestGlassButton"
+    ) {
+      jumpToLatestGlassRegistrar.register(
+        JumpToLatestGlassButtonFactory(messenger: messenger),
+        withId: "buzz/jump_to_latest_glass"
+      )
+    }
+
+    if let navigationGlassRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzNavigationGlassButton"
+    ) {
+      navigationGlassRegistrar.register(
+        NavigationGlassButtonFactory(messenger: messenger),
+        withId: "buzz/navigation_glass"
+      )
+    }
+
+    if let segmentedControlRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzNativeSegmentedControl"
+    ) {
+      segmentedControlRegistrar.register(
+        NativeSegmentedControlFactory(messenger: messenger),
+        withId: "buzz/native_segmented_control"
+      )
+    }
+
+    if let skinToneRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzNativeSkinToneControl"
+    ) {
+      skinToneRegistrar.register(
+        NativeSkinToneControlFactory(messenger: messenger),
+        withId: "buzz/native_skin_tone_control"
+      )
+    }
+
+    if let stickyDateGlassRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzStickyDateGlassHeader"
+    ) {
+      stickyDateGlassRegistrar.register(
+        StickyDateGlassHeaderFactory(messenger: messenger),
+        withId: "buzz/sticky_date_glass"
+      )
+    }
+
     let nativeAttachmentRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzNativeAttachmentPopover"
     )
@@ -95,6 +145,42 @@ import UserNotifications
       messenger: messenger,
       parentViewController: nativeAttachmentRegistrar?.viewController
     )
+
+    let nativeEmojiPickerRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzNativeEmojiPicker"
+    )
+    nativeEmojiPickerCoordinator = NativeEmojiPickerCoordinator(
+      messenger: messenger,
+      parentViewController: nativeEmojiPickerRegistrar?.viewController
+    )
+
+    let nativeProfileTextEditorRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzNativeProfileTextEditor"
+    )
+    nativeProfileTextEditorCoordinator = NativeProfileTextEditorCoordinator(
+      messenger: messenger,
+      parentViewController: nativeProfileTextEditorRegistrar?.viewController
+    )
+    if #available(iOS 16.0, *),
+      let nativeMessageActionsRegistrar = engineBridge.pluginRegistry.registrar(
+        forPlugin: "BuzzNativeMessageActionSurface"
+      ) {
+      nativeMessageActionsRegistrar.register(
+        NativeMessageActionSurfaceFactory(messenger: messenger),
+        withId: "buzz/native_message_action_surface"
+      )
+      nativeMessageActionSurfaceSupportChannel = FlutterMethodChannel(
+        name: "buzz/native_message_action_surface",
+        binaryMessenger: messenger
+      )
+      nativeMessageActionSurfaceSupportChannel?.setMethodCallHandler { call, result in
+        guard call.method == "isSupported" else {
+          result(FlutterMethodNotImplemented)
+          return
+        }
+        result(true)
+      }
+    }
   }
 
   private static func handleQrScannerMethodCall(

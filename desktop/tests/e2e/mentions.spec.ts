@@ -1,5 +1,7 @@
 import { expect, test } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
+
 import {
   installMockBridge,
   openChannelBrowser,
@@ -73,6 +75,22 @@ async function readOutgoingMentionPubkeys(
   content: string,
 ) {
   return page.evaluate((expectedContent) => {
+    const signedEvent = (
+      window as Window & {
+        __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
+          content?: string;
+          tags?: string[][];
+        }>;
+      }
+    ).__BUZZ_E2E_SIGNED_EVENTS__?.find(
+      (event) => event.content === expectedContent,
+    );
+    if (signedEvent) {
+      return (signedEvent.tags ?? [])
+        .filter((tag) => tag[0] === "p" && tag[1])
+        .map((tag) => tag[1]);
+    }
+
     const entries =
       (
         window as Window & {
@@ -84,6 +102,25 @@ async function readOutgoingMentionPubkeys(
       ).__BUZZ_E2E_COMMAND_LOG__ ?? [];
 
     for (const entry of entries) {
+      if (entry.command === "send_channel_message") {
+        const payload = entry.payload as
+          | { content?: string; mentionPubkeys?: string[] }
+          | undefined;
+        if (payload?.content === expectedContent) {
+          return payload.mentionPubkeys ?? [];
+        }
+      }
+
+      if (entry.command === "sign_event") {
+        const unsignedEvent = entry.payload as
+          | { content?: string; tags?: string[][] }
+          | undefined;
+        if (unsignedEvent?.content !== expectedContent) continue;
+        return (unsignedEvent.tags ?? [])
+          .filter((tag) => tag[0] === "p" && tag[1])
+          .map((tag) => tag[1]);
+      }
+
       if (entry.command !== "plugin:websocket|send") continue;
       const data = (
         entry.payload as { message?: { data?: string } } | undefined
@@ -283,6 +320,196 @@ test("@ trigger prioritizes channel members before runnable personas and other m
   expect(aliceIndex).toBeLessThan(fizzIndex);
   expect(bobIndex).toBeLessThan(fizzIndex);
   expect(fizzIndex).toBeLessThan(charlieIndex);
+});
+
+test("duplicate owned agents preserve provenance and exact pubkey selection", async ({
+  page,
+}) => {
+  const managedPubkey = IN_CHANNEL_MANAGED_AGENT_PUBKEY;
+  const relayPubkey = ALLOWLIST_RELAY_AGENT_PUBKEY;
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: managedPubkey,
+        name: "carl",
+        status: "running",
+        channelNames: ["general"],
+        backend: {
+          type: "provider",
+          id: "mock",
+          config: {},
+        },
+      },
+    ],
+    relayAgents: [
+      {
+        pubkey: relayPubkey,
+        ownerPubkey: MOCK_VIEWER_PUBKEY,
+        name: "carl",
+        respondTo: "owner-only",
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock bridge is not installed.");
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels"],
+      });
+    },
+    { channelId: GENERAL_CHANNEL_ID, pubkey: relayPubkey },
+  );
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@carl");
+  const dropdown = autocomplete(page);
+  const managedRow = dropdown.getByTestId(
+    `mention-suggestion-${managedPubkey}`,
+  );
+  const relayRow = dropdown.getByTestId(`mention-suggestion-${relayPubkey}`);
+  await expect(managedRow).toContainText("agent");
+  await expect(managedRow.getByTestId("mention-agent-provenance")).toHaveCount(
+    0,
+  );
+  await expect(relayRow).toContainText("agent");
+  const relayProvenanceMarker = relayRow.getByTestId(
+    "mention-agent-provenance",
+  );
+  await expect(relayProvenanceMarker).toHaveAttribute(
+    "aria-label",
+    "From another Buzz setup",
+  );
+  await expect(relayProvenanceMarker).toHaveAttribute(
+    "title",
+    "From another Buzz setup",
+  );
+  await expect(relayProvenanceMarker).toBeVisible();
+  await expect(relayProvenanceMarker).toHaveText("");
+  await expect(relayProvenanceMarker.locator("svg")).toBeVisible();
+  await expect(managedRow).not.toContainText("managed by you");
+  await expect(relayRow).not.toContainText("managed by you");
+
+  await page.setViewportSize({ width: 760, height: 640 });
+  await expect(relayProvenanceMarker).toBeVisible();
+  const rowBox = await relayRow.boundingBox();
+  const dropdownBox = await dropdown.boundingBox();
+  expect(rowBox).not.toBeNull();
+  expect(dropdownBox).not.toBeNull();
+  expect((rowBox?.x ?? 0) + (rowBox?.width ?? 0)).toBeLessThanOrEqual(
+    (dropdownBox?.x ?? 0) + (dropdownBox?.width ?? 0) + 1,
+  );
+
+  const collisionKeys = dropdown.getByTestId("mention-collision-npub");
+  await expect(collisionKeys).toHaveCount(2);
+  const fullNpubs = await collisionKeys.evaluateAll((nodes) =>
+    nodes.map((node) => node.getAttribute("title")),
+  );
+  expect(fullNpubs).toHaveLength(2);
+  expect(new Set(fullNpubs).size).toBe(2);
+
+  await managedRow
+    .getByRole("button", { name: "Automatically mention carl", exact: true })
+    .click();
+  await expect(
+    page.getByTestId(`composer-address-lock-${managedPubkey}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`composer-address-lock-${relayPubkey}`),
+  ).toHaveCount(0);
+  await input.fill("local");
+  await page.getByTestId("send-message").click();
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "local"))
+    .toEqual([managedPubkey]);
+  await expect(input).toHaveText("@carl ");
+
+  await page.getByTestId(`composer-address-lock-${managedPubkey}`).click();
+  await input.fill("@carl");
+  const reopenedDropdown = autocomplete(page);
+  await expect(reopenedDropdown).toBeVisible();
+  const reopenedRelayRow = reopenedDropdown.getByTestId(
+    `mention-suggestion-${relayPubkey}`,
+  );
+  await reopenedRelayRow
+    .getByRole("button", { name: "Automatically mention carl", exact: true })
+    .click();
+  await expect(
+    page.getByTestId(`composer-address-lock-${relayPubkey}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`composer-address-lock-${managedPubkey}`),
+  ).toHaveCount(0);
+  await input.fill("remote");
+  await page.getByTestId("send-message").click();
+  const sendWithoutInviting = page.getByRole("button", { name: "Do nothing" });
+  try {
+    await sendWithoutInviting.waitFor({ state: "visible", timeout: 2_000 });
+    await sendWithoutInviting.click();
+  } catch {
+    // In-channel selections send immediately without opening the prompt.
+  }
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "remote"))
+    .toEqual([relayPubkey]);
+
+  await page.getByTestId("channel-members-trigger").click();
+  const remoteSidebarMarker = page.getByTestId(
+    `sidebar-member-agent-provenance-${relayPubkey}`,
+  );
+  await expect(
+    page.getByTestId(`sidebar-member-agent-provenance-${managedPubkey}`),
+  ).toHaveCount(0);
+  await expect(remoteSidebarMarker).toHaveAttribute(
+    "aria-label",
+    "From another Buzz setup",
+  );
+  await expect(remoteSidebarMarker).toHaveText("");
+  await expect(remoteSidebarMarker.locator("svg")).toBeVisible();
+  const remoteSidebarRow = page.getByTestId(`sidebar-member-${relayPubkey}`);
+  const localSidebarMarker = page.getByTestId(
+    `sidebar-member-agent-provenance-${managedPubkey}`,
+  );
+  const markerRemainsVisible = () =>
+    remoteSidebarMarker.evaluate((marker) => {
+      let element: Element | null = marker;
+      while (element) {
+        const style = window.getComputedStyle(element);
+        if (style.display === "none" || style.visibility === "hidden") {
+          return false;
+        }
+        if (Number(style.opacity) === 0) return false;
+        element = element.parentElement;
+      }
+      return true;
+    });
+  await expect.poll(markerRemainsVisible).toBe(true);
+  await expect(localSidebarMarker).toHaveCount(0);
+  const sidebarMarkerBox = await remoteSidebarMarker.boundingBox();
+  const sidebarBox = await page.getByTestId("members-sidebar").boundingBox();
+  expect(sidebarMarkerBox).not.toBeNull();
+  expect(sidebarBox).not.toBeNull();
+  expect(
+    (sidebarMarkerBox?.x ?? 0) + (sidebarMarkerBox?.width ?? 0),
+  ).toBeLessThanOrEqual((sidebarBox?.x ?? 0) + (sidebarBox?.width ?? 0) + 1);
+
+  await remoteSidebarRow.hover();
+  await page.waitForTimeout(200);
+  await expect.poll(markerRemainsVisible).toBe(true);
+  await expect(localSidebarMarker).toHaveCount(0);
+
+  await page.getByTestId(`sidebar-member-open-profile-${relayPubkey}`).focus();
+  await page.waitForTimeout(200);
+  await expect.poll(markerRemainsVisible).toBe(true);
+  await expect(localSidebarMarker).toHaveCount(0);
 });
 
 test("relay-only shared agents emit an outbound mention tag when selected", async ({
@@ -493,7 +720,7 @@ test("defers agent mentions until DM members finish loading", async ({
   expect(commandCount(await readCommandLog(page), "add_channel_members")).toBe(
     commandCount(baselineCommands, "add_channel_members"),
   );
-  await expect(input).toBeEmpty();
+  await expect(input).toHaveText("@alice ");
   await expect(threadPanel).toContainText("before members resolve");
 });
 
@@ -588,22 +815,269 @@ test("mention autocomplete caps global people search at 50 results", async ({
 test("selecting a person mention inserts @Name into input", async ({
   page,
 }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "buzz-dark");
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  const dropdown = autocomplete(page);
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await input.fill("Hey @bo");
+    await dropdown.getByText("bob").click();
+    await page.keyboard.type("hello");
+    await expect(input).toHaveText("Hey @bob hello");
+  }
+  const mentionChip = input.locator(".human-mention-highlight", {
+    hasText: "bob",
+  });
+  await expect(mentionChip).toBeVisible();
+  await expect(mentionChip).toHaveText("bob");
+  await expect(mentionChip).not.toHaveClass(/agent-mention-highlight/);
+  await expect(mentionChip).toHaveCSS("display", "inline");
+  await expect(
+    input.locator(".mention-prefix-hidden", { hasText: "@" }),
+  ).toHaveCount(1);
+  const iconMask = await mentionChip.evaluate((element) =>
+    getComputedStyle(element, "::before").getPropertyValue(
+      "-webkit-mask-image",
+    ),
+  );
+  expect(iconMask).toContain("data:image/svg+xml");
+  await expect(mentionChip).toHaveCSS("line-height", "18px");
+  const scrollViewport = page.getByTestId("message-input-scroll");
+  const paintedBounds = await mentionChip.evaluate((element) => {
+    const chip = element.getBoundingClientRect();
+    const viewport = element
+      .closest("[data-testid='message-input-scroll']")
+      ?.getBoundingClientRect();
+    if (!viewport)
+      throw new Error("Mention chip is missing its scroll viewport");
+    return {
+      chipTop: chip.top,
+      chipBottom: chip.bottom,
+      viewportTop: viewport.top,
+      viewportBottom: viewport.bottom,
+    };
+  });
+  expect(paintedBounds.chipTop).toBeGreaterThanOrEqual(
+    paintedBounds.viewportTop,
+  );
+  expect(paintedBounds.chipBottom).toBeLessThanOrEqual(
+    paintedBounds.viewportBottom,
+  );
+  const humanIconTranslateY = await mentionChip.evaluate(
+    (element) =>
+      new DOMMatrix(getComputedStyle(element, "::before").transform).m42,
+  );
+  const channelIconTranslateY = await input.evaluate((composer) => {
+    const probe = document.createElement("span");
+    probe.className =
+      "mention-chip inline-chip-with-icon inline-chip-icon-channel";
+    composer.append(probe);
+    const translateY = new DOMMatrix(
+      getComputedStyle(probe, "::before").transform,
+    ).m42;
+    probe.remove();
+    return translateY;
+  });
+  expect(humanIconTranslateY - channelIconTranslateY).toBeCloseTo(1);
+
+  await input.fill("@bo");
+  await dropdown.getByText("bob").click();
+  await input.press("Shift+Enter");
+  await page.keyboard.type("@bo");
+  await dropdown.getByText("bob").click();
+  await input.press("Shift+Enter");
+  await page.keyboard.type("@bo");
+  await dropdown.getByText("bob").click();
+  const multilineChips = input.locator(".human-mention-highlight");
+  await expect(multilineChips).toHaveCount(3);
+  const multilinePaintBounds = await multilineChips.evaluateAll((elements) => {
+    const viewport = elements[0]
+      ?.closest("[data-testid='message-input-scroll']")
+      ?.getBoundingClientRect();
+    if (!viewport) {
+      throw new Error("Mention chips are missing their scroll viewport");
+    }
+    return elements.map((element) => {
+      const chip = element.getBoundingClientRect();
+      return {
+        chipTop: chip.top,
+        chipBottom: chip.bottom,
+        viewportTop: viewport.top,
+        viewportBottom: viewport.bottom,
+      };
+    });
+  });
+  for (const bounds of multilinePaintBounds) {
+    expect(bounds.chipTop).toBeGreaterThanOrEqual(bounds.viewportTop);
+    expect(bounds.chipBottom).toBeLessThanOrEqual(bounds.viewportBottom);
+  }
+
+  await scrollViewport.evaluate((element) => {
+    element.style.width = "8rem";
+  });
+  await input.fill("A deliberately long prefix that forces @bo");
+  await dropdown.getByText("bob").click();
+  const wrappedChip = input.locator(".human-mention-highlight", {
+    hasText: "bob",
+  });
+  const wrappedPaintBounds = await wrappedChip.evaluate((element) => {
+    const chip = element.getBoundingClientRect();
+    const viewport = element
+      .closest("[data-testid='message-input-scroll']")
+      ?.getBoundingClientRect();
+    if (!viewport)
+      throw new Error("Mention chip is missing its scroll viewport");
+    return {
+      chipTop: chip.top,
+      chipBottom: chip.bottom,
+      viewportTop: viewport.top,
+      viewportBottom: viewport.bottom,
+    };
+  });
+  expect(wrappedPaintBounds.chipTop).toBeGreaterThanOrEqual(
+    wrappedPaintBounds.viewportTop,
+  );
+  expect(wrappedPaintBounds.chipBottom).toBeLessThanOrEqual(
+    wrappedPaintBounds.viewportBottom,
+  );
+  await expect(input).toHaveCSS("height", /^(?!20px$)/);
+  await scrollViewport.evaluate((element) => {
+    element.style.removeProperty("width");
+  });
+
+  await waitForAnimations(page);
+  await page.getByTestId("message-composer").screenshot({
+    path: "test-results/inline-chip-polish/composer-after.png",
+  });
+});
+
+test("immediate ArrowLeft after a person mention is not bounced past the trailing space", async ({
+  page,
+}) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
   const input = page.getByTestId("message-input");
   await input.fill("Hey @bo");
+  await autocomplete(page).getByText("bob").click();
+  await page.keyboard.press("ArrowLeft");
+  await page.keyboard.type("x");
+  const text = (await input.innerText()).replace(/\s+$/, "");
+  expect(text).toBe("Hey @bobx");
+  expect(text).not.toMatch(/@bob x/);
+});
 
-  const dropdown = autocomplete(page);
-  await dropdown.getByText("bob").click();
+test("clicking a person mention chip edge is not treated as after the trailing space", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
 
-  await expect(input).toHaveText("Hey @bob ");
-  const mentionChip = input.locator(".mention-chip", {
-    hasText: "@bob",
+  const input = page.getByTestId("message-input");
+  await input.fill("Hey @bo");
+  await autocomplete(page).getByText("bob").click();
+  const chip = input.locator(".human-mention-highlight", { hasText: "bob" });
+  await expect(chip).toBeVisible();
+  const box = await chip.boundingBox();
+  expect(box).toBeTruthy();
+  await chip.click({
+    position: {
+      x: Math.max((box?.width ?? 1) - 2, 0),
+      y: (box?.height ?? 2) / 2,
+    },
   });
-  await expect(mentionChip).toBeVisible();
-  await expect(mentionChip).not.toHaveClass(/agent-mention-highlight/);
+  await page.keyboard.type("x");
+  const text = (await input.innerText()).replace(/\s+$/, "");
+  expect(text).toBe("Hey @bobx");
+  expect(text).not.toMatch(/@bob x/);
+});
+
+test("typing a mention before existing text does not interleave spaces", async ({
+  page,
+}) => {
+  // Regression (the reported repro): with a draft already written, place the
+  // caret earlier in the message, type a partial mention, pick a suggestion,
+  // then keep typing. Caret correction used to fire on every document change
+  // and walk the caret across the mention's trailing space, so each keystroke
+  // pushed a space further into the rest of the draft.
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("hello world");
+
+  // Click between "hello" and " world", then open autocomplete there.
+  await input.focus();
+  for (let i = 0; i < " world".length; i++) {
+    await page.keyboard.press("ArrowLeft");
+  }
+  await page.keyboard.type(" @bo");
+  await autocomplete(page).getByText("bob").click();
+  await page.keyboard.type("abc");
+
+  await expect(input).toHaveText("hello @bob abc world");
+});
+
+test("typing an unregistered @token before existing text is left alone", async ({
+  page,
+}) => {
+  // The trailing-space scan is purely textual, so it also fired for tokens
+  // that were never registered as mentions.
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("hello world");
+  await input.focus();
+  for (let i = 0; i < " world".length; i++) {
+    await page.keyboard.press("ArrowLeft");
+  }
+  await page.keyboard.type(" @zzq");
+
+  await expect(input).toHaveText("hello @zzq world");
+});
+
+test("channel references keep caret movement through the channel name", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("#general");
+
+  const channelChip = input.locator(".inline-chip-icon-channel", {
+    hasText: "general",
+  });
+  await expect(channelChip).toBeVisible();
+  await expect(channelChip).toHaveText("general");
+  await expect(
+    input.locator(".mention-prefix-hidden", { hasText: "#" }),
+  ).toHaveCount(1);
+  const iconMask = await channelChip.evaluate((element) =>
+    getComputedStyle(element, "::before").getPropertyValue(
+      "-webkit-mask-image",
+    ),
+  );
+  expect(iconMask).toContain("data:image/svg+xml");
+
+  await input.focus();
+  await input.press("ArrowLeft");
+  await input.press("ArrowLeft");
+  await input.press("ArrowLeft");
+  await page.keyboard.type("X");
+
+  await expect(input).toHaveText("#geneXral");
 });
 
 test("selecting a managed agent mention inserts @Name into input", async ({
@@ -623,18 +1097,19 @@ test("selecting a managed agent mention inserts @Name into input", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
   const input = page.getByTestId("message-input");
-  await input.fill("Hey @ali");
-
   const dropdown = autocomplete(page);
-  await dropdown.getByText("alice").click();
-
-  await expect(input).toHaveText("Hey @alice ");
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await input.fill("Hey @ali");
+    await dropdown.getByText("alice").click();
+    await page.keyboard.type("hello");
+    await expect(input).toHaveText("Hey @alice hello");
+  }
   const agentMentionChip = input.locator(".agent-mention-highlight", {
     hasText: "alice",
   });
   await expect(agentMentionChip).toBeVisible();
   await expect(agentMentionChip).toHaveText("alice");
-  await expect(agentMentionChip).toHaveCSS("display", "inline-flex");
+  await expect(agentMentionChip).toHaveCSS("display", "inline");
   await expect(agentMentionChip).toHaveCSS("border-top-width", "0px");
 });
 
@@ -679,7 +1154,6 @@ test("selecting a persona mention creates a channel agent before sending", async
     baselineCommands,
     "start_managed_agent",
   );
-
   await page.getByTestId("send-message").click();
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
 
@@ -785,7 +1259,7 @@ test("selecting a persona mention reuses an existing persona agent", async ({
   await expect(mentionChip).toHaveText("Fizz");
 });
 
-test("managed relay-profile agents with member roles use the agent composer style", async ({
+test("managed relay-profile agents with member roles can be addressed explicitly", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -811,15 +1285,28 @@ test("managed relay-profile agents with member roles use the agent composer styl
   await input.fill("@char");
 
   const dropdown = autocomplete(page);
-  await expect(dropdown.getByText("charlie")).toBeVisible();
-  await expect(dropdown.getByText("agent")).toBeVisible();
-  await input.press("Enter");
+  const charlieRow = dropdown.getByTestId(
+    `mention-suggestion-${TEST_IDENTITIES.charlie.pubkey}`,
+  );
+  await expect(charlieRow.getByText("charlie")).toBeVisible();
+  await expect(charlieRow.getByText("agent")).toBeVisible();
+  await charlieRow
+    .getByRole("button", {
+      name: "Automatically mention charlie",
+      exact: true,
+    })
+    .click();
 
-  const agentMentionChip = input.locator(".agent-mention-highlight", {
-    hasText: "charlie",
-  });
-  await expect(agentMentionChip).toBeVisible();
-  await expect(agentMentionChip).toHaveText("charlie");
+  await expect(input).toHaveText("@charlie ");
+  await expect(input.locator(".agent-mention-highlight")).toHaveText("charlie");
+  await expect(
+    page.getByTestId(`composer-address-lock-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("status").filter({
+      hasText: "Automatically mentioning charlie",
+    }),
+  ).toBeVisible();
 });
 
 test("other-owned agents without a shared channel are hidden from mentions", async ({
@@ -969,6 +1456,74 @@ test("relay-only shared agents appear in forum mentions", async ({ page }) => {
   ).toBeVisible();
 });
 
+test("forum sends revalidate relay-agent authorization before signing", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    deferredComposerUploads: true,
+    uploadDescriptors: [
+      {
+        url: `https://mock.relay/media/${"f".repeat(64)}.pdf`,
+        sha256: "f".repeat(64),
+        size: 12345,
+        type: "application/pdf",
+        uploaded: Math.floor(Date.now() / 1000),
+        filename: "forum-race.pdf",
+      },
+    ],
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["watercooler"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-watercooler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("watercooler");
+  await page.getByRole("button", { name: "Start a new post..." }).click();
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  await page.getByTestId("mention-autocomplete").getByText("quinn").click();
+  await page.keyboard.type("hello");
+  await page.getByRole("button", { name: "Attach file" }).click();
+  const removeAttachment = page.getByRole("button", {
+    name: "Remove attachment",
+  });
+  await expect(removeAttachment).toBeVisible();
+  await page.evaluate(() => {
+    window.__BUZZ_E2E__.mock ??= {};
+    window.__BUZZ_E2E__.mock.agentListDelayMs = 1_000;
+    window.__BUZZ_E2E__.mock.relayAgentListErrors = Array(100).fill(
+      "mock forum directory revoked before send",
+    );
+  });
+
+  await page.getByTestId("send-message").click();
+  await expect(input).toHaveAttribute("contenteditable", "false");
+  await expect(removeAttachment).toBeDisabled();
+  await removeAttachment.evaluate((button: HTMLButtonElement) =>
+    button.click(),
+  );
+  await expect(removeAttachment).toBeVisible();
+  await input.focus();
+  await page.keyboard.type(" later edit");
+  await expect(input).toContainText("@quinn hello");
+  await expect(input).not.toContainText("later edit");
+
+  const outgoingContent = `@quinn hello\n[forum-race.pdf](https://mock.relay/media/${"f".repeat(64)}.pdf)`;
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, outgoingContent))
+    .not.toBeNull();
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, outgoingContent))
+    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+});
+
 test("relay-only allowlisted agents are visible in channel mentions", async ({
   page,
 }) => {
@@ -995,6 +1550,412 @@ test("relay-only allowlisted agents are visible in channel mentions", async ({
   await expect(dropdown.getByText("agent")).toBeVisible();
 });
 
+test("relay-agent directory errors fail closed and recover after a fresh fetch", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgentListErrors: ["mock directory unavailable", null],
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  await expect(autocomplete(page)).toHaveCount(0);
+
+  await page.evaluate(async () => {
+    await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+      queryKey: ["relay-agents"],
+    });
+  });
+  await expect(autocomplete(page).getByText("quinn")).toBeVisible();
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E__.mock ??= {};
+    window.__BUZZ_E2E__.mock.agentListDelayMs = 1_000;
+    void window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+      queryKey: ["relay-agents"],
+    });
+  });
+  await expect(autocomplete(page).getByText("quinn")).toHaveCount(0);
+  await expect(autocomplete(page).getByText("quinn")).toBeVisible();
+});
+
+test("relay-only allowlisted agents emit a p tag when sent", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock bridge is not installed.");
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels"],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+    },
+  );
+
+  const input = page.getByTestId("message-input");
+  for (let attempt = 0; attempt < 5; attempt++) {
+    await input.fill("@quinn");
+    const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+    await expect(quinnRow).toBeVisible();
+    await quinnRow.click();
+    await page.keyboard.type("hello");
+    await expect(input).toHaveText("@quinn hello");
+  }
+  const baselineCommands = await readCommandLog(page);
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
+    .toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+
+  const commands = await readCommandLog(page);
+  expect(commandCount(commands, "revalidate_relay_agents")).toBe(
+    commandCount(baselineCommands, "revalidate_relay_agents") + 2,
+  );
+  expect(commandCount(commands, "list_relay_agents")).toBe(
+    commandCount(baselineCommands, "list_relay_agents"),
+  );
+});
+
+test("managed agents keep their p tag when relay discovery fails before send", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        status: "running",
+      },
+    ],
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+  await expect(quinnRow).toBeVisible();
+  await quinnRow.click();
+  await expect(input).toHaveText("@quinn ");
+  await page.keyboard.type("hello");
+  await expect(input).toHaveText("@quinn hello");
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E__.mock ??= {};
+    window.__BUZZ_E2E__.mock.relayAgentListErrors = Array(5).fill(
+      "mock unrelated relay directory failure",
+    );
+  });
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
+    .toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+});
+
+test("targeted revocation before send causes no agent side effects", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock bridge is not installed.");
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels"],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+    },
+  );
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+  await expect(quinnRow).toBeVisible();
+  await quinnRow.click();
+  await page.keyboard.type("hello");
+
+  await page.evaluate((pubkey) => {
+    window.__BUZZ_E2E__.mock ??= {};
+    window.__BUZZ_E2E__.mock.relayAgentRevalidationRevokedPubkeys = [pubkey];
+  }, ALLOWLIST_RELAY_AGENT_PUBKEY);
+  const baselineCommands = await readCommandLog(page);
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
+    .not.toBeNull();
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
+    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  const commands = await readCommandLog(page);
+  expect(commandCount(commands, "revalidate_relay_agents")).toBe(
+    commandCount(baselineCommands, "revalidate_relay_agents") + 2,
+  );
+  expect(commandCount(commands, "list_relay_agents")).toBe(
+    commandCount(baselineCommands, "list_relay_agents"),
+  );
+  for (const command of [
+    "add_channel_members",
+    "start_managed_agent",
+    "attach_managed_agent",
+    "sync_agents_to_active_huddle",
+  ]) {
+    expect(commandCount(commands, command)).toBe(
+      commandCount(baselineCommands, command),
+    );
+  }
+});
+
+test("selected relay agents revoked after the invite prompt cause no side effects", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+  await expect(quinnRow).toBeVisible();
+  await quinnRow.click();
+  await page.keyboard.type("hello");
+  await page.getByTestId("send-message").click();
+  const inviteButton = page.getByRole("button", {
+    name: "Invite",
+    exact: true,
+  });
+  await expect(inviteButton).toBeVisible();
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E__.mock ??= {};
+    window.__BUZZ_E2E__.mock.relayAgentListErrors = Array(5).fill(
+      "mock directory revoked after invite prompt",
+    );
+  });
+  const baselineCommands = await readCommandLog(page);
+  await inviteButton.click();
+
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
+    .not.toBeNull();
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
+    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  const commands = await readCommandLog(page);
+  for (const command of [
+    "add_channel_members",
+    "start_managed_agent",
+    "attach_managed_agent",
+    "sync_agents_to_active_huddle",
+  ]) {
+    expect(commandCount(commands, command)).toBe(
+      commandCount(baselineCommands, command),
+    );
+  }
+});
+
+test("selected relay agents revoked during send emit no p tag", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+  await expect(quinnRow).toBeVisible();
+  await quinnRow.click();
+  await page.keyboard.type("hello");
+
+  await page.evaluate(() => {
+    window.__BUZZ_E2E__.mock ??= {};
+    window.__BUZZ_E2E__.mock.agentListDelayMs = 300;
+  });
+  await page.getByTestId("send-message").click();
+  await page.getByRole("button", { name: "Invite", exact: true }).click();
+  await page.evaluate(() => {
+    window.__BUZZ_E2E__.mock ??= {};
+    window.__BUZZ_E2E__.mock.relayAgentListErrors = Array(100).fill(
+      "mock directory revoked mid-send",
+    );
+  });
+
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
+    .not.toBeNull();
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
+    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+});
+
+test("owner-only builds admit cross-owner relay agents authorized by allowlist", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    ownerOnlyAccessBuild: true,
+    searchProfiles: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        displayName: "quinn",
+        ownerPubkey: TEST_IDENTITIES.outsider.pubkey,
+        isAgent: true,
+      },
+    ],
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        ownerPubkey: TEST_IDENTITIES.outsider.pubkey,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock bridge is not installed.");
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels"],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+    },
+  );
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+  await expect(quinnRow).toBeVisible();
+  await quinnRow.click();
+  await page.keyboard.type("hello");
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
+    .toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+});
+
+test("owner-only builds show verified same-owner relay agents", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    ownerOnlyAccessBuild: true,
+    searchProfiles: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        displayName: "quinn",
+        ownerPubkey: MOCK_VIEWER_PUBKEY,
+        isAgent: true,
+      },
+    ],
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        ownerPubkey: MOCK_VIEWER_PUBKEY,
+        name: "quinn",
+        respondTo: "owner-only",
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("message-input").fill("@quinn");
+
+  await expect(autocomplete(page).getByText("quinn")).toBeVisible();
+});
+
 test("relay-only allowlisted agents stay hidden outside their channel", async ({
   page,
 }) => {
@@ -1018,13 +1979,23 @@ test("relay-only allowlisted agents stay hidden outside their channel", async ({
   await expect(autocomplete(page)).toHaveCount(0);
 });
 
-test("relay-only anyone agents are visible when a channel is shared", async ({
+test("owner-only builds admit cross-owner relay agents authorized for anyone", async ({
   page,
 }) => {
   await installMockBridge(page, {
+    ownerOnlyAccessBuild: true,
+    searchProfiles: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        displayName: "quinn",
+        ownerPubkey: TEST_IDENTITIES.outsider.pubkey,
+        isAgent: true,
+      },
+    ],
     relayAgents: [
       {
         pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        ownerPubkey: TEST_IDENTITIES.outsider.pubkey,
         name: "quinn",
         respondTo: "anyone",
         channelNames: ["general"],
@@ -1189,11 +2160,21 @@ test("mentioning a non-member managed agent adds and starts it before sending", 
   page,
 }) => {
   await installMockBridge(page, {
+    personas: [
+      {
+        id: "persona-owner",
+        displayName: "Fizz",
+        systemPrompt: "",
+      },
+    ],
     managedAgents: [
       {
         pubkey: OUT_OF_CHANNEL_MANAGED_AGENT_PUBKEY,
         name: "fizz",
+        personaId: "persona-owner",
         status: "stopped",
+        respondTo: "anyone",
+        respondToAllowlist: [TEST_IDENTITIES.outsider.pubkey],
       },
     ],
   });
@@ -1219,6 +2200,7 @@ test("mentioning a non-member managed agent adds and starts it before sending", 
     baselineCommands,
     "start_managed_agent",
   );
+  const baselinePayloadCount = (await readCommandPayloadLog(page)).length;
 
   await page.getByTestId("send-message").click();
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
@@ -1234,11 +2216,55 @@ test("mentioning a non-member managed agent adds and starts it before sending", 
     )
     .toBeGreaterThan(baselineStartCount);
 
+  const sendCommands = (await readCommandPayloadLog(page)).slice(
+    baselinePayloadCount,
+  );
+  const updateIndex = sendCommands.findIndex(
+    (entry) => entry.command === "update_managed_agent",
+  );
+  const addIndex = sendCommands.findIndex(
+    (entry) => entry.command === "add_channel_members",
+  );
+  const startIndex = sendCommands.findIndex(
+    (entry) => entry.command === "start_managed_agent",
+  );
+  expect(updateIndex).toBeGreaterThanOrEqual(0);
+  expect(updateIndex).toBeLessThan(addIndex);
+  expect(updateIndex).toBeLessThan(startIndex);
+  expect(sendCommands[updateIndex]?.payload).toMatchObject({
+    input: {
+      pubkey: OUT_OF_CHANNEL_MANAGED_AGENT_PUBKEY,
+      respondTo: "owner-only",
+      respondToAllowlist: [],
+    },
+  });
+
   const mentionChip = page
     .getByTestId("message-row")
     .last()
     .locator("[data-mention].agent-mention-highlight", { hasText: "fizz" });
   await expect(mentionChip).toBeVisible();
+
+  const persistedPolicy = await page.evaluate(async (pubkey) => {
+    const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+    if (!invoke) throw new Error("Mock bridge is not installed.");
+    const agents = (await invoke("list_managed_agents", {})) as Array<{
+      pubkey: string;
+      respond_to: string;
+      respond_to_allowlist: string[];
+    }>;
+    const agent = agents.find((candidate) => candidate.pubkey === pubkey);
+    return agent
+      ? {
+          respondTo: agent.respond_to,
+          respondToAllowlist: agent.respond_to_allowlist,
+        }
+      : null;
+  }, OUT_OF_CHANNEL_MANAGED_AGENT_PUBKEY);
+  expect(persistedPolicy).toEqual({
+    respondTo: "owner-only",
+    respondToAllowlist: [],
+  });
 });
 
 test("mentioning a non-member provider managed agent deploys it before sending", async ({
@@ -1654,7 +2680,7 @@ test("system member-joined rows render the joined person as a plain profile name
   await expect(joinedPersonName).not.toHaveAttribute("data-mention");
 });
 
-test("selecting a managed non-member agent from a DM inserts @Name into input", async ({
+test("a managed non-member agent from a DM can be addressed explicitly", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -1674,13 +2700,24 @@ test("selecting a managed non-member agent from a DM inserts @Name into input", 
   await input.fill("@char");
 
   const dropdown = autocomplete(page);
-  await expect(dropdown.getByText("charlie")).toBeVisible();
+  const charlieRow = dropdown.getByTestId(
+    `mention-suggestion-${TEST_IDENTITIES.charlie.pubkey}`,
+  );
+  await expect(charlieRow.getByText("charlie")).toBeVisible();
   await expect(autocomplete(page)).toHaveCount(1);
   await expect(input.locator(".mention-chip")).toHaveCount(0);
-  await input.press("Enter");
+  await charlieRow
+    .getByRole("button", {
+      name: "Automatically mention charlie",
+      exact: true,
+    })
+    .click();
 
   await expect(input).toHaveText("@charlie ");
-  await expect(input.locator(".mention-chip")).toBeVisible();
+  await expect(input.locator(".agent-mention-highlight")).toHaveText("charlie");
+  await expect(
+    page.getByTestId(`composer-address-lock-${TEST_IDENTITIES.charlie.pubkey}`),
+  ).toBeVisible();
 });
 
 test("global non-member people can be selected from channel mentions", async ({
@@ -1744,9 +2781,9 @@ test("sent non-member person mention uses the normal mention style", async ({
   const mentionChip = page
     .getByTestId("message-row")
     .last()
-    .locator("[data-mention]", { hasText: "@outsider" });
+    .locator("[data-mention]", { hasText: "outsider" });
   await expect(mentionChip).toBeVisible();
-  await expect(mentionChip.locator("svg")).toHaveCount(0);
+  await expect(mentionChip).toHaveClass(/inline-chip-icon-human/);
 });
 
 test("sent managed non-member agent mention uses the agent mention style", async ({
@@ -1884,8 +2921,8 @@ test("mention text is highlighted in sent messages", async ({ page }) => {
     .last()
     .locator("[data-mention].mention-chip", { hasText: "bob" });
   await expect(mentionChip).toBeVisible();
-  await expect(mentionChip.locator(".mention-chip-prefix")).toHaveText("@");
-  await expect(mentionChip.locator("svg")).toHaveCount(0);
+  await expect(mentionChip).toHaveText("bob");
+  await expect(mentionChip).toHaveClass(/inline-chip-icon-human/);
 });
 
 test("clicking author name opens user profile panel", async ({ page }) => {
@@ -1944,8 +2981,8 @@ test("clicking a mention chip in the timeline opens the profile panel", async ({
 
   const mentionChip = page
     .getByTestId("message-row")
-    .filter({ hasText: "Ping @bob about the launch" })
-    .locator("[data-mention]", { hasText: "@bob" });
+    .filter({ hasText: "Ping bob about the launch" })
+    .locator("[data-mention]", { hasText: "bob" });
   await expect(mentionChip).toBeVisible();
   await mentionChip.click();
 
@@ -1972,8 +3009,8 @@ test("mention text matching the kind-0 name alias resolves and opens the profile
 
   const mentionChip = page
     .getByTestId("message-row")
-    .filter({ hasText: "Ask @bobby to review the doc" })
-    .locator("[data-mention]", { hasText: "@bobby" });
+    .filter({ hasText: "Ask bobby to review the doc" })
+    .locator("[data-mention]", { hasText: "bobby" });
   await expect(mentionChip).toBeVisible();
   await mentionChip.click();
 
@@ -1998,7 +3035,7 @@ test("clicking a mention chip in a forum post opens the profile panel", async ({
   await page.getByTestId("channel-watercooler").click();
   await expect(page.getByTestId("chat-title")).toHaveText("watercooler");
 
-  const mentionChip = page.locator("[data-mention]", { hasText: "@bob" });
+  const mentionChip = page.locator("[data-mention]", { hasText: "bob" });
   await expect(mentionChip).toBeVisible();
   await mentionChip.click();
 
@@ -2016,7 +3053,7 @@ test("agent profile popover shows its owner", async ({ page }) => {
     searchProfiles: [
       {
         pubkey: OWNED_AGENT_PROFILE_PUBKEY,
-        displayName: "Bumble",
+        displayName: "Pollen",
         ownerPubkey: TEST_IDENTITIES.bob.pubkey,
         isAgent: true,
       },
@@ -2027,16 +3064,16 @@ test("agent profile popover shows its owner", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
 
-  await emitMockMessage(page, "general", "Bumble checking in.", {
+  await emitMockMessage(page, "general", "Pollen checking in.", {
     pubkey: OWNED_AGENT_PROFILE_PUBKEY,
   });
   await waitForTimelineSettled(page);
 
-  const bumbleMessage = page
+  const pollenMessage = page
     .getByTestId("message-row")
-    .filter({ hasText: "Bumble checking in." })
+    .filter({ hasText: "Pollen checking in." })
     .first();
-  await bumbleMessage.locator("button").first().hover();
+  await pollenMessage.locator("button").first().hover();
 
   const profilePopover = page.locator(
     '[data-testid="user-profile-popover"][data-state="open"]',
@@ -2056,7 +3093,7 @@ test("agent profile popover labels an agent owned by the viewer as you", async (
     searchProfiles: [
       {
         pubkey: OWNED_AGENT_PROFILE_PUBKEY,
-        displayName: "Bumble",
+        displayName: "Pollen",
         ownerPubkey: MOCK_VIEWER_PUBKEY,
         isAgent: true,
       },
@@ -2067,16 +3104,16 @@ test("agent profile popover labels an agent owned by the viewer as you", async (
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
 
-  await emitMockMessage(page, "general", "Bumble checking in.", {
+  await emitMockMessage(page, "general", "Pollen checking in.", {
     pubkey: OWNED_AGENT_PROFILE_PUBKEY,
   });
   await waitForTimelineSettled(page);
 
-  const bumbleMessage = page
+  const pollenMessage = page
     .getByTestId("message-row")
-    .filter({ hasText: "Bumble checking in." })
+    .filter({ hasText: "Pollen checking in." })
     .first();
-  await bumbleMessage.locator("button").first().hover();
+  await pollenMessage.locator("button").first().hover();
 
   const profilePopover = page.locator(
     '[data-testid="user-profile-popover"][data-state="open"]',
@@ -2096,7 +3133,7 @@ test("agent profile popover falls back to the owner's pubkey", async ({
     searchProfiles: [
       {
         pubkey: OWNED_AGENT_PROFILE_PUBKEY,
-        displayName: "Bumble",
+        displayName: "Pollen",
         ownerPubkey: CASEY_PROFILE_PUBKEY,
         isAgent: true,
       },
@@ -2107,16 +3144,16 @@ test("agent profile popover falls back to the owner's pubkey", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await waitForMockLiveSubscription(page, "general");
 
-  await emitMockMessage(page, "general", "Bumble checking in.", {
+  await emitMockMessage(page, "general", "Pollen checking in.", {
     pubkey: OWNED_AGENT_PROFILE_PUBKEY,
   });
   await waitForTimelineSettled(page);
 
-  const bumbleMessage = page
+  const pollenMessage = page
     .getByTestId("message-row")
-    .filter({ hasText: "Bumble checking in." })
+    .filter({ hasText: "Pollen checking in." })
     .first();
-  await bumbleMessage.locator("button").first().hover();
+  await pollenMessage.locator("button").first().hover();
 
   const profilePopover = page.locator(
     '[data-testid="user-profile-popover"][data-state="open"]',

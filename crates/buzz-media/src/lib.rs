@@ -14,12 +14,16 @@ pub mod upload_record;
 pub mod validation;
 
 pub use bucket_index::{
-    classify_key, fold_bucket_listing, BucketAggregate, BucketSnapshot, CommunityStorage, KeyClass,
-    Page, SweepError,
+    classify_key, fold_bucket_listing, is_tenant_owned_key, sweep_bucket_taxonomy, tenant_prefixes,
+    BucketAggregate, BucketSnapshot, CommunityStorage, KeyClass, Page, SweepError,
+    TaxonomySweepOutcome,
 };
 pub use config::{MediaConfig, S3AddressingStyle};
 pub use error::MediaError;
-pub use storage::{BlobHeadMeta, BlobMeta, ByteStream, MediaStorage};
+pub use storage::{
+    BlobHeadMeta, BlobMeta, BulkDeleteOutcome, ByteStream, MediaStorage, ObjectVersionEntry,
+    ObjectVersionKind, ObjectVersionRef, ObjectVersionsPage,
+};
 pub use types::BlobDescriptor;
 pub use upload::{process_file_upload, process_upload, process_video_upload};
 pub use upload_record::{

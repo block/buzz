@@ -5,6 +5,8 @@ import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
 
 const VIDEO_SHA = "b".repeat(64);
 const VIDEO_URL = `http://localhost:3000/media/${VIDEO_SHA}.mp4`;
+const EXTENSIONLESS_VIDEO_URL = `http://localhost:3000/media/${VIDEO_SHA}`;
+const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const PORTRAIT_VIDEO_SHA = "c".repeat(64);
 const PORTRAIT_VIDEO_URL = `http://localhost:3000/media/${PORTRAIT_VIDEO_SHA}.mp4`;
 const CONSTRAINED_LANDSCAPE_VIDEO_SHA = "d".repeat(64);
@@ -30,6 +32,15 @@ const VIDEO_REVIEW_INDIGO_FOREGROUND_RGB = "rgb(141, 143, 245)";
 const VIDEO_REVIEW_NEUTRAL_DARK_RGB = "rgb(250, 250, 250)";
 const POSTER_DATA_URL =
   "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNjAgODAiPjxyZWN0IHdpZHRoPSIxNjAiIGhlaWdodD0iODAiIGZpbGw9IiMyNjQ2NTMiLz48Y2lyY2xlIGN4PSI1NCIgY3k9IjQwIiByPSIyMiIgZmlsbD0iI2YyYzE0ZSIvPjxwYXRoIGQ9Ik05MiAyNGg0NHYzMkg5MnoiIGZpbGw9IiNmNzgxNTQiLz48L3N2Zz4=";
+
+type MockFeedMessage = {
+  content: string;
+  created_at: number;
+  id: string;
+  kind: number;
+  pubkey: string;
+  tags: string[][];
+};
 
 async function waitForMockLiveSubscription(page: Page, channelName: string) {
   await expect
@@ -78,6 +89,43 @@ function emitMockMessage(
       extraTags: options.extraTags,
       parentEventId: options.parentEventId,
     },
+  );
+}
+
+function pushMockFeedItems(page: Page, messages: MockFeedMessage[]) {
+  return page.evaluate(
+    ({ channelId, messages }) => {
+      const pushFeedItem = (
+        window as Window & {
+          __BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?: (item: {
+            category: "mention";
+            channel_id: string;
+            channel_name: string;
+            content: string;
+            created_at: number;
+            id: string;
+            kind: number;
+            pubkey: string;
+            tags: string[][];
+          }) => unknown;
+        }
+      ).__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!pushFeedItem) throw new Error("Mock feed helper is unavailable.");
+      for (const message of messages) {
+        pushFeedItem({
+          category: "mention",
+          channel_id: channelId,
+          channel_name: "general",
+          content: message.content,
+          created_at: message.created_at,
+          id: message.id,
+          kind: message.kind,
+          pubkey: message.pubkey,
+          tags: message.tags,
+        });
+      }
+    },
+    { channelId: GENERAL_CHANNEL_ID, messages },
   );
 }
 
@@ -185,7 +233,9 @@ async function openReviewWithPostedTimecode(
 
   await page.getByRole("button", { name: "Attach file" }).click();
   await expect(
-    page.getByTestId("message-composer").getByAltText("Video attachment bbbb"),
+    page
+      .getByTestId("message-composer")
+      .getByRole("button", { name: "Video attachment bbbb", exact: true }),
   ).toBeVisible();
   await page.getByTestId("send-message").click();
   await expect(page.getByText("Sending")).toHaveCount(0);
@@ -241,8 +291,12 @@ test("video upload previews use poster frames and inline videos open review mode
   await page.getByRole("button", { name: "Attach file" }).click();
 
   const composer = page.getByTestId("message-composer");
-  const composerPoster = composer.getByAltText("Video attachment bbbb");
-  await expect(composerPoster).toBeVisible();
+  const composerTrigger = composer.getByRole("button", {
+    name: "Video attachment bbbb",
+    exact: true,
+  });
+  await expect(composerTrigger).toBeVisible();
+  const composerPoster = composerTrigger.locator("img");
   await expect(composerPoster).toHaveAttribute("src", POSTER_DATA_URL);
 
   const box = await composerPoster.boundingBox();
@@ -884,6 +938,67 @@ test("inline video hover reveals a timeline without a second play control", asyn
     .toBe(true);
 });
 
+test("expanded video controls fade with the video hover boundary", async ({
+  page,
+}) => {
+  await installVideoReviewHarness(page);
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", `![video](${VIDEO_URL})`, {
+    extraTags: [
+      [
+        "imeta",
+        `url ${VIDEO_URL}`,
+        "m video/mp4",
+        `x ${VIDEO_SHA}`,
+        "size 987654",
+        "dim 160x80",
+        "duration 12.5",
+        `image ${POSTER_DATA_URL}`,
+        "filename launch-demo.mp4",
+      ],
+    ],
+  });
+
+  await page.getByRole("button", { name: "Open video review" }).last().click();
+
+  const dialog = page.getByTestId("video-review-dialog");
+  const mediaSurface = dialog.locator(".video-review-media-surface");
+  const controls = dialog.locator(".video-review-controls");
+  await expect(mediaSurface).toBeVisible();
+
+  await dialog.getByTestId("video-review-comments-panel").hover();
+  const restingControlsBox = await controls.boundingBox();
+  expect(restingControlsBox).not.toBeNull();
+  await expect(controls).toHaveCSS("opacity", "0");
+
+  await mediaSurface.hover();
+  await expect(controls).toHaveCSS("opacity", "1");
+  const hoveredControlsBox = await controls.boundingBox();
+  expect(hoveredControlsBox).not.toBeNull();
+  expect(
+    Math.abs((hoveredControlsBox?.y ?? 0) - (restingControlsBox?.y ?? 0)),
+  ).toBeLessThan(0.5);
+  await expect(controls).toHaveCSS("transition-property", "opacity");
+  await expect(controls).toHaveCSS("transition-duration", "0.15s");
+
+  const playButton = controls.getByRole("button", { name: /review video$/ });
+  await playButton.click();
+  await expect(playButton).toBeFocused();
+  await dialog.getByTestId("video-review-comments-panel").hover();
+  await expect(controls).toHaveCSS("opacity", "0");
+
+  await page.keyboard.press("Tab");
+  await expect(controls).toHaveCSS("opacity", "1");
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(controls).toHaveCSS("transition-property", "none");
+});
+
 test("video replies in threads open the review comments view", async ({
   page,
 }) => {
@@ -898,16 +1013,16 @@ test("video replies in threads open the review comments view", async ({
     page,
     "general",
     "Can you review this cut?",
-  )) as { id: string };
+  )) as MockFeedMessage;
   const videoReply = (await emitMockMessage(
     page,
     "general",
-    `![video](${VIDEO_URL})`,
+    `![video](${EXTENSIONLESS_VIDEO_URL})`,
     {
       extraTags: [
         [
           "imeta",
-          `url ${VIDEO_URL}`,
+          `url ${EXTENSIONLESS_VIDEO_URL}`,
           "m video/mp4",
           `x ${VIDEO_SHA}`,
           "size 987654",
@@ -920,9 +1035,13 @@ test("video replies in threads open the review comments view", async ({
       parentEventId: root.id,
     },
   )) as { id: string };
-  await emitMockMessage(page, "general", "[00:01] Tighten this transition.", {
-    parentEventId: videoReply.id,
-  });
+  const reviewComment = (await emitMockMessage(
+    page,
+    "general",
+    "[00:01] > Tighten this transition.",
+    { parentEventId: videoReply.id },
+  )) as MockFeedMessage;
+  await pushMockFeedItems(page, [videoReply, reviewComment]);
 
   const threadSummary = page.locator(`[data-thread-head-id="${root.id}"]`);
   await expect(threadSummary).toBeVisible();
@@ -951,6 +1070,12 @@ test("video replies in threads open the review comments view", async ({
     "data-testid",
     "video-review-comment-timecode",
   );
+  await expect(outsideTimecode.locator("xpath=ancestor::p")).toContainText(
+    "Tighten this transition.",
+  );
+  await expect(
+    outsideTimecode.locator("xpath=ancestor::blockquote"),
+  ).toBeVisible();
   const outsideTimecodeStyles = await outsideTimecode.evaluate((element) => {
     const styles = window.getComputedStyle(element);
     return {
@@ -1008,6 +1133,108 @@ test("video replies in threads open the review comments view", async ({
   await expect(reviewDialog.getByTestId("video-review-comments")).toContainText(
     "Tighten this transition.",
   );
+
+  await page
+    .getByTestId("video-review-backdrop")
+    .click({ position: { x: 4, y: 4 } });
+  await page.getByRole("button", { name: "Inbox", exact: true }).click();
+  const inboxRow = page.getByTestId(`home-inbox-item-${reviewComment.id}`);
+  await expect(inboxRow).toBeVisible();
+  const inboxPreviewTimecode = inboxRow.getByTestId(
+    "video-review-comment-timecode",
+  );
+  await expect(inboxPreviewTimecode.locator("xpath=ancestor::p")).toContainText(
+    "Tighten this transition.",
+  );
+  await expect(
+    inboxPreviewTimecode.locator("xpath=ancestor::blockquote"),
+  ).toBeVisible();
+  await inboxRow.click();
+
+  const inboxDetail = page.getByTestId("home-inbox-detail");
+  const inboxDetailTimecode = inboxDetail.getByRole("button", {
+    name: "Jump to 00:01",
+  });
+  await expect(inboxDetailTimecode).toBeVisible();
+  await expect(inboxDetailTimecode.locator("xpath=ancestor::p")).toContainText(
+    "Tighten this transition.",
+  );
+  await expect(
+    inboxDetailTimecode.locator("xpath=ancestor::blockquote"),
+  ).toBeVisible();
+  await inboxDetailTimecode.click();
+  await expect(page.getByTestId("video-review-dialog")).toBeVisible();
+});
+
+test("Inbox preserves bracketed timestamps without video evidence", async ({
+  page,
+}) => {
+  await installVideoReviewHarness(page);
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  const root = (await emitMockMessage(page, "general", "Planning note")) as {
+    id: string;
+  };
+  const reply = (await emitMockMessage(
+    page,
+    "general",
+    "[12:30] Meeting starts",
+    { parentEventId: root.id },
+  )) as MockFeedMessage;
+  await pushMockFeedItems(page, [reply]);
+
+  await page.getByRole("button", { name: "Inbox", exact: true }).click();
+  const inboxRow = page.getByTestId(`home-inbox-item-${reply.id}`);
+  await expect(inboxRow).toContainText("[12:30] Meeting starts");
+  await expect(
+    inboxRow.getByTestId("video-review-comment-timecode"),
+  ).toHaveCount(0);
+});
+
+test("Inbox recognizes reference-style video ancestors with custom alt text", async ({
+  page,
+}) => {
+  await installVideoReviewHarness(page);
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  const root = (await emitMockMessage(
+    page,
+    "general",
+    "Can you review this cut?",
+  )) as { id: string };
+  const video = (await emitMockMessage(
+    page,
+    "general",
+    `![Launch demo][cut]\n\n[cut]: ${VIDEO_URL}`,
+    { parentEventId: root.id },
+  )) as MockFeedMessage;
+  const comment = (await emitMockMessage(
+    page,
+    "general",
+    "[00:01] Tighten this transition.",
+    { parentEventId: video.id },
+  )) as MockFeedMessage;
+  await pushMockFeedItems(page, [video, comment]);
+
+  await page.getByRole("button", { name: "Inbox", exact: true }).click();
+  const inboxRow = page.getByTestId(`home-inbox-item-${comment.id}`);
+  await expect(
+    inboxRow.getByTestId("video-review-comment-timecode"),
+  ).toBeVisible();
+  await inboxRow.click();
+  await page
+    .getByTestId("home-inbox-detail")
+    .getByRole("button", { name: "Jump to 00:01" })
+    .click();
+  await expect(page.getByTestId("video-review-dialog")).toBeVisible();
 });
 
 test("message timecodes deterministically open the first attached video", async ({

@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 use buzz_core::kind::*;
 use buzz_core::tenant::{CommunityId, TenantContext};
+use buzz_datastore_tracing::datastore_span;
 use buzz_db::workflow::{ApprovalStatus, RunStatus};
 use buzz_db::DbError;
 use buzz_workflow::executor::TriggerContext;
@@ -97,36 +98,29 @@ enum PersistResult {
 /// persists without the event record. On retry, the event INSERT succeeds
 /// (no conflict), and the mutation re-executes — which is safe for idempotent
 /// operations (open_dm, hide_dm, update_approval, upsert_workflow).
+#[datastore_span(name = "persist_command_event", system = "postgresql")]
 async fn persist_command_event(
-    state: &Arc<AppState>,
+    db: &buzz_db::Db,
     tenant: &TenantContext,
     event: &Event,
     channel_id_override: Option<Uuid>,
 ) -> Result<PersistResult, IngestError> {
-    let channel_id = channel_id_override.or_else(|| extract_channel_id(event));
+    use buzz_db::replaceable::{ParameterizedReplacePrecondition, ParameterizedReplaceStatus};
 
-    let mut tx = state
-        .db
+    let channel_id = channel_id_override.or_else(|| extract_channel_id(event));
+    let mut tx = db
         .begin_transaction()
         .await
         .map_err(|e| IngestError::Internal(format!("error: begin transaction: {e}")))?;
+    buzz_deletion::store(db)
+        .guard_transaction(&mut tx, tenant.community())
+        .await
+        .map_err(|error| {
+            IngestError::Rejected(format!("restricted: community writes are fenced: {error}"))
+        })?;
 
-    // INSERT with ON CONFLICT DO NOTHING — idempotency guard.
-    let id_bytes = event.id.as_bytes();
-    let pubkey_bytes = event.pubkey.to_bytes();
-    let sig_bytes = event.sig.serialize();
-    let tags_json = serde_json::to_value(&event.tags)
-        .map_err(|e| IngestError::Internal(format!("error: serialize tags: {e}")))?;
-    let kind_i32 = event.kind.as_u16() as i32;
-    let created_at_secs = event.created_at.as_secs() as i64;
-    let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0).ok_or_else(|| {
-        IngestError::Rejected(format!("invalid: bad timestamp {created_at_secs}"))
-    })?;
-    let received_at = chrono::Utc::now();
-
-    // Extract d_tag for parameterized replaceable kinds (NIP-33).
     let d_tag = buzz_db::event::extract_d_tag(event);
-    if let Some(ref d_tag) = d_tag {
+    if let Some(d_tag) = d_tag.as_deref() {
         if d_tag.len() > buzz_db::event::D_TAG_MAX_LEN {
             return Err(IngestError::Rejected(format!(
                 "invalid: d tag too long ({} bytes, max {})",
@@ -135,100 +129,93 @@ async fn persist_command_event(
             )));
         }
 
-        // Command kinds normally use plain insert semantics, but workflow
-        // definitions are NIP-33 events. Serialize writers for the same
-        // coordinate and reject stale writes before executing the domain
-        // mutation, otherwise old updates can overwrite newer workflow state.
-        let lock_key = {
-            let mut h: u64 = 0xcbf29ce484222325;
-            for b in tenant.community().as_uuid().as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in kind_i32.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in pubkey_bytes.as_slice() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in d_tag.as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            h as i64
+        let kind = event.kind.as_u16() as i32;
+        let (expected_revision, revision_error) = match parse_expected_workflow_revision(
+            kind,
+            extract_tag(event, "expected-revision").as_deref(),
+        ) {
+            Ok(expected_revision) => (expected_revision, None),
+            Err(error) => (None, Some(error)),
         };
-
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(lock_key)
-            .execute(tx.as_mut())
-            .await
-            .map_err(|e| IngestError::Internal(format!("error: lock event coordinate: {e}")))?;
-
-        let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = sqlx::query_as(
-            "SELECT created_at, id FROM events \
-             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
-             ORDER BY created_at DESC, id ASC LIMIT 1",
-        )
-        .bind(tenant.community().as_uuid())
-        .bind(kind_i32)
-        .bind(pubkey_bytes.as_slice())
-        .bind(d_tag)
-        .fetch_optional(tx.as_mut())
-        .await
-        .map_err(|e| IngestError::Internal(format!("error: query event coordinate: {e}")))?;
-
-        let incoming_id = event.id.as_bytes().as_slice();
-        if let Some((existing_ts, existing_id)) = existing {
-            let dominated = created_at < existing_ts
-                || (created_at == existing_ts && incoming_id >= existing_id.as_slice());
-            if dominated {
-                return Ok(PersistResult::Duplicate);
-            }
-
-            sqlx::query(
-                "UPDATE events SET deleted_at = NOW() \
-                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL",
+        let precondition = if revision_error.is_some() {
+            ParameterizedReplacePrecondition::ExactReplayOnly
+        } else if let Some(expected_revision) = expected_revision.as_deref() {
+            ParameterizedReplacePrecondition::ExpectedRevision(expected_revision)
+        } else {
+            ParameterizedReplacePrecondition::Unconditional
+        };
+        let result = db
+            .replace_parameterized_event_in_transaction(
+                &mut tx,
+                tenant.community(),
+                event,
+                d_tag,
+                channel_id,
+                precondition,
             )
-            .bind(tenant.community().as_uuid())
-            .bind(kind_i32)
-            .bind(pubkey_bytes.as_slice())
-            .bind(d_tag)
-            .execute(tx.as_mut())
             .await
-            .map_err(|e| IngestError::Internal(format!("error: replace old event: {e}")))?;
-        }
+            .map_err(|e| {
+                IngestError::Internal(format!("error: replace parameterized event: {e}"))
+            })?;
+
+        return match result.status {
+            ParameterizedReplaceStatus::Inserted => Ok(PersistResult::Inserted(tx)),
+            ParameterizedReplaceStatus::Duplicate => Ok(PersistResult::Duplicate),
+            ParameterizedReplaceStatus::Superseded
+                if kind == KIND_WORKFLOW_DEF as i32 && expected_revision.is_some() =>
+            {
+                Err(IngestError::Rejected(
+                    "conflict: workflow update was superseded; refresh and try again".into(),
+                ))
+            }
+            ParameterizedReplaceStatus::Superseded => Ok(PersistResult::Duplicate),
+            ParameterizedReplaceStatus::RevisionMissing => Err(IngestError::Rejected(
+                "conflict: workflow revision does not exist".into(),
+            )),
+            ParameterizedReplaceStatus::RevisionMismatch => Err(IngestError::Rejected(
+                "conflict: workflow changed since it was loaded".into(),
+            )),
+            ParameterizedReplaceStatus::ReplayOnlyMiss => match revision_error {
+                Some(error) => Err(error),
+                None => Err(IngestError::Internal(
+                    "error: replay-only replacement lacked a revision error".into(),
+                )),
+            },
+        };
     }
 
-    let result = sqlx::query(
-        r#"
-        INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-        ON CONFLICT DO NOTHING
-        "#,
-    )
-    .bind(tenant.community().as_uuid())
-    .bind(id_bytes.as_slice())
-    .bind(pubkey_bytes.as_slice())
-    .bind(created_at)
-    .bind(kind_i32)
-    .bind(&tags_json)
-    .bind(&event.content)
-    .bind(sig_bytes.as_slice())
-    .bind(received_at)
-    .bind(channel_id)
-    .bind(d_tag.as_deref())
-    .execute(tx.as_mut())
-    .await
-    .map_err(|e| IngestError::Internal(format!("error: insert event: {e}")))?;
-
-    if result.rows_affected() == 0 {
-        // Duplicate — rollback (implicit on drop) and signal idempotent success.
-        Ok(PersistResult::Duplicate)
-    } else {
+    let (_, was_inserted) =
+        buzz_db::event::insert_event_in_transaction(&mut tx, tenant.community(), event, channel_id)
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: insert event: {e}")))?;
+    if was_inserted {
         Ok(PersistResult::Inserted(tx))
+    } else {
+        Ok(PersistResult::Duplicate)
     }
+}
+
+fn parse_expected_workflow_revision(
+    kind: i32,
+    expected_revision: Option<&str>,
+) -> Result<Option<Vec<u8>>, IngestError> {
+    if kind != KIND_WORKFLOW_DEF as i32 {
+        return Ok(None);
+    }
+
+    expected_revision
+        .map(|expected| {
+            let id = hex::decode(expected).map_err(|_| {
+                IngestError::Rejected("invalid: bad expected workflow revision".into())
+            })?;
+            if id.len() != 32 {
+                return Err(IngestError::Rejected(
+                    "invalid: bad expected workflow revision".into(),
+                ));
+            }
+            Ok(id)
+        })
+        .transpose()
 }
 
 /// Extract all `p` tag values (hex pubkeys) from an event.
@@ -346,7 +333,7 @@ async fn handle_dm_open(
     }
 
     // Persist the command event (idempotency) — returns open transaction
-    let tx = match persist_command_event(state, tenant, event, None).await? {
+    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -365,7 +352,7 @@ async fn handle_dm_open(
         .await
         .map_err(|e| IngestError::Internal(format!("error: db open_dm: {e}")))?;
 
-    // Commit: event + mutation succeeded atomically.
+    // Finalize the idempotency record after the separate mutation succeeds.
     tx.commit()
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
@@ -507,7 +494,7 @@ async fn handle_dm_add_member(
     }
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(state, tenant, event, None).await? {
+    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -526,7 +513,7 @@ async fn handle_dm_add_member(
         .await
         .map_err(|e| IngestError::Internal(format!("error: db open_dm: {e}")))?;
 
-    // Commit: event + mutation succeeded atomically.
+    // Finalize the idempotency record after the separate mutation succeeds.
     tx.commit()
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
@@ -613,7 +600,7 @@ async fn handle_dm_hide(
     }
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(state, tenant, event, None).await? {
+    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -631,7 +618,7 @@ async fn handle_dm_hide(
         .await
         .map_err(|e| IngestError::Internal(format!("error: db hide_dm: {e}")))?;
 
-    // Commit: event + mutation succeeded atomically.
+    // Finalize the idempotency record after the separate mutation succeeds.
     tx.commit()
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
@@ -750,7 +737,7 @@ async fn handle_workflow_def(
     let hash = compute_definition_hash(&definition_json_final);
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(state, tenant, event, None).await? {
+    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -889,7 +876,7 @@ async fn handle_workflow_trigger(
     // Persist the command event under the workflow channel even though the
     // trigger event itself only carries the workflow UUID. Storing channel
     // triggers as global events leaks workflow IDs to unrelated relay members.
-    let tx = match persist_command_event(state, tenant, event, workflow.channel_id).await? {
+    let tx = match persist_command_event(&state.db, tenant, event, workflow.channel_id).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -934,7 +921,7 @@ async fn handle_workflow_trigger(
         .await
         .map_err(|e| IngestError::Internal(format!("error: db create_workflow_run: {e}")))?;
 
-    // Commit: event + run creation succeeded atomically.
+    // Finalize the idempotency record after the separate run creation succeeds.
     tx.commit()
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
@@ -956,7 +943,10 @@ async fn handle_workflow_trigger(
                         RunStatus::Failed,
                         0,
                         &serde_json::json!([]),
-                        Some(&format!("definition parse error: {e}")),
+                        Some(buzz_db::workflow::WorkflowRunFailure {
+                            code: "invalid_definition",
+                            message: &format!("definition parse error: {e}"),
+                        }),
                     )
                     .await
                 {
@@ -1070,7 +1060,7 @@ async fn handle_approval_grant(
     check_approver_spec(&approval.approver_spec, &self_hex)?;
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(state, tenant, event, None).await? {
+    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -1106,7 +1096,7 @@ async fn handle_approval_grant(
         ));
     }
 
-    // Commit: event + approval update succeeded atomically.
+    // Finalize the idempotency record after the separate approval update succeeds.
     tx.commit()
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
@@ -1181,7 +1171,7 @@ async fn handle_approval_deny(
     check_approver_spec(&approval.approver_spec, &self_hex)?;
 
     // Persist the command event — returns open transaction
-    let tx = match persist_command_event(state, tenant, event, None).await? {
+    let tx = match persist_command_event(&state.db, tenant, event, None).await? {
         PersistResult::Duplicate => {
             return Ok(IngestResult {
                 event_id: event.id.to_hex(),
@@ -1217,7 +1207,7 @@ async fn handle_approval_deny(
         ));
     }
 
-    // Commit: event + approval denial succeeded atomically.
+    // Finalize the idempotency record after the separate approval denial succeeds.
     tx.commit()
         .await
         .map_err(|e| IngestError::Internal(format!("error: commit transaction: {e}")))?;
@@ -1253,7 +1243,10 @@ async fn handle_approval_deny(
                 RunStatus::Cancelled,
                 run.current_step,
                 &run.execution_trace,
-                Some(&cancel_msg),
+                Some(buzz_db::workflow::WorkflowRunFailure {
+                    code: "approval_denied",
+                    message: &cancel_msg,
+                }),
             )
             .await
         {
@@ -1321,7 +1314,10 @@ async fn resume_workflow_after_approval(
                     RunStatus::Failed,
                     run.current_step,
                     &run.execution_trace,
-                    Some(&format!("definition parse error: {e}")),
+                    Some(buzz_db::workflow::WorkflowRunFailure {
+                        code: "invalid_definition",
+                        message: &format!("definition parse error: {e}"),
+                    }),
                 )
                 .await
             {
@@ -1367,4 +1363,267 @@ async fn resume_workflow_after_approval(
     engine
         .finalize_run(community_id, run_id, result, existing_trace)
         .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+    async fn persistence_test_context() -> (buzz_db::Db, TenantContext) {
+        let url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+        let pool = sqlx::PgPool::connect(&url)
+            .await
+            .expect("connect workflow persistence test database");
+        let db = buzz_db::Db::from_pool(pool);
+        db.migrate()
+            .await
+            .expect("migrate workflow persistence test database");
+        let host = format!("workflow-cas-{}.example", Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("create workflow persistence test community")
+            .id;
+        (db, TenantContext::resolved(community, host))
+    }
+
+    fn workflow_event(
+        keys: &Keys,
+        workflow_id: Uuid,
+        created_at: u64,
+        expected_revision: Option<&str>,
+        name: &str,
+    ) -> Event {
+        let workflow_id = workflow_id.to_string();
+        let channel_id = Uuid::new_v4().to_string();
+        let mut tags = vec![
+            Tag::parse(["d", workflow_id.as_str()]).expect("d tag"),
+            Tag::parse(["h", channel_id.as_str()]).expect("h tag"),
+        ];
+        if let Some(revision) = expected_revision {
+            tags.push(Tag::parse(["expected-revision", revision]).expect("revision tag"));
+        }
+        EventBuilder::new(
+            Kind::Custom(KIND_WORKFLOW_DEF as u16),
+            format!("name: {name}\ntrigger:\n  on: message_posted\nsteps: []\n"),
+        )
+        .tags(tags)
+        .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(keys)
+        .expect("workflow event")
+    }
+
+    fn rejection_message(result: Result<Option<Vec<u8>>, IngestError>) -> String {
+        match result {
+            Err(IngestError::Rejected(message)) => message,
+            Err(IngestError::AuthFailed(message)) => panic!("unexpected auth failure: {message}"),
+            Err(IngestError::Internal(message)) => panic!("unexpected internal failure: {message}"),
+            Ok(_) => panic!("expected revision parsing to fail"),
+        }
+    }
+
+    #[test]
+    fn workflow_revision_parser_accepts_create_and_valid_update() {
+        let revision = [0x42; 32];
+        assert_eq!(
+            parse_expected_workflow_revision(KIND_WORKFLOW_DEF as i32, None)
+                .expect("tagless workflow"),
+            None
+        );
+        assert_eq!(
+            parse_expected_workflow_revision(
+                KIND_WORKFLOW_DEF as i32,
+                Some(&hex::encode(revision)),
+            )
+            .expect("valid revision"),
+            Some(revision.to_vec())
+        );
+    }
+
+    #[test]
+    fn workflow_revision_parser_rejects_malformed_values() {
+        for malformed in ["not-hex", "42"] {
+            assert_eq!(
+                rejection_message(parse_expected_workflow_revision(
+                    KIND_WORKFLOW_DEF as i32,
+                    Some(malformed),
+                )),
+                "invalid: bad expected workflow revision",
+            );
+        }
+    }
+
+    #[test]
+    fn revision_tag_does_not_change_other_command_kinds() {
+        assert_eq!(
+            parse_expected_workflow_revision(KIND_DM_OPEN as i32, Some("not-hex"))
+                .expect("non-workflow revision tag"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_persistence_preserves_replays_and_rejects_dominated_cas_updates() {
+        let (db, tenant) = persistence_test_context().await;
+        let keys = Keys::generate();
+        let workflow_id = Uuid::new_v4();
+        let created_at = Timestamp::now().as_secs();
+        let create = workflow_event(&keys, workflow_id, created_at, None, "create");
+
+        let missing_revision = hex::encode([0x24; 32]);
+        let missing_revision_update = workflow_event(
+            &keys,
+            Uuid::new_v4(),
+            created_at,
+            Some(&missing_revision),
+            "missing-revision",
+        );
+        let error = match persist_command_event(&db, &tenant, &missing_revision_update, None).await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("missing revision must not create a workflow"),
+        };
+        assert!(matches!(
+            error,
+            IngestError::Rejected(ref message)
+                if message == "conflict: workflow revision does not exist"
+        ));
+
+        let PersistResult::Inserted(tx) = persist_command_event(&db, &tenant, &create, None)
+            .await
+            .expect("persist create")
+        else {
+            panic!("first create must insert");
+        };
+        tx.commit().await.expect("commit create");
+        assert!(matches!(
+            persist_command_event(&db, &tenant, &create, None)
+                .await
+                .expect("replay create"),
+            PersistResult::Duplicate
+        ));
+
+        let create_revision = create.id.to_hex();
+        let mut updates = (0..64).map(|index| {
+            workflow_event(
+                &keys,
+                workflow_id,
+                created_at,
+                Some(&create_revision),
+                &format!("update-{index}"),
+            )
+        });
+        let update = updates
+            .find(|candidate| candidate.id.as_bytes() < create.id.as_bytes())
+            .expect("find same-second update that wins NIP-33 ordering");
+        let dominated_update = (64..256)
+            .map(|index| {
+                workflow_event(
+                    &keys,
+                    workflow_id,
+                    created_at,
+                    Some(&update.id.to_hex()),
+                    &format!("update-{index}"),
+                )
+            })
+            .find(|candidate| candidate.id.as_bytes() > update.id.as_bytes())
+            .expect("find same-second CAS-matching update dominated by current head");
+
+        let PersistResult::Inserted(tx) = persist_command_event(&db, &tenant, &update, None)
+            .await
+            .expect("persist update")
+        else {
+            panic!("matching update must insert");
+        };
+        tx.commit().await.expect("commit update");
+        assert!(matches!(
+            persist_command_event(&db, &tenant, &update, None)
+                .await
+                .expect("replay update"),
+            PersistResult::Duplicate
+        ));
+
+        let stale_revision_update = workflow_event(
+            &keys,
+            workflow_id,
+            created_at + 1,
+            Some(&create_revision),
+            "stale-revision",
+        );
+        let error = match persist_command_event(&db, &tenant, &stale_revision_update, None).await {
+            Err(error) => error,
+            Ok(_) => panic!("stale revision must not replace the current workflow"),
+        };
+        assert!(matches!(
+            error,
+            IngestError::Rejected(ref message)
+                if message == "conflict: workflow changed since it was loaded"
+        ));
+
+        let error = match persist_command_event(&db, &tenant, &dominated_update, None).await {
+            Err(error) => error,
+            Ok(_) => panic!("distinct dominated CAS update must not report duplicate success"),
+        };
+        assert!(matches!(
+            error,
+            IngestError::Rejected(ref message)
+                if message == "conflict: workflow update was superseded; refresh and try again"
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_persistence_replays_legacy_malformed_revision_before_validation() {
+        let (db, tenant) = persistence_test_context().await;
+        let keys = Keys::generate();
+        let workflow_id = Uuid::new_v4();
+        let created_at = Timestamp::now().as_secs();
+        let legacy = workflow_event(
+            &keys,
+            workflow_id,
+            created_at,
+            Some("not-hex"),
+            "legacy-malformed",
+        );
+
+        let mut tx = db.begin_transaction().await.expect("begin legacy seed");
+        let (_, was_inserted) = buzz_db::event::insert_event_in_transaction(
+            &mut tx,
+            tenant.community(),
+            &legacy,
+            extract_channel_id(&legacy),
+        )
+        .await
+        .expect("seed legacy workflow event");
+        assert!(was_inserted);
+        tx.commit().await.expect("commit legacy seed");
+
+        assert!(matches!(
+            persist_command_event(&db, &tenant, &legacy, None)
+                .await
+                .expect("exact legacy replay must remain idempotent"),
+            PersistResult::Duplicate
+        ));
+
+        let distinct = workflow_event(
+            &keys,
+            workflow_id,
+            created_at + 1,
+            Some("not-hex"),
+            "distinct-malformed",
+        );
+        let error = match persist_command_event(&db, &tenant, &distinct, None).await {
+            Err(error) => error,
+            Ok(_) => panic!("distinct malformed revision must remain rejected"),
+        };
+        assert!(matches!(
+            error,
+            IngestError::Rejected(ref message)
+                if message == "invalid: bad expected workflow revision"
+        ));
+    }
 }

@@ -170,9 +170,7 @@ spec:
             - { name: BUZZ_S3_ENDPOINT, value: {{ $s3Endpoint | quote }} }
             {{- end }}
             - { name: BUZZ_S3_BUCKET, value: {{ .Values.s3.bucket | quote }} }
-            {{- if .Values.s3.region }}
             - { name: BUZZ_S3_REGION, value: {{ .Values.s3.region | quote }} }
-            {{- end }}
             - { name: BUZZ_S3_ADDRESSING_STYLE, value: {{ .Values.s3.addressingStyle | quote }} }
 
             # ── Secrets (from chart-managed or existing) ─────────────
@@ -216,6 +214,12 @@ spec:
                 secretKeyRef:
                   name: {{ include "buzz.envSecretName" . }}
                   key: BUZZ_S3_SECRET_KEY
+                  optional: true
+            - name: BUZZ_KLIPY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.envSecretName" . }}
+                  key: BUZZ_KLIPY_API_KEY
                   optional: true
 
             - name: BUZZ_HUDDLE_AUDIO_AVAILABLE

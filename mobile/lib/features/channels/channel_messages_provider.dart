@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/relay/relay.dart';
+import 'channel_event_order.dart';
 import 'pending_local_messages_provider.dart';
 import 'channel_window.dart';
 import 'thread_replies_provider.dart';
@@ -158,7 +159,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
       final history = await session.fetchHistory(
         NostrFilters.messages(channelId),
       );
-      history.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      history.sort(compareChannelTimelineEventsChronologically);
       return history;
     }
   }
@@ -187,6 +188,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   );
 
   void _handleLiveEvent(NostrEvent event, {bool authoritative = true}) {
+    // Invalidate the thread query independently of the selected channel-history
+    // path. The websocket fallback does not merge through the window store.
+    _invalidateThreadReplies(event);
     // A live summary can race the initial channel-window query. Buffer it in
     // the window store even before that query installs its first page, rather
     // than treating metadata as an ordinary websocket timeline event.
@@ -232,28 +236,35 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     state = AsyncData(flattened);
   }
 
+  void _invalidateThreadReplies(NostrEvent event) {
+    if (!EventKind.channelTimelineContentKinds.contains(event.kind)) return;
+    final thread = event.threadReference;
+    if (thread.parentId == null) return;
+
+    final rootId = thread.rootId;
+    if (rootId != null) {
+      ref.invalidate(
+        threadRepliesProvider(
+          ThreadRepliesArgs(channelId: channelId, rootId: rootId),
+        ),
+      );
+    }
+    final parentId = thread.parentId;
+    if (parentId != null && parentId != rootId) {
+      ref.invalidate(
+        threadRepliesProvider(
+          ThreadRepliesArgs(channelId: channelId, rootId: parentId),
+        ),
+      );
+    }
+  }
+
   bool _mergeWindowEventIntoStore(NostrEvent event) {
     final isTimelineRow = EventKind.channelTimelineContentKinds.contains(
       event.kind,
     );
     final thread = isTimelineRow ? event.threadReference : null;
     if (thread?.parentId != null) {
-      final rootId = thread?.rootId;
-      if (rootId != null) {
-        ref.invalidate(
-          threadRepliesProvider(
-            ThreadRepliesArgs(channelId: channelId, rootId: rootId),
-          ),
-        );
-      }
-      final parentId = thread?.parentId;
-      if (parentId != null && parentId != rootId) {
-        ref.invalidate(
-          threadRepliesProvider(
-            ThreadRepliesArgs(channelId: channelId, rootId: parentId),
-          ),
-        );
-      }
       // Replies are kept in the store rather than dropped here, matching
       // desktop: the main timeline filters them out at render
       // (`buildMainTimelineEntries`), and their parent's "N replies" row needs
@@ -373,10 +384,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   ) {
     if (current.any((e) => e.id == incoming.id)) return current;
     final updated = [...current, incoming];
-    updated.sort((a, b) {
-      final createdAt = a.createdAt.compareTo(b.createdAt);
-      return createdAt != 0 ? createdAt : a.id.compareTo(b.id);
-    });
+    updated.sort(compareChannelTimelineEventsChronologically);
     return updated;
   }
 
@@ -442,7 +450,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     return [
       ...events,
       ..._deepLinkEvents.values.where((event) => ids.add(event.id)),
-    ]..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    ]..sort(compareChannelTimelineEventsChronologically);
   }
 
   Future<bool> fetchOlder() async {
@@ -491,7 +499,7 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
     }
     state = state.whenData((events) {
       final merged = [...deduped, ...events];
-      merged.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+      merged.sort(compareChannelTimelineEventsChronologically);
       _lastKnownMessages = merged;
       return merged;
     });

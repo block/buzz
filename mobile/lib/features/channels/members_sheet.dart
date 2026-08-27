@@ -7,8 +7,8 @@ import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/modal_presentation.dart';
-import '../profile/user_cache_provider.dart';
-import '../profile/user_profile.dart';
+import '../../shared/profile/user_cache_provider.dart';
+import '../../shared/profile/user_profile.dart';
 import '../profile/user_status.dart';
 import '../profile/user_status_cache_provider.dart';
 import 'agent_activity/agent_activity_sheet.dart';
@@ -35,6 +35,7 @@ class MembersSheet extends HookConsumerWidget {
     final userCache = ref.watch(userCacheProvider);
     final typingBotPubkeys = ref.watch(workingBotPubkeysProvider(channel.id));
     final statusCache = ref.watch(userStatusCacheProvider);
+    final bottomClearance = Grid.md + MediaQuery.viewPaddingOf(context).bottom;
 
     // Determine if the current user can manage members.
     final currentMember = allMembers.cast<ChannelMember?>().firstWhere(
@@ -82,93 +83,78 @@ class MembersSheet extends HookConsumerWidget {
     }, [allMembers.length]);
 
     return Padding(
-      padding: EdgeInsets.fromLTRB(
-        Grid.gutter,
-        0,
-        Grid.gutter,
-        MediaQuery.viewInsetsOf(context).bottom,
-      ),
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Members', style: context.textTheme.titleMedium),
-            const SizedBox(height: Grid.xxs),
-            if (!channel.isDm) ...[const Divider(height: 1)],
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxHeight: 400),
-              child: membersAsync.when(
-                data: (_) => ListView(
-                  shrinkWrap: true,
-                  padding: const EdgeInsets.only(top: Grid.xxs),
-                  children: [
-                    if (people.isNotEmpty) ...[
-                      _SectionLabel(label: 'People — ${people.length}'),
-                      for (final member in people)
-                        _MemberTile(
-                          member: member,
-                          currentPubkey: currentPubkey,
-                          profile: userCache[member.pubkey.toLowerCase()],
-                          canManage: canManage,
-                          isSelf:
-                              member.pubkey.toLowerCase() ==
-                              currentPubkey?.toLowerCase(),
-                          channelId: channel.id,
-                          userStatus: statusCache[member.pubkey.toLowerCase()],
-                        ),
-                    ],
-                    if (bots.isNotEmpty) ...[
-                      const SizedBox(height: Grid.xxs),
-                      _SectionLabel(label: 'Bots — ${bots.length}'),
-                      for (final bot in bots)
-                        _MemberTile(
-                          member: bot,
-                          currentPubkey: currentPubkey,
-                          profile: userCache[bot.pubkey.toLowerCase()],
-                          canManage: canManage,
-                          isSelf: false,
-                          channelId: channel.id,
-                          isWorking: typingBotPubkeys.contains(
-                            bot.pubkey.toLowerCase(),
-                          ),
-                          onViewActivity: () => openActivity(bot),
-                          onActivityTap:
-                              typingBotPubkeys.contains(
-                                bot.pubkey.toLowerCase(),
-                              )
-                              ? () => openActivity(bot)
-                              : null,
-                        ),
-                    ],
-                    if (people.isEmpty && bots.isEmpty)
-                      Center(
-                        child: Text(
-                          'No members found.',
-                          style: context.textTheme.bodySmall?.copyWith(
-                            color: context.colors.onSurfaceVariant,
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-                loading: () => const Center(
-                  child: BuzzLoadingIndicator(
-                    size: 44,
-                    semanticLabel: 'Loading members',
+      key: const ValueKey('members-sheet-content-padding'),
+      padding: EdgeInsets.fromLTRB(Grid.gutter, 0, Grid.gutter, 0),
+      child: ConstrainedBox(
+        key: const ValueKey('members-sheet-viewport'),
+        constraints: BoxConstraints(maxHeight: 400 + bottomClearance),
+        child: membersAsync.when(
+          data: (_) => ListView(
+            key: const ValueKey('members-sheet-list'),
+            shrinkWrap: true,
+            padding: EdgeInsets.only(top: Grid.xxs, bottom: bottomClearance),
+            children: [
+              if (people.isNotEmpty) ...[
+                _SectionLabel(label: 'People · ${people.length}'),
+                for (final member in people)
+                  _MemberTile(
+                    member: member,
+                    currentPubkey: currentPubkey,
+                    profile: userCache[member.pubkey.toLowerCase()],
+                    canManage: canManage,
+                    isSelf:
+                        member.pubkey.toLowerCase() ==
+                        currentPubkey?.toLowerCase(),
+                    channelId: channel.id,
+                    userStatus: statusCache[member.pubkey.toLowerCase()],
                   ),
-                ),
-                error: (error, _) => Center(
+              ],
+              if (bots.isNotEmpty) ...[
+                const SizedBox(height: Grid.xxs),
+                _SectionLabel(label: 'Agents · ${bots.length}'),
+                for (final bot in bots)
+                  _MemberTile(
+                    member: bot,
+                    currentPubkey: currentPubkey,
+                    profile: userCache[bot.pubkey.toLowerCase()],
+                    canManage: canManage,
+                    isSelf: false,
+                    channelId: channel.id,
+                    isWorking: typingBotPubkeys.contains(
+                      bot.pubkey.toLowerCase(),
+                    ),
+                    onViewActivity: () => openActivity(bot),
+                    onActivityTap:
+                        typingBotPubkeys.contains(bot.pubkey.toLowerCase())
+                        ? () => openActivity(bot)
+                        : null,
+                  ),
+              ],
+              if (people.isEmpty && bots.isEmpty)
+                Center(
                   child: Text(
-                    error.toString(),
+                    'No members found.',
                     style: context.textTheme.bodySmall?.copyWith(
-                      color: context.colors.error,
+                      color: context.colors.onSurfaceVariant,
                     ),
                   ),
                 ),
+            ],
+          ),
+          loading: () => const Center(
+            child: BuzzLoadingIndicator(
+              size: 44,
+              semanticLabel: 'Loading members',
+            ),
+          ),
+          error: (error, _) => Center(
+            child: Text(
+              error.toString(),
+              style: context.textTheme.bodySmall?.copyWith(
+                color: context.colors.error,
               ),
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -185,11 +171,10 @@ class _SectionLabel extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(top: Grid.half, bottom: Grid.half),
       child: Text(
-        label.toUpperCase(),
-        style: context.textTheme.labelSmall?.copyWith(
+        label,
+        style: context.textTheme.labelMedium?.copyWith(
           color: context.colors.onSurfaceVariant,
           fontWeight: FontWeight.w600,
-          letterSpacing: 0.8,
         ),
       ),
     );
@@ -199,6 +184,7 @@ class _SectionLabel extends StatelessWidget {
 const _changeableRoles = ['admin', 'member', 'guest'];
 
 String _roleLabel(String role) {
+  if (role == 'bot') return 'Agent';
   if (role.isEmpty) return 'Member';
   return '${role[0].toUpperCase()}${role.substring(1)}';
 }
@@ -305,17 +291,13 @@ class _MemberTile extends ConsumerWidget {
     final canChangeRole = showManagementActions && !member.isBot;
     showBuzzModalBottomSheet<void>(
       context: context,
+      title: label,
       showDragHandle: true,
       builder: (sheetContext) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
-              child: Text(label, style: context.textTheme.titleSmall),
-            ),
-            const SizedBox(height: Grid.xxs),
             if (onViewActivity != null)
               ListTile(
                 leading: Icon(
