@@ -819,6 +819,74 @@ test("automatic mentions are scoped to their channel or thread composer", async 
   ).toHaveCount(0);
 });
 
+test("a thread automatic mention preserves an explicitly unpinned root agent", async ({
+  page,
+}) => {
+  await keepMentionedAgentsPinned(page);
+  await installAudienceFixtures(page, { agentAName: "claude code" });
+  await openGeneral(page);
+
+  const rootComposer = channelComposer(page);
+  const rootInput = rootComposer.getByTestId("message-input");
+  await automaticallyMention(rootComposer, "claude code");
+  await expect(
+    rootComposer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toBeVisible();
+  await rootComposer
+    .getByTestId(`composer-address-lock-remove-${AGENT_A}`)
+    .click();
+  await expect(rootInput).toHaveText("");
+  await expect(
+    rootComposer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
+
+  await rootInput.fill("@cla");
+  await expect(rootComposer.getByTestId("mention-autocomplete")).toBeVisible();
+  await rootInput.press("Tab");
+  await rootInput.type("one time");
+  await rootInput.press("Enter");
+  await expect(rootInput).toHaveText("");
+  await expect(
+    rootComposer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
+
+  await openThread(page);
+  const activeThreadComposer = threadComposer(page);
+  const threadInput = activeThreadComposer.getByTestId("message-input");
+  await threadInput.fill("@cla");
+  await expect(
+    activeThreadComposer.getByTestId("mention-autocomplete"),
+  ).toBeVisible();
+  await threadInput.press("Tab");
+  await expect(
+    activeThreadComposer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toBeVisible();
+  await threadInput.type("thread message");
+  await threadInput.press("Enter");
+
+  await openGeneral(page);
+  await expect(
+    channelComposer(page).getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
+
+  const restoredRootInput = channelComposer(page).getByTestId("message-input");
+  await restoredRootInput.fill("@cla");
+  await expect(
+    channelComposer(page).getByTestId("mention-autocomplete"),
+  ).toBeVisible();
+  await restoredRootInput.press("Tab");
+  await expect(
+    channelComposer(page).getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
+  await restoredRootInput.type("one time");
+  await restoredRootInput.press("Enter");
+
+  await expect(restoredRootInput).toHaveText("");
+  await expect(
+    channelComposer(page).getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
+});
+
 test("an unchecked agent remains excluded while automatic mentions stay enabled", async ({
   page,
 }) => {

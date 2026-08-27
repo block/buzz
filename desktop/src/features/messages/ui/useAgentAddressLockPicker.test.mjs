@@ -632,7 +632,7 @@ test("selecting an agent from the explicit picker auto-addresses it", async () =
   );
 });
 
-test("selecting an explicitly unpinned agent inserts a mention until send", async () => {
+test("repeatedly selecting an explicitly unpinned agent keeps its mentions manual", async () => {
   const { act, renderHook } = await import("@testing-library/react");
   const { useAgentAddressLockPicker } = await import(
     "./useAgentAddressLockPicker.ts"
@@ -649,7 +649,7 @@ test("selecting an explicitly unpinned agent inserts a mention until send", asyn
     ],
     getMentionDisplayName: () => "Agent Ada",
     registerMentionPubkey: () => {},
-    isInlineMentionSelection: () => false,
+    isInlineMentionSelection: () => true,
     insertMention: () => ({
       replaceFromOffset: 0,
       replaceToOffset: 0,
@@ -699,6 +699,13 @@ test("selecting an explicitly unpinned agent inserts a mention until send", asyn
       isAgent: true,
     });
   });
+  act(() => {
+    result.current.selectMentionSuggestion({
+      pubkey: "agent-pubkey",
+      displayName: "Agent Ada",
+      isAgent: true,
+    });
+  });
 
   assert.deepEqual(removedPubkeys, ["agent-pubkey"]);
   assert.deepEqual(appliedEdits, [
@@ -707,9 +714,22 @@ test("selecting an explicitly unpinned agent inserts a mention until send", asyn
       replaceToOffset: 0,
       insertText: "@Agent Ada ",
     },
+    {
+      replaceFromOffset: 0,
+      replaceToOffset: 0,
+      insertText: "@Agent Ada ",
+    },
   ]);
   assert.deepEqual(addedPubkeys, []);
   assert.deepEqual(autoPinnedSuggestions, [
+    [
+      {
+        pubkey: "agent-pubkey",
+        displayName: "Agent Ada",
+        isAgent: true,
+      },
+      { reinstateExcluded: false },
+    ],
     [
       {
         pubkey: "agent-pubkey",

@@ -302,7 +302,6 @@ export function useAgentAddressLockPicker({
           unpinnedAgentPubkeysRef.current.has(pubkey);
         if (mentions.isInlineMentionSelection() || wasUnpinned) {
           applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
-          if (wasUnpinned) unpinnedAgentPubkeysRef.current.delete(pubkey);
           trackMentionAddressedAgent(pubkey);
           onAutoPinAgentMention?.(suggestion, {
             reinstateExcluded: !wasUnpinned,
