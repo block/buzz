@@ -347,7 +347,17 @@ export function useMentions(
         kind: "identity",
         pubkey,
         displayName: agent.name,
-        isMember: false,
+        // The directory's `channelIds` is the relay-signed membership fact —
+        // the same source that admits the agent into autocomplete
+        // (relayAgentCanRespondInChannel) and authorizes mention delivery.
+        // The member roster can lag a join by up to
+        // CHANNEL_MEMBERS_STALE_TIME_MS, so deriving isMember from the roster
+        // alone badged admitted agents "not in channel" until the cache
+        // lapsed. Fall back to false outside channel-scoped mention
+        // surfaces, where the badge reflects the roster only.
+        isMember: mentionChannelId
+          ? agent.channelIds.includes(mentionChannelId)
+          : false,
         personaId:
           managedAgentPersonaIdsByPubkey.get(pubkey) ??
           (activePersonaById.has(pubkey) ? pubkey : undefined),
@@ -433,6 +443,7 @@ export function useMentions(
     managedAgentsQuery.data,
     memberPubkeys,
     members,
+    mentionChannelId,
     mentionableAgentPubkeys,
     personaNameByPubkey,
     profiles,
