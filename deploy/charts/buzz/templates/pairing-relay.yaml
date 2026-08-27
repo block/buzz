@@ -62,6 +62,9 @@ metadata:
   {{- end }}
 spec:
   type: {{ .Values.pairingRelay.service.type }}
+  {{- with .Values.pairingRelay.service.trafficDistribution }}
+  trafficDistribution: {{ . }}
+  {{- end }}
   selector:
     {{- include "buzz.pairingRelaySelectorLabels" . | nindent 4 }}
   ports:
