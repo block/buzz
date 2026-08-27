@@ -23,6 +23,7 @@ class _ComposeBarLayout extends StatelessWidget {
   final VoidCallback onMention;
   final VoidCallback onChannel;
   final VoidCallback onEmoji;
+  final VoidCallback onCreateTask;
   final VoidCallback onOpenFormatting;
   final bool canSend;
   final bool hasPendingUploads;
@@ -51,6 +52,7 @@ class _ComposeBarLayout extends StatelessWidget {
     required this.onMention,
     required this.onChannel,
     required this.onEmoji,
+    required this.onCreateTask,
     required this.onOpenFormatting,
     required this.canSend,
     required this.hasPendingUploads,
@@ -196,6 +198,11 @@ class _ComposeBarLayout extends StatelessWidget {
                                 _ComposeAction(
                                   icon: LucideIcons.aLargeSmall,
                                   onTap: onOpenFormatting,
+                                ),
+                                _ComposeAction(
+                                  icon: LucideIcons.listTodo,
+                                  tooltip: 'Create task',
+                                  onTap: onCreateTask,
                                 ),
                                 const Spacer(),
                                 _SendButton(

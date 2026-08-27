@@ -77,6 +77,8 @@ pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "relay_members",
     "scheduled_workflow_fires",
     "subscriptions",
+    "task_events",
+    "tasks",
     "thread_metadata",
     "users",
     "workflow_approvals",
@@ -93,6 +95,10 @@ pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "join_policy_acceptances",
     "moderation_reports",
     "subscriptions",
+    // task_events → tasks (FK, cascading) and tasks → channels/users, so both
+    // must precede `channels` and `users` below.
+    "task_events",
+    "tasks",
     "api_tokens",
     "channel_members",
     "thread_metadata",

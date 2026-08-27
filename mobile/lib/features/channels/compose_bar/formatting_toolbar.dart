@@ -72,7 +72,12 @@ class _ComposeAction extends StatelessWidget {
   final IconData icon;
   final VoidCallback onTap;
 
-  const _ComposeAction({required this.icon, required this.onTap});
+  /// Doubles as the button's semantics label. Optional because the original
+  /// four actions (@, #, emoji, formatting) are conventional enough to read as
+  /// glyphs; a less familiar action should name itself.
+  final String? tooltip;
+
+  const _ComposeAction({required this.icon, required this.onTap, this.tooltip});
 
   @override
   Widget build(BuildContext context) {
@@ -81,6 +86,7 @@ class _ComposeAction extends StatelessWidget {
       height: 36,
       child: IconButton(
         onPressed: () => _runComposerAction(onTap),
+        tooltip: tooltip,
         icon: Icon(icon, size: 20, color: context.colors.onSurfaceVariant),
         padding: EdgeInsets.zero,
         visualDensity: VisualDensity.compact,
