@@ -3,7 +3,10 @@ import * as React from "react";
 import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 
+import type { LeaveCommunityResult } from "@/features/communities/leaveCommunity";
+import type { Community } from "@/features/communities/types";
 import { AddCommunityDialog } from "@/features/communities/ui/AddCommunityDialog";
+import type { AddCommunityPrefillRequest } from "@/features/communities/addCommunityPrefill";
 import { useIsMobile } from "@/shared/hooks/use-mobile";
 import { useDeferredLoad } from "@/shared/hooks/useDeferredStartup";
 import {
@@ -33,12 +36,7 @@ import {
   AppSidebarPinnedHeader,
   AppSidebarPrimaryMenu,
 } from "@/features/sidebar/ui/AppSidebarPinnedHeader";
-import {
-  canPreviewUnreadDm,
-  MoreUnreadButton,
-  preferredUnreadTarget,
-} from "@/features/sidebar/ui/MoreUnreadButton";
-import { unreadCountLabel } from "@/shared/ui/UnreadPill";
+import { MoreUnreadButton } from "@/features/sidebar/ui/MoreUnreadButton";
 import { SidebarSection } from "@/features/sidebar/ui/SidebarSection";
 import {
   ChannelGroupSection,
@@ -50,20 +48,27 @@ import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
 import { HuddleProfileControl } from "@/features/huddle";
 import type {
-  AppSidebarProps,
   CollapsibleSidebarGroup,
   CreateChannelKind,
 } from "@/features/sidebar/ui/AppSidebar.types";
-import { SidebarRelayConnectionCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
+import { SidebarFooterNotices } from "@/features/sidebar/ui/SidebarFooterNotices";
+import type { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import {
   SidebarLoadingContent,
   useSidebarLoadingShape,
 } from "@/features/sidebar/ui/sidebarLoadingSkeleton";
 import { useDeferredModalOpen } from "@/shared/ui/deferredModalOpen";
-import { SidebarUpdateCard } from "@/features/settings/SidebarUpdateCard";
 import { useUpdaterContext } from "@/features/settings/hooks/UpdaterProvider";
 import { shouldShowSidebarUpdateCard } from "@/features/settings/sidebarUpdateCardVisibility";
-import type { Channel, ChannelVisibility } from "@/shared/api/types";
+import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
+import type {
+  Channel,
+  ChannelVisibility,
+  PresenceStatus,
+  Profile,
+  SearchHit,
+  UserStatus,
+} from "@/shared/api/types";
 import {
   Sidebar,
   SidebarContent,
@@ -73,6 +78,99 @@ import {
   SidebarRail,
   useSidebar,
 } from "@/shared/ui/sidebar";
+
+type AppSidebarProps = {
+  addCommunityPrefill?: AddCommunityPrefillRequest | null;
+  activeCommunity: Community | null;
+  channels: Channel[];
+  currentPubkey?: string;
+  fallbackDisplayName?: string;
+  homeBadgeCount: number;
+  isAddCommunityOpen?: boolean;
+  isLoading: boolean;
+  isCreatingChannel: boolean;
+  isCreatingForum: boolean;
+  profile?: Profile;
+  projectsOverviewActive: boolean;
+  relayConnectionCard: ReturnType<typeof useSidebarRelayConnectionCard>;
+  selfPresenceStatus: PresenceStatus;
+  errorMessage?: string;
+  selectedChannelId: string | null;
+  selectedView:
+    | "home"
+    | "channel"
+    | "messages"
+    | "agents"
+    | "workflows"
+    | "pulse"
+    | "projects";
+  unreadChannelCounts: ReadonlyMap<string, number>;
+  unreadChannelIds: ReadonlySet<string>;
+  previewActivityChannelIds: ReadonlySet<string>;
+  communities: Community[];
+  onAddCommunity: (community: Community) => void;
+  onAddCommunityOpenChange?: (open: boolean) => void;
+  onCreateChannel: (input: {
+    name: string;
+    description?: string;
+    visibility: ChannelVisibility;
+    ttlSeconds?: number;
+    templateId?: string;
+  }) => Promise<void>;
+  onCreateForum: (input: {
+    name: string;
+    description?: string;
+    visibility: ChannelVisibility;
+    ttlSeconds?: number;
+    templateId?: string;
+  }) => Promise<void>;
+  onOpenAddCommunity: () => void;
+  onSendFeedback?: () => void;
+  onHideDm: (channelId: string) => void;
+  onMarkChannelUnread: (channelId: string) => void;
+  onMarkChannelRead: (
+    channelId: string,
+    lastMessageAt: string | null | undefined,
+  ) => void;
+  onMarkAllChannelsRead: () => void;
+  onBrowseChannels?: (onCreated?: (channelId: string) => void) => void;
+  onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
+  onUpdateCommunity: (
+    id: string,
+    updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
+  ) => void;
+  onRemoveCommunity: (id: string) => Promise<LeaveCommunityResult | undefined>;
+  onCreateAgent: () => void;
+  onSelectAgents: () => void;
+  onSelectProjects: () => void;
+  onSelectPulse: () => void;
+  onSelectWorkflows: () => void;
+  onSelectHome: () => void;
+  onSelectChannel: (channelId: string) => void;
+  onOpenSearchResult: (hit: SearchHit, query: string) => void;
+  /** Full channel set for global search, including channels outside the joined sidebar list. */
+  searchChannels: Channel[];
+  searchFocusRequests: readonly [global: number, channel: number];
+  onSelectSettings: (section?: SettingsSection) => void;
+  onSetPresenceStatus?: (status: "online" | "away" | "offline") => void;
+  onSetUserStatus: (text: string, emoji: string) => void;
+  onClearUserStatus: () => void;
+  onSwitchCommunity: (id: string) => void;
+  selfUserStatus?: UserStatus;
+  isPresencePending?: boolean;
+  onNewMessage: () => void;
+  onBackgroundClick?: () => void;
+  isCreateChannelOpen?: boolean;
+  isHuddleCompanionOpen?: boolean;
+  onHuddleEnded?: (ephemeralChannelId: string | null) => void;
+  onCreateChannelOpenChange?: (open: boolean) => void;
+  mutedChannelIds?: ReadonlySet<string>;
+  onMuteChannel?: (channelId: string) => void;
+  onUnmuteChannel?: (channelId: string) => void;
+  starredChannelIds?: ReadonlySet<string>;
+  onStarChannel?: (channelId: string) => void;
+  onUnstarChannel?: (channelId: string) => void;
+};
 
 export function AppSidebar({
   addCommunityPrefill,
@@ -153,7 +251,7 @@ export function AppSidebar({
   const scrollRef = React.useRef<HTMLDivElement>(null);
   useSidebarScrollLock(scrollRef);
   // biome-ignore format: keep compact to stay within file size limit
-  const { scrollToChannel, scrollToNextAbove, scrollToNextBelow, unreadAboveCount, unreadBelowCount, unreadMessageBelowChannelIds, unreadAboveLabel, unreadBelowLabel } = useSidebarActivityOverflow({ activeWorkingByChannelId, previewActivityChannelIds, scrollRef, unreadChannelIds });
+  const { scrollToNextAbove, scrollToNextBelow, unreadAboveCount, unreadBelowCount, unreadAboveLabel, unreadBelowLabel } = useSidebarActivityOverflow({ activeWorkingByChannelId, previewActivityChannelIds, scrollRef, unreadChannelIds });
 
   React.useEffect(() => {
     const scrollElement = scrollRef.current;
@@ -395,48 +493,6 @@ export function AppSidebar({
       ),
     [directMessages, dmChannelLabels, sortModeFor],
   );
-  const unreadDmPreviewsBelow = React.useMemo(
-    () =>
-      unreadMessageBelowChannelIds.flatMap((channelId) => {
-        const channel = directMessages.find(
-          (candidate) => candidate.id === channelId,
-        );
-        const participants = dmParticipantsByChannelId[channelId];
-        const participant = participants?.[0];
-        if (
-          !channel ||
-          !participant ||
-          !canPreviewUnreadDm(
-            channel.participantPubkeys.length,
-            participants?.length ?? 0,
-          )
-        ) {
-          return [];
-        }
-        return [
-          {
-            accessibleLabel: participant.label,
-            avatarUrl: participant.avatarUrl,
-            channelId,
-            label: dmChannelLabels[channelId] ?? participant.label,
-          },
-        ];
-      }),
-    [
-      directMessages,
-      dmChannelLabels,
-      dmParticipantsByChannelId,
-      unreadMessageBelowChannelIds,
-    ],
-  );
-  const unreadDmChannelIds = React.useMemo(
-    () => new Set(directMessages.map(({ id }) => id)),
-    [directMessages],
-  );
-  const nextUnreadDmBelowId = preferredUnreadTarget(
-    unreadMessageBelowChannelIds,
-    unreadDmChannelIds,
-  );
   const sidebarLoadingShape = useSidebarLoadingShape({
     activeCommunityId: activeCommunity?.id,
     currentPubkey,
@@ -534,7 +590,7 @@ export function AppSidebar({
           {unreadAboveCount > 0 ? (
             <MoreUnreadButton
               count={unreadAboveCount}
-              label={unreadAboveLabel ?? unreadCountLabel(unreadAboveCount)}
+              label={unreadAboveLabel}
               onClick={scrollToNextAbove}
               position="top"
               testId="sidebar-more-unread-above"
@@ -542,7 +598,7 @@ export function AppSidebar({
           ) : null}
 
           <SidebarContent
-            className="buzz-sidebar-scrollbar overscroll-none [overflow-anchor:none]"
+            className="buzz-sidebar-scrollbar overscroll-none"
             data-sidebar-background
             ref={scrollRef}
           >
@@ -807,40 +863,24 @@ export function AppSidebar({
             <MoreUnreadButton
               bottomClassName="bottom-full"
               count={unreadBelowCount}
-              dmPreviews={unreadDmPreviewsBelow}
-              label={unreadBelowLabel ?? unreadCountLabel(unreadBelowCount)}
-              onClick={() =>
-                nextUnreadDmBelowId
-                  ? scrollToChannel(nextUnreadDmBelowId)
-                  : scrollToNextBelow()
-              }
+              label={unreadBelowLabel}
+              onClick={scrollToNextBelow}
               position="bottom"
-              targetChannelId={nextUnreadDmBelowId}
               testId="sidebar-more-unread-below"
             />
           ) : null}
 
           <SidebarFooter>
-            {relayConnectionCard.showSidebarRelayConnectionCard &&
-            (isMobile ? openMobile : sidebarOpen) ? (
-              <SidebarRelayConnectionCard
-                className="mb-2"
-                isConnected={relayConnectionCard.isRelayConnectionSuccess}
-                isReconnectPending={relayConnectionCard.isRelayReconnectPending}
-                isWaitingOnReconnectHook={
-                  relayConnectionCard.isWaitingOnReconnectHook
-                }
-                onDismiss={relayConnectionCard.onDismissRelayConnectionCard}
-                onReconnect={relayConnectionCard.onReconnectRelay}
-              />
-            ) : null}
-            {showSidebarUpdateCard ? (
-              <div className="mb-2 group-data-[collapsible=icon]:hidden">
-                <SidebarUpdateCard
-                  onDismiss={() => setIsSidebarUpdateCardDismissed(true)}
-                />
-              </div>
-            ) : null}
+            <SidebarFooterNotices
+              expanded={isMobile ? openMobile : sidebarOpen}
+              onDismissRelayConnectionCard={
+                relayConnectionCard.onDismissRelayConnectionCard
+              }
+              onDismissUpdateCard={() => setIsSidebarUpdateCardDismissed(true)}
+              onReconnectRelay={relayConnectionCard.onReconnectRelay}
+              relayConnectionCard={relayConnectionCard}
+              showUpdateCard={showSidebarUpdateCard}
+            />
             <HuddleProfileControl
               channels={channels}
               onHuddleEnded={onHuddleEnded}

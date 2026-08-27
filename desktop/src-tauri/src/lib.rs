@@ -95,11 +95,8 @@ use tauri_plugin_window_state::StateFlags;
 use tray_menu::show_main_window;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // mesh-llm's async chains (model download, node start/join) overflow
-    // tokio's default 2 MiB worker stacks — a stack-guard SIGABRT, not a
-    // panic. Upstream mesh-llm and mesh-console both run on 8 MiB worker
-    // stacks for this reason; give Tauri's command runtime the same headroom
-    // before anything else touches tauri::async_runtime.
+    // Match mesh-llm's 8 MiB worker stacks before Tauri initializes its runtime;
+    // deep model-download and node-start futures can overflow Tokio's default.
     #[cfg(feature = "mesh-llm")]
     match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -720,6 +717,9 @@ pub fn run() {
             mesh_serving_usage,
             mesh_installed_models,
             mesh_model_catalog,
+            mesh_experimental_catalog,
+            mesh_snapshot,
+            mesh_live_view,
             update_managed_agent,
             discover_backend_providers,
             probe_backend_provider,

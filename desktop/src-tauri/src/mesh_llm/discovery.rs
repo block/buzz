@@ -12,12 +12,72 @@ use super::{dedupe_models, MeshAvailability, MeshModelOption, MeshServeTarget, M
 pub(super) const STATUS_FRESHNESS_SECS: u64 = 120;
 pub(crate) const MESH_STATUS_PAGE_SIZE: usize = 100;
 
-fn status_is_fresh(event: &nostr::Event, now: u64) -> bool {
+pub(super) fn status_is_fresh(event: &nostr::Event, now: u64) -> bool {
     event
         .created_at
         .as_secs()
         .saturating_add(STATUS_FRESHNESS_SECS)
         >= now
+}
+
+/// Whether the relay enforces NIP-43 relay membership.
+///
+/// This is a property of the *relay deployment*, not of any particular query
+/// result, and it is resolved from the relay's NIP-11 document (NIP-43 is
+/// advertised only when membership is actually enforced). It must never be
+/// inferred from an absent membership snapshot: on a closed relay a snapshot
+/// can also be missing because of a transient replication gap, and treating
+/// that as "open" would silently drop admission enforcement exactly when the
+/// relay is least healthy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MeshRelayMode {
+    /// Membership is enforced (`BUZZ_REQUIRE_RELAY_MEMBERSHIP=true`). Every
+    /// participant is a NIP-43 direct member, so the membership snapshot is the
+    /// trust boundary for both admission and routing.
+    ClosedMembershipEnforced,
+    /// Membership is not enforced. Signing in never writes a `relay_members`
+    /// row, so the snapshot lists at most whoever was added out of band and is
+    /// structurally useless as a trust boundary. Mesh runs unenforced (stock
+    /// MeshLLM behaviour) and is scoped by the relay-derived mesh topic.
+    OpenNoMembership,
+}
+
+impl MeshRelayMode {
+    pub(crate) fn is_open(self) -> bool {
+        matches!(self, Self::OpenNoMembership)
+    }
+}
+
+/// Resolve [`MeshRelayMode`] from a relay's NIP-11 document.
+///
+/// `buzz-relay` lists NIP-43 in `supported_nips` only when it has a stable
+/// signing key *and* `BUZZ_REQUIRE_RELAY_MEMBERSHIP=true`, so the advertisement
+/// is a faithful proxy for "membership is enforced here" when the field is
+/// well formed. A missing or malformed `supported_nips` field is rejected so
+/// callers keep the fail-closed fallback rather than treating an ambiguous
+/// response as evidence that membership is disabled.
+pub fn relay_mesh_mode_from_nip11(document: &serde_json::Value) -> Result<MeshRelayMode, String> {
+    let nips = document
+        .get("supported_nips")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "NIP-11 document has no supported_nips array".to_string())?;
+    let nips = nips
+        .iter()
+        .enumerate()
+        .map(|(index, nip)| {
+            nip.as_u64()
+                .filter(|value| *value <= u32::MAX as u64)
+                .map(|value| value as u32)
+                .ok_or_else(|| {
+                    format!("NIP-11 supported_nips[{index}] is not a valid u32 NIP number")
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if nips.contains(&43) {
+        Ok(MeshRelayMode::ClosedMembershipEnforced)
+    } else {
+        Ok(MeshRelayMode::OpenNoMembership)
+    }
 }
 
 fn dedupe_targets(targets: Vec<MeshServeTarget>) -> Vec<MeshServeTarget> {
@@ -63,7 +123,7 @@ pub fn owner_ids_from_events(events: &[nostr::Event]) -> Vec<String> {
     ids
 }
 
-fn latest_membership_list(events: &[nostr::Event]) -> Option<BTreeSet<String>> {
+pub(super) fn latest_membership_list(events: &[nostr::Event]) -> Option<BTreeSet<String>> {
     events
         .iter()
         .filter(|event| event.kind.as_u16() == 13_534)
@@ -108,7 +168,7 @@ pub(crate) fn has_membership_snapshot(events: &[nostr::Event]) -> bool {
     events.iter().any(|event| event.kind.as_u16() == 13_534)
 }
 
-fn owner_id_from_status_event(event: &nostr::Event) -> Option<String> {
+pub(super) fn owner_id_from_status_event(event: &nostr::Event) -> Option<String> {
     let content = serde_json::from_str::<serde_json::Value>(&event.content).ok()?;
     let owner_id = content
         .get("ownerId")
@@ -136,7 +196,7 @@ fn owner_id_from_status_event(event: &nostr::Event) -> Option<String> {
     Some(owner_id.to_string())
 }
 
-fn endpoint_binding_is_valid(event: &nostr::Event, content: &serde_json::Value) -> bool {
+pub(super) fn endpoint_binding_is_valid(event: &nostr::Event, content: &serde_json::Value) -> bool {
     let Some(endpoint_tokens) = super::identity::advertised_endpoint_tokens(content) else {
         return false;
     };
@@ -172,14 +232,47 @@ fn endpoint_binding_is_valid(event: &nostr::Event, content: &serde_json::Value) 
         .is_ok()
 }
 
+#[cfg(test)]
 pub fn availability_from_events(events: Vec<nostr::Event>) -> MeshAvailability {
+    availability_from_events_for_mode(events, MeshRelayMode::ClosedMembershipEnforced)
+}
+
+/// Resolve availability from relay events, scoped to the relay's membership mode.
+///
+/// On a membership-enforcing relay the NIP-43 snapshot gates routing: a serve
+/// target is selectable only when its status note is signed by a current
+/// member. On a relay that does not enforce membership there is no such
+/// roster to intersect with — requiring one would make every serving peer
+/// permanently undiscoverable — so status notes are accepted on their own
+/// merits (fresh, well-formed, and carrying a valid owner-signed endpoint
+/// binding). The mesh topic is derived from the relay origin, so this widens
+/// discovery to that relay's participants, not to the public internet.
+pub fn availability_from_events_for_mode(
+    events: Vec<nostr::Event>,
+    mode: MeshRelayMode,
+) -> MeshAvailability {
     if events.is_empty() {
         return MeshAvailability::unavailable("Buzz shared compute status is not published yet");
     }
-    let Some(members) = latest_membership_list(&events) else {
-        return MeshAvailability::unavailable(
-            "Buzz shared compute is waiting for the current member roster",
-        );
+    // On an open relay the snapshot is not a trust boundary even when one
+    // happens to exist (added out of band): admission runs `TrustPolicy::Off`
+    // there, so intersecting routing with a stray roster would hide peers the
+    // mesh happily admits. Ignore membership entirely and accept status notes
+    // on their own merits.
+    let members = if mode.is_open() {
+        None
+    } else {
+        match latest_membership_list(&events) {
+            Some(members) => Some(members),
+            // An enforcing relay always publishes a snapshot (even a
+            // zero-member one), so its absence means an incomplete read:
+            // stay closed.
+            None => {
+                return MeshAvailability::unavailable(
+                    "Buzz shared compute is waiting for the current member roster",
+                );
+            }
+        }
     };
 
     // Status is replaceable per member pubkey, so a query returns multiple
@@ -191,11 +284,13 @@ pub fn availability_from_events(events: Vec<nostr::Event>) -> MeshAvailability {
 
     let now = nostr::Timestamp::now().as_secs();
     for event in events {
-        if event.kind.as_u16() as u64 != MESH_STATUS_KIND
-            || !status_is_fresh(&event, now)
-            || !members.contains(&event.pubkey.to_hex().to_ascii_lowercase())
-        {
+        if event.kind.as_u16() as u64 != MESH_STATUS_KIND || !status_is_fresh(&event, now) {
             continue;
+        }
+        if let Some(members) = members.as_ref() {
+            if !members.contains(&event.pubkey.to_hex().to_ascii_lowercase()) {
+                continue;
+            }
         }
         let Ok(content) = serde_json::from_str::<serde_json::Value>(&event.content) else {
             continue;

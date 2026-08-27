@@ -1,5 +1,6 @@
 use super::*;
 use crate::app_state::build_app_state;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn target(model_id: &str, endpoint_addr: &str) -> mesh_llm::MeshServeTarget {
     mesh_llm::MeshServeTarget {
@@ -25,6 +26,51 @@ fn reported_target(
     target.reporter_pubkey = Some(reporter_pubkey.to_string());
     target.owner_id = Some(reporter_pubkey.to_string());
     target
+}
+
+#[tokio::test]
+async fn relay_mode_probe_rechecks_the_same_url_without_caching() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test NIP-11 server");
+    let addr = listener.local_addr().expect("test server address");
+    let server = tokio::spawn(async move {
+        for body in [
+            r#"{"supported_nips":[1,11,42]}"#,
+            r#"{"supported_nips":[1,11,42,43]}"#,
+            r#"{"supported_nips":[1,"43"]}"#,
+        ] {
+            let (mut stream, _) = listener.accept().await.expect("accept NIP-11 request");
+            let mut request = vec![0; 2048];
+            let bytes_read = stream.read(&mut request).await.expect("read request");
+            let request = String::from_utf8_lossy(&request[..bytes_read]);
+            assert!(request.starts_with("GET / HTTP/1.1"));
+            assert!(request
+                .to_ascii_lowercase()
+                .contains("accept: application/nostr+json"));
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/nostr+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        }
+    });
+    let relay_url = format!("ws://{addr}");
+
+    assert_eq!(
+        probe_relay_mesh_mode(&relay_url).await,
+        Ok(mesh_llm::MeshRelayMode::OpenNoMembership)
+    );
+    assert_eq!(
+        probe_relay_mesh_mode(&relay_url).await,
+        Ok(mesh_llm::MeshRelayMode::ClosedMembershipEnforced)
+    );
+    assert!(probe_relay_mesh_mode(&relay_url).await.is_err());
+    server.await.expect("NIP-11 server task");
 }
 
 #[test]

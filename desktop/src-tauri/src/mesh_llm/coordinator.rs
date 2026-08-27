@@ -234,14 +234,28 @@ fn roster_shrinks(current: &[String], fresh: &[String]) -> bool {
 ///
 /// Rules:
 /// - query failed (`Err`)              → `Keep` (never de-admit on a relay blip)
+/// - relay enforces no membership (`Ok(None)`), roster beyond self → `Keep` (see below)
+/// - relay enforces no membership (`Ok(None)`), self-only roster → `RestartProcess` (see below)
 /// - resolved roster == current        → `Keep` (no-op)
 /// - grows (only additions)            → `RestartProcess` immediately (fast admission)
 /// - shrinks/empties, first observation → `AwaitConfirm` (hold, re-check next poll)
 /// - shrinks/empties, confirmed         → `RestartProcess` (same reduced roster twice)
+///
+/// `Ok(None)` means the relay does not enforce NIP-43 membership, so there is
+/// no roster to reconcile against. A node enforcing an allowlist that admits
+/// *other* owners keeps it: relaxing a live multi-party allowlist on the
+/// strength of a NIP-11 read would let a relay downgrade (or a spoofed
+/// document) de-restrict a running mesh. A **self-only** allowlist is
+/// different: it admits nobody else, so it protects nothing — and it is
+/// exactly the fallback a transient NIP-11 probe failure at startup produces
+/// on an open relay. Without recovery here that node stays at "1 NODE" until
+/// an app restart (the original bug, reintroduced by a single HTTP blip).
+/// Restarting resolves the roster afresh, which on an open relay yields
+/// `None` → `TrustPolicy::Off`.
 fn roster_reconcile_action(
     current_owners: &[String],
     pending_shrink: Option<&[String]>,
-    query: Result<Vec<String>, String>,
+    query: Result<Option<Vec<String>>, String>,
 ) -> RosterReconcileAction {
     let fresh = match query {
         Err(error) => {
@@ -250,7 +264,20 @@ fn roster_reconcile_action(
             );
             return RosterReconcileAction::Keep;
         }
-        Ok(fresh) => fresh,
+        Ok(None) if current_owners.is_empty() => {
+            eprintln!(
+                "buzz-mesh: relay does not enforce membership and this node is isolated by the \
+                 startup fallback; restarting to run the mesh unenforced"
+            );
+            return RosterReconcileAction::RestartProcess;
+        }
+        Ok(None) => {
+            eprintln!(
+                "buzz-mesh: relay does not enforce membership; keeping this node's current allowlist"
+            );
+            return RosterReconcileAction::Keep;
+        }
+        Ok(Some(fresh)) => fresh,
     };
 
     if fresh == current_owners {
@@ -270,6 +297,14 @@ fn roster_reconcile_action(
     }
 }
 
+fn runtime_needs_mode_probe(current_owners: Option<&[String]>) -> bool {
+    current_owners.is_none_or(<[String]>::is_empty)
+}
+
+fn open_runtime_should_restart(query: &Result<Option<Vec<String>>, String>) -> bool {
+    matches!(query, Ok(Some(_)))
+}
+
 async fn reconcile_roster(
     app: &AppHandle,
     pending_shrink: &mut Option<Vec<String>>,
@@ -285,8 +320,32 @@ async fn reconcile_roster(
             }
         }
     };
-    let Some(current_owners) = current_request.trusted_owner_ids.as_ref() else {
+    let current_owners = current_request.trusted_owner_ids.as_ref();
+    // Closed runtimes keep the existing roster-only reconciliation path. Open
+    // runtimes re-probe NIP-11 so a later open -> closed relay restart is not
+    // hidden by a permanent mode cache.
+    let relay_url = current_request
+        .relay_url
+        .as_deref()
+        .map(str::to_owned)
+        .unwrap_or_else(|| crate::relay::relay_ws_url_with_override(&state));
+    if current_owners.is_none() {
+        let query =
+            crate::commands::mesh_llm::resolve_trusted_owner_ids_at(&state, &relay_url).await;
+        if open_runtime_should_restart(&query) {
+            eprintln!(
+                "buzz-mesh: relay now enforces membership; restarting Buzz to apply its allowlist"
+            );
+            app.request_restart();
+        } else if let Err(error) = query {
+            eprintln!(
+                "buzz-mesh: open-relay mode recheck failed; keeping the running policy: {error}"
+            );
+        }
         *pending_shrink = None;
+        return Ok(());
+    }
+    let Some(current_owners) = current_owners else {
         return Ok(());
     };
     // A failed roster query must NOT be treated as "the roster became empty":
@@ -294,12 +353,16 @@ async fn reconcile_roster(
     // other member on a transient relay blip (the flapping restart loop). Keep
     // the current allowlist and try again on the next poll. A shrink is held
     // for one extra poll (hysteresis) so a single short-read never tears down.
-    let relay_url = current_request
-        .relay_url
-        .as_deref()
-        .map(str::to_owned)
-        .unwrap_or_else(|| crate::relay::relay_ws_url_with_override(&state));
-    let query = crate::commands::mesh_llm::resolve_trusted_owner_ids_at(&state, &relay_url).await;
+    let query = if runtime_needs_mode_probe(Some(current_owners)) {
+        // Self-only is the fail-safe startup policy when the initial NIP-11
+        // probe is inconclusive. Re-probe this isolated state so a later valid
+        // open result can recover it; errors still keep it self-only.
+        crate::commands::mesh_llm::resolve_trusted_owner_ids_at(&state, &relay_url).await
+    } else {
+        crate::commands::mesh_llm::resolve_closed_trusted_owner_ids_at(&state, &relay_url)
+            .await
+            .map(Some)
+    };
     match roster_reconcile_action(current_owners, pending_shrink.as_deref(), query) {
         RosterReconcileAction::Keep => {
             *pending_shrink = None;
@@ -558,10 +621,38 @@ mod tests {
         );
     }
 
+    // Regression: a transient NIP-11 probe failure at startup on an OPEN relay
+    // falls back to the enforcing path and starts the node with a self-only
+    // allowlist. If reconcile then treated `Ok(None)` as an unconditional
+    // `Keep`, that node would sit at "1 NODE" until an app restart — the
+    // original open-relay bug, reintroduced by a single HTTP blip. A self-only
+    // roster admits nobody else, so restarting to run unenforced relaxes
+    // nothing that was protecting anyone.
+    #[test]
+    fn open_relay_recovers_a_fallback_isolated_node() {
+        let self_only: Vec<String> = Vec::new();
+        let action = roster_reconcile_action(&self_only, None, Ok(None));
+        assert_eq!(
+            action,
+            RosterReconcileAction::RestartProcess,
+            "a fallback-isolated node on an open relay must restart into open mesh"
+        );
+    }
+
+    // The other side of that rule: an allowlist that admits OTHER owners is
+    // never relaxed on the strength of a NIP-11 read. A relay downgrade (or a
+    // spoofed document) must not de-restrict a running mesh.
+    #[test]
+    fn open_relay_report_keeps_a_multi_party_allowlist() {
+        let current = vec!["owner-a".to_string(), "owner-b".to_string()];
+        let action = roster_reconcile_action(&current, None, Ok(None));
+        assert_eq!(action, RosterReconcileAction::Keep);
+    }
+
     #[test]
     fn unchanged_roster_is_a_noop() {
         let current = vec!["owner-a".to_string()];
-        let action = roster_reconcile_action(&current, None, Ok(vec!["owner-a".to_string()]));
+        let action = roster_reconcile_action(&current, None, Ok(Some(vec!["owner-a".to_string()])));
         assert_eq!(action, RosterReconcileAction::Keep);
     }
 
@@ -570,7 +661,7 @@ mod tests {
     fn roster_growth_requests_process_restart_immediately() {
         let current = vec!["owner-a".to_string()];
         let fresh = vec!["owner-a".to_string(), "owner-c".to_string()];
-        let action = roster_reconcile_action(&current, None, Ok(fresh));
+        let action = roster_reconcile_action(&current, None, Ok(Some(fresh)));
         assert_eq!(action, RosterReconcileAction::RestartProcess);
     }
 
@@ -579,7 +670,7 @@ mod tests {
     fn roster_shrink_awaits_confirmation_first() {
         let current = vec!["owner-a".to_string(), "owner-b".to_string()];
         let reduced = vec!["owner-a".to_string()];
-        let action = roster_reconcile_action(&current, None, Ok(reduced.clone()));
+        let action = roster_reconcile_action(&current, None, Ok(Some(reduced.clone())));
         assert_eq!(action, RosterReconcileAction::AwaitConfirm(reduced));
     }
 
@@ -588,7 +679,7 @@ mod tests {
     fn roster_shrink_requests_process_restart_once_confirmed() {
         let current = vec!["owner-a".to_string(), "owner-b".to_string()];
         let reduced = vec!["owner-a".to_string()];
-        let action = roster_reconcile_action(&current, Some(&reduced), Ok(reduced.clone()));
+        let action = roster_reconcile_action(&current, Some(&reduced), Ok(Some(reduced.clone())));
         assert_eq!(action, RosterReconcileAction::RestartProcess);
     }
 
@@ -599,8 +690,11 @@ mod tests {
         let current = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let first_reduced = vec!["a".to_string(), "b".to_string()];
         let second_reduced = vec!["a".to_string()];
-        let action =
-            roster_reconcile_action(&current, Some(&first_reduced), Ok(second_reduced.clone()));
+        let action = roster_reconcile_action(
+            &current,
+            Some(&first_reduced),
+            Ok(Some(second_reduced.clone())),
+        );
         assert_eq!(action, RosterReconcileAction::AwaitConfirm(second_reduced));
     }
 
@@ -609,10 +703,10 @@ mod tests {
     #[test]
     fn genuinely_empty_roster_awaits_then_restarts_to_self_only() {
         let current = vec!["owner-a".to_string()];
-        let first = roster_reconcile_action(&current, None, Ok(Vec::new()));
+        let first = roster_reconcile_action(&current, None, Ok(Some(Vec::new())));
         assert_eq!(first, RosterReconcileAction::AwaitConfirm(Vec::new()));
         let empty: Vec<String> = Vec::new();
-        let confirmed = roster_reconcile_action(&current, Some(&empty), Ok(Vec::new()));
+        let confirmed = roster_reconcile_action(&current, Some(&empty), Ok(Some(Vec::new())));
         assert_eq!(confirmed, RosterReconcileAction::RestartProcess);
     }
 
@@ -621,10 +715,31 @@ mod tests {
     fn roster_shrink_then_recovery_keeps_allowlist() {
         let current = vec!["owner-a".to_string(), "owner-b".to_string()];
         let reduced = vec!["owner-a".to_string()];
-        let held = roster_reconcile_action(&current, None, Ok(reduced.clone()));
+        let held = roster_reconcile_action(&current, None, Ok(Some(reduced.clone())));
         assert_eq!(held, RosterReconcileAction::AwaitConfirm(reduced.clone()));
-        let recovered = roster_reconcile_action(&current, Some(&reduced), Ok(current.clone()));
+        let recovered =
+            roster_reconcile_action(&current, Some(&reduced), Ok(Some(current.clone())));
         assert_eq!(recovered, RosterReconcileAction::Keep);
+    }
+
+    #[test]
+    fn only_open_or_self_only_runtimes_reprobe_mode() {
+        let self_only: Vec<String> = Vec::new();
+        let closed = vec!["owner-a".to_string()];
+        assert!(runtime_needs_mode_probe(None));
+        assert!(runtime_needs_mode_probe(Some(&self_only)));
+        assert!(!runtime_needs_mode_probe(Some(&closed)));
+    }
+
+    #[test]
+    fn open_runtime_restarts_only_for_a_proven_closed_roster() {
+        assert!(open_runtime_should_restart(&Ok(Some(vec![
+            "owner-a".to_string()
+        ]))));
+        assert!(!open_runtime_should_restart(&Ok(None)));
+        assert!(!open_runtime_should_restart(&Err(
+            "NIP-11 timed out".to_string()
+        )));
     }
 
     #[test]
