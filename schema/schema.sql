@@ -219,9 +219,9 @@ CREATE TABLE events (
     -- Privacy: encrypted/private routing wrappers and p-gated membership notices
     -- must never be discoverable through NIP-50 full-text search. NULL tsvector
     -- never matches `@@`.
-    -- Keep in sync with migrations (final state: 0001 + 0005 + 0009).
+    -- Keep in sync with migrations (final state: 0001 + 0005 + 0014 + 0033).
     search_tsv  TSVECTOR GENERATED ALWAYS AS (
-        CASE WHEN kind IN (1059, 30300, 30350, 30622, 44100, 44101, 44200) THEN NULL::tsvector
+        CASE WHEN kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200) THEN NULL::tsvector
              ELSE to_tsvector('simple', content)
         END
     ) STORED,
@@ -1800,7 +1800,7 @@ CREATE TABLE relay_admin_actions (
     cancelled_by    BYTEA CHECK (cancelled_by IS NULL OR length(cancelled_by) = 32),
     -- Error from the last failure, if any.
     error_message   TEXT,
-    -- Per-action exclusive lease (migration 0034): fences concurrent same-request
+    -- Per-action exclusive lease (migration 0036): fences concurrent same-request
     -- retries and lets the recovery worker claim/re-drive stranded actions.
     action_lease_token      UUID,
     action_lease_expires_at TIMESTAMPTZ,
@@ -1817,7 +1817,7 @@ CREATE INDEX idx_relay_admin_actions_report
 CREATE INDEX idx_relay_admin_actions_state
     ON relay_admin_actions (state)
     WHERE state IN ('pending', 'enforcing');
--- Recovery worker (migration 0034): find stranded actions by lease expiry.
+-- Recovery worker (migration 0036): find stranded actions by lease expiry.
 CREATE INDEX idx_relay_admin_actions_lease
     ON relay_admin_actions (action_lease_expires_at)
     WHERE state IN ('pending', 'enforcing');
@@ -1844,11 +1844,11 @@ CREATE TABLE relay_admin_outbox (
     -- Deduplication key: prevents re-creating an artifact after delivery.
     dedup_key   TEXT UNIQUE,
     error_message TEXT,
-    -- Retryable delivery with backoff (migration 0034): failures reschedule via
+    -- Retryable delivery with backoff (migration 0036): failures reschedule via
     -- retry_after rather than terminating immediately.
     attempt_count INT NOT NULL DEFAULT 0,
     retry_after   TIMESTAMPTZ,
-    -- Per-claim ownership fence (migration 0035): completion/failure updates
+    -- Per-claim ownership fence (migration 0037): completion/failure updates
     -- require the token written at claim time, so a stale worker cannot overwrite
     -- a newer worker's terminal update.
     outbox_claim_token UUID,

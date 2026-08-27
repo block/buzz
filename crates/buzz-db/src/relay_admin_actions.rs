@@ -1,8 +1,8 @@
 //! HTTP report-resolution enforcement state machine persistence.
 //!
 //! Backs the `relay_admin_actions` and `relay_admin_outbox` tables from
-//! `migrations/0034_relay_admin_actions.sql` and
-//! `migrations/0035_relay_admin_action_lease.sql`.
+//! `migrations/0035_relay_admin_actions.sql` and
+//! `migrations/0036_relay_admin_action_lease.sql`.
 //!
 //! This module is the only persistence allowed to write to `relay_admin_actions`;
 //! report claim, step advancement, and finalization all go through the

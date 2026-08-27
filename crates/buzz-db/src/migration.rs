@@ -685,7 +685,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 37);
+        assert_eq!(migrations.len(), 38);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -883,6 +883,18 @@ mod tests {
         assert!(migrations[13].sql.as_str().contains("30350"));
         assert!(migrations[13].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30350"));
+
+        // NIP-PMA kind:30179 FTS exclusion (0033): same wrap-the-existing-
+        // expression shape as 0014 so brownfield databases stop tokenizing
+        // private managed-agent ciphertext without a policy rewrite. (The
+        // migration itself still rewrites the events heap and rebuilds the
+        // GIN index — see the 0033 header for the operational cost.)
+        assert_eq!(migrations[32].version, 33);
+        assert!(migrations[32].sql.as_str().contains("kind = 30179"));
+        assert!(migrations[32].sql.as_str().contains("search_tsv"));
+        assert!(!migrations[0].sql.as_str().contains("30179"));
+        assert!(include_str!("../../../schema/schema.sql")
+            .contains("kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200)"));
 
         // Public push-gateway authority is intentionally deployment-global and
         // durable: immediate revocation and hostile-relay admission cannot be
@@ -1127,72 +1139,72 @@ mod tests {
             extract_roster_fence(desired_schema)
         );
 
-        assert_eq!(migrations[32].version, 33);
-        let relay_operators = migrations[32].sql.as_str();
+        assert_eq!(migrations[33].version, 34);
+        let relay_operators = migrations[33].sql.as_str();
         assert!(
             relay_operators.contains("CREATE TABLE relay_operators"),
-            "migration 33 must create relay_operators"
+            "migration 34 must create relay_operators"
         );
         assert!(
             relay_operators.contains("_operator_global_tables"),
-            "migration 33 must register relay_operators in _operator_global_tables"
+            "migration 34 must register relay_operators in _operator_global_tables"
         );
         assert!(
             relay_operators.contains("actor_authority"),
-            "migration 33 must add actor_authority to moderation_actions"
+            "migration 34 must add actor_authority to moderation_actions"
         );
         assert!(
             relay_operators.contains("processing"),
-            "migration 33 must add processing status to moderation_reports"
-        );
-
-        assert_eq!(migrations[33].version, 34);
-        let relay_admin_actions = migrations[33].sql.as_str();
-        assert!(
-            relay_admin_actions.contains("CREATE TABLE relay_admin_actions"),
-            "migration 34 must create relay_admin_actions"
-        );
-        assert!(
-            relay_admin_actions.contains("CREATE TABLE relay_admin_outbox"),
-            "migration 34 must create relay_admin_outbox"
-        );
-        assert!(
-            relay_admin_actions.contains("request_id"),
-            "migration 34 relay_admin_actions must include request_id for idempotency"
-        );
-        assert!(
-            relay_admin_actions.contains("step_marker"),
-            "migration 34 relay_admin_actions must include step_marker for crash recovery"
+            "migration 34 must add processing status to moderation_reports"
         );
 
         assert_eq!(migrations[34].version, 35);
-        let action_lease = migrations[34].sql.as_str();
+        let relay_admin_actions = migrations[34].sql.as_str();
+        assert!(
+            relay_admin_actions.contains("CREATE TABLE relay_admin_actions"),
+            "migration 35 must create relay_admin_actions"
+        );
+        assert!(
+            relay_admin_actions.contains("CREATE TABLE relay_admin_outbox"),
+            "migration 35 must create relay_admin_outbox"
+        );
+        assert!(
+            relay_admin_actions.contains("request_id"),
+            "migration 35 relay_admin_actions must include request_id for idempotency"
+        );
+        assert!(
+            relay_admin_actions.contains("step_marker"),
+            "migration 35 relay_admin_actions must include step_marker for crash recovery"
+        );
+
+        assert_eq!(migrations[35].version, 36);
+        let action_lease = migrations[35].sql.as_str();
         assert!(
             action_lease.contains("action_lease_token"),
-            "migration 35 must add action_lease_token to relay_admin_actions"
+            "migration 36 must add action_lease_token to relay_admin_actions"
         );
         assert!(
             action_lease.contains("action_lease_expires_at"),
-            "migration 35 must add action_lease_expires_at to relay_admin_actions"
+            "migration 36 must add action_lease_expires_at to relay_admin_actions"
         );
         assert!(
             action_lease.contains("attempt_count"),
-            "migration 35 must add attempt_count to relay_admin_outbox"
+            "migration 36 must add attempt_count to relay_admin_outbox"
         );
         assert!(
             action_lease.contains("retry_after"),
-            "migration 35 must add retry_after to relay_admin_outbox"
+            "migration 36 must add retry_after to relay_admin_outbox"
         );
 
-        assert_eq!(migrations[36].version, 37);
-        let operator_audit = migrations[36].sql.as_str();
+        assert_eq!(migrations[37].version, 38);
+        let operator_audit = migrations[37].sql.as_str();
         assert!(
             operator_audit.contains("CREATE TABLE relay_operator_audit"),
-            "migration 37 must create relay_operator_audit"
+            "migration 38 must create relay_operator_audit"
         );
         assert!(
             operator_audit.contains("_operator_global_tables"),
-            "migration 37 must register relay_operator_audit in _operator_global_tables"
+            "migration 38 must register relay_operator_audit in _operator_global_tables"
         );
     }
 
@@ -1947,11 +1959,11 @@ mod tests {
     /// migrations are two independent sources of the same schema. When a
     /// migration mutates the admin tables, `schema.sql` must be hand-updated to
     /// match — nothing enforces that automatically, and the lease/claim-token
-    /// migrations (0034/0035) once drifted for exactly this reason.
+    /// migrations (0035/0036) once drifted for exactly this reason.
     ///
     /// This bootstraps one probe database from `schema.sql` **through the real
     /// `bin/pgschema apply` binary** — the exact path CI (`ci.yml`) and both
-    /// test-relay launchers take — and migrates another through 1–36, then
+    /// test-relay launchers take — and migrates another through 1–38, then
     /// asserts the three admin tables have identical column definitions (name,
     /// type, nullability, default) and identical index shapes, including each
     /// key's catalog sort/null options (`pg_index.indoption`). Columns are keyed
@@ -2086,9 +2098,9 @@ mod tests {
             .await
             .expect("connect migrated probe database");
         MIGRATOR
-            .run_to(37, &migrated)
+            .run_to(38, &migrated)
             .await
-            .expect("apply migrations 1-37");
+            .expect("apply migrations 1-38");
 
         for table in [
             "relay_admin_actions",
@@ -2203,7 +2215,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn populated_upgrade_preserves_search_policy_except_for_push_leases() {
+    async fn populated_upgrade_preserves_search_policy_except_for_private_kinds() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
         MIGRATOR
@@ -2219,7 +2231,7 @@ mod tests {
             .await
             .expect("insert community");
 
-        for (marker, kind) in [(1_u8, 1_i32), (2_u8, 30_350_i32)] {
+        for (marker, kind) in [(1_u8, 1_i32), (2_u8, 30_350_i32), (3_u8, 30_179_i32)] {
             sqlx::query(
                 "INSERT INTO events \
                  (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at) \
@@ -2246,19 +2258,37 @@ mod tests {
         .fetch_all(&pool)
         .await
         .expect("read pre-push search behavior");
-        assert_eq!(before, vec![(1, true), (30_350, true)]);
+        assert_eq!(before, vec![(1, true), (30_179, true), (30_350, true)]);
+
+        // 0014 fixes 30350 only. A brownfield database that stopped here still
+        // tokenized kind:30179 ciphertext — the gap 0033 closes.
+        MIGRATOR
+            .run_to(32, &pool)
+            .await
+            .expect("apply migrations through 32");
+        let pre_0033: Vec<(i32, Option<bool>)> = sqlx::query_as(
+            "SELECT kind, search_tsv @@ plainto_tsquery('simple', 'needle') \
+             FROM events ORDER BY kind",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read pre-0033 search behavior");
+        assert_eq!(
+            pre_0033,
+            vec![(1, Some(true)), (30_179, Some(true)), (30_350, None)]
+        );
 
         run_migrations(&pool)
             .await
-            .expect("apply push migrations to populated database");
+            .expect("apply remaining migrations to populated database");
         let after: Vec<(i32, Option<bool>)> = sqlx::query_as(
             "SELECT kind, search_tsv @@ plainto_tsquery('simple', 'needle') \
              FROM events ORDER BY kind",
         )
         .fetch_all(&pool)
         .await
-        .expect("read post-push search behavior");
-        assert_eq!(after, vec![(1, Some(true)), (30_350, None)]);
+        .expect("read post-upgrade search behavior");
+        assert_eq!(after, vec![(1, Some(true)), (30_179, None), (30_350, None)]);
     }
 
     #[tokio::test]
