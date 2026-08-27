@@ -76,15 +76,25 @@ export function getBootWarmSnapshot() {
 /**
  * Overlay the launch boot-warm gate onto a cheap-path query result so cheap
  * consumers never present a cold catalog as authoritative. Pure so it can be
- * unit-tested without a mounted hook:
+ * unit-tested without a mounted hook.
  *
- * - A non-empty catalog always wins — a revalidation or a post-warm failure
- *   never blanks an already-good list.
- * - `pending` (first forced pass in flight) reads as loading.
- * - `failed` (forced pass rejected, still no catalog) reads as a retryable
- *   error carrying the probe's real reason.
+ * The cheap backend response is *never* empty on a cold cache — discovery
+ * always emits the full set of known runtimes (as `not_installed`/`cli_missing`
+ * rows) plus presets. Gating on `data.length` would therefore be a no-op for the
+ * exact payload this exists to gate, so the gate keys on the boot-warm state
+ * instead and always preserves `query.data`:
+ *
+ * - `pending` (first forced pass in flight) reads as loading, so a cold catalog
+ *   is presented as still-loading rather than a settled "everything
+ *   unavailable" list — even though those cold rows are non-empty.
+ * - `failed` (forced pass rejected) reads as a retryable error carrying the
+ *   probe's real reason.
  * - `idle`/`settled` pass the query through unchanged, so onboarding (which
- *   renders before the warm starts) is unaffected.
+ *   renders before the warm starts) and the warmed hot path are untouched.
+ *
+ * `query.data` is preserved on every branch: overlaying only the lifecycle
+ * flags means a consumer that reads `data ?? []` keeps its rows while a
+ * status-driven consumer correctly treats them as not-yet-authoritative.
  */
 export function applyBootWarmGate<
   Q extends {
@@ -96,7 +106,6 @@ export function applyBootWarmGate<
     isError: boolean;
   },
 >(query: Q, bootWarm: { status: AcpBootWarmStatus; error: Error | null }): Q {
-  if ((query.data?.length ?? 0) > 0) return query;
   if (bootWarm.status === "pending") {
     return { ...query, isLoading: true, isPending: true, isFetching: true };
   }
@@ -132,6 +141,22 @@ export async function startBootWarm(
   if (result === undefined && bootWarmSnapshot.status === "pending") {
     setBootWarm("failed", lastForcedError);
   }
+}
+
+/**
+ * A stable callback that re-runs the boot warm after it failed, for the retry
+ * affordance the cheap-path surfaces (create/edit picker, Agent defaults) show
+ * when the gate is in its `failed` state. `startBootWarm` is the retry
+ * primitive: from `failed` it transitions back through `pending` (so the
+ * surface shows loading again) to `settled` on success or `failed` with a fresh
+ * reason on another rejection. It no-ops while `pending`/`settled`, so a
+ * double-click cannot stack probes.
+ */
+export function useRetryBootWarm() {
+  const queryClient = useQueryClient();
+  return React.useCallback(() => {
+    void startBootWarm(queryClient);
+  }, [queryClient]);
 }
 
 /**

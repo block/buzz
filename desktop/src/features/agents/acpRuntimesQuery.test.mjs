@@ -239,37 +239,76 @@ afterEach(() => {
 // failure state (a failed forced pass must surface a retryable error carrying
 // the real reason, not a silent empty catalog), plus recovery on retry.
 describe("boot-warm gate drives cheap consumers through the initial pass", () => {
-  it("applyBootWarmGate: pending reads as loading, catalog always wins", () => {
-    const cold = {
-      data: [],
+  it("applyBootWarmGate: a non-empty cold catalog is not authoritative while pending or failed", () => {
+    // The real cold cheap response is NEVER empty: discovery always emits the
+    // known runtimes as not_installed/cli_missing rows plus presets. Model that
+    // wire shape so the gate is exercised against the payload it exists to
+    // gate, not a `[]` that never occurs in production.
+    const coldCatalog = {
+      data: [
+        rawEntry("codex", "unknown"),
+        rawEntry("goose", "unknown"),
+        rawEntry("claude-code", "unknown"),
+      ],
       error: null,
       isLoading: false,
       isPending: false,
       isFetching: false,
       isError: false,
     };
-    // Race: cheap path already resolved cold, but the first forced pass is in
-    // flight — the cold catalog must present as loading, never authoritative.
-    const pending = applyBootWarmGate(cold, { status: "pending", error: null });
+    // A consumer maps `isLoading -> "loading"`, `isError -> "error"`, else
+    // `"ready"`. "Ready" is what blesses the cold rows as authoritative — the
+    // exact P2 defect. Assert neither pending nor failed reads as ready.
+    const readsAsReady = (q) => !q.isLoading && !q.isError;
+
+    const pending = applyBootWarmGate(coldCatalog, {
+      status: "pending",
+      error: null,
+    });
     assert.equal(pending.isLoading, true);
     assert.equal(pending.isPending, true);
+    assert.equal(
+      readsAsReady(pending),
+      false,
+      "pending must not read as ready",
+    );
+    // The catalog rows are preserved so a consumer reading `data ?? []` keeps
+    // them; only the lifecycle flags are overlaid.
+    assert.equal(pending.data.length, 3);
 
-    // A non-empty catalog wins over the gate, so a revalidation or a later
-    // failure can never blank an already-good list.
-    const warm = { ...cold, data: [rawEntry("codex", "logged_in")] };
-    const kept = applyBootWarmGate(warm, {
+    const reason = new Error("PATH probe timed out");
+    const failed = applyBootWarmGate(coldCatalog, {
       status: "failed",
-      error: new Error("late failure"),
+      error: reason,
     });
-    assert.equal(kept.isError, false);
-    assert.equal(kept.data.length, 1);
+    assert.equal(failed.isError, true);
+    assert.equal(failed.error, reason);
+    assert.equal(readsAsReady(failed), false, "failed must not read as ready");
+    assert.equal(failed.data.length, 3);
 
-    // idle/settled pass through untouched (protects onboarding, warmed hot path).
+    // idle/settled pass through untouched: onboarding renders before the warm
+    // starts (idle) and the warmed hot path (settled) must both read as ready.
     for (const status of ["idle", "settled"]) {
-      const passed = applyBootWarmGate(cold, { status, error: null });
+      const passed = applyBootWarmGate(coldCatalog, { status, error: null });
       assert.equal(passed.isLoading, false);
       assert.equal(passed.isError, false);
+      assert.equal(readsAsReady(passed), true, `${status} must read as ready`);
     }
+  });
+
+  it("applyBootWarmGate: a warmed non-empty catalog reads as ready once settled", () => {
+    const warm = {
+      data: [rawEntry("codex", "logged_in")],
+      error: null,
+      isLoading: false,
+      isPending: false,
+      isFetching: false,
+      isError: false,
+    };
+    const settled = applyBootWarmGate(warm, { status: "settled", error: null });
+    assert.equal(settled.isLoading, false);
+    assert.equal(settled.isError, false);
+    assert.equal(settled.data.length, 1);
   });
 
   it("applyBootWarmGate: failed reads as a retryable error with the real reason", () => {

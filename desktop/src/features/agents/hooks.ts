@@ -57,7 +57,10 @@ import {
   refreshAcpRuntimes,
   subscribeBootWarm,
 } from "@/features/agents/acpRuntimesQuery";
-export { useAcpRuntimesQueryForced } from "@/features/agents/acpRuntimesQuery";
+export {
+  useAcpRuntimesQueryForced,
+  useRetryBootWarm,
+} from "@/features/agents/acpRuntimesQuery";
 import {
   createPersona,
   deletePersona,
