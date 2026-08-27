@@ -150,18 +150,39 @@ test("nip98 mode: a failed PATCH surfaces an error and does not lie about the st
     }
     route.fulfill({ contentType: "application/json", body: "[]" });
   });
-  await page.route(`**/api/admin/v1/feedback/${FEEDBACK_ONE}`, (route) =>
-    route.fulfill({
-      status: 500,
-      contentType: "application/json",
-      body: JSON.stringify({ error: { code: "internal", message: "boom" } }),
-    }),
+  // Gate the failing PATCH so the test can observe the in-flight (pending)
+  // state before the 500 lands.
+  let releasePatch: () => void = () => {};
+  const patchInFlight = new Promise<void>((resolve) => {
+    releasePatch = resolve;
+  });
+  await page.route(
+    `**/api/admin/v1/feedback/${FEEDBACK_ONE}`,
+    async (route) => {
+      await patchInFlight;
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ error: { code: "internal", message: "boom" } }),
+      });
+    },
   );
 
   await page.goto("/feedback");
-  await page.getByRole("combobox").last().selectOption("archived");
+  const control = page.getByRole("combobox").last();
+  await control.selectOption("archived");
 
+  // While the PATCH is in flight the control is disabled and no error is shown.
+  await expect(control).toBeDisabled();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+
+  releasePatch();
+
+  // The failed write surfaces an error and leaves the control at the original
+  // server status — it never optimistically adopts the requested value.
   await expect(page.getByRole("alert")).toHaveText("Update failed");
+  await expect(control).toHaveValue("new");
+  await expect(control).toBeEnabled();
 });
 
 test("disabled mode: the status control is a read-only badge with no write affordance", async ({
