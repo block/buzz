@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::http::header;
+use axum::http::HeaderValue;
 use axum::{
     extract::{FromRequestParts, Path, State},
     http::{request::Parts, HeaderMap, StatusCode},
@@ -779,6 +780,66 @@ pub(crate) async fn serve_blob_for_tenant(
     }
 }
 
+/// Passive raster image formats safe to render inline in a browser, keyed by
+/// content sniff of the stored bytes. SVG is intentionally excluded: it is an
+/// active document that can execute script.
+fn verified_inline_image_type(bytes: &[u8]) -> Option<&'static str> {
+    match infer::get(bytes).map(|kind| kind.mime_type()) {
+        Some("image/png") => Some("image/png"),
+        Some("image/jpeg") => Some("image/jpeg"),
+        Some("image/gif") => Some("image/gif"),
+        Some("image/webp") => Some("image/webp"),
+        _ => None,
+    }
+}
+
+/// Serve a feedback attachment to an admin operator without ever letting an
+/// attacker-controlled payload execute as a typed document.
+///
+/// Feedback attachment bytes, their `imeta` MIME, and filename are all supplied
+/// by untrusted reporters. The normal media route trusts the stored sidecar
+/// MIME to choose an inline disposition, so a hash-valid HTML or SVG payload
+/// mislabelled `image/*` would open as an executable document on the admin
+/// origin. This wrapper re-derives the served type from a content sniff of the
+/// stored bytes: only verified passive raster images render inline; every other
+/// payload is forced to `application/octet-stream` + `Content-Disposition:
+/// attachment` so the browser downloads it instead of running it. The normal
+/// `/media` route is unchanged.
+pub(crate) async fn serve_feedback_attachment(
+    state: &AppState,
+    tenant: &TenantContext,
+    sha256: &str,
+    req_headers: &HeaderMap,
+) -> Result<Response, MediaError> {
+    // infer needs only the leading magic bytes (webp reads through byte 11).
+    const SNIFF_PREFIX_LEN: u64 = 32;
+    let key = resolve_s3_key(&state.media_storage, tenant, sha256).await?;
+    let prefix = state
+        .media_storage
+        .get_range(&key, 0, SNIFF_PREFIX_LEN - 1)
+        .await
+        .unwrap_or_default();
+    let inline_type = verified_inline_image_type(&prefix);
+
+    let mut response = serve_blob_for_tenant(state, tenant, sha256, req_headers).await?;
+    let headers = response.headers_mut();
+    let (content_type, disposition) = match inline_type {
+        Some(mime) => (mime, "inline"),
+        None => ("application/octet-stream", "attachment"),
+    };
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static(disposition),
+    );
+    // A forced attachment must never be sniffed back into an executable type.
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok(response)
+}
+
 /// Parse a `Range: bytes=START-END` header value.
 ///
 /// Returns `Some((start, end))` for a valid absolute or suffix range.
@@ -961,6 +1022,35 @@ mod tests {
             serving_write_error(backend),
             MediaError::ServiceUnavailable
         ));
+    }
+
+    #[test]
+    fn feedback_inline_allows_only_sniffed_passive_raster_images() {
+        // Real magic bytes for the four verified passive raster formats.
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F', b'I', b'F'];
+        let gif = *b"GIF89a";
+        let mut webp = Vec::from(*b"RIFF");
+        webp.extend_from_slice(&[0, 0, 0, 0]);
+        webp.extend_from_slice(b"WEBP");
+        assert_eq!(verified_inline_image_type(&png), Some("image/png"));
+        assert_eq!(verified_inline_image_type(&jpeg), Some("image/jpeg"));
+        assert_eq!(verified_inline_image_type(&gif), Some("image/gif"));
+        assert_eq!(verified_inline_image_type(&webp), Some("image/webp"));
+
+        // Active documents and non-raster payloads never render inline — a
+        // reporter cannot smuggle script past the sniff, regardless of the
+        // imeta MIME they supplied.
+        assert_eq!(
+            verified_inline_image_type(b"<svg xmlns=\"...\"></svg>"),
+            None
+        );
+        assert_eq!(
+            verified_inline_image_type(b"<!DOCTYPE html><script>alert(1)</script>"),
+            None
+        );
+        assert_eq!(verified_inline_image_type(b"%PDF-1.7"), None);
+        assert_eq!(verified_inline_image_type(b""), None);
     }
 
     #[test]

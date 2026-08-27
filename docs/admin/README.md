@@ -141,6 +141,16 @@ ignored; it never demotes the config grant.
 `GET /operators` returns every effective principal with its `effectiveRole` and
 all contributing `sources` (`config`, `owner_fallback`, `db`).
 
+**Last-operator protection.** When no config-backed operator is effective —
+`RELAY_OPERATOR_PUBKEYS` is empty and owner fallback is inactive — the roster is
+staffed entirely by DB `operator` rows. A demotion or delete that would remove
+the final DB operator is rejected transactionally with `409 Conflict` ("add a
+replacement operator first"); the row is left unchanged. The safe way to hand
+off sole authority is the add-first transfer: `PUT` the replacement operator,
+then demote or delete the outgoing one. Config-backed operators are unaffected —
+while any config operator or owner fallback is effective, the DB roster may be
+emptied freely because config still guarantees an operator.
+
 ### Disabled mode (`BUZZ_ADMIN_AUTH=disabled`)
 
 Operators whose admin API is already protected at the network layer — for

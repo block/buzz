@@ -12,12 +12,21 @@
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Row as _, Transaction};
 
-use crate::error::Result;
+use crate::error::{DbError, Result};
 
 /// Advisory-lock namespace for per-target roster mutation serialization. The
 /// hashed key is `<namespace><hex-pubkey>`, scoping the lock to one target so
 /// mutations of different operators never contend.
 const OPERATOR_LOCK_NAMESPACE: &str = "relay_operator:";
+
+/// Well-known advisory-lock key for roster-wide serialization. Operator-
+/// removing mutations (demote/delete) take this single lock so the last-
+/// operator invariant is computed against a snapshot no concurrent removal can
+/// invalidate — a per-target lock cannot see a race between two *different*
+/// targets both dropping to zero. Always acquired before any per-target lock,
+/// giving a consistent lock order (deadlock-free: `remove` takes only this
+/// lock, `upsert` takes this then per-target).
+const OPERATOR_ROSTER_LOCK: &str = "relay_operator_roster";
 
 /// Take a transaction-scoped advisory lock keyed by the target pubkey. Held
 /// until the transaction commits or rolls back; serializes the read/upsert/audit
@@ -28,6 +37,27 @@ async fn acquire_operator_lock(tx: &mut Transaction<'_, Postgres>, pubkey: &[u8]
         .execute(&mut **tx)
         .await?;
     Ok(())
+}
+
+/// Take the transaction-scoped roster-wide advisory lock. Serializes all
+/// operator-removing mutations against each other so the last-operator check
+/// sees a stable count.
+async fn acquire_roster_lock(tx: &mut Transaction<'_, Postgres>) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(OPERATOR_ROSTER_LOCK)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Number of DB rows currently carrying the `operator` role, read inside the
+/// mutation transaction after the change is applied.
+async fn db_operator_count(tx: &mut Transaction<'_, Postgres>) -> Result<i64> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM relay_operators WHERE role = 'operator'")
+            .fetch_one(&mut **tx)
+            .await?;
+    Ok(count)
 }
 
 /// A row in `relay_operators`.
@@ -51,8 +81,34 @@ pub struct RelayOperatorRecord {
 /// captures the role the upsert overwrites. A per-target advisory lock (held
 /// for the transaction) serializes concurrent mutations of the same target so
 /// the pre-image can never be misread across the absent-row race.
-pub async fn upsert(pool: &PgPool, pubkey: &[u8], role: &str, added_by: &[u8]) -> Result<()> {
+///
+/// `config_operator_exists` is the request-time snapshot of whether any
+/// config-backed operator (`RELAY_OPERATOR_PUBKEYS` or active owner fallback)
+/// is effective. A demotion (`role == "moderator"`) that would leave no
+/// effective operator — no config operator and no remaining DB `operator` row —
+/// is rolled back with [`DbError::LastOperator`]. Grants and promotions to
+/// operator never remove an operator, so they take neither the roster lock nor
+/// the invariant check.
+pub async fn upsert(
+    pool: &PgPool,
+    pubkey: &[u8],
+    role: &str,
+    added_by: &[u8],
+    config_operator_exists: bool,
+) -> Result<()> {
     let mut tx = pool.begin().await?;
+
+    // A demotion to moderator can drop the effective-operator count; serialize
+    // it against every other operator-removing mutation via the roster-wide
+    // lock BEFORE the per-target lock so the post-mutation count is race-free (a
+    // per-target lock cannot observe a concurrent removal of a *different*
+    // operator). We take the lock whenever the target role is `moderator` —
+    // before the pre-image is known — and only enforce the invariant below once
+    // the pre-image confirms this actually demoted an operator.
+    let demotion_candidate = role == "moderator";
+    if demotion_candidate {
+        acquire_roster_lock(&mut tx).await?;
+    }
 
     // Serialize concurrent mutations of the SAME target before the pre-image
     // read. `SELECT ... FOR UPDATE` locks nothing when the row is absent, so
@@ -103,6 +159,17 @@ pub async fn upsert(pool: &PgPool, pubkey: &[u8], role: &str, added_by: &[u8]) -
     .execute(&mut *tx)
     .await?;
 
+    // Enforce the last-operator invariant only when this mutation actually
+    // demoted an operator (`prev_role == "operator"`, `new_role == "moderator"`).
+    // A fresh moderator grant (prev_role NULL) or a moderator→moderator no-op
+    // never removed an operator, so it must not trip the invariant even when the
+    // roster is empty. Dropping the tx without committing rolls the demotion and
+    // its audit row back.
+    let demotion = demotion_candidate && prev_role.as_deref() == Some("operator");
+    if demotion && !config_operator_exists && db_operator_count(&mut tx).await? == 0 {
+        return Err(DbError::LastOperator);
+    }
+
     tx.commit().await?;
     Ok(())
 }
@@ -112,8 +179,24 @@ pub async fn upsert(pool: &PgPool, pubkey: &[u8], role: &str, added_by: &[u8]) -
 ///
 /// Returns `true` if a row was deleted (and audited), `false` if the pubkey was
 /// not found (idempotent no-op; no audit row is written).
-pub async fn remove(pool: &PgPool, pubkey: &[u8], actor: &[u8]) -> Result<bool> {
+///
+/// `config_operator_exists` is the request-time snapshot of whether any
+/// config-backed operator is effective. Deleting the sole effective operator —
+/// no config operator and no remaining DB `operator` row — is rolled back with
+/// [`DbError::LastOperator`]. The roster-wide lock (taken before the delete)
+/// serializes this against every other operator-removing mutation so two
+/// concurrent deletes of different operators cannot both race to zero.
+pub async fn remove(
+    pool: &PgPool,
+    pubkey: &[u8],
+    actor: &[u8],
+    config_operator_exists: bool,
+) -> Result<bool> {
     let mut tx = pool.begin().await?;
+
+    // Serialize against every other operator-removing mutation before the
+    // delete so the post-delete count reflects a stable roster.
+    acquire_roster_lock(&mut tx).await?;
 
     // Capture the pre-image role the delete removes; also gates the audit row
     // so a no-op delete of an absent pubkey writes nothing.
@@ -137,6 +220,12 @@ pub async fn remove(pool: &PgPool, pubkey: &[u8], actor: &[u8]) -> Result<bool> 
         .bind(prev_role.as_deref())
         .execute(&mut *tx)
         .await?;
+
+        // Deleting an operator can empty the roster. Dropping the tx here rolls
+        // the delete and its audit row back.
+        if !config_operator_exists && db_operator_count(&mut tx).await? == 0 {
+            return Err(DbError::LastOperator);
+        }
     }
 
     tx.commit().await?;
@@ -230,17 +319,19 @@ mod tests {
         }
 
         // Grant moderator: no prior row → prev_role NULL, new_role moderator.
-        upsert(&pool, &target, "moderator", &actor)
+        upsert(&pool, &target, "moderator", &actor, true)
             .await
             .expect("grant");
         // Elevate to operator: prev_role moderator, new_role operator.
-        upsert(&pool, &target, "operator", &actor)
+        upsert(&pool, &target, "operator", &actor, true)
             .await
             .expect("elevate");
         // Revoke: prev_role operator, new_role NULL.
-        assert!(remove(&pool, &target, &actor).await.expect("revoke"));
+        assert!(remove(&pool, &target, &actor, true).await.expect("revoke"));
         // Idempotent no-op revoke writes no audit row.
-        assert!(!remove(&pool, &target, &actor).await.expect("no-op revoke"));
+        assert!(!remove(&pool, &target, &actor, true)
+            .await
+            .expect("no-op revoke"));
 
         let rows = audit_rows(&pool, &target).await;
         assert_eq!(
@@ -286,7 +377,8 @@ mod tests {
             .expect("hold operator key");
 
         let (pool2, t2, a2) = (pool.clone(), target.clone(), actor_a.clone());
-        let mut grant = tokio::spawn(async move { upsert(&pool2, &t2, "moderator", &a2).await });
+        let mut grant =
+            tokio::spawn(async move { upsert(&pool2, &t2, "moderator", &a2, true).await });
         let blocked = tokio::time::timeout(std::time::Duration::from_millis(750), &mut grant).await;
         assert!(
             blocked.is_err(),
@@ -302,7 +394,7 @@ mod tests {
             .expect("grant");
 
         // Phase 2 — a second upsert reads the first committed role, not NULL.
-        upsert(&pool, &target, "operator", &actor_b)
+        upsert(&pool, &target, "operator", &actor_b, true)
             .await
             .expect("elevate");
 
@@ -444,7 +536,7 @@ mod tests {
         .expect("create reject trigger");
 
         // The in-transaction audit INSERT raises, so the upsert must error.
-        let result = upsert(&pool, &target, "moderator", &actor).await;
+        let result = upsert(&pool, &target, "moderator", &actor, true).await;
         assert!(result.is_err(), "audit failure must surface as an error");
 
         // Coupling: the roster mutation shares the audit transaction, so it
@@ -466,5 +558,186 @@ mod tests {
             .execute(&pool)
             .await
             .ok();
+    }
+
+    /// Fresh unique 32-byte pubkey for a last-operator test, so parallel or
+    /// repeated runs never collide on the same target row.
+    fn unique_pubkey() -> Vec<u8> {
+        let id = uuid::Uuid::new_v4();
+        id.as_bytes().iter().chain(id.as_bytes()).copied().collect()
+    }
+
+    /// Empty the roster so `db_operator_count` reflects only rows this test
+    /// creates — the last-operator invariant counts every `role='operator'`
+    /// row in the table. Safe for `#[ignore]` PG tests run individually.
+    async fn clear_roster(pool: &PgPool) {
+        sqlx::query("DELETE FROM relay_operators")
+            .execute(pool)
+            .await
+            .expect("clear roster");
+    }
+
+    async fn audit_count(pool: &PgPool, target: &[u8]) -> i64 {
+        sqlx::query_scalar("SELECT count(*) FROM relay_operator_audit WHERE target_pubkey = $1")
+            .bind(target)
+            .fetch_one(pool)
+            .await
+            .expect("count audit rows")
+    }
+
+    /// Demoting the sole DB operator with no config-backed operator must roll
+    /// back with `LastOperator`: the row stays `operator` and no demotion audit
+    /// row is written. Without the in-transaction invariant the demotion would
+    /// commit and empty the effective roster.
+    #[tokio::test]
+    #[ignore = "requires Postgres — last-operator invariant on self-demotion"]
+    async fn demoting_sole_db_operator_without_config_is_rejected() {
+        let pool = setup_pool().await;
+        clear_roster(&pool).await;
+        let target = unique_pubkey();
+
+        upsert(&pool, &target, "operator", &target, false)
+            .await
+            .expect("grant sole operator");
+
+        let result = upsert(&pool, &target, "moderator", &target, false).await;
+        assert!(
+            matches!(result, Err(DbError::LastOperator)),
+            "demoting the sole operator with no config fallback must be rejected, got {result:?}"
+        );
+
+        let row = get(&pool, &target)
+            .await
+            .expect("get")
+            .expect("row present");
+        assert_eq!(row.role, "operator", "demotion must have rolled back");
+        assert_eq!(
+            audit_count(&pool, &target).await,
+            1,
+            "only the grant audit row survives; the rejected demotion writes none"
+        );
+    }
+
+    /// Deleting the sole DB operator with no config-backed operator must roll
+    /// back with `LastOperator`: the row stays and no revoke audit row is
+    /// written.
+    #[tokio::test]
+    #[ignore = "requires Postgres — last-operator invariant on self-delete"]
+    async fn deleting_sole_db_operator_without_config_is_rejected() {
+        let pool = setup_pool().await;
+        clear_roster(&pool).await;
+        let target = unique_pubkey();
+
+        upsert(&pool, &target, "operator", &target, false)
+            .await
+            .expect("grant sole operator");
+
+        let result = remove(&pool, &target, &target, false).await;
+        assert!(
+            matches!(result, Err(DbError::LastOperator)),
+            "deleting the sole operator with no config fallback must be rejected, got {result:?}"
+        );
+
+        assert!(
+            get(&pool, &target).await.expect("get").is_some(),
+            "delete must have rolled back — row still present"
+        );
+        assert_eq!(
+            audit_count(&pool, &target).await,
+            1,
+            "only the grant audit row survives; the rejected delete writes none"
+        );
+    }
+
+    /// A config-backed operator (or active owner fallback) is signalled by
+    /// `config_operator_exists = true`; with it set, deleting the last DB
+    /// operator is allowed because config still guarantees an effective
+    /// operator — the invariant only guards the empty-config case.
+    #[tokio::test]
+    #[ignore = "requires Postgres — config fallback allows emptying the DB roster"]
+    async fn config_present_allows_deleting_last_db_operator() {
+        let pool = setup_pool().await;
+        clear_roster(&pool).await;
+        let target = unique_pubkey();
+
+        upsert(&pool, &target, "operator", &target, true)
+            .await
+            .expect("grant operator");
+
+        let removed = remove(&pool, &target, &target, true)
+            .await
+            .expect("delete allowed when config operator exists");
+        assert!(removed, "row was deleted");
+        assert!(
+            get(&pool, &target).await.expect("get").is_none(),
+            "row must be gone"
+        );
+    }
+
+    /// The roster-wide advisory lock serializes operator-removing mutations
+    /// ACROSS targets — the property the per-target lock cannot provide. Two
+    /// facets, both required:
+    ///
+    /// - *Causality:* while a holder transaction owns the roster lock, a
+    ///   concurrent `remove` of a DIFFERENT operator must make no progress
+    ///   (it blocks acquiring the same roster lock). Dropping the roster lock
+    ///   from `remove` makes the spawned call return immediately and fails the
+    ///   block assertion — the per-target lock keys on the pubkey and never
+    ///   contends across targets.
+    /// - *Semantics:* once serialized, the second delete sees the first's
+    ///   committed removal, so the two operators cannot both race to zero — the
+    ///   loser is rejected with `LastOperator`, leaving one operator standing.
+    #[tokio::test]
+    #[ignore = "requires Postgres — roster lock serializes concurrent cross-target deletes"]
+    async fn concurrent_deletes_racing_to_zero_leave_one_operator() {
+        let pool = setup_pool().await;
+        clear_roster(&pool).await;
+        let a = unique_pubkey();
+        let b = unique_pubkey();
+
+        upsert(&pool, &a, "operator", &a, false)
+            .await
+            .expect("grant operator a");
+        upsert(&pool, &b, "operator", &b, false)
+            .await
+            .expect("grant operator b");
+
+        // Phase 1 — hold the roster lock; a concurrent delete of a DIFFERENT
+        // target must serialize on it and make no progress until released.
+        let mut holder = pool.begin().await.expect("begin lock holder");
+        acquire_roster_lock(&mut holder)
+            .await
+            .expect("hold roster lock");
+
+        let (p2, t2) = (pool.clone(), a.clone());
+        let mut del_a = tokio::spawn(async move { remove(&p2, &t2, &t2, false).await });
+        let blocked = tokio::time::timeout(std::time::Duration::from_millis(750), &mut del_a).await;
+        assert!(
+            blocked.is_err(),
+            "a delete of a different target must serialize on the roster-wide lock"
+        );
+
+        // Release the roster lock; the first delete now commits (b still an
+        // operator, so the roster is not emptied).
+        holder.rollback().await.expect("release roster lock");
+        let removed_a = tokio::time::timeout(std::time::Duration::from_secs(10), del_a)
+            .await
+            .expect("delete a must proceed once the lock is released")
+            .expect("join delete a")
+            .expect("delete a");
+        assert!(removed_a, "first delete removes operator a");
+
+        // Phase 2 — b is now the sole operator; deleting it races the roster to
+        // zero and must be rejected, leaving one operator standing.
+        let result_b = remove(&pool, &b, &b, false).await;
+        assert!(
+            matches!(result_b, Err(DbError::LastOperator)),
+            "deleting the last remaining operator must be rejected, got {result_b:?}"
+        );
+
+        let remaining = db_operator_count(&mut pool.begin().await.expect("begin"))
+            .await
+            .expect("count operators");
+        assert_eq!(remaining, 1, "operator b must remain standing");
     }
 }

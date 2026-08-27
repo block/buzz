@@ -391,7 +391,7 @@ async fn feedback_attachment(
         return Err(ApiError::not_found());
     }
 
-    let response = crate::api::media::serve_blob_for_tenant(&state, &tenant, &sha256, &headers)
+    let response = crate::api::media::serve_feedback_attachment(&state, &tenant, &sha256, &headers)
         .await
         .map_err(|error| match error {
             buzz_media::MediaError::NotFound => ApiError::not_found(),
@@ -1031,8 +1031,19 @@ async fn upsert_operator(
 
     state
         .db
-        .upsert_relay_operator(&target_bytes, &body.role, &principal.pubkey)
-        .await?;
+        .upsert_relay_operator(
+            &target_bytes,
+            &body.role,
+            &principal.pubkey,
+            config_operator_exists(&state.config),
+        )
+        .await
+        .map_err(|error| match error {
+            buzz_db::DbError::LastOperator => ApiError::conflict(
+                "operation would remove the last relay operator — add a replacement operator first",
+            ),
+            _ => ApiError::internal(),
+        })?;
 
     Ok(Json(
         serde_json::json!({"pubkey": canonical_hex, "role": body.role}),
@@ -1078,8 +1089,18 @@ async fn delete_operator(
 
     let removed = state
         .db
-        .remove_relay_operator(&target_bytes, &principal.pubkey)
-        .await?;
+        .remove_relay_operator(
+            &target_bytes,
+            &principal.pubkey,
+            config_operator_exists(&state.config),
+        )
+        .await
+        .map_err(|error| match error {
+            buzz_db::DbError::LastOperator => ApiError::conflict(
+                "operation would remove the last relay operator — add a replacement operator first",
+            ),
+            _ => ApiError::internal(),
+        })?;
     if !removed {
         return Err(ApiError::not_found());
     }
@@ -1088,6 +1109,15 @@ async fn delete_operator(
 }
 
 // ── Staffing helpers ──────────────────────────────────────────────────────────
+
+/// Returns true if any config-backed operator is effective — a non-empty
+/// `RELAY_OPERATOR_PUBKEYS` (every entry is an operator) or, when that list is
+/// empty, an owner-fallback operator. This is the request-time snapshot the
+/// last-operator invariant is computed against: while it holds, the DB roster
+/// can be emptied freely because config still guarantees an operator.
+fn config_operator_exists(config: &crate::config::Config) -> bool {
+    !config.relay_operator_pubkeys.is_empty() || config.relay_owner_pubkey.is_some()
+}
 
 /// Returns true if the hex pubkey is covered by a config-backed grant
 /// (RELAY_OPERATOR_PUBKEYS or owner-fallback B).
@@ -2383,7 +2413,7 @@ mod tests {
             .expect("clear prior operator row");
         state
             .db
-            .upsert_relay_operator(&owner_bytes, "moderator", &owner_bytes)
+            .upsert_relay_operator(&owner_bytes, "moderator", &owner_bytes, true)
             .await
             .expect("insert DB operator row for owner");
 

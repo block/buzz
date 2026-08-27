@@ -690,6 +690,7 @@ function Attachment({
   authMode: AuthMode;
 }) {
   const [objectUrl, setObjectUrl] = useState<string>();
+  const [objectType, setObjectType] = useState<string>();
   const [failed, setFailed] = useState(false);
   const path = attachment.path;
   const name =
@@ -708,15 +709,17 @@ function Attachment({
     let url: string | undefined;
     let active = true;
     setObjectUrl(undefined);
+    setObjectType(undefined);
     setFailed(false);
     requestObjectUrl(path, authMode)
       .then((created) => {
         if (!active) {
-          URL.revokeObjectURL(created);
+          URL.revokeObjectURL(created.url);
           return;
         }
-        url = created;
-        setObjectUrl(created);
+        url = created.url;
+        setObjectUrl(created.url);
+        setObjectType(created.type);
       })
       .catch(() => {
         if (active) setFailed(true);
@@ -729,18 +732,16 @@ function Attachment({
 
   const detail = failed ? "Could not load attachment" : metadata;
 
-  if (attachment.mimeType.startsWith("image/")) {
+  // Inline rendering is gated on the server-VERIFIED blob type, never the
+  // reporter-supplied `attachment.mimeType`: the relay only labels sniffed
+  // passive raster images as `image/*` and forces everything else to
+  // `application/octet-stream`, so a hostile payload can never render inline.
+  if (objectUrl && objectType?.startsWith("image/")) {
     return (
       <figure className="image-attachment">
-        {objectUrl ? (
-          <a href={objectUrl} target="_blank" rel="noreferrer">
-            <img src={objectUrl} alt={name} />
-          </a>
-        ) : (
-          <div className="attachment-placeholder">
-            {failed ? "Unavailable" : "Loading…"}
-          </div>
-        )}
+        <a href={objectUrl} target="_blank" rel="noreferrer">
+          <img src={objectUrl} alt={name} />
+        </a>
         <figcaption>
           <span>{name}</span>
           <small>{detail}</small>
@@ -763,14 +764,12 @@ function Attachment({
   // API path itself would open unauthenticated in a new tab.
   if (!objectUrl) return <div className="file-attachment">{label}</div>;
 
+  // Non-image (or not-yet-typed) payloads are download-only. The object URL
+  // already wraps `application/octet-stream` bytes, and the `download`
+  // attribute with no `target="_blank"` means clicking saves the file rather
+  // than navigating to a typed document on the admin origin.
   return (
-    <a
-      className="file-attachment"
-      href={objectUrl}
-      target="_blank"
-      rel="noreferrer"
-      download={name}
-    >
+    <a className="file-attachment" href={objectUrl} download={name}>
       {label}
       <ArrowIcon />
     </a>

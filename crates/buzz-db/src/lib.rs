@@ -4005,20 +4005,33 @@ impl Db {
     }
 
     /// Insert or update a relay operator/moderator row (upsert by pubkey).
+    ///
+    /// `config_operator_exists` is the caller's request-time snapshot of
+    /// whether a config-backed operator is effective; a demotion that would
+    /// leave no effective operator is rejected with [`DbError::LastOperator`].
     pub async fn upsert_relay_operator(
         &self,
         pubkey: &[u8],
         role: &str,
         added_by: &[u8],
+        config_operator_exists: bool,
     ) -> Result<()> {
-        relay_operators::upsert(&self.pool, pubkey, role, added_by).await
+        relay_operators::upsert(&self.pool, pubkey, role, added_by, config_operator_exists).await
     }
 
     /// Remove a relay operator/moderator row. Returns `true` if deleted.
     /// Records the revocation in the append-only audit trail; `actor` is the
-    /// authenticated operator performing the removal.
-    pub async fn remove_relay_operator(&self, pubkey: &[u8], actor: &[u8]) -> Result<bool> {
-        relay_operators::remove(&self.pool, pubkey, actor).await
+    /// authenticated operator performing the removal. `config_operator_exists`
+    /// is the caller's request-time snapshot of whether a config-backed
+    /// operator is effective; deleting the sole effective operator is rejected
+    /// with [`DbError::LastOperator`].
+    pub async fn remove_relay_operator(
+        &self,
+        pubkey: &[u8],
+        actor: &[u8],
+        config_operator_exists: bool,
+    ) -> Result<bool> {
+        relay_operators::remove(&self.pool, pubkey, actor, config_operator_exists).await
     }
 
     // ── relay_admin_actions (HTTP enforcement state machine) ──────────────────

@@ -172,8 +172,11 @@ test("nip98 mode: a failed PATCH surfaces an error and does not lie about the st
   const control = page.getByRole("combobox").last();
   await control.selectOption("archived");
 
-  // While the PATCH is in flight the control is disabled and no error is shown.
+  // While the PATCH is in flight the control is disabled, shows no error, and
+  // still reads the original server status — an optimistic set (even one that
+  // rolls back on failure) would surface the unpersisted value here.
   await expect(control).toBeDisabled();
+  await expect(control).toHaveValue("new");
   await expect(page.getByRole("alert")).toHaveCount(0);
 
   releasePatch();
@@ -292,4 +295,64 @@ test("a purged feedback detail derives no attachments from an absent host", asyn
   await page.waitForTimeout(200);
   // The authoritative host is absent, so no attachment fetch is derived.
   expect(attachmentRequested).toBe(false);
+});
+
+test("a hostile attachment served as octet-stream is download-only, never a navigable typed document", async ({
+  page,
+}) => {
+  // The reporter's imeta claims image/png, but the relay sniffs the stored
+  // bytes and forces application/octet-stream for anything that is not a
+  // verified passive raster image (e.g. an HTML/SVG payload). The client must
+  // trust the served type, so this attachment renders as a download link — no
+  // <img>, no target="_blank" navigation to a typed document on the admin
+  // origin.
+  const hash = "a".repeat(64);
+  await page.route("**/api/admin/v1/reports**", (route) =>
+    route.fulfill({ contentType: "application/json", body: "[]" }),
+  );
+  await page.route("**/api/admin/v1/feedback", (route) =>
+    route.fulfill({ contentType: "application/json", body: "[]" }),
+  );
+  await page.route(
+    `**/api/admin/v1/feedback/${FEEDBACK_ONE}/attachments/**`,
+    (route) =>
+      route.fulfill({
+        contentType: "application/octet-stream",
+        body: "<script>alert(1)</script>",
+      }),
+  );
+  await page.route(`**/api/admin/v1/feedback/${FEEDBACK_ONE}`, (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: FEEDBACK_ONE,
+        communityId: "6d474feb-c50a-44e4-a0b5-f30532df49bc",
+        communityHost: "design.buzz.xyz",
+        eventId: "31".repeat(32),
+        submitterPubkey: "21".repeat(32),
+        category: "bug",
+        body: "Broken.\n\n![shot](https://design.buzz.xyz/media/x.png)",
+        tags: [
+          [
+            "imeta",
+            "url https://design.buzz.xyz/media/x.png",
+            "m image/png",
+            `x ${hash}`,
+            "filename shot.png",
+          ],
+        ],
+        status: "new",
+        eventCreatedAt: "2026-07-17T17:25:00Z",
+        receivedAt: "2026-07-17T17:30:00Z",
+      }),
+    }),
+  );
+
+  await page.goto(`/feedback/${FEEDBACK_ONE}`);
+  const link = page.getByRole("link", { name: /shot\.png/ });
+  await expect(link).toBeVisible();
+  await expect(link).toHaveAttribute("download", "shot.png");
+  await expect(link).not.toHaveAttribute("target", "_blank");
+  // The hostile payload is never rendered as an inline image.
+  await expect(page.locator("figure.image-attachment img")).toHaveCount(0);
 });

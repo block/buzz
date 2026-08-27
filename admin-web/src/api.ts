@@ -170,10 +170,16 @@ export async function probeAuthMode(): Promise<AuthMode> {
 /// Attachments cannot be fetched by `<img src>` or `<a href>` because those
 /// carry no Authorization header. Callers render the object URL and must
 /// revoke it when it is replaced or unmounted.
+///
+/// Returns the server-verified `type` alongside the URL. The relay sniffs the
+/// stored bytes and only labels verified passive raster images as `image/*`;
+/// everything else is `application/octet-stream`. Callers must decide inline
+/// rendering from this type, never from the untrusted reporter-supplied MIME.
 export async function requestObjectUrl(
   path: string,
   authMode: AuthMode,
-): Promise<string> {
+): Promise<{ url: string; type: string }> {
   const response = await send(path, "*/*", authMode);
-  return URL.createObjectURL(await response.blob());
+  const blob = await response.blob();
+  return { url: URL.createObjectURL(blob), type: blob.type };
 }
