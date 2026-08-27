@@ -142,12 +142,14 @@ export function useAgentAddressLockPicker({
           !presentAgentPubkeys.has(pubkey) &&
           lockedAgentPubkeys.has(pubkey)
         ) {
-          audience.removePubkey(pubkey);
+          const excludePubkey = audience.excludePubkey ?? audience.removePubkey;
+          excludePubkey(pubkey);
         }
       }
       visibleAgentMentionPubkeysRef.current = presentAgentPubkeys;
     },
     [
+      audience.excludePubkey,
       audience.removePubkey,
       audienceScope,
       lockedAgentPubkeys,

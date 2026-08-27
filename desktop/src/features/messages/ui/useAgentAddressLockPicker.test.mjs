@@ -375,11 +375,12 @@ test("selecting a human mention never changes automatic addressing", async () =>
   assert.deepEqual(autoPinnedSuggestions, []);
 });
 
-test("removing the last agent chip clears its automatic address", async () => {
+test("deleting the last automatic agent mention explicitly excludes its address", async () => {
   const { act, renderHook } = await import("@testing-library/react");
   const { useAgentAddressLockPicker } = await import(
     "./useAgentAddressLockPicker.ts"
   );
+  const excludedPubkeys = [];
   const removedPubkeys = [];
   const mentionRefsByText = {
     "@Agent Ada first @Agent Ada second": [
@@ -396,6 +397,7 @@ test("removing the last agent chip clears its automatic address", async () => {
       applyAutocompleteEdit: () => {},
       audience: {
         pubkeys: ["agent-pubkey", "existing-lock"],
+        excludePubkey: (pubkey) => excludedPubkeys.push(pubkey),
         removePubkey: (pubkey) => removedPubkeys.push(pubkey),
       },
       audienceScope: "channel-scope",
@@ -418,20 +420,23 @@ test("removing the last agent chip clears its automatic address", async () => {
   assert.deepEqual(removedPubkeys, []);
 
   act(() => result.current.syncAddressedAgentsFromText(""));
-  assert.deepEqual(removedPubkeys, ["agent-pubkey"]);
+  assert.deepEqual(excludedPubkeys, ["agent-pubkey"]);
+  assert.deepEqual(removedPubkeys, []);
 });
 
-test("removing human mentions is ignored while removing a restored agent chip clears its lock", async () => {
+test("deleting human mentions is ignored while deleting a restored automatic agent mention excludes its address", async () => {
   const { act, renderHook } = await import("@testing-library/react");
   const { useAgentAddressLockPicker } = await import(
     "./useAgentAddressLockPicker.ts"
   );
+  const excludedPubkeys = [];
   const removedPubkeys = [];
   const { result } = renderHook(() =>
     useAgentAddressLockPicker({
       applyAutocompleteEdit: () => {},
       audience: {
         pubkeys: ["existing-lock"],
+        excludePubkey: (pubkey) => excludedPubkeys.push(pubkey),
         removePubkey: (pubkey) => removedPubkeys.push(pubkey),
       },
       audienceScope: "channel-scope",
@@ -462,9 +467,11 @@ test("removing human mentions is ignored while removing a restored agent chip cl
     result.current.syncAddressedAgentsFromText("@Alice @Existing Agent"),
   );
   act(() => result.current.syncAddressedAgentsFromText("@Alice"));
-  assert.deepEqual(removedPubkeys, ["existing-lock"]);
+  assert.deepEqual(excludedPubkeys, ["existing-lock"]);
+  assert.deepEqual(removedPubkeys, []);
   act(() => result.current.syncAddressedAgentsFromText(""));
-  assert.deepEqual(removedPubkeys, ["existing-lock"]);
+  assert.deepEqual(excludedPubkeys, ["existing-lock"]);
+  assert.deepEqual(removedPubkeys, []);
 });
 
 test("selecting an agent from the explicit picker auto-addresses it", async () => {

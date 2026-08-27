@@ -840,6 +840,39 @@ test("an unchecked agent remains excluded while automatic mentions stay enabled"
   ).toHaveCount(0);
 });
 
+test("deleting an automatic mention turns off that agent's automatic mention state", async ({
+  page,
+}) => {
+  await keepMentionedAgentsPinned(page);
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  await automaticallyMention(composer, "Morgarita");
+
+  const selectAllShortcut = await page.evaluate(() =>
+    /mac|iphone|ipad|ipod/i.test(navigator.platform) ? "Meta+A" : "Control+A",
+  );
+  await input.press(selectAllShortcut);
+  await input.press("Backspace");
+
+  await expect(input).toHaveText("");
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
+
+  await input.fill("@Mor");
+  await input.press("Tab");
+  await input.type("one time");
+  await input.press("Enter");
+
+  await expect(input).toHaveText("");
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
+});
+
 test("implicit automatic mentions stay out of persisted drafts", async ({
   page,
 }) => {
@@ -901,7 +934,7 @@ test("reduced motion removes addressed agents without spatial animation", async 
   await expect(removeButton).toHaveCSS("transform", "none");
 
   await removeButton.click();
-  await expect(input).toHaveText("@Morgarita ");
+  await expect(input).toHaveText("");
   await expect(removeButton).toHaveCount(0);
 });
 
