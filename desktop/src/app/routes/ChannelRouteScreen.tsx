@@ -1,4 +1,5 @@
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import type { SearchHighlightNavigation } from "@/app/navigation/searchHighlightNavigation";
 import { getCachedSearchHitEvent } from "@/app/navigation/searchHitEventCache";
@@ -19,7 +20,8 @@ import {
 } from "@/features/projects/hooks";
 import { findProjectHomeByChannelId } from "@/features/projects/lib/projectHomeChannel";
 import {
-  isAuthoritativeProjectData,
+  isProjectCollectionAuthoritative,
+  isProjectRelayValidated,
   shouldUseScopedProjectHomeLookup,
 } from "@/features/projects/projectSnapshot";
 import { ProjectChannelHome } from "@/features/projects/ui/ProjectChannelHome";
@@ -119,6 +121,7 @@ export function ChannelRouteScreen({
   targetThreadRootId,
 }: ChannelRouteScreenProps) {
   const isHuddleTranscript = huddleWindowChannelId() !== null;
+  const queryClient = useQueryClient();
   const { closeForumPost, goForumPost } = useAppNavigation();
   const channelsQuery = useChannelsQuery();
   const projectsQuery = useProjectsQuery();
@@ -144,13 +147,12 @@ export function ChannelRouteScreen({
     channelId,
     projectsQuery.data ?? [],
   );
-  const projectsAreAuthoritative = isAuthoritativeProjectData(
-    projectsQuery.dataUpdatedAt,
-  );
+  const projectCollectionIsAuthoritative =
+    isProjectCollectionAuthoritative(queryClient);
   const projectHomeLookupQuery = useProjectHomeForChannelQuery(
     channelId,
     shouldUseScopedProjectHomeLookup({
-      dataUpdatedAt: projectsQuery.dataUpdatedAt,
+      collectionIsAuthoritative: projectCollectionIsAuthoritative,
       hasEnumeratedProjectHome: Boolean(enumeratedProjectHome),
       isHuddleTranscript,
     }),
@@ -296,9 +298,7 @@ export function ChannelRouteScreen({
   if (projectHome && !isHuddleTranscript) {
     return (
       <ProjectChannelHome
-        allowRepositoryHealing={
-          projectsAreAuthoritative || Boolean(projectHomeLookupQuery.data)
-        }
+        allowRepositoryHealing={isProjectRelayValidated(projectHome)}
         autoSendDraftKey={autoSendDraftKey}
         project={projectHome}
         projects={projectsQuery.data ?? [projectHome]}

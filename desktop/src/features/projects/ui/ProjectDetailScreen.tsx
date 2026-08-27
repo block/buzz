@@ -48,7 +48,7 @@ import {
 import { wantsProjectRepositorySurface } from "@/features/projects/lib/projectDetailSearch";
 import { hasAuthoritativeHomeBinding } from "@/features/projects/lib/projectHomeChannel";
 import { selectProjectRepository } from "@/features/projects/projectModels";
-import { isAuthoritativeProjectData } from "@/features/projects/projectSnapshot";
+import { isProjectRelayValidated } from "@/features/projects/projectSnapshot";
 import { ProjectSelectionProvider } from "@/features/projects/lib/useProjectSelection";
 import { useMemberChannelIds } from "@/features/projects/useRepositoryAccess";
 import { KIND_REPO_ANNOUNCEMENT } from "@/shared/constants/kinds";
@@ -694,9 +694,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   if (showChannelHome) {
     return (
       <ProjectChannelHome
-        allowRepositoryHealing={isAuthoritativeProjectData(
-          projectQuery.dataUpdatedAt,
-        )}
+        allowRepositoryHealing={isProjectRelayValidated(project)}
         project={project}
         projects={projectsQuery.data ?? [project]}
       />

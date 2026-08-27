@@ -7,6 +7,7 @@ import {
   fetchProjectEventsExhaustively,
 } from "./projectEnumeration";
 import type { Project } from "./projectModels";
+import { markProjectDataAuthoritative } from "./projectSnapshot";
 
 const HIDDEN_PROJECT_CARDS_KEY = "buzz.projects.hidden-cards.v1";
 
@@ -42,11 +43,14 @@ export async function fetchProjects(
     fetchExhaustively ??
     ((kinds, extraFilter) =>
       fetchProjectEventsExhaustively(kinds, extraFilter, undefined, signal));
-  return buildProjectsFromFetcher(fetcher, {
+  const projects = await buildProjectsFromFetcher(fetcher, {
     relayOrigin: getCachedRelayOrigin(),
     hiddenAddresses: new Set(readHiddenProjectCards()),
     viewerPubkey,
   });
+  return projects.map((project) =>
+    markProjectDataAuthoritative(project, "relay"),
+  );
 }
 
 /** Resolves the active channel's project home with a scoped relay query. */
@@ -57,7 +61,7 @@ export async function fetchProjectHomeForChannel(
   const viewerPubkey = await getIdentity()
     .then((identity) => identity.pubkey)
     .catch(() => undefined);
-  return buildProjectHomeFromFetcher(
+  const project = await buildProjectHomeFromFetcher(
     (kinds, extraFilter) =>
       fetchProjectEventsExhaustively(kinds, extraFilter, undefined, signal),
     channelId,
@@ -67,4 +71,5 @@ export async function fetchProjectHomeForChannel(
       viewerPubkey,
     },
   );
+  return project ? markProjectDataAuthoritative(project, "relay") : null;
 }

@@ -67,7 +67,10 @@ import {
   type Repository,
 } from "./projectModels";
 import { fetchProjectHomeForChannel, fetchProjects } from "./projectFetch";
-import { persistProjectSnapshot } from "./projectSnapshot";
+import {
+  markProjectCollectionAuthoritative,
+  persistProjectSnapshot,
+} from "./projectSnapshot";
 import { projectMatchesRouteId } from "./projectRoutes";
 
 export { fetchProjects } from "./projectFetch";
@@ -613,6 +616,7 @@ export function useProjectsQuery(enabled = true) {
     queryKey: projectsQueryKey,
     queryFn: async ({ signal }) => {
       const projects = await fetchProjects(undefined, signal);
+      markProjectCollectionAuthoritative(queryClient);
       persistProjectSnapshot(queryClient, projects);
       return projects;
     },
@@ -641,6 +645,7 @@ export function useProjectQuery(projectId: string) {
     queryKey: projectsQueryKey,
     queryFn: async ({ signal }) => {
       const projects = await fetchProjects(undefined, signal);
+      markProjectCollectionAuthoritative(queryClient);
       persistProjectSnapshot(queryClient, projects);
       return projects;
     },

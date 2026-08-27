@@ -27,6 +27,36 @@ async function waitForProjectSnapshot(
     .toBe(true);
 }
 
+async function mutateProjectCache(
+  page: import("@playwright/test").Page,
+): Promise<void> {
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          "__BUZZ_E2E_QUERY_CLIENT__" in window &&
+          Boolean(window.__BUZZ_E2E_QUERY_CLIENT__),
+      ),
+    )
+    .toBe(true);
+  await page.evaluate(() => {
+    const queryClient = (
+      window as typeof window & {
+        __BUZZ_E2E_QUERY_CLIENT__?: {
+          setQueryData: (
+            key: readonly string[],
+            updater: (current: unknown) => unknown,
+          ) => void;
+        };
+      }
+    ).__BUZZ_E2E_QUERY_CLIENT__;
+    if (!queryClient) throw new Error("E2E query client is unavailable.");
+    queryClient.setQueryData(["projects"], (current) =>
+      Array.isArray(current) ? [...current] : current,
+    );
+  });
+}
+
 test("snapshot project home cannot publish repository healing", async ({
   page,
 }) => {
@@ -42,6 +72,7 @@ test("snapshot project home cannot publish repository healing", async ({
     window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__ = [];
   });
   await page.goto("/", { waitUntil: "domcontentloaded" });
+  await mutateProjectCache(page);
   await page.getByTestId("channel-buzz").click();
 
   await expect(page.getByTestId("project-home-context-panel")).toBeVisible();
@@ -49,7 +80,9 @@ test("snapshot project home cannot publish repository healing", async ({
   const projectPublications = await page.evaluate(
     () =>
       window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?.filter(
-        (event) => event.kind === 30621,
+        (event) =>
+          event.kind === 30621 &&
+          event.tags.some((tag) => tag[0] === "d" && tag[1] === "buzz"),
       ) ?? [],
   );
   expect(projectPublications).toEqual([]);
@@ -69,7 +102,9 @@ test("stale non-matching snapshot uses the scoped project-home lookup", async ({
     );
     if (!key) throw new Error("Project snapshot was not persisted.");
     const snapshot = JSON.parse(window.localStorage.getItem(key) ?? "{}");
-    snapshot.projects = [];
+    snapshot.projects = snapshot.projects.filter(
+      (project) => project.dtag !== "buzz",
+    );
     const value = JSON.stringify([
       snapshot.ownerPubkey.toLowerCase(),
       snapshot.projects,
@@ -86,6 +121,7 @@ test("stale non-matching snapshot uses the scoped project-home lookup", async ({
     window.__BUZZ_E2E_DEFER_FULL_PROJECT_QUERIES__ = true;
   });
   await page.goto("/", { waitUntil: "domcontentloaded" });
+  await mutateProjectCache(page);
   await page.getByTestId("channel-buzz").click();
 
   await expect(page.getByTestId("project-home-context-panel")).toBeVisible();

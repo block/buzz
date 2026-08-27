@@ -6,6 +6,8 @@ import type { Project } from "./projectModels";
 
 const STORAGE_KEY_PREFIX = "buzz-projects.v1";
 export const PROJECTS_QUERY_KEY = ["projects"] as const;
+const PROJECT_PROVENANCE = Symbol("project-provenance");
+type ProjectProvenance = "local-write" | "relay";
 
 type ProjectSnapshotScope = {
   pubkey: string;
@@ -21,29 +23,87 @@ type StoredProjectSnapshot = {
 };
 
 const snapshotScopes = new WeakMap<QueryClient, ProjectSnapshotScope>();
+const authoritativeProjectCollections = new WeakSet<QueryClient>();
 
-/**
- * Snapshot hydration uses timestamp zero; only a completed relay enumeration
- * may authorize side effects or suppress the scoped startup lookup.
- */
-export function isAuthoritativeProjectData(dataUpdatedAt: number): boolean {
-  return dataUpdatedAt > 0;
+/** Marks one project's origin without upgrading sibling snapshot rows. */
+export function markProjectDataAuthoritative<T extends Project>(
+  project: T,
+  provenance: ProjectProvenance,
+): T {
+  Object.defineProperty(project, PROJECT_PROVENANCE, {
+    configurable: true,
+    value: provenance,
+  });
+  return project;
+}
+
+/** Returns whether this exact project came from a live read or local write. */
+export function isProjectDataAuthoritative(
+  project: Project | null | undefined,
+): boolean {
+  return Boolean(
+    project &&
+      (project as Project & { [PROJECT_PROVENANCE]?: ProjectProvenance })[
+        PROJECT_PROVENANCE
+      ],
+  );
+}
+
+/** Returns whether relay reads validated this project's repository models. */
+export function isProjectRelayValidated(
+  project: Project | null | undefined,
+): boolean {
+  return (
+    (
+      project as
+        | (Project & { [PROJECT_PROVENANCE]?: ProjectProvenance })
+        | null
+        | undefined
+    )?.[PROJECT_PROVENANCE] === "relay"
+  );
+}
+
+/** Copies non-serialized provenance when replacing one cached project object. */
+export function inheritProjectDataProvenance<T extends Project>(
+  source: Project,
+  replacement: T,
+): T {
+  const provenance = (
+    source as Project & { [PROJECT_PROVENANCE]?: ProjectProvenance }
+  )[PROJECT_PROVENANCE];
+  return provenance
+    ? markProjectDataAuthoritative(replacement, provenance)
+    : replacement;
+}
+
+/** Records that exhaustive relay enumeration completed for this query client. */
+export function markProjectCollectionAuthoritative(
+  queryClient: QueryClient,
+): void {
+  authoritativeProjectCollections.add(queryClient);
+}
+
+/** Returns whether exhaustive relay enumeration completed for this client. */
+export function isProjectCollectionAuthoritative(
+  queryClient: QueryClient,
+): boolean {
+  return authoritativeProjectCollections.has(queryClient);
 }
 
 /** Keeps the active-channel fast path live while only a snapshot is present. */
 export function shouldUseScopedProjectHomeLookup({
-  dataUpdatedAt,
+  collectionIsAuthoritative,
   hasEnumeratedProjectHome,
   isHuddleTranscript,
 }: {
-  dataUpdatedAt: number;
+  collectionIsAuthoritative: boolean;
   hasEnumeratedProjectHome: boolean;
   isHuddleTranscript: boolean;
 }): boolean {
   return (
     !isHuddleTranscript &&
     !hasEnumeratedProjectHome &&
-    !isAuthoritativeProjectData(dataUpdatedAt)
+    !collectionIsAuthoritative
   );
 }
 
