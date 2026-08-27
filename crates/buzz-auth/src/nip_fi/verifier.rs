@@ -275,12 +275,14 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
         // Every check up to the key-source lookup below is bounded and
         // dependency-independent, so rejected evidence is classified (403)
         // before an unreadable snapshot could produce a 503: exact compact
-        // structure, the protected header, the selected policy, and the
-        // policy's algorithm and token-class contract all precede key
-        // resolution (NIP-FI.md:151-171, :458-475). This is round-3's
-        // offline-before-deferral guarantee at the pipeline's front end.
+        // structure, the protected header, the signature segment's shape, the
+        // selected policy, and the policy's algorithm and token-class contract
+        // all precede key resolution (NIP-FI.md:151-171, :458-475). This is
+        // round-3's offline-before-deferral guarantee at the pipeline's front
+        // end.
         enforce_compact_structure(token)?;
         let header = parse_header(token)?;
+        enforce_signature_shape(token)?;
         let signed_issuer = self.unverified_issuer(token)?;
         let policy = self
             .registry
@@ -553,15 +555,34 @@ struct ParsedHeader {
 /// lookup: two- or four-segment garbage (which the header/claims parsers, each
 /// reading a single fixed segment, would otherwise carry past the outage seam)
 /// is classified as malformed evidence (403), never as an unreadable snapshot
-/// (503) (NIP-FI.md:151-171). Empty header/payload segments are rejected by
-/// their own parsers (also before lookup); an empty signature is left to
-/// `decode`, which re-enforces the exact structure during verification.
+/// (503). The signature segment's well-formedness — non-empty and valid
+/// base64url — is validated separately by [`enforce_signature_shape`] after
+/// header parsing, so that no structurally malformed token can defer to the
+/// key-source lookup and masquerade as a 503 outage (NIP-FI.md:151-171).
 fn enforce_compact_structure(token: &str) -> Result<(), VerifierError> {
     if token.split('.').count() == 3 {
         Ok(())
     } else {
         Err(VerifierError::MalformedToken)
     }
+}
+
+/// Reject a missing or malformed signature segment before key-source lookup.
+///
+/// A dependency-independent shape check: the third compact segment must be
+/// non-empty and valid base64url. Only cryptographic *validity* of the
+/// signature needs the resolved key, so an empty or non-base64url signature is
+/// malformed evidence (403) and must not defer to the outage seam (503). Run
+/// after [`parse_header`], so `alg=none`'s empty-signature token is already
+/// rejected at header parsing (unsupported algorithm) before this distinction
+/// matters (NIP-FI.md:151-171).
+fn enforce_signature_shape(token: &str) -> Result<(), VerifierError> {
+    let signature = token
+        .split('.')
+        .nth(2)
+        .filter(|s| !s.is_empty())
+        .ok_or(VerifierError::MalformedToken)?;
+    base64url_decode(signature).map(|_| ())
 }
 
 fn parse_header(token: &str) -> Result<ParsedHeader, VerifierError> {

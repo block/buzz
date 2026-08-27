@@ -196,6 +196,20 @@ fn b64_segment(json_text: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json_text.as_bytes())
 }
 
+/// Corrupt a token's signature while keeping it well-formed base64url, so the
+/// result exercises post-lookup cryptographic rejection — not the pre-lookup
+/// signature-shape gate. The final segment character carries curve-dependent
+/// trailing-bit constraints (a flip there can produce invalid base64url), so
+/// flip the first signature character instead: a leading character always
+/// encodes a full 6-bit value and stays well-formed.
+fn tamper_signature(token: &str) -> String {
+    let (body, signature) = token.rsplit_once('.').expect("three compact segments");
+    let mut chars: Vec<char> = signature.chars().collect();
+    let first = &mut chars[0];
+    *first = if *first == 'A' { 'B' } else { 'A' };
+    format!("{body}.{}", chars.into_iter().collect::<String>())
+}
+
 // ---- Happy path ----------------------------------------------------------
 
 #[test]
@@ -393,14 +407,14 @@ fn unknown_kid_denies() {
 #[test]
 fn tampered_signature_denies() {
     let verifier = verifier_with(access_token_policy());
-    let mut token = mint(
+    let token = mint(
         Some("at+jwt"),
         TEST_KID,
         json!({ "sub": "u", "client_id": "a" }),
     );
-    // Flip the last signature character.
-    let last = token.pop().unwrap();
-    token.push(if last == 'A' { 'B' } else { 'A' });
+    // A well-formed but cryptographically wrong signature: post-lookup crypto
+    // rejection, not the pre-lookup signature-shape gate.
+    let token = tamper_signature(&token);
     assert_eq!(
         verifier.verify(&token).unwrap_err(),
         VerifierError::InvalidSignatureOrClaims
@@ -538,6 +552,73 @@ fn es256_token_against_ed25519_okp_material_denies() {
         verifier.verify(&token).unwrap_err(),
         VerifierError::InvalidKey
     );
+}
+
+#[test]
+fn key_material_binding_covers_every_accepted_algorithm() {
+    // Exact-shape matrix over `key_material_matches` for every algorithm the
+    // policy can accept (`is_asymmetric_algorithm`). Each accepted algorithm
+    // must match exactly its required family/curve and reject a representative
+    // of every other family/curve, so any single mapping mutation goes red.
+    use jsonwebtoken::jwk::{
+        AlgorithmParameters, EllipticCurve, EllipticCurveKeyParameters, EllipticCurveKeyType,
+        OctetKeyPairParameters, OctetKeyPairType, RSAKeyParameters, RSAKeyType,
+    };
+
+    // One representative parameter set per distinguishable key material.
+    let ec_p256 = AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
+        key_type: EllipticCurveKeyType::EC,
+        curve: EllipticCurve::P256,
+        x: String::new(),
+        y: String::new(),
+    });
+    let ec_p384 = AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
+        key_type: EllipticCurveKeyType::EC,
+        curve: EllipticCurve::P384,
+        x: String::new(),
+        y: String::new(),
+    });
+    let okp_ed25519 = AlgorithmParameters::OctetKeyPair(OctetKeyPairParameters {
+        key_type: OctetKeyPairType::OctetKeyPair,
+        curve: EllipticCurve::Ed25519,
+        x: String::new(),
+    });
+    let rsa = AlgorithmParameters::RSA(RSAKeyParameters {
+        key_type: RSAKeyType::RSA,
+        n: String::new(),
+        e: String::new(),
+    });
+    let all = [&ec_p256, &ec_p384, &okp_ed25519, &rsa];
+
+    // (algorithm, the one material shape it must accept).
+    let cases = [
+        (Algorithm::ES256, &ec_p256),
+        (Algorithm::ES384, &ec_p384),
+        (Algorithm::EdDSA, &okp_ed25519),
+        (Algorithm::RS256, &rsa),
+        (Algorithm::RS384, &rsa),
+        (Algorithm::RS512, &rsa),
+        (Algorithm::PS256, &rsa),
+        (Algorithm::PS384, &rsa),
+        (Algorithm::PS512, &rsa),
+    ];
+
+    for (alg, expected) in cases {
+        assert!(
+            is_asymmetric_algorithm(alg),
+            "case algorithm {alg:?} must be policy-acceptable"
+        );
+        for material in all {
+            let should_match = std::ptr::eq(material, expected)
+                || (matches!(expected, AlgorithmParameters::RSA(_))
+                    && matches!(material, AlgorithmParameters::RSA(_)));
+            assert_eq!(
+                key_material_matches(material, alg),
+                should_match,
+                "algorithm {alg:?} against material {material:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -878,6 +959,35 @@ fn four_segment_garbage_is_rejected_before_key_source_lookup() {
 }
 
 #[test]
+fn empty_signature_is_rejected_before_key_source_lookup() {
+    // Three segments but an empty signature: a dependency-independent malformed
+    // shape (only cryptographic validity needs the key). It must deny as
+    // malformed evidence (403), not defer to the outage seam (503).
+    let verifier = verifier_with_empty_source();
+    let header = b64_segment(r#"{"alg":"ES256","kid":"test-key-1","typ":"nip-fi+jwt"}"#);
+    let claims = b64_segment(r#"{"iss":"https://issuer.example","sub":"u"}"#);
+    let token = format!("{header}.{claims}.");
+    let err = verifier.verify(&token).unwrap_err();
+    assert_eq!(err, VerifierError::MalformedToken);
+    assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
+    assert_eq!(err.denial_class().http_status(), 403);
+}
+
+#[test]
+fn non_base64url_signature_is_rejected_before_key_source_lookup() {
+    // A non-empty but invalid-base64url signature (`!` is not in the alphabet)
+    // is also a dependency-independent malformed shape: 403, not 503.
+    let verifier = verifier_with_empty_source();
+    let header = b64_segment(r#"{"alg":"ES256","kid":"test-key-1","typ":"nip-fi+jwt"}"#);
+    let claims = b64_segment(r#"{"iss":"https://issuer.example","sub":"u"}"#);
+    let token = format!("{header}.{claims}.!");
+    let err = verifier.verify(&token).unwrap_err();
+    assert_eq!(err, VerifierError::MalformedToken);
+    assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
+    assert_eq!(err.denial_class().http_status(), 403);
+}
+
+#[test]
 fn misbinding_key_source_is_rejected_by_defensive_check() {
     // Defense-in-depth: even the crate-owned source, if it returned a snapshot
     // labelled for a different issuer than requested, must not authenticate.
@@ -974,9 +1084,10 @@ fn current_status_policy_denies_without_witness() {
 #[test]
 fn current_status_invalid_signature_is_evidence_rejected_not_unavailable() {
     let verifier = verifier_with(current_status_policy());
-    let mut token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
-    let last = token.pop().unwrap();
-    token.push(if last == 'A' { 'B' } else { 'A' });
+    let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
+    // A well-formed but cryptographically wrong signature completes every
+    // offline check and denies as rejected evidence before deferral.
+    let token = tamper_signature(&token);
     let err = verifier.verify(&token).unwrap_err();
     assert_eq!(err, VerifierError::InvalidSignatureOrClaims);
     assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
