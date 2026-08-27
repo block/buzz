@@ -16,6 +16,12 @@ use std::time::{Duration, Instant};
 /// Poll interval while waiting for the child to exit.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Idle backoff for a nonblocking Unix drain that has no bytes available and
+/// has not yet been told to stop. Short so a running child's output is pulled
+/// promptly and the post-teardown join returns quickly.
+#[cfg(unix)]
+const DRAIN_IDLE_POLL: Duration = Duration::from_millis(5);
+
 /// Maximum bytes retained across stdout + stderr for one bounded probe.
 ///
 /// Discovery output is tiny — a version string, an auth-status word, a PATH
@@ -212,28 +218,61 @@ impl BoundedChild {
     }
 }
 
+/// Set a file descriptor nonblocking so a read on it returns `WouldBlock`
+/// instead of parking when no bytes are available. Returns `false` on any
+/// `fcntl` failure, which the caller treats as fail-closed.
+#[cfg(unix)]
+fn set_nonblocking<F: std::os::unix::io::AsRawFd>(f: &F) -> bool {
+    let fd = f.as_raw_fd();
+    // SAFETY: `fd` is owned by `f` for the duration of this call; `F_GETFL` /
+    // `F_SETFL` read and set the descriptor's flags without transferring
+    // ownership or touching any other resource.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags < 0 {
+            return false;
+        }
+        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) == 0
+    }
+}
+
 /// Drain one child stream on its own thread into a buffer capped by the shared
 /// aggregate budget, so the sink itself — not a post-hoc size sample — enforces
 /// [`CAPTURE_LIMIT`].
 ///
-/// The thread reads to EOF, which is what makes the join in
-/// [`output_with_timeout`] safe: it is only ever joined *after* the tree has
-/// been killed, so every writer (the child and any descendant that inherited
-/// the pipe) is gone and the read returns EOF instead of blocking forever —
-/// the exact hang that made the round-2 code abandon pipes for temp files.
-/// Draining continuously also keeps the pipe buffer from filling, so the child
-/// can never block on a full pipe while we poll it.
+/// Continuous draining keeps the pipe buffer from filling, so the child can
+/// never block on a full pipe while we poll it. Retention is bounded: `total`
+/// reserves a disjoint byte range per chunk across both streams, so the sum of
+/// both buffers never exceeds the aggregate cap. Once the cap is crossed,
+/// `overflow` is set and further bytes are read but discarded. A read error
+/// other than `Interrupted`/`WouldBlock` returns `Err`, which the caller treats
+/// as fail-closed.
 ///
-/// Retention is bounded: `total` reserves a disjoint byte range per chunk
-/// across both streams, so the sum of both buffers never exceeds the aggregate
-/// cap. Once the cap is crossed, `overflow` is set and further bytes are read
-/// (to reach EOF) but discarded. A non-`Interrupted` read error returns `Err`,
-/// which the caller treats as fail-closed.
+/// **Bounded completion differs by platform, because tree ownership does.**
+/// - **Unix:** the read end is nonblocking (see [`set_nonblocking`]). A killed
+///   in-group writer's descriptors close, so the read reaches EOF (`Ok(0)`) and
+///   the thread returns normally. But `kill_tree` is a `killpg` on the child's
+///   group, which does *not* reach a descendant that left the group via
+///   `setsid`/`setpgid` while retaining the pipe; that writer keeps the write
+///   end open and EOF never comes. So once teardown has set `stop`, a
+///   `WouldBlock` (nothing more buffered) ends the drain rather than waiting on
+///   that escaped writer forever. This is what makes bounded return hold
+///   *without* depending on every inherited writer exiting — the correction to
+///   the round-8 blocking-EOF design.
+/// - **Windows:** the read blocks to EOF. That is sound because the whole tree
+///   is owned by a kill-on-close Job Object created without
+///   `JOB_OBJECT_LIMIT_BREAKAWAY_OK`, so no descendant can escape the job; job
+///   close reaps every writer and the read reaches EOF. `stop` is unused there.
 fn spawn_drain<R: Read + Send + 'static>(
     mut reader: R,
     total: Arc<AtomicU64>,
     overflow: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
 ) -> JoinHandle<std::io::Result<Vec<u8>>> {
+    // `stop` gates only the nonblocking Unix drain; the Windows path blocks to
+    // the job-close EOF and never consults it.
+    #[cfg(windows)]
+    let _ = &stop;
     std::thread::spawn(move || {
         let mut buf = Vec::new();
         let mut chunk = [0u8; 8192];
@@ -249,12 +288,24 @@ fn spawn_drain<R: Read + Send + 'static>(
                         overflow.store(true, Ordering::Relaxed);
                         let keep = CAPTURE_LIMIT.saturating_sub(prev).min(n as u64) as usize;
                         buf.extend_from_slice(&chunk[..keep]);
-                        // Keep reading to EOF (post-kill) but retain nothing more.
+                        // Keep reading to drain the pipe but retain nothing more.
                     } else {
                         buf.extend_from_slice(&chunk[..n]);
                     }
                 }
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                // Nonblocking read (Unix only): no bytes available right now.
+                // After teardown, an escaped out-of-group writer is the only
+                // thing that could still hold the pipe open, so stop draining it
+                // rather than block the join forever; otherwise back off and
+                // retry so a running child's later output is still captured.
+                #[cfg(unix)]
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    if stop.load(Ordering::Relaxed) {
+                        return Ok(buf);
+                    }
+                    std::thread::sleep(DRAIN_IDLE_POLL);
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -275,25 +326,29 @@ fn spawn_drain<R: Read + Send + 'static>(
 ///   rather than temp files, cannot fill the disk either). Continuous draining
 ///   also keeps the pipe buffer from filling, so the child can never block on a
 ///   full pipe while we poll.
-/// - **No pipe-drain hang — via a strict ordering invariant.** A pipe read
-///   blocks until every writer (the child *and* any descendant that inherited
-///   the write end) closes it. This code joins the drains *only after*
-///   [`BoundedChild::kill_tree`] has torn the whole tree down (Unix process
-///   group / Windows kill-on-close Job Object), so by the time we join, every
-///   writer is dead and each read has hit EOF. **Kill-before-join is the
-///   load-bearing invariant** — reversing it reintroduces the round-1 hang
-///   where a backgrounded worker held the pipe open forever. This is why the
-///   round-2 switch to temp files is no longer needed.
+/// - **Bounded drain completion without depending on writer death.** Tree
+///   teardown runs on *every* exit path before the drains are joined —
+///   [`BoundedChild::kill_tree`] on timeout, error, cap breach, *and* success.
+///   But teardown alone does not guarantee EOF on Unix: `kill_tree` is a
+///   `killpg` on the child's process group, and a descendant that left the
+///   group (`setsid`/`setpgid`) while retaining the pipe survives it and keeps
+///   the write end open. So the drains do not rely on EOF from every writer:
+///   the Unix reads are nonblocking, and after teardown sets the shared `stop`
+///   flag a `WouldBlock` (no more buffered bytes) ends each drain. An escaped
+///   writer is allowed to survive; the join still returns promptly. On Windows
+///   the reads block to EOF, which is sound because the kill-on-close Job Object
+///   is created without breakaway, so no writer can escape the job. This is the
+///   correction to the round-8 design, whose blocking Unix reads could hang the
+///   join forever on a group-escaping writer.
 /// - **No wait hang.** The child is polled with [`Child::try_wait`] against the
 ///   deadline rather than blocked on with `wait()`.
 /// - **Hard tree termination on every exit path.** [`BoundedChild`] owns the
 ///   child's whole descendant tree and tears it down whether the child times
-///   out, errors, breaches the cap, *or exits successfully*, before the drains
-///   are joined. Success is not an exemption: a login-shell rc file or an auth
-///   CLI can legitimately background a descendant (`worker &`) that would
-///   otherwise outlive discovery and hold the pipe open. The timeout path
-///   additionally sends a graceful `SIGTERM` and a bounded grace period before
-///   the final kill.
+///   out, errors, breaches the cap, *or exits successfully*. Success is not an
+///   exemption: a login-shell rc file or an auth CLI can legitimately background
+///   a descendant (`worker &`) that would otherwise outlive discovery and keep
+///   consuming resources. The timeout path additionally sends a graceful
+///   `SIGTERM` and a bounded grace period before the final kill.
 pub(crate) fn output_with_timeout(mut command: Command, timeout: Duration) -> Option<Output> {
     command
         .stdin(Stdio::null())
@@ -302,17 +357,41 @@ pub(crate) fn output_with_timeout(mut command: Command, timeout: Duration) -> Op
 
     let mut child = BoundedChild::spawn(command)?;
 
-    // Shared drain state: one aggregate byte budget across both streams and one
+    let stdout_pipe = child.take_stdout();
+    let stderr_pipe = child.take_stderr();
+
+    // Unix: make the parent read ends nonblocking so a drain can be told to stop
+    // (post-teardown) instead of parking forever on a group-escaping writer that
+    // still holds the pipe. Fail closed if the fd cannot be reconfigured — the
+    // child is still fully owned here, so cleanup is just kill + reap.
+    #[cfg(unix)]
+    {
+        let stdout_ok = match stdout_pipe.as_ref() {
+            Some(p) => set_nonblocking(p),
+            None => true,
+        };
+        let stderr_ok = match stderr_pipe.as_ref() {
+            Some(p) => set_nonblocking(p),
+            None => true,
+        };
+        if !(stdout_ok && stderr_ok) {
+            child.kill_tree();
+            child.reap();
+            return None;
+        }
+    }
+
+    // Shared drain state: one aggregate byte budget across both streams, an
     // overflow flag the poll loop watches so a streaming producer that never
-    // exits is failed closed the moment it crosses the cap.
+    // exits is failed closed the moment it crosses the cap, and a stop flag that
+    // teardown raises to end the nonblocking Unix drains.
     let total = Arc::new(AtomicU64::new(0));
     let overflow = Arc::new(AtomicBool::new(false));
-    let stdout_drain = child
-        .take_stdout()
-        .map(|s| spawn_drain(s, total.clone(), overflow.clone()));
-    let stderr_drain = child
-        .take_stderr()
-        .map(|s| spawn_drain(s, total.clone(), overflow.clone()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let stdout_drain =
+        stdout_pipe.map(|s| spawn_drain(s, total.clone(), overflow.clone(), stop.clone()));
+    let stderr_drain =
+        stderr_pipe.map(|s| spawn_drain(s, total.clone(), overflow.clone(), stop.clone()));
 
     let deadline = Instant::now() + timeout;
     let status = loop {
@@ -324,8 +403,8 @@ pub(crate) fn output_with_timeout(mut command: Command, timeout: Duration) -> Op
                     break None;
                 }
                 // Fail closed on a capture breach *while the child runs*: the
-                // drain kept nothing over the cap, and killing the tree lets the
-                // drains reach EOF so the join below cannot hang.
+                // drain kept nothing over the cap; teardown below ends the
+                // drains so the join cannot hang.
                 if overflow.load(Ordering::Relaxed) {
                     child.kill_tree();
                     break None;
@@ -339,14 +418,16 @@ pub(crate) fn output_with_timeout(mut command: Command, timeout: Duration) -> Op
         }
     };
 
-    // Tree down (timeout/error/overflow already killed it above; a clean exit
-    // may still have backgrounded a descendant holding the pipe). Kill is
-    // idempotent, so calling it here on the success path is safe and is what
-    // guarantees the joins below hit EOF instead of blocking.
+    // Tree down on every path (timeout/error/overflow killed it above; a clean
+    // exit may still have backgrounded a descendant holding the pipe). Kill is
+    // idempotent, so calling it here on the success path is safe. Then raise
+    // `stop`: a killed in-group writer's pipe reaches EOF and ends its drain on
+    // its own, but a group-escaping writer never will — `stop` ends that drain
+    // on the next `WouldBlock` so the joins below return promptly.
     child.kill_tree();
     child.reap();
+    stop.store(true, Ordering::Relaxed);
 
-    // Kill-before-join: every writer is now gone, so these joins return EOF.
     let stdout = join_drain(stdout_drain);
     let stderr = join_drain(stderr_drain);
 
@@ -432,11 +513,10 @@ mod tests {
 
     // Adversarial (success path): the direct child exits 0 but backgrounds a
     // descendant that keeps writing to the inherited stdout/stderr forever.
-    // Two guarantees under test: (1) the temp-file capture returns at EOF
-    // rather than blocking on the descendant, and (2) `kill_tree` reaps that
-    // descendant before returning, so no survivor keeps consuming disk/CPU
-    // after discovery reports success. This is the pass-2 leak Thufir proved
-    // with `(yes) & exit 0`.
+    // Two guarantees under test: (1) the drain returns rather than blocking on
+    // the descendant, and (2) `kill_tree` reaps that descendant before
+    // returning, so no survivor keeps consuming CPU after discovery reports
+    // success. This is the pass-2 leak Thufir proved with `(yes) & exit 0`.
     #[cfg(unix)]
     #[test]
     fn reaps_backgrounded_descendant_on_success() {
@@ -507,6 +587,62 @@ mod tests {
             !pid_alive(descendant_pid),
             "backgrounded descendant {descendant_pid} must be group-killed on timeout, but it survived"
         );
+    }
+
+    // Adversarial (group escape): the leader backgrounds a descendant that
+    // calls `setsid()` — leaving the leader's process group while retaining the
+    // inherited stdout — then sleeps 300s; the leader itself loops forever, so
+    // the helper times out. `kill_tree` is a `killpg` on the leader's group and
+    // cannot reach the escaped descendant, so its pipe write end stays open and
+    // never reaches EOF. The helper must still return within the outer watchdog
+    // and fail closed: the nonblocking drains stop on `WouldBlock` after
+    // teardown rather than blocking on that surviving writer. This is the exact
+    // primitive Thufir reproduced against the round-8 blocking-read design; with
+    // blocking reads the drain join hangs forever and `run_watchdogged` panics.
+    //
+    // Non-vacuous: the descendant is asserted *alive* after the helper returns,
+    // proving it genuinely escaped the `killpg` (so it was still holding the
+    // pipe at join time) — the return therefore came from the stop path, not
+    // from an EOF the kill happened to produce. The test then reaps it.
+    #[cfg(unix)]
+    #[test]
+    fn returns_when_escaped_descendant_retains_pipe() {
+        let pid_file = tempfile::NamedTempFile::new().expect("temp file for descendant pid");
+        let pid_path = pid_file
+            .path()
+            .to_str()
+            .expect("utf-8 temp path")
+            .to_string();
+        // The perl descendant `setsid()`s out of the leader's group, records its
+        // PID, writes a few bytes to the retained stdout, then sleeps. The
+        // leader waits until the PID is recorded (so the test can read it) and
+        // then loops forever, forcing the timeout path.
+        let script = format!(
+            "perl -MPOSIX -e 'POSIX::setsid() or die; open(my $f,\">\",$ARGV[0]) or die; \
+             print $f $$; close $f; print \"x\" x 4096; sleep 300;' '{pid_path}' & \
+             until [ -s '{pid_path}' ]; do :; done; while :; do sleep 1; done"
+        );
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", &script]);
+        let result = run_watchdogged(cmd, Duration::from_millis(300), Duration::from_secs(5));
+        assert!(
+            result.is_none(),
+            "a timed-out probe must fail closed even when an escaped writer holds the pipe"
+        );
+
+        let descendant_pid: i32 = std::fs::read_to_string(&pid_path)
+            .expect("escaped descendant must have recorded its PID")
+            .trim()
+            .parse()
+            .expect("descendant PID must be numeric");
+        assert!(
+            pid_alive(descendant_pid),
+            "descendant {descendant_pid} was expected to survive the group kill (proving it escaped)"
+        );
+        // Reap the escaped writer so the test leaves nothing behind.
+        unsafe {
+            libc::kill(descendant_pid, libc::SIGKILL);
+        }
     }
 
     // Adversarial (capture bound): a producer that streams zero bytes
