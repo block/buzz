@@ -10,6 +10,10 @@ export const STARTUP_CHANGELOG: StartupChangelogEntry[] = [
   {
     date: "2026-08-27",
     items: [
+      "修复公网和内网 WebSocket 长连接心跳处理，降低空闲连接周期性断开的概率。",
+      "修复连接写入失败后原生连接任务退出但前端未收到错误，恢复正常自动重连。",
+      "网络断开时仍可退出当前 Community，不再被卡在无法访问的社区。",
+      "加入 Community 时 join-policy 请求失败不再阻塞 WebSocket 加入。",
       "修复公网 WebSocket 空闲时被本地连接监测误判为断线的问题，减少穿透环境下的周期性掉线。",
       "加入 Community 时支持填写可选的 LAN relay URL，并在连接状态中显示当前使用 LAN 或公网 relay。",
       "连接状态卡片增加刷新按钮，切换网络环境后可以立即重新检测连接路径。",

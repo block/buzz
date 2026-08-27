@@ -411,11 +411,32 @@ async fn run_connection<S>(
                     .map_err(|_| "WebSocket send timed out".to_string())
                     .and_then(|result| result.map_err(|error| error.to_string()));
                 let failed = result.is_err();
+                if let Err(error) = &result {
+                    // A write-side failure can terminate the native task
+                    // without producing an inbound Close/Error frame. Notify
+                    // the WebView explicitly so RelayClient clears its stale
+                    // socket id and enters its normal reconnect path.
+                    let _ = on_message.send(
+                        serde_json::json!({ "type": "Error", "data": error }),
+                    );
+                }
                 let _ = request.result.send(result);
                 if failed { break; }
             }
             incoming = socket.next() => {
                 let message = match incoming {
+                    Some(Ok(Message::Ping(payload))) => {
+                        // Relay heartbeats are consumed by the native socket
+                        // layer. Reply immediately instead of forwarding the
+                        // control frame through the WebView, which may not
+                        // expose Ping/Pong frames consistently across network
+                        // and proxy environments.
+                        if let Err(error) = socket.send(Message::Pong(payload)).await {
+                            OutboundMessage::Error(error.to_string())
+                        } else {
+                            continue;
+                        }
+                    }
                     Some(Ok(message)) => outbound_message(message),
                     Some(Err(error)) => OutboundMessage::Error(error.to_string()),
                     None => OutboundMessage::Close(None),

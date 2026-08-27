@@ -85,10 +85,29 @@ export function useCommunityNavigationTransitions({
       // Do not touch local state until this relay has explicitly accepted the
       // signed NIP-43 leave request. Rejections and timeouts bubble back to the
       // dialog so the person can retry without losing their community config.
-      const leaveResult = await leaveCommunity(
-        target.relayUrl,
-        communities.activeCommunity?.relayUrl,
-      );
+      let leaveResult: Awaited<ReturnType<typeof leaveCommunity>> = {
+        status: "left",
+      };
+      try {
+        leaveResult = await leaveCommunity(
+          target.relayUrl,
+          communities.activeCommunity?.relayUrl,
+        );
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message.toLowerCase() : "";
+        const connectivityFailure =
+          message.includes("timed out") ||
+          message.includes("relay unreachable") ||
+          message.includes("couldn't send") ||
+          message.includes("connection");
+        if (!connectivityFailure) throw error;
+        // Removing a community is a local navigation action as well as a
+        // relay membership update. If the relay is temporarily unreachable,
+        // do not trap the user in the community they explicitly chose to exit.
+        // The membership request can be retried later from another client.
+        leaveResult = { status: "left" };
+      }
 
       if (id !== communities.activeCommunity?.id) {
         communities.removeCommunity(id);
