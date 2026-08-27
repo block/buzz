@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:developer' as developer;
 import 'dart:math';
 
@@ -7,6 +8,7 @@ import 'package:nostr/nostr.dart' as nostr;
 import '../auth/auth_provider.dart';
 import '../push/dev_push_lease.dart';
 import '../push/push_bridge.dart';
+import '../push/push_lease_revocation_outbox.dart';
 import '../push/push_subscription.dart';
 import '../relay/signed_event_relay.dart';
 import 'community.dart';
@@ -100,6 +102,21 @@ final communityPushLeaseDeactivatorProvider =
           _deactivateCommunityPushLease(community, generation: generation);
     });
 
+typedef CommunityPushLeaseRevocationEnqueuer =
+    Future<bool> Function(Community community);
+
+final communityPushLeaseRevocationEnqueuerProvider =
+    Provider<CommunityPushLeaseRevocationEnqueuer>((ref) {
+      return ref.read(buzzPushLeaseRevocationOutboxProvider).enqueueCommunity;
+    });
+
+typedef CommunityPushLeaseRevocationTrigger = Future<void> Function();
+
+final communityPushLeaseRevocationTriggerProvider =
+    Provider<CommunityPushLeaseRevocationTrigger>((ref) {
+      return ref.read(buzzPushLeaseRevocationOutboxProvider).trigger;
+    });
+
 Future<void> _deactivateCommunityPushLease(
   Community community, {
   int? generation,
@@ -116,17 +133,18 @@ Future<void> _deactivateCommunityPushLease(
   final decoded = nostr.Nip19.decode(payload: nsec);
   final memberPubkey = community.pubkey ?? nostr.Keys(decoded.data).public;
   final descriptor = await fetchBuzzPushLeaseDescriptor(community.relayUrl);
-  final installationId = (await readBuzzPushEndpointGrants())
+  final matchingGrant = (await readBuzzPushEndpointGrants())
       .where(
         (grant) =>
             grant.relayOrigin == descriptor.origin &&
             grant.appProfile == buzzDevPushAppProfile,
       )
-      .map((grant) => grant.installationId)
       .firstOrNull;
-  if (installationId == null) {
+  if (matchingGrant == null) {
     throw StateError('No endpoint grant exists for push lease tombstone.');
   }
+  final installationId =
+      community.pushLeaseInstallationId ?? matchingGrant.installationId;
   final uri = Uri.parse(community.relayUrl);
   final httpScheme = switch (uri.scheme) {
     'wss' => 'https',
@@ -255,10 +273,24 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     return community.id;
   }
 
-  Future<void> removeCommunity(String id) {
+  Future<void> removeCommunity(String id) =>
+      _removeCommunity(id, invalidateAuthentication: true);
+
+  /// Removes the active community through the same local-first path as the
+  /// community list while allowing [AuthNotifier] to publish its final state.
+  Future<void> removeActiveCommunityForSignOut() =>
+      _removeCommunity(null, invalidateAuthentication: false);
+
+  Future<void> _removeCommunity(
+    String? requestedId, {
+    required bool invalidateAuthentication,
+  }) {
     return ref.read(communityTransitionProvider).runExclusive(() async {
+      var revocationJournaled = false;
       final storage = ref.read(communityStorageProvider);
       final activeId = await storage.loadActiveId();
+      final id = requestedId ?? activeId;
+      if (id == null) return;
       if (activeId == id) {
         await ref.read(communityTransitionProvider).run();
       }
@@ -267,15 +299,12 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
         (community) => community.id == id,
       );
       if (removedIndex >= 0) {
-        try {
-          await ref.read(communityPushLeaseDeactivatorProvider)(
-            current[removedIndex],
-          );
-        } catch (error, stackTrace) {
-          // Community removal remains local-first. Its already-bounded relay
-          // lease expires even if this best-effort final tombstone fails.
-          reportPushLeaseCleanupError(error, stackTrace);
-        }
+        // Persist every remote-cleanup dependency before erasing credentials.
+        // This local transaction is the only removal prerequisite. Relay I/O
+        // starts after the community and NSE snapshot have been removed.
+        revocationJournaled = await ref.read(
+          communityPushLeaseRevocationEnqueuerProvider,
+        )(current[removedIndex]);
       }
       await storage.remove(id);
 
@@ -290,13 +319,23 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
           await storage.saveActiveId(remaining.first.id);
           // Reassign list state so activeCommunityProvider picks up the new ID.
           state = AsyncData([...remaining]);
-          ref.invalidate(authProvider);
+          if (invalidateAuthentication) ref.invalidate(authProvider);
         } else {
           await storage.clearActiveId();
           // Invalidate auth so it re-evaluates against the now-empty storage
           // and transitions to unauthenticated.
-          ref.invalidate(authProvider);
+          if (invalidateAuthentication) ref.invalidate(authProvider);
         }
+      }
+      if (revocationJournaled) {
+        unawaited(
+          ref.read(communityPushLeaseRevocationTriggerProvider)().catchError((
+            Object error,
+            StackTrace stackTrace,
+          ) {
+            reportPushLeaseCleanupError(error, stackTrace);
+          }),
+        );
       }
     });
   }

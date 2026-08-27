@@ -75,44 +75,24 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
   }
 
   Future<void> signOut() {
-    return ref.read(communityTransitionProvider).runExclusive(() async {
-      await ref.read(communityTransitionProvider).run();
+    return () async {
       final storage = ref.read(communityStorageProvider);
-      final activeId = await storage.loadActiveId();
-      if (activeId != null) {
-        final communities = await storage.loadAll();
-        final activeIndex = communities.indexWhere(
-          (community) => community.id == activeId,
-        );
-        if (activeIndex >= 0) {
-          await ref.read(communityPushLeaseDeactivatorProvider)(
-            communities[activeIndex],
-          );
-        }
-        await storage.remove(activeId);
-        await storage.clearActiveId();
-      }
+      await ref
+          .read(communityListProvider.notifier)
+          .removeActiveCommunityForSignOut();
 
-      // Check if other communities remain — switch to the next one instead of
-      // forcing the user back to the pairing screen. Refreshing the complete
-      // snapshot also removes revoked keys from the extension Keychain.
+      // Community removal already persisted the outbox, deleted credentials,
+      // selected the next active community, and removed NSE state. Authentication
+      // only needs to publish the truthful resulting account state.
       final remaining = await storage.loadAll();
-      await syncCommunitySnapshot(ref, remaining);
-
-      // Invalidate community providers so other consumers pick up the change.
-      ref.invalidate(communityListProvider);
       ref.invalidate(activeCommunityProvider);
-
-      if (remaining.isNotEmpty) {
-        final next = remaining.first;
-        await storage.saveActiveId(next.id);
-        // Re-run build() to validate the next community's credentials.
-        ref.invalidateSelf();
-        await future;
-      } else {
+      if (remaining.isEmpty) {
         state = const AsyncData(AuthState(status: AuthStatus.unauthenticated));
+        return;
       }
-    });
+      ref.invalidateSelf();
+      await future;
+    }();
   }
 }
 

@@ -89,6 +89,57 @@ void main() {
     });
   });
 
+  test('uses the community lease address instead of the endpoint id', () async {
+    List<List<String>>? submittedTags;
+
+    await publishBuzzDevPushLease(
+      grant: grant,
+      leaseInstallationId: 'e' * 32,
+      descriptor: descriptor,
+      nsec: signer.nsec,
+      memberPubkey: signer.public,
+      subscriptions: const [],
+      now: () => now,
+      submit:
+          ({required kind, required content, required tags, createdAt}) async {
+            submittedTags = tags;
+            return const NostrEvent(
+              id: 'accepted-id',
+              pubkey: '',
+              createdAt: 0,
+              kind: 0,
+              tags: [],
+              content: 'saved',
+              sig: '',
+            );
+          },
+    );
+
+    expect(submittedTags!.first, ['d', 'e' * 32]);
+  });
+
+  test('rejects a malformed community lease address', () async {
+    await expectLater(
+      publishBuzzDevPushLease(
+        grant: grant,
+        leaseInstallationId: 'malformed',
+        descriptor: descriptor,
+        nsec: signer.nsec,
+        memberPubkey: signer.public,
+        subscriptions: const [],
+        now: () => now,
+        submit:
+            ({
+              required kind,
+              required content,
+              required tags,
+              createdAt,
+            }) async => throw StateError('should not publish'),
+      ),
+      throwsFormatException,
+    );
+  });
+
   test(
     'mutation control rejects relay OK false then accepts restored event',
     () async {

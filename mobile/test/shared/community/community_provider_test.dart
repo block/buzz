@@ -18,6 +18,9 @@ void main() {
   late List<List<Community>> snapshots;
   late List<String> deactivatedCommunityIds;
   late List<int?> deactivationGenerations;
+  late List<String> journaledCommunityIds;
+  late int revocationTriggers;
+  late CommunityPushLeaseRevocationTrigger revocationTrigger;
   late CommunityPushLeaseDeactivator deactivator;
 
   setUp(() {
@@ -26,6 +29,11 @@ void main() {
     snapshots = [];
     deactivatedCommunityIds = [];
     deactivationGenerations = [];
+    journaledCommunityIds = [];
+    revocationTriggers = 0;
+    revocationTrigger = () async {
+      revocationTriggers += 1;
+    };
     deactivator = (community, {generation}) async {
       deactivatedCommunityIds.add(community.id);
       deactivationGenerations.add(generation);
@@ -42,6 +50,15 @@ void main() {
           snapshots.add(List.of(communities));
         }),
         communityPushLeaseDeactivatorProvider.overrideWithValue(deactivator),
+        communityPushLeaseRevocationEnqueuerProvider.overrideWithValue((
+          community,
+        ) async {
+          journaledCommunityIds.add(community.id);
+          return true;
+        }),
+        communityPushLeaseRevocationTriggerProvider.overrideWithValue(
+          revocationTrigger,
+        ),
       ],
     );
   }
@@ -353,7 +370,66 @@ void main() {
 
       final communities = await container.read(communityListProvider.future);
       expect(communities, isEmpty);
-      expect(deactivatedCommunityIds, [ws.id]);
+      expect(journaledCommunityIds, [ws.id]);
+      expect(deactivatedCommunityIds, isEmpty);
+      expect(revocationTriggers, 1);
+    });
+
+    test('remote tombstone attempt cannot block local removal', () async {
+      final remoteAttempt = Completer<void>();
+      revocationTrigger = () {
+        revocationTriggers += 1;
+        return remoteAttempt.future;
+      };
+      container = createContainer();
+      await container.read(communityListProvider.future);
+      final community = Community.create(
+        name: 'Test',
+        relayUrl: 'https://test.example.com',
+      );
+      final notifier = container.read(communityListProvider.notifier);
+      await notifier.addCommunity(community);
+
+      await notifier.removeCommunity(community.id);
+
+      expect(await communityStorage.loadAll(), isEmpty);
+      expect(journaledCommunityIds, [community.id]);
+      expect(revocationTriggers, 1);
+      remoteAttempt.complete();
+    });
+
+    test('journal persistence failure keeps community credentials', () async {
+      container = ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(communityStorage),
+          communitySnapshotWriterProvider.overrideWithValue((_) async {}),
+          communityPushLeaseRevocationEnqueuerProvider.overrideWithValue((
+            _,
+          ) async {
+            throw StateError('secure storage unavailable');
+          }),
+          communityPushLeaseRevocationTriggerProvider.overrideWithValue(
+            () async {},
+          ),
+        ],
+      );
+      await container.read(communityListProvider.future);
+      final community = Community.create(
+        name: 'Test',
+        relayUrl: 'https://test.example.com',
+      );
+      final notifier = container.read(communityListProvider.notifier);
+      await notifier.addCommunity(community);
+
+      await expectLater(
+        notifier.removeCommunity(community.id),
+        throwsStateError,
+      );
+
+      expect(
+        (await communityStorage.loadAll()).map((item) => item.id),
+        contains(community.id),
+      );
     });
 
     test(

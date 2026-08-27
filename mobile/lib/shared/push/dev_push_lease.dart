@@ -305,6 +305,7 @@ typedef BuzzPushLeaseSubmit =
 
 Future<BuzzPushLeasePublication> publishBuzzDevPushLease({
   required BuzzPushEndpointGrant grant,
+  String? leaseInstallationId,
   int? leaseGeneration,
   required BuzzPushLeaseDescriptor descriptor,
   required String nsec,
@@ -314,6 +315,13 @@ Future<BuzzPushLeasePublication> publishBuzzDevPushLease({
   DateTime Function() now = DateTime.now,
 }) async {
   _validateGrant(grant, descriptor);
+  final effectiveLeaseInstallationId =
+      leaseInstallationId ?? grant.installationId;
+  if (!RegExp(_installationIdPattern).hasMatch(effectiveLeaseInstallationId)) {
+    throw const FormatException(
+      'Lease installation id must be 16 random bytes encoded as lowercase hex',
+    );
+  }
   final effectiveLeaseGeneration = leaseGeneration ?? grant.generation;
   if (effectiveLeaseGeneration <= 0 ||
       effectiveLeaseGeneration > _maxSafeJsonInteger) {
@@ -373,7 +381,7 @@ Future<BuzzPushLeasePublication> publishBuzzDevPushLease({
     kind: buzzPushLeaseKind,
     content: content,
     tags: [
-      ['d', grant.installationId],
+      ['d', effectiveLeaseInstallationId],
       ['expiration', '$expiration'],
       ['exec', descriptor.executorKeyId],
     ],
@@ -391,6 +399,7 @@ Future<BuzzPushLeasePublication> publishBuzzDevPushLease({
 
 Future<BuzzPushLeasePublication> publishBuzzDevPushLeaseThroughRelay({
   required BuzzPushEndpointGrant grant,
+  String? leaseInstallationId,
   int? leaseGeneration,
   required BuzzPushLeaseDescriptor descriptor,
   required String nsec,
@@ -400,6 +409,7 @@ Future<BuzzPushLeasePublication> publishBuzzDevPushLeaseThroughRelay({
   DateTime Function() now = DateTime.now,
 }) => publishBuzzDevPushLease(
   grant: grant,
+  leaseInstallationId: leaseInstallationId,
   leaseGeneration: leaseGeneration,
   descriptor: descriptor,
   nsec: nsec,

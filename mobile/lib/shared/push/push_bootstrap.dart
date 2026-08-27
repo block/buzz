@@ -11,6 +11,7 @@ import '../relay/relay_session.dart';
 import '../relay/signed_event_relay.dart';
 import 'dev_push_lease.dart';
 import 'push_bridge.dart';
+import 'push_lease_revocation_outbox.dart';
 import 'push_relay_capability_provider.dart';
 import 'push_subscription.dart';
 
@@ -117,12 +118,28 @@ class BuzzPushBootstrap extends HookConsumerWidget {
     final registrationRetry = useState(0);
     final publicationRetry = useState(0);
     final tombstoneRetry = useState(0);
+    final revocationOutbox = ref.watch(buzzPushLeaseRevocationOutboxProvider);
     final session = ref.watch(relaySessionProvider);
     final communities = ref.watch(communityListProvider).value ?? const [];
     final config = ref.watch(relayConfigProvider);
     final community = ref.watch(activeCommunityProvider).value;
     final memberPubkey = ref.watch(myPubkeyProvider);
     final descriptor = ref.watch(currentRelayPushDescriptorProvider).value;
+
+    useEffect(() {
+      final listener = AppLifecycleListener(
+        onResume: () => _runRevocationOutbox(revocationOutbox.trigger),
+      );
+      _runRevocationOutbox(revocationOutbox.start);
+      return listener.dispose;
+    }, [revocationOutbox]);
+
+    useEffect(() {
+      if (session.status == SessionStatus.connected) {
+        _runRevocationOutbox(revocationOutbox.trigger);
+      }
+      return null;
+    }, [revocationOutbox, session.status]);
 
     useEffect(
       () => () {
@@ -351,6 +368,7 @@ class BuzzPushBootstrap extends HookConsumerWidget {
           notifier.reservePushLeaseGeneration(community.id),
       publish: (leaseGeneration) => publishBuzzDevPushLeaseThroughRelay(
         grant: grant,
+        leaseInstallationId: community.pushLeaseInstallationId,
         leaseGeneration: leaseGeneration,
         descriptor: descriptor,
         nsec: config.nsec!,
@@ -366,4 +384,12 @@ class BuzzPushBootstrap extends HookConsumerWidget {
     );
     return grant;
   }
+}
+
+void _runRevocationOutbox(Future<void> Function() operation) {
+  unawaited(
+    operation().catchError((Object error, StackTrace stackTrace) {
+      reportPushLeaseCleanupError(error, stackTrace);
+    }),
+  );
 }

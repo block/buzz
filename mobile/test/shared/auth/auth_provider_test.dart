@@ -213,7 +213,7 @@ void main() {
       await storage.save(second);
       await storage.saveActiveId(first.id);
       final snapshots = <List<Community>>[];
-      final deactivatedCommunityIds = <String>[];
+      final journaledCommunityIds = <String>[];
       final container = ProviderContainer(
         overrides: [
           communityStorageProvider.overrideWithValue(storage),
@@ -222,12 +222,15 @@ void main() {
           ) async {
             snapshots.add(List.of(communities));
           }),
-          communityPushLeaseDeactivatorProvider.overrideWithValue((
-            community, {
-            generation,
-          }) async {
-            deactivatedCommunityIds.add(community.id);
+          communityPushLeaseRevocationEnqueuerProvider.overrideWithValue((
+            community,
+          ) async {
+            journaledCommunityIds.add(community.id);
+            return true;
           }),
+          communityPushLeaseRevocationTriggerProvider.overrideWithValue(
+            () async {},
+          ),
         ],
       );
       addTearDown(container.dispose);
@@ -245,7 +248,7 @@ void main() {
         snapshots.last.map((community) => community.id),
         isNot(contains(first.id)),
       );
-      expect(deactivatedCommunityIds, [first.id]);
+      expect(journaledCommunityIds, [first.id]);
     },
   );
 

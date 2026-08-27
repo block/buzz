@@ -1,9 +1,20 @@
+import 'dart:math';
+
 import 'package:uuid/uuid.dart';
 
 import '../push/push_subscription.dart';
 
 const _uuid = Uuid();
 const _sentinel = Object();
+final _pushLeaseInstallationIdPattern = RegExp(r'^[0-9a-f]{32}$');
+
+String _newPushLeaseInstallationId() {
+  final random = Random.secure();
+  return List.generate(
+    16,
+    (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+  ).join();
+}
 
 enum SensitiveActionPolicy { enabled, disabledByUser }
 
@@ -16,6 +27,12 @@ class Community {
   final SensitiveActionPolicy sensitiveActionPolicy;
   final bool pushNotificationsEnabled;
   final BuzzPushLeaseSubscriptionState pushSubscriptionState;
+
+  /// Stable random address component for this community's relay push lease.
+  ///
+  /// Legacy records omit this value and continue using the endpoint grant's
+  /// installation id so their already-published lease remains addressable.
+  final String? pushLeaseInstallationId;
 
   /// Whether invite-created starter channels still need to be recovered.
   final bool starterSetupIncomplete;
@@ -30,6 +47,7 @@ class Community {
     this.sensitiveActionPolicy = SensitiveActionPolicy.disabledByUser,
     this.pushNotificationsEnabled = false,
     this.pushSubscriptionState = const BuzzPushLeaseSubscriptionState.desired(),
+    this.pushLeaseInstallationId,
     this.starterSetupIncomplete = false,
     required this.addedAt,
   });
@@ -50,6 +68,7 @@ class Community {
       pubkey: pubkey,
       nsec: nsec,
       sensitiveActionPolicy: sensitiveActionPolicy,
+      pushLeaseInstallationId: _newPushLeaseInstallationId(),
       starterSetupIncomplete: starterSetupIncomplete,
       addedAt: DateTime.now(),
     );
@@ -63,6 +82,7 @@ class Community {
     SensitiveActionPolicy? sensitiveActionPolicy,
     bool? pushNotificationsEnabled,
     BuzzPushLeaseSubscriptionState? pushSubscriptionState,
+    Object? pushLeaseInstallationId = _sentinel,
     bool? starterSetupIncomplete,
   }) {
     return Community(
@@ -77,6 +97,9 @@ class Community {
           pushNotificationsEnabled ?? this.pushNotificationsEnabled,
       pushSubscriptionState:
           pushSubscriptionState ?? this.pushSubscriptionState,
+      pushLeaseInstallationId: pushLeaseInstallationId == _sentinel
+          ? this.pushLeaseInstallationId
+          : pushLeaseInstallationId as String?,
       starterSetupIncomplete:
           starterSetupIncomplete ?? this.starterSetupIncomplete,
       addedAt: addedAt,
@@ -92,11 +115,20 @@ class Community {
     'sensitiveActionPolicy': sensitiveActionPolicy.name,
     'pushNotificationsEnabled': pushNotificationsEnabled,
     'pushSubscriptionState': pushSubscriptionState.toJson(),
+    if (pushLeaseInstallationId != null)
+      'pushLeaseInstallationId': pushLeaseInstallationId,
     'starterSetupIncomplete': starterSetupIncomplete,
     'addedAt': addedAt.toIso8601String(),
   };
 
   factory Community.fromJson(Map<String, dynamic> json) {
+    final pushLeaseInstallationId = json['pushLeaseInstallationId'] as String?;
+    if (pushLeaseInstallationId != null &&
+        !_pushLeaseInstallationIdPattern.hasMatch(pushLeaseInstallationId)) {
+      throw const FormatException(
+        'Push lease installation id must be 16 random bytes encoded as lowercase hex',
+      );
+    }
     final pushNotificationsEnabled =
         json['pushNotificationsEnabled'] as bool? ?? false;
     var pushSubscriptionState = json['pushSubscriptionState'] == null
@@ -121,6 +153,7 @@ class Community {
       ),
       pushNotificationsEnabled: pushNotificationsEnabled,
       pushSubscriptionState: pushSubscriptionState,
+      pushLeaseInstallationId: pushLeaseInstallationId,
       starterSetupIncomplete: json['starterSetupIncomplete'] as bool? ?? false,
       addedAt: DateTime.parse(json['addedAt'] as String),
     );
