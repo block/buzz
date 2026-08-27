@@ -18,6 +18,7 @@ use serde_json::Value as JsonValue;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::action_sink::WorkflowMessageContext;
 use crate::error::WorkflowError;
 use crate::schema::{ActionDef, Step, WorkflowDef};
 use crate::WorkflowEngine;
@@ -625,6 +626,42 @@ pub async fn dispatch_action(
                         "SendMessage → {channel_id}: {text}"
                     );
 
+                    let definition_event_id = wf_run
+                        .definition_event_id
+                        .as_deref()
+                        .ok_or_else(|| {
+                            WorkflowError::WebhookError(format!(
+                                "SendMessage: run {run_id} has no signed definition revision"
+                            ))
+                        })
+                        .and_then(|bytes| {
+                            nostr::EventId::from_slice(bytes).map_err(|error| {
+                                WorkflowError::WebhookError(format!(
+                                    "SendMessage: run {run_id} has invalid definition revision: {error}"
+                                ))
+                            })
+                        })?;
+                    let cause = engine
+                        .db
+                        .get_workflow_delivery_cause(
+                            community_id,
+                            wf_run.workflow_id,
+                            run_id,
+                        )
+                        .await
+                        .map_err(|error| {
+                            WorkflowError::WebhookError(format!(
+                                "SendMessage: failed to resolve run authority: {error}"
+                            ))
+                        })?;
+                    let context = WorkflowMessageContext {
+                        workflow_id: wf_run.workflow_id,
+                        run_id,
+                        definition_event_id,
+                        step_id: step_id.to_owned(),
+                        cause,
+                    };
+
                     let event_id = engine
                         .action_sink()?
                         .send_message(
@@ -632,6 +669,7 @@ pub async fn dispatch_action(
                             &channel_id,
                             text,
                             &owner_pubkey_hex,
+                            &context,
                             reply_to,
                         )
                         .await

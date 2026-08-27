@@ -3687,6 +3687,72 @@ impl Db {
         workflow::get_workflow_run(&self.pool, community_id, id).await
     }
 
+    /// Read the immutable authority that caused this workflow run.
+    ///
+    /// A signed event is authoritative when it is the run's persisted trigger.
+    /// Otherwise exactly one durable schedule-fire or webhook-invocation row
+    /// must point at the run. Missing or ambiguous server authority fails closed.
+    #[datastore_span(name = "get_workflow_delivery_cause", system = "postgresql")]
+    pub async fn get_workflow_delivery_cause(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        run_id: Uuid,
+    ) -> Result<buzz_core::workflow_delivery::WorkflowDeliveryCause> {
+        workflow::get_workflow_delivery_cause(&self.pool, community_id, workflow_id, run_id).await
+    }
+
+    /// Serialize a producer retry for one workflow message step.
+    #[datastore_span(
+        name = "lock_workflow_agent_delivery_message_identity",
+        system = "postgresql"
+    )]
+    pub async fn lock_workflow_agent_delivery_message_identity(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+        step_id: &str,
+    ) -> Result<workflow::WorkflowMessageIdentityLock> {
+        workflow::lock_workflow_agent_delivery_message_identity(
+            &self.pool,
+            community_id,
+            run_id,
+            step_id,
+        )
+        .await
+    }
+
+    /// Atomically persist a visible message and its durable deliveries.
+    #[datastore_span(name = "commit_workflow_message_deliveries", system = "postgresql")]
+    pub async fn commit_workflow_message_deliveries(
+        &self,
+        transaction: sqlx::Transaction<'static, sqlx::Postgres>,
+        community_id: CommunityId,
+        message: &nostr::Event,
+        channel_id: Uuid,
+        thread_meta: Option<event::ThreadMetadataParams<'_>>,
+        deliveries: &[workflow::WorkflowAgentDelivery],
+    ) -> Result<(
+        StoredEvent,
+        Vec<buzz_core::workflow_delivery::WorkflowDeliveryId>,
+    )> {
+        let result = workflow::commit_workflow_message_deliveries(
+            transaction,
+            community_id,
+            message,
+            channel_id,
+            thread_meta,
+            deliveries,
+        )
+        .await?;
+        if let Err(error) =
+            insert_mentions(&self.pool, community_id, message, Some(channel_id)).await
+        {
+            tracing::warn!(event_id = %message.id, "Failed to insert mentions: {error}");
+        }
+        Ok(result)
+    }
+
     /// Claim one pending workflow delivery for the authenticated target.
     #[datastore_span(name = "claim_workflow_agent_delivery", system = "postgresql")]
     pub async fn claim_workflow_agent_delivery(

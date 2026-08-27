@@ -174,6 +174,28 @@ pub async fn filter_fanout_by_access(
         matches
     };
 
+    // Recipient-private kinds are p-gated even when channel-less and ephemeral.
+    // Historical REQ authorization is insufficient for live fan-out: a kindless
+    // subscription must not observe another target's wake.
+    let matches = if buzz_core::kind::P_GATED_KINDS.contains(&event_kind_u32(&stored_event.event)) {
+        matches
+            .into_iter()
+            .filter(|(conn_id, _)| {
+                state
+                    .conn_manager
+                    .pubkey_for_conn(*conn_id)
+                    .is_some_and(|pubkey| {
+                        buzz_core::filter::reader_authorized_for_event(
+                            &stored_event.event,
+                            &hex::encode(pubkey),
+                        )
+                    })
+            })
+            .collect()
+    } else {
+        matches
+    };
+
     let Some(channel_id) = stored_event.channel_id else {
         return matches;
     };
@@ -2128,6 +2150,20 @@ mod tests {
             StoredEvent::new(event, channel_id)
         }
 
+        fn recipient_private_event(recipient: &Keys) -> StoredEvent {
+            let event = EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_WORKFLOW_AGENT_WAKE as u16),
+                "",
+            )
+            .tags([
+                nostr::Tag::parse(["p", &recipient.public_key().to_hex()]).expect("p tag"),
+                nostr::Tag::parse(["delivery", &Uuid::new_v4().to_string()]).expect("delivery tag"),
+            ])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign event");
+            StoredEvent::new(event, None)
+        }
+
         #[tokio::test]
         async fn channel_less_event_passes_through() {
             let state = test_state().await;
@@ -2142,6 +2178,33 @@ mod tests {
             )
             .await;
             assert_eq!(out, matches);
+        }
+
+        #[tokio::test]
+        async fn channel_less_recipient_private_event_keeps_only_recipient() {
+            let state = test_state().await;
+            let recipient = Keys::generate();
+            let stranger = Keys::generate();
+            let recipient_conn =
+                register_conn(&state, Some(recipient.public_key().to_bytes().to_vec()));
+            let stranger_conn =
+                register_conn(&state, Some(stranger.public_key().to_bytes().to_vec()));
+            let unauthed_conn = register_conn(&state, None);
+            let matches = vec![
+                (recipient_conn, "recipient".to_owned()),
+                (stranger_conn, "stranger".to_owned()),
+                (unauthed_conn, "unauthed".to_owned()),
+            ];
+
+            let out = filter_fanout_by_access(
+                &state,
+                buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                &recipient_private_event(&recipient),
+                matches,
+                None,
+            )
+            .await;
+            assert_eq!(out, vec![(recipient_conn, "recipient".to_owned())]);
         }
 
         #[tokio::test]

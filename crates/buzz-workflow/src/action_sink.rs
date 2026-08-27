@@ -6,7 +6,23 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use buzz_core::tenant::CommunityId;
+use buzz_core::{tenant::CommunityId, workflow_delivery::WorkflowDeliveryCause};
+use uuid::Uuid;
+
+/// Immutable provenance for one workflow-generated message delivery.
+#[derive(Debug, Clone)]
+pub struct WorkflowMessageContext {
+    /// Workflow whose signed definition authorizes the message.
+    pub workflow_id: Uuid,
+    /// Durable run executing the message step.
+    pub run_id: Uuid,
+    /// Exact owner-signed kind:30620 definition revision used by the run.
+    pub definition_event_id: nostr::EventId,
+    /// Stable step identifier within the signed definition.
+    pub step_id: String,
+    /// Durable authority that caused the run.
+    pub cause: WorkflowDeliveryCause,
+}
 
 /// Errors from action sink operations.
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +73,8 @@ pub trait ActionSink: Send + Sync {
     /// - `text`: message body (must not be empty/whitespace-only)
     /// - `author_pubkey`: hex-encoded pubkey of the workflow owner (used for
     ///   the `p` attribution tag; the relay keypair signs the event)
+    /// - `context`: immutable workflow/run/revision/step/cause provenance used
+    ///   to bind durable managed-agent deliveries
     /// - `reply_to`: when `Some(event_id_hex)`, the message is posted as a
     ///   threaded reply to that event (NIP-10 root/reply tags + real thread
     ///   metadata); when `None`, it is a top-level channel message.
@@ -68,6 +86,7 @@ pub trait ActionSink: Send + Sync {
         channel_id: &str,
         text: &str,
         author_pubkey: &str,
+        context: &WorkflowMessageContext,
         reply_to: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }

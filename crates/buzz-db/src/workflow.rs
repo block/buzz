@@ -1443,6 +1443,66 @@ pub async fn find_by_owner_and_name(
     }
 }
 
+/// Resolve the one persisted authority that caused a workflow run.
+///
+/// The run must belong to `community_id` and `workflow_id`. Exactly one of its
+/// signed trigger event, durable scheduled fire, or durable webhook invocation
+/// must exist; missing or ambiguous provenance is rejected.
+pub async fn get_workflow_delivery_cause(
+    pool: &PgPool,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    run_id: Uuid,
+) -> Result<WorkflowDeliveryCause> {
+    let rows = sqlx::query(
+        r#"
+        SELECT r.trigger_event_id,
+               sf.scheduled_for,
+               wi.invocation_id
+        FROM workflow_runs r
+        LEFT JOIN scheduled_workflow_fires sf
+          ON sf.community_id = r.community_id
+         AND sf.workflow_id = r.workflow_id
+         AND sf.workflow_run_id = r.id
+        LEFT JOIN workflow_webhook_invocations wi
+          ON wi.community_id = r.community_id
+         AND wi.workflow_id = r.workflow_id
+         AND wi.workflow_run_id = r.id
+        WHERE r.community_id = $1 AND r.workflow_id = $2 AND r.id = $3
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(workflow_id)
+    .bind(run_id)
+    .fetch_all(pool)
+    .await?;
+
+    if rows.len() != 1 {
+        return Err(DbError::InvalidData(
+            "workflow run has missing or ambiguous delivery authority".into(),
+        ));
+    }
+    let row = &rows[0];
+
+    let trigger_event_id: Option<Vec<u8>> = row.try_get("trigger_event_id")?;
+    let scheduled_for: Option<DateTime<Utc>> = row.try_get("scheduled_for")?;
+    let invocation_id: Option<Uuid> = row.try_get("invocation_id")?;
+    match (trigger_event_id, scheduled_for, invocation_id) {
+        (Some(event_id), None, None) => EventId::from_slice(&event_id)
+            .map(WorkflowDeliveryCause::Event)
+            .map_err(|error| {
+                DbError::InvalidData(format!("invalid workflow trigger event id: {error}"))
+            }),
+        (None, Some(scheduled_for), None) => Ok(WorkflowDeliveryCause::Schedule {
+            scheduled_for_unix_seconds: scheduled_for.timestamp(),
+        }),
+        (None, None, Some(invocation_id)) => Ok(WorkflowDeliveryCause::Webhook { invocation_id }),
+        _ => Err(DbError::InvalidData(
+            "workflow run has missing or ambiguous delivery authority".into(),
+        )),
+    }
+}
+
 // -- Workflow agent deliveries ------------------------------------------------
 //
 // Durable, target-scoped delivery inbox and the complete transition state
@@ -1755,17 +1815,81 @@ pub async fn lock_workflow_agent_delivery_identity(
     Ok((transaction, existing))
 }
 
-/// Atomically persist all canonical deliveries for one workflow step.
+/// Transaction-scoped producer lock and any message identity already committed.
+pub type WorkflowMessageIdentityLock = (
+    Transaction<'static, Postgres>,
+    Option<(Vec<u8>, DateTime<Utc>)>,
+);
+
+/// Lock one workflow run/step producer identity and find its bound message.
 ///
-/// This is the ONLY insert path into `workflow_agent_deliveries`. Callers hold
-/// the identity lock from [`lock_workflow_agent_delivery_identity`] and pass the
-/// same transaction so the visible message insert (owned by the producer node)
-/// and every delivery row commit or roll back together. Duplicate producer
-/// retries collapse via the `(community, run, step, target)` uniqueness with
-/// `ON CONFLICT DO NOTHING`; the returned vector lists only rows this call
-/// actually created.
-pub async fn commit_workflow_agent_deliveries(
+/// The returned transaction holds the advisory lock until commit or rollback.
+/// Callers must use that same transaction to atomically persist a new visible
+/// message and all target deliveries. An existing tuple means a prior attempt
+/// already committed and its message identity should be returned unchanged.
+pub async fn lock_workflow_agent_delivery_message_identity(
+    pool: &PgPool,
+    community_id: CommunityId,
+    run_id: Uuid,
+    step_id: &str,
+) -> Result<WorkflowMessageIdentityLock> {
+    let mut transaction = pool.begin().await?;
+    let identity = format!("{}:{run_id}:{step_id}", community_id.as_uuid());
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(identity)
+        .execute(&mut *transaction)
+        .await?;
+    let existing = sqlx::query_as::<_, (Vec<u8>, DateTime<Utc>)>(
+        "SELECT message_event_id, message_event_created_at \
+         FROM workflow_agent_deliveries \
+         WHERE community_id = $1 AND run_id = $2 AND step_id = $3 LIMIT 1",
+    )
+    .bind(community_id.as_uuid())
+    .bind(run_id)
+    .bind(step_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    Ok((transaction, existing))
+}
+
+/// Atomically persist one visible message and all canonical deliveries for its step.
+pub async fn commit_workflow_message_deliveries(
     mut transaction: Transaction<'static, Postgres>,
+    community_id: CommunityId,
+    message: &nostr::Event,
+    channel_id: Uuid,
+    thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
+    deliveries: &[WorkflowAgentDelivery],
+) -> Result<(buzz_core::StoredEvent, Vec<WorkflowDeliveryId>)> {
+    let (stored_message, was_inserted) = crate::event::insert_event_with_thread_metadata_tx(
+        &mut transaction,
+        community_id,
+        message,
+        Some(channel_id),
+        thread_meta,
+    )
+    .await?;
+    if !was_inserted {
+        return Err(DbError::InvalidData(
+            "new workflow delivery message already exists without its delivery identity".into(),
+        ));
+    }
+    let message_created_at =
+        DateTime::<Utc>::from_timestamp(message.created_at.as_secs() as i64, 0)
+            .ok_or_else(|| DbError::InvalidData("invalid workflow message timestamp".into()))?;
+    let created = insert_workflow_agent_deliveries(
+        &mut transaction,
+        community_id,
+        message_created_at,
+        deliveries,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok((stored_message, created))
+}
+
+async fn insert_workflow_agent_deliveries(
+    transaction: &mut Transaction<'_, Postgres>,
     community_id: CommunityId,
     message_event_created_at: DateTime<Utc>,
     deliveries: &[WorkflowAgentDelivery],
@@ -1801,13 +1925,38 @@ pub async fn commit_workflow_agent_deliveries(
         .bind(cause_event_id)
         .bind(cause_scheduled_for)
         .bind(cause_webhook_invocation_id)
-        .execute(&mut *transaction)
+        .execute(&mut **transaction)
         .await?
         .rows_affected();
         if affected == 1 {
             created.push(delivery.id);
         }
     }
+    Ok(created)
+}
+
+/// Atomically persist all canonical deliveries for one workflow step.
+///
+/// This is the ONLY insert path into `workflow_agent_deliveries`. Callers hold
+/// the identity lock from [`lock_workflow_agent_delivery_identity`] and pass the
+/// same transaction so the visible message insert (owned by the producer node)
+/// and every delivery row commit or roll back together. Duplicate producer
+/// retries collapse via the `(community, run, step, target)` uniqueness with
+/// `ON CONFLICT DO NOTHING`; the returned vector lists only rows this call
+/// actually created.
+pub async fn commit_workflow_agent_deliveries(
+    mut transaction: Transaction<'static, Postgres>,
+    community_id: CommunityId,
+    message_event_created_at: DateTime<Utc>,
+    deliveries: &[WorkflowAgentDelivery],
+) -> Result<Vec<WorkflowDeliveryId>> {
+    let created = insert_workflow_agent_deliveries(
+        &mut transaction,
+        community_id,
+        message_event_created_at,
+        deliveries,
+    )
+    .await?;
     transaction.commit().await?;
     Ok(created)
 }

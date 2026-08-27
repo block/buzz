@@ -22,7 +22,7 @@ pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
 /// a known event id) still cannot read another user's private event.
 pub fn reader_authorized_for_event(event: &nostr::Event, reader_pubkey_hex: &str) -> bool {
     let kind = crate::kind::event_kind_u32(event);
-    if kind != crate::kind::KIND_DM_VISIBILITY && kind != crate::kind::KIND_AGENT_TURN_METRIC {
+    if !crate::kind::P_GATED_KINDS.contains(&kind) {
         return true;
     }
     let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
@@ -285,6 +285,31 @@ mod tests {
             .sign_with_keys(&relay)
             .expect("sign");
         assert!(reader_authorized_for_event(&note, other));
+    }
+
+    #[test]
+    fn reader_authorized_for_event_gates_workflow_wake_by_p() {
+        let target_keys = Keys::generate();
+        let other_keys = Keys::generate();
+        let wake = EventBuilder::new(
+            Kind::Custom(crate::kind::KIND_WORKFLOW_AGENT_WAKE as u16),
+            "",
+        )
+        .tags([
+            Tag::parse(["p", &target_keys.public_key().to_hex()]).expect("p tag"),
+            Tag::parse(["delivery", &uuid::Uuid::new_v4().to_string()]).expect("delivery tag"),
+        ])
+        .sign_with_keys(&Keys::generate())
+        .expect("sign event");
+
+        assert!(reader_authorized_for_event(
+            &wake,
+            &target_keys.public_key().to_hex()
+        ));
+        assert!(!reader_authorized_for_event(
+            &wake,
+            &other_keys.public_key().to_hex()
+        ));
     }
 
     #[test]
