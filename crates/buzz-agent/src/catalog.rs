@@ -830,9 +830,11 @@ pub(crate) fn parse_v2_endpoints_page(
 /// Parse one page of a `GET api/2.1/unity-catalog/model-services` response.
 ///
 /// Unity Catalog resource names are returned as `model-services/<catalog>.<schema>.<service>`.
-/// Only the exact resource prefix and a structurally valid three-component FQN
-/// are selectable. All other resources are ignored without capability/name
-/// heuristics; the positive visibility filter is the only further restriction.
+/// Only the exact resource prefix, a structurally valid three-component FQN,
+/// and chat-capable service metadata are selectable. Missing or empty capability
+/// metadata is retained for compatibility with older Databricks workspaces; a
+/// non-empty capability list must advertise the MLflow chat API used for model-
+/// service inference. The positive visibility filter is applied later.
 pub(crate) fn parse_uc_model_services_page(
     json: &Value,
 ) -> Result<(Vec<ModelEntry>, Option<String>), AgentError> {
@@ -848,7 +850,9 @@ pub(crate) fn parse_uc_model_services_page(
         .filter_map(|service| {
             let resource_name = service.get("name")?.as_str()?;
             let fqn = resource_name.strip_prefix("model-services/")?;
-            if !crate::model_capabilities::is_databricks_model_service_fqn(fqn) {
+            if !crate::model_capabilities::is_databricks_model_service_fqn(fqn)
+                || !uc_model_service_supports_chat(service)
+            {
                 return None;
             }
             Some(ModelEntry {
@@ -859,6 +863,17 @@ pub(crate) fn parse_uc_model_services_page(
         .collect();
 
     Ok((models, next_page_token(json)))
+}
+
+fn uc_model_service_supports_chat(service: &Value) -> bool {
+    let Some(api_types) = service.get("supported_api_types").and_then(Value::as_array) else {
+        return true;
+    };
+
+    api_types.is_empty()
+        || api_types
+            .iter()
+            .any(|api_type| api_type.as_str() == Some("mlflow/v1/chat/completions"))
 }
 
 fn next_page_token(json: &Value) -> Option<String> {
@@ -1655,6 +1670,45 @@ mod tests {
             vec!["data_tools.goose.kimi-k3", "catalog.schema.claude-gpt-5"]
         );
         assert_eq!(next.as_deref(), Some("next token/1"));
+    }
+
+    #[test]
+    fn uc_parse_filters_known_non_chat_services_and_preserves_unknown_capabilities() {
+        let json = serde_json::json!({
+            "model_services": [
+                {
+                    "name": "model-services/system.ai.chat-model",
+                    "supported_api_types": [
+                        "mlflow/v1/chat/completions",
+                        "mlflow/v1/responses"
+                    ]
+                },
+                {
+                    "name": "model-services/system.ai.embedding-model",
+                    "supported_api_types": ["mlflow/v1/embeddings"]
+                },
+                {
+                    "name": "model-services/system.ai.responses-only-model",
+                    "supported_api_types": ["mlflow/v1/responses"]
+                },
+                {
+                    "name": "model-services/catalog.schema.empty-capabilities",
+                    "supported_api_types": []
+                },
+                {"name": "model-services/catalog.schema.absent-capabilities"},
+            ]
+        });
+
+        let (models, _) = parse_uc_model_services_page(&json).unwrap();
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "system.ai.chat-model",
+                "catalog.schema.empty-capabilities",
+                "catalog.schema.absent-capabilities",
+            ]
+        );
     }
 
     #[test]
