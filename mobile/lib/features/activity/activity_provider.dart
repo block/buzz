@@ -50,7 +50,7 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
   ];
 
   void Function()? _unsubscribeAddressed;
-  void Function()? _unsubscribeDms;
+  final List<void Function()> _unsubscribeDms = [];
   final List<void Function()> _unsubscribeHiddenDms = [];
   Timer? _liveRefreshTimer;
   Future<void>? _refreshInFlight;
@@ -127,111 +127,138 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
         for (final channel in channels)
           if (channel.isDm && channel.isMember) channel.id,
       ];
-      if (dmChannelIds.isNotEmpty) {
-        final unsubscribeDms = await session.subscribe(
-          NostrFilter(
-            kinds: const [9],
-            tags: {'#h': dmChannelIds},
-            since: since,
-            limit: 100,
-          ),
-          (_) => _scheduleLiveRefresh(generation),
-        );
-        if (generation != _subscriptionGeneration) {
-          unsubscribeDms();
-          return;
-        }
-        _unsubscribeDms = unsubscribeDms;
-      }
+      // The relay rejects a REQ whose explicit `#h` values exceed
+      // [kMaxExplicitChannelValues]. A single over-cap visible-DM REQ would be
+      // rejected and, hitting the outer catch, abort the whole live setup —
+      // including the hidden batches below — so more than that many visible DMs
+      // used to silently disable resurfacing. Batch it under the same cap so no
+      // single REQ can be rejected for size and a per-batch rejection stays
+      // isolated to that batch.
+      final visibleUnsubscribers = await _subscribeChannelBatches(
+        session,
+        generation,
+        channelIds: dmChannelIds,
+        kinds: const [9],
+        since: since,
+        onEvent: (_) => _scheduleLiveRefresh(generation),
+      );
+      if (visibleUnsubscribers == null) return;
+      _unsubscribeDms.addAll(visibleUnsubscribers);
 
       // Resurface trigger: hidden DMs are dropped from the visible-DM sub above,
       // so subscribe to them separately. Channel messages carry a channel_id and
       // the relay only fans channel-scoped events to channel-scoped subs, so an
       // `#h` filter (never `#p`, which the relay treats as global) is required.
-      // Hiding never drops membership, so `#h` authorization holds.
-      //
-      // The relay rejects a REQ whose aggregate explicit `#h` values exceed
-      // [kMaxExplicitChannelValues], so the hidden set is split into batches of
-      // at most that size, each its own subscription. All batches are owned by
-      // this generation and torn down together, so an over-limit hidden set no
-      // longer silently disables resurfacing.
+      // Hiding never drops membership, so `#h` authorization holds. The hidden
+      // set is batched under the same cap and owned by this generation, so an
+      // over-limit hidden set no longer silently disables resurfacing.
       final hiddenDmIds = ref
           .read(channelsProvider.notifier)
           .hiddenDmIds
           .toList();
-      final hiddenUnsubscribers = <void Function()>[];
-      for (
-        var start = 0;
-        start < hiddenDmIds.length;
-        start += kMaxExplicitChannelValues
-      ) {
-        // Never open a batch REQ for a superseded generation: check before
-        // each subscribe so teardown mid-setup stops issuing new REQs, and
-        // tear down everything this generation already opened.
-        if (generation != _subscriptionGeneration) {
-          for (final unsubscribe in hiddenUnsubscribers) {
-            unsubscribe();
-          }
-          return;
-        }
-        final end = start + kMaxExplicitChannelValues < hiddenDmIds.length
-            ? start + kMaxExplicitChannelValues
-            : hiddenDmIds.length;
-        final batch = hiddenDmIds.sublist(start, end);
-        try {
-          final unsubscribeHiddenDms = await session.subscribe(
-            NostrFilter(
-              kinds: EventKind.channelMessageEventKinds,
-              tags: {'#h': batch},
-              since: since,
-              limit: 100,
-            ),
-            (event) => _handleHiddenDmLiveEvent(event, generation),
-          );
-          // A newer generation may have superseded us while this batch's REQ
-          // was in flight. Dispose the just-resolved subscription plus every
-          // batch this generation already opened, and return without
-          // initiating another REQ.
-          if (generation != _subscriptionGeneration) {
-            unsubscribeHiddenDms();
-            for (final unsubscribe in hiddenUnsubscribers) {
-              unsubscribe();
-            }
-            return;
-          }
-          hiddenUnsubscribers.add(unsubscribeHiddenDms);
-        } catch (error) {
-          // Superseded while this batch's REQ was rejected: tear down what we
-          // opened and stop rather than initiating another REQ.
-          if (generation != _subscriptionGeneration) {
-            for (final unsubscribe in hiddenUnsubscribers) {
-              unsubscribe();
-            }
-            return;
-          }
-          // One batch's REQ was rejected; keep subscribing the rest so a
-          // partially-rejected hidden set still resurfaces every other batch.
-          debugPrint(
-            '[ActivityNotifier] hidden-DM batch subscription failed: $error',
-          );
-        }
-      }
-      // A newer generation may have superseded us after the final batch
-      // settled; tear down every batch this generation opened so none leak
-      // past the generation that owns them, and never publish into the field
-      // the successor already cleared.
-      if (generation != _subscriptionGeneration) {
-        for (final unsubscribe in hiddenUnsubscribers) {
-          unsubscribe();
-        }
-        return;
-      }
+      final hiddenUnsubscribers = await _subscribeChannelBatches(
+        session,
+        generation,
+        channelIds: hiddenDmIds,
+        kinds: EventKind.channelMessageEventKinds,
+        since: since,
+        onEvent: (event) => _handleHiddenDmLiveEvent(event, generation),
+      );
+      if (hiddenUnsubscribers == null) return;
       _unsubscribeHiddenDms.addAll(hiddenUnsubscribers);
     } catch (error) {
       if (generation == _subscriptionGeneration) {
         debugPrint('[ActivityNotifier] live subscription failed: $error');
       }
     }
+  }
+
+  /// Subscribes to a channel-scoped live feed split into batches that never
+  /// exceed [kMaxExplicitChannelValues] explicit `#h` values, since the relay
+  /// rejects a REQ that does. Each batch is its own subscription owned by
+  /// [generation]. The generation is checked before every `subscribe` and
+  /// immediately after each await, so teardown mid-setup disposes everything
+  /// this call already opened and stops issuing REQs. A single batch's
+  /// rejection is isolated so later batches still register.
+  ///
+  /// Returns the accumulated unsubscribers for the caller to retain, or `null`
+  /// if a newer generation superseded this call — in which case it has already
+  /// torn down everything it opened and the caller must return without
+  /// publishing into a field the successor already cleared.
+  Future<List<void Function()>?> _subscribeChannelBatches(
+    RelaySessionNotifier session,
+    int generation, {
+    required List<String> channelIds,
+    required List<int> kinds,
+    required int since,
+    required void Function(NostrEvent) onEvent,
+  }) async {
+    final unsubscribers = <void Function()>[];
+    for (
+      var start = 0;
+      start < channelIds.length;
+      start += kMaxExplicitChannelValues
+    ) {
+      // Never open a batch REQ for a superseded generation: check before each
+      // subscribe so teardown mid-setup stops issuing new REQs, and tear down
+      // everything this call already opened.
+      if (generation != _subscriptionGeneration) {
+        for (final unsubscribe in unsubscribers) {
+          unsubscribe();
+        }
+        return null;
+      }
+      final end = start + kMaxExplicitChannelValues < channelIds.length
+          ? start + kMaxExplicitChannelValues
+          : channelIds.length;
+      final batch = channelIds.sublist(start, end);
+      try {
+        final unsubscribe = await session.subscribe(
+          NostrFilter(
+            kinds: kinds,
+            tags: {'#h': batch},
+            since: since,
+            limit: 100,
+          ),
+          onEvent,
+        );
+        // A newer generation may have superseded us while this batch's REQ was
+        // in flight. Dispose the just-resolved subscription plus every batch
+        // this call already opened, and stop without initiating another REQ.
+        if (generation != _subscriptionGeneration) {
+          unsubscribe();
+          for (final accumulated in unsubscribers) {
+            accumulated();
+          }
+          return null;
+        }
+        unsubscribers.add(unsubscribe);
+      } catch (error) {
+        // Superseded while this batch's REQ was rejected: tear down what we
+        // opened and stop rather than initiating another REQ.
+        if (generation != _subscriptionGeneration) {
+          for (final accumulated in unsubscribers) {
+            accumulated();
+          }
+          return null;
+        }
+        // One batch's REQ was rejected; keep subscribing the rest so a
+        // partially-rejected set still covers every other batch.
+        debugPrint(
+          '[ActivityNotifier] channel batch subscription failed: $error',
+        );
+      }
+    }
+    // A newer generation may have superseded us after the final batch settled;
+    // tear down every batch this call opened so none leak past the generation
+    // that owns them.
+    if (generation != _subscriptionGeneration) {
+      for (final unsubscribe in unsubscribers) {
+        unsubscribe();
+      }
+      return null;
+    }
+    return unsubscribers;
   }
 
   void _handleAddressedLiveEvent(NostrEvent event, int generation) {
@@ -390,8 +417,10 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
     _refreshQueued = false;
     _unsubscribeAddressed?.call();
     _unsubscribeAddressed = null;
-    _unsubscribeDms?.call();
-    _unsubscribeDms = null;
+    for (final unsubscribe in _unsubscribeDms) {
+      unsubscribe();
+    }
+    _unsubscribeDms.clear();
     for (final unsubscribe in _unsubscribeHiddenDms) {
       unsubscribe();
     }

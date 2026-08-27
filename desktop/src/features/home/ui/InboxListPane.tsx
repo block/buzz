@@ -453,7 +453,6 @@ export function InboxListPane({
 
               {isReopening || hasReopenError ? (
                 <div
-                  aria-busy={isReopening}
                   aria-live="polite"
                   className={cn(
                     "mt-1 flex items-center gap-1 text-2xs font-medium",

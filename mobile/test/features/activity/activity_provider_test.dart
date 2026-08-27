@@ -140,6 +140,16 @@ class _RecordingSessionNotifier extends RelaySessionNotifier {
         subscription.filter.tags['#h']!,
   ];
 
+  /// The `#h` value lists of every registered visible-DM subscription (kind 9
+  /// only), in order.
+  List<List<String>> get visibleDmSubscriptionBatches => [
+    for (final subscription in _subscriptions)
+      if (subscription.filter.tags.containsKey('#h') &&
+          subscription.filter.kinds.length == 1 &&
+          subscription.filter.kinds.single == 9)
+        subscription.filter.tags['#h']!,
+  ];
+
   void emit(NostrEvent event) {
     _history.add(event);
     for (final subscription in List.of(_subscriptions)) {
@@ -1020,6 +1030,87 @@ void main() {
         await _waitFor(() => session.hiddenUnsubscribeCount == 2);
         expect(session.hiddenUnsubscribeCount, 2);
         expect(session.hiddenDmSubscriptionBatches, isEmpty);
+      },
+    );
+
+    test(
+      '129 visible DMs batch under the cap and hidden activity still resurfaces',
+      () async {
+        // An over-cap visible-DM set previously rejected as one REQ, aborting
+        // the whole live setup — so the hidden batches never registered and
+        // resurfacing silently died. Batching the visible set keeps every REQ
+        // within the cap and leaves the hidden subscription intact.
+        const alice =
+            '2222222222222222222222222222222222222222222222222222222222222222';
+        final visibleChannels = [
+          for (var i = 0; i < 129; i++)
+            _dmChannel('visible-${i.toString().padLeft(4, '0')}'),
+        ];
+        const hiddenTarget = 'hidden-dm';
+        final session = _RecordingSessionNotifier();
+        final reopened = <List<String>>[];
+        final container = ProviderContainer(
+          overrides: [
+            relayConfigProvider.overrideWith(_FixedRelayConfigNotifier.new),
+            myPubkeyProvider.overrideWithValue(self),
+            relaySessionProvider.overrideWith(() => session),
+            channelsProvider.overrideWith(
+              () => _FixedChannelsNotifier(
+                visibleChannels,
+                hiddenDmIds: const {hiddenTarget},
+              ),
+            ),
+            channelMembersProvider(hiddenTarget).overrideWith(
+              (ref) async => [
+                ChannelMember(
+                  pubkey: self,
+                  role: 'member',
+                  joinedAt: DateTime(2026),
+                ),
+                ChannelMember(
+                  pubkey: alice,
+                  role: 'member',
+                  joinedAt: DateTime(2026),
+                ),
+              ],
+            ),
+            dmResurfaceActionProvider.overrideWithValue((pubkeys) async {
+              reopened.add(pubkeys);
+              return hiddenTarget;
+            }),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container.read(channelsProvider.future);
+        await container.read(activityProvider.future);
+        await _waitFor(() => session.hiddenDmSubscriptionBatches.isNotEmpty);
+
+        // Every visible-DM REQ stays within the cap, split 128 + 1.
+        final visibleBatches = session.visibleDmSubscriptionBatches;
+        expect(visibleBatches.map((batch) => batch.length), [128, 1]);
+        expect(visibleBatches.expand((batch) => batch).toSet(), hasLength(129));
+        // The hidden subscription registered despite the over-cap visible set.
+        expect(session.hiddenDmSubscriptionBatches, hasLength(1));
+
+        // Hidden activity still resurfaces its DM.
+        session.emit(
+          NostrEvent(
+            id: 'hidden-message',
+            pubkey: alice,
+            createdAt: 1_700_000_000,
+            kind: EventKind.streamMessageV2,
+            tags: [
+              ['p', self],
+              ['h', hiddenTarget],
+            ],
+            content: 'Hello again',
+            sig: '',
+          ),
+        );
+
+        await _waitFor(() => reopened.isNotEmpty);
+        expect(reopened.single, [alice]);
       },
     );
   });

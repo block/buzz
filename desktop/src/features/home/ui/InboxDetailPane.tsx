@@ -597,7 +597,6 @@ function InboxMessageDetailPane({
                   <UpdateIndicator />
                   {reopenPending || reopenErrored ? (
                     <div
-                      aria-busy={reopenPending}
                       aria-live="polite"
                       className={cn(
                         "flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium",

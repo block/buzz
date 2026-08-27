@@ -9,7 +9,8 @@
  *   - a single open_dm is issued per activation (pointer, context-menu, keyboard),
  *   - a duplicate activation while a reopen is pending is suppressed,
  *   - navigation is withheld until the reopen resolves (no premature nav),
- *   - a perceivable pending state renders with aria-busy + role="status",
+ *   - a perceivable, immediately announceable pending state renders with
+ *     role="status" and no aria-busy suppression,
  *   - a failure surfaces an actionable, keyboard-reachable Retry, and
  *   - a successful retry finally navigates.
  *
@@ -516,7 +517,11 @@ test("pointer activation issues one reopen, shows pending, then navigates", asyn
     );
     assert.ok(status, "a persistent reopen status region must render");
     assert.equal(status.getAttribute("role"), "status");
-    assert.equal(status.getAttribute("aria-busy"), "true");
+    // The pending status must be immediately announceable: aria-busy on the
+    // live region would defer the update, and the region unmounts on success
+    // before ever committing aria-busy=false, so "Reopening…" could go
+    // unannounced (Jude's P2). Assert the region carries no busy suppression.
+    assert.equal(status.getAttribute("aria-busy"), null);
     assert.match(status.textContent, /Reopening/);
     assert.equal(inbox.navigations.length, 0, "no premature navigation");
 
@@ -570,7 +575,7 @@ test("context-menu activation shows pending, suppresses duplicates, then navigat
     );
     assert.ok(status, "a persistent reopen status region must render");
     assert.equal(status.getAttribute("role"), "status");
-    assert.equal(status.getAttribute("aria-busy"), "true");
+    assert.equal(status.getAttribute("aria-busy"), null);
     assert.match(status.textContent, /Reopening/);
     assert.equal(inbox.navigations.length, 0, "no premature navigation");
     assert.equal(openDmCalls, 1, "one open_dm issued from the menu");
