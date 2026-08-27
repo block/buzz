@@ -4,6 +4,7 @@ import {
   getPersistentAgentAudienceRevision,
   promotePersistentAgentAudienceIfUnchanged,
   removePersistentAgentAudienceMembersIfUnchanged,
+  usePersistentAgentAudience,
 } from "@/features/messages/lib/persistentAgentAudience";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
@@ -31,6 +32,8 @@ export function useAutoPinMentionedAgents({
   onPulse,
   onTurnOff,
 }: Options) {
+  const { pubkeys: currentAudiencePubkeys } =
+    usePersistentAgentAudience(audienceScope);
   const [confirmation, setConfirmation] = React.useState<Confirmation | null>(
     null,
   );
@@ -43,6 +46,19 @@ export function useAutoPinMentionedAgents({
     );
     return () => window.clearTimeout(timeout);
   }, [confirmation]);
+
+  const currentAudiencePubkeySet = React.useMemo(
+    () => new Set(currentAudiencePubkeys.map(normalizePubkey).filter(Boolean)),
+    [currentAudiencePubkeys],
+  );
+  const confirmationIsCurrent =
+    confirmation?.scope === audienceScope &&
+    confirmation.pubkeys.every((pubkey) =>
+      currentAudiencePubkeySet.has(pubkey),
+    );
+  React.useEffect(() => {
+    if (confirmation && !confirmationIsCurrent) setConfirmation(null);
+  }, [confirmation, confirmationIsCurrent]);
 
   const promoteAgents = React.useCallback(
     ({
@@ -129,8 +145,7 @@ export function useAutoPinMentionedAgents({
   }, [confirmation, onTurnOff]);
 
   return {
-    confirmationTitle:
-      confirmation?.scope === audienceScope ? confirmation.title : null,
+    confirmationTitle: confirmationIsCurrent ? confirmation.title : null,
     dismissConfirmation,
     promoteExplicitlyAddressedAgents,
     promoteMentionedAgents,

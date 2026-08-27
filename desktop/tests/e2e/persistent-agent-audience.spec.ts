@@ -784,6 +784,34 @@ test("the auto-pin popover can turn off automatic agent mentions", async ({
   await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);
 });
 
+test("removing the mention chip dismisses the auto-pin popover", async ({
+  page,
+}) => {
+  await keepMentionedAgentsPinned(page);
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  await input.fill("@Mor");
+  await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
+  await input.press("Tab");
+
+  const autoPinConfirmation = page.getByTestId(
+    "composer-auto-pin-confirmation",
+  );
+  await expect(autoPinConfirmation).toBeVisible();
+
+  const selectAllShortcut = await page.evaluate(() =>
+    /mac|iphone|ipad|ipod/i.test(navigator.platform) ? "Meta+A" : "Control+A",
+  );
+  await input.press(selectAllShortcut);
+  await input.press("Backspace");
+
+  await expect(input).toHaveText("");
+  await expect(autoPinConfirmation).toHaveCount(0);
+});
+
 test("automatic mentions are scoped to their channel or thread composer", async ({
   page,
 }) => {
