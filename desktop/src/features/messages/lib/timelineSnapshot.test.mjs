@@ -544,7 +544,7 @@ test("timeline-body-surface: loading and deferred-pending both paint the single 
 test("timeline-body-surface: first authoritative rows wait for deferred paint", () => {
   // A newly selected populated channel has already resolved live rows, but the
   // deferred snapshot is still empty. It has never committed a settled empty
-  // surface, so showing its intro here would flash Create agent / Add people.
+  // surface, so showing its intro here would flash Add agent / Add people.
   assert.equal(
     selectTimelineBodySurface({
       deferredCount: 0,

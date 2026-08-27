@@ -9,7 +9,7 @@ type CreateProjectDialogProps = {
   open: boolean;
 };
 
-/** Modal for publishing a project with its initial NIP-34 repository. */
+/** Modal for creating a project channel. */
 export function CreateProjectDialog({
   isCreating,
   onCreate,

@@ -185,6 +185,7 @@ test("project terminal button opens Buzz Term for the repository", async ({
     .first();
   await expect(projectEntry).toBeVisible({ timeout: 10_000 });
   await projectEntry.click();
+  await page.getByTestId("project-home-context-repo-buzz").click();
 
   const terminalButton = page.getByTestId("project-terminal-toggle");
   await expect(terminalButton).toBeEnabled();

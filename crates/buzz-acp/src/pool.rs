@@ -36,6 +36,7 @@ use crate::acp::{
 };
 use crate::config::{compose_session_title, DedupMode, PermissionMode};
 use crate::observer;
+use crate::prompt_project::{pick_authoritative_project_home, PromptProjectInfo};
 use crate::queue::{
     CancelReason, ContextMessage, ConversationContext, FlushBatch, PromptChannelInfo,
     PromptProfile, PromptProfileLookup, ThreadTags,
@@ -514,6 +515,9 @@ pub enum TimeoutKind {
 pub enum PromptOutcome {
     Ok(StopReason),
     Error(AcpError),
+    /// Local relay state could not establish project authority. The ACP
+    /// process is healthy; preserve the batch for bounded retry.
+    ProjectContextIndeterminate(String),
     AgentExited,
     Timeout(TimeoutKind),
     /// Intentional cancel via `!cancel` command or interrupt mode.
@@ -541,8 +545,20 @@ pub enum PromptOutcome {
 /// context, canvas, and setup mode). Unknown metadata is never cached as a
 /// non-DM: callers can fail closed and a later event retries resolution.
 #[derive(Debug, Clone)]
+struct CachedProjectInfo {
+    fetched_at: std::time::Instant,
+    value: Option<PromptProjectInfo>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ProjectLookupError(String);
+
+const PROJECT_INFO_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Debug, Clone)]
 pub struct ChannelInfoResolver {
     cache: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<Uuid, PromptChannelInfo>>>,
+    projects: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<Uuid, CachedProjectInfo>>>,
     rest_client: RestClient,
 }
 
@@ -560,17 +576,19 @@ impl ChannelInfoResolver {
                         name: info.name,
                         channel_type: info.channel_type,
                         description: info.description,
+                        project: None,
                     },
                 ))
             })
             .collect();
         Self {
             cache: std::sync::Arc::new(std::sync::RwLock::new(cache)),
+            projects: std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             rest_client,
         }
     }
 
-    pub async fn resolve(&self, channel_id: Uuid) -> Option<PromptChannelInfo> {
+    pub async fn resolve_channel_metadata(&self, channel_id: Uuid) -> Option<PromptChannelInfo> {
         if let Some(info) = self
             .cache
             .read()
@@ -579,12 +597,63 @@ impl ChannelInfoResolver {
         {
             return Some(info);
         }
-
         let info = fetch_channel_info(channel_id, &self.rest_client).await?;
         if let Ok(mut cache) = self.cache.write() {
             cache.insert(channel_id, info.clone());
         }
         Some(info)
+    }
+
+    pub async fn resolve(
+        &self,
+        channel_id: Uuid,
+    ) -> Result<Option<PromptChannelInfo>, ProjectLookupError> {
+        let Some(mut info) = self.resolve_channel_metadata(channel_id).await else {
+            return Ok(None);
+        };
+        info.project = self.lookup_project(channel_id).await?;
+        Ok(Some(info))
+    }
+
+    async fn lookup_project(
+        &self,
+        channel_id: Uuid,
+    ) -> Result<Option<PromptProjectInfo>, ProjectLookupError> {
+        let cached = self
+            .projects
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(&channel_id).cloned());
+        if let Some(fresh) = cached
+            .as_ref()
+            .filter(|cached| cached.fetched_at.elapsed() < PROJECT_INFO_CACHE_TTL)
+        {
+            return Ok(fresh.value.clone());
+        }
+        let fetched = match fetch_project_home_for_channel(channel_id, &self.rest_client).await {
+            Ok(fetched) => fetched,
+            Err(error) => {
+                if let Some(project) = cached.and_then(|stale| stale.value) {
+                    tracing::warn!(
+                        channel_id = %channel_id,
+                        "project context refresh failed; retaining stale project: {}",
+                        error.0
+                    );
+                    return Ok(Some(project));
+                }
+                return Err(error);
+            }
+        };
+        if let Ok(mut cache) = self.projects.write() {
+            cache.insert(
+                channel_id,
+                CachedProjectInfo {
+                    fetched_at: std::time::Instant::now(),
+                    value: fetched.clone(),
+                },
+            );
+        }
+        Ok(fetched)
     }
 }
 
@@ -980,15 +1049,14 @@ const UNKNOWN_CHANNEL_NAME: &str = "unknown";
 /// process restarts. An agent rename lands on the next spawn (the desktop
 /// restart badge covers it — see `spawn_config_hash`).
 async fn resolve_new_session_channel_context(
-    channel_info: &ChannelInfoResolver,
-    channel_id: Uuid,
+    channel_info: Option<&PromptChannelInfo>,
 ) -> (bool, Option<String>, Option<String>) {
-    let Some(info) = channel_info.resolve(channel_id).await else {
+    let Some(info) = channel_info else {
         return (true, None, None);
     };
     let is_dm = info.channel_type == "dm";
-    let title_channel = (!is_dm && info.name != UNKNOWN_CHANNEL_NAME).then_some(info.name);
-    (is_dm, title_channel, Some(info.channel_type))
+    let title_channel = (!is_dm && info.name != UNKNOWN_CHANNEL_NAME).then(|| info.name.clone());
+    (is_dm, title_channel, Some(info.channel_type.clone()))
 }
 
 /// Create a new ACP session via `session_new_full()`, populate model capabilities
@@ -1855,6 +1923,33 @@ pub async fn run_prompt_task(
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
 
+    // Resolve project authority exactly once, before any ACP session creation or
+    // initial-message delivery. An indeterminate result is a local relay-state
+    // outcome: fail closed and preserve the batch without poisoning the healthy
+    // ACP process.
+    let resolved_channel_info = match &source {
+        PromptSource::Channel(channel_id) => match ctx.channel_info.resolve(*channel_id).await {
+            Ok(info) => info,
+            Err(error) => {
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    "project context is indeterminate; requeueing turn before ACP session creation: {}",
+                    error.0
+                );
+                send_prompt_result(
+                    &result_tx,
+                    &turn_id,
+                    agent,
+                    source,
+                    PromptOutcome::ProjectContextIndeterminate(error.0),
+                    requeue_batch_if_queue(&ctx, batch),
+                );
+                return;
+            }
+        },
+        PromptSource::Heartbeat => None,
+    };
+
     //
     // Core memory is delivered inside the system prompt the harness already
     // builds (system role for protocol >= 2, the `<system>` user-message
@@ -1942,7 +2037,7 @@ pub async fn run_prompt_task(
         let needs_canvas = is_new_channel_session && !agent.state.canvas_sections.contains_key(cid);
         if is_new_channel_session {
             let (is_dm, resolved_channel, resolved_channel_type) =
-                resolve_new_session_channel_context(&ctx.channel_info, *cid).await;
+                resolve_new_session_channel_context(resolved_channel_info.as_ref()).await;
             title_channel = resolved_channel;
             origin_channel_type = resolved_channel_type;
             if let Some(owner) = ctx.agent_owner_pubkey.as_ref() {
@@ -2334,9 +2429,9 @@ pub async fn run_prompt_task(
         };
         vec![text]
     } else if let Some(ref b) = batch {
-        // Build prompt from batch with context enrichment.
-        // Try startup cache first; lazy-fetch via REST for dynamic channels.
-        let channel_info = ctx.channel_info.resolve(b.channel_id).await;
+        // Project authority was resolved before any ACP session boundary above;
+        // reuse that exact typed result for prompt formatting.
+        let channel_info = resolved_channel_info.clone();
 
         let conversation_context = if ctx.context_message_limit > 0 {
             fetch_conversation_context(b, &channel_info, &ctx).await
@@ -2963,6 +3058,7 @@ pub(crate) async fn fetch_channel_info(
                     name: name.unwrap_or(UNKNOWN_CHANNEL_NAME).to_string(),
                     channel_type,
                     description,
+                    project: None,
                 })
             }
             Ok(Err(e)) => {
@@ -2982,6 +3078,59 @@ pub(crate) async fn fetch_channel_info(
         }
     })
     .await
+}
+
+/// Resolve the listed NIP-MP project whose home channel is `channel_id`.
+pub(crate) async fn fetch_project_home_for_channel(
+    channel_id: Uuid,
+    rest: &RestClient,
+) -> Result<Option<PromptProjectInfo>, ProjectLookupError> {
+    let channel = channel_id.to_string();
+    let filters = [
+        serde_json::json!({
+            "kinds": [buzz_core::kind::KIND_PROJECT],
+            "#buzz-channel": [channel],
+        }),
+        serde_json::json!({
+            "kinds": [buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT],
+            "#buzz-channel": [channel],
+        }),
+    ];
+
+    let mut events = Vec::new();
+    for filter in filters {
+        let mut page_events = fetch_with_retry(|| async {
+            match timeout(CONTEXT_FETCH_TIMEOUT, rest.query_raw_all(filter.clone())).await {
+                Ok(Ok(events)) => Some(events),
+                Ok(Err(e)) => {
+                    tracing::debug!(
+                        channel_id = %channel_id,
+                        "project home fetch failed: {e} — will retry"
+                    );
+                    None
+                }
+                Err(_) => {
+                    tracing::debug!(
+                        channel_id = %channel_id,
+                        "project home fetch timed out — will retry"
+                    );
+                    None
+                }
+            }
+        })
+        .await
+        .ok_or_else(|| ProjectLookupError("relay query failed or timed out after retry".into()))?;
+        events.append(&mut page_events);
+    }
+    let (projects, repos): (Vec<_>, Vec<_>) = events.into_iter().partition(|event| {
+        event.get("kind").and_then(serde_json::Value::as_u64)
+            == Some(buzz_core::kind::KIND_PROJECT as u64)
+    });
+    Ok(pick_authoritative_project_home(
+        &projects,
+        &repos,
+        &channel_id.to_string(),
+    ))
 }
 
 /// Fetch owner-signed huddle instructions for a new channel session.
@@ -3278,12 +3427,14 @@ fn conversation_context_delta(
         ConversationContext::Thread {
             messages,
             total,
+            root_present,
             truncated,
         } => {
             let messages = filter(messages);
             (!messages.is_empty()).then_some(ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             })
         }
@@ -3753,6 +3904,7 @@ fn parse_thread_response(json: serde_json::Value) -> Option<ConversationContext>
     Some(ConversationContext::Thread {
         messages,
         total,
+        root_present: json.get("root").and_then(json_to_context_message).is_some(),
         truncated,
     })
 }
@@ -3931,6 +4083,7 @@ fn parse_nostr_thread_response_with_meta(
         context: ConversationContext::Thread {
             messages,
             total,
+            root_present,
             truncated,
         },
         root_present,
@@ -5109,11 +5262,13 @@ mod tests {
             ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             } => {
                 assert_eq!(messages.len(), 2); // root + 1 reply
                 assert_eq!(total, 2); // 1 reply + 1 root
                 assert!(!truncated);
+                assert!(root_present);
                 assert_eq!(messages[0].content, "root message");
                 assert_eq!(messages[1].content, "first reply");
             }
@@ -5146,11 +5301,13 @@ mod tests {
             ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             } => {
                 assert_eq!(messages.len(), 2);
                 assert_eq!(total, 11); // 10 replies + 1 root
                 assert!(truncated);
+                assert!(root_present);
             }
             _ => panic!("expected Thread context"),
         }
@@ -5321,11 +5478,13 @@ mod tests {
             ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             } => {
                 assert_eq!(messages.len(), 3); // root + 2 displayed replies
                 assert_eq!(total, 4); // root + displayed replies + sentinel
                 assert!(truncated);
+                assert!(root_present);
                 assert_eq!(messages[0].content, "root");
                 assert_eq!(messages[1].content, "middle reply");
                 assert_eq!(messages[2].content, "newest agent reply");
@@ -5362,11 +5521,50 @@ mod tests {
             ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             } => {
                 assert_eq!(messages.len(), 2);
                 assert_eq!(total, 2);
                 assert!(!truncated);
+                assert!(root_present);
+            }
+            _ => panic!("expected Thread context"),
+        }
+    }
+
+    #[test]
+    fn test_parse_nostr_thread_response_marks_missing_root_incomplete() {
+        let agent = Keys::generate();
+        let root_id = "1111111111111111111111111111111111111111111111111111111111111111";
+        let json = json!([
+            {
+                "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "pubkey": "replypub1",
+                "content": "first reply",
+                "created_at": 2000
+            },
+            {
+                "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "pubkey": "replypub2",
+                "content": "second reply",
+                "created_at": 3000
+            }
+        ]);
+
+        let ctx = parse_nostr_thread_response(json, root_id, 12, &agent.public_key())
+            .expect("reply context should still be available");
+        match ctx {
+            ConversationContext::Thread {
+                messages,
+                total,
+                root_present,
+                truncated,
+            } => {
+                assert_eq!(messages.len(), 2);
+                assert_eq!(total, 2);
+                assert!(!truncated);
+                assert!(!root_present);
             }
             _ => panic!("expected Thread context"),
         }
@@ -5483,6 +5681,7 @@ mod tests {
                 messages,
                 total,
                 truncated,
+                ..
             } => {
                 assert!(truncated);
                 assert_eq!(messages.len(), 3);
@@ -5533,11 +5732,13 @@ mod tests {
             ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             } => {
                 assert!(truncated);
                 assert_eq!(messages.len(), 2);
                 assert_eq!(total, 6);
+                assert!(!root_present);
             }
             _ => panic!("expected Thread context"),
         }
@@ -5586,6 +5787,7 @@ mod tests {
                 messages,
                 total,
                 truncated,
+                ..
             } => {
                 assert!(truncated);
                 assert_eq!(messages.len(), 3);
@@ -5638,6 +5840,7 @@ mod tests {
                 messages,
                 total,
                 truncated,
+                ..
             } => {
                 assert!(truncated);
                 assert_eq!(messages.len(), 3);
@@ -5699,6 +5902,7 @@ mod tests {
                 messages,
                 total,
                 truncated,
+                ..
             } => {
                 assert!(truncated);
                 assert_eq!(total, 4);
@@ -5772,6 +5976,7 @@ mod tests {
                 messages,
                 total,
                 truncated,
+                ..
             } => {
                 assert!(truncated);
                 assert_eq!(messages.len(), 3);
@@ -5910,6 +6115,7 @@ mod tests {
                 content: "follow up".into(),
             }],
             total: 1,
+            root_present: true,
             truncated: false,
         };
 
@@ -6579,6 +6785,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 context_message("new", "new context"),
             ],
             total: 3,
+            root_present: true,
             truncated: false,
         };
 
@@ -6588,12 +6795,14 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             ConversationContext::Thread {
                 messages,
                 total,
+                root_present,
                 truncated,
             } => {
                 assert_eq!(messages.len(), 1);
                 assert_eq!(messages[0].event_id, "new");
                 assert_eq!(total, 3);
                 assert!(!truncated);
+                assert!(root_present);
             }
             _ => panic!("expected thread context"),
         }
@@ -6955,6 +7164,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => "Timeout(Hard)",
             PromptOutcome::CancelDrainTimeout(_) => "CancelDrainTimeout",
             PromptOutcome::Error(_) => "Error",
+            PromptOutcome::ProjectContextIndeterminate(_) => "ProjectContextIndeterminate",
             PromptOutcome::Cancelled => "Cancelled",
             PromptOutcome::Ok(_) => "Ok",
         };
@@ -8421,8 +8631,364 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         json!([{ "tags": event_tags }])
     }
 
+    #[tokio::test]
+    async fn expired_absence_refreshes_to_project_without_restart() {
+        use std::sync::atomic::Ordering;
+
+        let id = Uuid::new_v4();
+        let channel = id.to_string();
+        let owner = "a".repeat(64);
+        let coordinate = format!("30617:{owner}:app");
+        let responses = [
+            json!([{
+                "kind": 30621,
+                "pubkey": owner,
+                "tags": [["d", "app"], ["buzz-channel", channel], ["a", coordinate]]
+            }]),
+            json!([{
+                "kind": 30617,
+                "pubkey": "a".repeat(64),
+                "tags": [["d", "app"], ["buzz-channel", id.to_string()]]
+            }]),
+        ];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0; 8192];
+                let _ = socket.read(&mut buf).await;
+                let index = server_requests.fetch_add(1, Ordering::SeqCst).min(1);
+                let body = responses[index].to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let resolver = ChannelInfoResolver::new(
+            std::collections::HashMap::new(),
+            crate::relay::RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: nostr::Keys::generate(),
+                auth_tag_json: None,
+            },
+        );
+        resolver.projects.write().unwrap().insert(
+            id,
+            CachedProjectInfo {
+                fetched_at: std::time::Instant::now() - PROJECT_INFO_CACHE_TTL,
+                value: None,
+            },
+        );
+
+        let project = resolver
+            .lookup_project(id)
+            .await
+            .expect("project lookup succeeds")
+            .expect("project refreshes");
+        assert_eq!(project.slug, "app");
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_rejects_expired_absence_but_retains_expired_project() {
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let id = Uuid::new_v4();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0; 8192];
+                let _ = socket.read(&mut buf).await;
+                server_requests.fetch_add(1, Ordering::SeqCst);
+                let body = "not-json";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let resolver = ChannelInfoResolver::new(
+            std::collections::HashMap::from([(
+                id,
+                crate::relay::ChannelInfo {
+                    name: "ordinary-looking".into(),
+                    channel_type: "stream".into(),
+                    description: None,
+                },
+            )]),
+            crate::relay::RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: nostr::Keys::generate(),
+                auth_tag_json: None,
+            },
+        );
+
+        resolver.projects.write().unwrap().insert(
+            id,
+            CachedProjectInfo {
+                fetched_at: std::time::Instant::now() - PROJECT_INFO_CACHE_TTL,
+                value: None,
+            },
+        );
+        assert!(
+            resolver.resolve(id).await.is_err(),
+            "an expired absence plus failed refresh must remain indeterminate"
+        );
+        assert!(
+            resolver
+                .projects
+                .read()
+                .unwrap()
+                .get(&id)
+                .unwrap()
+                .value
+                .is_none(),
+            "failed refresh must not renew the expired absence"
+        );
+
+        let stale_project = PromptProjectInfo {
+            name: "Last known project".into(),
+            slug: "last-known".into(),
+            owner: "a".repeat(64),
+            coordinate: format!("30621:{}:last-known", "a".repeat(64)),
+            default_repo_owner: None,
+            default_repo_id: None,
+        };
+        resolver.projects.write().unwrap().insert(
+            id,
+            CachedProjectInfo {
+                fetched_at: std::time::Instant::now() - PROJECT_INFO_CACHE_TTL,
+                value: Some(stale_project.clone()),
+            },
+        );
+        let resolved = resolver
+            .resolve(id)
+            .await
+            .expect("project lookup succeeds")
+            .expect("stale project is retained");
+        assert_eq!(resolved.project, Some(stale_project));
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            4,
+            "each refresh is retried once"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn indeterminate_project_context_never_reaches_acp_prompt_boundary() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let channel_id = Uuid::new_v4();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0; 8192];
+                let _ = socket.read(&mut buf).await;
+                let body = "not-json";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-indeterminate-project-wire-{}.ndjson",
+            Uuid::new_v4()
+        ));
+        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let script = format!(
+            r#"while IFS= read -r line; do
+  printf '%s\n' "$line" >> '{quoted_capture}'
+  printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'
+done"#
+        );
+        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+            .await
+            .expect("spawn wire-capture ACP");
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
+            agent_name: "boundary-test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 1,
+        };
+
+        let event = EventBuilder::new(Kind::Custom(9), "do project work")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let event_id = event.id.to_hex();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.dedup_mode = DedupMode::Queue;
+        ctx.initial_message = Some("inspect this project before the triggering turn".into());
+        ctx.rest_client.base_url = base_url.clone();
+        ctx.channel_info = ChannelInfoResolver::new(
+            HashMap::from([(
+                channel_id,
+                crate::relay::ChannelInfo {
+                    name: "ordinary-looking".into(),
+                    channel_type: "stream".into(),
+                    description: None,
+                },
+            )]),
+            RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: ctx.agent_keys.clone(),
+                auth_tag_json: None,
+            },
+        );
+        ctx.channel_info.projects.write().unwrap().insert(
+            channel_id,
+            CachedProjectInfo {
+                fetched_at: std::time::Instant::now() - PROJECT_INFO_CACHE_TTL,
+                value: None,
+            },
+        );
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        run_prompt_task(
+            agent,
+            Some(batch),
+            None,
+            Arc::new(ctx),
+            result_tx,
+            None,
+            "indeterminate-project-turn".into(),
+        )
+        .await;
+
+        let mut result = result_rx.recv().await.expect("prompt result");
+        assert!(matches!(
+            result.outcome,
+            PromptOutcome::ProjectContextIndeterminate(_)
+        ));
+        let retry = result
+            .batch
+            .take()
+            .expect("indeterminate turn must be requeued");
+        assert_eq!(retry.events[0].event.id.to_hex(), event_id);
+        result.agent.acp.shutdown().await;
+        server.abort();
+        assert!(
+            !capture.exists(),
+            "indeterminate project context must not send any ACP prompt, especially Scope: channel"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_finds_authoritative_project_beyond_first_bridge_page() {
+        use std::sync::atomic::Ordering;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let id = Uuid::new_v4();
+        let channel = id.to_string();
+        let owner = "a".repeat(64);
+        let coordinate = format!("30617:{owner}:app");
+        let first_page: Vec<_> = (0..500)
+            .map(|index| {
+                json!({
+                    "id": format!("{index:064x}"),
+                    "created_at": 1_000 - index,
+                    "kind": 30621,
+                    "pubkey": "b".repeat(64),
+                    "tags": [["d", format!("decoy-{index}")], ["buzz-channel", channel]]
+                })
+            })
+            .collect();
+        let responses = [
+            serde_json::Value::Array(first_page),
+            json!([{
+                "id": "f".repeat(64), "created_at": 1, "kind": 30621, "pubkey": owner,
+                "tags": [["d", "app"], ["buzz-channel", channel], ["a", coordinate]]
+            }]),
+            json!([{
+                "id": "e".repeat(64), "created_at": 1, "kind": 30617, "pubkey": "a".repeat(64),
+                "tags": [["d", "app"], ["buzz-channel", id.to_string()]]
+            }]),
+        ];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0; 65_536];
+                let read = socket.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..read]);
+                assert!(request.contains("#buzz-channel"));
+                let index = server_requests.fetch_add(1, Ordering::SeqCst);
+                let body = responses[index].to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let resolver = ChannelInfoResolver::new(
+            std::collections::HashMap::from([(
+                id,
+                crate::relay::ChannelInfo {
+                    name: "project-home".into(),
+                    channel_type: "stream".into(),
+                    description: None,
+                },
+            )]),
+            crate::relay::RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: nostr::Keys::generate(),
+                auth_tag_json: None,
+            },
+        );
+
+        let info = resolver
+            .resolve(id)
+            .await
+            .expect("project lookup succeeds")
+            .expect("context resolves");
+        assert_eq!(info.project.expect("project context").slug, "app");
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        server.abort();
+    }
+
     /// A normal channel yields a non-DM (canvas allowed) and its name for the
-    /// title suffix — and the second consumer reads it from cache, not the wire.
+    /// title suffix. Channel metadata and project context resolve once each;
+    /// the second consumer reads both from cache.
     #[tokio::test]
     async fn test_new_session_channel_context_qualifies_a_normal_channel() {
         use std::sync::atomic::Ordering;
@@ -8431,19 +8997,21 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let response = channel_metadata_response(id, &[["name", "buzz-dev"], ["t", "stream"]]);
         let (resolver, requests, server) = counting_resolver(response).await;
 
+        let info = resolver.resolve(id).await.expect("project lookup succeeds");
         let (is_dm, title_channel, channel_type) =
-            resolve_new_session_channel_context(&resolver, id).await;
+            resolve_new_session_channel_context(info.as_ref()).await;
         assert!(!is_dm, "a stream channel is not a DM");
         assert_eq!(title_channel.as_deref(), Some("buzz-dev"));
         assert_eq!(channel_type.as_deref(), Some("stream"));
-        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
 
-        let (_, again, _) = resolve_new_session_channel_context(&resolver, id).await;
+        let again_info = resolver.resolve(id).await.expect("cached lookup succeeds");
+        let (_, again, _) = resolve_new_session_channel_context(again_info.as_ref()).await;
         assert_eq!(again.as_deref(), Some("buzz-dev"));
         assert_eq!(
             requests.load(Ordering::SeqCst),
-            1,
-            "a resolved channel is cached — no second lookup"
+            3,
+            "resolved channel metadata and both project event classes are cached"
         );
         server.abort();
     }
@@ -8463,7 +9031,11 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         );
         let (resolver, _requests, server) = counting_resolver(response).await;
 
-        let info = resolver.resolve(id).await.expect("should resolve");
+        let info = resolver
+            .resolve(id)
+            .await
+            .expect("project lookup succeeds")
+            .expect("should resolve");
         assert_eq!(info.description.as_deref(), Some("Engineering discussions"));
         server.abort();
     }
@@ -8475,7 +9047,11 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let response = channel_metadata_response(id, &[["name", "buzz-dev"], ["t", "stream"]]);
         let (resolver, _requests, server) = counting_resolver(response).await;
 
-        let info = resolver.resolve(id).await.expect("should resolve");
+        let info = resolver
+            .resolve(id)
+            .await
+            .expect("project lookup succeeds")
+            .expect("should resolve");
         assert_eq!(info.description, None);
         server.abort();
     }
@@ -8488,8 +9064,9 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let response = channel_metadata_response(id, &[["name", "DM"], ["t", "dm"]]);
         let (resolver, _requests, server) = counting_resolver(response).await;
 
+        let info = resolver.resolve(id).await.expect("project lookup succeeds");
         let (is_dm, title_channel, channel_type) =
-            resolve_new_session_channel_context(&resolver, id).await;
+            resolve_new_session_channel_context(info.as_ref()).await;
         assert!(is_dm);
         assert_eq!(channel_type.as_deref(), Some("dm"));
         assert_eq!(
@@ -8508,7 +9085,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let response = channel_metadata_response(id, &[["t", "stream"]]);
         let (resolver, _requests, server) = counting_resolver(response).await;
 
-        let (is_dm, title_channel, _) = resolve_new_session_channel_context(&resolver, id).await;
+        let info = resolver.resolve(id).await.expect("project lookup succeeds");
+        let (is_dm, title_channel, _) = resolve_new_session_channel_context(info.as_ref()).await;
         assert!(!is_dm, "a nameless stream channel is still not a DM");
         assert_eq!(
             title_channel, None,
@@ -8528,8 +9106,12 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
 
         let (resolver, requests, server) = counting_resolver(json!([])).await;
 
+        let info = resolver
+            .resolve(Uuid::new_v4())
+            .await
+            .expect("missing metadata is not a project lookup error");
         let (is_dm, title_channel, channel_type) =
-            resolve_new_session_channel_context(&resolver, Uuid::new_v4()).await;
+            resolve_new_session_channel_context(info.as_ref()).await;
         assert!(is_dm, "an undeterminable channel type must fail closed");
         assert_eq!(title_channel, None, "unresolved channels get a bare title");
         assert_eq!(channel_type, None);

@@ -89,6 +89,8 @@ jobs:
           scripts/test-mobile-release-candidate-publisher.sh
       - name: Mobile worktree identity contract
         run: scripts/test-mobile-worktree-overrides.sh
+      - name: Codex security review contract
+        run: just security-review-check
       - name: Rust cache contract
         run: |
           scripts/test-rust-cache-contract.sh

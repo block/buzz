@@ -45,6 +45,8 @@ import {
   projectRepoUnavailableReason,
   refineRepoUnavailableReason,
 } from "@/features/projects/lib/projectRepoAvailability";
+import { wantsProjectRepositorySurface } from "@/features/projects/lib/projectDetailSearch";
+import { hasAuthoritativeHomeBinding } from "@/features/projects/lib/projectHomeChannel";
 import { selectProjectRepository } from "@/features/projects/projectModels";
 import { ProjectSelectionProvider } from "@/features/projects/lib/useProjectSelection";
 import { useMemberChannelIds } from "@/features/projects/useRepositoryAccess";
@@ -61,6 +63,7 @@ import { ProjectDetailChrome } from "./ProjectDetailChrome";
 import { ProjectConversationPanelController } from "./ProjectConversationPanelContext";
 import { ProjectDetailRightPanel } from "./ProjectDetailRightPanel";
 import { ProjectDetailUnavailableState } from "./ProjectDetailUnavailableState";
+import { ProjectChannelHome } from "./ProjectChannelHome";
 import { ProjectRightPanelControls } from "./ProjectRightPanelControls";
 import { buildProjectDetailCrumbs } from "./useProjectDetailCrumbs";
 import { useProjectDetailPeople } from "./useProjectDetailPeople";
@@ -84,6 +87,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const {
     commitHash,
     entityNavigationId,
+    filePath,
     projectId,
     pullRequestId,
     issueId,
@@ -282,15 +286,17 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const handleBranchChange = React.useCallback(
     (branch: string | null) => {
       selectBranch(branch);
+      if (!branch) return;
+      const localBranches = repoSyncStatusQuery.data?.localBranches;
       if (
-        branch &&
         repoSource === "local" &&
-        branch !== repoSyncStatusQuery.data?.localBranch
+        localBranches &&
+        !localBranches.includes(branch)
       ) {
         setRepoSource("remote");
       }
     },
-    [repoSource, repoSyncStatusQuery.data?.localBranch, selectBranch],
+    [repoSource, repoSyncStatusQuery.data?.localBranches, selectBranch],
   );
   const handleTagChange = React.useCallback(
     (tag: string) => {
@@ -673,6 +679,25 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       />
     );
   }
+  const showChannelHome =
+    hasAuthoritativeHomeBinding(project) &&
+    !wantsProjectRepositorySurface({
+      commitHash,
+      filePath,
+      issueId,
+      projectId,
+      pullRequestId,
+      repositoryId,
+      tab,
+    });
+  if (showChannelHome) {
+    return (
+      <ProjectChannelHome
+        project={project}
+        projects={projectsQuery.data ?? [project]}
+      />
+    );
+  }
   if (!repository) {
     return (
       <ProjectDetailUnavailableState
@@ -720,6 +745,13 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
       setSelectedPullRequestId,
       setTabsResetKey,
     });
+  const goChannelHome = () => {
+    if (project.projectChannelId) {
+      void goProject(project.id);
+      return;
+    }
+    handleGoToProjectHome();
+  };
   const agentPageContext = buildProjectDetailAgentContext({
     activeTab,
     branch: activeBranch,
@@ -834,7 +866,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                 actions={repositoryPanelAction}
                 activeTabCrumb={activeTabCrumb}
                 activeWorkItemCrumb={activeWorkItemCrumb}
-                onGoProjectHome={handleGoToProjectHome}
+                onGoProjectHome={goChannelHome}
                 onGoProjects={() => {
                   void goProjects();
                 }}
@@ -856,6 +888,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                         ? workspaceTabForShareTab(requestedTab)
                         : undefined
                     }
+                    initialFilePath={filePath}
                     initialTabRequestKey={entityNavigationId}
                     fileContentSource={fileContentSource}
                     commitDiff={commitDiffQuery.data}
@@ -900,6 +933,7 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                       handleSelectedPullRequestIdChange
                     }
                     onSelectedTabChange={setActiveTab}
+                    onBack={goChannelHome}
                     profiles={profiles}
                     project={repository}
                     projectId={project.id}

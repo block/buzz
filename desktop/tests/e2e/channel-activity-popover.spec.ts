@@ -244,7 +244,11 @@ async function seedChannelActivity(
     );
   }
 
-  await expect(page.getByTestId("channel-unread-dot-general")).toBeVisible();
+  // The seeded activity includes an in-thread @mention, so the row shows the
+  // numeric mention badge rather than the plain thread-activity dot. The
+  // hover preview popover must still work either way.
+  await expect(page.getByTestId("channel-unread-general")).toBeVisible();
+  await expect(page.getByTestId("channel-unread-dot-general")).toHaveCount(0);
   if (includeAgent) {
     await expect(page.getByTestId("channel-working-general")).toBeVisible();
   }

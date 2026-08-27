@@ -11,11 +11,11 @@ async function seedTheme(page: Page, theme: (typeof THEMES)[number]) {
   }, theme);
 }
 
-async function expectSecondarySurface(tooltip: Locator) {
+async function expectPopoverSurface(tooltip: Locator) {
   const colors = await tooltip.evaluate((element) => {
     const sample = document.createElement("div");
     sample.style.cssText =
-      "position:fixed;visibility:hidden;background:hsl(var(--secondary));color:hsl(var(--secondary-foreground))";
+      "position:fixed;visibility:hidden;background:hsl(var(--popover));color:hsl(var(--popover-foreground))";
     document.body.append(sample);
     const tooltipStyle = getComputedStyle(element);
     const sampleStyle = getComputedStyle(sample);
@@ -48,7 +48,7 @@ async function expectMutedSupportingText(
 }
 
 for (const theme of THEMES) {
-  test(`simple and rich tooltips use the secondary surface — ${theme}`, async ({
+  test(`simple and rich tooltips use the popover surface — ${theme}`, async ({
     page,
   }) => {
     await seedTheme(page, theme);
@@ -75,7 +75,7 @@ for (const theme of THEMES) {
     await page.getByTestId("channel-members-trigger").hover();
     const simpleTooltip = page.getByRole("tooltip");
     await expect(simpleTooltip).toHaveText("Channel members");
-    await expectSecondarySurface(simpleTooltip);
+    await expectPopoverSurface(simpleTooltip);
 
     await page.mouse.move(0, 0);
     await page.getByTestId("channel-intro-action-create-agent").click();
@@ -86,7 +86,7 @@ for (const theme of THEMES) {
     const richTooltip = page.getByRole("tooltip");
     await expect(richTooltip).toContainText("Checks semantic surface contrast");
     await expect(richTooltip).toContainText("Tooltip Reviewer");
-    await expectSecondarySurface(richTooltip);
+    await expectPopoverSurface(richTooltip);
     await expect(
       richTooltip.getByText("Checks semantic surface contrast"),
     ).toHaveClass(/text-secondary-foreground\/80/);
