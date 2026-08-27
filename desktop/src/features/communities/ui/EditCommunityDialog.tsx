@@ -5,6 +5,7 @@ import { useMyRelayMembershipLookupQuery } from "@/features/community-members/ho
 import type { Community } from "@/features/communities/types";
 import {
   expandTilde,
+  normalizeLanRelayUrl,
   normalizeRelayUrl,
 } from "@/features/communities/communityStorage";
 import { validateReposDir } from "@/shared/api/tauri";
@@ -24,7 +25,9 @@ type EditCommunityDialogProps = {
   onOpenChange: (open: boolean) => void;
   onSave: (
     id: string,
-    updates: Partial<Pick<Community, "name" | "relayUrl" | "reposDir">>,
+    updates: Partial<
+      Pick<Community, "name" | "relayUrl" | "lanRelayUrl" | "reposDir">
+    >,
   ) => void;
   showIconEditor?: boolean;
 };
@@ -38,6 +41,10 @@ export function EditCommunityDialog({
 }: EditCommunityDialogProps) {
   const [name, setName] = React.useState("");
   const [relayUrl, setRelayUrl] = React.useState("");
+  const [lanRelayUrl, setLanRelayUrl] = React.useState("");
+  const [lanRelayUrlError, setLanRelayUrlError] = React.useState<string | null>(
+    null,
+  );
   const [reposDir, setReposDir] = React.useState("");
   const [reposDirError, setReposDirError] = React.useState<string | null>(null);
   const membershipQuery = useMyRelayMembershipLookupQuery();
@@ -53,6 +60,8 @@ export function EditCommunityDialog({
     if (community && open) {
       setName(community.name);
       setRelayUrl(community.relayUrl);
+      setLanRelayUrl(community.lanRelayUrl ?? "");
+      setLanRelayUrlError(null);
       setReposDir(community.reposDir ?? "");
       setReposDirError(null);
     }
@@ -70,7 +79,7 @@ export function EditCommunityDialog({
       }
 
       const updates: Partial<
-        Pick<Community, "name" | "relayUrl" | "reposDir">
+        Pick<Community, "name" | "relayUrl" | "lanRelayUrl" | "reposDir">
       > = {};
 
       const trimmedName = name.trim();
@@ -81,6 +90,19 @@ export function EditCommunityDialog({
       const normalizedUrl = normalizeRelayUrl(relayUrl.trim());
       if (normalizedUrl !== community.relayUrl) {
         updates.relayUrl = normalizedUrl;
+      }
+
+      let normalizedLanRelayUrl: string | undefined;
+      try {
+        normalizedLanRelayUrl = normalizeLanRelayUrl(lanRelayUrl);
+      } catch (error) {
+        setLanRelayUrlError(
+          error instanceof Error ? error.message : String(error),
+        );
+        return;
+      }
+      if (normalizedLanRelayUrl !== community.lanRelayUrl) {
+        updates.lanRelayUrl = normalizedLanRelayUrl;
       }
 
       // Expand `~` to an absolute path before save — the backend rejects
@@ -106,7 +128,7 @@ export function EditCommunityDialog({
 
       handleClose();
     },
-    [community, name, relayUrl, reposDir, onSave, handleClose],
+    [community, name, relayUrl, lanRelayUrl, reposDir, onSave, handleClose],
   );
 
   if (!community) {
@@ -119,7 +141,7 @@ export function EditCommunityDialog({
         <DialogHeader>
           <DialogTitle>Edit Community</DialogTitle>
           <DialogDescription>
-            Update this community's name or relay URL.
+            Update this community's name or relay connections.
           </DialogDescription>
         </DialogHeader>
         <form
@@ -167,6 +189,34 @@ export function EditCommunityDialog({
               type="text"
               value={relayUrl}
             />
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <label
+              className="text-sm font-medium text-foreground"
+              htmlFor="edit-ws-lan-relay-url"
+            >
+              Campus / LAN relay
+              <span className="ml-1 text-xs font-normal text-muted-foreground">
+                (optional)
+              </span>
+            </label>
+            <Input
+              id="edit-ws-lan-relay-url"
+              onChange={(e) => {
+                setLanRelayUrl(e.target.value);
+                setLanRelayUrlError(null);
+              }}
+              placeholder="ws://10.0.0.8:3000"
+              type="text"
+              value={lanRelayUrl}
+            />
+            {lanRelayUrlError ? (
+              <p className="text-xs text-destructive">{lanRelayUrlError}</p>
+            ) : null}
+            <p className="text-xs text-muted-foreground">
+              Buzz tries this private address first for realtime traffic, then
+              automatically falls back to the Relay URL above.
+            </p>
           </div>
           <div className="flex flex-col gap-1.5">
             <label

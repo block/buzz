@@ -46,7 +46,7 @@ type CommunityRailProps = {
   onAddCommunity: () => void;
   onUpdateCommunity: (
     id: string,
-    updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
+    updates: Partial<Pick<Community, "name" | "relayUrl" | "lanRelayUrl">>,
   ) => void;
   onReorderCommunities: (orderedIds: string[]) => void;
 };

@@ -170,6 +170,71 @@ export function normalizeRelayUrl(url: string): string {
   return url;
 }
 
+function isPrivateIpv4(hostname: string): boolean {
+  const octets = hostname.split(".").map(Number);
+  if (
+    octets.length !== 4 ||
+    octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)
+  ) {
+    return false;
+  }
+  const [first, second] = octets;
+  return (
+    first === 10 ||
+    first === 127 ||
+    (first === 169 && second === 254) ||
+    (first === 172 && second >= 16 && second <= 31) ||
+    (first === 192 && second === 168) ||
+    (first === 100 && second >= 64 && second <= 127)
+  );
+}
+
+function isPrivateLanHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return (
+    normalized === "localhost" ||
+    normalized === "::1" ||
+    normalized.startsWith("fc") ||
+    normalized.startsWith("fd") ||
+    normalized.startsWith("fe8") ||
+    normalized.startsWith("fe9") ||
+    normalized.startsWith("fea") ||
+    normalized.startsWith("feb") ||
+    isPrivateIpv4(normalized)
+  );
+}
+
+/** Normalize and validate the optional plaintext private-network fast path. */
+export function normalizeLanRelayUrl(url: string): string | undefined {
+  const trimmed = url.trim();
+  if (!trimmed) return undefined;
+
+  const withScheme = trimmed.startsWith("ws://") ? trimmed : `ws://${trimmed}`;
+  let parsed: URL;
+  try {
+    parsed = new URL(withScheme);
+  } catch {
+    throw new Error("Enter a valid ws:// private-network relay URL.");
+  }
+  if (parsed.protocol !== "ws:") {
+    throw new Error("The Campus / LAN relay must use ws://.");
+  }
+  if (!isPrivateLanHost(parsed.hostname)) {
+    throw new Error(
+      "The Campus / LAN relay must use localhost or a private IP address.",
+    );
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error(
+      "The Campus / LAN relay URL cannot contain credentials or parameters.",
+    );
+  }
+  if (parsed.pathname !== "/") {
+    throw new Error("The Campus / LAN relay URL must not contain a path.");
+  }
+  return withScheme.replace(/\/+$/, "");
+}
+
 function isLocalRelayHost(hostname: string): boolean {
   return ["localhost", "127.0.0.1", "[::1]", "0.0.0.0"].includes(hostname);
 }

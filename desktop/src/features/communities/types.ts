@@ -3,6 +3,11 @@ export type Community = {
   name: string;
   relayUrl: string;
   /**
+   * Optional private-network WebSocket endpoint used only as a transport fast
+   * path. Authentication and community identity remain bound to `relayUrl`.
+   */
+  lanRelayUrl?: string;
+  /**
    * The pubkey associated with the active identity at the time the community
    * was created. Display-only — auth always uses the persisted `identity.key`
    * file resolved at startup, never this field.

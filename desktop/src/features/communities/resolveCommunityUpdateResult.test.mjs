@@ -98,3 +98,20 @@ test("resolveCommunityUpdateResult_same_relay_url_is_not_duplicate_of_self", () 
   });
   assert.deepEqual(result, { kind: "unchanged" });
 });
+
+test("resolveCommunityUpdateResult_lan_transport_edit_reinitializes_active_community", () => {
+  const result = resolveCommunityUpdateResult(COMMUNITIES, "ws-1", "ws-1", {
+    lanRelayUrl: "ws://10.24.11.82:3000",
+  });
+  assert.deepEqual(result, { kind: "updated", requiresReinit: true });
+});
+
+test("resolveCommunityUpdateResult_can_clear_lan_transport", () => {
+  const communities = [
+    { ...COMMUNITIES[0], lanRelayUrl: "ws://10.24.11.82:3000" },
+  ];
+  const result = resolveCommunityUpdateResult(communities, "ws-1", "ws-1", {
+    lanRelayUrl: undefined,
+  });
+  assert.deepEqual(result, { kind: "updated", requiresReinit: true });
+});

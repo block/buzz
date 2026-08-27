@@ -126,6 +126,7 @@ pub async fn validate_repos_dir(dir: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn apply_workspace(
     relay_url: String,
+    lan_relay_url: Option<String>,
     nsec: Option<String>,
     repos_dir: Option<String>,
     agent_managed_profiles: Option<bool>,
@@ -136,6 +137,15 @@ pub async fn apply_workspace(
         let state = app.state::<AppState>();
 
         // ── Validate before mutating ──────────────────────────────────────────
+        let lan_relay_url =
+            match crate::native_websocket::normalize_lan_relay_url(lan_relay_url.as_deref()) {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("buzz-desktop: ignoring invalid Campus / LAN relay URL: {error}");
+                    let _ = app.emit("lan-relay-error", &error);
+                    None
+                }
+            };
         let parsed_keys = match nsec.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             Some(nsec_trimmed) => {
                 Some(Keys::parse(nsec_trimmed).map_err(|e| format!("invalid nsec: {e}"))?)
@@ -167,6 +177,13 @@ pub async fn apply_workspace(
         {
             let mut override_guard = state.relay_url_override.lock().map_err(|e| e.to_string())?;
             *override_guard = Some(relay_url);
+        }
+        {
+            let mut override_guard = state
+                .relay_lan_url_override
+                .lock()
+                .map_err(|e| e.to_string())?;
+            *override_guard = lan_relay_url;
         }
         // Reset the Rust-side admission gate when switching workspace/community,
         // matching `resetRateLimitGate()` on the TS side (useCommunityInit.ts:38).

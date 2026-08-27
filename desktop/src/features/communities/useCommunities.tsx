@@ -42,7 +42,7 @@ export function resolveCommunityUpdateResult(
   activeId: string | null,
   id: string,
   updates: Partial<
-    Pick<Community, "name" | "relayUrl" | "pubkey" | "reposDir">
+    Pick<Community, "name" | "relayUrl" | "lanRelayUrl" | "pubkey" | "reposDir">
   >,
 ): UpdateCommunityResult {
   const current = communities.find((w) => w.id === id);
@@ -56,9 +56,11 @@ export function resolveCommunityUpdateResult(
     return { kind: "duplicate-relay" };
   }
 
+  const hasLanRelayUrlUpdate = Object.hasOwn(updates, "lanRelayUrl");
   const hasChange =
     (updates.name !== undefined && updates.name !== current.name) ||
     (updates.relayUrl !== undefined && updates.relayUrl !== current.relayUrl) ||
+    (hasLanRelayUrlUpdate && updates.lanRelayUrl !== current.lanRelayUrl) ||
     (updates.pubkey !== undefined && updates.pubkey !== current.pubkey) ||
     (updates.reposDir !== undefined && updates.reposDir !== current.reposDir);
 
@@ -69,6 +71,7 @@ export function resolveCommunityUpdateResult(
     isActive &&
     ((updates.relayUrl !== undefined &&
       updates.relayUrl !== current.relayUrl) ||
+      (hasLanRelayUrlUpdate && updates.lanRelayUrl !== current.lanRelayUrl) ||
       (updates.reposDir !== undefined &&
         updates.reposDir !== current.reposDir));
 
@@ -143,7 +146,10 @@ export type UseCommunitiesReturn = {
   updateCommunity: (
     id: string,
     updates: Partial<
-      Pick<Community, "name" | "relayUrl" | "pubkey" | "reposDir">
+      Pick<
+        Community,
+        "name" | "relayUrl" | "lanRelayUrl" | "pubkey" | "reposDir"
+      >
     >,
   ) => UpdateCommunityResult;
   /** Persist a new display order for the rail. IDs not in orderedIds keep their relative position at the end. */
@@ -272,7 +278,10 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
     (
       id: string,
       updates: Partial<
-        Pick<Community, "name" | "relayUrl" | "pubkey" | "reposDir">
+        Pick<
+          Community,
+          "name" | "relayUrl" | "lanRelayUrl" | "pubkey" | "reposDir"
+        >
       >,
     ): UpdateCommunityResult => {
       const result = resolveCommunityUpdateResult(

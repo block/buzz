@@ -227,6 +227,7 @@ export function useCommunityInit(
       try {
         await applyCommunity(
           activeCommunity.relayUrl,
+          activeCommunity.lanRelayUrl,
           undefined,
           activeCommunity.reposDir,
           getOverrides().agentManagedProfiles === true,

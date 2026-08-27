@@ -1,16 +1,24 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::IpAddr, sync::Arc, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tauri::{ipc::Channel, plugin::TauriPlugin, Manager, Runtime};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::{
+    net::TcpStream,
+    sync::{mpsc, oneshot, Mutex},
+};
 use tokio_tungstenite::{
-    connect_async,
-    tungstenite::protocol::{frame::coding::CloseCode, CloseFrame, Message},
+    client_async, connect_async,
+    tungstenite::{
+        client::IntoClientRequest,
+        protocol::{frame::coding::CloseCode, CloseFrame, Message},
+    },
+    MaybeTlsStream, WebSocketStream,
 };
 use tokio_util::sync::CancellationToken;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const LAN_CONNECT_TIMEOUT: Duration = Duration::from_millis(650);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 const SEND_QUEUE_CAPACITY: usize = 64;
@@ -21,6 +29,110 @@ pub(crate) fn install_crypto_provider() {
 }
 
 type Id = u32;
+
+type NativeSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectConfig {
+    transport_url: Option<String>,
+}
+
+pub(crate) fn normalize_lan_relay_url(input: Option<&str>) -> Result<Option<String>, String> {
+    let Some(trimmed) = input.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let parsed = url::Url::parse(trimmed)
+        .map_err(|error| format!("invalid Campus / LAN relay URL: {error}"))?;
+    if parsed.scheme() != "ws" {
+        return Err("Campus / LAN relay URL must use ws://".to_string());
+    }
+    if !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/"
+    {
+        return Err(
+            "Campus / LAN relay URL cannot contain credentials, a path, or parameters".to_string(),
+        );
+    }
+    let is_private = match parsed.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => {
+            buzz_core_pkg::network::is_private_ip(&IpAddr::V4(address))
+                && !address.is_unspecified()
+                && !address.is_broadcast()
+        }
+        Some(url::Host::Ipv6(address)) => {
+            buzz_core_pkg::network::is_private_ip(&IpAddr::V6(address)) && !address.is_unspecified()
+        }
+        None => false,
+    };
+    if !is_private {
+        return Err(
+            "Campus / LAN relay URL must use localhost or a private IP address".to_string(),
+        );
+    }
+    Ok(Some(trimmed.trim_end_matches('/').to_string()))
+}
+
+async fn connect_via_lan(canonical_url: &str, lan_url: &str) -> Result<NativeSocket, String> {
+    let normalized = normalize_lan_relay_url(Some(lan_url))?
+        .ok_or_else(|| "Campus / LAN relay URL is empty".to_string())?;
+    let parsed = url::Url::parse(&normalized).map_err(|error| error.to_string())?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "Campus / LAN relay URL has no host".to_string())?;
+    let port = parsed
+        .port_or_known_default()
+        .ok_or_else(|| "Campus / LAN relay URL has no port".to_string())?;
+    let request = canonical_url
+        .into_client_request()
+        .map_err(|error| format!("invalid canonical relay URL: {error}"))?;
+
+    let stream = TcpStream::connect((host, port))
+        .await
+        .map_err(|error| format!("Campus / LAN relay connection failed: {error}"))?;
+    let (socket, _) = client_async(request, MaybeTlsStream::Plain(stream))
+        .await
+        .map_err(|error| format!("Campus / LAN relay handshake failed: {error}"))?;
+    Ok(socket)
+}
+
+async fn connect_with_fallback(
+    canonical_url: &str,
+    lan_url: Option<&str>,
+) -> Result<NativeSocket, String> {
+    if let Some(lan_url) = lan_url {
+        match tokio::time::timeout(LAN_CONNECT_TIMEOUT, connect_via_lan(canonical_url, lan_url))
+            .await
+        {
+            Ok(Ok(socket)) => {
+                eprintln!(
+                    "buzz-desktop: relay transport=campus-lan dial={lan_url} canonical={canonical_url}"
+                );
+                return Ok(socket);
+            }
+            Ok(Err(error)) => {
+                eprintln!(
+                    "buzz-desktop: Campus / LAN relay unavailable ({error}); falling back to {canonical_url}"
+                );
+            }
+            Err(_) => {
+                eprintln!(
+                    "buzz-desktop: Campus / LAN relay unavailable (650 ms timeout); falling back to {canonical_url}"
+                );
+            }
+        }
+    }
+
+    let (socket, _) = connect_async(canonical_url)
+        .await
+        .map_err(|error| error.to_string())?;
+    eprintln!("buzz-desktop: relay transport=canonical url={canonical_url}");
+    Ok(socket)
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -125,11 +237,15 @@ async fn open_connection(
     manager: &WebSocketManager,
     url: &str,
     on_message: Channel<serde_json::Value>,
+    config: Option<ConnectConfig>,
 ) -> Result<Id, String> {
     let connect_cancel = manager.connect_cancel.lock().await.clone();
-    let (socket, _) = tokio::select! {
+    let socket = tokio::select! {
         _ = connect_cancel.cancelled() => return Err("WebSocket connection cancelled".to_string()),
-        result = tokio::time::timeout(CONNECT_TIMEOUT, connect_async(url)) => result
+        result = tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            connect_with_fallback(url, config.as_ref().and_then(|value| value.transport_url.as_deref())),
+        ) => result
             .map_err(|_| "WebSocket connection timed out".to_string())?
             .map_err(|error| error.to_string())?,
     };
@@ -177,9 +293,9 @@ async fn connect(
     manager: tauri::State<'_, WebSocketManager>,
     url: String,
     on_message: Channel<serde_json::Value>,
-    _config: Option<serde_json::Value>,
+    config: Option<ConnectConfig>,
 ) -> Result<Id, String> {
-    open_connection(manager.inner(), &url, on_message).await
+    open_connection(manager.inner(), &url, on_message, config).await
 }
 
 pub(crate) async fn send_message(
@@ -386,7 +502,7 @@ mod tests {
         });
 
         let manager = WebSocketManager::default();
-        let id = open_connection(&manager, &format!("ws://{address}"), silent_channel())
+        let id = open_connection(&manager, &format!("ws://{address}"), silent_channel(), None)
             .await
             .unwrap();
         send_message(&manager, id, WebSocketMessage::Text("live-probe".into()))
@@ -406,6 +522,70 @@ mod tests {
             .await
             .expect("live server should observe native socket shutdown")
             .unwrap();
+    }
+
+    #[test]
+    fn lan_url_validation_accepts_private_transport_only() {
+        assert_eq!(
+            normalize_lan_relay_url(Some(" ws://10.24.11.82:3000/ ")).unwrap(),
+            Some("ws://10.24.11.82:3000".to_string())
+        );
+        assert_eq!(normalize_lan_relay_url(Some("  ")).unwrap(), None);
+        assert!(normalize_lan_relay_url(Some("wss://10.24.11.82:3000")).is_err());
+        assert!(normalize_lan_relay_url(Some("ws://relay.example.com:3000")).is_err());
+        assert!(normalize_lan_relay_url(Some("ws://8.8.8.8:3000")).is_err());
+        assert!(normalize_lan_relay_url(Some("ws://10.24.11.82:3000/path")).is_err());
+    }
+
+    #[tokio::test]
+    async fn lan_transport_preserves_canonical_host_header() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (host_tx, host_rx) = oneshot::channel();
+        let host_tx = Arc::new(std::sync::Mutex::new(Some(host_tx)));
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let callback_tx = host_tx.clone();
+            let mut socket = tokio_tungstenite::accept_hdr_async(
+                stream,
+                move |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                      response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                    let host = request
+                        .headers()
+                        .get("host")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    if let Some(sender) = callback_tx.lock().unwrap().take() {
+                        let _ = sender.send(host);
+                    }
+                    Ok(response)
+                },
+            )
+            .await
+            .unwrap();
+            while let Some(message) = socket.next().await {
+                if matches!(message, Ok(Message::Close(_))) {
+                    break;
+                }
+            }
+        });
+
+        let manager = WebSocketManager::default();
+        let id = open_connection(
+            &manager,
+            "wss://future-relay.example.com",
+            silent_channel(),
+            Some(ConnectConfig {
+                transport_url: Some(format!("ws://{address}")),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(host_rx.await.unwrap(), "future-relay.example.com");
+
+        manager.disconnect(id).await;
+        server.await.unwrap();
     }
 
     #[tokio::test]
