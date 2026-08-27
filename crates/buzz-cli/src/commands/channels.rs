@@ -571,8 +571,9 @@ where
 /// A presence response is trusted as a **complete snapshot** for the requested
 /// `pubkeys` only when it parses as a JSON array in which *every* element is a
 /// relay-synthesized presence event — a complete signed [`nostr::Event`] of
-/// kind [`KIND_PRESENCE_UPDATE`] whose `p`-tag subject is one of the requested
-/// `pubkeys` (see [`trusted_presence_snapshot`]). The relay drops the Redis
+/// kind [`KIND_PRESENCE_UPDATE`] carrying exactly one `p` tag whose subject is
+/// one of the requested `pubkeys` (see [`trusted_presence_snapshot`]). The
+/// relay drops the Redis
 /// presence key when an identity goes offline, so a trusted snapshot that omits
 /// a requested pubkey means that pubkey is offline — exactly the stale
 /// duplicate an operator needs flagged. Omitted pubkeys are therefore seeded as
@@ -610,17 +611,20 @@ fn hints_from_results(
 /// Returns the parsed events only when the body parses as a JSON array and
 /// *every* element is a relay-synthesized presence snapshot for the requested
 /// set: a complete, well-formed [`nostr::Event`] of kind
-/// [`KIND_PRESENCE_UPDATE`] carrying a `p` tag whose subject is one of
+/// [`KIND_PRESENCE_UPDATE`] carrying exactly one `p` tag whose subject is one of
 /// `pubkeys`. A failed query, non-array JSON, or any element that is not such
 /// an event yields `None` — the caller must then treat presence as untrusted
 /// and never infer `offline`.
 ///
 /// Parsing each element as a full event (not just checking two fields) is what
 /// stops a vacuous object like `{"pubkey":"…","content":"online"}` — which
-/// lacks `id`/`sig`/`kind`/`created_at` — from masquerading as a snapshot, and
-/// the kind + subject-membership checks reject a fully-shaped event that is not
-/// a presence update or belongs to a subject we never asked about. Either would
-/// otherwise re-enable false `offline` seeding from an untrustworthy body.
+/// lacks `id`/`sig`/`kind`/`created_at` — from masquerading as a snapshot; the
+/// kind check rejects a fully-shaped event of the wrong kind; and validating the
+/// *sole* `p`-tag subject (the exact value the consumer reads) rejects an event
+/// for an unrequested subject as well as a mixed-tag event that would pass a
+/// weaker "any `p` tag is requested" check yet overlay a different subject
+/// downstream. Any of these would otherwise re-enable false `offline` seeding
+/// from an untrustworthy body.
 fn trusted_presence_snapshot(
     pubkeys: &[String],
     presence_result: Result<String, CliError>,
@@ -630,16 +634,41 @@ fn trusted_presence_snapshot(
         .and_then(|r| serde_json::from_str(&r).ok())?;
     let requested: HashSet<&str> = pubkeys.iter().map(String::as_str).collect();
     let all_trusted = events.iter().all(|value| {
+        // Must parse as a complete signed event of the presence-update kind.
         let Ok(event) = serde_json::from_value::<nostr::Event>(value.clone()) else {
             return false;
         };
         event.kind == nostr::Kind::Custom(KIND_PRESENCE_UPDATE as u16)
-            && event
-                .tags
-                .public_keys()
-                .any(|pk| requested.contains(pk.to_hex().as_str()))
+            // Require the *sole* `p`-tag subject — the one `build_hint_map`
+            // consumes via `presence_subject` — to be requested. Reading the
+            // same single subject the consumer reads is what prevents a
+            // mixed-tag event (`[["p","<unrequested>"],["p","<requested>"]]`)
+            // from passing here yet overlaying a different subject downstream.
+            && sole_p_tag_subject(value).is_some_and(|s| requested.contains(s))
     });
     all_trusted.then_some(events)
+}
+
+/// The subject of the event's single `p` tag, or `None` unless there is exactly
+/// one `p` tag carrying a string subject. The relay synthesizes presence
+/// snapshots with exactly one `p` tag (the subject); requiring exactly one keeps
+/// this validator reading the same subject that `presence_subject` (which takes
+/// the first `p` tag) consumes in `build_hint_map`, so a mixed- or
+/// malformed-tag event cannot pass validation and then overlay a different
+/// subject.
+fn sole_p_tag_subject(event: &serde_json::Value) -> Option<&str> {
+    let tags = event.get("tags")?.as_array()?;
+    let mut p_subjects = tags
+        .iter()
+        .filter_map(|tag| match tag.as_array()?.as_slice() {
+            [name, subject, ..] if name == "p" => Some(subject.as_str()),
+            _ => None,
+        });
+    let first = p_subjects.next()?;
+    if p_subjects.next().is_some() {
+        return None; // more than one `p` tag → outside the single-subject contract
+    }
+    first // the sole `p` tag's subject, or `None` if it was not a string
 }
 
 /// Pure response-to-map conversion: takes the raw presence (kind:40902) and
@@ -2528,6 +2557,27 @@ mod tests {
         serde_json::to_value(&event).expect("event to json")
     }
 
+    /// Build a presence event carrying the given `p`-tag subjects in order,
+    /// signed by a relay key. Used to construct off-contract multi-`p`-tag
+    /// events the relay never emits but a hostile responder could.
+    fn presence_event_with_p_tags(subjects: &[&str], status: &str) -> serde_json::Value {
+        let relay_keys =
+            nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000002")
+                .expect("valid relay test key");
+        let tags: Vec<nostr::Tag> = subjects
+            .iter()
+            .map(|s| nostr::Tag::parse(["p", s]).expect("valid p tag"))
+            .collect();
+        let event = nostr::EventBuilder::new(
+            nostr::Kind::Custom(buzz_core::kind::KIND_PRESENCE_UPDATE as u16),
+            status,
+        )
+        .tags(tags)
+        .sign_with_keys(&relay_keys)
+        .expect("signing presence event");
+        serde_json::to_value(&event).expect("event to json")
+    }
+
     #[test]
     fn hints_from_results_successful_partial_snapshot_seeds_absent_as_offline() {
         let online_pk = "a".repeat(64);
@@ -2711,7 +2761,48 @@ mod tests {
         );
     }
 
-    // --- join_bounded_queries: a completed lookup survives a hung sibling ---
+    #[test]
+    fn hints_from_results_mixed_p_tags_makes_snapshot_untrusted() {
+        // The relay emits exactly one `p` tag per presence event. A hostile
+        // responder could return `[["p","<unrequested>"],["p","<requested>"]]`:
+        // a weaker "any requested `p` tag" gate would accept it, but the
+        // consumer reads the FIRST `p` tag (the unrequested subject) — so it
+        // would overlay the wrong subject and leave the requested candidate
+        // falsely seeded `offline`. Requiring exactly one `p`-tag subject that
+        // is requested rejects both an unrequested-first ordering and any event
+        // carrying more than one `p` tag.
+        let requested = "a".repeat(64);
+        let unrequested = "b".repeat(64);
+        let pubkeys = vec![requested.clone()];
+        let profile =
+            events_json(&[json!({ "pubkey": requested.clone(), "created_at": 1_705_276_800_u64 })]);
+
+        // Case 1: an unrequested `p` tag before a requested one.
+        let mixed = events_json(&[presence_event_with_p_tags(
+            &[&unrequested, &requested],
+            "online",
+        )]);
+        // Case 2: a valid requested `p` tag plus a second (also requested) —
+        // still off-contract: more than one `p` tag.
+        let two_requested = events_json(&[presence_event_with_p_tags(
+            &[&requested, &requested],
+            "online",
+        )]);
+
+        for body in [mixed, two_requested] {
+            let map = hints_from_results(&pubkeys, Ok(body.clone()), Ok(profile.clone()));
+
+            assert!(
+                map.values().all(|h| h.presence.is_none()),
+                "a multi-`p`-tag event must yield no presence labels: {map:?}"
+            );
+            assert_eq!(
+                map[&requested].profile_updated_at,
+                Some(1_705_276_800),
+                "the completed profile sibling must still contribute hints: {map:?}"
+            );
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn join_bounded_queries_completed_presence_survives_hung_profile() {
