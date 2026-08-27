@@ -102,6 +102,16 @@ fn with_original_filename(
     filename: &Option<String>,
 ) -> BlobDescriptor {
     descriptor.filename.clone_from(filename);
+    if descriptor.mime_type == "application/zip"
+        && filename.as_deref().is_some_and(|name| {
+            Path::new(name)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("docx"))
+        })
+    {
+        descriptor.mime_type =
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into();
+    }
     descriptor
 }
 
@@ -2422,6 +2432,29 @@ mod tests {
         assert!(!filename.contains('\n'));
         assert_eq!(filename.chars().count(), 255);
         assert!(filename.ends_with(".quill"));
+    }
+
+    #[test]
+    fn docx_filename_refines_zip_container_mime_type() {
+        let descriptor = BlobDescriptor {
+            url: "https://relay.example/media/hash.zip".into(),
+            sha256: "ab".repeat(32),
+            size: 12,
+            mime_type: "application/zip".into(),
+            uploaded: 1,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+            filename: None,
+        };
+
+        let descriptor = with_original_filename(descriptor, &Some("survey.DOCX".into()));
+
+        assert_eq!(
+            descriptor.mime_type,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        );
     }
 
     #[test]
