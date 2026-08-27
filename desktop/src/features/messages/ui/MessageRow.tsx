@@ -1,5 +1,6 @@
 import * as React from "react";
 import { AlertTriangle } from "lucide-react";
+
 import {
   depthGuideActionsEqual,
   numberArrayEqual,
@@ -57,9 +58,6 @@ import { MessageTimestamp } from "./MessageTimestamp";
 import { SentFromThreadLine } from "./SentFromThreadLine";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
-import { getAgentAddressMentionPubkeys } from "@/features/messages/lib/agentAddressMention.mjs";
-import { getVisibleAgentAddressPubkeys } from "@/features/messages/lib/getVisibleAgentAddressPubkeys";
-import { MessageAgentAddressPrefix } from "./MessageAgentAddressPrefix";
 
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
@@ -279,20 +277,6 @@ export const MessageRow = React.memo(
 
       return Object.keys(values).length > 0 ? values : undefined;
     }, [isKnownAgentPubkey, mentionPubkeysByName]);
-    const addressedAgentPubkeys = React.useMemo(() => {
-      return getVisibleAgentAddressPubkeys(
-        message.body,
-        getAgentAddressMentionPubkeys(message.tags).filter(isKnownAgentPubkey),
-        mentionPubkeysByName,
-      );
-    }, [isKnownAgentPubkey, mentionPubkeysByName, message.body, message.tags]);
-    const agentAddressPrefix =
-      addressedAgentPubkeys.length > 0 ? (
-        <MessageAgentAddressPrefix
-          profiles={profiles}
-          pubkeys={addressedAgentPubkeys}
-        />
-      ) : undefined;
 
     const imetaByUrl = React.useMemo(
       () => (message.tags ? parseImetaTags(message.tags) : undefined),
@@ -445,7 +429,6 @@ export const MessageRow = React.memo(
               messageId={message.id}
               linkPreviewsSuppressed={linkPreviewsSuppressed}
               linkPreviewTags={message.tags}
-              leadingInlineContent={agentAddressPrefix}
               onRemoveLinkPreviewsForEveryone={removeLinkPreviewsForEveryone}
               customEmoji={customEmoji}
               imetaByUrl={imetaByUrl}

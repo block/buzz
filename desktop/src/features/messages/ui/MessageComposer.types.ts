@@ -25,7 +25,9 @@ export type MessageComposerEditTarget = {
 
 export type MessageComposerProps = {
   audienceContext?: {
-    type: "channel" | "thread";
+    type: "thread";
+    threadRootId: string;
+    initialAgentPubkeys?: readonly string[];
   } | null;
   channelId?: string | null;
   channelName: string;
@@ -95,8 +97,6 @@ export type MessageComposerProps = {
   ) => Promise<void>;
   placeholder?: string;
   profiles?: UserProfileLookup;
-  /** Explicit mention pubkeys from the loaded channel window, newest first. */
-  recentMentionPubkeys?: readonly string[];
   replyTarget?: {
     author: string;
     body: string;

@@ -249,7 +249,6 @@ export function settleAutocompleteMentionInsert(
   editor: { storage: object },
   tr: Transaction,
   text: string,
-  settleCaret = true,
 ): void {
   const storage = mentionHighlightStorage(editor);
   const mentionInsert = /(?:^|[\s(])([@#])([^\s]+) $/.exec(text);
@@ -270,7 +269,7 @@ export function settleAutocompleteMentionInsert(
       }
     }
   }
-  if (settleCaret) tr.setMeta(mentionHighlightKey, true);
+  tr.setMeta(mentionHighlightKey, true);
 }
 
 export function syncMentionHighlightFromProps(

@@ -9,7 +9,10 @@ import {
   VideoReviewTimecodeChip,
 } from "@/shared/ui/VideoReviewTimecodeButton";
 
-type VideoReviewCommentMarkdownProps = MarkdownProps & {
+type VideoReviewCommentMarkdownProps = Omit<
+  MarkdownProps,
+  "leadingInlineContent"
+> & {
   videoReviewCommentRootId?: string;
 };
 
@@ -17,7 +20,6 @@ type VideoReviewCommentMarkdownProps = MarkdownProps & {
 export function VideoReviewCommentMarkdown({
   content,
   interactive = true,
-  leadingInlineContent: suppliedLeadingInlineContent,
   videoReviewCommentRootId,
   ...markdownProps
 }: VideoReviewCommentMarkdownProps) {
@@ -36,7 +38,7 @@ export function VideoReviewCommentMarkdown({
     [openVideoReviewAt, reviewTimecode, videoReviewCommentRootId],
   );
   const leadingInlineContent = React.useMemo(() => {
-    if (!reviewTimecode) return suppliedLeadingInlineContent;
+    if (!reviewTimecode) return undefined;
 
     const timecode =
       interactive && openVideoReviewAt ? (
@@ -51,24 +53,23 @@ export function VideoReviewCommentMarkdown({
           timecode={reviewTimecode.timecode}
         />
       );
+    return <>{timecode} </>;
+  }, [handleTimecodeClick, interactive, openVideoReviewAt, reviewTimecode]);
+
+  if (!reviewTimecode) {
     return (
-      <>
-        {suppliedLeadingInlineContent}
-        {timecode}{" "}
-      </>
+      <Markdown
+        {...markdownProps}
+        content={content}
+        interactive={interactive}
+      />
     );
-  }, [
-    handleTimecodeClick,
-    interactive,
-    openVideoReviewAt,
-    reviewTimecode,
-    suppliedLeadingInlineContent,
-  ]);
+  }
 
   return (
     <Markdown
       {...markdownProps}
-      content={reviewTimecode ? reviewTimecode.text || "\u200B" : content}
+      content={reviewTimecode.text || "\u200B"}
       interactive={interactive}
       leadingInlineContent={leadingInlineContent}
     />

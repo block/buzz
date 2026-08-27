@@ -357,6 +357,7 @@ export const ChannelPane = React.memo(function ChannelPane({
       }),
     [activeChannel, currentPubkey, profiles],
   );
+
   const handleWelcomeAddAgent = React.useCallback(() => {
     onAddAgent?.({
       beforeSend: () =>
@@ -373,14 +374,13 @@ export const ChannelPane = React.memo(function ChannelPane({
     onWelcomeAddAgent: onAddAgent ? handleWelcomeAddAgent : undefined,
   });
   const channelIntro = isHuddleTranscript ? null : standardChannelIntro;
-  const { mainTimelineEntries, recentMentions, visibleMessages } =
-    useChannelPaneMessages({
-      activeChannel,
-      isHuddleTranscript,
-      messages,
-      profiles,
-      threadSummaries,
-    });
+  const { mainTimelineEntries, visibleMessages } = useChannelPaneMessages({
+    activeChannel,
+    isHuddleTranscript,
+    messages,
+    profiles,
+    threadSummaries,
+  });
   useRenderScopedReactionHydration({
     activeChannel,
     mainTimelineEntries,
@@ -753,7 +753,6 @@ export const ChannelPane = React.memo(function ChannelPane({
                   ) : null}
                   <ComposerDockBackdrop gutterClassName="inset-x-5" />
                   <MessageComposer
-                    audienceContext={{ type: "channel" }}
                     channelId={activeChannel?.id ?? null}
                     channelName={activeChannel?.name ?? "channel"}
                     channelType={activeChannel?.channelType ?? null}
@@ -775,7 +774,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                         : undefined
                     }
                     onSend={handleSendMessage}
-                    {...{ profiles, recentMentionPubkeys: recentMentions }}
+                    profiles={profiles}
                     showBackgroundUploadProgress={false}
                     placeholder={
                       timeoutState.active
@@ -877,7 +876,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 onScrollTargetSettled={resolveScrollTarget}
                 onToggleReaction={onToggleReaction}
                 onUnfollowThread={onUnfollowThread}
-                {...{ profiles, recentMentionPubkeys: recentMentions }}
+                profiles={profiles}
                 replyTargetMessage={threadReplyTargetMessage}
                 scrollTargetHighlights={!layoutScrollTargetId}
                 scrollTargetId={layoutScrollTargetId ?? threadScrollTargetId}

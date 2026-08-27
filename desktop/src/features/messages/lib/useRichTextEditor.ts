@@ -72,8 +72,6 @@ export type AutocompleteEdit = {
   replaceFromOffset: number;
   replaceToOffset: number;
   insertText: string;
-  /** Keep the current selection mapped through this edit instead of moving it to the insertion. */
-  preserveSelection?: boolean;
   /**
    * When set, the replaced range becomes a CustomEmojiNode for this
    * shortcode (followed by `insertText`, which carries the trailing space)
@@ -776,7 +774,6 @@ export function useRichTextEditor({
       toOffset: number,
       text: string,
       customEmojiShortcode?: string,
-      preserveSelection = false,
     ) => {
       if (!editor) return;
       const projection = buildPlainTextProjection(editor.state.doc);
@@ -809,23 +806,19 @@ export function useRichTextEditor({
       }
 
       const tr = editor.state.tr.insertText(text, fromPM, toPM);
-      if (preserveSelection) {
-        tr.setSelection(editor.state.selection.map(tr.doc, tr.mapping));
-      } else {
-        // Place cursor at the end of the inserted text. We map `toPM` (the
-        // right end of the replaced range) through the transaction's
-        // mapping — that's the post-transaction position right after the
-        // inserted text, valid even if mark normalisation shifted things.
-        // (Mapping `fromPM + text.length` directly would be a pre-image
-        // position that may not exist in the original doc, which throws
-        // "Position N out of range".)
-        const cursorPM = tr.mapping.map(toPM);
-        tr.setSelection(TextSelection.create(tr.doc, cursorPM));
-      }
-      settleAutocompleteMentionInsert(editor, tr, text, !preserveSelection);
+      // Place cursor at the end of the inserted text. We map `toPM` (the
+      // right end of the replaced range) through the transaction's
+      // mapping — that's the post-transaction position right after the
+      // inserted text, valid even if mark normalisation shifted things.
+      // (Mapping `fromPM + text.length` directly would be a pre-image
+      // position that may not exist in the original doc, which throws
+      // "Position N out of range".)
+      const cursorPM = tr.mapping.map(toPM);
+      tr.setSelection(TextSelection.create(tr.doc, cursorPM));
+      settleAutocompleteMentionInsert(editor, tr, text);
       editor.view.dispatch(tr);
       editor.view.focus();
-      if (!preserveSelection) reassertMentionCaretAfterFocus(editor.view);
+      reassertMentionCaretAfterFocus(editor.view);
     },
     [editor, customEmojiWiring.resolveUrl],
   );
