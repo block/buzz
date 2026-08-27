@@ -521,6 +521,41 @@ pub struct ChannelFilter {
     pub require_mention: bool,
 }
 
+/// Operator-owned routing metadata for a Buzz channel.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelRoute {
+    /// Logical ACP session route. Channels with the same route may share one
+    /// continuing session while keeping their Buzz channel UUIDs distinct.
+    pub session_route: Option<String>,
+    /// Authoritative role framing rendered into each turn for this channel.
+    pub role_authority: Option<String>,
+}
+
+/// Stable key used to choose which ACP session a channel turn should reuse.
+///
+/// The default route is the concrete Buzz channel UUID. Config rules may assign
+/// several channels to the same named route so one continuing ACP session can
+/// serve several role forums while prompts, replies, and observer frames still
+/// carry the triggering channel UUID.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum SessionRouteKey {
+    Channel(Uuid),
+    Named(String),
+}
+
+impl SessionRouteKey {
+    pub fn for_channel(channel_id: Uuid) -> Self {
+        Self::Channel(channel_id)
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            Self::Channel(channel_id) => channel_id.to_string(),
+            Self::Named(route) => route.clone(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Config {
     pub keys: Keys,
@@ -672,6 +707,77 @@ pub(crate) fn compose_session_title(agent: &str, channel_name: Option<&str>) -> 
     format!("{agent}{SESSION_TITLE_SEPARATOR}#{channel}")
 }
 
+fn sanitize_session_route(raw: &str) -> Option<String> {
+    let collapsed = raw
+        .split_whitespace()
+        .map(|word| word.chars().filter(|c| !c.is_control()).collect::<String>())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let route = collapsed
+        .trim_matches(['-', '/', '.', '_'])
+        .chars()
+        .take(128)
+        .collect::<String>();
+    if route.is_empty() {
+        None
+    } else {
+        Some(route)
+    }
+}
+
+/// Resolve the configured ACP-session route for a channel.
+///
+/// Absent `session_route` preserves the historic behavior: one ACP session key
+/// per Buzz channel. If more than one matching rule names different routes for
+/// the same channel, startup/dynamic subscription fails closed because the
+/// operator config no longer has one authoritative route for that channel.
+pub fn resolve_session_route_key(
+    channel_id: Uuid,
+    rules: &[SubscriptionRule],
+) -> Result<SessionRouteKey, ConfigError> {
+    let mut route: Option<String> = None;
+    for rule in rules {
+        if !rule.channels.matches(&channel_id) {
+            continue;
+        }
+        let Some(raw_route) = rule.session_route.as_deref() else {
+            continue;
+        };
+        let Some(normalized) = sanitize_session_route(raw_route) else {
+            return Err(ConfigError::ConfigFile(format!(
+                "subscription rule '{}' has an empty session_route",
+                rule.name
+            )));
+        };
+        match route.as_ref() {
+            Some(existing) if existing != &normalized => {
+                return Err(ConfigError::ConfigFile(format!(
+                    "channel {channel_id} matches conflicting session_route values \
+                     ('{existing}' and '{normalized}')"
+                )));
+            }
+            Some(_) => {}
+            None => route = Some(normalized),
+        }
+    }
+
+    Ok(route
+        .map(SessionRouteKey::Named)
+        .unwrap_or_else(|| SessionRouteKey::for_channel(channel_id)))
+}
+
+pub fn resolve_session_route_keys(
+    channel_ids: &[Uuid],
+    rules: &[SubscriptionRule],
+) -> Result<HashMap<Uuid, SessionRouteKey>, ConfigError> {
+    channel_ids
+        .iter()
+        .copied()
+        .map(|channel_id| resolve_session_route_key(channel_id, rules).map(|key| (channel_id, key)))
+        .collect()
+}
+
 /// Validate and deduplicate allowlist entries: each must be exactly 64 hex chars.
 fn validate_allowlist(entries: &[String]) -> Result<HashSet<String>, ConfigError> {
     let mut validated = HashSet::new();
@@ -711,6 +817,34 @@ fn validate_multiple_event_handling(
              producing incomplete merged prompts."
                 .into(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_optional_rule_text(
+    rule_name: &str,
+    field_name: &str,
+    value: &Option<String>,
+) -> Result<(), ConfigError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ConfigError::ConfigFile(format!(
+            "rule '{rule_name}': {field_name} must not be empty when set"
+        )));
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err(ConfigError::ConfigFile(format!(
+            "rule '{rule_name}': {field_name} must not contain control characters"
+        )));
+    }
+    if trimmed.len() > 4096 {
+        return Err(ConfigError::ConfigFile(format!(
+            "rule '{rule_name}': {field_name} too long ({} bytes, max 4096)",
+            trimmed.len()
+        )));
     }
     Ok(())
 }
@@ -1292,6 +1426,8 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
                 )));
             }
         }
+        validate_optional_rule_text(&rule.name, "session_route", &rule.session_route)?;
+        validate_optional_rule_text(&rule.name, "role_authority", &rule.role_authority)?;
         // Deserialization leaves consecutive_timeouts at its zero default; reset explicitly.
         rule.consecutive_timeouts = Arc::new(AtomicU32::new(0));
     }
@@ -1391,6 +1527,90 @@ pub fn resolve_channel_filters(
     }
 
     result
+}
+
+/// Resolve operator-owned channel routing metadata from config rules.
+///
+/// Only fields explicitly present on matching rules participate. A channel may
+/// match several subscription rules, but its session route and role authority
+/// must each resolve to at most one distinct value. Conflicts reject startup
+/// rather than letting a Forum name or rule order become an authority boundary.
+pub fn resolve_channel_routes(
+    discovered_channels: &[Uuid],
+    rules: &[SubscriptionRule],
+) -> Result<HashMap<Uuid, ChannelRoute>, ConfigError> {
+    let mut result = HashMap::new();
+
+    for channel_id in discovered_channels {
+        let mut session_route: Option<String> = None;
+        let mut session_route_source: Option<String> = None;
+        let mut role_authority: Option<String> = None;
+        let mut role_authority_source: Option<String> = None;
+
+        for rule in rules {
+            if !rule_applies_to_channel(rule, *channel_id) {
+                continue;
+            }
+
+            if let Some(raw_route) = rule.session_route.as_deref() {
+                let Some(route) = sanitize_session_route(raw_route) else {
+                    return Err(ConfigError::ConfigFile(format!(
+                        "subscription rule '{}' has an empty session_route",
+                        rule.name
+                    )));
+                };
+                match session_route.as_deref() {
+                    Some(existing) if existing != route.as_str() => {
+                        return Err(ConfigError::ConfigFile(format!(
+                            "channel {channel_id} has conflicting session_route values: \
+                             rule '{}' set {:?}, rule '{}' set {:?}",
+                            session_route_source.as_deref().unwrap_or("<unknown>"),
+                            existing,
+                            rule.name,
+                            route
+                        )));
+                    }
+                    Some(_) => {}
+                    None => {
+                        session_route = Some(route);
+                        session_route_source = Some(rule.name.clone());
+                    }
+                }
+            }
+
+            if let Some(authority) = rule.role_authority.as_deref().map(str::trim) {
+                match role_authority.as_deref() {
+                    Some(existing) if existing != authority => {
+                        return Err(ConfigError::ConfigFile(format!(
+                            "channel {channel_id} has conflicting role_authority values: \
+                             rule '{}' set {:?}, rule '{}' set {:?}",
+                            role_authority_source.as_deref().unwrap_or("<unknown>"),
+                            existing,
+                            rule.name,
+                            authority
+                        )));
+                    }
+                    Some(_) => {}
+                    None => {
+                        role_authority = Some(authority.to_string());
+                        role_authority_source = Some(rule.name.clone());
+                    }
+                }
+            }
+        }
+
+        if session_route.is_some() || role_authority.is_some() {
+            result.insert(
+                *channel_id,
+                ChannelRoute {
+                    session_route,
+                    role_authority,
+                },
+            );
+        }
+    }
+
+    Ok(result)
 }
 
 /// Resolve the subscription filter for a single dynamically-discovered channel.
@@ -1564,6 +1784,8 @@ mod tests {
             require_mention: mention,
             filter: None,
             prompt_tag: None,
+            session_route: None,
+            role_authority: None,
             compiled_filter: None,
             consecutive_timeouts: Arc::new(AtomicU32::new(0)),
         }
@@ -2040,6 +2262,136 @@ require_mention = false
         assert_eq!(rules.len(), 1);
         assert_eq!(rules[0].name, "catch-all");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_load_rules_accepts_route_metadata() {
+        let dir = std::env::temp_dir().join("buzz-acp-test-route-metadata");
+        let path = dir.join("rules.toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            r#"
+[[rules]]
+name = "platform"
+channels = "all"
+kinds = [9]
+require_mention = true
+session_route = "down-platform"
+role_authority = "You are Down acting as Platform Circle Lead."
+"#,
+        )
+        .unwrap();
+
+        let rules = load_rules(&path).unwrap();
+        assert_eq!(rules[0].session_route.as_deref(), Some("down-platform"));
+        assert_eq!(
+            rules[0].role_authority.as_deref(),
+            Some("You are Down acting as Platform Circle Lead.")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_resolve_channel_routes_maps_shared_session_route() {
+        let ch_a = Uuid::new_v4();
+        let ch_b = Uuid::new_v4();
+        let mut rule = make_rule(
+            "down-forums",
+            ChannelScope::List(vec![ch_a.to_string(), ch_b.to_string()]),
+            vec![9],
+            true,
+        );
+        rule.session_route = Some("down-role-forums".into());
+        rule.role_authority = Some("Down owns Platform Circle authority.".into());
+
+        let routes = resolve_channel_routes(&[ch_a, ch_b], &[rule]).unwrap();
+
+        assert_eq!(
+            routes[&ch_a].session_route.as_deref(),
+            Some("down-role-forums")
+        );
+        assert_eq!(
+            routes[&ch_b].role_authority.as_deref(),
+            Some("Down owns Platform Circle authority.")
+        );
+    }
+
+    #[test]
+    fn test_resolve_channel_routes_normalizes_session_route() {
+        let ch = Uuid::new_v4();
+        let mut rule = make_rule(
+            "down-forums",
+            ChannelScope::List(vec![ch.to_string()]),
+            vec![9],
+            true,
+        );
+        rule.session_route = Some(" down role forums ".into());
+
+        let routes = resolve_channel_routes(&[ch], &[rule]).unwrap();
+
+        assert_eq!(
+            routes[&ch].session_route.as_deref(),
+            Some("down-role-forums")
+        );
+    }
+
+    #[test]
+    fn test_resolve_session_route_keys_maps_shared_route() {
+        let ch_a = Uuid::new_v4();
+        let ch_b = Uuid::new_v4();
+        let mut rule = make_rule(
+            "down-forums",
+            ChannelScope::List(vec![ch_a.to_string(), ch_b.to_string()]),
+            vec![9],
+            true,
+        );
+        rule.session_route = Some("down role forums".into());
+
+        let routes = resolve_session_route_keys(&[ch_a, ch_b], &[rule]).unwrap();
+
+        assert_eq!(
+            routes.get(&ch_a),
+            Some(&SessionRouteKey::Named("down-role-forums".into()))
+        );
+        assert_eq!(routes.get(&ch_a), routes.get(&ch_b));
+    }
+
+    #[test]
+    fn test_resolve_session_route_keys_defaults_to_channel_route() {
+        let ch = Uuid::new_v4();
+        let rule = make_rule(
+            "plain",
+            ChannelScope::List(vec![ch.to_string()]),
+            vec![9],
+            true,
+        );
+
+        let routes = resolve_session_route_keys(&[ch], &[rule]).unwrap();
+
+        assert_eq!(routes.get(&ch), Some(&SessionRouteKey::for_channel(ch)));
+    }
+
+    #[test]
+    fn test_resolve_channel_routes_rejects_conflicting_session_routes() {
+        let ch = Uuid::new_v4();
+        let mut first = make_rule(
+            "first",
+            ChannelScope::List(vec![ch.to_string()]),
+            vec![9],
+            true,
+        );
+        first.session_route = Some("down-a".into());
+        let mut second = make_rule(
+            "second",
+            ChannelScope::List(vec![ch.to_string()]),
+            vec![9],
+            true,
+        );
+        second.session_route = Some("down-b".into());
+
+        let err = resolve_channel_routes(&[ch], &[first, second]).unwrap_err();
+        assert!(err.to_string().contains("conflicting session_route"));
     }
 
     #[test]

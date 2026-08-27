@@ -550,6 +550,8 @@ fn mentions_rule(kinds: Vec<u32>) -> filter::SubscriptionRule {
         kinds,
         require_mention: true,
         filter: None,
+        session_route: None,
+        role_authority: None,
         compiled_filter: None,
         consecutive_timeouts: Arc::new(AtomicU32::new(0)),
         prompt_tag: Some("@mention".into()),

@@ -97,6 +97,14 @@ pub struct SubscriptionRule {
     /// Tag passed to the prompt template. Falls back to `name` if absent.
     #[serde(default)]
     pub prompt_tag: Option<String>,
+    /// Optional logical session route. Rules with the same route can share one
+    /// ACP session across multiple Buzz channels.
+    #[serde(default)]
+    pub session_route: Option<String>,
+    /// Optional authoritative role framing rendered into each matched turn.
+    /// This is operator-owned config, never derived from the channel name.
+    #[serde(default)]
+    pub role_authority: Option<String>,
     /// Pre-compiled evalexpr AST for the `filter` expression.
     ///
     /// Populated by `load_rules()` at startup so `match_event` never re-parses
@@ -122,6 +130,8 @@ impl Default for SubscriptionRule {
             require_mention: false,
             filter: None,
             prompt_tag: None,
+            session_route: None,
+            role_authority: None,
             compiled_filter: None,
             consecutive_timeouts: Arc::new(AtomicU32::new(0)),
         }
@@ -137,6 +147,8 @@ impl Clone for SubscriptionRule {
             require_mention: self.require_mention,
             filter: self.filter.clone(),
             prompt_tag: self.prompt_tag.clone(),
+            session_route: self.session_route.clone(),
+            role_authority: self.role_authority.clone(),
             compiled_filter: self.compiled_filter.clone(),
             // Share the same counter across clones so all copies of a rule
             // agree on the timeout state.
@@ -503,6 +515,8 @@ mod tests {
             require_mention: mention,
             filter: filter.map(|s| s.into()),
             prompt_tag: prompt_tag.map(|s| s.into()),
+            session_route: None,
+            role_authority: None,
             compiled_filter: None,
             consecutive_timeouts: Arc::new(AtomicU32::new(0)),
         }
