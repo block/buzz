@@ -64,7 +64,9 @@ import {
   type Project,
   type Repository,
 } from "./projectModels";
+import { persistProjectSnapshot, PROJECTS_QUERY_KEY } from "./projectSnapshot";
 import {
+  buildProjectHomeFromFetcher,
   buildProjectsFromFetcher,
   type FetchProjectEventsExhaustively,
   fetchProjectEventsExhaustively,
@@ -184,6 +186,25 @@ export async function fetchProjects(
     hiddenAddresses: new Set(readHiddenProjectCards()),
     viewerPubkey,
   });
+}
+
+async function fetchProjectHomeForChannel(
+  channelId: string,
+  signal?: AbortSignal,
+): Promise<Project | null> {
+  const viewerPubkey = await getIdentity()
+    .then((identity) => identity.pubkey)
+    .catch(() => undefined);
+  return buildProjectHomeFromFetcher(
+    (kinds, extraFilter) =>
+      fetchProjectEventsExhaustively(kinds, extraFilter, undefined, signal),
+    channelId,
+    {
+      relayOrigin: getCachedRelayOrigin(),
+      hiddenAddresses: new Set(readHiddenProjectCards()),
+      viewerPubkey,
+    },
+  );
 }
 
 function eventToRepoState(event: RelayEvent): RepoState {
@@ -643,7 +664,7 @@ async function deleteProject(project: Project): Promise<void> {
   );
 }
 
-export const projectsQueryKey = ["projects"] as const;
+export const projectsQueryKey = PROJECTS_QUERY_KEY;
 
 /**
  * Freshness windows for the Projects surface. Every local write path
@@ -666,19 +687,42 @@ export const PROJECT_ACTIVITY_STALE_TIME_MS = 2 * 60_000;
 export const PROJECT_LOCAL_REPOS_STALE_TIME_MS = 2 * 60_000;
 
 export function useProjectsQuery(enabled = true) {
+  const queryClient = useQueryClient();
   return useQuery({
     queryKey: projectsQueryKey,
-    queryFn: ({ signal }) => fetchProjects(undefined, signal),
+    queryFn: async ({ signal }) => {
+      const projects = await fetchProjects(undefined, signal);
+      persistProjectSnapshot(queryClient, projects);
+      return projects;
+    },
     staleTime: PROJECTS_STALE_TIME_MS,
     gcTime: PROJECTS_GC_TIME_MS,
     enabled,
   });
 }
 
+export function useProjectHomeForChannelQuery(
+  channelId: string,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["projects", "home-channel", channelId],
+    queryFn: ({ signal }) => fetchProjectHomeForChannel(channelId, signal),
+    staleTime: PROJECTS_STALE_TIME_MS,
+    gcTime: PROJECTS_GC_TIME_MS,
+    enabled: enabled && channelId.length > 0,
+  });
+}
+
 export function useProjectQuery(projectId: string) {
+  const queryClient = useQueryClient();
   return useQuery({
     queryKey: projectsQueryKey,
-    queryFn: ({ signal }) => fetchProjects(undefined, signal),
+    queryFn: async ({ signal }) => {
+      const projects = await fetchProjects(undefined, signal);
+      persistProjectSnapshot(queryClient, projects);
+      return projects;
+    },
     select: (projects) =>
       projects.find((project) => projectMatchesRouteId(project, projectId)) ??
       null,

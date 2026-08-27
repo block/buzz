@@ -13,7 +13,10 @@ import {
   isBroadcastReply,
 } from "@/features/messages/lib/threading";
 import { useProfileQuery } from "@/features/profile/hooks";
-import { useProjectsQuery } from "@/features/projects/hooks";
+import {
+  useProjectHomeForChannelQuery,
+  useProjectsQuery,
+} from "@/features/projects/hooks";
 import { findProjectHomeByChannelId } from "@/features/projects/lib/projectHomeChannel";
 import { ProjectChannelHome } from "@/features/projects/ui/ProjectChannelHome";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -133,10 +136,16 @@ export function ChannelRouteScreen({
     memberChannel ??
     openDirectoryQuery.data?.find((channel) => channel.id === channelId) ??
     null;
-  const projectHome = findProjectHomeByChannelId(
+  const enumeratedProjectHome = findProjectHomeByChannelId(
     channelId,
     projectsQuery.data ?? [],
   );
+  const projectHomeLookupQuery = useProjectHomeForChannelQuery(
+    channelId,
+    !isHuddleTranscript && !enumeratedProjectHome && !projectsQuery.isSuccess,
+  );
+  const projectHome =
+    enumeratedProjectHome ?? projectHomeLookupQuery.data ?? null;
   const [targetMessageEvents, setTargetMessageEvents] = React.useState<
     RelayEvent[]
   >(() => {
