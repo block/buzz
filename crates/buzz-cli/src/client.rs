@@ -74,13 +74,26 @@ const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
 
 fn sanitized_filename(file_path: &str) -> Option<String> {
-    let filename: String = Path::new(file_path)
+    let mut filename: String = Path::new(file_path)
         .file_name()?
         .to_string_lossy()
         .chars()
         .filter(|character| !character.is_control())
-        .take(255)
         .collect();
+    if filename.chars().count() > 255 {
+        let suffix = Path::new(&filename)
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| format!(".{value}"))
+            .filter(|value| value.chars().count() <= 32);
+        filename = if let Some(suffix) = suffix {
+            let stem = filename.strip_suffix(&suffix).unwrap_or(&filename);
+            let keep = 255 - suffix.chars().count();
+            format!("{}{suffix}", stem.chars().take(keep).collect::<String>())
+        } else {
+            filename.chars().take(255).collect()
+        };
+    }
     (!filename.is_empty()).then_some(filename)
 }
 
@@ -2408,6 +2421,7 @@ mod tests {
 
         assert!(!filename.contains('\n'));
         assert_eq!(filename.chars().count(), 255);
+        assert!(filename.ends_with(".quill"));
     }
 
     #[test]
