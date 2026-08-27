@@ -224,13 +224,6 @@ export function InviteRedeemForm({
 
           onConnect?.(normalizedRelayUrl, normalizedLanRelayUrl ?? undefined);
         } catch (policyFetchError) {
-          // A community URL can be joined without a policy document. If the
-          // public HTTP policy probe is unavailable, continue with the relay
-          // connection attempt instead of trapping the form on an error.
-          if (isAddCommunity) {
-            onConnect?.(normalizedRelayUrl, normalizedLanRelayUrl ?? undefined);
-            return;
-          }
           setPolicyError(inviteErrorMessage(policyFetchError));
         } finally {
           setIsLoadingPolicy(false);
@@ -308,13 +301,6 @@ export function InviteRedeemForm({
           normalizedLanRelayUrl ?? undefined,
         );
       } catch (policyFetchError) {
-        // Joining by a community URL does not require a policy document. A
-        // transient public HTTP failure must not block the WebSocket join,
-        // especially when the optional LAN relay is reachable.
-        if (isAddCommunity && normalizedRelayUrl) {
-          onConnect?.(normalizedRelayUrl, normalizedLanRelayUrl ?? undefined);
-          return;
-        }
         setPolicyError(inviteErrorMessage(policyFetchError));
       } finally {
         setIsLoadingPolicy(false);

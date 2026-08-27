@@ -63,12 +63,8 @@ pub async fn submit_signed_event_at_with_keys(
     // Local proxies and stale pooled connections can reject a request before
     // any bytes reach the relay. Retry those connect failures with the exact
     // same signed event so a single click is reliable and remains idempotent.
-    let client = if super::relay_url_bypasses_proxy(&url) {
-        &state.direct_relay_http_client
-    } else {
-        &state.http_client
-    };
-    let response = send_signed_event_request(client, &url, &auth_header, &body_bytes).await?;
+    let response =
+        send_signed_event_request(&state.http_client, &url, &auth_header, &body_bytes).await?;
 
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);
@@ -145,20 +141,7 @@ pub async fn submit_event(
     builder: nostr::EventBuilder,
     state: &AppState,
 ) -> Result<SubmitEventResponse, String> {
+    let api_base_url = relay_api_base_url_with_override(state);
     let keys = state.signing_keys()?;
-    let event = builder
-        .sign_with_keys(&keys)
-        .map_err(|e| format!("failed to sign event: {e}"))?;
-    let bases = super::relay_http_base_urls(state);
-    let mut last_error = None;
-    for (index, base) in bases.iter().enumerate() {
-        match submit_signed_event_at_with_keys(&event, state, base, &keys).await {
-            Ok(result) => return Ok(result),
-            Err(error) if index + 1 < bases.len() && error.starts_with("relay unreachable:") => {
-                last_error = Some(error);
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Err(last_error.unwrap_or_else(|| "relay unreachable: could not connect to relay".to_string()))
+    submit_event_at_with_keys(builder, state, &api_base_url, &keys).await
 }
