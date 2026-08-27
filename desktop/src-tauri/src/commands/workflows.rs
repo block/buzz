@@ -323,7 +323,13 @@ pub async fn trigger_workflow(
     workflow_id: String,
     state: State<'_, AppState>,
 ) -> Result<WorkflowTriggerWire, String> {
-    let builder = events::build_workflow_trigger(&workflow_id)?;
+    // Resolve the current signed definition at trigger time. The relay binds
+    // authorization and execution to this exact revision and rejects a stale
+    // result if an update races this command.
+    let revision: nostr::Event =
+        get_relay_json(&state, &format!("/workflows/{workflow_id}/revision")).await?;
+    let definition_event_id = revision.id.to_hex();
+    let builder = events::build_workflow_trigger(&workflow_id, &definition_event_id)?;
     let result = submit_event(builder, &state).await?;
     trigger_wire_from_message(workflow_id, &result.message)
 }

@@ -44,7 +44,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use buzz_core::kind::{event_kind_u32, is_workflow_execution_kind, KIND_REACTION};
+use buzz_core::kind::{
+    event_kind_u32, is_workflow_execution_kind, KIND_REACTION, KIND_WORKFLOW_DEF,
+};
 use buzz_core::tenant::CommunityId;
 use buzz_db::workflow::RunStatus;
 use buzz_db::Db;
@@ -120,6 +122,62 @@ impl WorkflowEngine {
                 .time_to_live(std::time::Duration::from_secs(10))
                 .build(),
         }
+    }
+
+    /// Load and verify the exact owner-signed definition bound to a run.
+    ///
+    /// The mutable `workflows` row supplies only immutable identity/channel
+    /// binding. Definition content always comes from the run's signed event;
+    /// legacy runs without a revision fail closed.
+    pub async fn load_run_definition(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+    ) -> Result<(buzz_db::workflow::WorkflowRunRecord, WorkflowDef), WorkflowError> {
+        let run = self.db.get_workflow_run(community_id, run_id).await?;
+        let revision = run.definition_event_id.as_deref().ok_or_else(|| {
+            WorkflowError::InvalidDefinition(
+                "workflow run has no owner-signed definition revision".into(),
+            )
+        })?;
+        let workflow = self.db.get_workflow(community_id, run.workflow_id).await?;
+        let stored = self
+            .db
+            .get_event_by_id_including_deleted(community_id, revision)
+            .await?
+            .ok_or_else(|| {
+                WorkflowError::InvalidDefinition(
+                    "workflow run definition event is unavailable".into(),
+                )
+            })?;
+        let event = &stored.event;
+        let workflow_id = run.workflow_id.to_string();
+        let channel_id = workflow.channel_id.map(|id| id.to_string());
+        let exact_tag = |name: &str| {
+            let mut values = event.tags.iter().filter_map(|tag| {
+                (tag.kind().to_string() == name)
+                    .then(|| tag.content())
+                    .flatten()
+            });
+            let value = values.next();
+            value.filter(|_| values.next().is_none())
+        };
+        if event.id.as_bytes() != revision
+            || !event.verify_id()
+            || !event.verify_signature()
+            || event_kind_u32(event) != KIND_WORKFLOW_DEF
+            || event.pubkey.to_bytes().as_slice() != workflow.owner_pubkey
+            || exact_tag("d") != Some(workflow_id.as_str())
+            || channel_id.is_none()
+            || exact_tag("h") != channel_id.as_deref()
+            || stored.channel_id != workflow.channel_id
+        {
+            return Err(WorkflowError::InvalidDefinition(
+                "workflow run definition event binding mismatch".into(),
+            ));
+        }
+        let (definition, _) = Self::parse_yaml(&event.content)?;
+        Ok((run, definition))
     }
 
     /// Drop the cached enabled-workflow list for a channel.
