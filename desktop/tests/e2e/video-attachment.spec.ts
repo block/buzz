@@ -986,8 +986,14 @@ test("expanded video controls fade with the video hover boundary", async ({
   await expect(controls).toHaveCSS("transition-property", "opacity");
   await expect(controls).toHaveCSS("transition-duration", "0.15s");
 
+  const playButton = controls.getByRole("button", { name: /review video$/ });
+  await playButton.click();
+  await expect(playButton).toBeFocused();
   await dialog.getByTestId("video-review-comments-panel").hover();
   await expect(controls).toHaveCSS("opacity", "0");
+
+  await page.keyboard.press("Tab");
+  await expect(controls).toHaveCSS("opacity", "1");
 
   await page.emulateMedia({ reducedMotion: "reduce" });
   await expect(controls).toHaveCSS("transition-property", "none");

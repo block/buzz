@@ -13,7 +13,7 @@
   }
 
   .video-review-media-surface:hover .video-review-controls,
-  .video-review-media-surface:focus-within .video-review-controls {
+  .video-review-media-surface:has(:focus-visible) .video-review-controls {
     pointer-events: auto;
     opacity: 1;
   }
