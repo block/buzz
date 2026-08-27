@@ -586,7 +586,11 @@ pub fn build_add_member(
     if let Some(r) = role {
         tags.push(tag(&["role", r.as_str()])?);
     }
-    Ok(EventBuilder::new(Kind::Custom(9000), "").tags(tags))
+    // A role update may target the signer. nostr strips matching `p` tags by
+    // default, but kind:9000 requires that tag to identify the member.
+    Ok(EventBuilder::new(Kind::Custom(9000), "")
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a NIP-29 remove-member event (kind 9001).
@@ -2940,6 +2944,23 @@ mod tests {
         assert_eq!(ev.kind.as_u16(), 9000);
         assert!(has_tag(&ev, "p", pubkey));
         assert!(has_tag(&ev, "role", "admin"));
+    }
+
+    #[test]
+    fn add_member_preserves_self_target_p_tag_for_role_update() {
+        let cid = uuid();
+        let signer = keys();
+        let self_pubkey = signer.public_key().to_hex();
+        let ev = build_add_member(cid, &self_pubkey, Some(MemberRole::Bot))
+            .unwrap()
+            .sign_with_keys(&signer)
+            .expect("sign");
+
+        assert!(
+            has_tag(&ev, "p", &self_pubkey),
+            "self-target role update must retain its required p tag"
+        );
+        assert!(has_tag(&ev, "role", "bot"));
     }
 
     #[test]
