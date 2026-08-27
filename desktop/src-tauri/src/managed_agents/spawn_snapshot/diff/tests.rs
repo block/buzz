@@ -237,6 +237,27 @@ fn allowlisted_env_key_is_case_insensitive() {
 }
 
 #[test]
+fn allowlisted_databricks_filter_shows_plain_value() {
+    let mut before = base();
+    before
+        .env
+        .insert("DATABRICKS_MODEL_FILTER".into(), "old-*".into());
+    let mut after = before.clone();
+    after
+        .env
+        .insert("DATABRICKS_MODEL_FILTER".into(), "new-*".into());
+
+    assert_eq!(
+        change_at(&diff(&before, &after), "env.DATABRICKS_MODEL_FILTER"),
+        &RestartChange::Value {
+            before: Value::String("old-*".into()),
+            after: Value::String("new-*".into()),
+        },
+        "the discovery filter is non-secret and should be reviewable"
+    );
+}
+
+#[test]
 fn non_allowlisted_env_key_stays_masked() {
     // A key not in the allowlist must remain masked regardless of its name.
     let mut after = base();

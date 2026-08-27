@@ -63,6 +63,18 @@ test("registry label aliases refuse ambiguous stripped record keys", () => {
   );
 });
 
+test("Unity Catalog FQNs use neutral concrete-unknown capabilities", () => {
+  const fqn = resolveModelCapabilities(
+    "databricks_v2",
+    "data_workflow_tools.goose.goose-kimi-k3",
+  );
+  const fallback = resolveModelCapabilities(
+    "databricks_v2",
+    "some-unknown-xyz",
+  );
+  assert.deepEqual(fqn, fallback);
+});
+
 test("every executable corpus vector resolves to its expected six-axis profile", () => {
   for (const entry of executable) {
     const id = entry.id ?? "<no-id>";

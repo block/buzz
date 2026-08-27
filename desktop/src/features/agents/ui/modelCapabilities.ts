@@ -287,6 +287,19 @@ function toResult(
   };
 }
 
+function isDatabricksModelServiceFqn(model: string): boolean {
+  const components = model.split(".");
+  return (
+    components.length === 3 &&
+    components.every(
+      (component) =>
+        component.length > 0 &&
+        !/\s/.test(component) &&
+        !component.includes("/"),
+    )
+  );
+}
+
 /**
  * Resolve the capability profile for a `(provider, rawModelId)` pair.
  *
@@ -300,9 +313,13 @@ export function resolveModelCapabilities(
 ): CapabilityResult {
   const canon = canonicalizeProvider(provider);
   const blank = rawModelId.trim().length === 0;
+  // Unity Catalog FQNs are neutral model-service identities. Resolve them
+  // through the concrete-unknown fallback before suffix family matching.
+  const modelServiceFqn =
+    canon === "databricks_v2" && isDatabricksModelServiceFqn(rawModelId);
 
   // 1. Provider-qualified exact-record lookup (case-insensitive on the id).
-  if (!blank) {
+  if (!blank && !modelServiceFqn) {
     const idLower = rawModelId.toLowerCase();
     for (const rec of MANIFEST.exact_records) {
       if (
@@ -315,7 +332,7 @@ export function resolveModelCapabilities(
   }
 
   // 2. Boundary-aware family match: longest token wins, lexicographic tie-break.
-  if (!blank) {
+  if (!blank && !modelServiceFqn) {
     const modelLower = rawModelId.toLowerCase();
     const stripped = stripCatalogPrefix(modelLower, MANIFEST.family_tokens);
     let best: { len: number; rule: FamilyRule } | null = null;

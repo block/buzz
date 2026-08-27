@@ -1,3 +1,4 @@
+import { getChannelDetail } from "@/features/channels/lib/channelDescription";
 import { isEphemeralChannel } from "@/features/channels/lib/ephemeralChannel";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { Channel } from "@/shared/api/types";
@@ -10,6 +11,7 @@ export function shouldUseFocusIdleDrawer({
   hasIdlePanelCloseHandler,
   hasProfilePanel,
   hasThreadSurface,
+  overrideThread = false,
   useSplitAuxiliaryPane,
 }: {
   channelManagementOpen: boolean;
@@ -18,14 +20,15 @@ export function shouldUseFocusIdleDrawer({
   hasIdlePanelCloseHandler: boolean;
   hasProfilePanel: boolean;
   hasThreadSurface: boolean;
+  overrideThread?: boolean;
   useSplitAuxiliaryPane: boolean;
 }): boolean {
   return (
-    useSplitAuxiliaryPane &&
+    (useSplitAuxiliaryPane || overrideThread) &&
     !channelManagementOpen &&
     !hasAgentSession &&
     !hasProfilePanel &&
-    !hasThreadSurface &&
+    (!hasThreadSurface || overrideThread) &&
     hasIdleAuxiliaryPanel &&
     hasIdlePanelCloseHandler
   );
@@ -55,12 +58,7 @@ export function getChannelIntroKind(
 }
 
 export function getChannelIntroDescription(channel: Channel): string | null {
-  return (
-    channel.topic?.trim() ||
-    channel.purpose?.trim() ||
-    channel.description?.trim() ||
-    null
-  );
+  return getChannelDetail(channel);
 }
 
 /** Whether a caller-owned auxiliary sheet should render ahead of a thread. */
