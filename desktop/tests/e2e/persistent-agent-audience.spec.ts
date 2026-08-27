@@ -157,6 +157,7 @@ async function emitMockMessage(
 async function installAudienceFixtures(
   page: Page,
   options: {
+    agentAName?: string;
     deferredComposerUploads?: boolean;
     sendMessageDelayMs?: number;
     sendMessageErrors?: string[];
@@ -172,12 +173,13 @@ async function installAudienceFixtures(
     usersBatchDelayMs?: number;
   } = {},
 ) {
+  const { agentAName = "Morgarita", ...bridgeOptions } = options;
   await installMockBridge(page, {
-    ...options,
+    ...bridgeOptions,
     managedAgents: [
       {
         pubkey: AGENT_A,
-        name: "Morgarita",
+        name: agentAName,
         status: "running",
         channelNames: ["general"],
       },
@@ -918,6 +920,53 @@ test("implicit automatic mentions stay out of persisted drafts", async ({
       }, CHANNEL_ID),
     )
     .toBe("draft text continues");
+});
+
+test("a restored multi-word automatic mention remains a chip with the caret after its space", async ({
+  page,
+}) => {
+  await installAudienceFixtures(page, { agentAName: "claude code" });
+  await openGeneral(page);
+  const originalComposer = channelComposer(page);
+  await automaticallyMention(originalComposer, "claude code");
+  const originalInput = originalComposer.getByTestId("message-input");
+  await originalInput.pressSequentially("hello");
+  await originalInput.press("Enter");
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@claude code hello"))
+    .toContain(AGENT_A);
+  await expect(originalInput).toHaveText("@claude code ");
+
+  await page.goto(`/#/channels/${RANDOM_CHANNEL_ID}`, {
+    waitUntil: "domcontentloaded",
+  });
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await openGeneral(page);
+
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  const expectedContent = "@claude code ";
+  await expect(input).toHaveText(expectedContent);
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toBeVisible();
+  await expect(
+    composer.getByRole("button", { name: "Manage automatic agent mentions" }),
+  ).toBeVisible();
+  await page.waitForTimeout(500);
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
+  await expect(input).toBeFocused();
+  await expect
+    .poll(() => readComposerCaret(input))
+    .toBe(expectedContent.length);
+
+  await input.pressSequentially("follow-up");
+  await expect(input).toHaveText("@claude code follow-up");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toBeVisible();
 });
 
 test("reduced motion removes addressed agents without spatial animation", async ({

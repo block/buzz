@@ -124,6 +124,11 @@ export function useAgentAddressLockPicker({
       }),
     [audience.pubkeys, mentions.getMentionDisplayName, profiles],
   );
+  React.useLayoutEffect(() => {
+    richText.syncAddressedAgentMentionNames?.(
+      lockedAgents.map((agent) => agent.displayName),
+    );
+  }, [lockedAgents, richText.syncAddressedAgentMentionNames]);
   const trackMentionAddressedAgent = React.useCallback(
     (pubkey: string) => {
       const normalized = normalizePubkey(pubkey);
@@ -372,6 +377,9 @@ export function useAgentAddressLockPicker({
       const { text } = richText.getPlainTextAndCursor();
       for (const agent of targetAgents) {
         if (getMentionOffsets(text, agent.displayName).length > 0) {
+          mentions.registerMentionPubkey(agent.displayName, agent.pubkey, {
+            isAgent: true,
+          });
           visibleAgentMentionPubkeysRef.current.add(agent.pubkey);
         }
       }
@@ -397,6 +405,11 @@ export function useAgentAddressLockPicker({
         insertText: insertedText,
         preserveSelection: true,
       });
+      // A restored empty composer has no authored caret to preserve. Move it
+      // to the real document end after insertion so WebKit places it after
+      // the trailing space, without routing the multi-word name back through
+      // autocomplete settlement (which would lose its mention decoration).
+      if (text.length === 0) richText.focusEnd();
       return `${insertedText}${text}`;
     },
     [
@@ -405,6 +418,7 @@ export function useAgentAddressLockPicker({
       mentions.getMentionDisplayName,
       mentions.registerMentionPubkey,
       profiles,
+      richText.focusEnd,
       richText.getPlainTextAndCursor,
     ],
   );

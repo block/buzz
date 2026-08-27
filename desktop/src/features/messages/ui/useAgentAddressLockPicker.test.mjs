@@ -377,6 +377,100 @@ test("selecting a human mention never changes automatic addressing", async () =>
   assert.deepEqual(autoPinnedSuggestions, []);
 });
 
+test("restoring a multi-word automatic mention into an empty composer focuses after its trailing space", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  const appliedEdits = [];
+  const registeredMentions = [];
+  let focusEndCount = 0;
+  const { result } = renderHook(() =>
+    useAgentAddressLockPicker({
+      applyAutocompleteEdit: (edit) => appliedEdits.push(edit),
+      audience: {
+        pubkeys: ["agent-pubkey"],
+        addPubkey: () => {},
+      },
+      audienceScope: "thread-scope",
+      mentions: {
+        getDraftMentionRefs: () => [],
+        getMentionDisplayName: () => "claude code",
+        registerMentionPubkey: (...args) => registeredMentions.push(args),
+      },
+      onPulseAddressLock: () => {},
+      richText: {
+        focusEnd: () => {
+          focusEndCount += 1;
+        },
+        getPlainTextAndCursor: () => ({ text: "", cursor: 0 }),
+      },
+    }),
+  );
+
+  act(() => result.current.restoreAddressedAgentMentions());
+
+  assert.deepEqual(registeredMentions, [
+    ["claude code", "agent-pubkey", { isAgent: true }],
+  ]);
+  assert.deepEqual(appliedEdits, [
+    {
+      replaceFromOffset: 0,
+      replaceToOffset: 0,
+      insertText: "@claude code ",
+      preserveSelection: true,
+    },
+  ]);
+  assert.equal(focusEndCount, 1);
+});
+
+test("restoring an existing automatic mention re-registers its agent chip", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  const appliedEdits = [];
+  const registeredMentions = [];
+  const syncedAddressedNames = [];
+  let focusEndCount = 0;
+  const { result } = renderHook(() =>
+    useAgentAddressLockPicker({
+      applyAutocompleteEdit: (edit) => appliedEdits.push(edit),
+      audience: {
+        pubkeys: ["agent-pubkey"],
+        addPubkey: () => {},
+      },
+      audienceScope: "thread-scope",
+      mentions: {
+        getDraftMentionRefs: () => [],
+        getMentionDisplayName: () => "claude code",
+        registerMentionPubkey: (...args) => registeredMentions.push(args),
+      },
+      onPulseAddressLock: () => {},
+      richText: {
+        focusEnd: () => {
+          focusEndCount += 1;
+        },
+        getPlainTextAndCursor: () => ({
+          text: "@claude code ",
+          cursor: 13,
+        }),
+        syncAddressedAgentMentionNames: (names) =>
+          syncedAddressedNames.push(names),
+      },
+    }),
+  );
+
+  act(() => result.current.restoreAddressedAgentMentions());
+
+  assert.deepEqual(registeredMentions, [
+    ["claude code", "agent-pubkey", { isAgent: true }],
+  ]);
+  assert.deepEqual(appliedEdits, []);
+  assert.equal(focusEndCount, 0);
+  assert.deepEqual(syncedAddressedNames.at(-1), ["claude code"]);
+});
+
 test("deleting the last automatic agent mention explicitly excludes its address", async () => {
   const { act, renderHook } = await import("@testing-library/react");
   const { useAgentAddressLockPicker } = await import(

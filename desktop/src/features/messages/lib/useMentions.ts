@@ -541,11 +541,11 @@ export function useMentions(
         appendUniqueName(current, trimmedName),
       );
       if (options?.isAgent) {
-        setSelectedAgentMentionNames((current) => {
-          const next = appendUniqueName(current, trimmedName);
-          selectedAgentMentionNamesRef.current = next;
-          return next;
-        });
+        selectedAgentMentionNamesRef.current = appendUniqueName(
+          selectedAgentMentionNamesRef.current,
+          trimmedName,
+        );
+        setSelectedAgentMentionNames(selectedAgentMentionNamesRef.current);
       }
     },
     [],

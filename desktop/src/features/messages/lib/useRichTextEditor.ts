@@ -162,6 +162,7 @@ export function useRichTextEditor({
   onLinkSelectionChange,
   onLinkShortcut,
 }: RichTextEditorOptions) {
+  const addressedAgentMentionNamesRef = React.useRef<readonly string[]>([]);
   const onUpdateRef = React.useRef(onUpdate);
   onUpdateRef.current = onUpdate;
 
@@ -648,10 +649,29 @@ export function useRichTextEditor({
     syncMentionHighlightFromProps(
       editor,
       mentionNames,
-      agentMentionNames,
+      [
+        ...new Set([
+          ...(agentMentionNames ?? []),
+          ...addressedAgentMentionNamesRef.current,
+        ]),
+      ],
       channelNames,
     );
   }, [editor, mentionNames, agentMentionNames, channelNames]);
+
+  const syncAddressedAgentMentionNames = React.useCallback(
+    (names: readonly string[]) => {
+      addressedAgentMentionNamesRef.current = names;
+      if (!editor) return;
+      syncMentionHighlightFromProps(
+        editor,
+        mentionNames,
+        [...new Set([...(agentMentionNames ?? []), ...names])],
+        channelNames,
+      );
+    },
+    [agentMentionNames, channelNames, editor, mentionNames],
+  );
 
   // Custom-emoji set changes: re-resolve the `src` attr on any existing
   // node in the doc (e.g. an emoji's image was just published).
@@ -917,6 +937,7 @@ export function useRichTextEditor({
     focusPreserve,
     getPlainTextAndCursor,
     replacePlainTextRange,
+    syncAddressedAgentMentionNames,
     getLinkSelectionInfo,
     applyLink,
     removeLink,
