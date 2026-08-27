@@ -9,7 +9,15 @@
   "family_tokens": [
     "claude-",
     "gpt-",
-    "kimi-"
+    "kimi-",
+    "gemini-",
+    "deepseek-",
+    "glm-",
+    "grok-",
+    "llama-",
+    "qwen",
+    "gemma-",
+    "inkling"
   ],
   "family_rules": [
     {
@@ -865,6 +873,310 @@
       "provider": "databricks_v2",
       "raw_model_id": "databricks-glm-5-2",
       "registry_label": "GLM-5.2",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gemini-3-1-flash-image",
+      "registry_label": "Gemini 3.1 Flash Image",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gemini-3-5-flash",
+      "registry_label": "Gemini 3.5 Flash",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gemini-3-5-flash-lite",
+      "registry_label": "Gemini 3.5 Flash Lite",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gemini-3-6-flash",
+      "registry_label": "Gemini 3.6 Flash",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gemini-3-pro-image",
+      "registry_label": "Gemini 3 Pro Image",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-deepseek-v4-flash-0731",
+      "registry_label": "DeepSeek V4 Flash",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-deepseek-v4-pro-0813",
+      "registry_label": "DeepSeek V4 Pro",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-glm-5-3-flash",
+      "registry_label": "GLM-5.3 Flash",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-grok-4-6",
+      "registry_label": "Grok 4.6",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-llama-4-maverick",
+      "registry_label": "Llama 4 Maverick",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-meta-llama-3-1-8b-instruct",
+      "registry_label": "Llama 3.1 8B Instruct",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-meta-llama-3-3-70b-instruct",
+      "registry_label": "Llama 3.3 70B Instruct",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-qwen3-next-80b-a3b-instruct",
+      "registry_label": "Qwen3 Next 80B A3B Instruct",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-qwen35-122b-a10b",
+      "registry_label": "Qwen3.5 122B A10B",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gemma-3-12b",
+      "registry_label": "Gemma 3 12B",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-inkling",
+      "registry_label": "Inkling",
       "thinking_mode": "none",
       "supported_efforts": [
         "none",
