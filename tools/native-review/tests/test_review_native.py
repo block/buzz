@@ -209,8 +209,21 @@ class JourneyTests(unittest.TestCase):
             run_dir = pathlib.Path(directory)
             (run_dir / "manifest").mkdir()
             isolation = review_native.isolation_manifest("run", "ws://127.0.0.1:3030")
-            with mock.patch.object(review_native, "run", side_effect=[generated, RuntimeError("seed failed")]):
+            with mock.patch.object(pathlib.Path, "is_file", return_value=True), \
+                 mock.patch.object(review_native, "run", side_effect=[generated, RuntimeError("seed failed")]):
                 with self.assertRaisesRegex(RuntimeError, "seed failed"):
+                    review_native.prepare_fixture(run_dir, isolation)
+            self.assertFalse((run_dir / "state/identity.key").exists())
+
+    def test_fixture_seed_interruption_removes_generated_identity(self):
+        generated = mock.Mock(stdout=f"Secret key: {'1' * 64}\nPublic key: {'2' * 64}\n")
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = pathlib.Path(directory)
+            (run_dir / "manifest").mkdir()
+            isolation = review_native.isolation_manifest("run", "ws://127.0.0.1:3030")
+            with mock.patch.object(pathlib.Path, "is_file", return_value=True), \
+                 mock.patch.object(review_native, "run", side_effect=[generated, KeyboardInterrupt]):
+                with self.assertRaises(KeyboardInterrupt):
                     review_native.prepare_fixture(run_dir, isolation)
             self.assertFalse((run_dir / "state/identity.key").exists())
 
@@ -341,6 +354,70 @@ class JourneyTests(unittest.TestCase):
         process.wait.assert_called_once_with(timeout=15)
         process.kill.assert_not_called()
 
+    def test_launch_log_close_failure_reaps_child_before_propagating(self):
+        process = mock.Mock(pid=42)
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        log = mock.MagicMock()
+        log.close.side_effect = OSError("log close failed")
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = pathlib.Path(directory)
+            (run_dir / "logs").mkdir()
+            secret_path = run_dir / "identity.key"
+            secret_path.write_text("1" * 64)
+            app_binary = run_dir / "buzz-desktop"
+            app_binary.write_bytes(b"binary")
+            fixture = {
+                "secret_path": str(secret_path),
+                "identity_pubkey": "2" * 64,
+            }
+            isolation = review_native.isolation_manifest(
+                "run", "ws://127.0.0.1:3030"
+            )
+            with mock.patch.object(pathlib.Path, "open", return_value=log), \
+                 mock.patch.object(review_native.subprocess, "Popen", return_value=process), \
+                 mock.patch.object(review_native, "scrubbed_environment", return_value={"PATH": "/usr/bin"}):
+                with self.assertRaisesRegex(OSError, "log close failed"):
+                    review_native.build_and_launch(
+                        run_dir, isolation, fixture, "http://127.0.0.1/probe",
+                        "token", app_binary
+                    )
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=15)
+        process.kill.assert_not_called()
+
+    def test_driver_close_stream_failure_still_reaps_child(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        process.stdin.close.side_effect = BrokenPipeError("stdin close failed")
+        driver = review_native.Driver.__new__(review_native.Driver)
+        driver.process = process
+        with mock.patch.object(driver, "request", return_value={"ok": True}):
+            with self.assertRaisesRegex(
+                review_native.HarnessError,
+                "native driver stdin close failed: stdin close failed",
+            ):
+                driver.close()
+        process.stdout.close.assert_called_once_with()
+        process.stderr.close.assert_called_once_with()
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=5)
+
+    def test_driver_close_stream_failure_reaps_exited_child(self):
+        process = mock.Mock()
+        process.poll.return_value = 0
+        process.stdin.close.side_effect = BrokenPipeError("stdin close failed")
+        driver = review_native.Driver.__new__(review_native.Driver)
+        driver.process = process
+        with self.assertRaisesRegex(
+            review_native.HarnessError,
+            "native driver stdin close failed: stdin close failed",
+        ):
+            driver.close()
+        process.wait.assert_called_once_with()
+        process.terminate.assert_not_called()
+
     def test_driver_close_kills_and_reaps_term_ignoring_child(self):
         process = mock.Mock()
         process.poll.return_value = None
@@ -393,6 +470,102 @@ class JourneyTests(unittest.TestCase):
         process.terminate.assert_called_once_with()
         process.wait.assert_called_once_with(timeout=5)
         process.kill.assert_not_called()
+
+    def test_journey_body_interruption_runs_all_cleanup(self):
+        journey = {
+            "flow": "body_interruption",
+            "record": {"video": "off", "screenshots": False, "accessibility": False},
+            "steps": [{"name": "wait", "act": {"type": "wait", "duration_ms": 0},
+                       "expect": {"focused": False}}],
+            "cleanup": {"terminate_app": True, "remove_state": True},
+        }
+        process = mock.Mock(pid=42)
+        driver = mock.Mock()
+        driver.request.side_effect = KeyboardInterrupt
+        probe_server = mock.Mock()
+        sampler = mock.Mock()
+        sampler.finish.return_value = {"sample_count": 0}
+        with tempfile.TemporaryDirectory() as directory:
+            output_root = pathlib.Path(directory) / "output"
+            fixture = {"secret_path": str(pathlib.Path(directory) / "identity.key")}
+            app_binary = pathlib.Path(directory) / "buzz-desktop"
+            app_binary.write_bytes(b"binary")
+            journey_path = pathlib.Path(directory) / "journey.yaml"
+            journey_path.write_text("fixture")
+            with mock.patch.object(review_native, "load_journey", return_value=journey), \
+                 mock.patch.object(review_native, "provenance", return_value={"head_sha": "a" * 40}), \
+                 mock.patch.object(review_native, "machine_fingerprint", return_value={}), \
+                 mock.patch.object(review_native, "doctor", return_value={"ok": True}), \
+                 mock.patch.object(review_native, "prepare_fixture", return_value=fixture), \
+                 mock.patch.object(review_native, "semantic_probe_server", return_value=(probe_server, "probe")), \
+                 mock.patch.object(review_native, "build_and_launch", return_value=(process, app_binary, 42)), \
+                 mock.patch.object(review_native, "build_driver", return_value=pathlib.Path("driver")), \
+                 mock.patch.object(review_native, "Driver", return_value=driver), \
+                 mock.patch.object(review_native, "ProcessSampler", return_value=sampler), \
+                 mock.patch.object(review_native, "wait_for_visible_window", return_value={"visible": True}), \
+                 mock.patch.object(review_native, "capture_step", return_value={}), \
+                 mock.patch.object(review_native, "terminate_and_reap", return_value=[]) as reap, \
+                 mock.patch.object(review_native, "cleanup_review_state") as cleanup:
+                with self.assertRaises(KeyboardInterrupt):
+                    review_native.run_journey(
+                        journey_path, "ws://127.0.0.1:3030", output_root,
+                    )
+            driver.close.assert_called_once_with()
+            reap.assert_called_once_with(process, "Tauri launcher")
+            cleanup.assert_called_once()
+            receipt_path = next(output_root.glob("**/receipt.json"))
+            receipt = json.loads(receipt_path.read_text())
+            self.assertEqual(receipt["status"], "failed")
+            self.assertEqual(receipt["cleanup"], {"status": "passed", "errors": []})
+
+    def test_journey_cleanup_survives_driver_interruption(self):
+        journey = {
+            "flow": "cleanup_interruption",
+            "record": {"video": "off", "screenshots": False, "accessibility": False},
+            "steps": [{"name": "wait", "act": {"type": "wait", "duration_ms": 0},
+                       "expect": {"focused": False}}],
+            "cleanup": {"terminate_app": True, "remove_state": True},
+        }
+        process = mock.Mock(pid=42)
+        driver = mock.Mock()
+        driver.close.side_effect = KeyboardInterrupt
+        probe_server = mock.Mock()
+        sampler = mock.Mock()
+        sampler.finish.return_value = {"sample_count": 0}
+        with tempfile.TemporaryDirectory() as directory:
+            output_root = pathlib.Path(directory) / "output"
+            fixture = {"secret_path": str(pathlib.Path(directory) / "identity.key")}
+            app_binary = pathlib.Path(directory) / "buzz-desktop"
+            app_binary.write_bytes(b"binary")
+            journey_path = pathlib.Path(directory) / "journey.yaml"
+            journey_path.write_text("fixture")
+            with mock.patch.object(review_native, "load_journey", return_value=journey), \
+                 mock.patch.object(review_native, "provenance", return_value={"head_sha": "a" * 40}), \
+                 mock.patch.object(review_native, "machine_fingerprint", return_value={}), \
+                 mock.patch.object(review_native, "doctor", return_value={"ok": True}), \
+                 mock.patch.object(review_native, "prepare_fixture", return_value=fixture), \
+                 mock.patch.object(review_native, "semantic_probe_server", return_value=(probe_server, "probe")), \
+                 mock.patch.object(review_native, "build_and_launch", return_value=(process, app_binary, 42)), \
+                 mock.patch.object(review_native, "build_driver", return_value=pathlib.Path("driver")), \
+                 mock.patch.object(review_native, "Driver", return_value=driver), \
+                 mock.patch.object(review_native, "ProcessSampler", return_value=sampler), \
+                 mock.patch.object(review_native, "wait_for_visible_window", return_value={"visible": True}), \
+                 mock.patch.object(review_native, "wait_expectation"), \
+                 mock.patch.object(review_native, "capture_step", return_value={}), \
+                 mock.patch.object(review_native, "terminate_and_reap", return_value=[]) as reap, \
+                 mock.patch.object(review_native, "cleanup_review_state") as cleanup:
+                with self.assertRaises(KeyboardInterrupt):
+                    review_native.run_journey(
+                        journey_path,
+                        "ws://127.0.0.1:3030", output_root,
+                    )
+            reap.assert_called_once_with(process, "Tauri launcher")
+            cleanup.assert_called_once()
+            receipt_path = next(output_root.glob("**/receipt.json"))
+            receipt = json.loads(receipt_path.read_text())
+            self.assertEqual(receipt["status"], "failed")
+            self.assertEqual(receipt["cleanup"]["status"], "failed")
+            self.assertIn("native driver cleanup failed", receipt["cleanup"]["errors"][0])
 
     def test_final_wait_timeout_is_reported(self):
         process = mock.Mock()

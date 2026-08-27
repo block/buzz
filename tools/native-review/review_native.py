@@ -402,17 +402,25 @@ class Driver:
                 self.request("shutdown")
             except BaseException as exc:
                 shutdown_error = exc
-        for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+        cleanup_errors = []
+        for name, stream in (("stdin", self.process.stdin),
+                             ("stdout", self.process.stdout),
+                             ("stderr", self.process.stderr)):
             if stream:
-                stream.close()
-        cleanup_errors = terminate_and_reap(self.process, "native driver", timeout_seconds=5)
+                try:
+                    stream.close()
+                except BaseException as exc:
+                    cleanup_errors.append(f"native driver {name} close failed: {exc}")
+        cleanup_errors.extend(
+            terminate_and_reap(self.process, "native driver", timeout_seconds=5)
+        )
+        if shutdown_error and not isinstance(shutdown_error, Exception):
+            raise shutdown_error
         if cleanup_errors:
             detail = "; ".join(cleanup_errors)
             if shutdown_error:
                 detail = f"shutdown failed: {shutdown_error}; {detail}"
             raise HarnessError(detail) from shutdown_error
-        if shutdown_error and not isinstance(shutdown_error, Exception):
-            raise shutdown_error
 
 
 def doctor(require_permissions: bool = False) -> dict[str, Any]:
@@ -460,7 +468,7 @@ def prepare_fixture(run_dir: pathlib.Path, isolation: dict[str, str]) -> dict[st
     try:
         run([str(ROOT / "scripts/setup-desktop-test-data.sh")],
             env=fixture_environment(isolation, fixture["identity_pubkey"]), capture=False)
-    except Exception:
+    except BaseException:
         secret_path.unlink(missing_ok=True)
         raise
     (run_dir / "manifest" / "fixture.json").write_text(json.dumps({k: v for k, v in fixture.items() if k != "secret_path"}, indent=2))
@@ -618,9 +626,9 @@ def build_and_launch(run_dir: pathlib.Path, isolation: dict[str, str], fixture: 
     log = (run_dir / "logs" / "app.log").open("w")
     process = subprocess.Popen([str(app_binary)], cwd=ROOT, env=env, stdout=log,
                                stderr=subprocess.STDOUT, text=True)
-    log.close()
-    deadline = time.monotonic() + 60
     try:
+        log.close()
+        deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 raise HarnessError(f"Tauri exited during launch; see {run_dir / 'logs/app.log'}")
@@ -749,6 +757,8 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path,
     fixture: dict[str, Any] | None = None
     probe_server: http.server.ThreadingHTTPServer | None = None
     sampler: ProcessSampler | None = None
+    cleanup_interruption: BaseException | None = None
+    journey_interruption: BaseException | None = None
     try:
         if not doctor(require_permissions=True)["ok"]:
             raise HarnessError("doctor failed; grant required permissions and rerun")
@@ -799,8 +809,10 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path,
         if journey["record"]["video"] == "window":
             driver.request("record_stop")
         receipt["status"] = "passed"
-    except Exception as exc:
+    except BaseException as exc:
         receipt["failure"] = str(exc)
+        if not isinstance(exc, Exception):
+            journey_interruption = exc
         if driver:
             try:
                 receipt["artifacts"]["failure"] = capture_step(driver, run_dir, "failure", {"screenshots": True, "accessibility": True})
@@ -812,23 +824,42 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path,
                 pass
     finally:
         cleanup_errors = []
+
+        def record_cleanup_failure(label: str, exc: BaseException) -> None:
+            nonlocal cleanup_interruption
+            cleanup_errors.append(f"{label}: {exc}")
+            if not isinstance(exc, Exception) and cleanup_interruption is None:
+                cleanup_interruption = exc
+
         if sampler:
-            receipt["performance"]["process"] = sampler.finish()
+            try:
+                receipt["performance"]["process"] = sampler.finish()
+            except BaseException as exc:
+                record_cleanup_failure("process sampler cleanup failed", exc)
         if probe_server:
-            probe_server.shutdown()
-            probe_server.server_close()
+            try:
+                probe_server.shutdown()
+            except BaseException as exc:
+                record_cleanup_failure("semantic probe shutdown failed", exc)
+            try:
+                probe_server.server_close()
+            except BaseException as exc:
+                record_cleanup_failure("semantic probe close failed", exc)
         if driver:
             try:
                 driver.close()
-            except Exception as exc:
-                cleanup_errors.append(f"native driver cleanup failed: {exc}")
+            except BaseException as exc:
+                record_cleanup_failure("native driver cleanup failed", exc)
         if process and journey["cleanup"]["terminate_app"]:
-            cleanup_errors.extend(terminate_and_reap(process, "Tauri launcher"))
+            try:
+                cleanup_errors.extend(terminate_and_reap(process, "Tauri launcher"))
+            except BaseException as exc:
+                record_cleanup_failure("Tauri launcher cleanup failed", exc)
         if journey["cleanup"]["remove_state"]:
             try:
                 cleanup_review_state(run_dir, isolation, fixture)
-            except Exception as exc:
-                cleanup_errors.append(str(exc))
+            except BaseException as exc:
+                record_cleanup_failure("review state cleanup failed", exc)
         receipt["cleanup"] = {"status": "failed" if cleanup_errors else "passed", "errors": cleanup_errors}
         if cleanup_errors:
             receipt["status"] = "failed"
@@ -838,6 +869,10 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path,
         if receipt["failure"]:
             report += f"\nFailure: `{receipt['failure']}`\n"
         (run_dir / "report.md").write_text(report)
+    if journey_interruption is not None:
+        raise journey_interruption
+    if cleanup_interruption is not None:
+        raise cleanup_interruption
     print(run_dir)
     if receipt["status"] != "passed":
         raise HarnessError(receipt["failure"] or "journey or cleanup failed")
