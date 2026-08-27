@@ -326,6 +326,7 @@ function MessageComposerImpl({
     openOptionsRequest: openMentionOptionsRequest,
     promoteExplicitlyAddressedAgents,
     promoteMentionedAgents,
+    setConfirmationHovered: setAutoPinConfirmationHovered,
     turnOffConfirmation: turnOffAutoPinConfirmation,
   } = useAutoPinMentionedAgents({
     audienceScope,
@@ -958,6 +959,7 @@ function MessageComposerImpl({
               isUploading={media.isUploading}
               onCaptureSelection={handleCaptureSelection}
               onAutoPinConfirmationDismiss={dismissAutoPinConfirmation}
+              onAutoPinConfirmationHoverChange={setAutoPinConfirmationHovered}
               onAutoPinConfirmationTurnOff={mentionPicker.turnOff}
               onEmojiPickerOpenChange={setIsEmojiPickerOpen}
               onEmojiSelect={insertEmoji}

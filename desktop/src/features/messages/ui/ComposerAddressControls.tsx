@@ -129,6 +129,7 @@ export function ComposerMentionButton({
   confirmationTitle,
   disabled,
   onConfirmationDismiss,
+  onConfirmationHoverChange,
   onConfirmationTurnOff,
   onCaptureSelection,
   onOpen,
@@ -140,6 +141,7 @@ export function ComposerMentionButton({
   confirmationTitle?: string | null;
   disabled: boolean;
   onConfirmationDismiss?: () => void;
+  onConfirmationHoverChange?: (hovered: boolean) => void;
   onConfirmationTurnOff?: () => void;
   onCaptureSelection: () => void;
   onOpen: () => void;
@@ -290,6 +292,8 @@ export function ComposerMentionButton({
           data-testid="composer-auto-pin-confirmation"
           onCloseAutoFocus={(event) => event.preventDefault()}
           onOpenAutoFocus={(event) => event.preventDefault()}
+          onPointerEnter={() => onConfirmationHoverChange?.(true)}
+          onPointerLeave={() => onConfirmationHoverChange?.(false)}
           side="right"
           sideOffset={8}
           style={{ width: "max-content" }}

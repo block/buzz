@@ -45,6 +45,7 @@ export function useAutoPinMentionedAgents({
   const [confirmation, setConfirmation] = React.useState<Confirmation | null>(
     null,
   );
+  const [confirmationHovered, setConfirmationHovered] = React.useState(false);
   const [openOptionsRequest, setOpenOptionsRequest] = React.useState(0);
   const nextOptionsRequestRef = React.useRef(0);
   const pendingPreferenceChangeRef =
@@ -106,14 +107,19 @@ export function useAutoPinMentionedAgents({
     onTurnOffRef.current();
   }, []);
 
+  const clearConfirmation = React.useCallback(() => {
+    setConfirmationHovered(false);
+    setConfirmation(null);
+  }, []);
+
   React.useEffect(() => {
-    if (!confirmation) return;
+    if (!confirmation || confirmationHovered) return;
     const timeout = window.setTimeout(
-      () => setConfirmation(null),
+      clearConfirmation,
       CONFIRMATION_DURATION_MS,
     );
     return () => window.clearTimeout(timeout);
-  }, [confirmation]);
+  }, [clearConfirmation, confirmation, confirmationHovered]);
 
   const currentAudiencePubkeySet = React.useMemo(
     () => new Set(currentAudiencePubkeys.map(normalizePubkey).filter(Boolean)),
@@ -125,8 +131,8 @@ export function useAutoPinMentionedAgents({
       currentAudiencePubkeySet.has(pubkey),
     );
   React.useEffect(() => {
-    if (confirmation && !confirmationIsCurrent) setConfirmation(null);
-  }, [confirmation, confirmationIsCurrent]);
+    if (confirmation && !confirmationIsCurrent) clearConfirmation();
+  }, [clearConfirmation, confirmation, confirmationIsCurrent]);
 
   const promoteAgents = React.useCallback(
     ({
@@ -165,6 +171,7 @@ export function useAutoPinMentionedAgents({
         : promotedPubkeys.length === 1
           ? "Agent will be mentioned automatically"
           : `${promotedPubkeys.length} agents will be mentioned automatically`;
+      setConfirmationHovered(false);
       setConfirmation({
         expectedRevision: revision,
         pubkeys: promotedPubkeys,
@@ -199,15 +206,12 @@ export function useAutoPinMentionedAgents({
     [promoteAgents, requestPreferenceChange],
   );
 
-  const dismissConfirmation = React.useCallback(
-    () => setConfirmation(null),
-    [],
-  );
+  const dismissConfirmation = clearConfirmation;
   const turnOffConfirmation = React.useCallback(() => {
     if (!confirmation) return;
-    setConfirmation(null);
+    clearConfirmation();
     requestPreferenceChange(false, confirmation);
-  }, [confirmation, requestPreferenceChange]);
+  }, [clearConfirmation, confirmation, requestPreferenceChange]);
 
   return {
     confirmationTitle: confirmationIsCurrent ? confirmation.title : null,
@@ -216,6 +220,7 @@ export function useAutoPinMentionedAgents({
     openOptionsRequest,
     promoteExplicitlyAddressedAgents,
     promoteMentionedAgents,
+    setConfirmationHovered,
     turnOffConfirmation,
   };
 }
