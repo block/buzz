@@ -1247,7 +1247,15 @@ fn build_git_issue_assignee_operation(
         tags.push(tag(&["prior", &prior])?);
     }
 
-    Ok(EventBuilder::new(Kind::Custom(1), content).tags(tags))
+    // `.allow_self_tagging()`, for the same reason as the kind:9000/9001
+    // builders above: an assignment note's `p` tags ARE the assignees, so a
+    // self-assignment has target == signer and nostr 0.44 strips the tag by
+    // default. Without it, Desktop's "Assign to me" and "Unassign" report
+    // success and write the history comment while the Assignees row never
+    // changes (@sumit-m, #4326).
+    Ok(EventBuilder::new(Kind::Custom(1), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Status to apply to a patch or issue root (kind:1630/1631/1632/1633, NIP-34).
@@ -2962,6 +2970,29 @@ mod tests {
         let ev = sign(build_remove_member(cid, pubkey).unwrap());
         assert_eq!(ev.kind.as_u16(), 9001);
         assert!(has_tag(&ev, "p", pubkey));
+    }
+
+    #[test]
+    fn self_assignment_preserves_p_tag() {
+        // #4326 again, third builder: Desktop's "Assign to me" is a kind:1
+        // note whose `p` tags are the assignees, so a self-assignment has
+        // target == signer. Without allow_self_tagging the tag is stripped,
+        // the write "succeeds", and the Assignees row never changes.
+        let signer = keys();
+        let me = signer.public_key().to_hex();
+        let repo = GitRepoCoord {
+            owner: me.clone(),
+            id: "buzz".to_string(),
+        };
+        let ev = build_git_issue_assignment(&repo, &"a".repeat(64), &[me.clone()], "Assigned")
+            .unwrap()
+            .sign_with_keys(&signer)
+            .expect("sign");
+        assert_eq!(ev.kind.as_u16(), 1);
+        assert!(
+            has_tag(&ev, "p", &me),
+            "self-assignment must keep its own p tag"
+        );
     }
 
     #[test]
