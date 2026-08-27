@@ -22,6 +22,31 @@ type StoredProjectSnapshot = {
 
 const snapshotScopes = new WeakMap<QueryClient, ProjectSnapshotScope>();
 
+/**
+ * Snapshot hydration uses timestamp zero; only a completed relay enumeration
+ * may authorize side effects or suppress the scoped startup lookup.
+ */
+export function isAuthoritativeProjectData(dataUpdatedAt: number): boolean {
+  return dataUpdatedAt > 0;
+}
+
+/** Keeps the active-channel fast path live while only a snapshot is present. */
+export function shouldUseScopedProjectHomeLookup({
+  dataUpdatedAt,
+  hasEnumeratedProjectHome,
+  isHuddleTranscript,
+}: {
+  dataUpdatedAt: number;
+  hasEnumeratedProjectHome: boolean;
+  isHuddleTranscript: boolean;
+}): boolean {
+  return (
+    !isHuddleTranscript &&
+    !hasEnumeratedProjectHome &&
+    !isAuthoritativeProjectData(dataUpdatedAt)
+  );
+}
+
 function projectSnapshotRelayPrefix(relayUrl: string): string {
   return `${STORAGE_KEY_PREFIX}:${normalizeRelayUrl(relayUrl)}:`;
 }

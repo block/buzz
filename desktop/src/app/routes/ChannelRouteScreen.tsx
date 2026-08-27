@@ -18,6 +18,10 @@ import {
   useProjectsQuery,
 } from "@/features/projects/hooks";
 import { findProjectHomeByChannelId } from "@/features/projects/lib/projectHomeChannel";
+import {
+  isAuthoritativeProjectData,
+  shouldUseScopedProjectHomeLookup,
+} from "@/features/projects/projectSnapshot";
 import { ProjectChannelHome } from "@/features/projects/ui/ProjectChannelHome";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { getEventById } from "@/shared/api/tauri";
@@ -140,9 +144,16 @@ export function ChannelRouteScreen({
     channelId,
     projectsQuery.data ?? [],
   );
+  const projectsAreAuthoritative = isAuthoritativeProjectData(
+    projectsQuery.dataUpdatedAt,
+  );
   const projectHomeLookupQuery = useProjectHomeForChannelQuery(
     channelId,
-    !isHuddleTranscript && !enumeratedProjectHome && !projectsQuery.isSuccess,
+    shouldUseScopedProjectHomeLookup({
+      dataUpdatedAt: projectsQuery.dataUpdatedAt,
+      hasEnumeratedProjectHome: Boolean(enumeratedProjectHome),
+      isHuddleTranscript,
+    }),
   );
   const projectHome =
     enumeratedProjectHome ?? projectHomeLookupQuery.data ?? null;
@@ -285,6 +296,9 @@ export function ChannelRouteScreen({
   if (projectHome && !isHuddleTranscript) {
     return (
       <ProjectChannelHome
+        allowRepositoryHealing={
+          projectsAreAuthoritative || Boolean(projectHomeLookupQuery.data)
+        }
         autoSendDraftKey={autoSendDraftKey}
         project={projectHome}
         projects={projectsQuery.data ?? [projectHome]}

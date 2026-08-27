@@ -118,6 +118,7 @@ export default defineConfig({
         "**/inbox-reactions.spec.ts",
         "**/inbox-edit.spec.ts",
         "**/send-channel-binding.spec.ts",
+        "**/project-cold-start.spec.ts",
         "**/project-commit-detail.spec.ts",
         "**/project-inbox.spec.ts",
         "**/projects-v3-screenshots.spec.ts",

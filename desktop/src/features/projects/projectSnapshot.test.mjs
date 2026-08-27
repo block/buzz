@@ -3,11 +3,13 @@ import test from "node:test";
 
 import { QueryClient } from "@tanstack/react-query";
 import {
+  isAuthoritativeProjectData,
   persistProjectSnapshot,
   projectSnapshotKey,
   readProjectSnapshot,
   removeProjectSnapshotForRelay,
   seedProjectSnapshot,
+  shouldUseScopedProjectHomeLookup,
 } from "./projectSnapshot.ts";
 
 if (typeof globalThis.window === "undefined") {
@@ -74,4 +76,31 @@ test("seedProjectSnapshot paints stale data into a fresh query client", () => {
 
   assert.deepEqual(reader.getQueryData(["projects"]), [PROJECT]);
   assert.equal(reader.getQueryState(["projects"])?.dataUpdatedAt, 0);
+  assert.equal(
+    isAuthoritativeProjectData(
+      reader.getQueryState(["projects"])?.dataUpdatedAt ?? 0,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldUseScopedProjectHomeLookup({
+      dataUpdatedAt:
+        reader.getQueryState(["projects"])?.dataUpdatedAt ?? Number.NaN,
+      hasEnumeratedProjectHome: false,
+      isHuddleTranscript: false,
+    }),
+    true,
+  );
+});
+
+test("successful relay data is authoritative", () => {
+  const client = new QueryClient();
+  client.setQueryData(["projects"], [PROJECT], { updatedAt: Date.now() });
+
+  assert.equal(
+    isAuthoritativeProjectData(
+      client.getQueryState(["projects"])?.dataUpdatedAt ?? 0,
+    ),
+    true,
+  );
 });

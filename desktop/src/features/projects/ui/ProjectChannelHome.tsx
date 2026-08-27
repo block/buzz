@@ -85,12 +85,14 @@ function ProjectHomeHeaderToggle({
 }
 
 export function ProjectChannelHome({
+  allowRepositoryHealing,
   autoSendDraftKey,
   project,
   projects,
   targetMessageEvents = EMPTY_TARGET_MESSAGE_EVENTS,
   targetMessageId,
 }: {
+  allowRepositoryHealing: boolean;
   autoSendDraftKey?: string | null;
   project: Project;
   projects: Project[];
@@ -194,7 +196,11 @@ export function ProjectChannelHome({
     },
     [],
   );
-  useHealProjectHomeRepositories(project, identityQuery.data?.pubkey);
+  useHealProjectHomeRepositories(
+    project,
+    allowRepositoryHealing,
+    identityQuery.data?.pubkey,
+  );
   const handleOpenCommit = React.useCallback(
     (commitHash: string) => {
       if (!workspaceRepository) return;
