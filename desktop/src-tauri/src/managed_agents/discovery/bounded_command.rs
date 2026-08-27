@@ -18,6 +18,38 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_millis(500);
 
+/// Freeze the child so the Job Object can take ownership before any child code
+/// runs (see [`BoundedChild::spawn`]).
+#[cfg(windows)]
+const CREATE_SUSPENDED: u32 = 0x0000_0004;
+
+/// Suppress the console window a GUI-spawned console child would otherwise
+/// flash — the same suppression [`crate::util::configure_no_window`] applies to
+/// non-bounded spawns.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// The exact creation flags every bounded child is spawned with.
+///
+/// `Command::creation_flags` *replaces* rather than accumulates (std ORs only
+/// `CREATE_UNICODE_ENVIRONMENT` afterward), and [`BoundedChild::spawn`] is the
+/// last writer before spawn, so a caller's earlier `configure_no_window` is
+/// wiped. This constant therefore has to carry every flag a bounded child
+/// needs, and owning both here keeps the window-suppression contract in one
+/// place instead of split between the caller and the helper.
+#[cfg(windows)]
+const BOUNDED_CREATION_FLAGS: u32 = CREATE_SUSPENDED | CREATE_NO_WINDOW;
+
+/// Compile-time guard: the bounded flags must always carry *both* bits. A
+/// future edit that drops `CREATE_NO_WINDOW` (reintroducing the console-flash
+/// regression) or `CREATE_SUSPENDED` (reopening the spawn-to-assign race) fails
+/// the build on Windows rather than shipping silently.
+#[cfg(windows)]
+const _: () = {
+    assert!(BOUNDED_CREATION_FLAGS & CREATE_SUSPENDED == CREATE_SUSPENDED);
+    assert!(BOUNDED_CREATION_FLAGS & CREATE_NO_WINDOW == CREATE_NO_WINDOW);
+};
+
 /// A spawned child plus ownership of its entire descendant tree, so the tree
 /// can be torn down on *every* exit path — timeout, error, or successful exit.
 ///
@@ -62,12 +94,15 @@ impl BoundedChild {
         }
 
         // Spawn frozen so the Job Object can take ownership before any child
-        // code runs and forks a descendant that would escape the job.
+        // code runs and forks a descendant that would escape the job. The flags
+        // are set here as the last writer before spawn; `Command::creation_flags`
+        // replaces rather than ORs, so `BOUNDED_CREATION_FLAGS` must itself carry
+        // `CREATE_NO_WINDOW` — a caller's earlier `configure_no_window` would be
+        // clobbered otherwise, flashing a console window on GUI discovery.
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt as _;
-            const CREATE_SUSPENDED: u32 = 0x0000_0004;
-            command.creation_flags(CREATE_SUSPENDED);
+            command.creation_flags(BOUNDED_CREATION_FLAGS);
         }
 
         // `mut` is used only on the Windows fail-closed path (kill/wait on the

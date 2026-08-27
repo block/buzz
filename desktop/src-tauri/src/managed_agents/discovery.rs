@@ -845,7 +845,10 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
     if let Some(ref path) = augmented_path {
         command.env("PATH", path);
     }
-    crate::util::configure_no_window(&mut command);
+    // Window suppression is owned by `output_with_timeout`'s spawn
+    // (`BOUNDED_CREATION_FLAGS` carries `CREATE_NO_WINDOW`); a
+    // `configure_no_window` call here would be clobbered by that later
+    // `creation_flags` set, so it is deliberately omitted.
 
     let Some(output) = bounded_command::output_with_timeout(command, Duration::from_secs(10))
     else {

@@ -53,7 +53,10 @@ fn run_in_login_shell(args: &[&str]) -> Option<String> {
     for shell in login_shell_candidates() {
         let mut cmd = Command::new(&shell);
         cmd.args(args);
-        crate::util::configure_no_window(&mut cmd);
+        // Window suppression is owned by `output_with_timeout`'s spawn
+        // (`BOUNDED_CREATION_FLAGS` carries `CREATE_NO_WINDOW`); a
+        // `configure_no_window` call here would be clobbered by that later
+        // `creation_flags` set, so it is deliberately omitted.
         let Some(output) = super::bounded_command::output_with_timeout(cmd, LOGIN_SHELL_TIMEOUT)
         else {
             continue;
