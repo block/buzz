@@ -541,6 +541,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // Command kinds — DM management, workflows, approvals
         KIND_DM_OPEN | KIND_DM_ADD_MEMBER | KIND_DM_HIDE => Ok(Scope::MessagesWrite),
         KIND_WORKFLOW_DEF | KIND_WORKFLOW_TRIGGER => Ok(Scope::MessagesWrite),
+        buzz_core::kind::KIND_SECTION_WORKSPACE_IMPORT => Ok(Scope::UsersWrite),
         KIND_APPROVAL_GRANT | KIND_APPROVAL_DENY => Ok(Scope::MessagesWrite),
         _ => Err("restricted: unknown event kind"),
     }
@@ -697,6 +698,7 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_AGENT_TURN_METRIC
             // NIP-PL leases are author-owned, addressable global state.
             | super::push_lease::KIND_PUSH_LEASE
+            | buzz_core::kind::KIND_SECTION_WORKSPACE_IMPORT
     )
 }
 

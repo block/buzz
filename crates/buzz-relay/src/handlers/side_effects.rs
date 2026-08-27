@@ -246,6 +246,14 @@ pub async fn validate_standard_deletion_event(
         if parts.len() < 2 {
             return Err(anyhow::anyhow!("invalid a-tag format"));
         }
+        let target_kind: u32 = parts[0]
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid kind in a-tag"))?;
+        if buzz_core::kind::IMMUTABLE_SECTION_WORKSPACE_KINDS.contains(&target_kind) {
+            return Err(anyhow::anyhow!(
+                "section workspace migration records are immutable"
+            ));
+        }
         let target_pubkey_bytes =
             hex::decode(parts[1]).map_err(|_| anyhow::anyhow!("invalid pubkey in a-tag"))?;
         if target_pubkey_bytes != actor_bytes
@@ -266,6 +274,12 @@ pub async fn validate_standard_deletion_event(
             .await?
             .ok_or_else(|| anyhow::anyhow!("target event not found"))?;
 
+        let target_kind = u32::from(target_event.event.kind.as_u16());
+        if buzz_core::kind::IMMUTABLE_SECTION_WORKSPACE_KINDS.contains(&target_kind) {
+            return Err(anyhow::anyhow!(
+                "section workspace migration records are immutable"
+            ));
+        }
         let target_author =
             effective_message_author(&target_event.event, &state.relay_keypair.public_key());
         if target_author != actor_bytes
@@ -2155,6 +2169,13 @@ async fn handle_a_tag_deletion(
     let actor_bytes = effective_message_author(event, &state.relay_keypair.public_key());
 
     match kind_num {
+        kind if buzz_core::kind::IMMUTABLE_SECTION_WORKSPACE_KINDS.contains(&kind) => {
+            tracing::debug!(
+                kind,
+                d_tag,
+                "NIP-09 a-tag deletion ignored for immutable section workspace record"
+            );
+        }
         // kind:30350 revocation is exclusively a higher-generation inactive replacement.
         super::push_lease::KIND_PUSH_LEASE => {
             tracing::debug!(d_tag, "NIP-09 deletion ignored for push lease");
@@ -2291,10 +2312,14 @@ async fn handle_standard_deletion_event(
             Some(target) => target,
             None => continue,
         };
-        if u32::from(target_event.event.kind.as_u16()) == super::push_lease::KIND_PUSH_LEASE {
+        let target_kind = u32::from(target_event.event.kind.as_u16());
+        if target_kind == super::push_lease::KIND_PUSH_LEASE
+            || buzz_core::kind::IMMUTABLE_SECTION_WORKSPACE_KINDS.contains(&target_kind)
+        {
             tracing::debug!(
                 target_id = %hex::encode(&target_id),
-                "NIP-09 deletion ignored for push lease"
+                kind = target_kind,
+                "NIP-09 deletion ignored for immutable event"
             );
             continue;
         }
