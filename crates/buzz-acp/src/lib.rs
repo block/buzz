@@ -4,6 +4,8 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
+#[cfg(unix)]
+mod heavy_run_guard;
 mod observer;
 mod pool;
 mod pool_lifecycle;
