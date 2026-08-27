@@ -38,6 +38,16 @@ pub struct WorkflowWakeAuthority {
     pub message: Event,
 }
 
+/// Return whether a relay-signed workflow message must be dispatched only
+/// through its separately verified wake.
+pub fn requires_verified_wake(event: &Event, relay_pubkey: PublicKey) -> bool {
+    event.pubkey == relay_pubkey
+        && event.kind.as_u16() as u32 == KIND_STREAM_MESSAGE
+        && single_tag(event, "workflow-run").is_some()
+        && single_tag(event, "workflow-definition").is_some()
+        && single_tag(event, "workflow-step").is_some()
+}
+
 /// Verify every authority edge and return the visible message plus its signed author principal.
 pub fn verify(
     wake_event: &Event,
@@ -220,6 +230,31 @@ mod tests {
                 self.channel,
             )
         }
+    }
+
+    #[test]
+    fn workflow_message_is_ineligible_for_direct_dispatch() {
+        let fixture = Fixture::valid();
+        assert!(requires_verified_wake(
+            &fixture.message,
+            fixture.relay.public_key()
+        ));
+        assert!(!requires_verified_wake(
+            &fixture.message,
+            Keys::generate().public_key()
+        ));
+
+        let ordinary = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "ordinary")
+            .tags([
+                Tag::parse(["h", &fixture.channel.to_string()]).expect("h tag"),
+                Tag::parse(["p", &fixture.agent.public_key().to_hex()]).expect("p tag"),
+            ])
+            .sign_with_keys(&fixture.relay)
+            .expect("ordinary message");
+        assert!(!requires_verified_wake(
+            &ordinary,
+            fixture.relay.public_key()
+        ));
     }
 
     #[test]

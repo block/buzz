@@ -3214,6 +3214,12 @@ async fn tokio_main() -> Result<()> {
                     match buzz_event {
                         Some(buzz_event) => {
                             let kind_u32 = buzz_event.event.kind.as_u16() as u32;
+                            if workflow_wake::requires_verified_wake(
+                                &buzz_event.event,
+                                workflow_relay_pubkey,
+                            ) {
+                                continue;
+                            }
 
                             let (buzz_event, admission_author_override) = if kind_u32
                                 == buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE
