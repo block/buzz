@@ -6280,161 +6280,574 @@ mod tests {
         drop_scratch_db(&admin, writer, &wname).await;
     }
 
-    /// End-to-end deploy-default proof for the NEW routed seams: with the
-    /// budget unset, a covered-eligible query (channel-pinned + `until`)
-    /// through [`Db::query_events_routed`] is served by the WRITER — the
-    /// `for_query` gate keeps the covered arm dark (rev 5). With the budget
-    /// set and a fresh proved entry, the same query routes to the replica.
-    /// Divergent fixtures prove which pool served each read.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn query_events_routed_defaults_dark_and_routes_covered_when_enabled() {
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let (writer, wname) = create_scratch_db(&admin, "qer_w").await;
-        let (replica, rname) = create_scratch_db(&admin, "qer_r").await;
+    mod replica_routing {
+        use super::*;
 
-        let author = nostr::Keys::generate();
-        let community = Uuid::new_v4();
-        let channel = Uuid::new_v4();
-        seed_community_channel(&writer, community, channel, &author).await;
-        seed_community_channel(&replica, community, channel, &author).await;
+        /// End-to-end deploy-default proof for the NEW routed seams: with the
+        /// budget unset, a covered-eligible query (channel-pinned + `until`)
+        /// through [`Db::query_events_routed`] is served by the WRITER — the
+        /// `for_query` gate keeps the covered arm dark (rev 5). With the budget
+        /// set and a fresh proved entry, the same query routes to the replica.
+        /// Divergent fixtures prove which pool served each read.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn query_events_routed_defaults_dark_and_routes_covered_when_enabled() {
+            let admin = PgPool::connect(&admin_url().await)
+                .await
+                .expect("connect admin");
+            let (writer, wname) = create_scratch_db(&admin, "qer_w").await;
+            let (replica, rname) = create_scratch_db(&admin, "qer_r").await;
 
-        let base = 1_700_000_000u64;
-        let shared = signed_event_at(&author, "shared", base);
-        for pool in [&writer, &replica] {
-            insert_top_level(pool, community, channel, &shared).await;
+            let author = nostr::Keys::generate();
+            let community = Uuid::new_v4();
+            let channel = Uuid::new_v4();
+            seed_community_channel(&writer, community, channel, &author).await;
+            seed_community_channel(&replica, community, channel, &author).await;
+
+            let base = 1_700_000_000u64;
+            let shared = signed_event_at(&author, "shared", base);
+            for pool in [&writer, &replica] {
+                insert_top_level(pool, community, channel, &shared).await;
+            }
+            let writer_only = signed_event_at(&author, "writer-only", base + 10);
+            insert_top_level(&writer, community, channel, &writer_only).await;
+            let replica_only = signed_event_at(&author, "replica-only", base + 20);
+            insert_top_level(&replica, community, channel, &replica_only).await;
+
+            let mut db = Db::from_pools(writer.clone(), replica.clone());
+            db.fence().force_open_for_tests(chrono::Utc::now());
+            let cid = CommunityId::from_uuid(community);
+
+            // Covered-eligible shape: channel-pinned with an `until` upper
+            // bound below the (now) fence wall.
+            let q = {
+                let mut q = EventQuery::for_community(cid);
+                q.channel_id = Some(channel);
+                q.until = chrono::DateTime::from_timestamp((base + 60) as i64, 0);
+                q
+            };
+            let contents = |evs: &[StoredEvent]| -> std::collections::BTreeSet<String> {
+                evs.iter().map(|e| e.event.content.clone()).collect()
+            };
+
+            // Deploy default: budget unset ⇒ writer, even though the shape is
+            // covered-eligible and the fence is open.
+            let rows = db
+                .query_events_routed("test_routed", &q)
+                .await
+                .expect("routed query, gate off");
+            assert!(
+                contents(&rows).contains("writer-only"),
+                "budget unset must serve the writer"
+            );
+            assert!(
+                !contents(&rows).contains("replica-only"),
+                "budget unset must not reach the replica via the covered arm"
+            );
+
+            // Budget set ⇒ the covered arm serves it from the replica.
+            db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+            let rows = db
+                .query_events_routed("test_routed", &q)
+                .await
+                .expect("routed query, gate on");
+            assert!(
+                contents(&rows).contains("replica-only"),
+                "budget set + covered-eligible must route to the replica"
+            );
+            assert!(!contents(&rows).contains("writer-only"));
+
+            drop_scratch_db(&admin, replica, &rname).await;
+            drop_scratch_db(&admin, writer, &wname).await;
         }
-        let writer_only = signed_event_at(&author, "writer-only", base + 10);
-        insert_top_level(&writer, community, channel, &writer_only).await;
-        let replica_only = signed_event_at(&author, "replica-only", base + 20);
-        insert_top_level(&replica, community, channel, &replica_only).await;
 
-        let mut db = Db::from_pools(writer.clone(), replica.clone());
-        db.fence().force_open_for_tests(chrono::Utc::now());
-        let cid = CommunityId::from_uuid(community);
+        /// COUNT is bounded-only (rev 5 deletion-visibility rule): a
+        /// covered-eligible shape must NOT let a count take the covered arm.
+        /// With the budget unset the count reads the WRITER even with an open
+        /// fence; with the budget set and a fresh entry it reads the replica
+        /// under the bounded arm. Divergent row counts prove the serving pool.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn count_events_routed_is_bounded_only() {
+            let admin = PgPool::connect(&admin_url().await)
+                .await
+                .expect("connect admin");
+            let (writer, wname) = create_scratch_db(&admin, "cnt_w").await;
+            let (replica, rname) = create_scratch_db(&admin, "cnt_r").await;
 
-        // Covered-eligible shape: channel-pinned with an `until` upper
-        // bound below the (now) fence wall.
-        let q = {
-            let mut q = EventQuery::for_community(cid);
-            q.channel_id = Some(channel);
-            q.until = chrono::DateTime::from_timestamp((base + 60) as i64, 0);
-            q
-        };
-        let contents = |evs: &[StoredEvent]| -> std::collections::BTreeSet<String> {
-            evs.iter().map(|e| e.event.content.clone()).collect()
-        };
+            let author = nostr::Keys::generate();
+            let community = Uuid::new_v4();
+            let channel = Uuid::new_v4();
+            seed_community_channel(&writer, community, channel, &author).await;
+            seed_community_channel(&replica, community, channel, &author).await;
 
-        // Deploy default: budget unset ⇒ writer, even though the shape is
-        // covered-eligible and the fence is open.
-        let rows = db
-            .query_events_routed("test_routed", &q)
-            .await
-            .expect("routed query, gate off");
-        assert!(
-            contents(&rows).contains("writer-only"),
-            "budget unset must serve the writer"
-        );
-        assert!(
-            !contents(&rows).contains("replica-only"),
-            "budget unset must not reach the replica via the covered arm"
-        );
+            let base = 1_700_000_000u64;
+            // Writer: 2 rows. Replica: 1 row.
+            for (i, content) in ["a", "b"].iter().enumerate() {
+                let ev = signed_event_at(&author, content, base + i as u64);
+                insert_top_level(&writer, community, channel, &ev).await;
+            }
+            let ev = signed_event_at(&author, "c", base);
+            insert_top_level(&replica, community, channel, &ev).await;
 
-        // Budget set ⇒ the covered arm serves it from the replica.
-        db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
-        let rows = db
-            .query_events_routed("test_routed", &q)
-            .await
-            .expect("routed query, gate on");
-        assert!(
-            contents(&rows).contains("replica-only"),
-            "budget set + covered-eligible must route to the replica"
-        );
-        assert!(!contents(&rows).contains("writer-only"));
+            let mut db = Db::from_pools(writer.clone(), replica.clone());
+            db.fence().force_open_for_tests(chrono::Utc::now());
+            let cid = CommunityId::from_uuid(community);
 
-        drop_scratch_db(&admin, replica, &rname).await;
-        drop_scratch_db(&admin, writer, &wname).await;
-    }
+            // Covered-eligible shape on purpose: pinned + until. A count must
+            // ignore that eligibility.
+            let q = {
+                let mut q = EventQuery::for_community(cid);
+                q.channel_id = Some(channel);
+                q.until = chrono::DateTime::from_timestamp((base + 60) as i64, 0);
+                q
+            };
 
-    /// COUNT is bounded-only (rev 5 deletion-visibility rule): a
-    /// covered-eligible shape must NOT let a count take the covered arm.
-    /// With the budget unset the count reads the WRITER even with an open
-    /// fence; with the budget set and a fresh entry it reads the replica
-    /// under the bounded arm. Divergent row counts prove the serving pool.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn count_events_routed_is_bounded_only() {
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let (writer, wname) = create_scratch_db(&admin, "cnt_w").await;
-        let (replica, rname) = create_scratch_db(&admin, "cnt_r").await;
+            // Budget unset ⇒ bounded arm disabled ⇒ writer.
+            let n = db
+                .count_events_routed("test_count", &q)
+                .await
+                .expect("count, gate off");
+            assert_eq!(n, 2, "budget unset must count on the writer");
 
-        let author = nostr::Keys::generate();
-        let community = Uuid::new_v4();
-        let channel = Uuid::new_v4();
-        seed_community_channel(&writer, community, channel, &author).await;
-        seed_community_channel(&replica, community, channel, &author).await;
+            // Budget set + fresh entry ⇒ bounded arm ⇒ replica.
+            db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+            let n = db
+                .count_events_routed("test_count", &q)
+                .await
+                .expect("count, gate on");
+            assert_eq!(n, 1, "budget set must count on the replica (bounded)");
 
-        let base = 1_700_000_000u64;
-        // Writer: 2 rows. Replica: 1 row.
-        for (i, content) in ["a", "b"].iter().enumerate() {
-            let ev = signed_event_at(&author, content, base + i as u64);
-            insert_top_level(&writer, community, channel, &ev).await;
-        }
-        let ev = signed_event_at(&author, "c", base);
-        insert_top_level(&replica, community, channel, &ev).await;
-
-        let mut db = Db::from_pools(writer.clone(), replica.clone());
-        db.fence().force_open_for_tests(chrono::Utc::now());
-        let cid = CommunityId::from_uuid(community);
-
-        // Covered-eligible shape on purpose: pinned + until. A count must
-        // ignore that eligibility.
-        let q = {
-            let mut q = EventQuery::for_community(cid);
-            q.channel_id = Some(channel);
-            q.until = chrono::DateTime::from_timestamp((base + 60) as i64, 0);
-            q
-        };
-
-        // Budget unset ⇒ bounded arm disabled ⇒ writer.
-        let n = db
-            .count_events_routed("test_count", &q)
-            .await
-            .expect("count, gate off");
-        assert_eq!(n, 2, "budget unset must count on the writer");
-
-        // Budget set + fresh entry ⇒ bounded arm ⇒ replica.
-        db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
-        let n = db
-            .count_events_routed("test_count", &q)
-            .await
-            .expect("count, gate on");
-        assert_eq!(n, 1, "budget set must count on the replica (bounded)");
-
-        // Entry older than the budget ⇒ bounded fails ⇒ writer. Covered
-        // would still hold here (upper <= wall) — proving count never
-        // consults it.
-        db.fence().close();
-        db.fence().force_open_for_tests_at(
-            chrono::Utc::now(),
-            std::time::Instant::now() - std::time::Duration::from_secs(10),
-        );
-        let n = db
-            .count_events_routed("test_count", &q)
-            .await
-            .expect("count, entry too old");
-        assert_eq!(
-            n, 2,
-            "an over-budget entry must fail the count closed to the writer, \
+            // Entry older than the budget ⇒ bounded fails ⇒ writer. Covered
+            // would still hold here (upper <= wall) — proving count never
+            // consults it.
+            db.fence().close();
+            db.fence().force_open_for_tests_at(
+                chrono::Utc::now(),
+                std::time::Instant::now() - std::time::Duration::from_secs(10),
+            );
+            let n = db
+                .count_events_routed("test_count", &q)
+                .await
+                .expect("count, entry too old");
+            assert_eq!(
+                n, 2,
+                "an over-budget entry must fail the count closed to the writer, \
              even when the covered arm would admit the shape"
+            );
+
+            drop_scratch_db(&admin, replica, &rname).await;
+            drop_scratch_db(&admin, writer, &wname).await;
+        }
+
+        /// Community separation across every routed seam, verified on
+        /// REPLICA-SERVED reads.
+        ///
+        /// The pre-existing feed/event scoping tests prove the shared SQL
+        /// builders confine rows to one community, but they exercise those
+        /// builders through the WRITER wrapper. `_on` variants are
+        /// executor-only refactors, so scoping *should* be identical — this
+        /// test refuses to take that on faith and re-proves it through the
+        /// routed executor, on a snapshot the replica actually served.
+        ///
+        /// Construction: two communities A and B exist in BOTH databases with
+        /// the same ids. The replica additionally holds a `replica-only` row in
+        /// each — divergent fixtures, so any row bearing that content proves
+        /// the replica (not the writer) served the read. Every assertion
+        /// requests A and demands B's rows never appear, including B's
+        /// `replica-only` row, which is the one a leaky predicate would surface.
+        /// The routed fallback must cost ONE reader acquire budget, even when the
+        /// Aurora capability cache is cold.
+        ///
+        /// Regression test for a stacked-budget bug found at `9fa3c9c0b`: the
+        /// capability probe used to `acquire()` from the pool itself and return
+        /// `false` *uncached* on `PoolTimedOut`, so the routed read then spent a
+        /// SECOND `READER_ACQUIRE_TIMEOUT` inside `begin`. Measured 302ms against
+        /// a ~150ms documented bound. Boot priming
+        /// ([`Db::spawn_read_pool_boot_ping`]) hid it only when the boot ping
+        /// SUCCEEDED — and a reader that is unavailable at boot is exactly the
+        /// case the bound is specified for, so the two failures are correlated.
+        ///
+        /// The fixture reproduces that state deliberately: a size-1 reader whose
+        /// sole connection is established and then HELD (so every further acquire
+        /// must time out), with `reader_aurora_identity` asserted cold. It routes
+        /// through `count_events_routed` rather than calling `proved_reader`
+        /// directly, because `buzz_db_route_decision` is emitted by `route_read`
+        /// — a direct call would prove the timing but never emit the label.
+        ///
+        /// Timing uses an upper bound of 2x the budget minus a margin: it must
+        /// fail for two stacked budgets (~300ms) while tolerating scheduler
+        /// jitter on one (~150ms). Asserting a lower bound too would pin the
+        /// budget's own value, which `reader_acquire_timeout_is_the_documented_budget`
+        /// already covers.
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres"]
+        async fn routed_fallback_spends_one_acquire_budget_when_aurora_cache_is_cold() {
+            let admin = PgPool::connect(&admin_url().await)
+                .await
+                .expect("connect admin");
+            let (seed, wname) = create_scratch_db(&admin, "one_budget").await;
+            seed.close().await;
+            let base = admin_url().await;
+            let scratch_url = {
+                let idx = base.rfind('/').expect("db url has a path segment");
+                format!("{}/{}", &base[..idx], wname)
+            };
+
+            // `Db::new` so the writer arms the floor guard and the reader is the
+            // real lazy `connect_read_pool` pool (min_connections=0, 150ms
+            // acquire timeout). Reader is sized 1 so holding one connection
+            // saturates it.
+            let mut db = Db::new(&DbConfig {
+                database_url: scratch_url.clone(),
+                read_database_url: Some(scratch_url),
+                max_connections: 4,
+                read_max_connections: Some(1),
+                ..DbConfig::default()
+            })
+            .await
+            .expect("connect armed Db with size-1 lazy reader");
+            db.fence().force_open_for_tests(chrono::Utc::now());
+            db.set_replica_read_max_age_for_tests(Some(Duration::from_secs(5)));
+
+            let read_pool = db.read_pool.clone().expect("reader pool configured");
+            // Establish and hold the reader's only connection: saturated.
+            let held = read_pool
+                .acquire()
+                .await
+                .expect("establish the reader's sole connection");
+            assert_eq!(
+                db.read_max_connections, 1,
+                "reader max must report 1 for this fixture to test saturation"
+            );
+            assert_eq!(
+                read_pool.size(),
+                1,
+                "the sole reader connection is established and held"
+            );
+            // The bug is only observable with the capability cache cold; if a
+            // future change primes it here, this fixture would silently stop
+            // discriminating.
+            assert!(
+                db.reader_aurora_identity.get().is_none(),
+                "Aurora capability must be UNPRIMED (post-boot-ping-failure state)"
+            );
+
+            let recorder = metrics_util::debugging::DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let query = EventQuery::for_community(CommunityId::from_uuid(Uuid::new_v4()));
+
+            // The recorder is installed thread-locally, so it must stay installed
+            // across the `.await` — hence the guard form rather than
+            // `with_local_recorder`, whose closure cannot host an await. The
+            // `current_thread` flavor keeps the route decision on this thread; on
+            // a multi-thread runtime the emit could land on a worker where no
+            // local recorder is installed and the label assertions would vacuously
+            // see an empty snapshot.
+            let start = std::time::Instant::now();
+            let count = {
+                let _guard = metrics::set_default_local_recorder(&recorder);
+                db.count_events_routed("one_budget_probe", &query).await
+            }
+            .expect("writer fallback still answers the read");
+            let elapsed = start.elapsed();
+
+            assert_eq!(count, 0, "writer answered on an empty scratch database");
+            assert!(
+                elapsed < Duration::from_millis(250),
+                "routed fallback must spend ONE {}ms acquire budget, not two; took {}ms",
+                Db::READER_ACQUIRE_TIMEOUT.as_millis(),
+                elapsed.as_millis()
+            );
+
+            let reasons: std::collections::HashMap<(String, String), u64> = snapshotter
+                .snapshot()
+                .into_vec()
+                .into_iter()
+                .filter(|(key, ..)| key.key().name() == "buzz_db_route_decision")
+                .map(|(key, _, _, value)| {
+                    let metrics_util::debugging::DebugValue::Counter(n) = value else {
+                        panic!("buzz_db_route_decision must be a counter");
+                    };
+                    let labels: Vec<_> = key.key().labels().collect();
+                    let get = |name: &str| {
+                        labels
+                            .iter()
+                            .find(|l| l.key() == name)
+                            .map(|l| l.value().to_owned())
+                            .unwrap_or_default()
+                    };
+                    ((get("decision"), get("reason")), n)
+                })
+                .collect();
+
+            assert_eq!(
+                reasons.get(&("writer".to_owned(), "reader_acquire_timeout".to_owned())),
+                Some(&1),
+                "saturated reader must fall back as writer/reader_acquire_timeout; got {reasons:?}"
+            );
+            // `reader_validation_error` would mean we misclassified a timeout as a
+            // broken reader, and `pool_busy` is the retired name — neither may
+            // appear in ANY emitted label.
+            assert!(
+            !reasons
+                .keys()
+                .any(|(_, reason)| reason == "reader_validation_error" || reason == "pool_busy"),
+            "no reader_validation_error or retired pool_busy label may be emitted; got {reasons:?}"
         );
 
-        drop_scratch_db(&admin, replica, &rname).await;
-        drop_scratch_db(&admin, writer, &wname).await;
+            drop(held);
+            drop_scratch_db(&admin, db.pool.clone(), &wname).await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn routed_reads_are_confined_to_the_requested_community() {
+            let admin = PgPool::connect(&admin_url().await)
+                .await
+                .expect("connect admin");
+            let (writer, wname) = create_scratch_db(&admin, "sep_w").await;
+            let (replica, rname) = create_scratch_db(&admin, "sep_r").await;
+
+            let author = nostr::Keys::generate();
+            let (comm_a, chan_a) = (Uuid::new_v4(), Uuid::new_v4());
+            let (comm_b, chan_b) = (Uuid::new_v4(), Uuid::new_v4());
+            for pool in [&writer, &replica] {
+                seed_community_channel(pool, comm_a, chan_a, &author).await;
+                seed_community_channel(pool, comm_b, chan_b, &author).await;
+            }
+
+            // A p-tag mention is what makes a row eligible for the mentions and
+            // needs-action feeds. Kind 9 satisfies mentions + activity;
+            // needs-action admits only approval/reminder kinds, so each
+            // community also gets a kind-46010 row.
+            let mentioned = nostr::Keys::generate();
+            let mentioned_hex = mentioned.public_key().to_hex();
+            let mentioned_bytes = mentioned.public_key().to_bytes();
+            let tagged_kind = |kind: u16, content: &str, secs: u64| {
+                nostr::EventBuilder::new(nostr::Kind::Custom(kind), content)
+                    .tags([nostr::Tag::parse(["p", mentioned_hex.as_str()]).expect("p tag")])
+                    .custom_created_at(nostr::Timestamp::from(secs))
+                    .sign_with_keys(&author)
+                    .expect("sign event")
+            };
+            let tagged = |content: &str, secs: u64| tagged_kind(9, content, secs);
+
+            let base = 1_700_000_000u64;
+            // Shared rows (both DBs) + replica-only rows (divergence) per community.
+            let a_shared = tagged("a-shared", base);
+            let b_shared = tagged("b-shared", base + 1);
+            for pool in [&writer, &replica] {
+                insert_top_level(pool, comm_a, chan_a, &a_shared).await;
+                insert_mentions(
+                    pool,
+                    CommunityId::from_uuid(comm_a),
+                    &a_shared,
+                    Some(chan_a),
+                )
+                .await
+                .expect("mentions a-shared");
+                insert_top_level(pool, comm_b, chan_b, &b_shared).await;
+                insert_mentions(
+                    pool,
+                    CommunityId::from_uuid(comm_b),
+                    &b_shared,
+                    Some(chan_b),
+                )
+                .await
+                .expect("mentions b-shared");
+            }
+            let a_replica_only = tagged("a-replica-only", base + 10);
+            let b_replica_only = tagged("b-replica-only", base + 11);
+            insert_top_level(&replica, comm_a, chan_a, &a_replica_only).await;
+            insert_mentions(
+                &replica,
+                CommunityId::from_uuid(comm_a),
+                &a_replica_only,
+                Some(chan_a),
+            )
+            .await
+            .expect("mentions a-replica-only");
+            insert_top_level(&replica, comm_b, chan_b, &b_replica_only).await;
+            insert_mentions(
+                &replica,
+                CommunityId::from_uuid(comm_b),
+                &b_replica_only,
+                Some(chan_b),
+            )
+            .await
+            .expect("mentions b-replica-only");
+
+            // Needs-action fixtures: approval kind, replica-only in BOTH
+            // communities, so the assertion below is replica-served on A and
+            // must still not see B's.
+            let a_approval = tagged_kind(46010, "a-approval-replica-only", base + 20);
+            let b_approval = tagged_kind(46010, "b-approval-replica-only", base + 21);
+            insert_top_level(&replica, comm_a, chan_a, &a_approval).await;
+            insert_mentions(
+                &replica,
+                CommunityId::from_uuid(comm_a),
+                &a_approval,
+                Some(chan_a),
+            )
+            .await
+            .expect("mentions a-approval");
+            insert_top_level(&replica, comm_b, chan_b, &b_approval).await;
+            insert_mentions(
+                &replica,
+                CommunityId::from_uuid(comm_b),
+                &b_approval,
+                Some(chan_b),
+            )
+            .await
+            .expect("mentions b-approval");
+
+            let mut db = Db::from_pools(writer.clone(), replica.clone());
+            db.fence().force_open_for_tests(chrono::Utc::now());
+            db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
+            let cid_a = CommunityId::from_uuid(comm_a);
+
+            let contents = |evs: &[StoredEvent]| -> std::collections::BTreeSet<String> {
+                evs.iter().map(|e| e.event.content.clone()).collect()
+            };
+            // Every routed seam must (a) have been served by the replica —
+            // proven by a divergent row absent from the writer — and (b) contain
+            // no row belonging to community B. All B fixtures are named `b-*`,
+            // so the leak check is a single prefix scan.
+            let assert_a_only = |rows: &[StoredEvent], marker: &str, seam: &str| {
+                let got = contents(rows);
+                assert!(
+                got.contains(marker),
+                "{seam}: must be replica-served (divergent row `{marker}` absent from writer); got {got:?}"
+            );
+                assert!(
+                    !got.iter().any(|c| c.starts_with("b-")),
+                    "{seam}: community B rows leaked into a community A read; got {got:?}"
+                );
+            };
+
+            // 1. Generic query — covered arm (channel-pinned + `until`).
+            let mut q = EventQuery::for_community(cid_a);
+            q.channel_id = Some(chan_a);
+            q.until = chrono::DateTime::from_timestamp((base + 60) as i64, 0);
+            let rows = db
+                .query_events_routed("sep_query", &q)
+                .await
+                .expect("routed query");
+            assert_a_only(&rows, "a-replica-only", "query_events_routed");
+
+            // 2. Generic query — bounded arm (no channel pin at all, so a
+            //    missing community predicate could not be masked by the pin).
+            let unpinned = EventQuery::for_community(cid_a);
+            let rows = db
+                .query_events_routed_bounded("sep_query_bounded", &unpinned)
+                .await
+                .expect("routed bounded query");
+            assert_a_only(&rows, "a-replica-only", "query_events_routed_bounded");
+
+            // 3. COUNT — bounded-only. Community A holds 3 rows on the replica
+            //    (shared + replica-only + approval) but only 1 on the writer,
+            //    and 3 more exist in community B. Exactly 3 proves the read was
+            //    both replica-served and community-confined.
+            let count = db
+                .count_events_routed("sep_count", &unpinned)
+                .await
+                .expect("routed count");
+            assert_eq!(
+                count, 3,
+                "count must see A's three replica rows only — not B's, not the writer's one"
+            );
+
+            // 4. By-ID hydration — ids carry no channel pin, and B's ids are
+            //    requested alongside A's. Only A's may hydrate.
+            let ids: Vec<&[u8]> = vec![
+                a_shared.id.as_bytes(),
+                a_replica_only.id.as_bytes(),
+                b_shared.id.as_bytes(),
+                b_replica_only.id.as_bytes(),
+            ];
+            let rows = db
+                .get_events_by_ids_routed("sep_by_ids", cid_a, &ids)
+                .await
+                .expect("routed by-ids");
+            assert_a_only(&rows, "a-replica-only", "get_events_by_ids_routed");
+
+            // 5-7. All three feed builders, each given BOTH channels as
+            //      accessible — so only the community predicate can exclude B.
+            let both = [chan_a, chan_b];
+            let rows = db
+                .query_feed_mentions_routed("sep_feed", cid_a, &mentioned_bytes, &both, None, 50)
+                .await
+                .expect("routed mentions");
+            assert_a_only(&rows, "a-replica-only", "query_feed_mentions_routed");
+
+            let rows = db
+                .query_feed_needs_action_routed(
+                    "sep_feed",
+                    cid_a,
+                    &mentioned_bytes,
+                    &both,
+                    None,
+                    50,
+                )
+                .await
+                .expect("routed needs action");
+            assert_a_only(
+                &rows,
+                "a-approval-replica-only",
+                "query_feed_needs_action_routed",
+            );
+
+            let rows = db
+                .query_feed_activity_routed("sep_feed", cid_a, &both, None, 50)
+                .await
+                .expect("routed activity");
+            assert_a_only(&rows, "a-replica-only", "query_feed_activity_routed");
+
+            drop_scratch_db(&admin, replica, &rname).await;
+            drop_scratch_db(&admin, writer, &wname).await;
+        }
+
+        /// D4: a LAZY reader pool (connect_lazy, min_connections=0, never yet
+        /// used) must still let [`Db::spawn_fence_probe`] verify the writer's
+        /// floor guard and spawn — reader-down or reader-idle at boot must not
+        /// disable fence probing.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn lazy_reader_pool_still_spawns_fence_probe() {
+            let admin = PgPool::connect(&admin_url().await)
+                .await
+                .expect("connect admin");
+            let (seed, wname) = create_scratch_db(&admin, "lazy_w").await;
+            seed.close().await;
+
+            let writer_url = {
+                let base = admin_url().await;
+                let idx = base.rfind('/').expect("db url has a path segment");
+                format!("{}/{}", &base[..idx], wname)
+            };
+            // `Db::new` (not `from_pools`) so the WRITER pool arms the
+            // `buzz.created_at_floor` GUC — `spawn_fence_probe` verifies the
+            // floor guard on a writer connection, and `create_scratch_db`'s
+            // plain `PgPool::connect` never arms it. The reader is still the
+            // lazy `connect_read_pool` pool this test is about.
+            let db = Db::new(&DbConfig {
+                database_url: writer_url.clone(),
+                read_database_url: Some(writer_url),
+                max_connections: 2,
+                ..DbConfig::default()
+            })
+            .await
+            .expect("connect armed Db with lazy reader");
+
+            let spawned = db
+                .spawn_fence_probe()
+                .await
+                .expect("floor-guard verification must pass on the migrated writer");
+            assert!(spawned, "a configured (lazy) reader must spawn the probe");
+
+            drop_scratch_db(&admin, db.pool.clone(), &wname).await;
+        }
     }
 
     /// Routed relay-membership check: budget unset ⇒ writer; budget set +
@@ -6507,408 +6920,6 @@ mod tests {
 
         drop_scratch_db(&admin, replica, &rname).await;
         drop_scratch_db(&admin, writer, &wname).await;
-    }
-
-    /// Community separation across every routed seam, verified on
-    /// REPLICA-SERVED reads.
-    ///
-    /// The pre-existing feed/event scoping tests prove the shared SQL
-    /// builders confine rows to one community, but they exercise those
-    /// builders through the WRITER wrapper. `_on` variants are
-    /// executor-only refactors, so scoping *should* be identical — this
-    /// test refuses to take that on faith and re-proves it through the
-    /// routed executor, on a snapshot the replica actually served.
-    ///
-    /// Construction: two communities A and B exist in BOTH databases with
-    /// the same ids. The replica additionally holds a `replica-only` row in
-    /// each — divergent fixtures, so any row bearing that content proves
-    /// the replica (not the writer) served the read. Every assertion
-    /// requests A and demands B's rows never appear, including B's
-    /// `replica-only` row, which is the one a leaky predicate would surface.
-    /// The routed fallback must cost ONE reader acquire budget, even when the
-    /// Aurora capability cache is cold.
-    ///
-    /// Regression test for a stacked-budget bug found at `9fa3c9c0b`: the
-    /// capability probe used to `acquire()` from the pool itself and return
-    /// `false` *uncached* on `PoolTimedOut`, so the routed read then spent a
-    /// SECOND `READER_ACQUIRE_TIMEOUT` inside `begin`. Measured 302ms against
-    /// a ~150ms documented bound. Boot priming
-    /// ([`Db::spawn_read_pool_boot_ping`]) hid it only when the boot ping
-    /// SUCCEEDED — and a reader that is unavailable at boot is exactly the
-    /// case the bound is specified for, so the two failures are correlated.
-    ///
-    /// The fixture reproduces that state deliberately: a size-1 reader whose
-    /// sole connection is established and then HELD (so every further acquire
-    /// must time out), with `reader_aurora_identity` asserted cold. It routes
-    /// through `count_events_routed` rather than calling `proved_reader`
-    /// directly, because `buzz_db_route_decision` is emitted by `route_read`
-    /// — a direct call would prove the timing but never emit the label.
-    ///
-    /// Timing uses an upper bound of 2x the budget minus a margin: it must
-    /// fail for two stacked budgets (~300ms) while tolerating scheduler
-    /// jitter on one (~150ms). Asserting a lower bound too would pin the
-    /// budget's own value, which `reader_acquire_timeout_is_the_documented_budget`
-    /// already covers.
-    #[tokio::test(flavor = "current_thread")]
-    #[ignore = "requires Postgres"]
-    async fn routed_fallback_spends_one_acquire_budget_when_aurora_cache_is_cold() {
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let (seed, wname) = create_scratch_db(&admin, "one_budget").await;
-        seed.close().await;
-        let base = admin_url().await;
-        let scratch_url = {
-            let idx = base.rfind('/').expect("db url has a path segment");
-            format!("{}/{}", &base[..idx], wname)
-        };
-
-        // `Db::new` so the writer arms the floor guard and the reader is the
-        // real lazy `connect_read_pool` pool (min_connections=0, 150ms
-        // acquire timeout). Reader is sized 1 so holding one connection
-        // saturates it.
-        let mut db = Db::new(&DbConfig {
-            database_url: scratch_url.clone(),
-            read_database_url: Some(scratch_url),
-            max_connections: 4,
-            read_max_connections: Some(1),
-            ..DbConfig::default()
-        })
-        .await
-        .expect("connect armed Db with size-1 lazy reader");
-        db.fence().force_open_for_tests(chrono::Utc::now());
-        db.set_replica_read_max_age_for_tests(Some(Duration::from_secs(5)));
-
-        let read_pool = db.read_pool.clone().expect("reader pool configured");
-        // Establish and hold the reader's only connection: saturated.
-        let held = read_pool
-            .acquire()
-            .await
-            .expect("establish the reader's sole connection");
-        assert_eq!(
-            db.read_max_connections, 1,
-            "reader max must report 1 for this fixture to test saturation"
-        );
-        assert_eq!(
-            read_pool.size(),
-            1,
-            "the sole reader connection is established and held"
-        );
-        // The bug is only observable with the capability cache cold; if a
-        // future change primes it here, this fixture would silently stop
-        // discriminating.
-        assert!(
-            db.reader_aurora_identity.get().is_none(),
-            "Aurora capability must be UNPRIMED (post-boot-ping-failure state)"
-        );
-
-        let recorder = metrics_util::debugging::DebuggingRecorder::new();
-        let snapshotter = recorder.snapshotter();
-        let query = EventQuery::for_community(CommunityId::from_uuid(Uuid::new_v4()));
-
-        // The recorder is installed thread-locally, so it must stay installed
-        // across the `.await` — hence the guard form rather than
-        // `with_local_recorder`, whose closure cannot host an await. The
-        // `current_thread` flavor keeps the route decision on this thread; on
-        // a multi-thread runtime the emit could land on a worker where no
-        // local recorder is installed and the label assertions would vacuously
-        // see an empty snapshot.
-        let start = std::time::Instant::now();
-        let count = {
-            let _guard = metrics::set_default_local_recorder(&recorder);
-            db.count_events_routed("one_budget_probe", &query).await
-        }
-        .expect("writer fallback still answers the read");
-        let elapsed = start.elapsed();
-
-        assert_eq!(count, 0, "writer answered on an empty scratch database");
-        assert!(
-            elapsed < Duration::from_millis(250),
-            "routed fallback must spend ONE {}ms acquire budget, not two; took {}ms",
-            Db::READER_ACQUIRE_TIMEOUT.as_millis(),
-            elapsed.as_millis()
-        );
-
-        let reasons: std::collections::HashMap<(String, String), u64> = snapshotter
-            .snapshot()
-            .into_vec()
-            .into_iter()
-            .filter(|(key, ..)| key.key().name() == "buzz_db_route_decision")
-            .map(|(key, _, _, value)| {
-                let metrics_util::debugging::DebugValue::Counter(n) = value else {
-                    panic!("buzz_db_route_decision must be a counter");
-                };
-                let labels: Vec<_> = key.key().labels().collect();
-                let get = |name: &str| {
-                    labels
-                        .iter()
-                        .find(|l| l.key() == name)
-                        .map(|l| l.value().to_owned())
-                        .unwrap_or_default()
-                };
-                ((get("decision"), get("reason")), n)
-            })
-            .collect();
-
-        assert_eq!(
-            reasons.get(&("writer".to_owned(), "reader_acquire_timeout".to_owned())),
-            Some(&1),
-            "saturated reader must fall back as writer/reader_acquire_timeout; got {reasons:?}"
-        );
-        // `reader_validation_error` would mean we misclassified a timeout as a
-        // broken reader, and `pool_busy` is the retired name — neither may
-        // appear in ANY emitted label.
-        assert!(
-            !reasons
-                .keys()
-                .any(|(_, reason)| reason == "reader_validation_error" || reason == "pool_busy"),
-            "no reader_validation_error or retired pool_busy label may be emitted; got {reasons:?}"
-        );
-
-        drop(held);
-        drop_scratch_db(&admin, db.pool.clone(), &wname).await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn routed_reads_are_confined_to_the_requested_community() {
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let (writer, wname) = create_scratch_db(&admin, "sep_w").await;
-        let (replica, rname) = create_scratch_db(&admin, "sep_r").await;
-
-        let author = nostr::Keys::generate();
-        let (comm_a, chan_a) = (Uuid::new_v4(), Uuid::new_v4());
-        let (comm_b, chan_b) = (Uuid::new_v4(), Uuid::new_v4());
-        for pool in [&writer, &replica] {
-            seed_community_channel(pool, comm_a, chan_a, &author).await;
-            seed_community_channel(pool, comm_b, chan_b, &author).await;
-        }
-
-        // A p-tag mention is what makes a row eligible for the mentions and
-        // needs-action feeds. Kind 9 satisfies mentions + activity;
-        // needs-action admits only approval/reminder kinds, so each
-        // community also gets a kind-46010 row.
-        let mentioned = nostr::Keys::generate();
-        let mentioned_hex = mentioned.public_key().to_hex();
-        let mentioned_bytes = mentioned.public_key().to_bytes();
-        let tagged_kind = |kind: u16, content: &str, secs: u64| {
-            nostr::EventBuilder::new(nostr::Kind::Custom(kind), content)
-                .tags([nostr::Tag::parse(["p", mentioned_hex.as_str()]).expect("p tag")])
-                .custom_created_at(nostr::Timestamp::from(secs))
-                .sign_with_keys(&author)
-                .expect("sign event")
-        };
-        let tagged = |content: &str, secs: u64| tagged_kind(9, content, secs);
-
-        let base = 1_700_000_000u64;
-        // Shared rows (both DBs) + replica-only rows (divergence) per community.
-        let a_shared = tagged("a-shared", base);
-        let b_shared = tagged("b-shared", base + 1);
-        for pool in [&writer, &replica] {
-            insert_top_level(pool, comm_a, chan_a, &a_shared).await;
-            insert_mentions(
-                pool,
-                CommunityId::from_uuid(comm_a),
-                &a_shared,
-                Some(chan_a),
-            )
-            .await
-            .expect("mentions a-shared");
-            insert_top_level(pool, comm_b, chan_b, &b_shared).await;
-            insert_mentions(
-                pool,
-                CommunityId::from_uuid(comm_b),
-                &b_shared,
-                Some(chan_b),
-            )
-            .await
-            .expect("mentions b-shared");
-        }
-        let a_replica_only = tagged("a-replica-only", base + 10);
-        let b_replica_only = tagged("b-replica-only", base + 11);
-        insert_top_level(&replica, comm_a, chan_a, &a_replica_only).await;
-        insert_mentions(
-            &replica,
-            CommunityId::from_uuid(comm_a),
-            &a_replica_only,
-            Some(chan_a),
-        )
-        .await
-        .expect("mentions a-replica-only");
-        insert_top_level(&replica, comm_b, chan_b, &b_replica_only).await;
-        insert_mentions(
-            &replica,
-            CommunityId::from_uuid(comm_b),
-            &b_replica_only,
-            Some(chan_b),
-        )
-        .await
-        .expect("mentions b-replica-only");
-
-        // Needs-action fixtures: approval kind, replica-only in BOTH
-        // communities, so the assertion below is replica-served on A and
-        // must still not see B's.
-        let a_approval = tagged_kind(46010, "a-approval-replica-only", base + 20);
-        let b_approval = tagged_kind(46010, "b-approval-replica-only", base + 21);
-        insert_top_level(&replica, comm_a, chan_a, &a_approval).await;
-        insert_mentions(
-            &replica,
-            CommunityId::from_uuid(comm_a),
-            &a_approval,
-            Some(chan_a),
-        )
-        .await
-        .expect("mentions a-approval");
-        insert_top_level(&replica, comm_b, chan_b, &b_approval).await;
-        insert_mentions(
-            &replica,
-            CommunityId::from_uuid(comm_b),
-            &b_approval,
-            Some(chan_b),
-        )
-        .await
-        .expect("mentions b-approval");
-
-        let mut db = Db::from_pools(writer.clone(), replica.clone());
-        db.fence().force_open_for_tests(chrono::Utc::now());
-        db.set_replica_read_max_age_for_tests(Some(std::time::Duration::from_secs(5)));
-        let cid_a = CommunityId::from_uuid(comm_a);
-
-        let contents = |evs: &[StoredEvent]| -> std::collections::BTreeSet<String> {
-            evs.iter().map(|e| e.event.content.clone()).collect()
-        };
-        // Every routed seam must (a) have been served by the replica —
-        // proven by a divergent row absent from the writer — and (b) contain
-        // no row belonging to community B. All B fixtures are named `b-*`,
-        // so the leak check is a single prefix scan.
-        let assert_a_only = |rows: &[StoredEvent], marker: &str, seam: &str| {
-            let got = contents(rows);
-            assert!(
-                got.contains(marker),
-                "{seam}: must be replica-served (divergent row `{marker}` absent from writer); got {got:?}"
-            );
-            assert!(
-                !got.iter().any(|c| c.starts_with("b-")),
-                "{seam}: community B rows leaked into a community A read; got {got:?}"
-            );
-        };
-
-        // 1. Generic query — covered arm (channel-pinned + `until`).
-        let mut q = EventQuery::for_community(cid_a);
-        q.channel_id = Some(chan_a);
-        q.until = chrono::DateTime::from_timestamp((base + 60) as i64, 0);
-        let rows = db
-            .query_events_routed("sep_query", &q)
-            .await
-            .expect("routed query");
-        assert_a_only(&rows, "a-replica-only", "query_events_routed");
-
-        // 2. Generic query — bounded arm (no channel pin at all, so a
-        //    missing community predicate could not be masked by the pin).
-        let unpinned = EventQuery::for_community(cid_a);
-        let rows = db
-            .query_events_routed_bounded("sep_query_bounded", &unpinned)
-            .await
-            .expect("routed bounded query");
-        assert_a_only(&rows, "a-replica-only", "query_events_routed_bounded");
-
-        // 3. COUNT — bounded-only. Community A holds 3 rows on the replica
-        //    (shared + replica-only + approval) but only 1 on the writer,
-        //    and 3 more exist in community B. Exactly 3 proves the read was
-        //    both replica-served and community-confined.
-        let count = db
-            .count_events_routed("sep_count", &unpinned)
-            .await
-            .expect("routed count");
-        assert_eq!(
-            count, 3,
-            "count must see A's three replica rows only — not B's, not the writer's one"
-        );
-
-        // 4. By-ID hydration — ids carry no channel pin, and B's ids are
-        //    requested alongside A's. Only A's may hydrate.
-        let ids: Vec<&[u8]> = vec![
-            a_shared.id.as_bytes(),
-            a_replica_only.id.as_bytes(),
-            b_shared.id.as_bytes(),
-            b_replica_only.id.as_bytes(),
-        ];
-        let rows = db
-            .get_events_by_ids_routed("sep_by_ids", cid_a, &ids)
-            .await
-            .expect("routed by-ids");
-        assert_a_only(&rows, "a-replica-only", "get_events_by_ids_routed");
-
-        // 5-7. All three feed builders, each given BOTH channels as
-        //      accessible — so only the community predicate can exclude B.
-        let both = [chan_a, chan_b];
-        let rows = db
-            .query_feed_mentions_routed("sep_feed", cid_a, &mentioned_bytes, &both, None, 50)
-            .await
-            .expect("routed mentions");
-        assert_a_only(&rows, "a-replica-only", "query_feed_mentions_routed");
-
-        let rows = db
-            .query_feed_needs_action_routed("sep_feed", cid_a, &mentioned_bytes, &both, None, 50)
-            .await
-            .expect("routed needs action");
-        assert_a_only(
-            &rows,
-            "a-approval-replica-only",
-            "query_feed_needs_action_routed",
-        );
-
-        let rows = db
-            .query_feed_activity_routed("sep_feed", cid_a, &both, None, 50)
-            .await
-            .expect("routed activity");
-        assert_a_only(&rows, "a-replica-only", "query_feed_activity_routed");
-
-        drop_scratch_db(&admin, replica, &rname).await;
-        drop_scratch_db(&admin, writer, &wname).await;
-    }
-
-    /// D4: a LAZY reader pool (connect_lazy, min_connections=0, never yet
-    /// used) must still let [`Db::spawn_fence_probe`] verify the writer's
-    /// floor guard and spawn — reader-down or reader-idle at boot must not
-    /// disable fence probing.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn lazy_reader_pool_still_spawns_fence_probe() {
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let (seed, wname) = create_scratch_db(&admin, "lazy_w").await;
-        seed.close().await;
-
-        let writer_url = {
-            let base = admin_url().await;
-            let idx = base.rfind('/').expect("db url has a path segment");
-            format!("{}/{}", &base[..idx], wname)
-        };
-        // `Db::new` (not `from_pools`) so the WRITER pool arms the
-        // `buzz.created_at_floor` GUC — `spawn_fence_probe` verifies the
-        // floor guard on a writer connection, and `create_scratch_db`'s
-        // plain `PgPool::connect` never arms it. The reader is still the
-        // lazy `connect_read_pool` pool this test is about.
-        let db = Db::new(&DbConfig {
-            database_url: writer_url.clone(),
-            read_database_url: Some(writer_url),
-            max_connections: 2,
-            ..DbConfig::default()
-        })
-        .await
-        .expect("connect armed Db with lazy reader");
-
-        let spawned = db
-            .spawn_fence_probe()
-            .await
-            .expect("floor-guard verification must pass on the migrated writer");
-        assert!(spawned, "a configured (lazy) reader must spawn the probe");
-
-        drop_scratch_db(&admin, db.pool.clone(), &wname).await;
     }
 
     /// Thread replies: head fetch reads the writer; a FULL cursor page is
