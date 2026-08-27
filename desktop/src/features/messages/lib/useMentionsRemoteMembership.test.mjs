@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, test } from "node:test";
+import { after, afterEach, test } from "node:test";
 
 import { JSDOM } from "jsdom";
 
@@ -50,6 +50,14 @@ window.__TAURI_INTERNALS__ = {
   },
   transformCallback: () => Math.floor(Math.random() * 1e9),
 };
+
+// The media URL module starts a shared proxy-port poll at import time (it
+// sees the JSDOM window). Without handlers for its two commands the poll
+// spins for its full 5s deadline on rejected invokes, and that timer chain
+// outlives the tests. Install static success handlers BEFORE any production
+// import so the poll resolves on its first iteration instead.
+ipc.set("get_relay_http_url", async () => "http://localhost");
+ipc.set("get_media_proxy_port", async () => 3128);
 
 // Production imports after the DOM/IPC shims are in place.
 const { act, cleanup, renderHook, waitFor } = await import(
@@ -199,15 +207,27 @@ async function openPicker(view, query) {
 // QueryClients created by mountMentions. React-query schedules a 5-minute GC
 // timer per query when its last observer unmounts; without clear() those
 // timers keep the event loop (and the test runner) alive for ~300s after the
-// last assertion. Each test clears its own clients before the next mount.
+// last assertion. Each test settles and clears its own clients.
+//
+// Order matters: Query.fetch() ends with `finally { this.scheduleGc() }`, so
+// a fetch that settles AFTER clear() re-arms a 300s GC timer on a query that
+// clear() already removed from the cache — nobody calls destroy() on it again.
+// Awaiting cancelQueries() first settles every in-flight fetch (CancelledError
+// path runs the finally) while the queries are still cache-resident, and the
+// subsequent clear() removes+destroys them with no surviving timers.
 const queryClients = [];
 
 afterEach(async () => {
   cleanup();
   for (const client of queryClients.splice(0)) {
+    await client.cancelQueries();
     await client.clear();
   }
   dom.window.localStorage.clear();
+});
+
+after(() => {
+  dom.window.close();
 });
 
 test("admitted remote agent is not badged not-in-channel when the roster cache predates its join", async () => {
