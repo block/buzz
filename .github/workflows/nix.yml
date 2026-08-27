@@ -7,7 +7,12 @@ on:
     paths:
       - flake.nix
       - flake.lock
+      - nix/**
       - .github/workflows/nix.yml
+      - Cargo.lock
+      - desktop/src-tauri/Cargo.lock
+      - pnpm-lock.yaml
+      - package.json
   schedule:
     # Check for desktop release updates daily at 06:00 UTC
     - cron: "0 6 * * *"
@@ -54,10 +59,10 @@ jobs:
       - uses: DeterminateSystems/magic-nix-cache-action@v8
       - run: nix build .#buzz-relay --no-link --print-build-logs
 
-  build-desktop-linux:
-    name: build buzz-desktop (x86_64-linux)
+  build-desktop-source-linux:
+    name: build buzz-desktop from source (x86_64-linux)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     permissions:
       contents: read
     steps:
@@ -65,6 +70,18 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: DeterminateSystems/magic-nix-cache-action@v8
       - run: nix build .#buzz-desktop --no-link --print-build-logs
+
+  build-desktop-prebuilt-linux:
+    name: build buzz-desktop-prebuilt (x86_64-linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - run: nix build .#buzz-desktop-prebuilt --no-link --print-build-logs
 
   build-cli-darwin:
     name: build buzz-cli (aarch64-darwin)
@@ -79,10 +96,10 @@ jobs:
       - run: nix build .#buzz-cli --no-link --print-build-logs
       - run: nix run .#buzz-cli -- --help
 
-  build-desktop-darwin:
-    name: build buzz-desktop (aarch64-darwin)
+  build-desktop-source-darwin:
+    name: build buzz-desktop from source (aarch64-darwin)
     runs-on: macos-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     permissions:
       contents: read
     steps:
@@ -90,6 +107,18 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: DeterminateSystems/magic-nix-cache-action@v8
       - run: nix build .#buzz-desktop --no-link --print-build-logs
+
+  build-desktop-prebuilt-darwin:
+    name: build buzz-desktop-prebuilt (aarch64-darwin)
+    runs-on: macos-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - run: nix build .#buzz-desktop-prebuilt --no-link --print-build-logs
 
   update-desktop-hashes:
     name: Update desktop release hashes
@@ -139,13 +168,11 @@ jobs:
           AMD64_LINUX_SRI=$(nix hash to-sri --type sha256 "$AMD64_LINUX")
 
           # Update flake.nix
-          sed -i "s/desktopVersion = \".*\"/desktopVersion = \"${VERSION}\"/" flake.nix
-          sed -i "s|\"sha256-[^\"]*\";  # aarch64-darwin placeholder|\"${AARCH64_DARWIN_SRI}\";|" flake.nix || true
-          # Use more robust replacement
           python3 -c "
           import re
           with open('flake.nix', 'r') as f:
               content = f.read()
+          content = re.sub(r'desktopVersion = \"[^\"]*\"', 'desktopVersion = \"${VERSION}\"', content)
           content = re.sub(r'\"aarch64-darwin\" = \{[^}]*sha256 = \"[^\"]*\"', '\"aarch64-darwin\" = { file = \"Buzz_\${desktopVersion}_aarch64.app.tar.gz\"; sha256 = \"${AARCH64_DARWIN_SRI}\"', content)
           content = re.sub(r'\"x86_64-darwin\" = \{[^}]*sha256 = \"[^\"]*\"', '\"x86_64-darwin\" = { file = \"Buzz_\${desktopVersion}_x64.app.tar.gz\"; sha256 = \"${X64_DARWIN_SRI}\"', content)
           content = re.sub(r'\"x86_64-linux\" = \{[^}]*sha256 = \"[^\"]*\"', '\"x86_64-linux\" = { file = \"Buzz_\${desktopVersion}_amd64.AppImage\"; sha256 = \"${AMD64_LINUX_SRI}\"', content)

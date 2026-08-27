@@ -148,12 +148,17 @@ nix run github:block/buzz#buzz-relay -- --help
 nix profile install github:block/buzz#buzz-relay
 ```
 
-**Desktop app** (prebuilt release binary, supported platforms only):
+**Desktop app** (built from source via cargo-tauri + pnpm):
 ```bash
-nix run github:block/buzz#buzz-desktop   # macOS Apple Silicon, macOS Intel, Linux x86_64
+nix run github:block/buzz#buzz-desktop
 ```
 
-> **Note:** There is no prebuilt desktop binary for `aarch64-linux`. The CLI and relay are built from source on all four standard platforms (`x86_64-linux`, `aarch64-linux`, `x86_64-darwin`, `aarch64-darwin`); the desktop package wraps the official release artifacts where they exist.
+**Desktop app** (prebuilt release binary — faster, but not available on all platforms):
+```bash
+nix run github:block/buzz#buzz-desktop-prebuilt   # macOS Apple Silicon, macOS Intel, Linux x86_64
+```
+
+> **Note:** `buzz-desktop` (source build) is the default and works on all four standard platforms (`x86_64-linux`, `aarch64-linux`, `x86_64-darwin`, `aarch64-darwin`). `buzz-desktop-prebuilt` wraps the official release artifacts where they exist; there is no prebuilt binary for `aarch64-linux`. The CLI and relay are always built from source.
 >
 > **Intel macOS:** `x86_64-darwin` is supported via a pinned nixpkgs revision. Nixpkgs unstable has dropped `x86_64-darwin`; the flake uses a pre-drop pin for that system. Nixpkgs 26.05 will be the last release to support Intel Darwin.
 

@@ -19,7 +19,8 @@
       desktopVersion = "0.5.20";
 
       # All standard Nix target systems. The relay and CLI are cross-platform
-      # Rust; the desktop prebuilt covers a subset (see desktopAssets below).
+      # Rust; the desktop source build covers all four, the prebuilt covers a
+      # subset (see desktopAssets below).
       allSystems = [
         "x86_64-linux"
         "aarch64-linux"
@@ -28,7 +29,8 @@
       ];
 
       # Prebuilt desktop release assets. aarch64-linux has no prebuilt desktop
-      # binary — the project does not ship one. See PR body for details.
+      # binary — the project does not ship one. Use buzz-desktop (source build)
+      # for aarch64-linux instead.
       desktopAssets = {
         "aarch64-darwin" = {
           file = "Buzz_${desktopVersion}_aarch64.app.tar.gz";
@@ -98,15 +100,28 @@
           };
         };
 
-      # Prebuilt desktop app wrapper.
-      desktopFor =
+      # Source-built desktop app (cargo-tauri + pnpm + native deps).
+      # This is the default buzz-desktop package.
+      desktopFromSource =
+        system:
+        let
+          pkgs = pkgsFor system;
+        in
+        pkgs.callPackage ./nix/buzz.nix {
+          src = pkgs.lib.cleanSource ./.;
+        };
+
+      # Prebuilt desktop app wrapper (release artifacts).
+      # Faster to install than the source build, but not available on all
+      # platforms and cannot be patched.
+      desktopPrebuilt =
         system:
         let
           pkgs = pkgsFor system;
           asset = desktopAssets.${system};
         in
         pkgs.stdenv.mkDerivation {
-          pname = "buzz-desktop";
+          pname = "buzz-desktop-prebuilt";
           version = desktopVersion;
           src = pkgs.fetchurl {
             url = "https://github.com/block/buzz/releases/download/desktop-v${desktopVersion}/${asset.file}";
@@ -136,7 +151,7 @@
                 runHook postInstall
               '';
           meta = with pkgs.lib; {
-            description = "Buzz desktop app — Tauri 2 + React 19 desktop client";
+            description = "Buzz desktop app (prebuilt release binary) — Tauri 2 + React 19 desktop client";
             homepage = "https://github.com/block/buzz";
             downloadPage = "https://github.com/block/buzz/releases";
             license = licenses.asl20;
@@ -168,11 +183,16 @@
         rec {
           inherit buzz-cli buzz-relay;
           buzz = buzz-cli;
-          buzz-desktop =
+          # Source-built desktop (default) — builds from the Tauri + React
+          # source with cargo-tauri, pnpm, and native dependencies.
+          buzz-desktop = desktopFromSource system;
+          # Prebuilt desktop (alternative) — wraps the release artifact for
+          # faster installation where a prebuilt binary exists.
+          buzz-desktop-prebuilt =
             if desktopAssets ? ${system} then
-              desktopFor system
+              desktopPrebuilt system
             else
-              throw "buzz-desktop: no prebuilt binary for ${system}";
+              throw "buzz-desktop-prebuilt: no release binary for ${system}";
           default = buzz-cli;
         }
       );
@@ -191,13 +211,13 @@
           default = self.apps.${system}.buzz;
         }
         // nixpkgs.lib.optionalAttrs (desktopAssets ? ${system}) {
-          buzz-desktop = {
+          buzz-desktop-prebuilt = {
             type = "app";
             program =
               if system == "x86_64-linux" then
-                "${self.packages.${system}.buzz-desktop}/bin/buzz-desktop"
+                "${self.packages.${system}.buzz-desktop-prebuilt}/bin/buzz-desktop"
               else
-                "${self.packages.${system}.buzz-desktop}/Applications/Buzz.app/Contents/MacOS/Buzz";
+                "${self.packages.${system}.buzz-desktop-prebuilt}/Applications/Buzz.app/Contents/MacOS/Buzz";
           };
         }
       );
@@ -209,7 +229,7 @@
           buzz-relay = self.packages.${system}.buzz-relay;
         }
         // nixpkgs.lib.optionalAttrs (desktopAssets ? ${system}) {
-          buzz-desktop = self.packages.${system}.buzz-desktop;
+          buzz-desktop-prebuilt = self.packages.${system}.buzz-desktop-prebuilt;
         }
       );
 
