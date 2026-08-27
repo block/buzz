@@ -77,6 +77,11 @@ test("agent rows offer automatic mention controls", async () => {
   });
   assert.equal(action.getAttribute("aria-pressed"), "false");
   assert.equal(action.getAttribute("data-state"), "off");
+  const inactivePin = action.querySelector(
+    '[data-testid="mention-auto-pin-icon"]',
+  );
+  assert.match(inactivePin?.getAttribute("class") ?? "", /\blucide-pin\b/);
+  assert.equal(inactivePin?.getAttribute("fill"), "none");
   fireEvent.click(action);
   assert.deepEqual(toggled, [suggestion]);
   assert.deepEqual(selected, [suggestion]);
@@ -92,6 +97,10 @@ test("agent rows offer automatic mention controls", async () => {
   });
   assert.equal(selectedAction.getAttribute("aria-pressed"), "true");
   assert.equal(selectedAction.getAttribute("data-state"), "on");
+  const activePin = selectedAction.querySelector(
+    '[data-testid="mention-auto-pin-icon"]',
+  );
+  assert.equal(activePin?.getAttribute("fill"), "currentColor");
   fireEvent.click(selectedAction);
   assert.deepEqual(toggled, [suggestion, suggestion]);
 });

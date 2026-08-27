@@ -1,5 +1,5 @@
 import * as React from "react";
-import { AtSign, Bot, ChevronRight, Users } from "lucide-react";
+import { Bot, ChevronRight, Pin, Users } from "lucide-react";
 import { OtherSetupAgentMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { motion } from "motion/react";
 import type { TeamMentionMember } from "@/features/messages/lib/mentionCandidates";
@@ -414,7 +414,12 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                           size="xs"
                           type="button"
                         >
-                          <AtSign aria-hidden="true" className="h-3.5 w-3.5" />
+                          <Pin
+                            aria-hidden="true"
+                            className="h-3.5 w-3.5"
+                            data-testid="mention-auto-pin-icon"
+                            fill={isAlwaysAddressed ? "currentColor" : "none"}
+                          />
                         </Toggle>
                       </span>
                     </TooltipTrigger>
