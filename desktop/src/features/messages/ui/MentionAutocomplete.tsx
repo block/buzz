@@ -44,6 +44,7 @@ type MentionAutocompleteProps = {
   keepMentionedAgentsPinned?: boolean;
   onKeepMentionedAgentsPinnedChange?: (value: boolean) => void;
   openOptionsRequest?: number;
+  onOptionsRevealComplete?: (request: number) => void;
   onDismiss?: () => void;
   position?: "above" | "below";
 };
@@ -65,6 +66,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   keepMentionedAgentsPinned = true,
   onKeepMentionedAgentsPinnedChange,
   openOptionsRequest = 0,
+  onOptionsRevealComplete,
   onDismiss,
   position = "above",
 }: MentionAutocompleteProps) {
@@ -175,6 +177,12 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                   className="w-72"
                   id={optionsId}
                   initial={{ opacity: 0, y: 4 }}
+                  key={openOptionsRequest}
+                  onAnimationComplete={() => {
+                    if (openOptionsRequest > 0) {
+                      onOptionsRevealComplete?.(openOptionsRequest);
+                    }
+                  }}
                   transition={{ duration: 0.16, ease: "easeOut" }}
                 >
                   <div className="flex min-h-12 items-center justify-between gap-3 px-3 py-2">

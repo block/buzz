@@ -30,6 +30,7 @@ test("always addressing an agent keeps autocomplete open, inserts the chip, adds
   );
   const appliedEdits = [];
   const addedPubkeys = [];
+  const openPickerCalls = [];
   const pulsedPubkeys = [];
   let cancelCount = 0;
   const text = "@";
@@ -47,6 +48,7 @@ test("always addressing an agent keeps autocomplete open, inserts the chip, adds
     getMentionDisplayName: () => "Agent Ada",
     isInlineMentionSelection: () => false,
     isMentionOpen: true,
+    openMentionPicker: (...args) => openPickerCalls.push(args),
     registerMentionPubkey: () => {},
     mentionStartIndex: text.lastIndexOf("@"),
   };
@@ -85,6 +87,7 @@ test("always addressing an agent keeps autocomplete open, inserts the chip, adds
     },
   ]);
   assert.equal(cancelCount, 0);
+  assert.deepEqual(openPickerCalls, [[text.length, "preserve"]]);
   assert.deepEqual(addedPubkeys, ["agent-pubkey"]);
   assert.deepEqual(pulsedPubkeys, ["agent-pubkey"]);
   assert.equal(

@@ -288,6 +288,65 @@ test("automatically mentions multiple agents from the mention picker", async ({
   ).toBeVisible();
 });
 
+test("keeps the composer and global automatic mention settings synchronized", async ({
+  page,
+}) => {
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+
+  const composer = channelComposer(page);
+  await composer.getByTestId("message-insert-mention").click();
+  const optionsTrigger = composer.getByTestId("mention-options-trigger");
+  await expect(optionsTrigger).toHaveAttribute("aria-expanded", "false");
+  await composer
+    .getByTestId("mention-autocomplete")
+    .getByRole("button", { name: "Automatically mention Morgarita" })
+    .click();
+  await expect(optionsTrigger).toHaveAttribute("aria-expanded", "true");
+  const composerToggle = composer.getByTestId(
+    "mention-keep-agents-pinned-toggle",
+  );
+  await expect(composerToggle).toHaveAttribute("data-state", "unchecked");
+  await expect(composerToggle).toHaveAttribute("data-state", "checked", {
+    timeout: 1_500,
+  });
+
+  await page
+    .getByTestId("composer-auto-pin-confirmation")
+    .getByRole("button", { name: "Turn off" })
+    .click();
+  await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
+  await expect(optionsTrigger).toHaveAttribute("aria-expanded", "true");
+  await expect(composerToggle).toHaveAttribute("data-state", "checked");
+  await expect(composerToggle).toHaveAttribute("data-state", "unchecked", {
+    timeout: 1_500,
+  });
+
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await expect(page.getByTestId("settings-view")).toBeVisible();
+  await page.getByTestId("settings-nav-agents").click();
+  const settingsToggle = page
+    .getByTestId("settings-automatic-agent-mentions")
+    .getByRole("switch", { name: "Automatically mention agents" });
+  await expect(settingsToggle).toHaveAttribute("data-state", "unchecked");
+
+  await page.getByTestId("settings-back-to-app").click();
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
+  await composer.getByTestId("message-insert-mention").click();
+  await composer.getByTestId("mention-options-trigger").click();
+  await expect(
+    composer.getByTestId("mention-keep-agents-pinned-toggle"),
+  ).toHaveAttribute("data-state", "unchecked");
+  await expect(
+    composer.getByRole("button", {
+      name: "Automatically mention Morgarita",
+    }),
+  ).toHaveAttribute("aria-pressed", "false");
+});
+
 test("hides automatic mention state while disabled without clearing the draft", async ({
   page,
 }) => {
@@ -768,17 +827,18 @@ test("the auto-pin popover can turn off automatic agent mentions", async ({
   );
   await autoPinConfirmation.getByRole("button", { name: "Turn off" }).click();
 
+  await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
+  await expect(composer.getByTestId("mention-options-trigger")).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
+  await expect(
+    composer.getByTestId("mention-keep-agents-pinned-toggle"),
+  ).toHaveAttribute("data-state", "unchecked");
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
   ).toHaveCount(0);
   await expect(autoPinConfirmation).toHaveCount(0);
-
-  await composer.getByTestId("message-insert-mention").click();
-  await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
-  await composer.getByTestId("mention-options-trigger").click();
-  await expect(
-    composer.getByTestId("mention-keep-agents-pinned-toggle"),
-  ).toHaveAttribute("data-state", "unchecked");
 
   await input.press("Escape");
   await expect(composer.getByTestId("mention-autocomplete")).toHaveCount(0);

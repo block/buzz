@@ -254,24 +254,31 @@ export function useAgentAddressLockPicker({
         setAnnouncement(`Automatically mentioning ${suggestion.displayName}`);
       }
 
-      if (mentions.isMentionOpen && mentions.isInlineMentionSelection()) {
+      if (mentions.isMentionOpen) {
         const { text, cursor } = richText.getPlainTextAndCursor();
-        const activeMention = detectPrefixQuery("@", text, cursor, [
-          suggestion.displayName.toLowerCase(),
-        ]);
-        const queryStart = Math.max(
-          0,
-          Math.min(
-            activeMention?.startIndex ?? mentions.mentionStartIndex,
-            text.length,
-          ),
-        );
-        applyAutocompleteEdit({
-          replaceFromOffset: queryStart,
-          replaceToOffset: Math.max(queryStart, Math.min(cursor, text.length)),
-          insertText: "",
-        });
-        mentions.openMentionPicker(queryStart, "preserve");
+        if (mentions.isInlineMentionSelection()) {
+          const activeMention = detectPrefixQuery("@", text, cursor, [
+            suggestion.displayName.toLowerCase(),
+          ]);
+          const queryStart = Math.max(
+            0,
+            Math.min(
+              activeMention?.startIndex ?? mentions.mentionStartIndex,
+              text.length,
+            ),
+          );
+          applyAutocompleteEdit({
+            replaceFromOffset: queryStart,
+            replaceToOffset: Math.max(
+              queryStart,
+              Math.min(cursor, text.length),
+            ),
+            insertText: "",
+          });
+          mentions.openMentionPicker(queryStart, "preserve");
+        } else {
+          mentions.openMentionPicker(cursor, "preserve");
+        }
       }
     },
     [

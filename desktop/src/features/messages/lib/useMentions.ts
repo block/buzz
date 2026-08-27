@@ -33,7 +33,6 @@ import type { ChannelMember, ChannelType } from "@/shared/api/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { channelMemberPubkeySet } from "@/shared/lib/rosterDerivations";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { useActiveAgentPubkeys } from "./useActiveAgentPubkeys";
 import { useDefaultAgentSuggestion } from "./useDefaultAgentSuggestion";
@@ -51,6 +50,7 @@ import {
 } from "./useMentionSelection";
 import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
+import { getMentionMemberPubkeys } from "./mentionMemberPubkeys";
 import {
   appendUniqueName,
   buildTeamMentionCandidates,
@@ -223,21 +223,10 @@ export function useMentions(
     () => new Set(activePersonas.map((persona) => persona.id)),
     [activePersonas],
   );
-  // Merge both signed membership projections: the dedicated roster and the
-  // active channel summary. The latter keeps autocomplete current when the
-  // roster cache has not observed a membership change yet.
-  const memberPubkeys = React.useMemo(() => {
-    const pubkeys = new Set(
-      members ? channelMemberPubkeySet(members) : undefined,
-    );
-    const activeChannel = (channelsQuery.data ?? []).find(
-      (channel) => channel.id === channelId,
-    );
-    for (const pubkey of activeChannel?.memberPubkeys ?? []) {
-      pubkeys.add(normalizePubkey(pubkey));
-    }
-    return pubkeys;
-  }, [channelId, channelsQuery.data, members]);
+  const memberPubkeys = React.useMemo(
+    () => getMentionMemberPubkeys(channelId, channelsQuery.data, members),
+    [channelId, channelsQuery.data, members],
+  );
   const agentIdentityPubkeys = React.useMemo(
     () =>
       getAgentIdentityPubkeys({

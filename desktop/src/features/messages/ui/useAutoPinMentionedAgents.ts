@@ -17,12 +17,19 @@ type Confirmation = {
   title: string;
 };
 
+type PendingPreferenceChange = {
+  confirmation?: Confirmation;
+  enabled: boolean;
+  request: number;
+};
+
 type Options = {
   audienceScope: string | null;
   enabled: boolean;
   getDisplayName: (pubkey: string) => string | null | undefined;
   onPulse: (pubkey: string) => void;
   onTurnOff: () => void;
+  onTurnOn: () => void;
 };
 
 export function useAutoPinMentionedAgents({
@@ -31,12 +38,73 @@ export function useAutoPinMentionedAgents({
   getDisplayName,
   onPulse,
   onTurnOff,
+  onTurnOn,
 }: Options) {
   const { pubkeys: currentAudiencePubkeys } =
     usePersistentAgentAudience(audienceScope);
   const [confirmation, setConfirmation] = React.useState<Confirmation | null>(
     null,
   );
+  const [openOptionsRequest, setOpenOptionsRequest] = React.useState(0);
+  const nextOptionsRequestRef = React.useRef(0);
+  const pendingPreferenceChangeRef =
+    React.useRef<PendingPreferenceChange | null>(null);
+  const onTurnOffRef = React.useRef(onTurnOff);
+  const onTurnOnRef = React.useRef(onTurnOn);
+  onTurnOffRef.current = onTurnOff;
+  onTurnOnRef.current = onTurnOn;
+
+  React.useEffect(() => {
+    if (pendingPreferenceChangeRef.current?.enabled === enabled) {
+      pendingPreferenceChangeRef.current = null;
+    }
+  }, [enabled]);
+
+  React.useEffect(
+    () => () => {
+      const pending = pendingPreferenceChangeRef.current;
+      pendingPreferenceChangeRef.current = null;
+      if (!pending) return;
+      if (pending.enabled) {
+        onTurnOnRef.current();
+      } else {
+        onTurnOffRef.current();
+      }
+    },
+    [],
+  );
+
+  const requestPreferenceChange = React.useCallback(
+    (preferenceEnabled: boolean, pendingConfirmation?: Confirmation) => {
+      const request = nextOptionsRequestRef.current + 1;
+      nextOptionsRequestRef.current = request;
+      pendingPreferenceChangeRef.current = {
+        confirmation: pendingConfirmation,
+        enabled: preferenceEnabled,
+        request,
+      };
+      setOpenOptionsRequest(request);
+    },
+    [],
+  );
+
+  const completeOptionsReveal = React.useCallback((request: number) => {
+    const pending = pendingPreferenceChangeRef.current;
+    if (!pending || pending.request !== request) return;
+    pendingPreferenceChangeRef.current = null;
+    if (pending.enabled) {
+      onTurnOnRef.current();
+      return;
+    }
+    if (pending.confirmation) {
+      removePersistentAgentAudienceMembersIfUnchanged({
+        expectedRevision: pending.confirmation.expectedRevision,
+        pubkeys: pending.confirmation.pubkeys,
+        scope: pending.confirmation.scope,
+      });
+    }
+    onTurnOffRef.current();
+  }, []);
 
   React.useEffect(() => {
     if (!confirmation) return;
@@ -120,13 +188,15 @@ export function useAutoPinMentionedAgents({
     [promoteAgents],
   );
   const promoteExplicitlyAddressedAgents = React.useCallback(
-    (promotion: { expectedRevision?: number; pubkeys: readonly string[] }) =>
+    (promotion: { expectedRevision?: number; pubkeys: readonly string[] }) => {
       promoteAgents({
         ...promotion,
         reinstateExcluded: true,
         requirePreference: false,
-      }),
-    [promoteAgents],
+      });
+      requestPreferenceChange(true);
+    },
+    [promoteAgents, requestPreferenceChange],
   );
 
   const dismissConfirmation = React.useCallback(
@@ -136,17 +206,14 @@ export function useAutoPinMentionedAgents({
   const turnOffConfirmation = React.useCallback(() => {
     if (!confirmation) return;
     setConfirmation(null);
-    removePersistentAgentAudienceMembersIfUnchanged({
-      expectedRevision: confirmation.expectedRevision,
-      pubkeys: confirmation.pubkeys,
-      scope: confirmation.scope,
-    });
-    onTurnOff();
-  }, [confirmation, onTurnOff]);
+    requestPreferenceChange(false, confirmation);
+  }, [confirmation, requestPreferenceChange]);
 
   return {
     confirmationTitle: confirmationIsCurrent ? confirmation.title : null,
+    completeOptionsReveal,
     dismissConfirmation,
+    openOptionsRequest,
     promoteExplicitlyAddressedAgents,
     promoteMentionedAgents,
     turnOffConfirmation,
