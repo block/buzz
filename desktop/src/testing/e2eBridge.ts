@@ -41,6 +41,8 @@ import {
   KIND_CHANNEL_WINDOW_BOUNDS,
   KIND_DM_VISIBILITY,
   KIND_EVENT_REMINDER,
+  KIND_FORUM_COMMENT,
+  KIND_FORUM_POST,
   KIND_GIT_ISSUE,
   KIND_GIT_PATCH,
   KIND_GIT_PR_UPDATE,
@@ -57,6 +59,8 @@ import {
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
   KIND_STREAM_MESSAGE_EDIT,
+  KIND_STREAM_MESSAGE,
+  KIND_STREAM_MESSAGE_V2,
   KIND_SYSTEM_MESSAGE,
   KIND_TEXT_NOTE,
   KIND_USER_STATUS,
@@ -10450,6 +10454,38 @@ function sendToMockSocket(args: {
       }
     }
     if (!channelId) {
+      const messageKinds = new Set([
+        KIND_STREAM_MESSAGE,
+        KIND_STREAM_MESSAGE_V2,
+        KIND_FORUM_POST,
+        KIND_FORUM_COMMENT,
+      ]);
+      if (
+        filter.authors?.length &&
+        filter.kinds?.some((kind) => messageKinds.has(kind))
+      ) {
+        const authors = new Set(
+          filter.authors.map((author) => author.toLowerCase()),
+        );
+        const matchingEvents = [...mockMessages.values()]
+          .flat()
+          .filter(
+            (event) =>
+              authors.has(event.pubkey.toLowerCase()) &&
+              (filter.kinds?.includes(event.kind) ?? false) &&
+              (filter.since === undefined ||
+                event.created_at >= filter.since) &&
+              (filter.until === undefined || event.created_at <= filter.until),
+          )
+          .sort((left, right) => right.created_at - left.created_at)
+          .slice(0, filter.limit ?? 200);
+        for (const event of matchingEvents) {
+          sendWsText(socket.handler, ["EVENT", subId, event]);
+        }
+        sendWsText(socket.handler, ["EOSE", subId]);
+        return;
+      }
+
       // Aux-backfill filters (reactions/deletions) are `#e`-keyed with no
       // channel tag — serve them across all channel stores like the relay.
       const referencedIds = filter["#e"];
@@ -13569,6 +13605,7 @@ export function maybeInstallE2eTauriMocks() {
       case "download_image":
       case "save_png_data_url":
       case "download_file":
+      case "open_artifact":
       case "save_agent_card":
         // The save dialog can't run headlessly; report a successful save so the
         // FileCard / image-menu click handlers resolve. Specs assert the

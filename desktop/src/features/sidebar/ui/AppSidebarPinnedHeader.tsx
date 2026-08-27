@@ -1,4 +1,4 @@
-import { Activity, Bot, Folders, Inbox, Zap } from "lucide-react";
+import { Activity, Bot, FileOutput, Folders, Inbox, Zap } from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { SidebarProjectsSection } from "@/features/sidebar/ui/SidebarProjectsSection";
@@ -15,6 +15,7 @@ import { SidebarMenuLabel } from "@/shared/ui/sidebar-menu-label";
 
 type SidebarSelectedView =
   | "home"
+  | "outbox"
   | "channel"
   | "messages"
   | "agents"
@@ -42,6 +43,7 @@ type AppSidebarPrimaryMenuProps = {
   homeBadgeCount: number;
   onSelectAgents: () => void;
   onSelectHome: () => void;
+  onSelectOutbox: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
@@ -92,6 +94,7 @@ export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
   onSelectHome,
+  onSelectOutbox,
   onSelectProjects,
   onSelectPulse,
   onSelectWorkflows,
@@ -125,6 +128,19 @@ export function AppSidebarPrimaryMenu({
                 {Math.min(homeBadgeCount, 99)}
               </SidebarMenuBadge>
             ) : null}
+          </SidebarMenuItem>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              className="data-[active=true]:font-normal"
+              data-testid="open-outbox-view"
+              isActive={selectedView === "outbox"}
+              onClick={onSelectOutbox}
+              tooltip="Outbox"
+              type="button"
+            >
+              <FileOutput className="h-4 w-4" />
+              <SidebarMenuLabel>Outbox</SidebarMenuLabel>
+            </SidebarMenuButton>
           </SidebarMenuItem>
           <FeatureGate feature="pulse">
             <SidebarMenuItem>

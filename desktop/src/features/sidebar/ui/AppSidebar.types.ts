@@ -39,6 +39,7 @@ export type AppSidebarProps = {
   selectedChannelId: string | null;
   selectedView:
     | "home"
+    | "outbox"
     | "channel"
     | "messages"
     | "agents"
@@ -87,6 +88,7 @@ export type AppSidebarProps = {
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
   onSelectHome: () => void;
+  onSelectOutbox: () => void;
   onSelectChannel: (channelId: string) => void;
   onOpenSearchResult: (hit: SearchHit, query: string) => void;
   /** Full channel set for global search, including channels outside the joined sidebar list. */

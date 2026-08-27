@@ -1,6 +1,7 @@
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use tauri::State;
+use tauri_plugin_opener::OpenerExt;
 
 use crate::app_state::AppState;
 use crate::commands::clipboard::with_clipboard;
@@ -137,6 +138,44 @@ pub async fn download_file(
     // Generic filter: an arbitrary attachment is not necessarily an image.
     let extensions: Vec<&str> = ext.as_deref().into_iter().collect();
     save_bytes_with_dialog(&app, &filename, "All Files", &extensions, &bytes).await
+}
+
+/// Download a relay-hosted artifact into an isolated temporary directory and
+/// open it with the operating system's default application.
+///
+/// Outbox uses this instead of a bare webview link so one click reaches the
+/// actual artifact without handing authenticated media URLs to an external
+/// browser. The same origin, size, and MIME safeguards as `download_file`
+/// apply before any bytes are written locally.
+#[tauri::command]
+pub async fn open_artifact(
+    url: String,
+    filename: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let relay_base = relay_api_base_url_with_override(&state);
+    validate_download_url(&url, &relay_base)?;
+
+    let filename = sanitize_filename(&filename);
+    let bytes = fetch_blob_bytes(&url, &state).await?;
+    detect_and_validate_mime(&bytes)?;
+
+    let artifact_dir = std::env::temp_dir().join(format!(
+        "buzz-artifact-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    tokio::fs::create_dir_all(&artifact_dir)
+        .await
+        .map_err(|error| format!("create artifact directory: {error}"))?;
+    let artifact_path = artifact_dir.join(filename);
+    tokio::fs::write(&artifact_path, bytes)
+        .await
+        .map_err(|error| format!("write artifact: {error}"))?;
+
+    app.opener()
+        .open_path(artifact_path.to_string_lossy(), None::<&str>)
+        .map_err(|error| format!("open artifact: {error}"))
 }
 
 /// Fetch relay media bytes for the composer image editor.

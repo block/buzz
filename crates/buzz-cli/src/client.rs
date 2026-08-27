@@ -37,7 +37,7 @@ pub struct BlobDescriptor {
 }
 
 /// Build an `imeta` tag array from a BlobDescriptor (NIP-92 media metadata).
-pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
+pub fn build_imeta_tag(d: &BlobDescriptor, filename: Option<&str>) -> Vec<String> {
     let mut tag = vec![
         "imeta".to_string(),
         format!("url {}", d.url),
@@ -56,6 +56,9 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     }
     if let Some(dur) = d.duration {
         tag.push(format!("duration {dur}"));
+    }
+    if let Some(filename) = filename.filter(|value| !value.trim().is_empty()) {
+        tag.push(format!("filename {}", filename.trim()));
     }
     tag
 }
@@ -2307,10 +2310,28 @@ mod retry_policy_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
-        normalize_events, BuzzClient,
+        advance_query_cursor, build_imeta_tag, create_response_with_id_if_accepted,
+        extract_relay_response_field, normalize_events, BlobDescriptor, BuzzClient,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn imeta_preserves_the_attached_filename_for_outbox_display() {
+        let descriptor = BlobDescriptor {
+            url: "https://relay.example/media/abc".into(),
+            sha256: "a".repeat(64),
+            size: 42,
+            mime_type: "application/pdf".into(),
+            uploaded: 1_700_000_000,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+        };
+
+        assert!(build_imeta_tag(&descriptor, Some("FINAL_REPORT.pdf"))
+            .contains(&"filename FINAL_REPORT.pdf".to_string()));
+    }
 
     #[test]
     fn normalize_events_preserves_the_complete_signed_event_shape() {

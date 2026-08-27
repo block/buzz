@@ -670,6 +670,7 @@ pub fn run() {
             download_image,
             save_png_data_url,
             download_file,
+            open_artifact,
             fetch_media_bytes,
             copy_image_to_clipboard,
             copy_text_to_clipboard,

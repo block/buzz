@@ -112,6 +112,7 @@ export function AppSidebar({
   onSelectPulse,
   onSelectWorkflows,
   onSelectHome,
+  onSelectOutbox,
   onSelectChannel,
   onOpenSearchResult,
   searchChannels,
@@ -508,6 +509,7 @@ export function AppSidebar({
                 homeBadgeCount={homeBadgeCount}
                 onSelectAgents={onSelectAgents}
                 onSelectHome={onSelectHome}
+                onSelectOutbox={onSelectOutbox}
                 onSelectProjects={onSelectProjects}
                 onSelectPulse={onSelectPulse}
                 onSelectWorkflows={onSelectWorkflows}
