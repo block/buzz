@@ -1303,7 +1303,7 @@ fn to_ws_url(http_url: &str) -> String {
 }
 
 /// Normalize raw event JSON array into consistent shape.
-/// Each event becomes: {id, pubkey, kind, content, created_at, tags}
+/// Each event becomes: {id, pubkey, sig, kind, content, created_at, tags}
 pub fn normalize_events(events: &[serde_json::Value]) -> String {
     let normalized: Vec<serde_json::Value> = events
         .iter()
@@ -1311,6 +1311,7 @@ pub fn normalize_events(events: &[serde_json::Value]) -> String {
             serde_json::json!({
                 "id": e.get("id").and_then(|v| v.as_str()).unwrap_or(""),
                 "pubkey": e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""),
+                "sig": e.get("sig").and_then(|v| v.as_str()).unwrap_or(""),
                 "kind": e.get("kind").and_then(|v| v.as_u64()).unwrap_or(0),
                 "content": e.get("content").and_then(|v| v.as_str()).unwrap_or(""),
                 "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -1319,6 +1320,72 @@ pub fn normalize_events(events: &[serde_json::Value]) -> String {
         })
         .collect();
     serde_json::to_string(&normalized).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod normalize_events_tests {
+    use super::normalize_events;
+    use serde_json::json;
+
+    #[test]
+    fn preserves_sig_field() {
+        let events = vec![json!({
+            "id": "abc123",
+            "pubkey": "def456",
+            "sig": "aabbcc",
+            "kind": 9,
+            "content": "hello",
+            "created_at": 1700000000u64,
+            "tags": []
+        })];
+        let result = normalize_events(&events);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed[0]["sig"].as_str().unwrap(), "aabbcc");
+    }
+
+    #[test]
+    fn missing_sig_defaults_to_empty() {
+        let events = vec![json!({
+            "id": "abc123",
+            "pubkey": "def456",
+            "kind": 9,
+            "content": "hello",
+            "created_at": 1700000000u64,
+            "tags": []
+        })];
+        let result = normalize_events(&events);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed[0]["sig"].as_str().unwrap(), "");
+    }
+
+    #[test]
+    fn all_fields_present_in_output() {
+        let events = vec![json!({
+            "id": "id1",
+            "pubkey": "pk1",
+            "sig": "sig1",
+            "kind": 1,
+            "content": "test",
+            "created_at": 100u64,
+            "tags": [["p", "pk2"]]
+        })];
+        let result = normalize_events(&events);
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
+        let keys: Vec<&str> = parsed[0].as_object().unwrap().keys().map(|s| s.as_str()).collect();
+        assert!(keys.contains(&"id"));
+        assert!(keys.contains(&"pubkey"));
+        assert!(keys.contains(&"sig"));
+        assert!(keys.contains(&"kind"));
+        assert!(keys.contains(&"content"));
+        assert!(keys.contains(&"created_at"));
+        assert!(keys.contains(&"tags"));
+    }
+
+    #[test]
+    fn empty_input_returns_empty_array() {
+        let result = normalize_events(&[]);
+        assert_eq!(result, "[]");
+    }
 }
 
 /// Extract the d-tag value from a Nostr event JSON object.
