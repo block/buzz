@@ -337,6 +337,28 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
     }
 }
 
+/// Fan out one relay-generated ephemeral event without passing through client admission.
+///
+/// The event is never stored. Global routing plus `P_GATED_KINDS` ensures only a
+/// subscription authenticated as the exact `p` recipient can receive a wake.
+pub(crate) async fn dispatch_ephemeral_event(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: Event,
+    channel_id: Option<uuid::Uuid>,
+) {
+    state.mark_local_event(tenant.community(), &event.id);
+    let topic = channel_id.map_or(EventTopic::Global, EventTopic::Channel);
+    if let Err(error) = state.pubsub.publish_event(tenant, topic, &event).await {
+        state
+            .local_event_ids
+            .invalidate(&(tenant.community(), event.id.to_bytes()));
+        warn!(event_id = %event.id, %error, "relay-generated ephemeral publish failed");
+    }
+    let stored = StoredEvent::new(event, channel_id);
+    fan_out_event_to_local_subscribers(state, tenant.community(), &stored).await;
+}
+
 /// Schedule post-commit delivery/side effects for a stored event.
 ///
 /// This intentionally returns after only the bounded audit enqueue has completed:

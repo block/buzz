@@ -7,6 +7,21 @@ use std::future::Future;
 use std::pin::Pin;
 
 use buzz_core::tenant::CommunityId;
+use uuid::Uuid;
+
+/// Workflow authority carried into a message side effect.
+#[derive(Debug, Clone)]
+pub struct WorkflowMessageContext {
+    /// Server-resolved community that owns the workflow run.
+    pub community_id: CommunityId,
+    /// Exact workflow run driving this side effect.
+    pub run_id: Uuid,
+    /// Exact signed-definition step being executed.
+    pub step_id: String,
+    /// Exact signed definition selected when the run was created, or `None`
+    /// for a legacy run that must not emit an automatic wake.
+    pub definition_event_id: Option<Vec<u8>>,
+}
 
 /// Errors from action sink operations.
 #[derive(Debug, thiserror::Error)]
@@ -48,11 +63,8 @@ impl From<ActionSinkError> for crate::WorkflowError {
 pub trait ActionSink: Send + Sync {
     /// Post a message to a channel on behalf of a workflow owner.
     ///
-    /// - `community_id`: the server-resolved community that owns the workflow
-    ///   run driving this side effect. The relay-signed message is published
-    ///   under *this* community, never the deployment/default tenant — the run
-    ///   carries its owning community so a workflow in community B posts into B
-    ///   even though the side effect has no inbound connection to bind.
+    /// - `context`: exact workflow authority driving this side effect, including
+    ///   the server-resolved community and optional signed-definition revision
     /// - `channel_id`: UUID string of the target channel
     /// - `text`: rendered message body (must not be empty/whitespace-only)
     /// - `authored_text`: the workflow owner's stored, unrendered step template;
@@ -67,7 +79,7 @@ pub trait ActionSink: Send + Sync {
     /// Returns the event ID hex string on success.
     fn send_message(
         &self,
-        community_id: CommunityId,
+        context: WorkflowMessageContext,
         channel_id: &str,
         text: &str,
         authored_text: &str,

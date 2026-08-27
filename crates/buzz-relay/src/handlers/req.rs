@@ -227,18 +227,21 @@ pub async fn handle_req(
     // kinds) to harvest indexed-but-globally-stored sensitive events. Search
     // hits are looked up by event id and returned without the per-filter
     // post-check the historical-delivery branch applies, so the gate must run
-    // here, up front. Only applies to GLOBAL subscriptions (channel_id = None):
-    // channel-scoped subs can never receive globally-stored events because of
-    // the fan_out() invariant in subscription.rs.
+    // here, up front. P-gated authorization applies to every subscription;
+    // the other global-event gates below remain global-only.
+    // P-gated events require an exact authenticated recipient even when they
+    // are channel-scoped. Channel membership alone is not authority to observe
+    // another recipient's ephemeral workflow wake.
+    let authed_pubkey_hex = hex::encode(&pubkey_bytes);
+    if !p_gated_filters_authorized(&filters, &authed_pubkey_hex) {
+        conn.send(RelayMessage::closed(
+            &sub_id,
+            "restricted: p-gated events require #p matching your pubkey",
+        ));
+        return;
+    }
+
     if channel_id.is_none() {
-        let authed_pubkey_hex = hex::encode(&pubkey_bytes);
-        if !p_gated_filters_authorized(&filters, &authed_pubkey_hex) {
-            conn.send(RelayMessage::closed(
-                &sub_id,
-                "restricted: p-gated events require #p matching your pubkey",
-            ));
-            return;
-        }
         if !engram_filters_authorized(&filters, &authed_pubkey_hex) {
             conn.send(RelayMessage::closed(
                 &sub_id,

@@ -479,6 +479,55 @@ impl RestClient {
         .await
     }
 
+    /// Fetch the relay's advertised signing identity from NIP-11 `/info`.
+    pub async fn relay_signing_pubkey(&self) -> Result<nostr::PublicKey, RelayError> {
+        let url = format!("{}/info", self.base_url.trim_end_matches('/'));
+        let value: Value = self
+            .http
+            .get(&url)
+            .header("Accept", "application/nostr+json")
+            .send()
+            .await
+            .map_err(|error| RelayError::Http(error.to_string()))?
+            .json()
+            .await
+            .map_err(|error| RelayError::Http(error.to_string()))?;
+        let relay_self = value
+            .get("self")
+            .and_then(Value::as_str)
+            .ok_or_else(|| RelayError::Http("relay did not advertise a signing identity".into()))?;
+        nostr::PublicKey::from_hex(relay_self)
+            .map_err(|error| RelayError::Http(format!("invalid relay signing identity: {error}")))
+    }
+
+    async fn bridge_get(&self, path: &str) -> Result<reqwest::Response, RelayError> {
+        let url = format!("{}{}", self.base_url, path);
+        let auth_tag_header = self.auth_tag_json.clone();
+        self.request_with_retry("GET", path, || {
+            let auth = self.nip98_header("GET", &url, None).unwrap_or_default();
+            let mut request = self.http.get(&url).header("Authorization", auth);
+            if let Some(ref tag) = auth_tag_header {
+                request = request.header("x-auth-tag", tag);
+            }
+            request.send()
+        })
+        .await
+    }
+
+    /// Fetch one exact workflow-wake authority bundle.
+    pub async fn workflow_wake_authority(
+        &self,
+        run_id: uuid::Uuid,
+        message_id: &nostr::EventId,
+    ) -> Result<crate::workflow_wake::WorkflowWakeAuthority, RelayError> {
+        let path = format!("/workflow-wakes/{run_id}/{}", message_id.to_hex());
+        self.bridge_get(&path)
+            .await?
+            .json()
+            .await
+            .map_err(|error| RelayError::Http(error.to_string()))
+    }
+
     /// Query events via the HTTP bridge: `POST /query` with NIP-98 auth.
     ///
     /// Accepts a slice of `nostr::Filter` (serialized as JSON array).
@@ -3384,6 +3433,59 @@ async fn wait_for_reconnect(
 ///   history. On reconnect (`since` is `Some`) subtracts [`SINCE_SKEW_SECS`].
 ///
 /// Returns `true` if the REQ was successfully written to the WebSocket.
+fn build_channel_req(
+    sub_id: &str,
+    channel_id: Uuid,
+    agent_pubkey_hex: &str,
+    since_ts: u64,
+    filter: &ChannelFilter,
+) -> Value {
+    let mut req_filter = serde_json::Map::new();
+
+    // The recipient-gated wake kind always gets its own exact #p filter. This
+    // preserves `--no-mention-filter` for ordinary channel events without
+    // weakening wake recipient gating or causing the relay to reject the mixed
+    // subscription.
+    let wake_kind = buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE;
+    let includes_wake = filter
+        .kinds
+        .as_ref()
+        .is_some_and(|kinds| kinds.contains(&wake_kind));
+    let normal_kinds = filter.kinds.as_ref().map(|kinds| {
+        kinds
+            .iter()
+            .copied()
+            .filter(|kind| *kind != wake_kind)
+            .collect::<Vec<_>>()
+    });
+
+    if let Some(kinds) = normal_kinds.as_ref().filter(|kinds| !kinds.is_empty()) {
+        req_filter.insert("kinds".into(), json!(kinds));
+    }
+    req_filter.insert("#h".into(), json!([channel_id.to_string()]));
+    if filter.require_mention {
+        req_filter.insert("#p".into(), json!([agent_pubkey_hex]));
+    }
+    req_filter.insert("since".into(), json!(since_ts));
+
+    let mut req_filters = Vec::new();
+    if normal_kinds.as_ref().is_none_or(|kinds| !kinds.is_empty()) {
+        req_filters.push(Value::Object(req_filter));
+    }
+    if includes_wake {
+        let mut wake_filter = serde_json::Map::new();
+        wake_filter.insert("kinds".into(), json!([wake_kind]));
+        wake_filter.insert("#h".into(), json!([channel_id.to_string()]));
+        wake_filter.insert("#p".into(), json!([agent_pubkey_hex]));
+        wake_filter.insert("since".into(), json!(since_ts));
+        req_filters.push(Value::Object(wake_filter));
+    }
+
+    let mut req = vec![json!("REQ"), json!(sub_id)];
+    req.extend(req_filters);
+    Value::Array(req)
+}
+
 async fn send_subscribe(
     ws: &mut WsStream,
     _state: &BgState,
@@ -3393,24 +3495,6 @@ async fn send_subscribe(
     filter: &ChannelFilter,
 ) -> bool {
     let sub_id = channel_sub_id(channel_id);
-
-    let mut req_filter = serde_json::Map::new();
-
-    // kinds — omit entirely for wildcard subscriptions.
-    if let Some(ref kinds) = filter.kinds {
-        req_filter.insert("kinds".into(), json!(kinds));
-    }
-
-    // #h — always present (channel scope).
-    req_filter.insert("#h".into(), json!([channel_id.to_string()]));
-
-    // #p — only when require_mention is true.
-    if filter.require_mention {
-        req_filter.insert("#p".into(), json!([agent_pubkey_hex]));
-    }
-
-    // since — on first subscribe use current time to skip history; on reconnect
-    // subtract skew buffer to catch events missed during the disconnect window.
     let since_ts = match since {
         Some(ts) => ts.saturating_sub(SINCE_SKEW_SECS),
         None => std::time::SystemTime::now()
@@ -3418,9 +3502,7 @@ async fn send_subscribe(
             .unwrap_or_default()
             .as_secs(),
     };
-    req_filter.insert("since".into(), json!(since_ts));
-
-    let req = json!(["REQ", sub_id, Value::Object(req_filter)]);
+    let req = build_channel_req(&sub_id, channel_id, agent_pubkey_hex, since_ts, filter);
 
     match serde_json::to_string(&req) {
         Ok(text) => {
@@ -4361,6 +4443,38 @@ mod tests {
             .to_string()
             .contains("failed to fetch a usable NIP-11 document"));
         server.abort();
+    }
+
+    #[test]
+    fn workflow_wake_uses_exact_recipient_filter_when_mentions_are_disabled() {
+        let channel = Uuid::new_v4();
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let req = build_channel_req(
+            "sub",
+            channel,
+            &agent,
+            123,
+            &ChannelFilter {
+                kinds: Some(vec![
+                    buzz_core::kind::KIND_STREAM_MESSAGE,
+                    buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE,
+                ]),
+                require_mention: false,
+            },
+        );
+        let filters = req.as_array().expect("REQ array");
+        assert_eq!(filters.len(), 4);
+        assert_eq!(
+            filters[2]["kinds"],
+            json!([buzz_core::kind::KIND_STREAM_MESSAGE])
+        );
+        assert!(filters[2].get("#p").is_none());
+        assert_eq!(
+            filters[3]["kinds"],
+            json!([buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE])
+        );
+        assert_eq!(filters[3]["#p"], json!([agent]));
+        assert_eq!(filters[3]["#h"], json!([channel.to_string()]));
     }
 
     #[test]

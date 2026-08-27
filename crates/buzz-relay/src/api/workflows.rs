@@ -228,6 +228,96 @@ fn approval_json(approval: &buzz_db::workflow::ApprovalRecord) -> Value {
     })
 }
 
+/// `GET /workflow-wakes/{run_id}/{message_id}` — exact authority bundle for one wake.
+pub async fn workflow_wake_authority(
+    State(state): State<Arc<AppState>>,
+    Path((run_id, message_id)): Path<(Uuid, String)>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let path = format!("/workflow-wakes/{run_id}/{message_id}");
+    let raw_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let tenant = crate::tenant::bind_community(&state.db, raw_host)
+        .await
+        .map_err(|_| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
+    let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, &path);
+    let (recipient, auth_event_id) =
+        bridge::verify_bridge_auth(&headers, "GET", &url, None, state.config.require_auth_token)?;
+    bridge::enforce_http_admission(&state, &tenant, &recipient).await?;
+    bridge::check_nip98_replay(&state, &tenant, auth_event_id).await?;
+
+    let run = state
+        .db
+        .get_workflow_run(tenant.community(), run_id)
+        .await
+        .map_err(|_| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
+    let workflow = state
+        .db
+        .get_workflow(tenant.community(), run.workflow_id)
+        .await
+        .map_err(|_| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
+    let definition_id = run
+        .definition_event_id
+        .as_deref()
+        .filter(|id| id.len() == 32)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
+    let message_id = nostr::EventId::from_hex(&message_id)
+        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid message id"))?;
+    let definition = state
+        .db
+        .get_event_by_id(tenant.community(), definition_id)
+        .await
+        .map_err(|error| internal_error(&format!("workflow definition lookup: {error}")))?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
+    let message = state
+        .db
+        .get_event_by_id(tenant.community(), message_id.as_bytes())
+        .await
+        .map_err(|error| internal_error(&format!("workflow message lookup: {error}")))?
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
+
+    let recipient_hex = recipient.to_hex();
+    let exact_tag = |event: &nostr::Event, name: &str, value: &str| {
+        event.tags.iter().any(|tag| {
+            let values = tag.as_slice();
+            values.len() == 2 && values[0] == name && values[1].eq_ignore_ascii_case(value)
+        })
+    };
+    let message_channel = message
+        .channel_id
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
+    if workflow.owner_pubkey != definition.event.pubkey.to_bytes()
+        || workflow.channel_id != Some(message_channel)
+        || !exact_tag(&definition.event, "h", &message_channel.to_string())
+        || !exact_tag(&definition.event, "d", &run.workflow_id.to_string())
+        || !exact_tag(&message.event, "h", &message_channel.to_string())
+        || !message.event.tags.iter().any(|tag| {
+            let values = tag.as_slice();
+            values.len() == 2 && values[0] == "p" && values[1].eq_ignore_ascii_case(&recipient_hex)
+        })
+        || !exact_tag(&message.event, "workflow-run", &run_id.to_string())
+        || !exact_tag(
+            &message.event,
+            "workflow-definition",
+            &definition.event.id.to_hex(),
+        )
+    {
+        return Err(api_error(StatusCode::NOT_FOUND, "workflow wake not found"));
+    }
+
+    Ok(Json(serde_json::json!({
+        "run_id": run.id,
+        "channel_id": message_channel,
+        "workflow_id": run.workflow_id,
+        "definition_event_id": definition.event.id.to_hex(),
+        "workflow_owner": hex::encode(&workflow.owner_pubkey),
+        "definition": definition.event,
+        "message": message.event,
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
