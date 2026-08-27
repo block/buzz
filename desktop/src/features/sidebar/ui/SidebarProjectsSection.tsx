@@ -24,7 +24,8 @@ import {
   useProjectsQuery,
 } from "@/features/projects/hooks";
 import { listProjectChildChannels } from "@/features/projects/lib/projectRelatedChannels";
-import { isProjectOwnedByCurrentUser } from "@/features/projects/lib/projectsViewHelpers";
+import { canDeleteProject } from "@/features/projects/projectDeletion";
+import { useProjectOwnerProfiles } from "@/features/projects/useProjectOwnerProfiles";
 import { projectShareLink } from "@/features/projects/lib/projectShareLinks";
 import {
   addProjectToSidebar,
@@ -128,6 +129,7 @@ function SidebarProjectsSectionContent() {
   const projectsQuery = useProjectsQuery();
   const channelsQuery = useChannelsQuery();
   const identityQuery = useIdentityQuery();
+  const ownerProfiles = useProjectOwnerProfiles(projectsQuery.data ?? []);
   const currentPubkey = identityQuery.data?.pubkey;
   const { goChannel, goProject, goProjects } = useAppNavigation();
   const pathname = useLocation({ select: (location) => location.pathname });
@@ -311,9 +313,10 @@ function SidebarProjectsSectionContent() {
                 return (
                   <React.Fragment key={project.id}>
                     <SidebarProjectRow
-                      canDelete={isProjectOwnedByCurrentUser(
+                      canDelete={canDeleteProject(
                         project,
                         currentPubkey,
+                        ownerProfiles,
                       )}
                       childCount={childChannels.length}
                       deleteDisabled={deleteProjectMutation.isPending}

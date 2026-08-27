@@ -1206,6 +1206,8 @@ CREATE TABLE replica_heartbeat (
     id    smallint PRIMARY KEY CHECK (id = 1),
     epoch uuid     NOT NULL DEFAULT gen_random_uuid(),
     token bigint   NOT NULL DEFAULT 0
+) WITH (
+    vacuum_truncate = false
 );
 
 INSERT INTO replica_heartbeat (id) VALUES (1);
@@ -1800,7 +1802,7 @@ CREATE TABLE relay_admin_actions (
     cancelled_by    BYTEA CHECK (cancelled_by IS NULL OR length(cancelled_by) = 32),
     -- Error from the last failure, if any.
     error_message   TEXT,
-    -- Per-action exclusive lease (migration 0036): fences concurrent same-request
+    -- Per-action exclusive lease (migration 0037): fences concurrent same-request
     -- retries and lets the recovery worker claim/re-drive stranded actions.
     action_lease_token      UUID,
     action_lease_expires_at TIMESTAMPTZ,
@@ -1817,7 +1819,7 @@ CREATE INDEX idx_relay_admin_actions_report
 CREATE INDEX idx_relay_admin_actions_state
     ON relay_admin_actions (state)
     WHERE state IN ('pending', 'enforcing');
--- Recovery worker (migration 0036): find stranded actions by lease expiry.
+-- Recovery worker (migration 0037): find stranded actions by lease expiry.
 CREATE INDEX idx_relay_admin_actions_lease
     ON relay_admin_actions (action_lease_expires_at)
     WHERE state IN ('pending', 'enforcing');
@@ -1844,11 +1846,11 @@ CREATE TABLE relay_admin_outbox (
     -- Deduplication key: prevents re-creating an artifact after delivery.
     dedup_key   TEXT UNIQUE,
     error_message TEXT,
-    -- Retryable delivery with backoff (migration 0036): failures reschedule via
+    -- Retryable delivery with backoff (migration 0037): failures reschedule via
     -- retry_after rather than terminating immediately.
     attempt_count INT NOT NULL DEFAULT 0,
     retry_after   TIMESTAMPTZ,
-    -- Per-claim ownership fence (migration 0037): completion/failure updates
+    -- Per-claim ownership fence (migration 0038): completion/failure updates
     -- require the token written at claim time, so a stale worker cannot overwrite
     -- a newer worker's terminal update.
     outbox_claim_token UUID,

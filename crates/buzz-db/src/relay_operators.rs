@@ -1,6 +1,6 @@
 //! Deployment-global relay operator/moderator roster persistence.
 //!
-//! Backs the `relay_operators` table from `migrations/0034_relay_operators.sql`.
+//! Backs the `relay_operators` table from `migrations/0035_relay_operators.sql`.
 //!
 //! Config-backed operators (`RELAY_OPERATOR_PUBKEYS`, owner-fallback) are
 //! resolved at request time in the relay — this module only handles DB rows.

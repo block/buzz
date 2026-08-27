@@ -175,7 +175,11 @@ async fn reject_legacy_nip_rs_cardinality_ambiguity(conn: &mut PgConnection) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::{
+        collections::BTreeSet,
+        fs,
+        path::{Path, PathBuf},
+    };
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
@@ -685,7 +689,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 38);
+        assert_eq!(migrations.len(), 39);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1139,72 +1143,151 @@ mod tests {
             extract_roster_fence(desired_schema)
         );
 
+        // The single-row heartbeat table is updated continuously. Prevent
+        // autovacuum from truncating its heap so standby queries are not
+        // cancelled by the ACCESS EXCLUSIVE truncation lock replay.
         assert_eq!(migrations[33].version, 34);
-        let relay_operators = migrations[33].sql.as_str();
+        let heartbeat_vacuum = migrations[33].sql.as_str();
+        assert!(heartbeat_vacuum.contains("ALTER TABLE replica_heartbeat"));
+        assert!(heartbeat_vacuum.contains("vacuum_truncate = false"));
+        assert!(desired_schema.contains("vacuum_truncate = false"));
+
+        // pgschema intentionally reconciles DDL, not seed DML or table storage
+        // parameters. Its post-apply reconciliation must restore and verify
+        // both parts of the live heartbeat contract for fresh bootstraps.
+        let pgschema_reconciliation =
+            include_str!("../../../scripts/reconcile-schema-after-pgschema.sql");
+        assert!(pgschema_reconciliation
+            .contains("ALTER TABLE replica_heartbeat SET (vacuum_truncate = false)"));
+        assert!(pgschema_reconciliation.contains("INSERT INTO replica_heartbeat (id) VALUES (1)"));
+        assert!(pgschema_reconciliation.contains("ON CONFLICT (id) DO NOTHING"));
+        assert!(pgschema_reconciliation.contains("pg_class"));
+        assert!(pgschema_reconciliation.contains("reloptions"));
+
+        assert_eq!(migrations[34].version, 35);
+        let relay_operators = migrations[34].sql.as_str();
         assert!(
             relay_operators.contains("CREATE TABLE relay_operators"),
-            "migration 34 must create relay_operators"
+            "migration 35 must create relay_operators"
         );
         assert!(
             relay_operators.contains("_operator_global_tables"),
-            "migration 34 must register relay_operators in _operator_global_tables"
+            "migration 35 must register relay_operators in _operator_global_tables"
         );
         assert!(
             relay_operators.contains("actor_authority"),
-            "migration 34 must add actor_authority to moderation_actions"
+            "migration 35 must add actor_authority to moderation_actions"
         );
         assert!(
             relay_operators.contains("processing"),
-            "migration 34 must add processing status to moderation_reports"
-        );
-
-        assert_eq!(migrations[34].version, 35);
-        let relay_admin_actions = migrations[34].sql.as_str();
-        assert!(
-            relay_admin_actions.contains("CREATE TABLE relay_admin_actions"),
-            "migration 35 must create relay_admin_actions"
-        );
-        assert!(
-            relay_admin_actions.contains("CREATE TABLE relay_admin_outbox"),
-            "migration 35 must create relay_admin_outbox"
-        );
-        assert!(
-            relay_admin_actions.contains("request_id"),
-            "migration 35 relay_admin_actions must include request_id for idempotency"
-        );
-        assert!(
-            relay_admin_actions.contains("step_marker"),
-            "migration 35 relay_admin_actions must include step_marker for crash recovery"
+            "migration 35 must add processing status to moderation_reports"
         );
 
         assert_eq!(migrations[35].version, 36);
-        let action_lease = migrations[35].sql.as_str();
+        let relay_admin_actions = migrations[35].sql.as_str();
+        assert!(
+            relay_admin_actions.contains("CREATE TABLE relay_admin_actions"),
+            "migration 36 must create relay_admin_actions"
+        );
+        assert!(
+            relay_admin_actions.contains("CREATE TABLE relay_admin_outbox"),
+            "migration 36 must create relay_admin_outbox"
+        );
+        assert!(
+            relay_admin_actions.contains("request_id"),
+            "migration 36 relay_admin_actions must include request_id for idempotency"
+        );
+        assert!(
+            relay_admin_actions.contains("step_marker"),
+            "migration 36 relay_admin_actions must include step_marker for crash recovery"
+        );
+
+        assert_eq!(migrations[36].version, 37);
+        let action_lease = migrations[36].sql.as_str();
         assert!(
             action_lease.contains("action_lease_token"),
-            "migration 36 must add action_lease_token to relay_admin_actions"
+            "migration 37 must add action_lease_token to relay_admin_actions"
         );
         assert!(
             action_lease.contains("action_lease_expires_at"),
-            "migration 36 must add action_lease_expires_at to relay_admin_actions"
+            "migration 37 must add action_lease_expires_at to relay_admin_actions"
         );
         assert!(
             action_lease.contains("attempt_count"),
-            "migration 36 must add attempt_count to relay_admin_outbox"
+            "migration 37 must add attempt_count to relay_admin_outbox"
         );
         assert!(
             action_lease.contains("retry_after"),
-            "migration 36 must add retry_after to relay_admin_outbox"
+            "migration 37 must add retry_after to relay_admin_outbox"
         );
 
-        assert_eq!(migrations[37].version, 38);
-        let operator_audit = migrations[37].sql.as_str();
+        assert_eq!(migrations[38].version, 39);
+        let operator_audit = migrations[38].sql.as_str();
         assert!(
             operator_audit.contains("CREATE TABLE relay_operator_audit"),
-            "migration 38 must create relay_operator_audit"
+            "migration 39 must create relay_operator_audit"
         );
         assert!(
             operator_audit.contains("_operator_global_tables"),
-            "migration 38 must register relay_operator_audit in _operator_global_tables"
+            "migration 39 must register relay_operator_audit in _operator_global_tables"
+        );
+    }
+
+    #[test]
+    fn every_pgschema_apply_runs_post_apply_reconciliation() {
+        fn files_under(root: &Path) -> Vec<PathBuf> {
+            let mut pending = vec![root.to_owned()];
+            let mut files = Vec::new();
+
+            while let Some(path) = pending.pop() {
+                for entry in fs::read_dir(&path)
+                    .unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()))
+                {
+                    let path = entry.expect("directory entry").path();
+                    if path.is_dir() {
+                        pending.push(path);
+                    } else {
+                        files.push(path);
+                    }
+                }
+            }
+
+            files
+        }
+
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let roots = [
+            repo_root.join("scripts"),
+            repo_root.join(".github/workflows"),
+        ];
+        let mut apply_count = 0;
+
+        for path in roots.iter().flat_map(|root| files_under(root)) {
+            let Ok(contents) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let lines: Vec<_> = contents.lines().collect();
+
+            for (index, line) in lines.iter().enumerate() {
+                if !line.contains("./bin/pgschema apply") {
+                    continue;
+                }
+
+                apply_count += 1;
+                let following_lines = &lines[index + 1..(index + 7).min(lines.len())];
+                assert!(
+                    following_lines.iter().any(|line| line.contains(
+                        "scripts/reconcile-schema-after-pgschema.sql"
+                    )),
+                    "{} must run scripts/reconcile-schema-after-pgschema.sql immediately after pgschema apply",
+                    path.display()
+                );
+            }
+        }
+
+        assert!(
+            apply_count > 0,
+            "expected at least one pgschema apply caller"
         );
     }
 
@@ -2098,9 +2181,9 @@ mod tests {
             .await
             .expect("connect migrated probe database");
         MIGRATOR
-            .run_to(38, &migrated)
+            .run_to(39, &migrated)
             .await
-            .expect("apply migrations 1-38");
+            .expect("apply migrations 1-39");
 
         for table in [
             "relay_admin_actions",
