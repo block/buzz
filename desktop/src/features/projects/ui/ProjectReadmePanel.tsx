@@ -4,19 +4,21 @@ import {
   ExternalLink,
   Globe,
   Loader2,
+  MessageCircle,
 } from "lucide-react";
 
 import type { ProjectRepoFile } from "@/features/projects/hooks";
 import { projectExternalRefUrl } from "@/features/projects/lib/projectExternalUrl";
 import type { ProjectRepoUnavailableReason } from "@/features/projects/lib/projectRepoAvailability";
+import { formatLastChangedAt } from "@/features/projects/lib/projectsViewHelpers";
 import { Button } from "@/shared/ui/button";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import { Markdown, SyntaxHighlightedCode } from "@/shared/ui/markdown";
+import { baseName, languageForPath } from "./ProjectRepositoryPanel";
 import {
-  baseName,
-  formatLastChangedAt,
-  languageForPath,
-} from "./ProjectRepositoryPanel";
+  type RepositoryFileContentSource,
+  useRepositoryFileContent,
+} from "./useRepositoryFileContent";
 import {
   type RepoSourceHeaderControls,
   RepoSourceDropdown,
@@ -25,6 +27,7 @@ import {
 } from "./ProjectRepositorySource";
 import { GitHubMark } from "./GitHubMark";
 import { ProjectRepositoryUnavailableState } from "./ProjectRepositoryUnavailableState";
+import { ProjectPanelState } from "./ProjectPanelState";
 
 export function findReadmeFile(files: ProjectRepoFile[]) {
   const readmes = files.filter((file) =>
@@ -91,6 +94,7 @@ function normalizeReadmeMarkdown(content: string) {
 export function ReadmePanel({
   accessChannelId,
   file,
+  fileContentSource,
   gitDataState,
   externalHost,
   externalUrl,
@@ -104,6 +108,7 @@ export function ReadmePanel({
   /** `buzz-channel` binding of the repository, for access-restricted copy. */
   accessChannelId?: string | null;
   file: ProjectRepoFile | null;
+  fileContentSource?: RepositoryFileContentSource;
   gitDataState: "checking" | "available" | "empty" | "unavailable";
   externalHost?: string;
   externalUrl?: string | null;
@@ -119,6 +124,7 @@ export function ReadmePanel({
   /** Branch picker + remote/local toggle rendered in the panel header. */
   sourceControls?: RepoSourceHeaderControls;
 }) {
+  const fileContent = useRepositoryFileContent(file, fileContentSource);
   const externalOpenUrl = projectExternalRefUrl(
     externalUrl,
     sourceControls?.selectedTag ?? sourceControls?.branch,
@@ -246,15 +252,47 @@ export function ReadmePanel({
     );
   }
 
-  if (!file?.previewContent) {
+  if (fileContent.isLoading) {
     return (
       <section className="overflow-hidden">
         {header}
-        <div className="p-6 text-sm text-muted-foreground">
-          {gitDataState === "empty"
-            ? "No files have been pushed to this repository yet."
-            : "Add a README to this repository to describe setup, usage, and project context."}
-        </div>
+        <BuzzLoadingState label="Loading README" />
+      </section>
+    );
+  }
+
+  if (!file || !fileContent.content) {
+    const loadError = Boolean(fileContent.error);
+    const emptyRepository = gitDataState === "empty";
+    return (
+      <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        {header}
+        <ProjectPanelState
+          action={
+            sourceControls?.onAskForAccess ? (
+              <Button onClick={sourceControls.onAskForAccess} size="sm">
+                <MessageCircle className="h-4 w-4" />
+                Chat with an agent
+              </Button>
+            ) : undefined
+          }
+          description={
+            loadError
+              ? "Refresh the repository or ask an agent to investigate."
+              : emptyRepository
+                ? "Ask an agent to create the initial codebase or connect an existing repository."
+                : "Add a README to describe setup, usage, and project context."
+          }
+          error={loadError}
+          panel={false}
+          title={
+            loadError
+              ? "Could not load the README"
+              : emptyRepository
+                ? "No files have been pushed yet"
+                : "No README yet"
+          }
+        />
       </section>
     );
   }
@@ -262,31 +300,33 @@ export function ReadmePanel({
   const language = languageForPath(file.path);
   const isMarkdown = /\.(?:md|markdown|mdx)$/i.test(file.path);
   const readmeContent = isMarkdown
-    ? normalizeReadmeMarkdown(file.previewContent)
-    : file.previewContent;
+    ? normalizeReadmeMarkdown(fileContent.content)
+    : fileContent.content;
 
   return (
     <section className="overflow-hidden">
       {header}
-      <div className="p-4">
+      <div className="min-w-0 px-8 py-6">
         {isMarkdown ? (
           <Markdown
+            blockCode
             className="text-sm"
             content={readmeContent}
+            hardLineBreaks={false}
             interactive={false}
           />
         ) : language ? (
           <pre className="overflow-x-auto bg-muted/40 p-4">
             <SyntaxHighlightedCode
               className="text-xs leading-relaxed"
-              code={file.previewContent}
+              code={fileContent.content}
               language={language}
             />
           </pre>
         ) : (
           <pre className="overflow-x-auto bg-muted/40 p-4">
             <code className="block min-w-full whitespace-pre font-mono text-xs leading-relaxed text-foreground">
-              {file.previewContent}
+              {fileContent.content}
             </code>
           </pre>
         )}

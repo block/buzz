@@ -363,3 +363,56 @@ test("test_pageless_live_projection_preserves_cached_timeline", () => {
   assert.deepEqual(contents(harness), ["initial", "live"]);
   assert.equal(harness.client.getQueryData(harness.messagesKey)[0], cached[0]);
 });
+
+test("test_concurrent_refreshes_after_seeded_snapshot_share_one_authoritative_fetch", async () => {
+  // Subscribe settlement and a reconnect can both call the helper while the
+  // channel query is still parked on its hydration-seeded snapshot. Both wake
+  // on the same promise; the second invalidation must join the first
+  // authoritative fetch, not cancel and replace it (Max/Wren, #6572 review).
+  const harness = createHarness();
+  const seeded = event("seeded", 100);
+  harness.client.setQueryData(harness.messagesKey, [seeded], { updatedAt: 0 });
+  const requests = [];
+  const observer = new QueryObserver(harness.client, {
+    queryKey: harness.messagesKey,
+    queryFn: async ({ signal }) => {
+      const previousMessages = harness.client.getQueryData(harness.messagesKey);
+      let resolveFetch;
+      const fetch = new Promise((resolve) => {
+        resolveFetch = resolve;
+      });
+      requests.push({ resolveFetch, signal });
+      const events = await fetch;
+      return reconcileFetchedChannelWindow(
+        harness.client,
+        harness.channelId,
+        events,
+        previousMessages,
+        signal,
+      );
+    },
+  });
+  const unsubscribe = observer.subscribe(() => {});
+  try {
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(requests.length, 1);
+    const first = refreshChannelWindowMessages(
+      harness.client,
+      harness.channelId,
+    );
+    const second = refreshChannelWindowMessages(
+      harness.client,
+      harness.channelId,
+    );
+    requests[0].resolveFetch(wirePage([seeded]));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(requests.length, 2);
+    requests[1].resolveFetch(wirePage([event("gap", 110), seeded]));
+    await Promise.all([first, second]);
+    assert.equal(requests.length, 2);
+    assert.equal(requests[1].signal.aborted, false);
+    assert.deepEqual(contents(harness), ["seeded", "gap"]);
+  } finally {
+    unsubscribe();
+  }
+});

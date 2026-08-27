@@ -3,6 +3,7 @@ import type { ProjectRepoUnavailableReason } from "@/features/projects/lib/proje
 import type * as React from "react";
 import { cn } from "@/shared/lib/cn";
 import { ReadmePanel } from "./ProjectReadmePanel";
+import type { RepositoryFileContentSource } from "./useRepositoryFileContent";
 import type { RepoSourceHeaderControls } from "./ProjectRepositorySource";
 
 type ProjectOverviewPanelProps = {
@@ -10,6 +11,7 @@ type ProjectOverviewPanelProps = {
   accessChannelId?: string | null;
   externalHost?: string;
   externalUrl?: string | null;
+  fileContentSource?: RepositoryFileContentSource;
   gitDataState: GitDataState;
   /** Hide the readme header rows when the workspace renders them itself. */
   hideReadmeHeader?: boolean;
@@ -49,6 +51,7 @@ export function ProjectOverviewPanel({
   accessChannelId,
   externalHost,
   externalUrl,
+  fileContentSource,
   gitDataState,
   hideReadmeHeader,
   ownerAvatarUrl,
@@ -59,7 +62,7 @@ export function ProjectOverviewPanel({
   unavailableReason,
 }: ProjectOverviewPanelProps) {
   return (
-    <div className="min-w-0">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       {/* ReadmePanel renders its own "no README" fallback while keeping
           repository recovery actions reachable. */}
       <ReadmePanel
@@ -67,6 +70,7 @@ export function ProjectOverviewPanel({
         externalHost={externalHost}
         externalUrl={externalUrl}
         file={readmeFile}
+        fileContentSource={fileContentSource}
         gitDataState={gitDataState}
         hideHeader={hideReadmeHeader}
         ownerAvatarUrl={ownerAvatarUrl}

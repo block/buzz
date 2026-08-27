@@ -53,6 +53,7 @@ import '../../shared/read_state/read_state_time.dart';
 import 'unread_badge/observed_unread_event.dart';
 
 part 'channels_page/body.dart';
+part 'channels_page/browse_channels_sheet.dart';
 part 'channels_page/sections.dart';
 part 'channels_page/channel_tile.dart';
 part 'channels_page/sheets.dart';
@@ -62,7 +63,7 @@ part 'channels_page/community.dart';
 part 'channels_page/quick_actions.dart';
 part 'channels_page/quick_actions_launcher.dart';
 
-enum _QuickAction { createChannel, newDm }
+enum _QuickAction { createChannel, newDm, browseChannels }
 
 const double _kChannelSectionInset = Grid.gutter;
 const double _kChannelLeadingWidth = 22.0;
@@ -86,7 +87,8 @@ const double _kChannelLabelInset =
 /// sections while the labels stay on [_kChannelLabelInset].
 const double _kDmAvatarSize = _kChannelIconSize;
 
-const double _kTopSectionAvatarSize = 40.0;
+const double _kTopSectionCommunityAvatarSize = 40.0;
+const double _kTopSectionProfileAvatarSize = 36.0;
 const double _kTopSectionBottomPadding = Grid.xxs;
 
 /// The top section's avatars are 40dp circles, which fill their box edge to
@@ -333,6 +335,7 @@ class ChannelsPage extends HookConsumerWidget {
             : 20,
         showBottomDivider: false,
         leading: _CommunityIndicator(onTap: openCommunitySwitcher),
+        centerTitle: false,
         titleStyle: headerTitleStyle,
         title: _CommunityHeaderTitle(
           style: headerTitleStyle,
@@ -344,7 +347,8 @@ class ChannelsPage extends HookConsumerWidget {
             height: Grid.xl,
             child: Center(
               child: ProfileAvatar(
-                size: _kTopSectionAvatarSize,
+                size: _kTopSectionProfileAvatarSize,
+                showPresence: false,
                 onTap: () {
                   unawaited(HapticFeedback.lightImpact());
                   final route = _SettingsPageRoute(
@@ -390,8 +394,8 @@ class _SettingsPageRoute extends PageRouteBuilder<void> {
          transitionsBuilder: _buildSettingsTransition,
          opaque: false,
          allowSnapshotting: false,
-         transitionDuration: const Duration(milliseconds: 220),
-         reverseTransitionDuration: const Duration(milliseconds: 190),
+         transitionDuration: const Duration(milliseconds: 150),
+         reverseTransitionDuration: const Duration(milliseconds: 150),
        );
 
   final ValueChanged<double> onTransitionProgress;

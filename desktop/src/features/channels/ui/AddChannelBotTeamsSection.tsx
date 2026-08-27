@@ -143,7 +143,7 @@ export function AddChannelBotTeamsSection({
                   <div className="space-y-1.5">
                     <p className="font-medium">{team.name}</p>
                     {team.description ? (
-                      <p className="text-2xs text-primary-foreground/80">
+                      <p className="text-2xs text-secondary-foreground/80">
                         {team.description}
                       </p>
                     ) : null}
@@ -153,15 +153,17 @@ export function AddChannelBotTeamsSection({
                           inChannelPersonaIds?.has(persona.id) ?? false;
                         return (
                           <div
-                            className="flex items-center gap-1 rounded-full bg-primary-foreground/10 px-1.5 py-0.5"
+                            className="flex items-center gap-1 rounded-full bg-secondary-foreground/10 px-1.5 py-0.5"
+                            data-testid="team-tooltip-persona-chip"
                             key={persona.id}
                           >
                             <ProfileAvatar
                               avatarUrl={persona.avatarUrl}
-                              className="h-4 w-4 text-3xs bg-primary-foreground/20 text-primary-foreground"
+                              className="h-4 w-4 text-3xs bg-secondary-foreground/20 text-secondary-foreground"
                               label={persona.displayName}
+                              testId="team-tooltip-persona-avatar"
                             />
-                            <span className="text-2xs text-primary-foreground">
+                            <span className="text-2xs text-secondary-foreground">
                               {persona.displayName}
                             </span>
                             {personaInChannel ? (

@@ -16,6 +16,7 @@ import 'channels_provider.dart';
 
 export 'channel_metadata_updates.dart';
 
+part 'channel_huddle_actions.dart';
 part 'channel_management_actions.dart';
 
 String _relayErrorMessage(Object error) =>
@@ -487,7 +488,11 @@ final channelDetailsProvider = FutureProvider.family<ChannelDetails, String>((
 /// Channel members from kind:39002 NIP-29 members event.
 final channelMembersProvider = FutureProvider.autoDispose
     .family<List<ChannelMember>, String>((ref, channelId) async {
-      ref.watch(channelMembershipUpdateProvider(channelId));
+      ref.watch(
+        channelMembershipUpdateProvider(
+          channelId,
+        ).select((update) => update.version),
+      );
       final relayBaseUrl = ref.watch(relayConfigProvider).baseUrl;
       final pubkey = ref.watch(myPubkeyProvider)?.toLowerCase();
       final snapshotCache = ref.read(_channelMembersSnapshotCacheProvider);

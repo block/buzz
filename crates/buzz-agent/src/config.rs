@@ -479,6 +479,18 @@ pub struct Config {
     /// Set via `BUZZ_AGENT_MAX_HANDOFFS`. Default 10.
     pub max_handoffs: usize,
     pub max_parallel_tools: usize,
+    /// Process-wide cap on simultaneously-outstanding `session/request_permission`
+    /// asks. Bounds the [`PermissionBroker`](crate::permission::PermissionBroker)
+    /// correlation map independently of the per-turn tool semaphore (which is
+    /// fresh per turn) and of `max_sessions` (unbounded by default). Default 32.
+    /// Set via `BUZZ_AGENT_MAX_PENDING_PERMISSIONS`; validated `>= 1`.
+    pub max_pending_permissions: usize,
+    /// Single absolute deadline for a permission ask — shared by broker
+    /// admission and the response wait, so a saturated call cannot live for two
+    /// full timeout windows. Default 330s, chosen to outlast the client's 300s
+    /// auto-deny so the answer (or auto-deny) lands first. Set via
+    /// `BUZZ_AGENT_PERMISSION_TIMEOUT_SECS`; validated `>= 1`.
+    pub permission_timeout: Duration,
     pub hook_timeout: Duration,
     /// Maximum `_Stop` rejections per prompt. Default 3. Set to 0 to
     /// disable `_Stop` hooks entirely (agent always honors end_turn).
@@ -622,6 +634,11 @@ impl Config {
             max_context_tokens: parse_env("BUZZ_AGENT_MAX_CONTEXT_TOKENS", 200_000u64)?,
             max_handoffs: parse_env("BUZZ_AGENT_MAX_HANDOFFS", 10)?,
             max_parallel_tools: parse_env("BUZZ_AGENT_MAX_PARALLEL_TOOLS", 8usize)?,
+            max_pending_permissions: parse_env("BUZZ_AGENT_MAX_PENDING_PERMISSIONS", 32usize)?,
+            permission_timeout: Duration::from_secs(parse_env(
+                "BUZZ_AGENT_PERMISSION_TIMEOUT_SECS",
+                330u64,
+            )?),
             hook_timeout: Duration::from_millis(parse_env("BUZZ_AGENT_HOOK_TIMEOUT_MS", 2500u64)?),
             stop_max_rejections: parse_env("BUZZ_AGENT_STOP_MAX_REJECTIONS", 3u32)?,
             require_reply: parse_env("BUZZ_AGENT_REQUIRE_REPLY", 0u8)? != 0,
@@ -668,6 +685,8 @@ impl Config {
             max_context_tokens: 200_001,
             max_handoffs: 0,
             max_parallel_tools: 1,
+            max_pending_permissions: 32,
+            permission_timeout: Duration::from_secs(330),
             hook_timeout: Duration::from_secs(1),
             stop_max_rejections: 0,
             require_reply: false,
@@ -728,6 +747,12 @@ impl Config {
         }
         if self.max_parallel_tools < 1 {
             return Err("config: BUZZ_AGENT_MAX_PARALLEL_TOOLS must be >= 1".into());
+        }
+        if self.max_pending_permissions < 1 {
+            return Err("config: BUZZ_AGENT_MAX_PENDING_PERMISSIONS must be >= 1".into());
+        }
+        if self.permission_timeout < MIN_TIMEOUT {
+            return Err("config: BUZZ_AGENT_PERMISSION_TIMEOUT_SECS must be >= 1".into());
         }
         if self.mcp_max_restart_attempts < 1 {
             return Err("config: BUZZ_AGENT_MCP_RESTART_MAX_ATTEMPTS must be >= 1".into());

@@ -3,6 +3,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'app.dart';
+import 'features/invites/invite_join_provider.dart';
 import 'shared/theme/theme_provider.dart';
 
 void main() async {
@@ -13,7 +14,13 @@ void main() async {
 
   runApp(
     ProviderScope(
-      overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+      overrides: [
+        savedPrefsProvider.overrideWithValue(prefs),
+        inviteJoinRecoveryProvider.overrideWith(
+          (ref) =>
+              (scope) => buildMobileInviteJoinRecovery(ref, scope),
+        ),
+      ],
       child: const App(),
     ),
   );

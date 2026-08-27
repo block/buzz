@@ -7,7 +7,7 @@ description: |
   PostgreSQL and Redis. Configurable for single-node evaluation
   (subcharts on) and HA production (external services, existingSecret).
 type: application
-version: 0.1.7
+version: 0.1.8
 appVersion: "0.1.0"
 home: https://github.com/block/buzz
 sources:
@@ -24,7 +24,7 @@ maintainers:
 annotations:
   artifacthub.io/changes: |
     - kind: added
-      description: Generic init-container, volume, volume-mount, command, and args extension points for the relay Pod.
+      description: Optional immutable relay image digest pinning with backwards-compatible tag fallback.
   artifacthub.io/license: Apache-2.0
 
 # Optional eval-only subcharts. Production deploys disable both and point

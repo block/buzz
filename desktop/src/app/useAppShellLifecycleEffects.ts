@@ -42,33 +42,13 @@ export function useAppShellLifecycleEffects({
 
   React.useEffect(() => {
     let isCancelled = false;
-
-    const startPreconnect = () => {
-      if (isCancelled) {
-        return;
+    void relayClient.preconnect().catch((error) => {
+      if (!isCancelled) {
+        console.error("Failed to preconnect to relay", error);
       }
-
-      void relayClient.preconnect().catch((error) => {
-        if (!isCancelled) {
-          console.error("Failed to preconnect to relay", error);
-        }
-      });
-    };
-
-    if ("requestIdleCallback" in window) {
-      const idleId = window.requestIdleCallback(startPreconnect, {
-        timeout: 1_500,
-      });
-      return () => {
-        isCancelled = true;
-        window.cancelIdleCallback(idleId);
-      };
-    }
-
-    const timeoutId = globalThis.setTimeout(startPreconnect, 250);
+    });
     return () => {
       isCancelled = true;
-      globalThis.clearTimeout(timeoutId);
     };
   }, []);
 

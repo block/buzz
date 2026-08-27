@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use nostr::Event;
-use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, Row, Transaction};
 use uuid::Uuid;
 
 use buzz_core::kind::{
@@ -70,6 +70,9 @@ pub struct EventQuery {
     /// Restrict results to events with an `e` tag referencing any of these event IDs (hex).
     /// Uses JSONB containment (`tags @> ...`) against the `tags` column.
     pub e_tags: Option<Vec<String>>,
+    /// Restrict results to events with an exact custom tag pair.
+    /// Uses JSONB containment against `tags` before SQL `LIMIT`.
+    pub custom_tag: Option<(String, String)>,
     /// Restrict results to events in any of these channels. By default,
     /// channel-less global events are retained so this can enforce a viewer's
     /// accessible-channel scope without hiding global events. Set
@@ -128,6 +131,7 @@ impl EventQuery {
             authors: None,
             ids: None,
             e_tags: None,
+            custom_tag: None,
             channel_ids: None,
             channel_ids_include_global: true,
             max_limit: None,
@@ -276,6 +280,30 @@ pub async fn insert_event(
     event: &Event,
     channel_id: Option<Uuid>,
 ) -> Result<(StoredEvent, bool)> {
+    let mut connection = pool.acquire().await?;
+    insert_event_on(&mut connection, community_id, event, channel_id).await
+}
+
+/// Insert a Nostr event in a caller-owned PostgreSQL transaction.
+///
+/// This is the transaction-composition seam for callers that must keep the
+/// event insert open while performing related work. The caller owns commit or
+/// rollback.
+pub async fn insert_event_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Option<Uuid>,
+) -> Result<(StoredEvent, bool)> {
+    insert_event_on(tx.as_mut(), community_id, event, channel_id).await
+}
+
+async fn insert_event_on(
+    connection: &mut PgConnection,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Option<Uuid>,
+) -> Result<(StoredEvent, bool)> {
     let kind_u16 = event.kind.as_u16();
     let kind_u32 = u32::from(kind_u16);
 
@@ -317,7 +345,7 @@ pub async fn insert_event(
     .bind(channel_id)
     .bind(d_tag.as_deref())
     .bind(not_before)
-    .execute(pool)
+    .execute(connection)
     .await?;
 
     let was_inserted = result.rows_affected() > 0;
@@ -495,6 +523,12 @@ pub(crate) async fn query_events_on(
             }
             qb.push(")");
         }
+    }
+
+    if let Some((ref name, ref value)) = q.custom_tag {
+        let containment = serde_json::json!([[name, value]]);
+        qb.push(format!(" AND {col_prefix}tags @> "))
+            .push_bind(containment);
     }
 
     if let Some(s) = q.since {
@@ -1605,6 +1639,31 @@ mod tests {
         .await
         .expect("insert test channel");
         id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn event_insert_in_existing_transaction_rolls_back_with_caller() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let event = make_text_event("caller-owned transaction");
+
+        let mut tx = pool.begin().await.expect("begin event insert transaction");
+        let (_, was_inserted) = insert_event_in_transaction(&mut tx, community, &event, None)
+            .await
+            .expect("insert event in caller transaction");
+        assert!(was_inserted);
+        tx.rollback().await.expect("roll back event insert");
+
+        let persisted: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community_uuid)
+                .bind(event.id.as_bytes().as_slice())
+                .fetch_one(&pool)
+                .await
+                .expect("count rolled-back event");
+        assert_eq!(persisted, 0);
     }
 
     #[tokio::test]

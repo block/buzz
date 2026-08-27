@@ -43,6 +43,7 @@ bootstrap:
         cp .env.example .env
         echo "Created .env from .env.example — review it before running just dev."
     fi
+    ./scripts/ensure-local-relay-key.sh .env
 
 # Start Docker services, run migrations, install desktop deps
 setup: bootstrap
@@ -92,7 +93,12 @@ build-release:
     cargo build --workspace --release
 
 # Run repo lint, formatting, and repository policy checks
-check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check file-size-check
+check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check security-review-check file-size-check
+
+# Validate the trusted security-review workflow support and renderer contract.
+security-review-check:
+    node --check .github/scripts/codex-security-review.js
+    node --test .github/scripts/codex-security-review.test.js
 
 # Run the repository-wide differential file-size ratchet and its policy tests.
 # The ratchet inspects only files changed from the merge base, so this stays
@@ -307,6 +313,7 @@ test:
 test-unit:
     #!/usr/bin/env bash
     set -euo pipefail
+    ./scripts/test-ensure-local-relay-key.sh
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
         cargo nextest run -p buzz-voice --lib
@@ -335,7 +342,7 @@ test-unit:
         # buzz-agent model-capabilities corpus: the Rust half of the
         # cross-language drift guard. `model_capabilities.rs` embeds
         # scripts/model-capabilities.json + scripts/normative-corpus.json via
-        # include_str! and replays all 103 vectors as pure in-process tests (no
+        # include_str! and replays the full locked corpus as pure in-process tests (no
         # infra). Enumerated explicitly because nothing in CI runs
         # `cargo test --workspace`; without this step a manifest edit that
         # diverges Rust from the corpus ships green.
@@ -423,6 +430,9 @@ relay: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     cargo run -p buzz-relay
 
 # Start the relay with the built web UI served from it
@@ -430,6 +440,9 @@ relay-web: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     [[ -d node_modules ]] || pnpm install
     pnpm -C web build
     BUZZ_WEB_DIR=./web/dist cargo run -p buzz-relay
@@ -439,6 +452,9 @@ admin: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     [[ -d node_modules ]] || pnpm install
     pnpm -C admin-web build
     export BUZZ_ADMIN_HOST="${BUZZ_ADMIN_HOST:-admin.localhost:3000}"
@@ -459,7 +475,12 @@ admin-check: fmt-check
     pnpm -C admin-web exec playwright test
 
 # Start the relay server in release mode
-relay-release: _ensure-migrations
+relay-release: bootstrap _ensure-migrations
+    #!/usr/bin/env bash
+    set -euo pipefail
+    set -o allexport
+    source .env
+    set +o allexport
     cargo run -p buzz-relay --release
 
 
@@ -468,6 +489,9 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     bind_addr="${BUZZ_BIND_ADDR:-0.0.0.0:3000}"
     relay_port="${bind_addr##*:}"; [[ -n "$relay_port" ]] || relay_port=3000
     health_port="${BUZZ_HEALTH_PORT:-8080}"
@@ -988,13 +1012,38 @@ goose-bg relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BU
 
 # ─── Benchmarking ─────────────────────────────────────────────────────────────
 
-# Run the Buzz orchestra benchmark — leaderboard-eligible by default (TB 2.1, k=5, Sonnet+Haiku). Stands up its own Docker stack; --gui opens a live spectator desktop app; other flags pass to benchmark.py (--dataset/--path, --include-task, --attempts, --manifest, --dry-run, ...)
+# Run the Buzz orchestra benchmark — TB defaults to leaderboard-eligible k=5; Buzz task layers default to regression k=1 and workflow k=3. Stands up its own Docker stack; --gui opens a live spectator desktop app; other flags pass to benchmark.py (--dataset/--path, --layer, --include-task, --attempts, --manifest, --dry-run, ...)
 benchmark *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
     uv run --project benchmarks/harbor-buzz-orchestra/testbed \
         benchmarks/harbor-buzz-orchestra/scripts/benchmark.py {{ARGS}}
+
+# Run the benchmark adapter + testbed gate exactly as CI does (pytest + ruff, pinned ruff from pyproject)
+benchmark-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}/benchmarks/harbor-buzz-orchestra"
+    # CI installs the dev extra with pip, so pyproject — not uv.lock — decides
+    # which ruff lints. Read the pin from there so this recipe cannot drift
+    # from the workflow (a floating specifier once meant CI failed on RUF100
+    # while the locked local ruff passed).
+    ruff_pin="$(grep -oE 'ruff==[0-9.]+' pyproject.toml | head -1 | cut -d= -f3)"
+    for project in . testbed; do
+        (
+            cd "$project"
+            echo "── harbor-buzz-orchestra/$project (ruff $ruff_pin)"
+            uv run --frozen pytest -q
+            uvx "ruff@$ruff_pin" check .
+            uvx "ruff@$ruff_pin" format --check .
+        )
+    done
+    # The task verifiers live in the sibling benchmarks/buzz-dataset, so they
+    # need the harness config passed explicitly to stay linted.
+    echo "── buzz-dataset (ruff $ruff_pin)"
+    uvx "ruff@$ruff_pin" check --config pyproject.toml ../buzz-dataset
+    uvx "ruff@$ruff_pin" format --check --config pyproject.toml ../buzz-dataset
 
 # Stop the benchmark Docker stack (state and channels are kept)
 benchmark-down:

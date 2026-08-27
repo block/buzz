@@ -30,7 +30,7 @@ type AppSidebarPinnedHeaderProps = {
   onCreateAgent: () => void;
   onCreateChannel: () => void;
   onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
-  onOpenSearchResult: (hit: SearchHit) => void;
+  onOpenSearchResult: (hit: SearchHit, query: string) => void;
   onSelectChannel: (channelId: string) => void;
   searchChannels: Channel[];
   searchFocusRequest: number;
@@ -45,6 +45,7 @@ type AppSidebarPrimaryMenuProps = {
   onSelectProjects: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
+  projectsOverviewActive: boolean;
   selectedView: SidebarSelectedView;
 };
 
@@ -94,6 +95,7 @@ export function AppSidebarPrimaryMenu({
   onSelectProjects,
   onSelectPulse,
   onSelectWorkflows,
+  projectsOverviewActive,
   selectedView,
 }: AppSidebarPrimaryMenuProps) {
   return (
@@ -142,7 +144,7 @@ export function AppSidebarPrimaryMenu({
             <SidebarMenuItem>
               <SidebarMenuButton
                 data-testid="open-projects-view"
-                isActive={selectedView === "projects"}
+                isActive={selectedView === "projects" && projectsOverviewActive}
                 onClick={onSelectProjects}
                 tooltip="Projects"
                 type="button"

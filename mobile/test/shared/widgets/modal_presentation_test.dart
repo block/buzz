@@ -80,6 +80,141 @@ void main() {
     },
   );
 
+  testWidgets(
+    'native surfaces can limit concentric clipping to bottom corners',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      const surfaceChannel = MethodChannel('buzz/concentric_sheet_surface');
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        surfaceChannel,
+        (call) async => call.method == 'isSupported' ? true : null,
+      );
+      try {
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: AppTheme.light(),
+            home: const ConcentricSheetSurface(
+              enabled: true,
+              color: Colors.red,
+              backdropColor: Colors.black,
+              corners: ConcentricSurfaceCorners.bottom,
+              padding: EdgeInsets.zero,
+              providesSheetSurface: false,
+              child: SizedBox(height: 80, child: Text('App surface')),
+            ),
+          ),
+        );
+        await tester.pump();
+
+        final nativeSurface = tester.widget<UiKitView>(find.byType(UiKitView));
+        expect(nativeSurface.creationParams, containsPair('corners', 'bottom'));
+        expect(
+          nativeSurface.creationParams,
+          containsPair('backdropColor', Colors.black.toARGB32()),
+        );
+        final contentClip = tester.widget<ClipRSuperellipse>(
+          find.byKey(const ValueKey('concentric-sheet-content-clip')),
+        );
+        expect(
+          contentClip.borderRadius,
+          BorderRadius.vertical(bottom: Radius.circular(Radii.dialog * 2)),
+        );
+      } finally {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          surfaceChannel,
+          null,
+        );
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
+
+  testWidgets('native surface colors follow live theme changes', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    const supportChannel = MethodChannel('buzz/concentric_sheet_surface');
+    const viewChannel = MethodChannel('buzz/concentric_sheet_surface/42');
+    final colorUpdates = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      supportChannel,
+      (call) async => call.method == 'isSupported' ? true : null,
+    );
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      viewChannel,
+      (call) async {
+        colorUpdates.add(call);
+        return null;
+      },
+    );
+
+    Widget themedSurface(ThemeData theme) => MaterialApp(
+      theme: theme,
+      home: Builder(
+        builder: (context) => ConcentricSheetSurface(
+          enabled: true,
+          color: context.colors.surface,
+          backdropColor: context.appColors.huddleDrawerSurface,
+          corners: ConcentricSurfaceCorners.bottom,
+          padding: EdgeInsets.zero,
+          providesSheetSurface: false,
+          child: const SizedBox(height: 80, child: Text('App surface')),
+        ),
+      ),
+    );
+
+    try {
+      final darkTheme = AppTheme.dark();
+      await tester.pumpWidget(themedSurface(darkTheme));
+      await tester.pump();
+      tester.widget<UiKitView>(find.byType(UiKitView)).onPlatformViewCreated!(
+        42,
+      );
+      await tester.pump();
+
+      expect(colorUpdates, hasLength(1));
+      expect(colorUpdates.single.method, 'updateColors');
+      expect(
+        colorUpdates.single.arguments,
+        containsPair('color', darkTheme.colorScheme.surface.toARGB32()),
+      );
+      expect(
+        colorUpdates.single.arguments,
+        containsPair(
+          'backdropColor',
+          darkTheme.extension<AppColors>()!.huddleDrawerSurface.toARGB32(),
+        ),
+      );
+
+      final lightTheme = AppTheme.light();
+      await tester.pumpWidget(themedSurface(lightTheme));
+      await tester.pumpAndSettle();
+
+      expect(colorUpdates.length, greaterThanOrEqualTo(2));
+      expect(
+        colorUpdates.last.arguments,
+        containsPair('color', lightTheme.colorScheme.surface.toARGB32()),
+      );
+      expect(
+        colorUpdates.last.arguments,
+        containsPair(
+          'backdropColor',
+          lightTheme.extension<AppColors>()!.huddleDrawerSurface.toARGB32(),
+        ),
+      );
+    } finally {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        supportChannel,
+        null,
+      );
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        viewChannel,
+        null,
+      );
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
   testWidgets('native titled sheets leave the concentric surface unobscured', (
     tester,
   ) async {
@@ -111,7 +246,13 @@ void main() {
       await tester.tap(find.text('Open sheet'));
       await tester.pumpAndSettle();
 
-      final nativeSurface = tester.widget<UiKitView>(find.byType(UiKitView));
+      final nativeSurface = tester.widget<UiKitView>(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is UiKitView &&
+              widget.viewType == 'buzz/concentric_sheet_surface',
+        ),
+      );
       expect(
         nativeSurface.creationParams,
         containsPair('color', lightColorScheme.surface.toARGB32()),
@@ -131,6 +272,13 @@ void main() {
       expect(contentClip.borderRadius, BorderRadius.circular(Radii.dialog * 2));
       expect(contentClip.clipBehavior, Clip.antiAlias);
       expect(find.text('Members'), findsOneWidget);
+      final nativeClose = tester.widget<UiKitView>(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is UiKitView && widget.viewType == 'buzz/navigation_glass',
+        ),
+      );
+      expect(nativeClose.creationParams, containsPair('icon', 'close'));
     } finally {
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
         surfaceChannel,

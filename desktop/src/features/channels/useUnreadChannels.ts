@@ -784,13 +784,8 @@ export function useUnreadChannels(
     relayClient,
   ]);
 
-  // Unread = inactive channels, plus any channel manually marked unread this
-  // session. A manually marked active channel must remain visible as unread
-  // until the user explicitly marks it read again.
-  // High-priority unread = DMs or channels with a mention/broadcast newer
-  // than the read marker. Forced-unread channels are dot tier only (not
-  // high-priority). Both sets share identical deps and always invalidate
-  // together, so they are computed in a single memo.
+  // Derive unread and high-priority projections together so they invalidate
+  // from the same read-state snapshot.
   const rawUnread =
     // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion and latestVersion are intentional invalidation signals
     React.useMemo(() => {
@@ -841,7 +836,7 @@ export function useUnreadChannels(
           if (!isForcedUnread) continue;
           unread.add(channel.id);
           topLevelUnread.add(channel.id);
-          counts.set(channel.id, 1);
+          if (channel.channelType === "dm") counts.set(channel.id, 1);
           unreadChannelNotificationCount += 1;
           continue;
         }
@@ -863,27 +858,33 @@ export function useUnreadChannels(
             observedEvents,
             readAtForObservedEvent,
           );
-        counts.set(channel.id, badgeCount);
-        unreadChannelNotificationCount +=
+        const appBadgeCount =
           nativeProjection?.appBadgeCount ??
           countUnreadAppBadgeObservedEvents(
             observedEvents,
             readAtForObservedEvent,
           );
+        // Sidebar numerals on non-DM rows count every unread mention and
+        // broadcast, including threaded ones. The Dock projection
+        // (appBadgeCount) keeps excluding threaded replies because Home's
+        // badge subtotal already counts those; reusing it here would hide
+        // thread mentions from the channel row.
+        const highPriorityCount =
+          nativeProjection?.highPriorityCount ??
+          countUnreadHighPriorityObservedEvents(
+            observedEvents,
+            readAtForObservedEvent,
+          );
+        counts.set(
+          channel.id,
+          channel.channelType === "dm" ? badgeCount : highPriorityCount,
+        );
+        unreadChannelNotificationCount += appBadgeCount;
 
-        // DM channels: any unread DM is high-priority.
-        if (channel.channelType === "dm") {
-          highPriority.add(channel.id);
-        } else if (
-          nativeProjection?.highPriorityUnread ||
-          (!nativeProjection &&
-            countUnreadHighPriorityObservedEvents(
-              observedEvents,
-              readAtForObservedEvent,
-            ) > 0)
-        ) {
-          // Non-DM: high-priority only if at least one mention/broadcast
-          // remains unread in its own channel/thread context.
+        // DM channels: any unread DM is high-priority. Non-DM: high-priority
+        // only if at least one mention/broadcast remains unread in its own
+        // channel/thread context.
+        if (channel.channelType === "dm" || highPriorityCount > 0) {
           highPriority.add(channel.id);
         }
       }

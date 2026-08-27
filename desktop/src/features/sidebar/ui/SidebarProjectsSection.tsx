@@ -2,13 +2,14 @@ import { useLocation } from "@tanstack/react-router";
 import {
   ArrowUpDown,
   ChevronDown,
+  ChevronRight,
   EllipsisVertical,
   Folder,
-  FolderGit2,
-  FolderOpen,
   Folders,
+  Hash,
   Link2,
   ListMinus,
+  Lock,
   Plus,
   Trash2,
 } from "lucide-react";
@@ -16,23 +17,24 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { useChannelsQuery } from "@/features/channels/hooks";
 import {
   type Project,
   useDeleteProjectMutation,
   useProjectsQuery,
 } from "@/features/projects/hooks";
-import { isProjectOwnedByCurrentUser } from "@/features/projects/lib/projectsViewHelpers";
+import { listProjectChildChannels } from "@/features/projects/lib/projectRelatedChannels";
+import { canDeleteProject } from "@/features/projects/projectDeletion";
+import { useProjectOwnerProfiles } from "@/features/projects/useProjectOwnerProfiles";
 import { projectShareLink } from "@/features/projects/lib/projectShareLinks";
 import {
   addProjectToSidebar,
-  PROJECT_SIDEBAR_MEMBERSHIP_EVENT,
-  type ProjectSidebarMembershipChange,
-  readProjectSidebarMembership,
   removeProjectFromSidebar,
 } from "@/features/projects/lib/projectSidebarMembership";
-import { selectProjectRepository } from "@/features/projects/projectModels";
+import { useProjectSidebarMembership } from "@/features/projects/lib/useProjectSidebarMembership";
 import { projectMatchesRouteId } from "@/features/projects/projectRoutes";
 import { ProjectBrowserDialog } from "@/features/projects/ui/ProjectBrowserDialog";
+import { ProjectChannelIcon } from "@/features/projects/ui/ProjectChannelIcon";
 import { useCreateProjectMutation } from "@/features/projects/useCreateProject";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { FeatureGate } from "@/shared/features";
@@ -93,6 +95,7 @@ import {
   readSidebarProjectExpansion,
   readSidebarProjectsFilter,
   readSidebarProjectsSort,
+  selectedChannelRouteId,
   selectedProjectRouteId,
   type SidebarProjectExpansionState,
   type SidebarProjectsFilter,
@@ -124,17 +127,14 @@ export function SidebarProjectsSection() {
 
 function SidebarProjectsSectionContent() {
   const projectsQuery = useProjectsQuery();
+  const channelsQuery = useChannelsQuery();
   const identityQuery = useIdentityQuery();
+  const ownerProfiles = useProjectOwnerProfiles(projectsQuery.data ?? []);
   const currentPubkey = identityQuery.data?.pubkey;
-  const { goProject, goProjects } = useAppNavigation();
+  const { goChannel, goProject, goProjects } = useAppNavigation();
   const pathname = useLocation({ select: (location) => location.pathname });
-  const routeRepositoryId = useLocation({
-    select: (location) => {
-      const value = (location.search as Record<string, unknown>).repositoryId;
-      return typeof value === "string" ? value : undefined;
-    },
-  });
   const routeProjectId = selectedProjectRouteId(pathname);
+  const routeChannelId = selectedChannelRouteId(pathname);
   const relayOrigin = getCachedRelayOrigin();
   const [collapsed, setCollapsed] = React.useState(false);
   const [actionsOpen, setActionsOpen] = React.useState(false);
@@ -152,42 +152,13 @@ function SidebarProjectsSectionContent() {
     React.useState<SidebarProjectExpansionState>(() =>
       readSidebarProjectExpansion(relayOrigin, currentPubkey),
     );
-  const [addedProjectAddresses, setAddedProjectAddresses] = React.useState<
-    string[]
-  >(() => readProjectSidebarMembership(relayOrigin, currentPubkey));
+  const addedProjectAddresses = useProjectSidebarMembership(
+    relayOrigin,
+    currentPubkey,
+  );
   const createProjectMutation = useCreateProjectMutation();
   const deleteProjectMutation = useDeleteProjectMutation();
   const isPending = projectsQuery.isPending || identityQuery.isPending;
-  React.useEffect(() => {
-    setAddedProjectAddresses(
-      readProjectSidebarMembership(relayOrigin, currentPubkey),
-    );
-    // Consume the membership carried on the event: when persistence is
-    // unavailable the change lives only in the event detail, and re-reading
-    // localStorage would silently revert the user's add/remove.
-    const onChange = (event: Event) => {
-      const detail = (event as CustomEvent<ProjectSidebarMembershipChange>)
-        .detail;
-      if (
-        detail &&
-        detail.relayOrigin === relayOrigin &&
-        currentPubkey &&
-        detail.pubkey.toLowerCase() === currentPubkey.toLowerCase()
-      ) {
-        setAddedProjectAddresses(detail.addresses);
-        return;
-      }
-      setAddedProjectAddresses(
-        readProjectSidebarMembership(relayOrigin, currentPubkey),
-      );
-    };
-    globalThis.addEventListener(PROJECT_SIDEBAR_MEMBERSHIP_EVENT, onChange);
-    return () =>
-      globalThis.removeEventListener(
-        PROJECT_SIDEBAR_MEMBERSHIP_EVENT,
-        onChange,
-      );
-  }, [currentPubkey, relayOrigin]);
   React.useEffect(() => {
     setProjectExpansion(
       readSidebarProjectExpansion(relayOrigin, currentPubkey),
@@ -212,24 +183,13 @@ function SidebarProjectsSectionContent() {
       }),
     [addedProjectAddressSet, currentPubkey, filter, projectsQuery.data, sort],
   );
-  React.useEffect(() => {
-    if (!routeProjectId) return;
-    const selectedProject = projects.find((project) =>
-      projectMatchesRouteId(project, routeProjectId),
-    );
-    if (
-      !selectedProject ||
-      projectExpansion[selectedProject.projectAddress] !== undefined
-    ) {
-      return;
-    }
-    setProjectExpansion((current) => {
-      const next = { ...current, [selectedProject.projectAddress]: true };
-      writeSidebarProjectExpansion(next, relayOrigin, currentPubkey);
-      return next;
-    });
-  }, [currentPubkey, projectExpansion, projects, relayOrigin, routeProjectId]);
-
+  const channelsById = React.useMemo(
+    () =>
+      new Map(
+        (channelsQuery.data ?? []).map((channel) => [channel.id, channel]),
+      ),
+    [channelsQuery.data],
+  );
   const handleFilterChange = (next: SidebarProjectsFilter) => {
     setFilter(next);
     writeSidebarProjectsFilter(next, relayOrigin, currentPubkey);
@@ -340,58 +300,64 @@ function SidebarProjectsSectionContent() {
                 const isActive =
                   routeProjectId != null &&
                   projectMatchesRouteId(project, routeProjectId);
-                const selectedRepository = isActive
-                  ? selectProjectRepository(project, routeRepositoryId)
-                  : null;
+                const childChannels = listProjectChildChannels(project).flatMap(
+                  (binding) => {
+                    const channel = channelsById.get(binding.channelId);
+                    return channel ? [{ binding, channel }] : [];
+                  },
+                );
                 const isExpanded =
-                  projectExpansion[project.projectAddress] ?? isActive;
+                  childChannels.length > 0 &&
+                  (projectExpansion[project.projectAddress] ?? false);
 
                 return (
                   <React.Fragment key={project.id}>
                     <SidebarProjectRow
-                      canDelete={isProjectOwnedByCurrentUser(
+                      canDelete={canDeleteProject(
                         project,
                         currentPubkey,
+                        ownerProfiles,
                       )}
+                      childCount={childChannels.length}
                       deleteDisabled={deleteProjectMutation.isPending}
                       isActive={isActive}
                       isExpanded={isExpanded}
                       onDelete={() => setProjectToDelete(project)}
                       onOpen={() => {
-                        if (isActive) {
-                          setProjectExpanded(project, !isExpanded);
-                          return;
-                        }
-                        setProjectExpanded(project, true);
                         void goProject(project.id);
                       }}
                       onRemove={() => handleRemove(project)}
+                      onToggleExpanded={() =>
+                        setProjectExpanded(project, !isExpanded)
+                      }
                       project={project}
                     />
                     {isExpanded
-                      ? project.repositories.map((repository) => (
-                          <SidebarMenuItem key={repository.id}>
-                            <SidebarMenuButton
-                              className="h-7 pl-7 text-sidebar-foreground/70 data-[active=true]:!bg-transparent data-[active=true]:font-semibold data-[active=true]:text-sidebar-foreground data-[active=true]:shadow-none data-[active=true]:hover:!bg-transparent data-[active=true]:hover:text-sidebar-foreground data-[active=true]:active:!bg-transparent"
-                              data-testid={`sidebar-project-repository-${repository.dtag}`}
-                              isActive={
-                                repository.id === selectedRepository?.id
-                              }
-                              onClick={() =>
-                                goProject(project.id, {
-                                  repositoryId: repository.id,
-                                })
-                              }
-                              tooltip={repository.name}
-                              type="button"
+                      ? childChannels.map(({ binding, channel }) => {
+                          const ChannelIcon =
+                            channel.visibility === "private" ? Lock : Hash;
+                          return (
+                            <SidebarMenuItem
+                              key={`${project.id}:${binding.role}:${channel.id}`}
                             >
-                              <FolderGit2 className="h-3.5 w-3.5" />
-                              <SidebarMenuLabel>
-                                {repository.name}
-                              </SidebarMenuLabel>
-                            </SidebarMenuButton>
-                          </SidebarMenuItem>
-                        ))
+                              <SidebarMenuButton
+                                className="h-7 pl-7 text-sidebar-foreground/70 data-[active=true]:!bg-transparent data-[active=true]:font-semibold data-[active=true]:text-sidebar-foreground data-[active=true]:shadow-none data-[active=true]:hover:!bg-transparent data-[active=true]:hover:text-sidebar-foreground data-[active=true]:active:!bg-transparent"
+                                data-testid={`sidebar-project-channel-${project.dtag}-${channel.name}`}
+                                isActive={channel.id === routeChannelId}
+                                onClick={() => {
+                                  void goChannel(channel.id);
+                                }}
+                                tooltip={`#${channel.name}`}
+                                type="button"
+                              >
+                                <ChannelIcon className="h-3.5 w-3.5" />
+                                <SidebarMenuLabel>
+                                  {`#${channel.name}`}
+                                </SidebarMenuLabel>
+                              </SidebarMenuButton>
+                            </SidebarMenuItem>
+                          );
+                        })
                       : null}
                   </React.Fragment>
                 );
@@ -598,43 +564,74 @@ function SidebarProjectsHeaderActions({
 
 function SidebarProjectRow({
   canDelete,
+  childCount,
   deleteDisabled,
   isActive,
   isExpanded,
   onDelete,
   onOpen,
   onRemove,
+  onToggleExpanded,
   project,
 }: {
   canDelete: boolean;
+  childCount: number;
   deleteDisabled: boolean;
   isActive: boolean;
   isExpanded: boolean;
   onDelete: () => void;
   onOpen: () => void;
   onRemove: () => void;
+  onToggleExpanded: () => void;
   project: Project;
 }) {
   const shareLink = projectShareLink(project);
-  const ProjectIcon = isExpanded ? FolderOpen : Folders;
+  const hasChildren = childCount > 0;
 
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
         <SidebarMenuItem>
           <SidebarMenuButton
-            aria-expanded={isExpanded}
-            className="data-[active=true]:!bg-transparent data-[active=true]:font-normal data-[active=true]:text-sidebar-foreground data-[active=true]:shadow-none data-[active=true]:hover:!bg-transparent data-[active=true]:hover:text-sidebar-foreground data-[active=true]:active:!bg-transparent"
+            className={cn(
+              "data-[active=true]:!bg-transparent data-[active=true]:font-normal data-[active=true]:text-sidebar-foreground data-[active=true]:shadow-none data-[active=true]:hover:!bg-transparent data-[active=true]:hover:text-sidebar-foreground data-[active=true]:active:!bg-transparent",
+              hasChildren && "pr-8",
+            )}
             data-testid={`sidebar-project-${project.dtag}`}
             isActive={isActive}
             onClick={onOpen}
             tooltip={project.name}
             type="button"
           >
-            <ProjectIcon className="h-4 w-4" />
-            <SidebarMenuLabel>{project.name}</SidebarMenuLabel>
+            <ProjectChannelIcon className={cn(!isActive && "opacity-80")} />
+            <SidebarMenuLabel className={cn(!isActive && "opacity-80")}>
+              {project.name}
+            </SidebarMenuLabel>
           </SidebarMenuButton>
-          {canDelete ? (
+          {hasChildren ? (
+            <SidebarMenuAction
+              aria-expanded={isExpanded}
+              aria-label={
+                isExpanded
+                  ? `Hide channels in ${project.name}`
+                  : `Show channels in ${project.name}`
+              }
+              data-testid={`sidebar-project-expand-${project.dtag}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                onToggleExpanded();
+              }}
+              type="button"
+            >
+              <ChevronRight
+                className={cn(
+                  "transition-transform duration-150",
+                  isExpanded && "rotate-90",
+                )}
+              />
+            </SidebarMenuAction>
+          ) : null}
+          {canDelete && !hasChildren ? (
             <SidebarMenuAction
               aria-label={`Delete ${project.name}`}
               data-testid={`sidebar-project-delete-${project.dtag}`}

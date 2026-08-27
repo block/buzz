@@ -25,6 +25,7 @@ import {
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
 import { entityDiscussionQuery } from "@/features/projects/lib/discussionChannels";
+import { selectionItemFromTask } from "@/features/projects/lib/projectSelection";
 import { issueShareLink } from "@/features/projects/lib/projectShareLinks";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import {
@@ -55,6 +56,7 @@ import {
 } from "./ProjectStatusProgressIcon";
 import { ProjectWorkItemGroup } from "./ProjectWorkItemGroup";
 import { ProjectWorkItemRow } from "./ProjectWorkItemRow";
+import { ProjectPanelState } from "./ProjectPanelState";
 
 export function issueStatusClassName(status: ProjectIssue["status"]) {
   if (status === "Triage" || status === "In Progress") return "text-amber-500";
@@ -114,6 +116,11 @@ const ISSUE_STATUS_ORDER: readonly ProjectIssue["status"][] = [
   "Closed",
 ];
 
+export type ProjectIssuePanelItem = {
+  issue: ProjectIssue;
+  project: Project;
+};
+
 function issueMembers(
   project: Project,
   issue: ProjectIssue,
@@ -139,14 +146,28 @@ function issueMembers(
   });
 }
 
+function issueSelectionItem(project: Project, issue: ProjectIssue) {
+  return selectionItemFromTask({
+    author: issue.author,
+    channelId: issue.channelId ?? project.channelId,
+    id: issue.id,
+    shareLink: issueShareLink(issue),
+    title: issue.title,
+  });
+}
+
 function IssueRow({
   issue,
   onOpen,
   profiles,
+  project,
+  rangeItems,
 }: {
   issue: ProjectIssue;
   onOpen: () => void;
   profiles?: UserProfileLookup;
+  project: Project;
+  rangeItems: ReturnType<typeof issueSelectionItem>[];
 }) {
   const authorProfile = profiles?.[normalizePubkey(issue.author)];
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
@@ -158,6 +179,10 @@ function IssueRow({
       identifier={`#${issue.id.slice(0, 8)}`}
       identifierTitle="View task"
       onOpen={onOpen}
+      selection={{
+        item: issueSelectionItem(project, issue),
+        rangeItems,
+      }}
       statusIcon={
         <ProjectStatusProgressIcon
           aria-label={issue.status}
@@ -170,7 +195,7 @@ function IssueRow({
       trailing={
         <>
           <span
-            className="hidden w-24 shrink-0 truncate text-right text-xs text-muted-foreground md:block"
+            className="hidden w-24 shrink-0 truncate text-right text-xs text-muted-foreground/60 md:block"
             data-testid="project-issue-row-category"
           >
             {projectTaskCategoryLabel(issue.category)}
@@ -221,7 +246,7 @@ function IssueRow({
               }
               className={`flex items-center gap-1 rounded-md text-xs hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring ${
                 issue.comments.length > 0
-                  ? "text-muted-foreground"
+                  ? "text-muted-foreground/60"
                   : "text-muted-foreground/45"
               }`}
               data-testid="project-issue-comments"
@@ -233,7 +258,7 @@ function IssueRow({
             </button>
           </span>
           <span
-            className="hidden w-20 shrink-0 text-right text-xs text-muted-foreground/70 sm:block"
+            className="hidden w-20 shrink-0 text-right text-xs text-muted-foreground/55 sm:block"
             data-testid="project-issue-row-date"
             title={new Date(issue.createdAt * 1_000).toLocaleString()}
           >
@@ -256,7 +281,6 @@ export function ProjectIssueDetail({
   project: Project;
 }) {
   const commentMutation = useCreateProjectIssueCommentMutation(project);
-  const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
   const members = React.useMemo(
     () => issueMembers(project, issue, profiles),
     [issue, profiles, project],
@@ -285,7 +309,6 @@ export function ProjectIssueDetail({
     [commentMutation, issue],
   );
   const identityQuery = useIdentityQuery();
-  const authorProfile = profiles?.[normalizePubkey(issue.author)];
   const status = issueStatusVisual(issue.status);
   const labels = projectTaskUserLabels(issue.labels);
   const viewerPubkey = identityQuery.data?.pubkey;
@@ -316,16 +339,7 @@ export function ProjectIssueDetail({
           />
         </h3>
         <p className="flex flex-wrap items-center gap-x-1 gap-y-1 text-xs text-muted-foreground">
-          <ProfileIdentityButton
-            avatarClassName="shrink-0"
-            avatarSize="xs"
-            avatarUrl={authorProfile?.avatarUrl ?? null}
-            isAgent={authorProfile?.isAgent === true}
-            label={authorLabel}
-            pubkey={issue.author}
-            showLabel={false}
-          />
-          <span className="font-medium text-foreground">{authorLabel}</span>
+          <span>Task created</span>
           <span
             className="shrink-0 whitespace-nowrap"
             title={new Date(issue.createdAt * 1_000).toLocaleString()}
@@ -388,7 +402,7 @@ export function ProjectIssueDetail({
         </div>
       </ProjectDetailSection>
       <div
-        className="border-border/50 border-t px-6 pb-6 pt-4"
+        className="px-6 pb-6 pt-4"
         data-testid="project-issue-comment-composer"
       >
         <ForumComposer
@@ -406,49 +420,69 @@ export function ProjectIssueDetail({
 }
 
 export function ProjectIssuesPanel({
+  error,
+  isLoading,
+  issueItems,
   onSelectedIssueIdChange,
   profiles,
   project,
   selectedIssueId,
 }: {
+  error?: unknown;
+  isLoading?: boolean;
+  issueItems?: ProjectIssuePanelItem[];
   onSelectedIssueIdChange: (id: string | null) => void;
   profiles?: UserProfileLookup;
   project: Project;
   selectedIssueId: string | null;
 }) {
-  const issuesQuery = useProjectIssuesQuery(project);
-  const issues = issuesQuery.data ?? [];
-  const selectedIssue =
-    issues.find((issue) => issue.id === selectedIssueId) ?? null;
+  const issuesQuery = useProjectIssuesQuery(
+    issueItems === undefined ? project : null,
+  );
+  const resolvedItems =
+    issueItems ?? (issuesQuery.data ?? []).map((issue) => ({ issue, project }));
+  const selectedItem =
+    resolvedItems.find(({ issue }) => issue.id === selectedIssueId) ?? null;
+  const loading = isLoading ?? issuesQuery.isLoading;
+  const loadError = error ?? issuesQuery.error;
 
-  if (issuesQuery.isLoading) {
+  if (loading) {
     return <BuzzLoadingState label="Loading tasks" />;
   }
 
-  if (issues.length === 0) {
+  if (resolvedItems.length === 0) {
     return (
-      <p className="p-4 text-sm text-muted-foreground">
-        {issuesQuery.error
-          ? "Could not load tasks for this repository."
-          : "No tasks yet."}
-      </p>
+      <ProjectPanelState
+        description={
+          loadError
+            ? "Refresh the project and try again."
+            : issueItems
+              ? "Tasks created for this project's repositories will appear here."
+              : "Tasks created for this repository will appear here."
+        }
+        error={Boolean(loadError)}
+        title={loadError ? "Could not load tasks" : "No tasks yet"}
+      />
     );
   }
 
-  if (selectedIssue) {
+  if (selectedItem) {
     return (
       <ProjectIssueDetail
-        issue={selectedIssue}
+        issue={selectedItem.issue}
         profiles={profiles}
-        project={project}
+        project={selectedItem.project}
       />
     );
   }
 
   const groups = ISSUE_STATUS_ORDER.map((status) => ({
-    items: issues.filter((issue) => issue.status === status),
+    items: resolvedItems.filter(({ issue }) => issue.status === status),
     status,
   })).filter((group) => group.items.length > 0);
+  const rangeItems = resolvedItems.map(({ issue, project: itemProject }) =>
+    issueSelectionItem(itemProject, issue),
+  );
 
   return (
     <div>
@@ -463,15 +497,20 @@ export function ProjectIssuesPanel({
                 state={visual.progress}
               />
             }
+            items={items.map(({ issue, project: itemProject }) =>
+              issueSelectionItem(itemProject, issue),
+            )}
             key={status}
             label={status}
           >
-            {items.map((issue) => (
+            {items.map(({ issue, project: itemProject }) => (
               <IssueRow
                 issue={issue}
                 key={issue.id}
                 onOpen={() => onSelectedIssueIdChange(issue.id)}
                 profiles={profiles}
+                project={itemProject}
+                rangeItems={rangeItems}
               />
             ))}
           </ProjectWorkItemGroup>

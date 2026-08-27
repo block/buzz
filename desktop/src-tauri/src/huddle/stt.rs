@@ -19,6 +19,7 @@
 //! sherpa-onnx is CPU-bound and not Send-safe across await points.
 
 use std::{
+    collections::VecDeque,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -30,6 +31,8 @@ use std::{
 };
 
 use tokio::sync::mpsc as tokio_mpsc;
+
+use super::{human_floor::HumanFloor, local_barge_in};
 
 // ── Public pipeline handle ────────────────────────────────────────────────────
 
@@ -51,21 +54,33 @@ const MAX_SPEECH_SAMPLES: usize = 16_000 * 30;
 #[derive(Debug)]
 pub struct SttPipeline {
     /// Send raw PCM bytes (f32 LE, 48 kHz mono) into the pipeline.
-    audio_tx: SyncSender<Vec<u8>>,
+    audio_tx: SyncSender<SttAudioInput>,
     /// Signals the worker thread to stop.
     shutdown: Arc<AtomicBool>,
     /// Worker thread handle — taken on drop to join cleanly.
     thread: Option<thread::JoinHandle<()>>,
 }
 
+#[derive(Debug)]
+struct SttAudioInput {
+    pcm_bytes: Vec<u8>,
+    origin: SttAudioOrigin,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SttAudioOrigin {
+    Local,
+    RemoteHuman,
+}
+
 impl SttPipeline {
     /// Spawn the pipeline thread.
     ///
-    /// Mic input is transcribed even while agent TTS is playing: the huddle UI
-    /// already tells users to wear headphones, so speaker bleed is accepted in
-    /// exchange for never dropping human speech that overlaps agent audio.
-    /// Local mic frames still never cancel TTS — push-to-talk and remote
-    /// participant speech remain the explicit barge-in paths.
+    /// Mic input is transcribed even while agent TTS is playing. In open-mic
+    /// VAD mode, confirmed speech acquires the shared human floor: immediately
+    /// on an isolated output route, or after the restored 320 ms sustained-
+    /// speech debounce on an acoustically coupled route. Push-to-talk retains
+    /// its explicit shortcut cancellation path.
     ///
     /// `ptt_active` and `manual_mic_unmuted` are present when the PTT shortcut
     /// is enabled. The pipeline accepts speech while either input path is open;
@@ -84,8 +99,10 @@ impl SttPipeline {
         model_dir: PathBuf,
         ptt_active: Option<Arc<AtomicBool>>,
         manual_mic_unmuted: Option<Arc<AtomicBool>>,
+        human_floor: HumanFloor,
+        output_device: Option<String>,
     ) -> Result<(Self, tokio_mpsc::Receiver<String>), String> {
-        let (audio_tx, audio_rx) = mpsc::sync_channel::<Vec<u8>>(AUDIO_QUEUE_DEPTH);
+        let (audio_tx, audio_rx) = mpsc::sync_channel::<SttAudioInput>(AUDIO_QUEUE_DEPTH);
         let (text_tx, text_rx) = tokio_mpsc::channel::<String>(64);
         let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -102,6 +119,8 @@ impl SttPipeline {
                     shutdown_worker,
                     ptt_active_worker,
                     manual_mic_unmuted_worker,
+                    human_floor,
+                    output_device,
                 )
             })
             .map_err(|e| format!("failed to spawn stt-worker thread: {e}"))?;
@@ -130,6 +149,18 @@ impl SttPipeline {
     /// Non-blocking. Drops audio silently if the pipeline can't keep up —
     /// better to lose frames than to stall the UI thread.
     pub fn push_audio(&self, pcm_bytes: Vec<u8>) -> Result<(), String> {
+        self.push_audio_from(pcm_bytes, SttAudioOrigin::Local)
+    }
+
+    /// Feed decoded remote-human PCM into transcription. Unlike the desktop
+    /// microphone path, this is not gated by the desktop PTT or mute state: the
+    /// remote participant already made their transmission choice on their own
+    /// device before the relay delivered these samples.
+    pub fn push_remote_audio(&self, pcm_bytes: Vec<u8>) -> Result<(), String> {
+        self.push_audio_from(pcm_bytes, SttAudioOrigin::RemoteHuman)
+    }
+
+    fn push_audio_from(&self, pcm_bytes: Vec<u8>, origin: SttAudioOrigin) -> Result<(), String> {
         // Reject non-4-byte-aligned input — would silently truncate in bytes_to_f32.
         if !pcm_bytes.len().is_multiple_of(4) {
             return Err(format!(
@@ -138,7 +169,7 @@ impl SttPipeline {
             ));
         }
         // Drop audio if the pipeline can't keep up — better than blocking the UI.
-        let _ = self.audio_tx.try_send(pcm_bytes);
+        let _ = self.audio_tx.try_send(SttAudioInput { pcm_bytes, origin });
         Ok(())
     }
 }
@@ -158,26 +189,155 @@ impl Drop for SttPipeline {
 // ── Worker thread ─────────────────────────────────────────────────────────────
 
 /// How many 16 kHz samples of silence before we flush to STT.
-/// 300 ms × 16 000 Hz / 256 samples-per-frame ≈ 19 frames.
-/// Previous value (28 frames / 450 ms) felt sluggish in conversation.
+/// 500 ms × 16 000 Hz / 256 samples-per-frame ≈ 31 frames.
+/// This favors natural conversational pauses over the lower latency of the
+/// previous 19-frame / 304 ms window.
 ///
 /// This window is a turn-taking quality knob, not a latency lever: an earlier
 /// env override (`BUZZ_STT_FLUSH_MS`) let it be lowered to 150 ms, which split
 /// natural mid-sentence pauses into separate messages and confused the
 /// listening agents. Reverted — the window is fixed at the production value.
-const SILENCE_FLUSH_FRAMES: usize = 19;
+const SILENCE_FLUSH_FRAMES: usize = 31;
 
 /// earshot requires exactly 256 samples per frame at 16 kHz.
 const VAD_FRAME_SAMPLES: usize = 256;
 
-/// VAD probability threshold — above this is considered speech.
-const VAD_THRESHOLD: f32 = 0.5;
+/// Earshot 1.1.0 onset operating point. Any Earshot model/version change
+/// invalidates this and `VAD_OFFSET_THRESHOLD`; re-run the matched-corpus
+/// threshold harness before updating either constant.
+const VAD_ONSET_THRESHOLD: f32 = 0.55;
+
+/// Earshot 1.1.0 offset operating point. The lower threshold keeps borderline
+/// speech inside the active utterance without changing the onset sensitivity.
+const VAD_OFFSET_THRESHOLD: f32 = 0.35;
+
+/// Consecutive onset frames required before an utterance begins.
+const VAD_ONSET_FRAMES: usize = 3;
+
+/// Audio retained before confirmed onset so initial phonemes are not clipped.
+/// A rolling pre-roll that survived a hard boundary would leak segment N into
+/// segment N+1 when the next confirmed onset occurs within
+/// `VAD_PRE_ROLL_FRAMES - VAD_ONSET_FRAMES` frames (13 frames, or 208 ms, at
+/// the shipped values) of the previous flush. Hangover and the silence flush
+/// window do not enter this bound; `reset_segment` keeps them independent by
+/// clearing pre-roll.
+const VAD_PRE_ROLL_FRAMES: usize = 16;
+
+/// Trailing silence retained in the transcript buffer (about 100 ms).
+const VAD_HANGOVER_FRAMES: usize = 6;
 
 /// Minimum voiced audio needed before an utterance may be decoded.
 /// One earshot false-positive frame is only 16 ms; requiring 192 ms prevents
 /// silence/room-noise blips from reaching Parakeet and becoming hallucinated
 /// transcript text while still preserving short replies such as "yes".
 const MIN_VOICED_FRAMES: usize = 12;
+
+#[derive(Debug, PartialEq, Eq)]
+enum VadFrameAction {
+    None,
+    ConfirmedOnset,
+    Speech,
+    FirstSilence,
+    Flush,
+}
+
+struct VadEndpoint {
+    pre_roll: VecDeque<Vec<f32>>,
+    speech_buf: Vec<f32>,
+    onset_frames: usize,
+    silence_frames: usize,
+    voiced_frames: usize,
+    in_speech: bool,
+}
+
+impl VadEndpoint {
+    fn new() -> Self {
+        Self {
+            pre_roll: VecDeque::with_capacity(VAD_PRE_ROLL_FRAMES),
+            speech_buf: Vec::new(),
+            onset_frames: 0,
+            silence_frames: 0,
+            voiced_frames: 0,
+            in_speech: false,
+        }
+    }
+
+    fn process_frame(
+        &mut self,
+        frame: Vec<f32>,
+        probability: f32,
+        accepts_audio: bool,
+        flush_allowed: bool,
+        flush_frames: usize,
+    ) -> VadFrameAction {
+        if !accepts_audio {
+            self.pre_roll.clear();
+            self.onset_frames = 0;
+            return VadFrameAction::None;
+        }
+
+        if !self.in_speech {
+            self.pre_roll.push_back(frame);
+            if self.pre_roll.len() > VAD_PRE_ROLL_FRAMES {
+                self.pre_roll.pop_front();
+            }
+
+            if probability > VAD_ONSET_THRESHOLD {
+                self.onset_frames += 1;
+            } else {
+                self.onset_frames = 0;
+            }
+
+            if self.onset_frames < VAD_ONSET_FRAMES {
+                return VadFrameAction::None;
+            }
+
+            self.in_speech = true;
+            self.silence_frames = 0;
+            self.voiced_frames = self.onset_frames;
+            self.onset_frames = 0;
+            for buffered in self.pre_roll.drain(..) {
+                self.speech_buf.extend_from_slice(&buffered);
+            }
+            return VadFrameAction::ConfirmedOnset;
+        }
+
+        if probability > VAD_OFFSET_THRESHOLD {
+            self.silence_frames = 0;
+            self.voiced_frames += 1;
+            self.speech_buf.extend_from_slice(&frame);
+            return VadFrameAction::Speech;
+        }
+
+        self.silence_frames += 1;
+        self.speech_buf.extend_from_slice(&frame);
+        if flush_allowed && self.silence_frames >= flush_frames {
+            let excess_silence = self.silence_frames.saturating_sub(VAD_HANGOVER_FRAMES);
+            let retained_samples = self
+                .speech_buf
+                .len()
+                .saturating_sub(excess_silence * VAD_FRAME_SAMPLES);
+            self.speech_buf.truncate(retained_samples);
+            VadFrameAction::Flush
+        } else if self.silence_frames == 1 {
+            VadFrameAction::FirstSilence
+        } else {
+            VadFrameAction::None
+        }
+    }
+
+    fn reset_segment(&mut self) {
+        self.speech_buf.clear();
+        // A hard message boundary also clears pre-roll: fast follow-up turns
+        // may receive less than the full window, but no frame can be decoded
+        // into both adjacent transcript messages.
+        self.pre_roll.clear();
+        self.onset_frames = 0;
+        self.silence_frames = 0;
+        self.voiced_frames = 0;
+        self.in_speech = false;
+    }
+}
 
 /// How long the worker waits on the audio channel before checking the shutdown flag.
 const RECV_TIMEOUT: Duration = Duration::from_millis(50);
@@ -213,31 +373,85 @@ fn stt_speculative_decode() -> bool {
     std::env::var("BUZZ_STT_SPECULATIVE").is_ok_and(|v| v == "1")
 }
 
+struct SttStreamState {
+    resampler: rubato::Fft<f32>,
+    chunk_in: usize,
+    input_buf_48k: Vec<f32>,
+    leftover_16k: Vec<f32>,
+    vad: earshot::Detector<earshot::DefaultPredictor>,
+    endpoint: VadEndpoint,
+    speculative: Option<(String, usize)>,
+}
+
+impl SttStreamState {
+    fn new() -> Result<Self, String> {
+        use rubato::{FixedSync, Resampler};
+
+        let resampler = rubato::Fft::<f32>::new(48_000, 16_000, 1024, 2, 1, FixedSync::Input)
+            .map_err(|error| format!("STT resampler init failed: {error}"))?;
+        let chunk_in = resampler.input_frames_next();
+        Ok(Self {
+            resampler,
+            chunk_in,
+            input_buf_48k: Vec::with_capacity(chunk_in * 2),
+            leftover_16k: Vec::new(),
+            vad: earshot::Detector::new(earshot::DefaultPredictor::new()),
+            endpoint: VadEndpoint::new(),
+            speculative: None,
+        })
+    }
+}
+
+#[derive(Debug)]
+enum SttLoopInput {
+    Tick,
+    Batch(Vec<SttAudioInput>),
+}
+
+fn run_stt_receive_loop(
+    audio_rx: Receiver<SttAudioInput>,
+    shutdown: &AtomicBool,
+    human_floor: HumanFloor,
+    mut process: impl FnMut(SttLoopInput, &mut local_barge_in::LocalBargeIn),
+) {
+    let mut local_barge_in_state = local_barge_in::WorkerLocalBargeIn::new(human_floor);
+
+    loop {
+        // Check shutdown flag before blocking.
+        if shutdown.load(Ordering::Acquire) {
+            break;
+        }
+
+        process(SttLoopInput::Tick, &mut local_barge_in_state);
+
+        // Use recv_timeout so we can periodically check the shutdown flag.
+        let input = match audio_rx.recv_timeout(RECV_TIMEOUT) {
+            Ok(input) => input,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break, // Sender dropped.
+        };
+
+        // Drain any additional pending messages to batch-process.
+        let mut batch = vec![input];
+        while let Ok(input) = audio_rx.try_recv() {
+            batch.push(input);
+        }
+        process(SttLoopInput::Batch(batch), &mut local_barge_in_state);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn stt_worker(
     model_dir: PathBuf,
-    audio_rx: Receiver<Vec<u8>>,
+    audio_rx: Receiver<SttAudioInput>,
     text_tx: tokio_mpsc::Sender<String>,
     shutdown: Arc<AtomicBool>,
     ptt_active: Option<Arc<AtomicBool>>,
     manual_mic_unmuted: Option<Arc<AtomicBool>>,
+    human_floor: HumanFloor,
+    output_device: Option<String>,
 ) {
-    // ── 1. Initialise rubato resampler (48 kHz → 16 kHz, mono) ───────────────
-    use rubato::{Fft, FixedSync, Resampler};
-
-    let mut resampler = match Fft::<f32>::new(48_000, 16_000, 1024, 2, 1, FixedSync::Input) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("buzz-desktop: STT resampler init failed: {e}");
-            return;
-        }
-    };
-    let chunk_in = resampler.input_frames_next();
-
-    // ── 2. Initialise earshot VAD ─────────────────────────────────────────────
-    use earshot::{DefaultPredictor, Detector};
-    let mut vad = Detector::new(DefaultPredictor::new());
-
-    // ── 3. Initialise sherpa-onnx recognizer ─────────────────────────────────
+    // ── 1. Initialise sherpa-onnx recognizer ─────────────────────────────────
     //
     // Parakeet TDT-CTC 110M ships as a single `model.int8.onnx` (CTC head) plus
     // `tokens.txt`. sherpa-onnx infers the model family from which inner config
@@ -274,101 +488,135 @@ fn stt_worker(
         }
     };
 
-    // ── 4. Processing state ───────────────────────────────────────────────────
-    // Leftover 48 kHz samples that didn't fill a full resampler chunk.
-    let mut input_buf_48k: Vec<f32> = Vec::with_capacity(chunk_in * 2);
-    // Leftover 16 kHz samples that didn't fill a full VAD frame.
-    let mut leftover_16k: Vec<f32> = Vec::new();
-    // Accumulated speech frames (16 kHz).
-    let mut speech_buf: Vec<f32> = Vec::new();
-    // Consecutive silence frame count.
-    let mut silence_frames: usize = 0;
-    // Whether we're currently in a speech segment.
-    let mut in_speech = false;
-    // Number of frames earshot classified as voiced in the current segment.
-    let mut voiced_frames = 0;
-    // Silence flush window (frames) — fixed at the production value.
-    let flush_frames = SILENCE_FLUSH_FRAMES;
-    // EXPERIMENTAL: speculative decode result + the voiced-frame count it was
-    // computed at. Valid only while no new voiced frame has arrived since.
+    // ── 2. Independent local and remote processing state ─────────────────────
+    // Separate resampler/VAD state prevents simultaneous desktop and remote
+    // speech from being serialized into one artificial utterance.
+    let mut local_stream = match SttStreamState::new() {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("buzz-desktop: {error}");
+            return;
+        }
+    };
+    let mut remote_stream = match SttStreamState::new() {
+        Ok(stream) => stream,
+        Err(error) => {
+            eprintln!("buzz-desktop: {error}");
+            return;
+        }
+    };
     let speculative_enabled = stt_speculative_decode();
-    let mut speculative: Option<(String, usize)> = None;
-
-    // ── 5. Main loop ──────────────────────────────────────────────────────────
     let mut transmit_was_active = ptt_active
         .as_ref()
         .is_some_and(|ptt| ptt.load(Ordering::Acquire))
         || manual_mic_unmuted
             .as_ref()
             .is_some_and(|manual| manual.load(Ordering::Acquire));
-    loop {
-        // Check shutdown flag before blocking.
-        if shutdown.load(Ordering::Acquire) {
-            break;
-        }
 
-        // Track the combined manual/PTT transmission edge. When both paths
-        // close, the worklet stops sending frames, so flush here rather than
-        // waiting for silence that will never arrive.
-        if let Some(ref ptt) = ptt_active {
-            let transmit_now = ptt.load(Ordering::Acquire)
-                || manual_mic_unmuted
-                    .as_ref()
-                    .is_some_and(|manual| manual.load(Ordering::Acquire));
-            if transmit_was_active && !transmit_now && in_speech && !speech_buf.is_empty() {
-                flush_to_stt(&speech_buf, voiced_frames, &recognizer, &text_tx);
-                speech_buf.clear();
-                silence_frames = 0;
-                in_speech = false;
-                voiced_frames = 0;
+    run_stt_receive_loop(
+        audio_rx,
+        &shutdown,
+        human_floor.clone(),
+        |input, local_barge_in_state| match input {
+            SttLoopInput::Tick => {
+                // The worklet stops sending frames when both local transmit
+                // paths close, so flush on that edge instead of waiting for
+                // silence that will never arrive.
+                if let Some(ref ptt) = ptt_active {
+                    let transmit_now = ptt.load(Ordering::Acquire)
+                        || manual_mic_unmuted
+                            .as_ref()
+                            .is_some_and(|manual| manual.load(Ordering::Acquire));
+                    if transmit_was_active
+                        && !transmit_now
+                        && local_stream.endpoint.in_speech
+                        && !local_stream.endpoint.speech_buf.is_empty()
+                    {
+                        flush_to_stt(
+                            &local_stream.endpoint.speech_buf,
+                            local_stream.endpoint.voiced_frames,
+                            &recognizer,
+                            &text_tx,
+                        );
+                        local_stream.endpoint.reset_segment();
+                        local_stream.speculative.take();
+                        local_barge_in_state.release(&human_floor);
+                    }
+                    transmit_was_active = transmit_now;
+                }
             }
-            transmit_was_active = transmit_now;
-        }
-
-        // Use recv_timeout so we can periodically check the shutdown flag.
-        let bytes = match audio_rx.recv_timeout(RECV_TIMEOUT) {
-            Ok(b) => b,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break, // Sender dropped.
-        };
-
-        // Drain any additional pending messages to batch-process.
-        let mut batch = vec![bytes];
-        while let Ok(b) = audio_rx.try_recv() {
-            batch.push(b);
-        }
-
-        for bytes in batch {
-            // Convert raw bytes to f32 samples (little-endian).
-            let samples_48k = bytes_to_f32(&bytes);
-            input_buf_48k.extend_from_slice(&samples_48k);
-
-            // Resample in chunk_in-sized blocks.
-            while input_buf_48k.len() >= chunk_in {
-                let chunk: Vec<f32> = input_buf_48k.drain(..chunk_in).collect();
-                let resampled = resample_chunk(&mut resampler, &chunk);
-                process_16k_samples(
-                    &resampled,
-                    &mut leftover_16k,
-                    &mut vad,
-                    &mut speech_buf,
-                    &mut silence_frames,
-                    &mut in_speech,
-                    &mut voiced_frames,
-                    flush_frames,
-                    (speculative_enabled, &mut speculative),
-                    &recognizer,
-                    &text_tx,
-                    ptt_active.as_ref(),
-                    manual_mic_unmuted.as_ref(),
-                );
+            SttLoopInput::Batch(batch) => {
+                for input in batch {
+                    let (stream, ptt_gate, manual_gate, track_local_floor) = match input.origin {
+                        SttAudioOrigin::Local => (
+                            &mut local_stream,
+                            ptt_active.as_ref(),
+                            manual_mic_unmuted.as_ref(),
+                            true,
+                        ),
+                        SttAudioOrigin::RemoteHuman => (&mut remote_stream, None, None, false),
+                    };
+                    process_stt_input(
+                        stream,
+                        &input.pcm_bytes,
+                        speculative_enabled,
+                        &recognizer,
+                        &text_tx,
+                        ptt_gate,
+                        manual_gate,
+                        &human_floor,
+                        local_barge_in_state,
+                        output_device.as_deref(),
+                        track_local_floor,
+                    );
+                }
             }
-        }
-    }
+        },
+    );
 
     // No final flush — leave_huddle/end_huddle emit lifecycle events before
     // the STT worker exits, so a final flush would post a kind:9 message AFTER
     // the user has "left." Losing the last partial utterance is acceptable.
+}
+
+#[allow(clippy::too_many_arguments)]
+fn process_stt_input(
+    stream: &mut SttStreamState,
+    pcm_bytes: &[u8],
+    speculative_enabled: bool,
+    recognizer: &sherpa_onnx::OfflineRecognizer,
+    text_tx: &tokio_mpsc::Sender<String>,
+    ptt_active: Option<&Arc<AtomicBool>>,
+    manual_mic_unmuted: Option<&Arc<AtomicBool>>,
+    human_floor: &HumanFloor,
+    local_barge_in_state: &mut local_barge_in::LocalBargeIn,
+    output_device: Option<&str>,
+    track_local_floor: bool,
+) {
+    stream
+        .input_buf_48k
+        .extend_from_slice(&bytes_to_f32(pcm_bytes));
+
+    while stream.input_buf_48k.len() >= stream.chunk_in {
+        let chunk: Vec<f32> = stream.input_buf_48k.drain(..stream.chunk_in).collect();
+        let resampled = resample_chunk(&mut stream.resampler, &chunk);
+        process_16k_samples(
+            &resampled,
+            &mut stream.leftover_16k,
+            &mut stream.vad,
+            &mut stream.endpoint,
+            SILENCE_FLUSH_FRAMES,
+            (speculative_enabled, &mut stream.speculative),
+            recognizer,
+            text_tx,
+            ptt_active,
+            manual_mic_unmuted,
+            human_floor,
+            local_barge_in_state,
+            output_device,
+            track_local_floor,
+        );
+    }
 }
 
 /// Resample a mono 48 kHz chunk to 16 kHz using rubato.
@@ -413,16 +661,17 @@ fn process_16k_samples(
     samples: &[f32],
     leftover: &mut Vec<f32>,
     vad: &mut earshot::Detector<earshot::DefaultPredictor>,
-    speech_buf: &mut Vec<f32>,
-    silence_frames: &mut usize,
-    in_speech: &mut bool,
-    voiced_frames: &mut usize,
+    endpoint: &mut VadEndpoint,
     flush_frames: usize,
     speculative: (bool, &mut Option<(String, usize)>),
     recognizer: &sherpa_onnx::OfflineRecognizer,
     text_tx: &tokio_mpsc::Sender<String>,
     ptt_active: Option<&Arc<AtomicBool>>,
     manual_mic_unmuted: Option<&Arc<AtomicBool>>,
+    human_floor: &HumanFloor,
+    local_barge_in_state: &mut local_barge_in::LocalBargeIn,
+    output_device: Option<&str>,
+    track_local_floor: bool,
 ) {
     let (speculative_enabled, speculative) = speculative;
     leftover.extend_from_slice(samples);
@@ -431,73 +680,90 @@ fn process_16k_samples(
         let frame: Vec<f32> = leftover.drain(..VAD_FRAME_SAMPLES).collect();
         let clamped: Vec<f32> = frame.iter().map(|&s| s.clamp(-1.0, 1.0)).collect();
         let prob = vad.predict_f32(&clamped);
-        let is_speech = prob > VAD_THRESHOLD;
-
         let manually_open = manual_mic_unmuted.is_some_and(|manual| manual.load(Ordering::Acquire));
         let ptt_held = ptt_active.is_some_and(|ptt| ptt.load(Ordering::Acquire));
-        // Shortcut-enabled mode accepts input from either the held shortcut or
-        // a manually open microphone.
-        let is_speech = if ptt_active.is_some() {
-            is_speech && (ptt_held || manually_open)
-        } else {
-            is_speech
-        };
+        let accepts_audio = ptt_active.is_none() || ptt_held || manually_open;
         // A held shortcut means "I am not done talking": silence never ends
         // the utterance while it is held. VAD pause flushing applies in pure
         // VAD mode, or with a manually open mic once the shortcut is up.
-        let vad_flush_allowed = vad_flush_allowed(ptt_active.is_some(), manually_open, ptt_held);
+        let flush_allowed = vad_flush_allowed(ptt_active.is_some(), manually_open, ptt_held);
 
-        if is_speech {
-            *silence_frames = 0;
-            *in_speech = true;
-            *voiced_frames += 1;
-            speech_buf.extend_from_slice(&frame);
-            // New voiced audio invalidates any speculative decode.
-            speculative.take();
-
-            // OOM guard: flush and reset if the buffer exceeds 30 s of audio.
-            if speech_buf.len() >= MAX_SPEECH_SAMPLES {
-                flush_to_stt(speech_buf, *voiced_frames, recognizer, text_tx);
-                speech_buf.clear();
-                *silence_frames = 0;
-                *in_speech = false;
-                *voiced_frames = 0;
-            }
-        } else if *in_speech {
-            // Still accumulate during brief silence gaps.
-            speech_buf.extend_from_slice(&frame);
-            *silence_frames += 1;
-
-            // EXPERIMENTAL: kick the Parakeet decode at the first silent
-            // frame so it overlaps the flush window. speech_buf keeps
-            // accumulating silence afterwards, but trailing silence does not
-            // change the transcript; any resumed speech invalidates the
-            // speculative result above.
-            if speculative_enabled
-                && speculative.is_none()
-                && vad_flush_allowed
-                && has_enough_voiced_audio(*voiced_frames)
-            {
-                speculative.replace((decode_speech(recognizer, speech_buf), *voiced_frames));
-            }
-
-            // A manually open microphone behaves like normal VAD. A held
-            // shortcut keeps the utterance grouped until key release.
-            if vad_flush_allowed && *silence_frames >= flush_frames {
-                // End of utterance — transcribe (or emit the speculative decode).
-                match speculative.take() {
-                    Some((text, decoded_at)) if decoded_at == *voiced_frames => {
-                        send_transcript(text, text_tx);
-                    }
-                    _ => flush_to_stt(speech_buf, *voiced_frames, recognizer, text_tx),
-                }
-                speech_buf.clear();
-                *silence_frames = 0;
-                *in_speech = false;
-                *voiced_frames = 0;
+        let action =
+            endpoint.process_frame(frame, prob, accepts_audio, flush_allowed, flush_frames);
+        // Open-mic VAD semantics also apply when a PTT-mode user manually
+        // opens the mic. A held shortcut keeps its explicit key-down cancel.
+        let local_barge_in = track_local_floor
+            && local_barge_in::enabled(ptt_active.is_some(), manually_open, ptt_held);
+        if track_local_floor {
+            if local_barge_in {
+                local_barge_in_state.observe(
+                    prob,
+                    action == VadFrameAction::ConfirmedOnset,
+                    human_floor,
+                    output_device,
+                    VAD_ONSET_THRESHOLD,
+                );
+            } else {
+                local_barge_in_state.release(human_floor);
             }
         }
-        // If not in speech and not accumulating, just discard the frame.
+
+        match action {
+            VadFrameAction::ConfirmedOnset => {
+                speculative.take();
+            }
+            VadFrameAction::Speech => {
+                // New voiced audio invalidates any speculative decode.
+                speculative.take();
+            }
+            VadFrameAction::FirstSilence => {
+                // Start speculative decode at the first silent frame. Any
+                // resumed speech invalidates this result in the arm above.
+                if speculative_enabled
+                    && speculative.is_none()
+                    && flush_allowed
+                    && has_enough_voiced_audio(endpoint.voiced_frames)
+                {
+                    speculative.replace((
+                        decode_speech(recognizer, &endpoint.speech_buf),
+                        endpoint.voiced_frames,
+                    ));
+                }
+            }
+            VadFrameAction::Flush => {
+                match speculative.take() {
+                    Some((text, decoded_at)) if decoded_at == endpoint.voiced_frames => {
+                        send_transcript(text, text_tx);
+                    }
+                    _ => flush_to_stt(
+                        &endpoint.speech_buf,
+                        endpoint.voiced_frames,
+                        recognizer,
+                        text_tx,
+                    ),
+                }
+                endpoint.reset_segment();
+                if local_barge_in {
+                    local_barge_in_state.release(human_floor);
+                }
+            }
+            VadFrameAction::None => {}
+        }
+
+        // Preserve the 30 s guard even while PTT suppresses silence flushing.
+        if endpoint.speech_buf.len() >= MAX_SPEECH_SAMPLES {
+            flush_to_stt(
+                &endpoint.speech_buf,
+                endpoint.voiced_frames,
+                recognizer,
+                text_tx,
+            );
+            endpoint.reset_segment();
+            if local_barge_in {
+                local_barge_in_state.release(human_floor);
+            }
+            speculative.take();
+        }
     }
 }
 
@@ -511,7 +777,13 @@ fn flush_to_stt(
     recognizer: &sherpa_onnx::OfflineRecognizer,
     text_tx: &tokio_mpsc::Sender<String>,
 ) {
-    if speech_buf.is_empty() || !has_enough_voiced_audio(voiced_frames) {
+    if speech_buf.is_empty() {
+        return;
+    }
+    if !has_enough_voiced_audio(voiced_frames) {
+        eprintln!(
+            "buzz-desktop: STT dropped short VAD segment ({voiced_frames}/{MIN_VOICED_FRAMES} voiced frames)"
+        );
         return;
     }
     send_transcript(decode_speech(recognizer, speech_buf), text_tx);
@@ -569,28 +841,5 @@ fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
 use super::drain_until_shutdown;
 
 #[cfg(test)]
-mod tests {
-    use super::{has_enough_voiced_audio, vad_flush_allowed, MIN_VOICED_FRAMES};
-
-    #[test]
-    fn short_vad_blips_do_not_reach_the_recognizer() {
-        assert!(!has_enough_voiced_audio(1));
-        assert!(!has_enough_voiced_audio(MIN_VOICED_FRAMES - 1));
-        assert!(has_enough_voiced_audio(MIN_VOICED_FRAMES));
-    }
-
-    #[test]
-    fn held_push_to_talk_never_silence_flushes() {
-        // Pure VAD mode: silence always ends the utterance.
-        assert!(vad_flush_allowed(false, false, false));
-        // Shortcut configured, nothing transmitting: nothing to flush anyway,
-        // but the pause path stays closed.
-        assert!(!vad_flush_allowed(true, false, false));
-        // Shortcut held: "I am not done talking" — never flush on silence,
-        // regardless of the manual mic state.
-        assert!(!vad_flush_allowed(true, false, true));
-        assert!(!vad_flush_allowed(true, true, true));
-        // Manually open mic with the shortcut up: normal VAD behavior.
-        assert!(vad_flush_allowed(true, true, false));
-    }
-}
+#[path = "stt_tests.rs"]
+mod tests;

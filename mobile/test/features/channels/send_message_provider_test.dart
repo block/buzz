@@ -16,6 +16,7 @@ void main() {
       final localMessages = <NostrEvent>[];
       final removedIds = <String>[];
       final completedIds = <String>[];
+      final animatedIds = <String>[];
       final send = SendMessage(
         signedEventRelay: SignedEventRelay(
           session: session,
@@ -24,6 +25,7 @@ void main() {
         fetchMembers: (_) async => const [],
         readUserCache: () => const {},
         addLocalMessage: (_, event) => localMessages.add(event),
+        markLocalMessageForAnimation: (_, eventId) => animatedIds.add(eventId),
         completeLocalMessage: (_, eventId) => completedIds.add(eventId),
         removeLocalMessage: (_, eventId) => removedIds.add(eventId),
       );
@@ -35,6 +37,7 @@ void main() {
       expect(localMessages.single.id, session.event.id);
       expect(localMessages.single.content, 'hello');
       expect(localMessages.single.channelId, _channelId);
+      expect(animatedIds, [localMessages.single.id]);
       expect(removedIds, isEmpty);
 
       session.accept();

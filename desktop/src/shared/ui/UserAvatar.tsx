@@ -67,6 +67,7 @@ export function UserAvatar({
       // Animated avatars carry their own backdrop disc and transparent
       // surroundings — any container fill would flatten the pop-out.
       className={cn(sizeClasses[size], !animated && "shadow-xs", className)}
+      data-testid={testId}
       onMouseEnter={animated ? () => setIsHovered(true) : undefined}
       onMouseLeave={animated ? () => setIsHovered(false) : undefined}
     >

@@ -3,17 +3,91 @@ export const PROJECT_SIDEBAR_MEMBERSHIP_EVENT =
   "buzz:project-sidebar-membership-change";
 
 /** Detail carried by {@link PROJECT_SIDEBAR_MEMBERSHIP_EVENT}: the computed
- * membership for one relay/pubkey scope. Listeners must consume this rather
- * than re-reading localStorage — when persistence fails the write never
- * lands, and re-reading would silently revert the user's add/remove. */
+ * membership for one relay/pubkey scope. Listeners may consume this instead of
+ * re-reading storage — when persistence fails the write never lands, but the
+ * in-session scope below stays authoritative either way. */
 export type ProjectSidebarMembershipChange = {
   relayOrigin: string;
   pubkey: string;
   addresses: string[];
 };
 
-function membershipKey(relayOrigin: string, pubkey: string) {
+export type ProjectSidebarMembershipEntry = {
+  selected: boolean;
+  updatedAt: number;
+};
+
+export type ProjectSidebarMembershipStore = {
+  version: 1;
+  projects: Record<string, ProjectSidebarMembershipEntry>;
+};
+
+export const EMPTY_PROJECT_SIDEBAR_MEMBERSHIP_STORE: ProjectSidebarMembershipStore =
+  Object.freeze({
+    version: 1,
+    projects: {},
+  });
+
+export function projectSidebarMembershipStorageKey(
+  relayOrigin: string,
+  pubkey: string,
+) {
   return `${PROJECT_SIDEBAR_MEMBERSHIP_PREFIX}.${encodeURIComponent(relayOrigin)}.${pubkey.toLowerCase()}`;
+}
+
+export function parseProjectSidebarMembershipPayload(
+  value: unknown,
+): ProjectSidebarMembershipStore | null {
+  if (Array.isArray(value)) {
+    return {
+      version: 1,
+      projects: Object.fromEntries(
+        value
+          .filter(
+            (address): address is string =>
+              typeof address === "string" && address.length > 0,
+          )
+          .map((address) => [
+            address,
+            {
+              selected: true,
+              updatedAt: 0,
+            } satisfies ProjectSidebarMembershipEntry,
+          ]),
+      ),
+    };
+  }
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Record<string, unknown>;
+  if (candidate.version !== 1) return null;
+  if (
+    !candidate.projects ||
+    typeof candidate.projects !== "object" ||
+    Array.isArray(candidate.projects)
+  ) {
+    return null;
+  }
+  const projects = Object.fromEntries(
+    Object.entries(candidate.projects).filter(
+      (entry): entry is [string, ProjectSidebarMembershipEntry] => {
+        const membership = entry[1];
+        return (
+          entry[0].length > 0 &&
+          typeof membership === "object" &&
+          membership !== null &&
+          typeof (membership as Record<string, unknown>).selected ===
+            "boolean" &&
+          typeof (membership as Record<string, unknown>).updatedAt ===
+            "number" &&
+          Number.isFinite(
+            (membership as Record<string, unknown>).updatedAt as number,
+          ) &&
+          ((membership as Record<string, unknown>).updatedAt as number) >= 0
+        );
+      },
+    ),
+  );
+  return { version: 1, projects };
 }
 
 /**
@@ -21,72 +95,152 @@ function membershipKey(relayOrigin: string, pubkey: string) {
  * mirror: once a scope is seeded here, every read and mutation goes through
  * this map, so `add(A) → add(B) → remove(A)` accumulates correctly even when
  * every storage write fails — recomputing each mutation from storage would
- * silently drop all but the latest unpersisted change.
+ * silently drop all but the latest unpersisted change. Scoping by
+ * relay origin and pubkey keeps entries from crossing tenant boundaries.
  */
-const membershipByScope = new Map<string, string[]>();
+const membershipStoreByScope = new Map<string, ProjectSidebarMembershipStore>();
 
 /** Clears the in-memory authoritative scopes between test cases. */
 export function __resetProjectSidebarMembershipForTests(): void {
-  membershipByScope.clear();
+  membershipStoreByScope.clear();
 }
 
-function dedupe(addresses: readonly unknown[]): string[] {
-  return [
-    ...new Set(
-      addresses.filter(
-        (address): address is string =>
-          typeof address === "string" && address.length > 0,
-      ),
-    ),
-  ];
-}
-
-function readStoredMembership(key: string): string[] {
+function readStoredMembershipStore(key: string): ProjectSidebarMembershipStore {
   try {
-    const parsed = JSON.parse(globalThis.localStorage?.getItem(key) ?? "[]");
-    return Array.isArray(parsed) ? dedupe(parsed) : [];
+    const raw = globalThis.localStorage?.getItem(key);
+    if (!raw) return EMPTY_PROJECT_SIDEBAR_MEMBERSHIP_STORE;
+    return (
+      parseProjectSidebarMembershipPayload(JSON.parse(raw)) ??
+      EMPTY_PROJECT_SIDEBAR_MEMBERSHIP_STORE
+    );
   } catch {
-    return [];
+    return EMPTY_PROJECT_SIDEBAR_MEMBERSHIP_STORE;
   }
+}
+
+export function readProjectSidebarMembershipStore(
+  relayOrigin: string | null | undefined,
+  pubkey: string | null | undefined,
+): ProjectSidebarMembershipStore {
+  if (!relayOrigin || !pubkey) return EMPTY_PROJECT_SIDEBAR_MEMBERSHIP_STORE;
+  const key = projectSidebarMembershipStorageKey(relayOrigin, pubkey);
+  const cached = membershipStoreByScope.get(key);
+  const stored = readStoredMembershipStore(key);
+  if (!cached) {
+    membershipStoreByScope.set(key, stored);
+    return stored;
+  }
+  // Merge instead of preferring either side: the cache holds mutations whose
+  // persistence failed, while storage may hold newer cross-tab writes. The
+  // per-entry LWW merge keeps both.
+  if (projectSidebarMembershipStoresEqual(cached, stored)) return cached;
+  const merged = mergeProjectSidebarMembershipStores(cached, stored);
+  membershipStoreByScope.set(key, merged);
+  return merged;
+}
+
+export function selectedProjectAddressesFromStore(
+  store: ProjectSidebarMembershipStore,
+): string[] {
+  return Object.entries(store.projects)
+    .filter(([, membership]) => membership.selected)
+    .map(([address]) => address);
 }
 
 export function readProjectSidebarMembership(
   relayOrigin: string | null | undefined,
   pubkey: string | null | undefined,
 ): string[] {
-  if (!relayOrigin || !pubkey) return [];
-  const key = membershipKey(relayOrigin, pubkey);
-  let addresses = membershipByScope.get(key);
-  if (!addresses) {
-    addresses = readStoredMembership(key);
-    membershipByScope.set(key, addresses);
-  }
-  return [...addresses];
+  return selectedProjectAddressesFromStore(
+    readProjectSidebarMembershipStore(relayOrigin, pubkey),
+  );
 }
 
-function writeProjectSidebarMembership(
+export function mergeProjectSidebarMembershipStores(
+  local: ProjectSidebarMembershipStore,
+  remote: ProjectSidebarMembershipStore,
+): ProjectSidebarMembershipStore {
+  const addresses = new Set([
+    ...Object.keys(local.projects),
+    ...Object.keys(remote.projects),
+  ]);
+  const projects: Record<string, ProjectSidebarMembershipEntry> = {};
+  for (const address of addresses) {
+    const localEntry = local.projects[address];
+    const remoteEntry = remote.projects[address];
+    if (localEntry && remoteEntry) {
+      if (localEntry.updatedAt > remoteEntry.updatedAt) {
+        projects[address] = localEntry;
+      } else if (remoteEntry.updatedAt > localEntry.updatedAt) {
+        projects[address] = remoteEntry;
+      } else {
+        projects[address] =
+          localEntry.selected === remoteEntry.selected
+            ? localEntry
+            : { selected: false, updatedAt: localEntry.updatedAt };
+      }
+    } else {
+      projects[address] = (localEntry ??
+        remoteEntry) as ProjectSidebarMembershipEntry;
+    }
+  }
+  return { version: 1, projects };
+}
+
+export function projectSidebarMembershipStoresEqual(
+  left: ProjectSidebarMembershipStore,
+  right: ProjectSidebarMembershipStore,
+): boolean {
+  const leftKeys = Object.keys(left.projects);
+  const rightKeys = Object.keys(right.projects);
+  if (leftKeys.length !== rightKeys.length) return false;
+  return leftKeys.every((address) => {
+    const leftEntry = left.projects[address];
+    const rightEntry = right.projects[address];
+    return (
+      rightEntry !== undefined &&
+      leftEntry.selected === rightEntry.selected &&
+      leftEntry.updatedAt === rightEntry.updatedAt
+    );
+  });
+}
+
+/**
+ * Records `store` as the authoritative in-session state for the scope, then
+ * mirrors it to localStorage. Persistence is best-effort: on failure the
+ * in-memory scope stays authoritative, so sequential mutations never lose
+ * earlier unpersisted changes and the next successful write persists the
+ * accumulated state. Returns whether the mirror write landed.
+ */
+export function writeProjectSidebarMembershipStore(
   relayOrigin: string,
   pubkey: string,
-  addresses: readonly string[],
-) {
-  const deduped = dedupe(addresses);
-  membershipByScope.set(membershipKey(relayOrigin, pubkey), deduped);
+  store: ProjectSidebarMembershipStore,
+  notify = true,
+): boolean {
+  const key = projectSidebarMembershipStorageKey(relayOrigin, pubkey);
+  membershipStoreByScope.set(key, store);
+  let persisted = true;
   try {
-    globalThis.localStorage?.setItem(
-      membershipKey(relayOrigin, pubkey),
-      JSON.stringify(deduped),
-    );
+    globalThis.localStorage?.setItem(key, JSON.stringify(store));
   } catch {
-    // Persistence is best-effort; the in-memory scope above stays
-    // authoritative, so sequential add/remove never loses earlier
-    // unpersisted changes, and the event below updates every mounted view.
+    persisted = false;
   }
-  globalThis.dispatchEvent?.(
-    new CustomEvent<ProjectSidebarMembershipChange>(
-      PROJECT_SIDEBAR_MEMBERSHIP_EVENT,
-      { detail: { addresses: deduped, pubkey, relayOrigin } },
-    ),
-  );
+  if (notify) {
+    globalThis.dispatchEvent?.(
+      new CustomEvent<ProjectSidebarMembershipChange>(
+        PROJECT_SIDEBAR_MEMBERSHIP_EVENT,
+        {
+          detail: {
+            addresses: selectedProjectAddressesFromStore(store),
+            pubkey,
+            relayOrigin,
+          },
+        },
+      ),
+    );
+  }
+  return persisted;
 }
 
 export function addProjectToSidebar(
@@ -95,10 +249,14 @@ export function addProjectToSidebar(
   pubkey: string | null | undefined,
 ) {
   if (!relayOrigin || !pubkey) return;
-  writeProjectSidebarMembership(relayOrigin, pubkey, [
-    ...readProjectSidebarMembership(relayOrigin, pubkey),
-    projectAddress,
-  ]);
+  const current = readProjectSidebarMembershipStore(relayOrigin, pubkey);
+  writeProjectSidebarMembershipStore(relayOrigin, pubkey, {
+    version: 1,
+    projects: {
+      ...current.projects,
+      [projectAddress]: { selected: true, updatedAt: Date.now() },
+    },
+  });
 }
 
 export function removeProjectFromSidebar(
@@ -107,11 +265,12 @@ export function removeProjectFromSidebar(
   pubkey: string | null | undefined,
 ) {
   if (!relayOrigin || !pubkey) return;
-  writeProjectSidebarMembership(
-    relayOrigin,
-    pubkey,
-    readProjectSidebarMembership(relayOrigin, pubkey).filter(
-      (address) => address !== projectAddress,
-    ),
-  );
+  const current = readProjectSidebarMembershipStore(relayOrigin, pubkey);
+  writeProjectSidebarMembershipStore(relayOrigin, pubkey, {
+    version: 1,
+    projects: {
+      ...current.projects,
+      [projectAddress]: { selected: false, updatedAt: Date.now() },
+    },
+  });
 }

@@ -1,7 +1,7 @@
 {
   "name": "buzz",
   "private": true,
-  "version": "0.5.17",
+  "version": "0.5.20",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -66,6 +66,7 @@
     "embla-carousel-react": "^8.6.0",
     "emoji-mart": "^5.6.0",
     "jdenticon": "^3.3.0",
+    "linkifyjs": "^4.3.2",
     "lucide-react": "^1.0.0",
     "mdast-util-from-markdown": "^2.0.3",
     "motion": "^12.38.0",

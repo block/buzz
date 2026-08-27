@@ -32,6 +32,12 @@ export type Project = {
   owner: string;
   createdAt: number;
   projectChannelId: string | null;
+  /**
+   * Extra streams linked to this project via repeatable
+   * `buzz-related-channel` tags. Client convention: NIP-MP treats the tag as
+   * unrecognized metadata, so older readers ignore it.
+   */
+  relatedChannelIds: string[];
   status: string;
   projectAddress: string;
   primaryRepositoryAddress: string | null;
@@ -43,6 +49,11 @@ export type Project = {
   legacy: boolean;
 };
 
+/** True for an announced NIP-MP project, excluding repository-only read models. */
+export function isExplicitProject(project: Project): boolean {
+  return !project.legacy;
+}
+
 type BuildProjectReadModelsInput = {
   projectEvents: RelayEvent[];
   repositoryEvents: RelayEvent[];
@@ -50,6 +61,12 @@ type BuildProjectReadModelsInput = {
   deletionEvents?: RelayEvent[];
   relayOrigin?: string | null;
   hiddenAddresses?: ReadonlySet<string>;
+  /**
+   * When set, the viewer's own unlisted projects stay in the collection so the
+   * creator can still open them. Other viewers keep the NIP-MP fold: unlisted
+   * projects are absent and do not claim members.
+   */
+  viewerPubkey?: string | null;
 };
 
 const MAX_D_TAG_BYTES = 1_024;
@@ -108,6 +125,12 @@ export function isValidProjectChannelId(value: string): boolean {
     value,
   );
 }
+
+/** Repeatable project tag naming an extra stream besides `buzz-channel`. */
+export const PROJECT_RELATED_CHANNEL_TAG = "buzz-related-channel";
+
+/** Cap extra project streams so a tag list cannot grow without bound. */
+export const MAX_PROJECT_RELATED_CHANNELS = 64;
 
 const SINGLETON_METADATA_TAGS = [
   "name",
@@ -339,6 +362,16 @@ export function eventToExplicitProject(
   const visibility =
     rawVisibility === "unlisted" ? ("unlisted" as const) : ("listed" as const);
   const channel = getTag(event, "buzz-channel");
+  const projectChannelId =
+    channel && isValidProjectChannelId(channel) ? channel : null;
+  const relatedChannelIds = [
+    ...new Set(
+      getAllTags(event, PROJECT_RELATED_CHANNEL_TAG).filter(
+        (channelId) =>
+          isValidProjectChannelId(channelId) && channelId !== projectChannelId,
+      ),
+    ),
+  ].slice(0, MAX_PROJECT_RELATED_CHANNELS);
   return {
     id: projectAddress,
     dtag,
@@ -346,8 +379,8 @@ export function eventToExplicitProject(
     description: getTag(event, "description") ?? "",
     owner,
     createdAt: event.created_at,
-    projectChannelId:
-      channel && isValidProjectChannelId(channel) ? channel : null,
+    projectChannelId,
+    relatedChannelIds,
     status: visibility === "listed" ? "active" : "unlisted",
     projectAddress,
     primaryRepositoryAddress,
@@ -374,6 +407,7 @@ function repositoryToLegacyProject(repository: Repository): Project {
     owner: repository.owner,
     createdAt: repository.createdAt,
     projectChannelId: null,
+    relatedChannelIds: [],
     status: repository.status,
     projectAddress: repository.repoAddress,
     primaryRepositoryAddress: repository.repoAddress,
@@ -387,27 +421,18 @@ function repositoryToLegacyProject(repository: Repository): Project {
 }
 
 /**
- * Builds the set of addressable coordinates that have been authoritatively
- * deleted per NIP-09 semantics: the deletion signer must equal the coordinate
- * owner, and the deletion's `created_at` must be ≥ the live head's timestamp.
- * Returns a `Map<coordinate, deletedAt>` for threshold comparison.
+ * Builds deletion thresholds from relay-accepted tombstones. The relay has
+ * already enforced that each signer controls the addressed coordinate,
+ * including Buzz's NIP-OA owner delegation for agent-authored events.
  */
 function buildDeletionThresholds(
   deletionEvents: RelayEvent[],
 ): Map<string, number> {
   const thresholds = new Map<string, number>();
   for (const event of deletionEvents) {
-    const signer = event.pubkey.toLowerCase();
     for (const tag of event.tags) {
       if (tag[0] !== "a" || !tag[1]) continue;
       const coordinate = tag[1];
-      // The signer must be the owner of the coordinate.
-      const firstColon = coordinate.indexOf(":");
-      const secondColon = coordinate.indexOf(":", firstColon + 1);
-      if (firstColon < 0 || secondColon < 0) continue;
-      const owner = coordinate.slice(firstColon + 1, secondColon).toLowerCase();
-      if (owner !== signer) continue;
-      // Keep the latest (most permissive) deletion threshold.
       const existing = thresholds.get(coordinate);
       if (existing === undefined || event.created_at > existing) {
         thresholds.set(coordinate, event.created_at);
@@ -417,12 +442,23 @@ function buildDeletionThresholds(
   return thresholds;
 }
 
+function projectIsListingEligible(
+  project: Project,
+  viewerPubkey: string | null | undefined,
+): boolean {
+  if (project.visibility !== "unlisted") return true;
+  return Boolean(
+    viewerPubkey && project.owner === viewerPubkey.trim().toLowerCase(),
+  );
+}
+
 export function buildProjectReadModels({
   projectEvents,
   repositoryEvents,
   deletionEvents = [],
   relayOrigin,
   hiddenAddresses = new Set(),
+  viewerPubkey,
 }: BuildProjectReadModelsInput): Project[] {
   const deletionThresholds = buildDeletionThresholds(deletionEvents);
 
@@ -463,7 +499,7 @@ export function buildProjectReadModels({
         visibleRepositoriesByAddress,
       );
       return project &&
-        project.visibility === "listed" &&
+        projectIsListingEligible(project, viewerPubkey) &&
         !hiddenAddresses.has(project.projectAddress)
         ? [project]
         : [];
@@ -546,5 +582,23 @@ export function addRepositoryToProject(
       project.unavailableRepositoryAddresses?.filter(
         (address) => address !== repository.repoAddress,
       ) ?? [],
+  };
+}
+
+/** Returns the optimistic read model after linking an extra project stream. */
+export function addRelatedChannelToProject(
+  project: Project,
+  channelId: string,
+  createdAt: number,
+): Project {
+  const relatedChannelIds = [
+    ...new Set([...(project.relatedChannelIds ?? []), channelId]),
+  ].filter(
+    (id) => id !== project.projectChannelId && isValidProjectChannelId(id),
+  );
+  return {
+    ...project,
+    createdAt,
+    relatedChannelIds: relatedChannelIds.slice(0, MAX_PROJECT_RELATED_CHANNELS),
   };
 }

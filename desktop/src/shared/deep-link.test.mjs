@@ -359,6 +359,58 @@ test("failed community clear quarantines stale navigation from the next listener
   await resetNavigationDeepLinkDrain();
 });
 
+test("refused navigation stays at the FIFO head and retries with one acknowledgement", async () => {
+  const pending = {
+    id: "retry-me",
+    kind: "message",
+    channelId: "channel-1",
+    messageId: "message-1",
+    threadRootId: "root-1",
+  };
+  const queue = [pending];
+  const opened = [];
+  const acknowledged = [];
+
+  ipcHandlers.set("plugin:event|listen", () => nextCallbackId);
+  ipcHandlers.set("plugin:event|unlisten", () => {});
+  ipcHandlers.set("take_pending_navigation_deep_link", () => queue[0] ?? null);
+  ipcHandlers.set("acknowledge_pending_navigation_deep_link", ({ id }) => {
+    assert.equal(queue[0]?.id, id);
+    acknowledged.push(id);
+    queue.shift();
+    return true;
+  });
+
+  const firstUnlisten = await listenForNavigationDeepLinks(
+    () => true,
+    (payload) => {
+      opened.push(`refused:${payload.messageId}`);
+      return false;
+    },
+  );
+  await settle();
+
+  assert.deepEqual(opened, ["refused:message-1"]);
+  assert.equal(queue[0], pending);
+  assert.deepEqual(acknowledged, []);
+  firstUnlisten();
+
+  const secondUnlisten = await listenForNavigationDeepLinks(
+    () => true,
+    (payload) => {
+      opened.push(`accepted:${payload.messageId}`);
+      return true;
+    },
+  );
+  await settle();
+  await settle();
+
+  assert.deepEqual(opened, ["refused:message-1", "accepted:message-1"]);
+  assert.deepEqual(acknowledged, ["retry-me"]);
+  assert.equal(queue.length, 0);
+  secondUnlisten();
+});
+
 test("rejected navigation remains queued and is not acknowledged", async () => {
   const pending = {
     id: "retry-me",
