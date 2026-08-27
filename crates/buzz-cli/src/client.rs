@@ -3,6 +3,8 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use buzz_core::clock_skew::ClockOffsetBounds;
+use chrono::Utc;
 use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
 use sha2::{Digest, Sha256};
 
@@ -74,6 +76,25 @@ const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Lifetime stamped on a Blossom upload token, in seconds.
+///
+/// Video uploads get an hour to survive a slow connection; everything else gets
+/// ten minutes. `sign_blossom_upload` stamps the `expiration` from this, and
+/// the clock diagnosis reads the same value to judge how far behind a clock
+/// would have to be for a token to arrive already expired — one definition, so
+/// the two cannot disagree.
+fn upload_token_lifetime_secs(mime: &str) -> u64 {
+    if mime.starts_with("video/") {
+        3600
+    } else {
+        600
+    }
+}
+
+/// Timeout for the clock-skew probe. Short on purpose: the probe only runs
+/// after an upload has already failed, and must not stretch out the failure.
+const CLOCK_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -357,12 +378,7 @@ fn sign_blossom_upload(
     use nostr::Timestamp;
 
     let now = Timestamp::now().as_secs();
-    let expiry: u64 = if mime.starts_with("video/") {
-        3600
-    } else {
-        600
-    };
-    let exp_str = (now + expiry).to_string();
+    let exp_str = (now + upload_token_lifetime_secs(mime)).to_string();
 
     let mut tags = vec![
         Tag::parse(["t", "upload"]).map_err(|e| CliError::Other(e.to_string()))?,
@@ -1116,6 +1132,62 @@ impl BuzzClient {
         .to_string())
     }
 
+    /// Explain a refused upload when this machine's clock is provably why.
+    ///
+    /// Runs its own `HEAD` of the upload route rather than reading the `Date`
+    /// off the rejection: the relay verifies Blossom auth *before* it reads the
+    /// body, so on a large upload that header was stamped at the start of a
+    /// transfer that ran for minutes, and treating it as "the relay's clock
+    /// now" would pin every slow-upload 401 on a healthy clock. A dedicated
+    /// round trip is the only one short enough to bound.
+    ///
+    /// The local clock is read either side of that round trip so the offset is
+    /// bracketed rather than estimated. `None` whenever the observation does
+    /// not prove drift — no `Date`, probe failed, or a clock the relay would
+    /// have accepted.
+    async fn diagnose_upload_clock(&self, token_lifetime_secs: u64) -> Option<String> {
+        let before = Utc::now().timestamp_millis();
+        let resp = self
+            .http
+            .head(format!("{}/upload", self.relay_url))
+            .header(reqwest::header::CACHE_CONTROL, "no-cache")
+            .timeout(CLOCK_PROBE_TIMEOUT)
+            .send()
+            .await
+            .ok()?;
+        let after = Utc::now().timestamp_millis();
+        // Only a cache sends `Age`, and a cached reply carries the origin's
+        // original `Date` — a clock reading as stale as the cache entry. Refuse
+        // to measure rather than try to correct for it.
+        if resp.headers().contains_key(reqwest::header::AGE) {
+            return None;
+        }
+        let date = resp.headers().get(reqwest::header::DATE)?.to_str().ok()?;
+        ClockOffsetBounds::measure(before, after, date)?.media_auth_advice(token_lifetime_secs)
+    }
+
+    /// Append a clock-skew explanation to a refused upload's error body, when
+    /// this machine's clock is provably the cause.
+    ///
+    /// The relay's own message is kept: a 401 has many possible causes and only
+    /// one of them is the clock, so replacing the body would throw away the
+    /// evidence whenever the diagnosis is wrong.
+    async fn explain_upload_rejection(&self, status: u16, body: String, mime: &str) -> CliError {
+        if status != 401 {
+            return CliError::Relay { status, body };
+        }
+        match self
+            .diagnose_upload_clock(upload_token_lifetime_secs(mime))
+            .await
+        {
+            Some(advice) => CliError::Relay {
+                status,
+                body: format!("{body}\n\n{advice}"),
+            },
+            None => CliError::Relay { status, body },
+        }
+    }
+
     /// Upload a file to the relay's Blossom endpoint.
     /// Returns a BlobDescriptor on success.
     pub async fn upload_file(&self, file_path: &str) -> Result<BlobDescriptor, CliError> {
@@ -1193,7 +1265,7 @@ impl BuzzClient {
                     if !status.is_success() {
                         let s = status.as_u16();
                         let body = resp.text().await.unwrap_or_default();
-                        return Err(CliError::Relay { status: s, body });
+                        return Err(self.explain_upload_rejection(s, body, &mime).await);
                     }
                     resp.json::<BlobDescriptor>().await.map_err(CliError::from)
                 }
@@ -1238,7 +1310,7 @@ impl BuzzClient {
                 if !resp.status().is_success() {
                     let status = resp.status().as_u16();
                     let body = resp.text().await.unwrap_or_default();
-                    return Err(CliError::Relay { status, body });
+                    return Err(self.explain_upload_rejection(status, body, &mime).await);
                 }
                 resp.json::<BlobDescriptor>().await.map_err(CliError::from)
             }
@@ -2551,6 +2623,236 @@ mod tests {
         assert!(
             built.headers().get("x-auth-tag").is_none(),
             "x-auth-tag header must not be present when no auth tag is configured"
+        );
+    }
+}
+
+/// Upload clock-skew diagnosis: a drifted system clock makes the relay refuse
+/// Blossom auth with an opaque 401. These tests pin the behaviour that names
+/// the clock when it is provably at fault, keeps quiet when it is not, and
+/// never withholds what the relay actually said.
+#[cfg(test)]
+mod upload_clock_skew_tests {
+    use std::io::Write;
+    use std::net::SocketAddr;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::extract::State;
+    use axum::http::{Response, StatusCode};
+    use axum::routing::head;
+    use axum::Router;
+    use nostr::Keys;
+    use tokio::net::TcpListener;
+
+    use super::super::error::CliError;
+    use super::BuzzClient;
+
+    /// Smallest byte sequence `infer` reports as `image/png`.
+    const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
+    /// What the stand-in relay says when it refuses an upload — the opaque
+    /// message the real relay sends for every auth failure.
+    const RELAY_401_BODY: &str = "{\"error\":\"authentication failed\"}";
+
+    /// The `Date` a server whose clock sits `delta` seconds from ours would send.
+    ///
+    /// A *negative* delta is a server behind us, which is what a local clock
+    /// running fast looks like from the client's side.
+    fn date_header(delta_secs: i64) -> String {
+        (chrono::Utc::now() + chrono::Duration::seconds(delta_secs))
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string()
+    }
+
+    struct SkewServer {
+        base_url: String,
+        /// `PUT /upload` attempts — the upload itself.
+        put_attempts: Arc<AtomicU32>,
+        /// `HEAD /upload` attempts — the clock probe, which must only ever fire
+        /// after an upload has already been refused.
+        probe_attempts: Arc<AtomicU32>,
+    }
+
+    /// A `Date` value no parser can read, standing in for the proxy that mangles
+    /// the header. Overwriting is the only way to test this: hyper stamps a
+    /// valid `Date` on any response that omits one, so a handler cannot produce
+    /// a header-less reply.
+    const UNREADABLE_DATE: &str = "whenever o'clock";
+
+    /// Spawn a relay stand-in that dates its responses as if its clock sat
+    /// `delta` seconds from ours. `None` replaces the header with
+    /// [`UNREADABLE_DATE`], leaving nothing to measure against.
+    ///
+    /// The probe (`HEAD`) and the rejection (`PUT` → 401) are dated separately,
+    /// so a test can prove which of the two the diagnosis actually trusts.
+    async fn skew_server(probe_delta: Option<i64>, reject_delta: Option<i64>) -> SkewServer {
+        let put_attempts = Arc::new(AtomicU32::new(0));
+        let probe_attempts = Arc::new(AtomicU32::new(0));
+        let state = (
+            probe_delta,
+            reject_delta,
+            put_attempts.clone(),
+            probe_attempts.clone(),
+        );
+        type S = (Option<i64>, Option<i64>, Arc<AtomicU32>, Arc<AtomicU32>);
+
+        fn dated(status: StatusCode, delta: Option<i64>, body: &'static str) -> Response<Body> {
+            let date = delta.map_or_else(|| UNREADABLE_DATE.to_string(), date_header);
+            Response::builder()
+                .status(status)
+                .header("date", date)
+                .body(Body::from(body))
+                .expect("valid response")
+        }
+
+        let app = Router::new()
+            .route(
+                "/upload",
+                head(|State((probe, _, _, probes)): State<S>| async move {
+                    probes.fetch_add(1, Ordering::SeqCst);
+                    dated(StatusCode::METHOD_NOT_ALLOWED, probe, "")
+                })
+                .put(
+                    |State((_, reject, puts, _)): State<S>, _body: Body| async move {
+                        puts.fetch_add(1, Ordering::SeqCst);
+                        dated(StatusCode::UNAUTHORIZED, reject, RELAY_401_BODY)
+                    },
+                ),
+            )
+            .with_state(state);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr: SocketAddr = listener.local_addr().expect("addr");
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+        SkewServer {
+            base_url: format!("http://{addr}"),
+            put_attempts,
+            probe_attempts,
+        }
+    }
+
+    /// Upload a tiny PNG to the given server and return the resulting error.
+    async fn upload_png_err(server: &SkewServer) -> CliError {
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        file.write_all(PNG_MAGIC).expect("write png magic");
+        file.flush().expect("flush");
+
+        let client =
+            BuzzClient::new(server.base_url.clone(), Keys::generate(), None, None).expect("client");
+        client
+            .upload_file(file.path().to_str().expect("utf-8 path"))
+            .await
+            .expect_err("upload must fail against this stand-in relay")
+    }
+
+    /// The reported bug: a clock running fast earns a named cause. The relay's
+    /// own message survives alongside it, and the error stays a `Relay` 401 so
+    /// exit codes and the JSON error category are unchanged.
+    #[tokio::test]
+    async fn a_fast_clock_is_named_on_the_rejection() {
+        let server = skew_server(Some(-30), Some(-30)).await;
+        let err = upload_png_err(&server).await;
+
+        let CliError::Relay { status, ref body } = err else {
+            panic!("expected a relay error, got {err}");
+        };
+        assert_eq!(status, 401);
+        assert!(body.contains("authentication failed"), "{body}");
+        assert!(body.contains("ahead of"), "{body}");
+        assert!(body.contains("w32tm"), "{body}");
+        assert_eq!(server.probe_attempts.load(Ordering::SeqCst), 1);
+    }
+
+    /// The asymmetric half: the backward bound is the token's own lifetime, so
+    /// it takes a much larger drift to trip, and the message says "behind".
+    #[tokio::test]
+    async fn a_slow_clock_is_named_too() {
+        let server = skew_server(Some(1200), Some(1200)).await;
+        let err = upload_png_err(&server).await;
+
+        assert!(err.to_string().contains("behind"), "{err}");
+    }
+
+    /// Regression test for the misdiagnosis this design was rebuilt to avoid.
+    ///
+    /// The relay verifies Blossom auth *before* it reads the body, so a large
+    /// upload that is refused at the start observes a `Date` stamped minutes
+    /// earlier. Reading the clock off that rejection would blame a perfectly
+    /// healthy clock for someone else's auth failure. The diagnosis must ignore
+    /// the rejection's own `Date` and trust only its own bounded probe.
+    #[tokio::test]
+    async fn a_stale_date_on_the_rejection_is_not_mistaken_for_drift() {
+        let server = skew_server(Some(0), Some(-600)).await;
+        let err = upload_png_err(&server).await;
+
+        let message = err.to_string();
+        assert!(
+            !message.contains("clock"),
+            "a healthy clock must not be blamed for a stale rejection date: {message}"
+        );
+        assert!(message.contains("authentication failed"), "{message}");
+    }
+
+    /// A synced clock is never blamed, so a genuine auth problem keeps the
+    /// relay's message and nothing else.
+    #[tokio::test]
+    async fn a_synced_clock_leaves_the_relays_401_alone() {
+        let server = skew_server(Some(0), Some(0)).await;
+        let err = upload_png_err(&server).await;
+
+        let CliError::Relay { status, ref body } = err else {
+            panic!("expected a relay error, got {err}");
+        };
+        assert_eq!(status, 401);
+        assert_eq!(body.trim(), RELAY_401_BODY);
+    }
+
+    /// With no readable `Date` to measure against there is nothing to say, and
+    /// the failure is reported exactly as it was before. This covers the
+    /// unparseable-header branch, which a synced-clock test cannot reach.
+    #[tokio::test]
+    async fn an_unreadable_date_header_changes_nothing() {
+        let server = skew_server(None, None).await;
+        let err = upload_png_err(&server).await;
+
+        let CliError::Relay { status, ref body } = err else {
+            panic!("expected a relay error, got {err}");
+        };
+        assert_eq!(status, 401);
+        assert_eq!(body.trim(), RELAY_401_BODY);
+        assert_eq!(server.probe_attempts.load(Ordering::SeqCst), 1);
+        assert!(server.put_attempts.load(Ordering::SeqCst) >= 1);
+    }
+
+    /// A failure that is not a 401 is none of this code's business: no probe
+    /// fires and the relay's error is returned untouched.
+    #[tokio::test]
+    async fn a_non_401_failure_is_not_probed_at_all() {
+        let server = skew_server(Some(-30), Some(-30)).await;
+        let mut file = tempfile::NamedTempFile::new().expect("temp file");
+        file.write_all(PNG_MAGIC).expect("write png magic");
+        file.flush().expect("flush");
+
+        // `/media/upload` is the legacy alias; this stand-in never routes it,
+        // so axum answers 405 and the upload fails without a 401 anywhere.
+        let client = BuzzClient::new(
+            format!("{}/nowhere", server.base_url),
+            Keys::generate(),
+            None,
+            None,
+        )
+        .expect("client");
+        let err = client
+            .upload_file(file.path().to_str().expect("utf-8 path"))
+            .await
+            .expect_err("no upload route exists at this base URL");
+
+        assert!(!err.to_string().contains("clock"), "{err}");
+        assert_eq!(
+            server.probe_attempts.load(Ordering::SeqCst),
+            0,
+            "a non-401 failure must not trigger a clock probe"
         );
     }
 }

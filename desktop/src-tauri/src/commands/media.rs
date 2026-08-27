@@ -13,6 +13,7 @@ use super::media_transcode::{
     transcode_and_extract_poster_with_cancellation, transcode_heic_path_to_jpeg_bytes,
     transcode_heic_path_to_jpeg_bytes_with_cancellation,
 };
+use super::media_upload_auth::{diagnose_upload_rejection, mint_upload_auth_header};
 use super::media_upload_progress::{emit_media_upload_phase, send_upload_attempt, UploadAttempt};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,7 +44,7 @@ pub struct BlobDescriptor {
 /// Extract the server authority from a URL for BUD-11 server tag scoping.
 ///
 /// Returns `host` for default ports (80/443), `host:port` for non-default ports.
-fn extract_server_authority(url_str: &str) -> Option<String> {
+pub(super) fn extract_server_authority(url_str: &str) -> Option<String> {
     let parsed = url::Url::parse(url_str).ok()?;
     let host = parsed.host_str()?;
     match parsed.port() {
@@ -373,28 +374,6 @@ pub(crate) fn mint_media_get_auth(state: &AppState, base_url: &str) -> Option<St
     }
 }
 
-fn sign_blossom_upload_auth(
-    keys: &Keys,
-    sha256: &str,
-    expiry_secs: u64,
-    base_url: &str,
-) -> Result<nostr::Event, String> {
-    let now = Timestamp::now().as_secs();
-    let mut tags = vec![
-        Tag::parse(vec!["t", "upload"]).map_err(|e| e.to_string())?,
-        Tag::parse(vec!["x", sha256]).map_err(|e| e.to_string())?,
-        Tag::parse(vec!["expiration", &(now + expiry_secs).to_string()])
-            .map_err(|e| e.to_string())?,
-    ];
-    if let Some(domain) = extract_server_authority(base_url) {
-        tags.push(Tag::parse(vec!["server".to_string(), domain]).map_err(|e| e.to_string())?);
-    }
-    EventBuilder::new(Kind::from(24242), "Upload buzz-media")
-        .tags(tags)
-        .sign_with_keys(keys)
-        .map_err(|e| e.to_string())
-}
-
 /// Execute the upload HTTP request. Shared by all upload entry points.
 // TODO(v2): Stream large video files to the relay instead of buffering in RAM.
 // Current approach works for videos up to ~100MB but will OOM on 500MB files.
@@ -437,15 +416,8 @@ async fn do_upload(
         300
     };
     let base_url = relay_api_base_url_with_override(state);
-    let auth_event = {
-        let keys = state.signing_keys()?;
-        sign_blossom_upload_auth(&keys, &sha256, expiry_secs, &base_url)?
-    };
 
-    let auth_header = format!(
-        "Nostr {}",
-        URL_SAFE_NO_PAD.encode(auth_event.as_json().as_bytes())
-    );
+    let auth_header = mint_upload_auth_header(state, &base_url, &sha256, expiry_secs)?;
     let body = bytes::Bytes::from(body);
     if let Some((app, progress_id)) = progress.as_ref() {
         emit_media_upload_phase(app, Some(progress_id.as_str()), "uploading");
@@ -480,7 +452,19 @@ async fn do_upload(
     }
 
     if !resp.status().is_success() {
-        return Err(relay_error_message(resp).await);
+        let status = resp.status();
+        let message = relay_error_message(resp).await;
+        // Keep the relay's own message: a 401 has many possible causes and only
+        // one of them is the clock. Joined with a space, not a newline — these
+        // strings surface in toasts and badges that collapse whitespace.
+        return Err(
+            match diagnose_upload_rejection(state, &base_url, status, expiry_secs, cancellation)
+                .await
+            {
+                Some(advice) => format!("{message} {advice}"),
+                None => message,
+            },
+        );
     }
 
     parse_json_response::<BlobDescriptor>(resp).await
