@@ -46,6 +46,7 @@ pub(crate) struct BusinessAgentHostConfig {
     max_payload_bytes: usize,
     default_limit: u64,
     max_limit: u64,
+    draft_write_enabled: bool,
     client: reqwest::Client,
 }
 
@@ -367,6 +368,15 @@ impl BusinessAgentHostConfig {
         )? as usize;
         let default_limit = bounded_number("BUSINESS_TOOL_DEFAULT_LIMIT", 20, 1, 100)?;
         let max_limit = bounded_number("BUSINESS_TOOL_MAX_LIMIT", 100, default_limit, 100)?;
+        let draft_write_enabled = std::env::var("BUSINESS_AGENT_DRAFT_WRITE_ENABLED")
+            .ok()
+            .map(|value| {
+                value.parse::<bool>().map_err(|_| {
+                    "BUSINESS_AGENT_DRAFT_WRITE_ENABLED must be true or false".to_string()
+                })
+            })
+            .transpose()?
+            .unwrap_or(false);
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(10))
@@ -388,6 +398,7 @@ impl BusinessAgentHostConfig {
             max_payload_bytes,
             default_limit,
             max_limit,
+            draft_write_enabled,
             client,
         }))
     }
@@ -404,6 +415,11 @@ impl BusinessAgentHostConfig {
             .gateway_base_url
             .join("internal/agent-delegations")
             .map_err(|_| "Business Agent gateway URL is invalid")?;
+        let requested_scopes = AGENT_SCOPES
+            .iter()
+            .copied()
+            .filter(|scope| self.draft_write_enabled || !scope.ends_with(":create"))
+            .collect::<Vec<_>>();
         let response = self
             .client
             .post(url)
@@ -416,7 +432,7 @@ impl BusinessAgentHostConfig {
                 "sourceChannelId": source_channel_id.to_string(),
                 "agentId": agent_id,
                 "agentTurnId": agent_turn_id,
-                "scopes": AGENT_SCOPES,
+                "scopes": requested_scopes,
             }))
             .send()
             .await
@@ -441,11 +457,11 @@ impl BusinessAgentHostConfig {
             || issued.audience != "business-read-mcp"
             || issued.token.len() != 43
             || issued.scopes.is_empty()
-            || issued.scopes.len() > AGENT_SCOPES.len()
+            || issued.scopes.len() > requested_scopes.len()
             || issued
                 .scopes
                 .iter()
-                .any(|scope| !AGENT_SCOPES.contains(&scope.as_str()))
+                .any(|scope| !requested_scopes.contains(&scope.as_str()))
             || issued
                 .scopes
                 .iter()
@@ -469,6 +485,10 @@ impl BusinessAgentHostConfig {
             env("BUSINESS_READ_SERVICE_AUDIENCE", "business-read-api"),
             env("BUSINESS_ANOMALY_ENABLED", "true"),
             env("BUSINESS_ACTION_ENABLED", "true"),
+            env(
+                "BUSINESS_AGENT_DRAFT_WRITE_ENABLED",
+                self.draft_write_enabled.to_string(),
+            ),
             env("BUSINESS_READ_ADAPTER", &self.adapter),
             env(
                 "BUSINESS_TOOL_TIMEOUT_SECONDS",
@@ -546,6 +566,17 @@ mod tests {
         assert!(AGENT_SCOPES.contains(&"sales_order:create"));
         assert!(!AGENT_SCOPES.contains(&"sales_order:confirm"));
         assert!(!AGENT_SCOPES.contains(&"payment:execute"));
+    }
+
+    #[test]
+    fn draft_write_switch_defaults_to_disabled_semantics() {
+        let read_only = AGENT_SCOPES
+            .iter()
+            .copied()
+            .filter(|scope| !scope.ends_with(":create"))
+            .collect::<Vec<_>>();
+        assert_eq!(read_only.len(), 8);
+        assert!(read_only.iter().all(|scope| scope.ends_with(":read")));
     }
 
     #[test]

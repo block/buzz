@@ -11,6 +11,11 @@ V4 adds internal Agent Delegation endpoints. They are disabled unless
 Base64URL values; only their SHA-256 hashes are stored. These endpoints are for
 the trusted Agent Host and `business-read-mcp`, not browsers.
 
+The six draft-create scopes have a separate default-off kill switch:
+`BUSINESS_AGENT_DRAFT_WRITE_ENABLED`. The Gateway rejects issuing, consuming,
+or verifying a create scope while it is false. It cannot be enabled unless the
+read/delegation subsystem is also enabled.
+
 Run migrations with `business-auth-gateway --migrate-only`, then run the normal
 binary as a least-privilege PostgreSQL role. Configuration is validated before
 the listener starts. `/health/live` is process liveness and `/health/ready`

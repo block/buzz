@@ -17,7 +17,7 @@ export function ProjectHomeColumn({
   canResetWidth: boolean;
   children: React.ReactNode;
   onResetWidth: () => void;
-  onResizeStart: (event: React.PointerEvent<HTMLButtonElement>) => void;
+  onResizeStart: (event: React.MouseEvent<HTMLButtonElement>) => void;
   testId: string;
   widthPx: number;
 }) {

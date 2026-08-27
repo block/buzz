@@ -51,6 +51,7 @@ struct Config {
     default_limit: u32,
     max_limit: u32,
     adapter: AdapterKind,
+    draft_write_enabled: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -147,6 +148,15 @@ impl Config {
         let default_limit = parse_u64("BUSINESS_TOOL_DEFAULT_LIMIT", 20, 1, 100)? as u32;
         let max_limit =
             parse_u64("BUSINESS_TOOL_MAX_LIMIT", 100, default_limit as u64, 100)? as u32;
+        let draft_write_enabled = std::env::var("BUSINESS_AGENT_DRAFT_WRITE_ENABLED")
+            .ok()
+            .map(|value| {
+                value.parse::<bool>().map_err(|_| {
+                    "BUSINESS_AGENT_DRAFT_WRITE_ENABLED must be true or false".to_string()
+                })
+            })
+            .transpose()?
+            .unwrap_or(false);
         Ok(Self {
             gateway_base_url: parse_url(
                 "BUSINESS_AUTH_GATEWAY_BASE_URL",
@@ -170,6 +180,7 @@ impl Config {
             default_limit,
             max_limit,
             adapter,
+            draft_write_enabled,
         })
     }
 }
@@ -828,6 +839,13 @@ impl BusinessReadMcp {
     where
         T: Serialize + Send,
     {
+        if !self.config.draft_write_enabled {
+            return write_error_json(
+                "draft_write_disabled",
+                "Business Agent draft creation is disabled by the operator",
+                self.config.trace_id,
+            );
+        }
         let started = std::time::Instant::now();
         let context = match self.consume_delegation(tool, required_scope).await {
             Ok(value) => value,
@@ -2204,7 +2222,23 @@ mod tests {
             default_limit: 20,
             max_limit: 100,
             adapter: AdapterKind::Production,
+            draft_write_enabled: true,
         }
+    }
+
+    #[tokio::test]
+    async fn draft_write_kill_switch_fails_before_delegation_consumption() {
+        let mut config = production_config(
+            Url::parse("http://127.0.0.1:9/").expect("url"),
+            Uuid::new_v4(),
+        );
+        config.draft_write_enabled = false;
+        let mcp = BusinessReadMcp::new(config).expect("mcp");
+        let result = mcp
+            .invoke_write("create_sales_order_draft", "sales_order:create", json!({}))
+            .await;
+        let value: Value = serde_json::from_str(&result).expect("json");
+        assert_eq!(value["code"], "draft_write_disabled");
     }
 
     async fn retry_server(body: String) -> (Url, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {

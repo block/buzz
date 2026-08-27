@@ -408,7 +408,12 @@ function resourceFromPath(path: string): BusinessResource {
   }
   if (path.startsWith("/embed/reports/")) {
     const id = path.slice("/embed/reports/".length).split("/")[0];
-    return { version: 1, type: "management_report", ...(SAFE_SEGMENT.test(id) ? { id } : {}), path };
+    return {
+      version: 1,
+      type: "management_report",
+      ...(SAFE_SEGMENT.test(id) ? { id } : {}),
+      path,
+    };
   }
   for (const route of ROUTES) {
     if (SINGLETON_DEEP_LINKS.has(route.deepLink)) {
@@ -456,8 +461,21 @@ export function parseBusinessUrl(
       if (rawSegments.length !== 3) return null;
       const [dimension, rawId, period] = rawSegments;
       const id = decodePath(rawId);
-      if (!PROFIT_DIMENSIONS.has(dimension) || !id || !SAFE_SEGMENT.test(id) || !SAFE_PERIOD.test(period)) return null;
-      return { version: 1, type: "profitability", id, period, metadata: { dimension }, path: `/embed/profitability/${dimension}/${encodeURIComponent(id)}/period/${period}` };
+      if (
+        !PROFIT_DIMENSIONS.has(dimension) ||
+        !id ||
+        !SAFE_SEGMENT.test(id) ||
+        !SAFE_PERIOD.test(period)
+      )
+        return null;
+      return {
+        version: 1,
+        type: "profitability",
+        id,
+        period,
+        metadata: { dimension },
+        path: `/embed/profitability/${dimension}/${encodeURIComponent(id)}/period/${period}`,
+      };
     }
     if (SINGLETON_DEEP_LINKS.has(url.hostname)) {
       if (rawSegments.length !== 0) return null;
@@ -614,7 +632,12 @@ export function buildBusinessReference(
   }
   if (resource.type === "profitability" && resource.id && resource.period) {
     const dimension = resource.metadata?.dimension;
-    if (dimension && PROFIT_DIMENSIONS.has(dimension) && resource.path === `/embed/profitability/${dimension}/${encodeURIComponent(resource.id)}/period/${resource.period}`) {
+    if (
+      dimension &&
+      PROFIT_DIMENSIONS.has(dimension) &&
+      resource.path ===
+        `/embed/profitability/${dimension}/${encodeURIComponent(resource.id)}/period/${resource.period}`
+    ) {
       return `biz://profitability/${dimension}/${encodeURIComponent(resource.id)}/${resource.period}`;
     }
   }
@@ -642,7 +665,10 @@ export function isBusinessDeepLinkCandidate(value: string): boolean {
           PROFIT_DIMENSIONS.has(segments[0]) &&
           SAFE_SEGMENT.test(segments[1]) &&
           SAFE_PERIOD.test(segments[2]) &&
-          !url.username && !url.password && !url.search && !url.hash,
+          !url.username &&
+          !url.password &&
+          !url.search &&
+          !url.hash,
       );
     }
     if (SINGLETON_DEEP_LINKS.has(url.hostname)) {

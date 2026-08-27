@@ -34,6 +34,7 @@ fn config(database_url: String, max_calls: i32) -> Config {
         deployment_id: "test".into(),
         global_logout_redirect_uri: "https://workbench.test/".into(),
         business_agent_read_enabled: true,
+        business_agent_draft_write_enabled: true,
         business_read_mcp_audience: "business-read-mcp".into(),
         agent_delegation_ttl: Duration::from_secs(300),
         agent_delegation_max_calls: max_calls,

@@ -40,6 +40,8 @@ strict input validation
 Draft writes additionally receive a server-generated idempotency key derived
 from the delegation and tool name, then pass through Business Core's existing
 user permission, data-scope, validation, idempotency and domain-audit checks.
+They fail closed before consuming a delegation call when
+`BUSINESS_AGENT_DRAFT_WRITE_ENABLED` is false; the default is false.
 
 Default tool timeout is 10 seconds, result limit 100, payload limit 128 KiB.
 The API client has no direct database access and does not forward Workbench,

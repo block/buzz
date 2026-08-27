@@ -20,6 +20,7 @@ pub struct Config {
     pub deployment_id: String,
     pub global_logout_redirect_uri: String,
     pub business_agent_read_enabled: bool,
+    pub business_agent_draft_write_enabled: bool,
     pub business_read_mcp_audience: String,
     pub agent_delegation_ttl: Duration,
     pub agent_delegation_max_calls: i32,
@@ -115,6 +116,14 @@ impl Config {
             return Err("BUSINESS_SESSION_COOKIE_NAME must use __Host-".into());
         }
         let business_agent_read_enabled = boolean("BUSINESS_AGENT_READ_ENABLED", false)?;
+        let business_agent_draft_write_enabled =
+            boolean("BUSINESS_AGENT_DRAFT_WRITE_ENABLED", false)?;
+        if business_agent_draft_write_enabled && !business_agent_read_enabled {
+            return Err(
+                "BUSINESS_AGENT_DRAFT_WRITE_ENABLED=true requires BUSINESS_AGENT_READ_ENABLED=true"
+                    .into(),
+            );
+        }
         let business_read_service_credential = std::env::var("BUSINESS_READ_SERVICE_CREDENTIAL")
             .ok()
             .filter(|value| !value.trim().is_empty());
@@ -173,6 +182,7 @@ impl Config {
             deployment_id: required("DEPLOYMENT_ID")?,
             global_logout_redirect_uri: required("GLOBAL_LOGOUT_REDIRECT_URI")?,
             business_agent_read_enabled,
+            business_agent_draft_write_enabled,
             business_read_mcp_audience: audience,
             agent_delegation_ttl: seconds("AGENT_DELEGATION_TTL_SECONDS", 300, 30, 900)?,
             agent_delegation_max_calls: max_calls,

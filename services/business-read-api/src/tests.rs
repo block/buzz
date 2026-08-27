@@ -337,6 +337,17 @@ fn draft_write_inputs_are_strict_and_typed() {
 }
 
 #[tokio::test]
+async fn draft_write_route_is_hidden_when_kill_switch_is_off() {
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/write/create_sales_order_draft")
+        .body(Body::from("{}"))
+        .expect("request");
+    let response = app().oneshot(request).await.expect("response");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn draft_forwarding_uses_fixed_route_actor_and_server_idempotency() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

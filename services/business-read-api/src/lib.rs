@@ -79,6 +79,7 @@ struct ApiState {
     max_findings: usize,
     max_payload_bytes: usize,
     core: Option<CoreClient>,
+    draft_write_enabled: bool,
 }
 
 #[derive(Clone)]
@@ -187,6 +188,7 @@ fn router_with_verifier(
         100,
         128 * 1024,
         None,
+        false,
     )
 }
 
@@ -197,6 +199,7 @@ fn router_with_runtime(
     max_findings: usize,
     max_payload_bytes: usize,
     core: Option<CoreClient>,
+    draft_write_enabled: bool,
 ) -> Result<Router, String> {
     let analytics = BusinessAnalyticsService::new(
         BusinessDataset::desensitized_acceptance().map_err(|e| e.to_string())?,
@@ -211,6 +214,7 @@ fn router_with_runtime(
         max_findings,
         max_payload_bytes,
         core,
+        draft_write_enabled,
     };
     Ok(Router::new()
         .route("/health", get(|| async { "ok" }))
@@ -224,6 +228,9 @@ async fn write_tool(
     Path(tool): Path<String>,
     request: Request<Body>,
 ) -> Response {
+    if !state.draft_write_enabled {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if !WRITE_TOOLS.contains(&tool.as_str()) {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -1670,6 +1677,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             base_url: config.core_base_url,
             credential: config.core_credential,
         }),
+        config.draft_write_enabled,
     )?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()

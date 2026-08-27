@@ -11,6 +11,7 @@ audience, effective capability/data-scope list, Trace id, expiry, and call budge
 - default/max TTL: 300/900 seconds;
 - default call limit: 20;
 - scopes: a Business IAM-approved subset of the fixed read and draft-create catalog;
+- draft-create scopes are rejected unless `BUSINESS_AGENT_DRAFT_WRITE_ENABLED=true`;
 - issuance idempotency: unique `(source_buzz_event_id, agent_id)`;
 - state: `active`, `expired`, `revoked`, or `exhausted`.
 

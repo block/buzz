@@ -93,8 +93,7 @@ test("parses and rebuilds an allowlisted biz deep link", () => {
 });
 
 test("parses and rebuilds an agent query receipt deep link", () => {
-  const reference =
-    "biz://agent-query/fc84644d-43ac-462f-8a30-456e04a2e9a3";
+  const reference = "biz://agent-query/fc84644d-43ac-462f-8a30-456e04a2e9a3";
   const resource = parseBusinessUrl(reference, config);
   assert.deepEqual(resource, {
     version: 1,
@@ -149,9 +148,21 @@ test("parses B3 receipt and supplier payment deep links", () => {
 
 test("parses and rebuilds B4 profit deep links", () => {
   for (const [reference, type, path] of [
-    ["biz://order-profit/SO-001", "order_profit", "/embed/order-profits/SO-001"],
-    ["biz://profit-adjustment/ADJ-001", "profit_adjustment", "/embed/profit-adjustments/ADJ-001"],
-    ["biz://management-report/RPT-001", "management_report", "/embed/management-reports/RPT-001"],
+    [
+      "biz://order-profit/SO-001",
+      "order_profit",
+      "/embed/order-profits/SO-001",
+    ],
+    [
+      "biz://profit-adjustment/ADJ-001",
+      "profit_adjustment",
+      "/embed/profit-adjustments/ADJ-001",
+    ],
+    [
+      "biz://management-report/RPT-001",
+      "management_report",
+      "/embed/management-reports/RPT-001",
+    ],
   ]) {
     const resource = parseBusinessUrl(reference, config);
     assert.equal(resource?.type, type);
@@ -178,9 +189,17 @@ test("parses and rebuilds B4 profit deep links", () => {
 
 test("parses S1 operating singleton links", () => {
   for (const [reference, type, path] of [
-    ["biz://operations-dashboard", "operations_dashboard", "/embed/operations-dashboard"],
+    [
+      "biz://operations-dashboard",
+      "operations_dashboard",
+      "/embed/operations-dashboard",
+    ],
     ["biz://data-quality", "data_quality", "/embed/data-quality"],
-    ["biz://operating-incidents", "operating_incidents", "/embed/operating-incidents"],
+    [
+      "biz://operating-incidents",
+      "operating_incidents",
+      "/embed/operating-incidents",
+    ],
     ["biz://operating-trends", "operating_trends", "/embed/operating-trends"],
   ]) {
     const resource = parseBusinessUrl(reference, config);
@@ -191,19 +210,40 @@ test("parses S1 operating singleton links", () => {
   }
   assert.equal(parseBusinessUrl("biz://data-quality/extra", config), null);
   assert.equal(
-    parseBusinessUrl("https://biz.example.com/embed/data-quality-evil", config)?.type,
+    parseBusinessUrl("https://biz.example.com/embed/data-quality-evil", config)
+      ?.type,
     "generic",
   );
 });
 
 test("parses and rebuilds conversation entry links", () => {
   for (const [reference, type, path] of [
-    ["biz://sales-order-entry", "sales_order_entry", "/embed/entries/sales-order"],
+    [
+      "biz://sales-order-entry",
+      "sales_order_entry",
+      "/embed/entries/sales-order",
+    ],
     ["biz://shipment-entry", "shipment_entry", "/embed/entries/shipment"],
-    ["biz://purchase-order-entry", "purchase_order_entry", "/embed/entries/purchase-order"],
-    ["biz://goods-receipt-entry", "goods_receipt_entry", "/embed/entries/goods-receipt"],
-    ["biz://customer-receipt-entry", "customer_receipt_entry", "/embed/entries/customer-receipt"],
-    ["biz://supplier-payment-entry", "supplier_payment_entry", "/embed/entries/supplier-payment"],
+    [
+      "biz://purchase-order-entry",
+      "purchase_order_entry",
+      "/embed/entries/purchase-order",
+    ],
+    [
+      "biz://goods-receipt-entry",
+      "goods_receipt_entry",
+      "/embed/entries/goods-receipt",
+    ],
+    [
+      "biz://customer-receipt-entry",
+      "customer_receipt_entry",
+      "/embed/entries/customer-receipt",
+    ],
+    [
+      "biz://supplier-payment-entry",
+      "supplier_payment_entry",
+      "/embed/entries/supplier-payment",
+    ],
   ]) {
     const resource = parseBusinessUrl(reference, config);
     assert.deepEqual(resource, { version: 1, type, path });

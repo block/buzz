@@ -33,9 +33,9 @@ mod native_websocket_batch;
 mod nostr_bind;
 pub mod nostr_convert;
 mod observed_unread;
-mod persona_catalog;
 #[cfg(feature = "authentik-poc")]
 mod oidc_poc_proxy;
+mod persona_catalog;
 mod prevent_sleep;
 mod ptt_shortcut;
 mod relay;

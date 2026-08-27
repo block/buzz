@@ -29,6 +29,10 @@ const AGENT_SCOPES: [&str; 14] = [
     "supplier_payment:create",
 ];
 
+fn scope_is_allowed(scope: &str, draft_write_enabled: bool) -> bool {
+    AGENT_SCOPES.contains(&scope) && (draft_write_enabled || !scope.ends_with(":create"))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct IssueAgentDelegationRequest {
@@ -216,10 +220,9 @@ impl Store {
             && security::safe_text(&request.source_channel_id, 1, 200);
         let valid_scopes = !request.scopes.is_empty()
             && request.scopes.len() <= AGENT_SCOPES.len()
-            && request
-                .scopes
-                .iter()
-                .all(|scope| AGENT_SCOPES.contains(&scope.as_str()));
+            && request.scopes.iter().all(|scope| {
+                scope_is_allowed(scope, self.config().business_agent_draft_write_enabled)
+            });
         if !valid_source || !valid_ids || !valid_scopes {
             let mut audit = Audit::event("AGENT_TURN_REJECTED", "failure", facts);
             audit.reason = Some(if !valid_source {
@@ -393,7 +396,10 @@ impl Store {
             || !safe_id(&request.tool_name)
             || !safe_id(&request.agent_id)
             || !safe_id(&request.agent_turn_id)
-            || !AGENT_SCOPES.contains(&request.required_scope.as_str())
+            || !scope_is_allowed(
+                &request.required_scope,
+                self.config().business_agent_draft_write_enabled,
+            )
         {
             return Err(Rejection::Unauthorized("delegation_invalid"));
         }
@@ -511,7 +517,10 @@ impl Store {
             || !safe_id(&request.agent_turn_id)
             || request.trace_id != facts.trace_id
             || request.used_calls <= 0
-            || !AGENT_SCOPES.contains(&request.required_scope.as_str())
+            || !scope_is_allowed(
+                &request.required_scope,
+                self.config().business_agent_draft_write_enabled,
+            )
         {
             return Err(Rejection::Forbidden("delegation_context_rejected"));
         }
@@ -694,5 +703,8 @@ mod tests {
         assert!(AGENT_SCOPES.contains(&"sales_order:create"));
         assert!(!AGENT_SCOPES.contains(&"sales_order:confirm"));
         assert!(!AGENT_SCOPES.contains(&"payment:execute"));
+        assert!(scope_is_allowed("sales_order:read", false));
+        assert!(!scope_is_allowed("sales_order:create", false));
+        assert!(scope_is_allowed("sales_order:create", true));
     }
 }

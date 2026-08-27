@@ -2,12 +2,13 @@
 
 ## Production
 
-Run migrations through `0003_business_anomaly_audit.sql`, provision a minimum 32-byte
+Run all Gateway migrations through `0025_business_agent_draft_create.sql`, provision a minimum 32-byte
 service credential from the server secret store, deploy the Gateway and
 `business-read-mcp`, then configure the dedicated `buzz-acp` process:
 
 ```text
 BUSINESS_AGENT_READ_ENABLED=true
+BUSINESS_AGENT_DRAFT_WRITE_ENABLED=false # independent kill switch; enable only after scoped IAM grants
 BUZZ_ACP_AGENT_COMMAND=buzz-agent # recommended; other ACP runtimes are supported
 # When using buzz-agent, configure exactly one model provider, for example:
 BUZZ_AGENT_PROVIDER=openai
@@ -58,10 +59,17 @@ With `BUSINESS_AGENT_READ_ENABLED=false` or missing real integration, ordinary
 Buzz agents continue unchanged. Enabling with a missing credential/API URL
 fails startup instead of using fixtures.
 
+Deploy code and migration `0025` with `BUSINESS_AGENT_DRAFT_WRITE_ENABLED=false`
+at the Agent Host, Gateway and Business Agent API. Grant only the six fixed
+`*:create` capabilities to the canary human and Agent principals, then set the
+switch to `true` on the canary deployment. Switching it back to `false` stops
+new write delegations and makes both MCP invocation and the API write route
+fail closed; existing read tools continue normally.
+
 When deploying with `buzz-agent`, run `just business-agent-runtime-acceptance`. The probe uses
 the real `buzz-agent -> session/new -> business-read-mcp` path and a loopback
-model stub, then asserts that the model sees exactly the 28 fixed business read
-tools and no general-purpose tool. It does not call a model, consume a real
+model stub, then asserts that the model sees exactly 28 fixed reads plus six
+fixed draft creates and no general-purpose tool. It does not call a model, consume a real
 Delegation, or read business data.
 
 ## Debug fixture

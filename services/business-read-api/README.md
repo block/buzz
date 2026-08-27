@@ -23,3 +23,7 @@ and six draft creates form the allowlist. Drafts pass through Business Core's
 current-user permission and scope checks with a server-derived idempotency key.
 The process never exposes generic SQL, HTTP, arbitrary resources, confirmation,
 approval, reversal, posting or payment execution.
+
+`BUSINESS_AGENT_DRAFT_WRITE_ENABLED` defaults to false. While false, the write
+route returns not found without verifying or forwarding a delegation; reads
+remain available.

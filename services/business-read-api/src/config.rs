@@ -13,6 +13,7 @@ pub struct Config {
     pub max_payload_bytes: usize,
     pub core_base_url: Url,
     pub core_credential: String,
+    pub draft_write_enabled: bool,
 }
 
 impl Config {
@@ -101,6 +102,15 @@ impl Config {
         if core_credential.len() < 32 {
             return Err("BUSINESS_CORE_SERVICE_CREDENTIAL must be at least 32 bytes".into());
         }
+        let draft_write_enabled = std::env::var("BUSINESS_AGENT_DRAFT_WRITE_ENABLED")
+            .ok()
+            .map(|value| {
+                value.parse::<bool>().map_err(|_| {
+                    "BUSINESS_AGENT_DRAFT_WRITE_ENABLED must be true or false".to_string()
+                })
+            })
+            .transpose()?
+            .unwrap_or(false);
         Ok(Self {
             bind: required("BUSINESS_READ_API_BIND")?
                 .parse()
@@ -113,6 +123,7 @@ impl Config {
             max_payload_bytes,
             core_base_url,
             core_credential,
+            draft_write_enabled,
         })
     }
 }
