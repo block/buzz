@@ -48,11 +48,11 @@ function assertMultilineDescriptionClasses(html) {
   )?.[0];
   assert.ok(descriptionTag, "channel-management description must render");
   assert.match(descriptionTag, /whitespace-pre-line/);
-  assert.match(descriptionTag, /line-clamp-4/);
+  assert.match(descriptionTag, /line-clamp-6/);
   assert.doesNotMatch(descriptionTag, /line-clamp-2/);
 }
 
-test("editable ChannelHero preserves paragraph layout within a four-line clamp", () => {
+test("editable ChannelHero preserves paragraph layout within a six-line clamp", () => {
   const html = renderHero({
     channel: channel(),
     onEdit() {},
@@ -62,7 +62,7 @@ test("editable ChannelHero preserves paragraph layout within a four-line clamp",
   assertMultilineDescriptionClasses(html);
 });
 
-test("read-only ChannelHero preserves paragraph layout within a four-line clamp", () => {
+test("read-only ChannelHero preserves paragraph layout within a six-line clamp", () => {
   const html = renderHero({ channel: channel() });
 
   assert.doesNotMatch(html, /data-testid="channel-management-edit"/);
