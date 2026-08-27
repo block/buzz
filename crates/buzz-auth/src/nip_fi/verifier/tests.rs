@@ -454,7 +454,91 @@ fn key_restricted_to_encrypt_key_ops_denies() {
     );
 }
 
-// ---- nostr_pubkey handling -----------------------------------------------
+// ---- Algorithm ↔ key family/curve binding (P1 #1) ------------------------
+//
+// The optional JWK `alg` is advisory; the key material (`kty`/`crv`) is what
+// signs. `validate_jwk` runs before signature verification, so a JWK whose
+// declared `alg` matches the token but whose material is a different family or
+// curve must deny as `InvalidKey` — a cross-family/cross-curve substitution
+// can never mint a `VerifiedAssertion` (NIP-FI.md:166-171).
+
+fn install_jwk_for(
+    policy_algorithms: Vec<Algorithm>,
+    jwk: Value,
+) -> FederatedAssertionVerifier<StaticIssuerKeySource> {
+    let jwks: JwkSet = serde_json::from_value(json!({ "keys": [jwk] })).expect("valid JWKS");
+    let key_set =
+        AssertionKeySet::new(ISSUER.to_owned(), 1, jwks, future_deadline()).expect("valid key set");
+    let mut registry = IssuerRegistry::new();
+    registry.insert(dedicated_policy_with_algorithms(policy_algorithms));
+    FederatedAssertionVerifier::new(registry, StaticIssuerKeySource::new([key_set]))
+}
+
+#[test]
+fn es256_token_against_p384_curve_material_denies() {
+    // Carl's exploit: a JWK declaring `crv=P-384, alg=ES256` over valid P-256
+    // coordinates. The advisory `alg` matches the ES256 token, but the curve is
+    // wrong, so the key material is inadmissible.
+    let verifier = install_jwk_for(
+        vec![Algorithm::ES256],
+        json!({
+            "kty": "EC",
+            "crv": "P-384",
+            "use": "sig",
+            "alg": "ES256",
+            "kid": TEST_KID,
+            "x": TEST_JWK_X,
+            "y": TEST_JWK_Y,
+        }),
+    );
+    let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
+    assert_eq!(
+        verifier.verify(&token).unwrap_err(),
+        VerifierError::InvalidKey
+    );
+}
+
+#[test]
+fn es256_token_against_rsa_family_material_denies() {
+    // Cross-family: an RSA JWK selected by `kid` for an ES256 token. No `alg`
+    // is declared, so the advisory check is silent; the family mismatch alone
+    // must deny.
+    let verifier = install_jwk_for(
+        vec![Algorithm::ES256],
+        json!({
+            "kty": "RSA",
+            "use": "sig",
+            "kid": TEST_KID,
+            "n": "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM64",
+            "e": "AQAB",
+        }),
+    );
+    let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
+    assert_eq!(
+        verifier.verify(&token).unwrap_err(),
+        VerifierError::InvalidKey
+    );
+}
+
+#[test]
+fn es256_token_against_ed25519_okp_material_denies() {
+    // Cross-family the other direction: an OKP/Ed25519 JWK for an ES256 token.
+    let verifier = install_jwk_for(
+        vec![Algorithm::ES256],
+        json!({
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "use": "sig",
+            "kid": TEST_KID,
+            "x": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+        }),
+    );
+    let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
+    assert_eq!(
+        verifier.verify(&token).unwrap_err(),
+        VerifierError::InvalidKey
+    );
+}
 
 #[test]
 fn lowercase_hex_nostr_pubkey_is_accepted() {
@@ -528,6 +612,72 @@ fn assertion_beyond_maximum_age_denies() {
         json!({ "sub": "u", "client_id": "a", "sub_type": "user", "iat": now() - 4000, "exp": now() + 600 }),
     );
     assert_eq!(verifier.verify(&token).unwrap_err(), VerifierError::Expired);
+}
+
+// ---- Fractional NumericDate (P2 #4) --------------------------------------
+//
+// RFC 7519 permits non-integer `NumericDate` seconds, and real IdPs emit them.
+// A finite fractional `iat`/`exp`/`nbf` within bounds must verify; NaN,
+// infinity, and absurd magnitudes must deny with `InvalidTimeBounds`.
+
+#[test]
+fn fractional_iat_and_exp_within_bounds_verify() {
+    let verifier = verifier_with(dedicated_policy(ISSUER));
+    let iat = now() as f64 - 0.5;
+    let exp = now() as f64 + 600.25;
+    let token = mint(
+        Some("nip-fi+jwt"),
+        TEST_KID,
+        json!({ "sub": "u", "iat": iat, "exp": exp }),
+    );
+    assert!(verifier.verify(&token).is_ok());
+}
+
+#[test]
+fn fractional_nbf_within_bounds_verifies() {
+    let verifier = verifier_with(dedicated_policy(ISSUER));
+    let token = mint(
+        Some("nip-fi+jwt"),
+        TEST_KID,
+        json!({ "sub": "u", "nbf": now() as f64 - 0.75 }),
+    );
+    assert!(verifier.verify(&token).is_ok());
+}
+
+#[test]
+fn non_finite_numeric_date_denies() {
+    // JSON cannot encode NaN/Infinity as a number, so a non-finite time claim
+    // can only arrive as a string. `exp`/`iat` are required spec claims that
+    // `decode` rejects first; the optional `nbf` reaches `parse_numeric_date`,
+    // whose `as_f64` rejects the string with `InvalidTimeBounds`.
+    let verifier = verifier_with(dedicated_policy(ISSUER));
+    let token = mint(
+        Some("nip-fi+jwt"),
+        TEST_KID,
+        json!({ "sub": "u", "nbf": "Infinity" }),
+    );
+    assert_eq!(
+        verifier.verify(&token).unwrap_err(),
+        VerifierError::InvalidTimeBounds
+    );
+}
+
+#[test]
+fn absurd_magnitude_fractional_date_denies() {
+    // A fractional `nbf` beyond the representable `i64`-seconds range denies
+    // rather than saturating the cast. (`decode` leaves the optional, non-
+    // required `nbf` untouched when it fails its own numeric parse, so this
+    // reaches `parse_numeric_date`.)
+    let verifier = verifier_with(dedicated_policy(ISSUER));
+    let token = mint(
+        Some("nip-fi+jwt"),
+        TEST_KID,
+        json!({ "sub": "u", "nbf": 1.0e30 }),
+    );
+    assert_eq!(
+        verifier.verify(&token).unwrap_err(),
+        VerifierError::InvalidTimeBounds
+    );
 }
 
 // ---- Multi-issuer selection ----------------------------------------------
@@ -671,6 +821,60 @@ fn registered_issuer_without_key_snapshot_is_unavailable_not_rejected() {
     let err = verifier.verify(&token).unwrap_err();
     assert_eq!(err, VerifierError::KeySourceUnavailable);
     assert_eq!(err.denial_class(), DenialClass::AuthorizationUnavailable);
+}
+
+// ---- Dependency-independent checks precede key-source lookup (P1 #2) ------
+//
+// Malformed evidence must be classified (403) before an unreadable snapshot
+// could yield a 503, at the front end of the pipeline (the mirror of round-3's
+// offline-before-`CurrentStatus`-deferral at the back end). With an empty key
+// source, a wrong-`typ` or structurally malformed token must still deny as
+// rejected evidence, never `KeySourceUnavailable` (NIP-FI.md:151-171, :458-475).
+
+fn verifier_with_empty_source() -> FederatedAssertionVerifier<StaticIssuerKeySource> {
+    let mut registry = IssuerRegistry::new();
+    registry.insert(dedicated_policy(ISSUER));
+    FederatedAssertionVerifier::new(registry, StaticIssuerKeySource::new([]))
+}
+
+#[test]
+fn wrong_typ_is_rejected_before_key_source_lookup() {
+    // A configured issuer whose source has no snapshot: a `typ=JWT` token for a
+    // `nip-fi+jwt` policy is rejected evidence (403), not 503.
+    let verifier = verifier_with_empty_source();
+    let token = mint(Some("JWT"), TEST_KID, json!({ "sub": "u" }));
+    let err = verifier.verify(&token).unwrap_err();
+    assert_eq!(err, VerifierError::TokenTypeRejected);
+    assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
+    assert_eq!(err.denial_class().http_status(), 403);
+}
+
+#[test]
+fn two_segment_garbage_is_rejected_before_key_source_lookup() {
+    // Two-segment garbage: the header/claims parsers each read a single fixed
+    // segment, so without the explicit structure gate this would reach the
+    // outage path. It must deny as malformed evidence (403).
+    let verifier = verifier_with_empty_source();
+    let header = b64_segment(r#"{"alg":"ES256","kid":"test-key-1","typ":"nip-fi+jwt"}"#);
+    let claims = b64_segment(r#"{"iss":"https://issuer.example","sub":"u"}"#);
+    let token = format!("{header}.{claims}");
+    let err = verifier.verify(&token).unwrap_err();
+    assert_eq!(err, VerifierError::MalformedToken);
+    assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
+    assert_eq!(err.denial_class().http_status(), 403);
+}
+
+#[test]
+fn four_segment_garbage_is_rejected_before_key_source_lookup() {
+    // Four-segment garbage likewise denies as malformed evidence (403), not an
+    // outage 503.
+    let verifier = verifier_with_empty_source();
+    let header = b64_segment(r#"{"alg":"ES256","kid":"test-key-1","typ":"nip-fi+jwt"}"#);
+    let claims = b64_segment(r#"{"iss":"https://issuer.example","sub":"u"}"#);
+    let token = format!("{header}.{claims}.sig.extra");
+    let err = verifier.verify(&token).unwrap_err();
+    assert_eq!(err, VerifierError::MalformedToken);
+    assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
 }
 
 #[test]
@@ -1027,6 +1231,80 @@ fn assertion_policy_id_is_deterministic_and_semantic() {
     )
     .unwrap();
     assert_ne!(p1.id(), changed.id());
+}
+
+// ---- `maximum_status_age` applicability (P1 #3) --------------------------
+//
+// `maximum_status_age` is read only under `current-status`. An `offline-jwt`
+// policy that accepted it would hash it into the ID, so two semantically
+// identical offline policies (`None` vs `Some(120)`) would derive different
+// IDs. It is rejected at construction, keeping the canonical encoding total
+// over valid configs (NIP-FI.md:219-237).
+
+#[test]
+fn offline_policy_rejects_inapplicable_maximum_status_age() {
+    let err = IssuerPolicy::new(
+        ISSUER.to_owned(),
+        vec![AUDIENCE.to_owned()],
+        TokenClass::DedicatedNipFi,
+        FreshnessClass::OfflineJwt,
+        vec![Algorithm::ES256],
+        false,
+        60,
+        3600,
+        Some(120),
+    )
+    .unwrap_err();
+    assert_eq!(err, IssuerPolicyError::InapplicableMaximumStatusAge);
+}
+
+#[test]
+fn offline_policy_accepts_absent_maximum_status_age() {
+    // The only valid offline shape: `None`. Construction succeeds.
+    assert!(IssuerPolicy::new(
+        ISSUER.to_owned(),
+        vec![AUDIENCE.to_owned()],
+        TokenClass::DedicatedNipFi,
+        FreshnessClass::OfflineJwt,
+        vec![Algorithm::ES256],
+        false,
+        60,
+        3600,
+        None,
+    )
+    .is_ok());
+}
+
+#[test]
+fn current_status_policy_still_requires_positive_maximum_status_age() {
+    // The applicability rule must not weaken the existing current-status
+    // requirement: `None` and `Some(0)` both deny.
+    let missing = IssuerPolicy::new(
+        ISSUER.to_owned(),
+        vec![AUDIENCE.to_owned()],
+        TokenClass::DedicatedNipFi,
+        FreshnessClass::CurrentStatus,
+        vec![Algorithm::ES256],
+        false,
+        60,
+        3600,
+        None,
+    )
+    .unwrap_err();
+    assert_eq!(missing, IssuerPolicyError::MissingMaximumStatusAge);
+    let zero = IssuerPolicy::new(
+        ISSUER.to_owned(),
+        vec![AUDIENCE.to_owned()],
+        TokenClass::DedicatedNipFi,
+        FreshnessClass::CurrentStatus,
+        vec![Algorithm::ES256],
+        false,
+        60,
+        3600,
+        Some(0),
+    )
+    .unwrap_err();
+    assert_eq!(zero, IssuerPolicyError::InvalidTimeBounds);
 }
 
 #[test]

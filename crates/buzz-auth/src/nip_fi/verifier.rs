@@ -34,7 +34,9 @@ use super::config::{
 };
 use super::denial::DenialClass;
 use chrono::{DateTime, TimeZone, Utc};
-use jsonwebtoken::jwk::{JwkSet, KeyAlgorithm, KeyOperations, PublicKeyUse};
+use jsonwebtoken::jwk::{
+    AlgorithmParameters, EllipticCurve, JwkSet, KeyAlgorithm, KeyOperations, PublicKeyUse,
+};
 use jsonwebtoken::{decode, jwk::Jwk, Algorithm, DecodingKey, Validation};
 use nostr::PublicKey;
 use serde::de::{Deserializer, Error as _, MapAccess, Visitor};
@@ -269,12 +271,26 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
         // Parse the JOSE header without trusting it. Reject duplicate members,
         // `alg=none`, symmetric algorithms, any critical header, and a
         // missing/oversized `kid` before touching claims.
+        //
+        // Every check up to the key-source lookup below is bounded and
+        // dependency-independent, so rejected evidence is classified (403)
+        // before an unreadable snapshot could produce a 503: exact compact
+        // structure, the protected header, the selected policy, and the
+        // policy's algorithm and token-class contract all precede key
+        // resolution (NIP-FI.md:151-171, :458-475). This is round-3's
+        // offline-before-deferral guarantee at the pipeline's front end.
+        enforce_compact_structure(token)?;
         let header = parse_header(token)?;
         let signed_issuer = self.unverified_issuer(token)?;
         let policy = self
             .registry
             .policy_for_issuer(&signed_issuer)
             .ok_or(VerifierError::UnknownIssuer)?;
+
+        if !policy.algorithms().contains(&header.algorithm) {
+            return Err(VerifierError::UnsupportedAlgorithm);
+        }
+        enforce_token_type(policy.token_class(), header.typ.as_deref())?;
 
         // Resolve the key snapshot internally from the trusted source, keyed by
         // the policy's exact `iss`. The snapshot is never a caller argument, so
@@ -296,11 +312,6 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
         // malformed or invalidly-signed input is rejected (403) rather than
         // masquerading as an availability failure (503) — see the deferral just
         // before sealing.
-
-        if !policy.algorithms().contains(&header.algorithm) {
-            return Err(VerifierError::UnsupportedAlgorithm);
-        }
-        enforce_token_type(policy.token_class(), header.typ.as_deref())?;
 
         // Select exactly one matching key by `kid`.
         let jwk = select_unique_jwk(&key_set.jwks, &header.kid)?;
@@ -536,6 +547,23 @@ struct ParsedHeader {
     typ: Option<String>,
 }
 
+/// Reject any token that is not exactly three compact-JWS segments.
+///
+/// This is a bounded, dependency-independent shape check run before key-source
+/// lookup: two- or four-segment garbage (which the header/claims parsers, each
+/// reading a single fixed segment, would otherwise carry past the outage seam)
+/// is classified as malformed evidence (403), never as an unreadable snapshot
+/// (503) (NIP-FI.md:151-171). Empty header/payload segments are rejected by
+/// their own parsers (also before lookup); an empty signature is left to
+/// `decode`, which re-enforces the exact structure during verification.
+fn enforce_compact_structure(token: &str) -> Result<(), VerifierError> {
+    if token.split('.').count() == 3 {
+        Ok(())
+    } else {
+        Err(VerifierError::MalformedToken)
+    }
+}
+
 fn parse_header(token: &str) -> Result<ParsedHeader, VerifierError> {
     let segment = token
         .split('.')
@@ -723,11 +751,48 @@ fn validate_jwk(jwk: &Jwk, token_algorithm: Algorithm) -> Result<(), VerifierErr
         .common
         .key_algorithm
         .is_none_or(|alg| jwk_algorithm_matches(alg, token_algorithm));
-    if usage_ok && key_ops_ok && algorithm_ok {
+    // NIP-FI.md:166-169 rejects algorithm/key mismatch. The optional `alg`
+    // header is advisory; the key's actual material (`kty`/`crv`) is what
+    // signs. Bind the selected JOSE algorithm to the required key family and
+    // curve so a JWK declaring, say, `alg=ES256` over P-384 material (or any
+    // cross-family/cross-curve substitution) cannot verify an ES256 token.
+    if usage_ok
+        && key_ops_ok
+        && algorithm_ok
+        && key_material_matches(&jwk.algorithm, token_algorithm)
+    {
         Ok(())
     } else {
         Err(VerifierError::InvalidKey)
     }
+}
+
+/// Bind a JOSE signature algorithm to the JWK key family and curve it requires.
+/// Every algorithm the policy can accept (`is_asymmetric_algorithm`) has an
+/// exact key-material shape; anything else denies.
+fn key_material_matches(params: &AlgorithmParameters, token: Algorithm) -> bool {
+    match token {
+        Algorithm::ES256 => is_ec_curve(params, EllipticCurve::P256),
+        Algorithm::ES384 => is_ec_curve(params, EllipticCurve::P384),
+        Algorithm::EdDSA => is_okp_curve(params, EllipticCurve::Ed25519),
+        Algorithm::RS256
+        | Algorithm::RS384
+        | Algorithm::RS512
+        | Algorithm::PS256
+        | Algorithm::PS384
+        | Algorithm::PS512 => matches!(params, AlgorithmParameters::RSA(_)),
+        // Symmetric and `none` never reach key selection (rejected at header
+        // parse); deny defensively rather than accept unknown material.
+        Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => false,
+    }
+}
+
+fn is_ec_curve(params: &AlgorithmParameters, curve: EllipticCurve) -> bool {
+    matches!(params, AlgorithmParameters::EllipticCurve(ec) if ec.curve == curve)
+}
+
+fn is_okp_curve(params: &AlgorithmParameters, curve: EllipticCurve) -> bool {
+    matches!(params, AlgorithmParameters::OctetKeyPair(okp) if okp.curve == curve)
 }
 
 fn jwk_algorithm_matches(key: KeyAlgorithm, token: Algorithm) -> bool {
@@ -761,13 +826,8 @@ fn claim_string(
 }
 
 fn numeric_date(claims: &Map<String, Value>, claim: &str) -> Result<DateTime<Utc>, VerifierError> {
-    let secs = claims
-        .get(claim)
-        .and_then(Value::as_i64)
-        .ok_or(VerifierError::InvalidTimeBounds)?;
-    Utc.timestamp_opt(secs, 0)
-        .single()
-        .ok_or(VerifierError::InvalidTimeBounds)
+    let value = claims.get(claim).ok_or(VerifierError::InvalidTimeBounds)?;
+    parse_numeric_date(value)
 }
 
 fn optional_numeric_date(
@@ -776,14 +836,47 @@ fn optional_numeric_date(
 ) -> Result<Option<DateTime<Utc>>, VerifierError> {
     match claims.get(claim) {
         None => Ok(None),
-        Some(value) => {
-            let secs = value.as_i64().ok_or(VerifierError::InvalidTimeBounds)?;
-            Utc.timestamp_opt(secs, 0)
-                .single()
-                .map(Some)
-                .ok_or(VerifierError::InvalidTimeBounds)
-        }
+        Some(value) => parse_numeric_date(value).map(Some),
     }
+}
+
+/// Parse an RFC 7519 `NumericDate`: seconds since the epoch, integer *or*
+/// fractional. Integers are exact; a finite fractional value (real IdPs emit
+/// them) is converted with subsecond nanosecond precision. NaN, infinity, a
+/// non-number, and any magnitude outside the representable `i64`-seconds range
+/// deny as invalid time bounds.
+fn parse_numeric_date(value: &Value) -> Result<DateTime<Utc>, VerifierError> {
+    // Integer NumericDate: exact, no float round-trip.
+    if let Some(secs) = value.as_i64() {
+        return Utc
+            .timestamp_opt(secs, 0)
+            .single()
+            .ok_or(VerifierError::InvalidTimeBounds);
+    }
+    // Fractional NumericDate. `as_f64` yields `None` for a non-number, so a
+    // string or object `exp`/`iat`/`nbf` denies here.
+    let seconds = value.as_f64().ok_or(VerifierError::InvalidTimeBounds)?;
+    if !seconds.is_finite() {
+        return Err(VerifierError::InvalidTimeBounds);
+    }
+    let whole = seconds.floor();
+    // Guard the `i64` cast: reject magnitudes at or beyond the representable
+    // range before casting (an out-of-range `as` cast would saturate silently).
+    if whole < i64::MIN as f64 || whole >= i64::MAX as f64 {
+        return Err(VerifierError::InvalidTimeBounds);
+    }
+    let mut secs = whole as i64;
+    // `seconds - whole` is in `[0, 1)`; rounding can reach 1e9, so carry it.
+    let mut nanos = ((seconds - whole) * 1_000_000_000.0).round() as u32;
+    if nanos >= 1_000_000_000 {
+        secs = secs
+            .checked_add(1)
+            .ok_or(VerifierError::InvalidTimeBounds)?;
+        nanos -= 1_000_000_000;
+    }
+    Utc.timestamp_opt(secs, nanos)
+        .single()
+        .ok_or(VerifierError::InvalidTimeBounds)
 }
 
 fn seconds(value: u64) -> chrono::Duration {

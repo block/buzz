@@ -373,6 +373,11 @@ pub enum IssuerPolicyError {
     /// `current-status` freshness requires a positive finite `maximum_status_age`.
     #[error("missing maximum status age")]
     MissingMaximumStatusAge,
+    /// `offline-jwt` freshness never reads `maximum_status_age`, so accepting a
+    /// value would move the policy ID for two semantically identical offline
+    /// policies. It is rejected at construction.
+    #[error("inapplicable maximum status age")]
+    InapplicableMaximumStatusAge,
     /// A `SubjectClassContract`'s value sets were empty, unbounded, or overlapped,
     /// so subject classification could not be total and mutually exclusive.
     #[error("subject class contract is not exclusive")]
@@ -416,12 +421,23 @@ impl IssuerPolicy {
         {
             return Err(IssuerPolicyError::InvalidTimeBounds);
         }
-        match maximum_status_age_seconds {
-            Some(0) => return Err(IssuerPolicyError::InvalidTimeBounds),
-            None if freshness == FreshnessClass::CurrentStatus => {
+        // `maximum_status_age` is read only by `current-status` verification.
+        // Tie its applicability to the freshness class so semantically
+        // identical offline policies always derive one ID: `current-status`
+        // requires a positive finite value; `offline-jwt` must omit it. Both
+        // rejects fail closed at construction, keeping the canonical ID
+        // encoding total over valid configs (NIP-FI.md:176-181, :219-237).
+        match (freshness, maximum_status_age_seconds) {
+            (FreshnessClass::CurrentStatus, None) => {
                 return Err(IssuerPolicyError::MissingMaximumStatusAge);
             }
-            _ => {}
+            (FreshnessClass::CurrentStatus, Some(0)) => {
+                return Err(IssuerPolicyError::InvalidTimeBounds);
+            }
+            (FreshnessClass::OfflineJwt, Some(_)) => {
+                return Err(IssuerPolicyError::InapplicableMaximumStatusAge);
+            }
+            (FreshnessClass::CurrentStatus, Some(_)) | (FreshnessClass::OfflineJwt, None) => {}
         }
 
         // The verifier consumes audiences and algorithms as membership sets, so
