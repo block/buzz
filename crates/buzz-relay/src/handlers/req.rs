@@ -1322,10 +1322,18 @@ fn extract_channel_id_from_filters(filters: &[Filter]) -> Option<uuid::Uuid> {
 pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: &str) -> bool {
     let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
     filters.iter().all(|filter| {
-        let can_match_p_gated = filter.kinds.as_ref().is_none_or(|ks| {
-            ks.iter()
-                .any(|kind| P_GATED_KINDS.contains(&(kind.as_u16() as u32)))
-        });
+        // A kindless full-text search cannot surface a p-gated event: persistent
+        // p-gated kinds have a NULL search vector and ephemeral kinds are never
+        // stored. Keep explicit p-gated kind searches subject to the recipient
+        // check, but do not close ordinary channel searches merely because their
+        // omitted kind set is theoretically broad.
+        let can_match_p_gated = filter.kinds.as_ref().map_or_else(
+            || filter.search.is_none(),
+            |ks| {
+                ks.iter()
+                    .any(|kind| P_GATED_KINDS.contains(&(kind.as_u16() as u32)))
+            },
+        );
         if !can_match_p_gated {
             return true;
         }
@@ -2463,6 +2471,13 @@ mod tests {
             .author(nostr::PublicKey::from_hex(&agent).unwrap())
             .search("foo");
         assert!(engram_filters_authorized(&[f], &agent));
+    }
+
+    #[test]
+    fn p_gate_allows_kindless_search_because_p_gated_rows_are_unsearchable() {
+        let (agent, _, _) = three_pubkeys();
+        let f = Filter::new().search("ordinary-channel-search");
+        assert!(p_gated_filters_authorized(&[f], &agent));
     }
 
     #[test]
