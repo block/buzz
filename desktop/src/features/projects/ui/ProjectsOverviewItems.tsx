@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import { canDeleteProject } from "@/features/projects/projectDeletion";
 import { FolderGit2, Folders } from "lucide-react";
 import type {
   Project,
@@ -17,7 +18,6 @@ import {
   repositoryShareLink,
 } from "@/features/projects/lib/projectShareLinks";
 import {
-  isProjectOwnedByCurrentUser,
   isProjectMine,
   projectPeople,
   type ProjectsViewMode,
@@ -228,9 +228,10 @@ export function ProjectsOverviewProjectItems({
                       key={project.id}
                     >
                       <ProjectGridCard
-                        canDelete={isProjectOwnedByCurrentUser(
+                        canDelete={canDeleteProject(
                           project,
                           currentPubkey,
+                          profiles,
                         )}
                         deleteDisabled={deleteDisabled}
                         hasLocal={hasLocalCheckout(project, localRepoNames)}
@@ -272,9 +273,10 @@ export function ProjectsOverviewProjectItems({
                   key={project.id}
                 >
                   <ProjectListRow
-                    canDelete={isProjectOwnedByCurrentUser(
+                    canDelete={canDeleteProject(
                       project,
                       currentPubkey,
+                      profiles,
                     )}
                     deleteDisabled={deleteDisabled}
                     hasLocal={hasLocalCheckout(project, localRepoNames)}

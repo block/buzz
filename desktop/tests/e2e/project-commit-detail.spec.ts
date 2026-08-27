@@ -781,7 +781,7 @@ test("latest files commit opens its detail without a divider", async ({
   await expect(page.getByTestId("project-commit-detail")).toBeVisible();
 });
 
-test("project workspace sheet enters at its settled width", async ({
+test("project workspace sheet stays independent from an open thread", async ({
   page,
 }) => {
   await enableProjectsFeature(page);
@@ -792,6 +792,7 @@ test("project workspace sheet enters at its settled width", async ({
   await page.getByTestId("create-project-name").fill("sheet-motion-demo");
   await page.getByTestId("create-project-submit").click();
   await expect(page.getByTestId("project-channel-home")).toBeVisible();
+  await page.setViewportSize({ height: 720, width: 820 });
 
   const summaryColumn = page.getByTestId("project-home-summary-column");
   const resizeHandle = summaryColumn.getByTestId(
@@ -822,6 +823,153 @@ test("project workspace sheet enters at its settled width", async ({
   expect(
     Math.abs(settledDrawerWidth - enteringDrawerWidth),
   ).toBeLessThanOrEqual(1);
+
+  await focusDrawer.getByTestId("auxiliary-panel-close").click();
+  await expect(page.getByTestId("project-home-workspace-sheet")).toHaveCount(0);
+  await expect(page.getByTestId("project-home-summary-column")).toBeVisible();
+  await waitForMockLiveSubscription(page, "sheet-motion-demo");
+  const threadRootContent = "Workspace drawer thread root";
+  await page.evaluate((content) => {
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "sheet-motion-demo",
+      content,
+    });
+  }, threadRootContent);
+  const threadRoot = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .filter({ hasText: threadRootContent });
+  await expect(threadRoot).toBeVisible();
+  await threadRoot.hover();
+  await threadRoot.getByRole("button", { name: "Reply" }).click();
+  await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+
+  await page.getByTestId("project-home-context-tasks").click();
+  await expect(page.getByTestId("project-home-workspace-sheet")).toBeVisible();
+  const workspaceDrawer = page.getByTestId("focus-thread-drawer");
+  await expect(workspaceDrawer).toHaveCount(1);
+  await expect(
+    workspaceDrawer.getByTestId("project-home-workspace-sheet"),
+  ).toBeVisible();
+  await expect(page.getByTestId("message-thread-panel")).toHaveCount(1);
+  await expect(workspaceDrawer.getByTestId("message-thread-panel")).toHaveCount(
+    0,
+  );
+  const coveredThreadSurface = page.getByTestId("thread-surface");
+  await expect(coveredThreadSurface).toHaveAttribute("inert", "");
+  await expect(coveredThreadSurface).toHaveAttribute("aria-hidden", "true");
+  const coveredSnapshot = await page.locator("body").ariaSnapshot();
+  expect(coveredSnapshot).not.toContain(threadRootContent);
+  expect(coveredSnapshot).toContain("Tasks");
+  expect(coveredSnapshot).toContain("Close panel");
+
+  const workspaceClose = workspaceDrawer.getByTestId("auxiliary-panel-close");
+  await workspaceClose.focus();
+  await expect(workspaceClose).toBeFocused();
+  for (let index = 0; index < 8; index += 1) {
+    await page.keyboard.press("Tab");
+    expect(
+      await page.evaluate(
+        () =>
+          document.activeElement?.closest('[data-testid="thread-surface"]') !==
+          null,
+      ),
+    ).toBe(false);
+  }
+
+  await workspaceClose.click();
+  const exitingWorkspaceState = await page.evaluate(() => {
+    const workspaceSheet = document.querySelector(
+      '[data-testid="project-home-workspace-sheet"]',
+    );
+    const threadSurface = document.querySelector(
+      '[data-testid="thread-surface"]',
+    );
+    return {
+      threadAriaHidden: threadSurface?.getAttribute("aria-hidden"),
+      threadInert: threadSurface?.hasAttribute("inert") ?? false,
+      workspaceSheetMounted: workspaceSheet !== null,
+    };
+  });
+  expect(exitingWorkspaceState).toEqual({
+    threadAriaHidden: "true",
+    threadInert: true,
+    workspaceSheetMounted: true,
+  });
+  await expect(page.getByTestId("project-home-workspace-sheet")).toHaveCount(0);
+  await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+  const threadClose = coveredThreadSurface.getByTestId("auxiliary-panel-close");
+  await expect(threadClose).toBeFocused();
+  await expect(coveredThreadSurface).not.toHaveAttribute("inert", "");
+  await expect(coveredThreadSurface).not.toHaveAttribute("aria-hidden", "true");
+
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = "140%";
+  });
+  await page.getByTestId("project-home-context-tasks").click();
+  await expect(page.getByTestId("project-home-workspace-sheet")).toBeVisible();
+  const enlargedTextWorkspaceClose = page
+    .getByTestId("focus-thread-drawer")
+    .getByTestId("auxiliary-panel-close");
+  await expect
+    .poll(() =>
+      enlargedTextWorkspaceClose.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        return {
+          leftInsideViewport: bounds.left >= 0,
+          rightInsideViewport: bounds.right <= window.innerWidth,
+          viewportWidth: window.innerWidth,
+        };
+      }),
+    )
+    .toEqual({
+      leftInsideViewport: true,
+      rightInsideViewport: true,
+      viewportWidth: 820,
+    });
+  await enlargedTextWorkspaceClose.click();
+  await expect(page.getByTestId("project-home-workspace-sheet")).toHaveCount(0);
+  await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+  await page.evaluate(() => {
+    document.documentElement.style.removeProperty("font-size");
+  });
+
+  await page.setViewportSize({ height: 1080, width: 1920 });
+  const splitThreadPane = page
+    .locator(
+      '[data-testid="message-thread-panel"]:has([data-testid="right-auxiliary-pane-resize-handle"])',
+    )
+    .first();
+  await expect(splitThreadPane).toBeVisible();
+  const threadResizeHandle = splitThreadPane.getByTestId(
+    "right-auxiliary-pane-resize-handle",
+  );
+  const threadResizeHandleBox = await threadResizeHandle.boundingBox();
+  expect(threadResizeHandleBox).not.toBeNull();
+
+  await page.getByTestId("project-home-context-tasks").click();
+  await expect(page.getByTestId("project-home-workspace-sheet")).toBeVisible();
+  await waitForAnimations(page);
+  const workspaceCoversThreadDivider = await page.evaluate(
+    ({ x, y }) => {
+      return Boolean(
+        document
+          .elementFromPoint(x, y)
+          ?.closest('[data-testid="focus-thread-drawer"]'),
+      );
+    },
+    {
+      x:
+        (threadResizeHandleBox?.x ?? 0) +
+        (threadResizeHandleBox?.width ?? 0) / 2,
+      y: (threadResizeHandleBox?.y ?? 0) + 40,
+    },
+  );
+  expect(workspaceCoversThreadDivider).toBe(true);
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("project-home-workspace-sheet")).toHaveCount(0);
+  await expect(splitThreadPane).toBeVisible();
+  await expect(threadClose).toBeFocused();
 });
 
 test("commit detail opens from the commits feed with a diff", async ({

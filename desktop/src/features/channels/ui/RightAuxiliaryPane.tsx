@@ -31,7 +31,7 @@ export function RightAuxiliaryPane({
   return (
     <aside
       className={cn(
-        "group/right-pane relative flex h-full shrink-0 flex-col overflow-hidden bg-background",
+        "group/right-pane relative isolate flex h-full shrink-0 flex-col overflow-hidden bg-background",
         detached
           ? "bg-transparent"
           : "before:pointer-events-none before:absolute before:bottom-0 before:left-0 before:top-0 before:z-50 before:w-px before:bg-border/80 before:content-['']",

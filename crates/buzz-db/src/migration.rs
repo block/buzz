@@ -845,6 +845,18 @@ mod tests {
         assert!(migrations[13].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30350"));
 
+        // NIP-PMA kind:30179 FTS exclusion (0033): same wrap-the-existing-
+        // expression shape as 0014 so brownfield databases stop tokenizing
+        // private managed-agent ciphertext without a policy rewrite. (The
+        // migration itself still rewrites the events heap and rebuilds the
+        // GIN index — see the 0033 header for the operational cost.)
+        assert_eq!(migrations[32].version, 33);
+        assert!(migrations[32].sql.as_str().contains("kind = 30179"));
+        assert!(migrations[32].sql.as_str().contains("search_tsv"));
+        assert!(!migrations[0].sql.as_str().contains("30179"));
+        assert!(include_str!("../../../schema/schema.sql")
+            .contains("kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200)"));
+
         // Public push-gateway authority is intentionally deployment-global and
         // durable: immediate revocation and hostile-relay admission cannot be
         // honestly provided by a stateless gateway.
@@ -1932,7 +1944,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn populated_upgrade_preserves_search_policy_except_for_push_leases() {
+    async fn populated_upgrade_preserves_search_policy_except_for_private_kinds() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
         MIGRATOR
@@ -1948,7 +1960,7 @@ mod tests {
             .await
             .expect("insert community");
 
-        for (marker, kind) in [(1_u8, 1_i32), (2_u8, 30_350_i32)] {
+        for (marker, kind) in [(1_u8, 1_i32), (2_u8, 30_350_i32), (3_u8, 30_179_i32)] {
             sqlx::query(
                 "INSERT INTO events \
                  (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at) \
@@ -1975,19 +1987,37 @@ mod tests {
         .fetch_all(&pool)
         .await
         .expect("read pre-push search behavior");
-        assert_eq!(before, vec![(1, true), (30_350, true)]);
+        assert_eq!(before, vec![(1, true), (30_179, true), (30_350, true)]);
+
+        // 0014 fixes 30350 only. A brownfield database that stopped here still
+        // tokenized kind:30179 ciphertext — the gap 0033 closes.
+        MIGRATOR
+            .run_to(32, &pool)
+            .await
+            .expect("apply migrations through 32");
+        let pre_0033: Vec<(i32, Option<bool>)> = sqlx::query_as(
+            "SELECT kind, search_tsv @@ plainto_tsquery('simple', 'needle') \
+             FROM events ORDER BY kind",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read pre-0033 search behavior");
+        assert_eq!(
+            pre_0033,
+            vec![(1, Some(true)), (30_179, Some(true)), (30_350, None)]
+        );
 
         run_migrations(&pool)
             .await
-            .expect("apply push migrations to populated database");
+            .expect("apply remaining migrations to populated database");
         let after: Vec<(i32, Option<bool>)> = sqlx::query_as(
             "SELECT kind, search_tsv @@ plainto_tsquery('simple', 'needle') \
              FROM events ORDER BY kind",
         )
         .fetch_all(&pool)
         .await
-        .expect("read post-push search behavior");
-        assert_eq!(after, vec![(1, Some(true)), (30_350, None)]);
+        .expect("read post-upgrade search behavior");
+        assert_eq!(after, vec![(1, Some(true)), (30_179, None), (30_350, None)]);
     }
 
     #[tokio::test]
