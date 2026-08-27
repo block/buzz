@@ -1,7 +1,7 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
-import { refreshAcpRuntimes } from "@/features/agents/acpRuntimesQuery";
+import { startBootWarm } from "@/features/agents/acpRuntimesQuery";
 import { setDesktopAppBadge } from "@/features/notifications/lib/desktop";
 import { useForegroundQueryRefresh } from "@/features/workflows/hooks";
 import { relayClient } from "@/shared/api/relayClient";
@@ -31,12 +31,14 @@ export function useAppShellLifecycleEffects({
   // it. The create/edit picker and Agents > Agent defaults surfaces read that
   // cheap path, so without this warm they render all-missing (and block agent
   // save) until the user visits Settings > Agents — the accidental workaround.
-  // Fire-and-forget: `refreshAcpRuntimes` writes the fresh catalog into the
-  // shared cache and swallows its own errors, so a failed probe leaves the last
-  // good catalog in place without an unhandled rejection.
+  // `startBootWarm` drives the module-level boot-warm gate (once per launch, so
+  // this remounting effect never re-fires the probe) which makes those cheap
+  // surfaces show loading/retryable-error instead of blessing the cold catalog,
+  // and swallows the probe's own errors so a failure leaves the last good
+  // catalog in place without an unhandled rejection.
   const queryClient = useQueryClient();
   React.useEffect(() => {
-    void refreshAcpRuntimes(queryClient);
+    void startBootWarm(queryClient);
   }, [queryClient]);
 
   // Prevent webview file:/// navigation on file drop outside the composer.

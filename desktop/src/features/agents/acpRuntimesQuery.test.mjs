@@ -184,7 +184,10 @@ import { QueryClientProvider } from "@tanstack/react-query";
 
 import {
   acpRuntimesQueryKey,
+  applyBootWarmGate,
+  getBootWarmSnapshot,
   refreshAcpRuntimes,
+  startBootWarm,
   useAcpRuntimesQueryForced,
 } from "./acpRuntimesQuery.ts";
 import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery.ts";
@@ -228,6 +231,105 @@ function deferred() {
 afterEach(() => {
   calls.length = 0;
   discoverHandler = () => Promise.resolve([]);
+});
+
+// Runs FIRST so the process-global boot-warm gate is observed from `idle`.
+// Covers Carl's ask: the cheap/forced race (a cold cheap catalog must read as
+// loading, not authoritative, while the first forced pass is in flight) and the
+// failure state (a failed forced pass must surface a retryable error carrying
+// the real reason, not a silent empty catalog), plus recovery on retry.
+describe("boot-warm gate drives cheap consumers through the initial pass", () => {
+  it("applyBootWarmGate: pending reads as loading, catalog always wins", () => {
+    const cold = {
+      data: [],
+      error: null,
+      isLoading: false,
+      isPending: false,
+      isFetching: false,
+      isError: false,
+    };
+    // Race: cheap path already resolved cold, but the first forced pass is in
+    // flight — the cold catalog must present as loading, never authoritative.
+    const pending = applyBootWarmGate(cold, { status: "pending", error: null });
+    assert.equal(pending.isLoading, true);
+    assert.equal(pending.isPending, true);
+
+    // A non-empty catalog wins over the gate, so a revalidation or a later
+    // failure can never blank an already-good list.
+    const warm = { ...cold, data: [rawEntry("codex", "logged_in")] };
+    const kept = applyBootWarmGate(warm, {
+      status: "failed",
+      error: new Error("late failure"),
+    });
+    assert.equal(kept.isError, false);
+    assert.equal(kept.data.length, 1);
+
+    // idle/settled pass through untouched (protects onboarding, warmed hot path).
+    for (const status of ["idle", "settled"]) {
+      const passed = applyBootWarmGate(cold, { status, error: null });
+      assert.equal(passed.isLoading, false);
+      assert.equal(passed.isError, false);
+    }
+  });
+
+  it("applyBootWarmGate: failed reads as a retryable error with the real reason", () => {
+    const cold = {
+      data: [],
+      error: null,
+      isLoading: true,
+      isPending: true,
+      isFetching: true,
+      isError: false,
+    };
+    const reason = new Error("PATH probe timed out");
+    const failed = applyBootWarmGate(cold, { status: "failed", error: reason });
+    assert.equal(failed.isError, true);
+    assert.equal(failed.error, reason);
+    assert.equal(failed.isLoading, false, "a failed warm is not still loading");
+  });
+
+  it("startBootWarm: failure marks the gate failed, a retry settles it", async () => {
+    assert.equal(
+      getBootWarmSnapshot().status,
+      "idle",
+      "gate must start idle before any warm",
+    );
+
+    const queryClient = makeQueryClient();
+    queryClient.mount();
+
+    // 1. First forced pass fails: the gate goes `failed` and captures the
+    //    reason, so cold cheap surfaces can show a retryable error.
+    let failForced = true;
+    discoverHandler = (args) =>
+      args?.force === true && failForced
+        ? Promise.reject(new Error("discovery boom"))
+        : Promise.resolve([]);
+    await startBootWarm(queryClient);
+    assert.equal(getBootWarmSnapshot().status, "failed");
+    assert.equal(getBootWarmSnapshot().error?.message, "discovery boom");
+
+    // 2. A retry that succeeds settles the gate and clears the error, so cheap
+    //    consumers stop overlaying and render the warmed catalog.
+    failForced = false;
+    discoverHandler = () => Promise.resolve([rawEntry("codex", "logged_in")]);
+    await startBootWarm(queryClient);
+    assert.equal(getBootWarmSnapshot().status, "settled");
+    assert.equal(getBootWarmSnapshot().error, null);
+
+    // 3. Once settled, further boot warms are no-ops (fixes the per-remount
+    //    re-fire): no additional forced probe fires.
+    const before = calls.filter(
+      (c) => c.command === "discover_acp_providers" && c.args?.force === true,
+    ).length;
+    await startBootWarm(queryClient);
+    const after = calls.filter(
+      (c) => c.command === "discover_acp_providers" && c.args?.force === true,
+    ).length;
+    assert.equal(after, before, "a settled gate must not re-fire the probe");
+
+    queryClient.unmount();
+  });
 });
 
 describe("refreshAcpRuntimes cannot dedup onto an in-flight cheap request", () => {
