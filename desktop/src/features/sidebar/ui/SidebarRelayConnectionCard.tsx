@@ -1,4 +1,4 @@
-import { CloudOff, RefreshCw } from "lucide-react";
+import { Check, CloudOff } from "lucide-react";
 
 import {
   SidebarCompactActionCard,
@@ -15,7 +15,6 @@ type SidebarRelayConnectionCardProps = {
   isWaitingOnReconnectHook?: boolean;
   onDismiss?: () => void;
   onReconnect: () => void;
-  transport?: "lan" | "public" | null;
   surface?: SidebarActionCardSurface;
   testId?: string;
 };
@@ -29,7 +28,6 @@ export function SidebarRelayConnectionCard({
   isWaitingOnReconnectHook = false,
   onDismiss,
   onReconnect,
-  transport,
   surface,
 }: SidebarRelayConnectionCardProps) {
   return (
@@ -42,7 +40,6 @@ export function SidebarRelayConnectionCard({
       isWaitingOnReconnectHook={isWaitingOnReconnectHook}
       onDismiss={onDismiss}
       onReconnect={onReconnect}
-      transport={transport}
       surface={surface}
       testId="sidebar-relay-unreachable"
     />
@@ -58,7 +55,6 @@ export function SidebarRelayConnectionCompactCard({
   isWaitingOnReconnectHook = false,
   onDismiss,
   onReconnect,
-  transport,
   surface,
   testId = "sidebar-relay-unreachable-compact",
 }: SidebarRelayConnectionCardProps) {
@@ -71,16 +67,12 @@ export function SidebarRelayConnectionCompactCard({
 
   return (
     <SidebarCompactActionCard
-      actionAriaLabel={isConnected ? "Refresh connection" : "Connect to relay"}
-      actionDisabled={isActionDisabled || isReconnectPending}
+      actionAriaLabel={isConnected ? "Connected" : "Connect to relay"}
+      actionDisabled={isActionDisabled || isReconnectPending || isConnected}
       actionTestId={actionTestId}
       description={
         isConnected
-          ? transport === "lan"
-            ? "Connected via LAN"
-            : transport === "public"
-              ? "Connected via public relay"
-              : undefined
+          ? undefined
           : isReconnectPending
             ? reconnectDescription
             : "Click to connect"
@@ -91,7 +83,7 @@ export function SidebarRelayConnectionCompactCard({
       }
       icon={
         isConnected ? (
-          <RefreshCw aria-hidden="true" className="h-5 w-5" />
+          <Check aria-hidden="true" className="h-5 w-5" />
         ) : isReconnectPending ? (
           <Spinner aria-hidden="true" className="h-5 w-5 border-2" />
         ) : (

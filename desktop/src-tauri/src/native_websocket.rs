@@ -103,7 +103,7 @@ async fn connect_via_lan(canonical_url: &str, lan_url: &str) -> Result<NativeSoc
 async fn connect_with_fallback(
     canonical_url: &str,
     lan_url: Option<&str>,
-) -> Result<(NativeSocket, String), String> {
+) -> Result<NativeSocket, String> {
     if let Some(lan_url) = lan_url {
         match tokio::time::timeout(LAN_CONNECT_TIMEOUT, connect_via_lan(canonical_url, lan_url))
             .await
@@ -112,7 +112,7 @@ async fn connect_with_fallback(
                 eprintln!(
                     "buzz-desktop: relay transport=campus-lan dial={lan_url} canonical={canonical_url}"
                 );
-                return Ok((socket, "lan".to_string()));
+                return Ok(socket);
             }
             Ok(Err(error)) => {
                 eprintln!(
@@ -131,7 +131,7 @@ async fn connect_with_fallback(
         .await
         .map_err(|error| error.to_string())?;
     eprintln!("buzz-desktop: relay transport=canonical url={canonical_url}");
-    Ok((socket, "public".to_string()))
+    Ok(socket)
 }
 
 #[derive(Debug, Deserialize)]
@@ -197,7 +197,6 @@ struct ConnectionHandle {
 pub(crate) struct WebSocketManager {
     connections: Arc<Mutex<HashMap<Id, Arc<ConnectionHandle>>>>,
     connect_cancel: Arc<Mutex<CancellationToken>>,
-    last_transport: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for WebSocketManager {
@@ -205,7 +204,6 @@ impl Default for WebSocketManager {
         Self {
             connections: Arc::default(),
             connect_cancel: Arc::new(Mutex::new(CancellationToken::new())),
-            last_transport: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -242,7 +240,7 @@ async fn open_connection(
     config: Option<ConnectConfig>,
 ) -> Result<Id, String> {
     let connect_cancel = manager.connect_cancel.lock().await.clone();
-    let (socket, transport) = tokio::select! {
+    let socket = tokio::select! {
         _ = connect_cancel.cancelled() => return Err("WebSocket connection cancelled".to_string()),
         result = tokio::time::timeout(
             CONNECT_TIMEOUT,
@@ -251,7 +249,6 @@ async fn open_connection(
             .map_err(|_| "WebSocket connection timed out".to_string())?
             .map_err(|error| error.to_string())?,
     };
-    *manager.last_transport.lock().await = Some(transport);
 
     // Serialize registration with disconnect_all so a reload cannot miss a
     // connection that finished its handshake concurrently with teardown.
@@ -375,13 +372,6 @@ async fn disconnect_all(manager: tauri::State<'_, WebSocketManager>) -> Result<(
     Ok(())
 }
 
-#[tauri::command]
-async fn get_transport(
-    manager: tauri::State<'_, WebSocketManager>,
-) -> Result<Option<String>, String> {
-    Ok(manager.last_transport.lock().await.clone())
-}
-
 async fn run_connection<S>(
     id: Id,
     mut socket: tokio_tungstenite::WebSocketStream<S>,
@@ -452,8 +442,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             connect,
             send,
             disconnect,
-            disconnect_all,
-            get_transport
+            disconnect_all
         ])
         .setup(|app, _api| {
             app.manage(WebSocketManager::default());
