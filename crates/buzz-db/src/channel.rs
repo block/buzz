@@ -2432,14 +2432,19 @@ mod tests {
         .await
         .expect("insert large roster");
 
-        let stale_tags: Vec<serde_json::Value> =
+        let roster_tags = |owner: Option<&[u8]>, members: std::ops::RangeInclusive<i32>| {
             std::iter::once(serde_json::json!(["d", channel.id.to_string()]))
-                .chain((0..1_000).map(|n| serde_json::json!(["p", format!("{n:064x}")])))
-                .collect();
-        let complete_tags: Vec<serde_json::Value> =
-            std::iter::once(serde_json::json!(["d", channel.id.to_string()]))
-                .chain((0..1_501).map(|n| serde_json::json!(["p", format!("{n:064x}")])))
-                .collect();
+                .chain(
+                    owner
+                        .into_iter()
+                        .map(|pubkey| serde_json::json!(["p", hex::encode(pubkey), "", "owner"])),
+                )
+                .chain(members.map(|n| serde_json::json!(["p", format!("{n:064x}"), "", "member"])))
+                .collect::<Vec<_>>()
+        };
+        let stale_tags = roster_tags(Some(&creator), 1..=999);
+        let complete_tags = roster_tags(Some(&creator), 1..=1_500);
+        let other_complete_tags = roster_tags(None, 0..=1_500);
 
         // Insert canonical-looking history first, then corrupt the newest row
         // with UPDATE to model a stale snapshot that predates migration 0032's
@@ -2517,7 +2522,7 @@ mod tests {
         .bind(other_community_id)
         .bind(random_pubkey())
         .bind(&relay_pubkey)
-        .bind(serde_json::Value::Array(complete_tags.clone()))
+        .bind(serde_json::Value::Array(other_complete_tags))
         .bind(vec![0u8; 64])
         .bind(channel.id)
         .bind(channel.id.to_string())
@@ -3102,7 +3107,8 @@ mod tests {
         let event = nostr::EventBuilder::new(nostr::Kind::Custom(39002), "")
             .tags(vec![
                 nostr::Tag::parse(["d", &channel.id.to_string()]).expect("d tag"),
-                nostr::Tag::parse(["p", &hex::encode(&owner)]).expect("p tag"),
+                nostr::Tag::parse(["p", &hex::encode(&owner), "", MemberRole::Owner.as_str()])
+                    .expect("p tag"),
             ])
             .sign_with_keys(&relay_keys)
             .expect("sign roster");
