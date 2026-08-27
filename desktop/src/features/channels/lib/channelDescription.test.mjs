@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getChannelDescription } from "./channelDescription.ts";
+import {
+  getChannelDescription,
+  getChannelDetail,
+} from "./channelDescription.ts";
 
 function makeChannel(overrides = {}) {
   return {
@@ -26,6 +29,20 @@ test("getChannelDescription falls back when no detail fields are set", () => {
     getChannelDescription(makeChannel()),
     "Channel details and activity.",
   );
+});
+
+test("getChannelDetail provides one shared field order for every surface", () => {
+  const channel = makeChannel({
+    description: "Description paragraphs.\n\nKeep this structure.",
+    purpose: "Legacy purpose",
+    topic: "",
+  });
+
+  assert.equal(
+    getChannelDetail(channel),
+    "Description paragraphs.\n\nKeep this structure.",
+  );
+  assert.equal(getChannelDescription(channel), getChannelDetail(channel));
 });
 
 test("getChannelDescription returns single-line detail unchanged", () => {
