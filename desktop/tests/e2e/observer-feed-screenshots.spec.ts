@@ -606,9 +606,25 @@ test.describe("observer feed screenshots", () => {
       },
     ]);
 
-    await expect(feedPanel.getByText("Commands", { exact: true })).toBeVisible({
-      timeout: 5_000,
-    });
+    // This panel is the agent activity cover drawer, so it renders the reading
+    // (`conversation`) variant, where a plain lifecycle status recedes to a
+    // centered divider whose label joins the title and detail. The row is not
+    // lost — the previous `getByText("Commands", { exact: true })` encoded the
+    // dense variant's separate title span, so it stopped describing this
+    // surface the moment the variant was pinned to the drawer.
+    //
+    // Asserting the row, its recede presentation and its full joined label is
+    // strictly stronger than the bare text node it replaces: a variant flip or
+    // a dropped detail half both fail here.
+    const commandsRow = feedPanel
+      .getByTestId("transcript-lifecycle-item")
+      .filter({ hasText: "Commands available: 3" });
+    await expect(commandsRow).toBeVisible({ timeout: 5_000 });
+    await expect(commandsRow).toHaveAttribute(
+      "data-variant",
+      "conversation-divider",
+    );
+    await expect(commandsRow).toHaveText("Commands · Commands available: 3");
     await settleAnimations(feedPanel);
     await feedPanel.screenshot({
       path: `${SHOTS}/09-available-commands-update.png`,

@@ -1,7 +1,9 @@
 import { AlertCircle, CheckCircle2, ShieldCheck, XCircle } from "lucide-react";
 
+import { useAgentSessionTranscriptVariant } from "../agentSessionTranscriptContext";
 import { formatTranscriptTimestampTitle } from "../agentSessionUtils";
 import { ActivityRow, ActivityRowLabel } from "./ActivityRow";
+import { ConversationDivider } from "./ConversationDivider";
 import { ToolActivity } from "./ToolActivity";
 import type { ActivityRenderClassItemProps } from "./types";
 
@@ -119,11 +121,44 @@ export function LifecycleActivity(props: ActivityRenderClassItemProps) {
   }
 
   return (
+    <LifecycleStatusRow item={props.item} timestampTitle={timestampTitle} />
+  );
+}
+
+/**
+ * Plain lifecycle status ("Turn started", "Context compacted") — structure, not
+ * work. Focus mode recedes it to a quiet centered divider so the reader's eye
+ * stays on the prompt/response rhythm; errors and permission gates never reach
+ * here and keep their loud treatment.
+ *
+ * Split into its own component so `LifecycleActivity` stays hook-free above its
+ * early returns.
+ */
+function LifecycleStatusRow({
+  item,
+  timestampTitle,
+}: {
+  item: Extract<ActivityRenderClassItemProps["item"], { type: "lifecycle" }>;
+  timestampTitle: string | undefined;
+}) {
+  const variant = useAgentSessionTranscriptVariant();
+
+  if (variant === "conversation") {
+    return (
+      <ConversationDivider
+        label={[item.title, item.text].filter(Boolean).join(" · ")}
+        testId="transcript-lifecycle-item"
+        title={timestampTitle}
+      />
+    );
+  }
+
+  return (
     <ActivityRow testId="transcript-lifecycle-item" title={timestampTitle}>
       <ActivityRowLabel
-        object={props.item.text || undefined}
+        object={item.text || undefined}
         openToneScope="none"
-        verb={props.item.title}
+        verb={item.title}
       />
     </ActivityRow>
   );

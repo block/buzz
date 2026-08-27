@@ -28,6 +28,7 @@ function MessageItem({
 }) {
   const variant = useAgentSessionTranscriptVariant();
   const isCompactPreview = variant === "compactPreview";
+  const isConversation = variant === "conversation";
   const isAssistant = item.role === "assistant";
   const text = item.text.trim();
   const messageLink = getTranscriptMessageLink(item);
@@ -63,7 +64,16 @@ function MessageItem({
           title={formatTranscriptTimestampTitle(item.timestamp)}
         >
           <Markdown
-            className={isCompactPreview ? "text-xs leading-4" : "leading-5"}
+            className={
+              isCompactPreview
+                ? "text-xs leading-4"
+                : isConversation
+                  ? // Focus mode reads as prose: no box, comfortable line
+                    // height, and full-fidelity markdown/code from the shared
+                    // renderer.
+                    "leading-relaxed"
+                  : "leading-5"
+            }
             content={text || " "}
           />
         </div>

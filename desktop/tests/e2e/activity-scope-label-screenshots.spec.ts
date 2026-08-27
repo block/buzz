@@ -6,8 +6,11 @@ import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 const SHOTS = "test-results/activity-scope-label";
 
 const AGENT_PUBKEY = TEST_IDENTITIES.tyler.pubkey;
+// Long enough to overflow the widest presentation the pane has (the cover
+// drawer, which is far wider than the split pane), so the truncation assertion
+// below measures real clamping rather than an accident of panel width.
 const LONG_AGENT_NAME =
-  "Observer Agent With An Exceptionally Long Display Name";
+  "Observer Agent With An Exceptionally Long Display Name That Keeps Going Well Past Any Reasonable Header Width";
 const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301"; // #agents
 
 // Open the activity pane via profile → "View activity" (same ingress the

@@ -63,6 +63,14 @@ export default {
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
       },
+      maxWidth: {
+        // Focus-mode agent prompt bubble. Mirrors berd's
+        // `--chat-user-message-max-width: 640px` (shared/styles/globals.css):
+        // a fixed measure, not a percentage of the column, so the prompt keeps
+        // one stable line length as the full-cover view is resized. Not a text
+        // size, so the px-text guard does not apply.
+        "prompt-bubble": "640px",
+      },
       spacing: {
         4.5: "1.125rem",
         "conversation-body": "var(--conversation-body-gap)",

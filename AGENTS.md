@@ -258,6 +258,24 @@ scripts build the required E2E bridge before running Playwright.
 
 See [TESTING.md](TESTING.md) for the full multi-agent E2E guide.
 
+### Never assert a DOM element against `null` with `assert.equal`
+
+In the desktop jsdom tests (`desktop/src/**/*.test.mjs`), write
+
+```js
+assert.ok(container.querySelector(sel) === null, "no header row");
+```
+
+**not** `assert.equal(container.querySelector(sel), null, ...)`. Both pass
+identically, but when the `assert.equal` form *fails*, node serializes the
+matched element and its entire subtree to build a diff. On a real transcript
+that exhausts memory and the runner dies with SIGKILL after ~100s instead of
+printing the assertion message — so a genuine regression is unreadable and
+looks like a hang or an OOM in unrelated code. The `assert.ok(x === null)` form
+fails in milliseconds with the message you wrote.
+
+Comparing `getAttribute(...)` to `null` is fine — attributes are strings.
+
 ### PR Screenshots
 
 > **Do NOT use `buzz upload`, the relay media endpoint, or any third-party

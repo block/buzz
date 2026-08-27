@@ -19,6 +19,31 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 import { getReactNodeText } from "./utils";
 
+/**
+ * Code-block presentation, supplied by the rendering surface.
+ *
+ * `focusProse` applies berd's recipe (`code-block.tsx` CodeBlockHeader:388-402,
+ * viewport:528-529): the language in a real header row above the frame with the
+ * copy action opposite it, a 10px radius, page-background fill behind a subtle
+ * border, and no shadow.
+ *
+ * It is opt-in because this renderer is shared with channel messages —
+ * restyling the default would change every code block in the app. The variant
+ * is a property of the *surface*, not of a role: `AgentSessionTranscriptList`
+ * provides it once at the transcript boundary, so a fence in a human prompt
+ * gets the same chrome as one in an agent reply.
+ *
+ * Delivered through context rather than a `MarkdownCodeBlock` prop for the same
+ * reason as `VideoReviewMarkdownContext`: the component map handed to
+ * react-markdown must stay module-stable. A prop would have to be threaded
+ * through `createMarkdownComponents`, which would also mean partitioning the
+ * parsed-node cache that identifies that map by variant string
+ * (`nodeCache.ts`). A context read at render time needs neither.
+ */
+export const CodeBlockVariantContext = React.createContext<
+  "default" | "focusProse"
+>("default");
+
 let shikiHighlighter: HighlighterGeneric<BundledLanguage, BundledTheme> | null =
   null;
 let shikiInitPromise: Promise<void> | null = null;
@@ -75,6 +100,8 @@ export function MarkdownCodeBlock({
   const [isCopying, setIsCopying] = React.useState(false);
   const codeBlockRef = React.useRef<HTMLPreElement | null>(null);
   const code = React.useMemo(() => getCodeBlockText(children), [children]);
+  const isFocusProse =
+    React.useContext(CodeBlockVariantContext) === "focusProse";
   useSmoothCorners(codeBlockRef);
 
   const handleCopy = React.useCallback(
@@ -96,6 +123,52 @@ export function MarkdownCodeBlock({
     [code],
   );
 
+  const focusProseCopyButton = (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          aria-label="Copy code block"
+          // In berd's header row the action is a flow sibling of the language
+          // label, so it needs no absolute placement, backdrop, or ring to stay
+          // legible over the code.
+          className="h-5 w-5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 disabled:opacity-60"
+          disabled={isCopying}
+          onClick={handleCopy}
+          size="icon"
+          type="button"
+          variant="ghost"
+        >
+          <Copy className="h-3.5 w-3.5" />
+          <span className="sr-only">Copy code block</span>
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>Copy code</TooltipContent>
+    </Tooltip>
+  );
+
+  if (isFocusProse) {
+    return (
+      <div className="group relative w-full min-w-0" data-code-block="">
+        <div
+          className="flex min-h-7 items-end justify-between gap-2 text-2xs leading-4 text-muted-foreground"
+          data-testid="markdown-code-block-header"
+        >
+          <span className="min-w-0 truncate font-mono">{language}</span>
+          {focusProseCopyButton}
+        </div>
+        <pre
+          className="relative max-h-[400px] min-w-0 max-w-full overflow-auto rounded-lg border border-border/80 bg-background px-3 py-1.5"
+          ref={codeBlockRef}
+        >
+          {children}
+        </pre>
+      </div>
+    );
+  }
+
+  // Unchanged default path: this renderer is shared with channel messages, so
+  // its markup stays byte-identical (including class order) to keep every other
+  // code block in the app exactly as it was.
   return (
     <div className="group relative" data-code-block="">
       <pre

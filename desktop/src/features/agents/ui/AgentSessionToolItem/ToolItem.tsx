@@ -10,6 +10,7 @@ import type { TranscriptItem } from "../agentSessionTypes";
 import { getBuzzToolInfo } from "../agentSessionToolCatalog";
 import { buildCompactToolSummary } from "../agentSessionToolSummary";
 import type { AgentTranscriptIdentityProps } from "../activityRenderClasses/types";
+import { useIsInsideWorkBlockRail } from "../agentSessionTranscriptContext";
 import {
   formatTranscriptTimestampTitle,
   getToolDurationDisplay,
@@ -34,6 +35,7 @@ export function ToolItem({
   profiles?: UserProfileLookup;
 }) {
   const [isExpanded, setIsExpanded] = React.useState(false);
+  const insideWorkBlockRail = useIsInsideWorkBlockRail();
   const hasArgs = Object.keys(item.args).length > 0;
   const hasResult = item.result.trim().length > 0;
   const canonicalToolName = item.buzzToolName ?? item.toolName;
@@ -57,7 +59,11 @@ export function ToolItem({
     [],
   );
 
-  if (compactSummary.presentation === "message") {
+  // Message presentations keep their readable bubble whenever they are standalone.
+  // The conversation grouping keeps message sends standalone rather than placing
+  // them on a work block rail; this guard preserves the muted row if another
+  // transcript composition explicitly embeds one in a rail.
+  if (compactSummary.presentation === "message" && !insideWorkBlockRail) {
     return (
       <div
         className="not-prose w-full"

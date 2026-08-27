@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import { releaseCoverDrawerFocus } from "@/features/channels/lib/coverDrawerFocusSlot";
 import {
   setThreadViewMode,
   type ThreadViewMode,
@@ -89,6 +90,10 @@ export function useThreadViewModeSwitch({
       );
       onModeChange?.(mode);
       setThreadViewMode(mode);
+      // Changing presentation is not a dismissal: this function decides where
+      // focus goes below, so release the cover drawer's focus slot to stop the
+      // outgoing drawer's own deferred restore from overriding that choice.
+      releaseCoverDrawerFocus();
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           document
