@@ -770,6 +770,31 @@ mod tests {
     use super::*;
     use nostr::Keys;
     #[test]
+    fn workflow_trigger_binds_exact_definition_revision() {
+        let workflow_id = Uuid::new_v4().to_string();
+        let revision = "ab".repeat(32);
+        let event = build_workflow_trigger(&workflow_id, &revision)
+            .expect("build workflow trigger")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign workflow trigger");
+        let tags: Vec<Vec<String>> = event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+
+        assert_eq!(event.kind, Kind::Custom(46020));
+        assert_eq!(
+            tags,
+            vec![
+                vec!["d".to_string(), workflow_id.clone()],
+                vec!["e".to_string(), revision.clone()],
+            ]
+        );
+        assert!(build_workflow_trigger(&workflow_id, "not-an-event-id").is_err());
+    }
+
+    #[test]
     fn channel_builders_reject_hash_only_names() {
         let channel_id = Uuid::new_v4();
         assert!(build_create_channel(channel_id, "###", "open", "stream", None, None).is_err());

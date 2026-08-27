@@ -76,6 +76,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(api::gifs::SEARCH_PATH, post(api::gifs::search))
         .route(api::gifs::SHARE_PATH, post(api::gifs::share))
         .route(
+            "/workflows/{workflow_id}/revision",
+            get(api::workflows::workflow_revision),
+        )
+        .route(
             "/workflows/{workflow_id}/runs",
             get(api::workflows::workflow_runs),
         )

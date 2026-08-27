@@ -1419,6 +1419,17 @@ impl Db {
         event::get_event_by_id(&self.pool, community_id, id_bytes).await
     }
 
+    /// Fetches a single non-deleted event by its raw ID bytes on the caller's transaction.
+    #[datastore_span(name = "get_event_by_id_in_transaction", system = "postgresql")]
+    pub async fn get_event_by_id_in_transaction(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        community_id: CommunityId,
+        id_bytes: &[u8],
+    ) -> Result<Option<StoredEvent>> {
+        event::get_event_by_id_in_transaction(tx, community_id, id_bytes).await
+    }
+
     /// Fetches a single event by its raw ID bytes, **including soft-deleted rows**.
     #[datastore_span(name = "get_event_by_id_including_deleted", system = "postgresql")]
     pub async fn get_event_by_id_including_deleted(
@@ -3325,11 +3336,12 @@ impl Db {
         .await
     }
 
-    /// Insert or update a workflow using its NIP-33 `d`-tag UUID.
+    /// Atomically insert or update a workflow using its NIP-33 `d`-tag UUID.
     #[allow(clippy::too_many_arguments)]
     #[datastore_span(name = "upsert_workflow", system = "postgresql")]
     pub async fn upsert_workflow(
         &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         community_id: CommunityId,
         id: Uuid,
         channel_id: Option<Uuid>,
@@ -3337,9 +3349,10 @@ impl Db {
         name: &str,
         definition_json: &str,
         definition_hash: &[u8],
+        definition_event_id: &[u8],
     ) -> Result<()> {
         workflow::upsert_workflow(
-            &self.pool,
+            tx.as_mut(),
             community_id,
             id,
             channel_id,
@@ -3347,6 +3360,7 @@ impl Db {
             name,
             definition_json,
             definition_hash,
+            definition_event_id,
         )
         .await
     }
@@ -3542,12 +3556,46 @@ impl Db {
         workflow::find_by_owner_and_name(&self.pool, community_id, owner_pubkey, name).await
     }
 
+    /// Fetch and share-lock one workflow on an existing transaction.
+    #[datastore_span(name = "get_workflow_for_share_in_transaction", system = "postgresql")]
+    pub async fn get_workflow_for_share_in_transaction(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        community_id: CommunityId,
+        id: Uuid,
+    ) -> Result<workflow::WorkflowRecord> {
+        workflow::get_workflow_for_share_in_transaction(tx, community_id, id).await
+    }
+
+    /// Create a new workflow run on an existing transaction.
+    #[datastore_span(name = "create_workflow_run_in_transaction", system = "postgresql")]
+    pub async fn create_workflow_run_in_transaction(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        definition_event_id: &[u8],
+        trigger_event_id: Option<&[u8]>,
+        trigger_context: Option<&serde_json::Value>,
+    ) -> Result<Uuid> {
+        workflow::create_workflow_run_in_transaction(
+            tx,
+            community_id,
+            workflow_id,
+            definition_event_id,
+            trigger_event_id,
+            trigger_context,
+        )
+        .await
+    }
+
     /// Create a new workflow run.
     #[datastore_span(name = "create_workflow_run", system = "postgresql")]
     pub async fn create_workflow_run(
         &self,
         community_id: CommunityId,
         workflow_id: Uuid,
+        definition_event_id: &[u8],
         trigger_event_id: Option<&[u8]>,
         trigger_context: Option<&serde_json::Value>,
     ) -> Result<Uuid> {
@@ -3555,6 +3603,7 @@ impl Db {
             &self.pool,
             community_id,
             workflow_id,
+            definition_event_id,
             trigger_event_id,
             trigger_context,
         )

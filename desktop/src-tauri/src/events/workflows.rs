@@ -31,9 +31,16 @@ pub fn build_workflow_delete(
     Ok(EventBuilder::new(Kind::Custom(5), "").tags(tags))
 }
 
-/// Kind 46020 — trigger a workflow run by id.
-pub fn build_workflow_trigger(workflow_id: &str) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["d", workflow_id])?];
+/// Kind 46020 — trigger a workflow run by id, bound to one exact definition revision.
+pub fn build_workflow_trigger(
+    workflow_id: &str,
+    definition_event_id: &str,
+) -> Result<EventBuilder, String> {
+    EventId::from_hex(definition_event_id).map_err(|_| "invalid workflow revision".to_string())?;
+    let tags = vec![
+        tag(vec!["d", workflow_id])?,
+        tag(vec!["e", definition_event_id])?,
+    ];
     Ok(EventBuilder::new(Kind::Custom(46020), "").tags(tags))
 }
 

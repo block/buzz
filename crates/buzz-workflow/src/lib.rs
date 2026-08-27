@@ -44,7 +44,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use buzz_core::kind::{event_kind_u32, is_workflow_execution_kind, KIND_REACTION};
+use buzz_core::kind::{
+    event_kind_u32, is_workflow_execution_kind, KIND_REACTION, KIND_WORKFLOW_DEF,
+};
 use buzz_core::tenant::CommunityId;
 use buzz_db::workflow::RunStatus;
 use buzz_db::Db;
@@ -120,6 +122,62 @@ impl WorkflowEngine {
                 .time_to_live(std::time::Duration::from_secs(10))
                 .build(),
         }
+    }
+
+    /// Load and verify the exact owner-signed definition bound to a run.
+    ///
+    /// The mutable `workflows` row supplies only immutable identity/channel
+    /// binding. Definition content always comes from the run's signed event;
+    /// legacy runs without a revision fail closed.
+    pub async fn load_run_definition(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+    ) -> Result<(buzz_db::workflow::WorkflowRunRecord, WorkflowDef), WorkflowError> {
+        let run = self.db.get_workflow_run(community_id, run_id).await?;
+        let revision = run.definition_event_id.as_deref().ok_or_else(|| {
+            WorkflowError::InvalidDefinition(
+                "workflow run has no owner-signed definition revision".into(),
+            )
+        })?;
+        let workflow = self.db.get_workflow(community_id, run.workflow_id).await?;
+        let stored = self
+            .db
+            .get_event_by_id_including_deleted(community_id, revision)
+            .await?
+            .ok_or_else(|| {
+                WorkflowError::InvalidDefinition(
+                    "workflow run definition event is unavailable".into(),
+                )
+            })?;
+        let event = &stored.event;
+        let workflow_id = run.workflow_id.to_string();
+        let channel_id = workflow.channel_id.map(|id| id.to_string());
+        let exact_tag = |name: &str| {
+            let mut values = event.tags.iter().filter_map(|tag| {
+                (tag.kind().to_string() == name)
+                    .then(|| tag.content())
+                    .flatten()
+            });
+            let value = values.next();
+            value.filter(|_| values.next().is_none())
+        };
+        if event.id.as_bytes() != revision
+            || !event.verify_id()
+            || !event.verify_signature()
+            || event_kind_u32(event) != KIND_WORKFLOW_DEF
+            || event.pubkey.to_bytes().as_slice() != workflow.owner_pubkey
+            || exact_tag("d") != Some(workflow_id.as_str())
+            || channel_id.is_none()
+            || exact_tag("h") != channel_id.as_deref()
+            || stored.channel_id != workflow.channel_id
+        {
+            return Err(WorkflowError::InvalidDefinition(
+                "workflow run definition event binding mismatch".into(),
+            ));
+        }
+        let (definition, _) = Self::parse_yaml(&event.content)?;
+        Ok((run, definition))
     }
 
     /// Drop the cached enabled-workflow list for a channel.
@@ -407,6 +465,13 @@ impl WorkflowEngine {
                 .create_workflow_run(
                     community_id,
                     workflow.id,
+                    match workflow.definition_event_id.as_deref() {
+                        Some(revision) => revision,
+                        None => {
+                            tracing::warn!(workflow_id = %workflow.id, "Skipping workflow — signed revision unavailable");
+                            continue;
+                        }
+                    },
                     Some(&trigger_event_id_bytes),
                     Some(&trigger_ctx_json),
                 )
@@ -426,13 +491,22 @@ impl WorkflowEngine {
             );
 
             let engine = Arc::clone(self);
-            let def_clone = def.clone();
             let ctx_clone = trigger_ctx.clone();
 
             tokio::spawn(async move {
-                let result =
-                    executor::execute_run(&engine, community_id, run_id, &def_clone, &ctx_clone)
-                        .await;
+                let result = match engine.load_run_definition(community_id, run_id).await {
+                    Ok((_, definition)) => {
+                        executor::execute_run(
+                            &engine,
+                            community_id,
+                            run_id,
+                            &definition,
+                            &ctx_clone,
+                        )
+                        .await
+                    }
+                    Err(error) => Err((error, PartialProgress::default())),
+                };
                 engine
                     .finalize_run(community_id, run_id, result, None)
                     .await;
@@ -669,6 +743,13 @@ impl WorkflowEngine {
                     .create_workflow_run(
                         community_id,
                         workflow.id,
+                        match workflow.definition_event_id.as_deref() {
+                            Some(revision) => revision,
+                            None => {
+                                tracing::warn!(workflow_id = %workflow.id, "Cron tick: signed revision unavailable");
+                                continue;
+                            }
+                        },
                         None, // no trigger event for cron
                         trigger_ctx_json.as_ref(),
                     )
@@ -721,17 +802,21 @@ impl WorkflowEngine {
                 );
 
                 let engine = Arc::clone(self);
-                let def_clone = def.clone();
                 let ctx_clone = trigger_ctx.clone();
                 tokio::spawn(async move {
-                    let result = executor::execute_run(
-                        &engine,
-                        community_id,
-                        run_id,
-                        &def_clone,
-                        &ctx_clone,
-                    )
-                    .await;
+                    let result = match engine.load_run_definition(community_id, run_id).await {
+                        Ok((_, definition)) => {
+                            executor::execute_run(
+                                &engine,
+                                community_id,
+                                run_id,
+                                &definition,
+                                &ctx_clone,
+                            )
+                            .await
+                        }
+                        Err(error) => Err((error, PartialProgress::default())),
+                    };
                     engine
                         .finalize_run(community_id, run_id, result, None)
                         .await;
@@ -999,6 +1084,7 @@ pub fn build_trigger_context(event: &buzz_core::StoredEvent) -> executor::Trigge
         message_id,
         is_reply: event_is_reply(&event.event),
         webhook_fields: HashMap::new(),
+        definition_event_id: String::new(),
     }
 }
 
@@ -1974,17 +2060,25 @@ steps:
             "enabled": true,
         })
         .to_string();
-        let workflow_id = db
-            .create_workflow(
-                community,
-                Some(channel_id),
-                &member,
-                "sec006-event",
-                &def_json,
-                &[0u8; 32],
-            )
-            .await
-            .expect("create workflow");
+        // Seed through the production insert path (`upsert_workflow`), which
+        // binds a signed definition revision: run creation now skips any
+        // workflow without one (legacy NULL-revision rows fail closed).
+        let workflow_id = Uuid::new_v4();
+        let mut tx = db.begin_transaction().await.expect("begin tx");
+        db.upsert_workflow(
+            &mut tx,
+            community,
+            workflow_id,
+            Some(channel_id),
+            &member,
+            "sec006-event",
+            &def_json,
+            &[0u8; 32],
+            &[0x42u8; 32],
+        )
+        .await
+        .expect("create workflow");
+        tx.commit().await.expect("commit workflow");
 
         let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
 
@@ -2039,29 +2133,41 @@ steps:
         })
         .to_string();
 
-        // Same definition, two owners: plain member vs channel owner.
-        let wf_member = db
-            .create_workflow(
-                community,
-                Some(channel_id),
-                &member,
-                "hook-member",
-                &def_json,
-                &[0u8; 32],
-            )
-            .await
-            .expect("create member workflow");
-        let wf_owner = db
-            .create_workflow(
-                community,
-                Some(channel_id),
-                &creator,
-                "hook-owner",
-                &def_json,
-                &[1u8; 32],
-            )
-            .await
-            .expect("create owner workflow");
+        // Same definition, two owners: plain member vs channel owner. Seed
+        // through `upsert_workflow` so each row carries a bound signed
+        // revision (run creation skips NULL-revision rows fail-closed).
+        let wf_member = Uuid::new_v4();
+        let mut tx = db.begin_transaction().await.expect("begin member tx");
+        db.upsert_workflow(
+            &mut tx,
+            community,
+            wf_member,
+            Some(channel_id),
+            &member,
+            "hook-member",
+            &def_json,
+            &[0u8; 32],
+            &[0x42u8; 32],
+        )
+        .await
+        .expect("create member workflow");
+        tx.commit().await.expect("commit member workflow");
+        let wf_owner = Uuid::new_v4();
+        let mut tx = db.begin_transaction().await.expect("begin owner tx");
+        db.upsert_workflow(
+            &mut tx,
+            community,
+            wf_owner,
+            Some(channel_id),
+            &creator,
+            "hook-owner",
+            &def_json,
+            &[1u8; 32],
+            &[0x43u8; 32],
+        )
+        .await
+        .expect("create owner workflow");
+        tx.commit().await.expect("commit owner workflow");
 
         let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
         engine
@@ -2086,5 +2192,90 @@ steps:
             1,
             "channel owner's call_webhook workflow fires"
         );
+    }
+
+    /// A run is bound to the exact signed revision persisted at creation.
+    /// Replacing the definition (NIP-33) soft-deletes the old kind-30620
+    /// event, but historical runs must keep loading their bound revision —
+    /// `load_run_definition` reads through soft deletion.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn run_definition_loads_after_revision_soft_deleted() {
+        let db = setup_db().await;
+        let owner_keys = nostr::Keys::generate();
+        let owner = owner_keys.public_key().to_bytes().to_vec();
+        let member = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let (community, channel_id) = setup_channel(&db, &owner, &member).await;
+
+        let workflow_id = Uuid::new_v4();
+        let yaml = concat!(
+            "name: revision-history\n",
+            "trigger:\n  on: message_posted\n",
+            "steps:\n  - id: s1\n    action: send_message\n    text: hi\n",
+        );
+        let definition_event =
+            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_WORKFLOW_DEF as u16), yaml)
+                .tags([
+                    nostr::Tag::parse(["d", &workflow_id.to_string()]).expect("d tag"),
+                    nostr::Tag::parse(["h", &channel_id.to_string()]).expect("h tag"),
+                ])
+                .sign_with_keys(&owner_keys)
+                .expect("sign definition");
+        db.insert_event(community, &definition_event, Some(channel_id))
+            .await
+            .expect("store definition event");
+
+        let (def, _) = WorkflowEngine::parse_yaml(yaml).expect("parse yaml");
+        let def_json = serde_json::to_string(&def).expect("serialize definition");
+        let mut tx = db.begin_transaction().await.expect("begin tx");
+        db.upsert_workflow(
+            &mut tx,
+            community,
+            workflow_id,
+            Some(channel_id),
+            &owner,
+            "revision-history",
+            &def_json,
+            &[0u8; 32],
+            definition_event.id.as_bytes(),
+        )
+        .await
+        .expect("create workflow");
+        tx.commit().await.expect("commit workflow");
+
+        let run_id = db
+            .create_workflow_run(
+                community,
+                workflow_id,
+                definition_event.id.as_bytes(),
+                None,
+                None,
+            )
+            .await
+            .expect("create run");
+
+        let engine = Arc::new(WorkflowEngine::new(db.clone(), WorkflowConfig::default()));
+
+        // Bound revision loads while the event is live.
+        engine
+            .load_run_definition(community, run_id)
+            .await
+            .expect("load definition before deletion");
+
+        // Definition replacement soft-deletes the superseded revision event.
+        assert!(
+            db.soft_delete_event(community, definition_event.id.as_bytes())
+                .await
+                .expect("soft delete revision"),
+            "revision event must exist to be soft-deleted"
+        );
+
+        // The historical run still resolves its exact signed revision.
+        let (run, loaded) = engine
+            .load_run_definition(community, run_id)
+            .await
+            .expect("load definition after soft deletion");
+        assert_eq!(run.id, run_id);
+        assert_eq!(loaded.name, "revision-history");
     }
 }

@@ -473,7 +473,7 @@ pub async fn verify_channel_roster_fence_behavior(pool: &sqlx::PgPool) -> Result
 /// Take the per-channel membership lock. MUST be the first statement in the
 /// transaction that then reads roles/owner counts and writes membership, so the
 /// whole check-then-write sequence is atomic against a concurrent one.
-async fn acquire_channel_membership_lock(
+pub async fn acquire_channel_membership_lock(
     tx: &mut Transaction<'_, Postgres>,
     community_id: CommunityId,
     channel_id: Uuid,
@@ -1868,6 +1868,30 @@ pub async fn get_member_role(
     .bind(channel_id)
     .bind(pubkey)
     .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|r| r.try_get("role")).transpose()?)
+}
+
+/// Get an active member role using the caller's transaction.
+///
+/// Callers that authorize a workflow run must first acquire
+/// [`acquire_channel_membership_lock`] and hold the transaction through run
+/// commit, serializing authorization with membership revocation.
+pub async fn get_member_role_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<Option<String>> {
+    let row = sqlx::query(
+        "SELECT cm.role::text AS role FROM channel_members cm \
+         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
+         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.pubkey = $3 AND cm.removed_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(pubkey)
+    .fetch_optional(&mut **tx)
     .await?;
     Ok(row.map(|r| r.try_get("role")).transpose()?)
 }

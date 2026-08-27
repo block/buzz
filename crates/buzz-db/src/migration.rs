@@ -1088,6 +1088,21 @@ mod tests {
         assert!(roster_fence.contains("snapshot_members IS DISTINCT FROM canonical_members"));
         assert!(roster_fence.contains("ERRCODE = '23514'"));
 
+        // Exact workflow-definition revision persistence is additive and keeps
+        // pre-migration rows nullable until their next signed definition write.
+        assert_eq!(migrations[32].version, 33);
+        let workflow_revision = migrations[32].sql.as_str();
+        assert!(workflow_revision.contains("ADD COLUMN definition_event_id BYTEA"));
+        assert!(workflow_revision.contains("octet_length(definition_event_id) = 32"));
+
+        // Runs durably inherit the exact signed revision they execute. Existing
+        // runs remain nullable and execution/resume must fail them closed.
+        assert_eq!(migrations[33].version, 34);
+        let run_revision = migrations[33].sql.as_str();
+        assert!(run_revision.contains("ALTER TABLE workflow_runs"));
+        assert!(run_revision.contains("ADD COLUMN definition_event_id BYTEA"));
+        assert!(run_revision.contains("octet_length(definition_event_id) = 32"));
+
         // Fresh desired-state bootstrap must install the identical executable
         // fence as migration 0032. CI and isolated relay startup use schema.sql
         // without running migrations, so drift reopens rolling-deploy races.

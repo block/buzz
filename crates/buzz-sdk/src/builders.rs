@@ -1640,9 +1640,16 @@ pub fn build_workflow_delete(
     build_delete_addressable(KIND_WORKFLOW_DEF, author_pubkey, &workflow_id.to_string())
 }
 
-/// Build a workflow trigger event (kind 46020).
-pub fn build_workflow_trigger(workflow_id: Uuid) -> Result<EventBuilder, SdkError> {
-    let tags = vec![tag(&["d", &workflow_id.to_string()])?];
+/// Build a workflow trigger event (kind 46020) bound to an exact signed revision.
+pub fn build_workflow_trigger(
+    workflow_id: Uuid,
+    definition_event_id: &str,
+) -> Result<EventBuilder, SdkError> {
+    let revision = check_hex_exact(definition_event_id, 64, "definition_event_id")?;
+    let tags = vec![
+        tag(&["d", &workflow_id.to_string()])?,
+        tag(&["e", &revision])?,
+    ];
     Ok(EventBuilder::new(Kind::Custom(KIND_WORKFLOW_TRIGGER as u16), "").tags(tags))
 }
 
@@ -4010,9 +4017,11 @@ mod tests {
     #[test]
     fn workflow_trigger_happy_path() {
         let wid = uuid();
-        let ev = sign(build_workflow_trigger(wid).unwrap());
+        let ev = sign(build_workflow_trigger(wid, &"ab".repeat(32)).unwrap());
         assert_eq!(ev.kind.as_u16(), 46020);
         assert!(has_tag(&ev, "d", &wid.to_string()));
+        assert!(has_tag(&ev, "e", &"ab".repeat(32)));
+        assert!(build_workflow_trigger(wid, "not-an-event-id").is_err());
     }
 
     #[test]

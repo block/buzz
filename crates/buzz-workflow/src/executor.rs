@@ -43,6 +43,9 @@ pub struct TriggerContext {
     pub is_reply: bool,
     /// Arbitrary webhook body fields (webhook trigger).
     pub webhook_fields: HashMap<String, String>,
+    /// Exact owner-signed kind:30620 definition revision executed by this run.
+    #[serde(default)]
+    pub definition_event_id: String,
 }
 
 impl TriggerContext {
@@ -1312,6 +1315,7 @@ mod tests {
             message_id: "event-id-hex".to_owned(),
             is_reply: false,
             webhook_fields: HashMap::new(),
+            definition_event_id: String::new(),
         }
     }
 

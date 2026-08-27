@@ -46,6 +46,7 @@ async fn authorize_workflow_read(
     path: &str,
     raw_query: Option<&str>,
     workflow_id: Uuid,
+    allow_immutable_owner: bool,
 ) -> Result<TenantContext, (StatusCode, Json<Value>)> {
     let raw_host = headers
         .get(axum::http::header::HOST)
@@ -97,13 +98,57 @@ async fn authorize_workflow_read(
         .await
         .map_err(|error| internal_error(&format!("workflow channel access lookup: {error}")))?;
     if !accessible.contains(&channel_id) {
-        return Err(api_error(
-            StatusCode::FORBIDDEN,
-            "workflow is not accessible",
-        ));
+        let controls = allow_immutable_owner
+            && (workflow.owner_pubkey == pubkey_bytes
+                || state
+                    .db
+                    .is_agent_owner(tenant.community(), &workflow.owner_pubkey, &pubkey_bytes)
+                    .await
+                    .map_err(|error| internal_error(&format!("workflow owner lookup: {error}")))?);
+        if !controls {
+            return Err(api_error(
+                StatusCode::FORBIDDEN,
+                "workflow is not accessible",
+            ));
+        }
     }
 
     Ok(tenant)
+}
+
+/// `GET /workflows/{workflow_id}/revision` — current signed revision for an
+/// authorized channel reader or the managed agent's immutable human owner.
+///
+/// This narrow endpoint does not grant channel visibility; it returns only the
+/// exact owner-signed definition event needed to construct a revision-bound
+/// manual trigger.
+pub async fn workflow_revision(
+    State(state): State<Arc<AppState>>,
+    Path(workflow_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let path = format!("/workflows/{workflow_id}/revision");
+    let tenant = authorize_workflow_read(&state, &headers, &path, None, workflow_id, true).await?;
+    let workflow = state
+        .db
+        .get_workflow(tenant.community(), workflow_id)
+        .await
+        .map_err(|_| api_error(StatusCode::NOT_FOUND, "workflow not found"))?;
+    let revision = workflow.definition_event_id.as_deref().ok_or_else(|| {
+        api_error(
+            StatusCode::CONFLICT,
+            "owner-signed workflow revision is unavailable",
+        )
+    })?;
+    let event = state
+        .db
+        .get_event_by_id(tenant.community(), revision)
+        .await
+        .map_err(|error| internal_error(&format!("get workflow revision: {error}")))?
+        .ok_or_else(|| api_error(StatusCode::CONFLICT, "workflow revision is unavailable"))?;
+    Ok(Json(serde_json::to_value(event.event).map_err(
+        |error| internal_error(&format!("serialize workflow revision: {error}")),
+    )?))
 }
 
 /// `GET /workflows/{workflow_id}/runs` — one authorized, keyset-paginated page.
@@ -129,8 +174,15 @@ pub async fn workflow_runs(
     }
 
     let path = format!("/workflows/{workflow_id}/runs");
-    let tenant =
-        authorize_workflow_read(&state, &headers, &path, raw_query.as_deref(), workflow_id).await?;
+    let tenant = authorize_workflow_read(
+        &state,
+        &headers,
+        &path,
+        raw_query.as_deref(),
+        workflow_id,
+        false,
+    )
+    .await?;
     let mut rows = state
         .db
         .list_workflow_runs_page(
@@ -169,7 +221,7 @@ pub async fn run_approvals(
     headers: HeaderMap,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let path = format!("/workflows/{workflow_id}/runs/{run_id}/approvals");
-    let tenant = authorize_workflow_read(&state, &headers, &path, None, workflow_id).await?;
+    let tenant = authorize_workflow_read(&state, &headers, &path, None, workflow_id, false).await?;
 
     let run = state
         .db
