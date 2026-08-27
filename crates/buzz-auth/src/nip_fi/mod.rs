@@ -28,7 +28,8 @@ pub mod denial;
 pub mod verifier;
 
 pub use assertion::{
-    CanonicalCapabilities, FederatedIdentity, RevalidationDependencies, VerifiedAssertion,
+    CanonicalCapabilities, ConfidentialAssertion, FederatedIdentity, RevalidationDependencies,
+    VerifiedAssertion,
 };
 pub use config::{
     AssertionPolicyId, ClientSubjectPosture, FreshnessClass, IssuerPolicy, IssuerPolicyError,

@@ -63,8 +63,14 @@ fn jwks_with_coords(kid: &str, x: &str, y: &str) -> JwkSet {
     .expect("valid JWKS")
 }
 
+/// A key-snapshot hard deadline comfortably in the future, so time checks pass
+/// and the required-finite-positive-deadline construction succeeds.
+fn future_deadline() -> chrono::DateTime<chrono::Utc> {
+    chrono::Utc::now() + chrono::Duration::seconds(3600)
+}
+
 fn key_set_for(issuer: &str) -> AssertionKeySet {
-    AssertionKeySet::new(issuer.to_owned(), 1, test_jwks(TEST_KID), None)
+    AssertionKeySet::new(issuer.to_owned(), 1, test_jwks(TEST_KID), future_deadline())
         .expect("nonzero generation, non-empty issuer")
 }
 
@@ -91,7 +97,6 @@ fn access_token_policy_with(subject_class: SubjectClassContract) -> IssuerPolicy
         vec![AUDIENCE.to_owned()],
         TokenClass::AccessTokenAtJwt { subject_class },
         FreshnessClass::OfflineJwt,
-        "sub".to_owned(),
         vec![Algorithm::ES256],
         false,
         60,
@@ -107,7 +112,6 @@ fn dedicated_policy(issuer: &str) -> IssuerPolicy {
         vec![AUDIENCE.to_owned()],
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
-        "sub".to_owned(),
         vec![Algorithm::ES256],
         false,
         60,
@@ -123,7 +127,6 @@ fn dedicated_policy_with_audiences(audiences: Vec<String>) -> IssuerPolicy {
         audiences,
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
-        "sub".to_owned(),
         vec![Algorithm::ES256],
         false,
         60,
@@ -139,7 +142,6 @@ fn dedicated_policy_with_algorithms(algorithms: Vec<Algorithm>) -> IssuerPolicy 
         vec![AUDIENCE.to_owned()],
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
-        "sub".to_owned(),
         algorithms,
         false,
         60,
@@ -436,7 +438,8 @@ fn key_restricted_to_encrypt_key_ops_denies() {
         }]
     }))
     .expect("valid JWKS");
-    let key_set = AssertionKeySet::new(ISSUER.to_owned(), 1, jwks, None).expect("valid key set");
+    let key_set =
+        AssertionKeySet::new(ISSUER.to_owned(), 1, jwks, future_deadline()).expect("valid key set");
     let mut registry = IssuerRegistry::new();
     registry.insert(access_token_policy());
     let verifier = FederatedAssertionVerifier::new(registry, StaticIssuerKeySource::new([key_set]));
@@ -488,7 +491,6 @@ fn missing_nostr_pubkey_denies_under_attested_key_policy() {
         vec![AUDIENCE.to_owned()],
         TokenClass::DedicatedNipFi,
         FreshnessClass::OfflineJwt,
-        "sub".to_owned(),
         vec![Algorithm::ES256],
         true, // require attested key
         60,
@@ -604,7 +606,7 @@ fn cross_issuer_token_cannot_mint_through_any_seam() {
         issuer_b.to_owned(),
         1,
         jwks_with_coords(TEST_KID, TEST_JWK_X_B, TEST_JWK_Y_B),
-        None,
+        future_deadline(),
     )
     .unwrap();
 
@@ -733,22 +735,24 @@ fn duplicate_header_member_denies() {
 
 // ---- CurrentStatus deferral (IMPORTANT #7) -------------------------------
 
-#[test]
-fn current_status_policy_denies_without_witness() {
-    let policy = IssuerPolicy::new(
+fn current_status_policy() -> IssuerPolicy {
+    IssuerPolicy::new(
         ISSUER.to_owned(),
         vec![AUDIENCE.to_owned()],
         TokenClass::DedicatedNipFi,
         FreshnessClass::CurrentStatus,
-        "sub".to_owned(),
         vec![Algorithm::ES256],
         false,
         60,
         3600,
         Some(120), // maximum_status_age required for current-status
     )
-    .expect("valid current-status policy");
-    let verifier = verifier_with(policy);
+    .expect("valid current-status policy")
+}
+
+#[test]
+fn current_status_policy_denies_without_witness() {
+    let verifier = verifier_with(current_status_policy());
     let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
     let err = verifier.verify(&token).unwrap_err();
     assert_eq!(err, VerifierError::StatusWitnessUnavailable);
@@ -756,6 +760,203 @@ fn current_status_policy_denies_without_witness() {
     // (503), never rejected evidence (403): the token may be perfectly valid.
     assert_eq!(err.denial_class(), DenialClass::AuthorizationUnavailable);
     assert_eq!(err.denial_class().http_status(), 503);
+}
+
+// A `current-status` policy must complete every offline check before deferring
+// to the (unavailable) status witness. Invalid attacker input therefore denies
+// as `evidence_rejected` (403), not `authorization_unavailable` (503): a bad
+// token can never masquerade as an availability signal (NIP-FI.md:459-476).
+
+#[test]
+fn current_status_invalid_signature_is_evidence_rejected_not_unavailable() {
+    let verifier = verifier_with(current_status_policy());
+    let mut token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
+    let last = token.pop().unwrap();
+    token.push(if last == 'A' { 'B' } else { 'A' });
+    let err = verifier.verify(&token).unwrap_err();
+    assert_eq!(err, VerifierError::InvalidSignatureOrClaims);
+    assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
+    assert_eq!(err.denial_class().http_status(), 403);
+}
+
+#[test]
+fn current_status_wrong_audience_is_evidence_rejected_not_unavailable() {
+    let verifier = verifier_with(current_status_policy());
+    let token = mint(
+        Some("nip-fi+jwt"),
+        TEST_KID,
+        json!({ "sub": "u", "aud": "https://other.example" }),
+    );
+    let err = verifier.verify(&token).unwrap_err();
+    assert_eq!(err, VerifierError::InvalidSignatureOrClaims);
+    assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
+}
+
+#[test]
+fn current_status_malformed_claim_is_evidence_rejected_not_unavailable() {
+    // A non-integer `exp` is a malformed time claim, rejected during offline
+    // signature/claim validation. Under a current-status policy it must still
+    // deny as rejected evidence (403), reached only because offline validation
+    // runs before the status deferral.
+    let verifier = verifier_with(current_status_policy());
+    let token = mint(
+        Some("nip-fi+jwt"),
+        TEST_KID,
+        json!({ "sub": "u", "exp": "not-a-number" }),
+    );
+    let err = verifier.verify(&token).unwrap_err();
+    assert_eq!(err, VerifierError::InvalidSignatureOrClaims);
+    assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
+}
+
+#[test]
+fn current_status_expired_token_is_evidence_rejected_not_unavailable() {
+    // Time validation precedes the status deferral, so an expired current-status
+    // token is rejected evidence (403), not authorization-unavailable (503).
+    let verifier = verifier_with(current_status_policy());
+    let token = mint(
+        Some("nip-fi+jwt"),
+        TEST_KID,
+        json!({ "sub": "u", "iat": now() - 1200, "exp": now() - 600 }),
+    );
+    let err = verifier.verify(&token).unwrap_err();
+    assert_eq!(err, VerifierError::Expired);
+    assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
+}
+
+// ---- Authenticated key-set bound (P1 #1) ---------------------------------
+
+fn jwks_with_n_keys(n: usize) -> JwkSet {
+    let keys: Vec<Value> = (0..n)
+        .map(|i| {
+            json!({
+                "kty": "EC",
+                "crv": "P-256",
+                "use": "sig",
+                "alg": "ES256",
+                "kid": format!("k{i}"),
+                "x": TEST_JWK_X,
+                "y": TEST_JWK_Y,
+            })
+        })
+        .collect();
+    serde_json::from_value(json!({ "keys": keys })).expect("valid JWKS")
+}
+
+#[test]
+fn oversized_key_snapshot_cannot_be_installed() {
+    // The authenticated key set is bounded before lookup (NIP-FI.md:166-171):
+    // `verify` scans it by an attacker-controlled `kid`, so a snapshot beyond
+    // MAX_JWKS_KEYS cannot even be constructed — the O(keys) scan is capped at
+    // the source. An attacker-installed 100k-key JWKS is impossible.
+    let oversized = jwks_with_n_keys(MAX_JWKS_KEYS + 1);
+    assert!(
+        AssertionKeySet::new(ISSUER.to_owned(), 1, oversized, future_deadline()).is_none(),
+        "a snapshot exceeding MAX_JWKS_KEYS must be rejected at construction"
+    );
+    // The bound itself is admissible.
+    let at_bound = jwks_with_n_keys(MAX_JWKS_KEYS);
+    assert!(
+        AssertionKeySet::new(ISSUER.to_owned(), 1, at_bound, future_deadline()).is_some(),
+        "a snapshot at exactly MAX_JWKS_KEYS is accepted"
+    );
+}
+
+#[test]
+fn empty_key_snapshot_cannot_be_installed() {
+    let empty: JwkSet = serde_json::from_value(json!({ "keys": [] })).expect("valid JWKS");
+    assert!(AssertionKeySet::new(ISSUER.to_owned(), 1, empty, future_deadline()).is_none());
+}
+
+// ---- Fixed `sub` identity coordinate (P1 #2) -----------------------------
+
+#[test]
+fn identity_subject_is_the_jwt_sub_claim() {
+    // Identity is exactly `(iss, sub)`; the subject coordinate is the JWT `sub`
+    // claim, hard-coded and never configurable (NIP-FI.md:35-41, :173-175).
+    let verifier = verifier_with(access_token_policy());
+    let token = mint(
+        Some("at+jwt"),
+        TEST_KID,
+        json!({ "sub": "user-123", "email": "mutable@example.com", "client_id": "app-1", "sub_type": "user" }),
+    );
+    let assertion = verifier.verify(&token).expect("verifies");
+    // The sealed subject is `sub`, never a mutable attribute like `email`.
+    assert_eq!(assertion.identity().subject(), "user-123");
+    assert_ne!(assertion.identity().subject(), "mutable@example.com");
+}
+
+#[test]
+fn token_without_sub_denies_even_with_other_identifier_claims() {
+    // With `sub` absent, no other claim (email, employee number, …) can stand
+    // in as the identity coordinate: the token denies as rejected evidence.
+    let verifier = verifier_with(access_token_policy());
+    let token = mint(
+        Some("at+jwt"),
+        TEST_KID,
+        json!({ "email": "mutable@example.com", "client_id": "app-1", "sub_type": "user" }),
+    );
+    assert_eq!(
+        verifier.verify(&token).unwrap_err(),
+        VerifierError::ClaimRejected
+    );
+}
+
+// ---- Revalidation dependencies: confidential JWS + key deadline (P1 #4) --
+
+#[test]
+fn revalidation_dependencies_carry_key_deadline_and_confidential_assertion() {
+    // The sealed result carries the key-snapshot hard deadline and a
+    // confidential handle to the exact compact JWS, so final admission can
+    // revalidate the byte-identical assertion under current state
+    // (NIP-FI.md:240-249, :371-395).
+    let deadline = future_deadline();
+    let key_set = AssertionKeySet::new(ISSUER.to_owned(), 7, test_jwks(TEST_KID), deadline)
+        .expect("valid key set");
+    let mut registry = IssuerRegistry::new();
+    registry.insert(dedicated_policy(ISSUER));
+    let verifier = FederatedAssertionVerifier::new(registry, StaticIssuerKeySource::new([key_set]));
+    let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
+    let assertion = verifier.verify(&token).expect("verifies");
+    let deps = assertion.revalidation_dependencies();
+    assert_eq!(deps.verification_key_id(), TEST_KID);
+    assert_eq!(deps.key_snapshot_generation(), 7);
+    assert_eq!(deps.key_snapshot_hard_deadline(), deadline);
+    // The confidential handle is the exact compact JWS, byte-for-byte.
+    assert_eq!(deps.confidential_assertion().compact_jws(), token);
+    // The key-snapshot deadline is a bounds-class member of authority_deadlines.
+    assert!(assertion.authority_deadlines().contains(&deadline));
+}
+
+#[test]
+fn retained_key_revalidates_and_removed_key_denies() {
+    // FI-TRACE-JWKS-ADD / FI-TRACE-JWKS-REMOVE at the verifier seam: the same
+    // assertion re-verifies while its key snapshot is retained, and denies as
+    // an unreadable dependency once the key is removed from the source.
+    let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
+
+    let retained = verifier_with(dedicated_policy(ISSUER));
+    let first = retained
+        .verify(&token)
+        .expect("verifies under retained key");
+    let again = retained
+        .verify(
+            first
+                .revalidation_dependencies()
+                .confidential_assertion()
+                .compact_jws(),
+        )
+        .expect("re-verifies the exact retained assertion");
+    assert_eq!(first.identity().subject(), again.identity().subject());
+
+    // Remove the key: the source has no snapshot, so the same evidence denies
+    // as authorization-unavailable, never sealing under an absent key.
+    let mut registry = IssuerRegistry::new();
+    registry.insert(dedicated_policy(ISSUER));
+    let removed = FederatedAssertionVerifier::new(registry, StaticIssuerKeySource::new([]));
+    let err = removed.verify(&token).unwrap_err();
+    assert_eq!(err, VerifierError::KeySourceUnavailable);
+    assert_eq!(err.denial_class(), DenialClass::AuthorizationUnavailable);
 }
 
 #[test]
@@ -786,7 +987,6 @@ fn assertion_policy_id_is_deterministic_and_semantic() {
         vec![AUDIENCE.to_owned()],
         changed.token_class().clone(),
         FreshnessClass::OfflineJwt,
-        "sub".to_owned(),
         vec![Algorithm::ES256],
         false,
         120, // different skew => different semantics

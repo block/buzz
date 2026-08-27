@@ -47,6 +47,14 @@ pub(crate) const MAX_KID_BYTES: usize = 512;
 pub(crate) const MAX_SUBJECT_BYTES: usize = 2_048;
 /// Maximum accepted `client_id` length, in bytes.
 pub(crate) const MAX_CLIENT_ID_BYTES: usize = 2_048;
+/// Maximum number of keys in one authenticated JWKS snapshot. The verifier
+/// scans the snapshot by an attacker-controlled `kid` on every unauthenticated
+/// token naming a configured issuer, so the authenticated key set is bounded
+/// before lookup (NIP-FI.md "bounds the … authenticated key set before
+/// lookup"). Real issuer JWKS carry a handful of keys even across rotation;
+/// this cap blocks an oversized snapshot from turning each lookup into an
+/// attacker-driven O(keys) scan.
+pub(crate) const MAX_JWKS_KEYS: usize = 64;
 
 /// The compiled-verifier-behavior fingerprint folded into every
 /// [`AssertionPolicyId`]. It stands in for the normative semantic inputs that
@@ -67,6 +75,14 @@ pub(crate) const TRANSPORT_CONTRACT_VERSION: u32 = 1;
 /// The fixed name of the Nostr-key claim ([NIP-FI.md](../../../../docs/nips/NIP-FI.md),
 /// "Assertion validation"). Not configurable: other encodings and aliases deny.
 pub const NOSTR_PUBKEY_CLAIM: &str = "nostr_pubkey";
+
+/// The fixed identity-subject claim. Identity is the exact tuple `(iss, sub)`
+/// (NIP-FI.md:35-41), so the subject coordinate is always the JWT `sub` claim
+/// and is never deployment-configurable: an operator cannot seal a mutable
+/// attribute such as `email` or `display_name` as identity (NIP-FI.md:173-175,
+/// :296-298). Attributes other than `sub` may be captured as claims/capabilities
+/// but never as the identity coordinate.
+pub const SUBJECT_CLAIM: &str = "sub";
 
 /// Stable identifier for the accepted assertion-policy semantics.
 ///
@@ -326,7 +342,6 @@ pub struct IssuerPolicy {
     audiences: Vec<String>,
     token_class: TokenClass,
     freshness: FreshnessClass,
-    subject_claim: String,
     algorithms: Vec<Algorithm>,
     require_attested_key: bool,
     skew_seconds: u64,
@@ -370,7 +385,6 @@ impl IssuerPolicy {
         audiences: Vec<String>,
         token_class: TokenClass,
         freshness: FreshnessClass,
-        subject_claim: String,
         algorithms: Vec<Algorithm>,
         require_attested_key: bool,
         skew_seconds: u64,
@@ -378,8 +392,9 @@ impl IssuerPolicy {
         maximum_status_age_seconds: Option<u64>,
     ) -> Result<Self, IssuerPolicyError> {
         // Identity-bearing strings are validated for bounds but never mutated:
-        // exact `iss`/`aud`/`sub`/claim bytes select policies and form the
-        // identity tuple (NIP-FI.md, "Terms and identifier classes").
+        // exact `iss`/`aud`/`sub` bytes select policies and form the identity
+        // tuple (NIP-FI.md, "Terms and identifier classes"). The subject
+        // coordinate is the fixed `sub` claim, not a configurable name.
         if issuer.is_empty() || issuer.len() > MAX_URI_LEN {
             return Err(IssuerPolicyError::InvalidIssuer);
         }
@@ -389,9 +404,6 @@ impl IssuerPolicy {
                 .any(|a| a.is_empty() || a.len() > MAX_URI_LEN)
         {
             return Err(IssuerPolicyError::InvalidAudiences);
-        }
-        if subject_claim.is_empty() || subject_claim.len() > MAX_CLAIM_NAME_LEN {
-            return Err(IssuerPolicyError::InvalidSubjectClaim);
         }
         if algorithms.is_empty() || !algorithms.iter().copied().all(is_asymmetric_algorithm) {
             return Err(IssuerPolicyError::InvalidAlgorithms);
@@ -424,7 +436,6 @@ impl IssuerPolicy {
             &audiences,
             &token_class,
             freshness,
-            &subject_claim,
             &algorithms,
             require_attested_key,
             skew_seconds,
@@ -437,7 +448,6 @@ impl IssuerPolicy {
             audiences,
             token_class,
             freshness,
-            subject_claim,
             algorithms,
             require_attested_key,
             skew_seconds,
@@ -465,11 +475,6 @@ impl IssuerPolicy {
     /// The declared freshness class.
     pub const fn freshness(&self) -> FreshnessClass {
         self.freshness
-    }
-
-    /// The claim name carrying the opaque subject.
-    pub fn subject_claim(&self) -> &str {
-        &self.subject_claim
     }
 
     /// The accepted asymmetric algorithms.
@@ -597,7 +602,6 @@ fn derive_assertion_policy_id(
     audiences: &[String],
     token_class: &TokenClass,
     freshness: FreshnessClass,
-    subject_claim: &str,
     algorithms: &[Algorithm],
     require_attested_key: bool,
     skew_seconds: u64,
@@ -613,12 +617,13 @@ fn derive_assertion_policy_id(
     // moves every policy ID.
     hasher.update(VERIFIER_CONTRACT_VERSION.to_be_bytes());
     // Normative size rules (NIP-FI.md "bounds the assertion, headers, claims,
-    // subject, key identifiers … before lookup").
+    // subject, key identifiers, and authenticated key set … before lookup").
     for bound in [
         MAX_TOKEN_BYTES,
         MAX_KID_BYTES,
         MAX_SUBJECT_BYTES,
         MAX_CLIENT_ID_BYTES,
+        MAX_JWKS_KEYS,
     ] {
         hasher.update((bound as u64).to_be_bytes());
     }
@@ -647,7 +652,7 @@ fn derive_assertion_policy_id(
         TokenClass::DedicatedNipFi => {}
     }
     hash_field(&mut hasher, freshness.tag().as_bytes());
-    hash_field(&mut hasher, subject_claim.as_bytes());
+    hash_field(&mut hasher, SUBJECT_CLAIM.as_bytes());
     hash_field(&mut hasher, NOSTR_PUBKEY_CLAIM.as_bytes());
     hash_seq(
         &mut hasher,

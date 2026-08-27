@@ -47,13 +47,39 @@ impl fmt::Debug for FederatedIdentity {
     }
 }
 
+/// A confidential handle to the exact compact JWS that produced a
+/// [`VerifiedAssertion`]. Final admission revalidates the byte-identical
+/// assertion against current state, so carrying the exact token lets a changed
+/// key snapshot re-verify the same evidence and a removed key deny
+/// (NIP-FI.md:240-249, :371-395). The handle is confidential: it deliberately
+/// has no `Debug`, `Display`, or `serde` implementation, so the token cannot
+/// leak through a formatting, logging, or serialization path. The exact bytes
+/// are exposed only through [`Self::compact_jws`] for in-deployment
+/// revalidation. Equality is by exact bytes.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ConfidentialAssertion {
+    compact_jws: String,
+}
+
+impl ConfidentialAssertion {
+    /// The exact compact JWS, for final-admission revalidation only. This is
+    /// the sole read path; there is no `Debug`/`Display`/`serde` exposure.
+    pub fn compact_jws(&self) -> &str {
+        &self.compact_jws
+    }
+}
+
 /// The exact key-snapshot member of `revalidation_dependencies`: the
-/// verification-key identity and the snapshot generation that authenticated the
-/// assertion. A changed generation requires revalidation; a removed key denies.
+/// verification-key identity, the snapshot generation that authenticated the
+/// assertion, the key-snapshot hard deadline, and a confidential handle to the
+/// exact compact JWS. A changed generation requires revalidation; a removed key
+/// denies (NIP-FI.md:240-249).
 #[derive(Clone, PartialEq, Eq)]
 pub struct RevalidationDependencies {
     verification_key_id: String,
     key_snapshot_generation: u64,
+    key_snapshot_hard_deadline: DateTime<Utc>,
+    confidential_assertion: ConfidentialAssertion,
 }
 
 impl RevalidationDependencies {
@@ -65,6 +91,17 @@ impl RevalidationDependencies {
     /// The generation of the key snapshot used for verification.
     pub const fn key_snapshot_generation(&self) -> u64 {
         self.key_snapshot_generation
+    }
+
+    /// The hard deadline of the key snapshot that authenticated the assertion.
+    /// A bounds-class dependency: the sealed authority ends no later than this.
+    pub const fn key_snapshot_hard_deadline(&self) -> DateTime<Utc> {
+        self.key_snapshot_hard_deadline
+    }
+
+    /// The confidential handle to the exact compact JWS, for revalidation.
+    pub const fn confidential_assertion(&self) -> &ConfidentialAssertion {
+        &self.confidential_assertion
     }
 }
 
@@ -171,10 +208,17 @@ impl fmt::Debug for VerifiedAssertion {
 }
 
 impl RevalidationDependencies {
-    pub(super) fn new(verification_key_id: String, key_snapshot_generation: u64) -> Self {
+    pub(super) fn new(
+        verification_key_id: String,
+        key_snapshot_generation: u64,
+        key_snapshot_hard_deadline: DateTime<Utc>,
+        compact_jws: String,
+    ) -> Self {
         Self {
             verification_key_id,
             key_snapshot_generation,
+            key_snapshot_hard_deadline,
+            confidential_assertion: ConfidentialAssertion { compact_jws },
         }
     }
 }

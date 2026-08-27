@@ -28,8 +28,9 @@
 use super::assertion::{CanonicalCapabilities, RevalidationDependencies, VerifiedAssertion};
 use super::config::{
     is_asymmetric_algorithm, ClientSubjectPosture, FreshnessClass, IssuerPolicy, IssuerRegistry,
-    SubjectClass, TokenClass, TransportContractId, MAX_CLIENT_ID_BYTES, MAX_KID_BYTES,
-    MAX_SUBJECT_BYTES, MAX_TOKEN_BYTES, NOSTR_PUBKEY_CLAIM, OAUTH_CLIENT_ID_CLAIM,
+    SubjectClass, TokenClass, TransportContractId, MAX_CLIENT_ID_BYTES, MAX_JWKS_KEYS,
+    MAX_KID_BYTES, MAX_SUBJECT_BYTES, MAX_TOKEN_BYTES, NOSTR_PUBKEY_CLAIM, OAUTH_CLIENT_ID_CLAIM,
+    SUBJECT_CLAIM,
 };
 use super::denial::DenialClass;
 use chrono::{DateTime, TimeZone, Utc};
@@ -52,7 +53,7 @@ mod sealed {
 }
 
 /// One issuer's key source: a JWKS snapshot bound to the exact `iss` it
-/// authenticates, with a positive generation and an optional hard deadline
+/// authenticates, with a positive generation and a required hard deadline
 /// beyond which the snapshot can no longer authorize.
 ///
 /// The issuer binding is the anti-cross-issuer control (`FI-INV`): a snapshot
@@ -79,14 +80,24 @@ pub struct AssertionKeySet {
     issuer: String,
     generation: u64,
     jwks: JwkSet,
-    hard_deadline: Option<DateTime<Utc>>,
+    hard_deadline: DateTime<Utc>,
 }
 
 impl AssertionKeySet {
     /// Seal a parsed JWKS for exactly one issuer, with a positive cache
-    /// generation and optional deadline. A zero generation or empty issuer is
-    /// rejected. Crate-private: only the trusted in-crate configuration path
-    /// (PR 3's JWKS runtime) may bind key material to an issuer.
+    /// generation and a required key-snapshot hard deadline. Rejects a zero
+    /// generation, an empty issuer, an empty or oversized key set
+    /// ([`MAX_JWKS_KEYS`]), or a non-positive deadline. Crate-private: only the
+    /// trusted in-crate configuration path (PR 3's JWKS runtime) may bind key
+    /// material to an issuer.
+    ///
+    /// Bounding the key count here is the pre-lookup control (NIP-FI.md:166-171):
+    /// [`verify`] scans this snapshot by an attacker-controlled `kid` on every
+    /// token naming the issuer, so an unbounded snapshot would let an oversized
+    /// JWKS turn each lookup into an attacker-driven O(keys) scan. The deadline
+    /// is required rather than optional so every sealed assertion carries a
+    /// finite key-snapshot bound into `revalidation_dependencies`
+    /// (NIP-FI.md:240-249).
     ///
     /// Its only current callers are the in-crate `cfg(test)` verifier suite;
     /// PR 3's JWKS runtime is the intended non-test consumer. Until it lands the
@@ -99,9 +110,14 @@ impl AssertionKeySet {
         issuer: String,
         generation: u64,
         jwks: JwkSet,
-        hard_deadline: Option<DateTime<Utc>>,
+        hard_deadline: DateTime<Utc>,
     ) -> Option<Self> {
-        if generation == 0 || issuer.is_empty() {
+        if generation == 0
+            || issuer.is_empty()
+            || jwks.keys.is_empty()
+            || jwks.keys.len() > MAX_JWKS_KEYS
+            || hard_deadline.timestamp() <= 0
+        {
             return None;
         }
         Some(Self {
@@ -275,12 +291,11 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
         }
 
         // A `current-status` policy requires a runtime status witness this
-        // verifier does not gather (delivered by a later PR). Deny rather than
-        // seal an assertion documented as verified without its mandatory
-        // dependency. PR 3 adds the witness path additively.
-        if policy.freshness() == FreshnessClass::CurrentStatus {
-            return Err(VerifierError::StatusWitnessUnavailable);
-        }
+        // verifier does not gather (delivered by a later PR); its deferral is
+        // resolved only after every offline check below passes, so that
+        // malformed or invalidly-signed input is rejected (403) rather than
+        // masquerading as an availability failure (503) — see the deferral just
+        // before sealing.
 
         if !policy.algorithms().contains(&header.algorithm) {
             return Err(VerifierError::UnsupportedAlgorithm);
@@ -310,12 +325,24 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
 
         enforce_claim_semantics(policy, &claims)?;
 
-        let subject = claim_string(&claims, policy.subject_claim(), MAX_SUBJECT_BYTES)?;
+        let subject = claim_string(&claims, SUBJECT_CLAIM, MAX_SUBJECT_BYTES)?;
         let asserted_key = parse_nostr_pubkey_claim(policy, &claims)?;
 
         let now = Utc::now();
         let deadlines = self.check_time_and_deadlines(policy, &key_set, &claims, now)?;
         let capabilities = capture_capabilities(policy, &claims);
+
+        // Offline validation (token-class, key, signature, audience, claims,
+        // time) has now fully passed. Only an otherwise-valid `current-status`
+        // assertion is deferred to the status-bearing runtime this verifier does
+        // not yet gather (delivered by a later PR): an invalid token deny above
+        // is `evidence_rejected` (403), and this defers a valid one as
+        // `authorization_unavailable` (503) so a missing witness never
+        // masquerades as rejected evidence, nor invalid input as unavailable
+        // (NIP-FI.md:459-476). PR 3 adds the witness path additively.
+        if policy.freshness() == FreshnessClass::CurrentStatus {
+            return Err(VerifierError::StatusWitnessUnavailable);
+        }
 
         Ok(VerifiedAssertion::seal(
             policy.issuer().to_owned(),
@@ -325,7 +352,12 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
             deadlines,
             policy.id(),
             self.transport_contract_id,
-            RevalidationDependencies::new(header.kid, key_set.generation()),
+            RevalidationDependencies::new(
+                header.kid,
+                key_set.generation(),
+                key_set.hard_deadline,
+                token.to_owned(),
+            ),
         ))
     }
 
@@ -367,12 +399,10 @@ impl<S: IssuerKeySource> FederatedAssertionVerifier<S> {
 
         // offline authority deadline = min(exp, iat + max_age, key hard deadline).
         let mut deadlines = vec![exp, checked_add(iat, max_age)?];
-        if let Some(hard) = key_set.hard_deadline {
-            if now >= hard {
-                return Err(VerifierError::Expired);
-            }
-            deadlines.push(hard);
+        if now >= key_set.hard_deadline {
+            return Err(VerifierError::Expired);
         }
+        deadlines.push(key_set.hard_deadline);
         // `current-status` adds a runtime status deadline in a later PR; the
         // offline deadlines computed here always bound it.
         debug_assert!(matches!(
