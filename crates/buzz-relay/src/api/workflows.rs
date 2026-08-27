@@ -40,6 +40,45 @@ fn request_path(path: &str, raw_query: Option<&str>) -> String {
     }
 }
 
+fn ensure_channel_access(
+    accessible: &[Uuid],
+    channel_id: Uuid,
+    error: &'static str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    if accessible.contains(&channel_id) {
+        Ok(())
+    } else {
+        Err(api_error(StatusCode::FORBIDDEN, error))
+    }
+}
+
+async fn enforce_current_channel_read(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    headers: &HeaderMap,
+    pubkey: &nostr::PublicKey,
+    channel_id: Uuid,
+    error: &'static str,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let pubkey_bytes = pubkey.to_bytes().to_vec();
+    let auth_tag = headers
+        .get("x-auth-tag")
+        .and_then(|value| value.to_str().ok());
+    super::relay_members::enforce_relay_membership(
+        state,
+        tenant.community(),
+        &pubkey_bytes,
+        auth_tag,
+    )
+    .await?;
+
+    let accessible = state
+        .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
+        .await
+        .map_err(|error| internal_error(&format!("workflow channel access lookup: {error}")))?;
+    ensure_channel_access(&accessible, channel_id, error)
+}
+
 async fn authorize_workflow_read(
     state: &Arc<AppState>,
     headers: &HeaderMap,
@@ -94,16 +133,15 @@ async fn authorize_workflow_read(
     let channel_id = workflow
         .channel_id
         .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "workflow is not channel-scoped"))?;
-    let accessible = state
-        .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
-        .await
-        .map_err(|error| internal_error(&format!("workflow channel access lookup: {error}")))?;
-    if !accessible.contains(&channel_id) {
-        return Err(api_error(
-            StatusCode::FORBIDDEN,
-            "workflow is not accessible",
-        ));
-    }
+    enforce_current_channel_read(
+        state,
+        &tenant,
+        headers,
+        &pubkey,
+        channel_id,
+        "workflow is not accessible",
+    )
+    .await?;
 
     Ok(tenant)
 }
@@ -288,6 +326,15 @@ pub async fn workflow_wake_authority(
     let message_channel = message
         .channel_id
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
+    enforce_current_channel_read(
+        &state,
+        &tenant,
+        &headers,
+        &recipient,
+        message_channel,
+        "workflow wake not accessible",
+    )
+    .await?;
     if workflow.owner_pubkey != definition.event.pubkey.to_bytes()
         || workflow.channel_id != Some(message_channel)
         || !exact_tag(&definition.event, "h", &message_channel.to_string())
@@ -332,6 +379,16 @@ mod tests {
             request_path("/workflows/id/runs", None),
             "/workflows/id/runs"
         );
+    }
+
+    #[test]
+    fn channel_access_is_required_at_authority_read_time() {
+        let channel = Uuid::new_v4();
+        assert!(ensure_channel_access(&[channel], channel, "revoked").is_ok());
+
+        let (status, _) = ensure_channel_access(&[], channel, "revoked")
+            .expect_err("removed member must not retain authority read access");
+        assert_eq!(status, StatusCode::FORBIDDEN);
     }
 
     #[test]
