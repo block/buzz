@@ -73,6 +73,7 @@ export function RelayConnectionOverlay({
           <div className="pointer-events-auto rounded-xl bg-background shadow-md">
             <SidebarRelayConnectionCard
               isConnected={card.isRelayConnectionSuccess}
+              transport={card.transport}
               isReconnectPending={card.isRelayReconnectPending}
               isWaitingOnReconnectHook={card.isWaitingOnReconnectHook}
               onDismiss={card.onDismissRelayConnectionCard}

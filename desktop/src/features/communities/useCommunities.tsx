@@ -205,6 +205,7 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
                 ...w,
                 name: community.name || w.name,
                 pubkey: community.pubkey ?? w.pubkey,
+                lanRelayUrl: community.lanRelayUrl ?? w.lanRelayUrl,
               }
             : w,
         );

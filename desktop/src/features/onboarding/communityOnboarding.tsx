@@ -36,6 +36,7 @@ export type CommunityOnboardingTransaction = {
   firstCommunityPage?: FirstCommunityPage;
   stage: CommunityOnboardingStage;
   relayUrl: string;
+  lanRelayUrl?: string;
   inviteCode?: string;
   communityName: string;
   reposDir?: string;
@@ -61,6 +62,7 @@ export type CommunityOnboardingTransactionPatch = Partial<
     CommunityOnboardingTransaction,
     | "stage"
     | "relayUrl"
+    | "lanRelayUrl"
     | "communityId"
     | "previousCommunityId"
     | "addedCommunity"
@@ -74,6 +76,7 @@ export type StartCommunityOnboardingInput = {
   source: CommunityOnboardingSource;
   firstCommunityPage?: FirstCommunityPage;
   relayUrl: string;
+  lanRelayUrl?: string;
   inviteCode?: string;
   communityName?: string;
   reposDir?: string;
@@ -157,6 +160,7 @@ export function startCommunityOnboarding(
       firstCommunityPage:
         input.firstCommunityPage ?? existing.firstCommunityPage,
       inviteCode: input.inviteCode?.trim() || existing.inviteCode,
+      lanRelayUrl: input.lanRelayUrl?.trim() || existing.lanRelayUrl,
       communityName: input.communityName?.trim() || existing.communityName,
       reposDir: input.reposDir ?? existing.reposDir,
       policyReceipt: input.policyReceipt ?? existing.policyReceipt,
@@ -177,6 +181,7 @@ export function startCommunityOnboarding(
     firstCommunityPage: input.firstCommunityPage,
     stage: input.inviteCode?.trim() ? "claiming" : "connecting",
     relayUrl,
+    lanRelayUrl: input.lanRelayUrl?.trim() || undefined,
     inviteCode: input.inviteCode?.trim() || undefined,
     communityName: input.communityName?.trim() || deriveCommunityName(relayUrl),
     reposDir: input.reposDir,

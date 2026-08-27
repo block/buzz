@@ -21,7 +21,7 @@ import { relayReconnectController } from "@/shared/api/relayReconnectController"
 
 function buildDeps(onSuccess: () => void, onBackstop: () => void) {
   return {
-    preconnect: () => relayClient.preconnect(),
+    preconnect: () => relayClient.refreshConnection(),
     hookConfigured: () => invoke<boolean>("relay_reconnect_hook_configured"),
     runHook: () => invoke<void>("relay_reconnect_hook"),
     subscribeToConnectionState: (listener: (state: string) => void) =>

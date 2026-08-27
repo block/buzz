@@ -874,6 +874,7 @@ export function AppSidebar({
               <SidebarRelayConnectionCard
                 className="mb-2"
                 isConnected={relayConnectionCard.isRelayConnectionSuccess}
+                transport={relayConnectionCard.transport}
                 isReconnectPending={relayConnectionCard.isRelayReconnectPending}
                 isWaitingOnReconnectHook={
                   relayConnectionCard.isWaitingOnReconnectHook

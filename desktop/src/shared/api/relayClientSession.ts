@@ -63,7 +63,6 @@ import {
   shouldWaitForScheduledReconnect,
 } from "@/shared/api/relayReconnectPolicy";
 import { RelayReconnectWaiters } from "@/shared/api/relayReconnectWaiters";
-import { RelayStallWatchdog } from "@/shared/api/relayStallWatchdog";
 import {
   AUTH_TIMEOUT_MS,
   BACKOFF_RESET_STABLE_MS,
@@ -72,8 +71,6 @@ import {
   PUBLISH_TIMEOUT_MS,
   RECONNECT_BASE_DELAY_MS,
   RECONNECT_MAX_DELAY_MS,
-  STALL_CHECK_INTERVAL_MS,
-  STALL_IDLE_TIMEOUT_MS,
 } from "@/shared/api/relayClientTimings";
 import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
 import { AuthOkTracker } from "@/shared/api/relayAuthPolicy";
@@ -105,18 +102,16 @@ export class RelayClient {
   private stabilityTimer: number | null = null;
   private visibleChannelId: string | null = null;
   private authOkTracker = new AuthOkTracker();
+  private transport: "lan" | "public" | null = null;
 
   private terminal = false;
 
   private connectionStateEmitter = new RelayConnectionStateEmitter("idle");
-  private stallWatchdog = new RelayStallWatchdog({
-    intervalMs: STALL_CHECK_INTERVAL_MS,
-    idleTimeoutMs: STALL_IDLE_TIMEOUT_MS,
-    onStall: (error) => {
-      this.connectionStateEmitter.set("stalled");
-      this.resetConnection(error);
-    },
-  });
+  // Do not tear down an otherwise healthy relay socket based only on the
+  // absence of WebView-visible frames. Some reverse proxies and websocket
+  // plugins consume Ping/Pong control frames below the JS boundary, so an
+  // idle public connection can look silent for longer than the watchdog
+  // threshold even while the TCP/WebSocket session is healthy.
 
   setVisibleChannelId(id: string | null) {
     this.visibleChannelId = id;
@@ -133,10 +128,10 @@ export class RelayClient {
       window.clearTimeout(this.stabilityTimer);
       this.stabilityTimer = null;
     }
-    this.stallWatchdog.stop();
     this.connectionGeneration++;
     this.keepAliveRequested = false;
     this.relayUrl = null;
+    this.transport = null;
     this.hasConnectedOnce = false;
     this.notifyReconnectListeners = false;
     this.terminal = false;
@@ -432,6 +427,13 @@ export class RelayClient {
     await this.connectBypassingBackoff();
   }
 
+  async refreshConnection() {
+    if (this.wsId !== null) {
+      this.resetConnection(new Error("Refreshing relay transport."));
+    }
+    await this.preconnect();
+  }
+
   /**
    * Environment-driven resume (online/focus/visibility): bypasses a pending
    * backoff timer but preserves the terminal latch and AUTH rejection streak
@@ -555,6 +557,9 @@ export class RelayClient {
         throw new Error("Relay connection attempt was superseded.");
       }
       this.wsId = wsId;
+      this.transport = await invoke<"lan" | "public">(
+        "plugin:websocket|get_transport",
+      );
 
       await new Promise<void>((resolve, reject) => {
         const timeout = window.setTimeout(() => {
@@ -579,7 +584,6 @@ export class RelayClient {
 
       this.connectionStateEmitter.set("connected");
       await this.replayLiveSubscriptions();
-      this.stallWatchdog.start();
       this.emitReconnectIfNeeded();
     } catch (error) {
       const connectionError = this.normalizeRelayError(
@@ -591,6 +595,10 @@ export class RelayClient {
       }
       throw connectionError;
     }
+  }
+
+  getTransport(): "lan" | "public" | null {
+    return this.transport;
   }
 
   private async subscribe(
@@ -759,8 +767,6 @@ export class RelayClient {
 
   private async handleWsMessage(message: unknown, generation: number) {
     if (generation !== this.connectionGeneration) return;
-    this.stallWatchdog.recordInbound();
-
     if (isWebSocketClose(message)) {
       if (isServiceRestartClose(message))
         this.reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
@@ -1015,7 +1021,6 @@ export class RelayClient {
     },
   ) {
     this.onMessageChannel = null;
-    this.stallWatchdog.stop();
     this.connectionGeneration++;
     if (this.stabilityTimer !== null) {
       window.clearTimeout(this.stabilityTimer);

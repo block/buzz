@@ -53,16 +53,19 @@ export function AddCommunityDialog({
   const startConnection = React.useCallback(
     ({
       relayUrl,
+      lanRelayUrl,
       inviteCode,
       policyReceipt,
     }: {
       relayUrl: string;
       inviteCode?: string;
       policyReceipt?: string;
+      lanRelayUrl?: string;
     }) => {
       const started = communityOnboarding.start({
         source: "add-community",
         relayUrl,
+        lanRelayUrl,
         inviteCode,
         communityName: prefill?.name,
         policyReceipt,
@@ -182,9 +185,16 @@ export function AddCommunityDialog({
                 setJoinError(null);
                 setMode("choose");
               }}
-              onConnect={(relayUrl) => startConnection({ relayUrl })}
-              onRedeem={(relayUrl, inviteCode, policyReceipt) =>
-                startConnection({ relayUrl, inviteCode, policyReceipt })
+              onConnect={(relayUrl, lanRelayUrl) =>
+                startConnection({ relayUrl, lanRelayUrl })
+              }
+              onRedeem={(relayUrl, inviteCode, policyReceipt, lanRelayUrl) =>
+                startConnection({
+                  relayUrl,
+                  inviteCode,
+                  policyReceipt,
+                  lanRelayUrl,
+                })
               }
               variant="add-community"
             />

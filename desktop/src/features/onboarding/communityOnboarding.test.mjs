@@ -55,6 +55,28 @@ test("non-invite onboarding starts at connection", () => {
   assert.equal(transaction.stage, "connecting");
 });
 
+test("LAN relay URL is persisted and retained when same relay onboarding resumes", () => {
+  const storage = createMemoryStorage();
+  const first = startCommunityOnboarding(
+    {
+      source: "add-community",
+      relayUrl: "wss://relay.example",
+      lanRelayUrl: "ws://192.168.1.10:3000",
+    },
+    storage,
+  );
+  assert.equal(first.lanRelayUrl, "ws://192.168.1.10:3000");
+  const resumed = startCommunityOnboarding(
+    { source: "deep-link-connect", relayUrl: "wss://relay.example/" },
+    storage,
+  );
+  assert.equal(resumed.lanRelayUrl, "ws://192.168.1.10:3000");
+  assert.equal(
+    loadCommunityOnboardingTransaction(storage)?.lanRelayUrl,
+    resumed.lanRelayUrl,
+  );
+});
+
 test("same-relay ingress resumes rather than replacing progress", () => {
   const storage = createMemoryStorage();
   const first = startCommunityOnboarding(

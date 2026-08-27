@@ -13,6 +13,7 @@ import {
   type JoinPolicy,
 } from "@/shared/api/invites";
 import { normalizeRelayUrl } from "@/features/communities/relayProbe";
+import { normalizeLanRelayUrl } from "@/features/communities/communityStorage";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
@@ -54,8 +55,13 @@ type InviteRedeemFormProps = {
   initialValue?: string;
   isRedeeming: boolean;
   onCancel: () => void;
-  onConnect?: (relayWsUrl: string) => void;
-  onRedeem: (relayWsUrl: string, code: string, policyReceipt?: string) => void;
+  onConnect?: (relayWsUrl: string, lanRelayUrl?: string) => void;
+  onRedeem: (
+    relayWsUrl: string,
+    code: string,
+    policyReceipt?: string,
+    lanRelayUrl?: string,
+  ) => void;
   placeholder?: string;
   variant?: "add-community" | "default" | "onboarding-spotlight";
 };
@@ -75,6 +81,10 @@ export function InviteRedeemForm({
   const [inviteInput, setInviteInput] = React.useState(initialValue);
   const [bareCodeRelayUrl, setBareCodeRelayUrl] = React.useState(
     defaultRelayUrl ?? "",
+  );
+  const [lanRelayUrl, setLanRelayUrl] = React.useState("");
+  const [lanRelayUrlError, setLanRelayUrlError] = React.useState<string | null>(
+    null,
   );
   const [joinPolicy, setJoinPolicy] = React.useState<JoinPolicy | null>(null);
   const [policyTarget, setPolicyTarget] = React.useState<{
@@ -144,6 +154,14 @@ export function InviteRedeemForm({
     normalizedRelayUrl !== null;
   const isOnboardingSpotlight = variant === "onboarding-spotlight";
   const isAddCommunity = variant === "add-community";
+  const normalizedLanRelayUrl = React.useMemo(() => {
+    if (!isAddCommunity || !lanRelayUrl.trim()) return undefined;
+    try {
+      return normalizeLanRelayUrl(lanRelayUrl);
+    } catch {
+      return null;
+    }
+  }, [isAddCommunity, lanRelayUrl]);
   const showInvalidInviteTip =
     isOnboardingSpotlight && inviteInput.trim().length > 0 && !canSubmit;
 
@@ -151,12 +169,23 @@ export function InviteRedeemForm({
     async (event: React.FormEvent) => {
       event.preventDefault();
       if (normalizedRelayUrl) {
+        if (
+          isAddCommunity &&
+          lanRelayUrl.trim() &&
+          normalizedLanRelayUrl === null
+        ) {
+          setLanRelayUrlError(
+            "Enter a private LAN relay URL, such as ws://192.168.1.10:3000.",
+          );
+          return;
+        }
+        setLanRelayUrlError(null);
         setPolicyError(null);
         setIsLoadingPolicy(true);
         try {
           const policy = await getJoinPolicy(normalizedRelayUrl, "native");
           if (!policy) {
-            onConnect?.(normalizedRelayUrl);
+            onConnect?.(normalizedRelayUrl, normalizedLanRelayUrl ?? undefined);
             return;
           }
 
@@ -185,7 +214,7 @@ export function InviteRedeemForm({
             return;
           }
 
-          onConnect?.(normalizedRelayUrl);
+          onConnect?.(normalizedRelayUrl, normalizedLanRelayUrl ?? undefined);
         } catch (policyFetchError) {
           setPolicyError(inviteErrorMessage(policyFetchError));
         } finally {
@@ -200,12 +229,29 @@ export function InviteRedeemForm({
         : bareCodeRelayUrl.trim();
       if (!relayWsUrl) return;
 
+      if (
+        isAddCommunity &&
+        lanRelayUrl.trim() &&
+        normalizedLanRelayUrl === null
+      ) {
+        setLanRelayUrlError(
+          "Enter a private LAN relay URL, such as ws://192.168.1.10:3000.",
+        );
+        return;
+      }
+      setLanRelayUrlError(null);
+
       setPolicyError(null);
       setIsLoadingPolicy(true);
       try {
         const policy = await getJoinPolicy(relayWsUrl, "webview");
         if (!policy) {
-          onRedeem(relayWsUrl, parsedInvite.code);
+          onRedeem(
+            relayWsUrl,
+            parsedInvite.code,
+            undefined,
+            normalizedLanRelayUrl ?? undefined,
+          );
           return;
         }
 
@@ -240,7 +286,12 @@ export function InviteRedeemForm({
           policy.version,
           ageConfirmed,
         );
-        onRedeem(relayWsUrl, parsedInvite.code, receipt);
+        onRedeem(
+          relayWsUrl,
+          parsedInvite.code,
+          receipt,
+          normalizedLanRelayUrl ?? undefined,
+        );
       } catch (policyFetchError) {
         setPolicyError(inviteErrorMessage(policyFetchError));
       } finally {
@@ -253,10 +304,13 @@ export function InviteRedeemForm({
       bareCodeRelayUrl,
       joinPolicy,
       normalizedRelayUrl,
+      normalizedLanRelayUrl,
       onConnect,
       onRedeem,
       parsedInvite,
       policyTarget,
+      isAddCommunity,
+      lanRelayUrl,
     ],
   );
 
@@ -280,6 +334,13 @@ export function InviteRedeemForm({
     setAgeConfirmed(false);
     setAgreementConfirmed(false);
     setPolicyError(null);
+  };
+
+  const handleLanRelayInputChange = (
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    setLanRelayUrl(event.target.value);
+    setLanRelayUrlError(null);
   };
 
   const submitButton = (
@@ -463,6 +524,29 @@ export function InviteRedeemForm({
             type="text"
             value={bareCodeRelayUrl}
           />
+        </div>
+      ) : null}
+
+      {isAddCommunity ? (
+        <div className="space-y-1.5 text-left">
+          <label
+            className="text-sm font-medium text-foreground"
+            htmlFor="lan-relay-url"
+          >
+            LAN relay URL (optional)
+          </label>
+          <Input
+            className="h-11 rounded-xl border-input bg-muted/40 px-3 shadow-none transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-visible:border-muted-foreground/50 focus-visible:ring-0"
+            disabled={isRedeeming}
+            id="lan-relay-url"
+            onChange={handleLanRelayInputChange}
+            placeholder="ws://192.168.1.10:3000"
+            type="text"
+            value={lanRelayUrl}
+          />
+          {lanRelayUrlError ? (
+            <p className="text-xs text-destructive">{lanRelayUrlError}</p>
+          ) : null}
         </div>
       ) : null}
 

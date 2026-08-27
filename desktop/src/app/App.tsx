@@ -395,6 +395,7 @@ function CommunityApp({
       id: crypto.randomUUID(),
       name: transaction.communityName,
       relayUrl: transaction.relayUrl,
+      lanRelayUrl: transaction.lanRelayUrl,
       reposDir: transaction.reposDir,
       pubkey: currentPubkey ?? undefined,
       addedAt: new Date().toISOString(),

@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { useRelayConnection } from "@/shared/api/useRelayConnection";
+import { relayClient } from "@/shared/api/relayClient";
 import { useReconnectRelay } from "@/shared/api/useReconnectRelay";
 import { isRelayUnreachableError } from "@/shared/lib/relayError";
 
@@ -66,6 +67,7 @@ export function useSidebarRelayConnectionCard(
   relayLifecycleKey = relaySuccessKey(relayUrl),
 ) {
   const relayConnectionState = useRelayConnection();
+  const transport = relayClient.getTransport();
   const hasRelayUnreachableError = errorMessage
     ? isRelayUnreachableError(errorMessage)
     : false;
@@ -242,6 +244,7 @@ export function useSidebarRelayConnectionCard(
       setIsDismissed(true);
     },
     onReconnectRelay: handleReconnectRelay,
+    transport,
     showSidebarRelayConnectionCard: show,
   };
 }
