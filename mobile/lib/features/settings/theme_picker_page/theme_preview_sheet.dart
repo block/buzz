@@ -20,7 +20,7 @@ class _ThemePreviewExperience extends HookConsumerWidget {
     final draftMode = useState(stored.mode);
     final draftThemeName = useState(initialEntries[initialIndex].name);
     final draftAccent = useState(
-      effectiveAccentIndex(stored.theme, stored.accent),
+      accentIndexForWireValue(stored.accent) ?? defaultAccentIndex,
     );
     final currentPage = useState(initialIndex);
     final suppressNextPageHaptic = useRef(false);

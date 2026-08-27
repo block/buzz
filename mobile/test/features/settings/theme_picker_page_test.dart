@@ -374,6 +374,28 @@ void main() {
       expect(instance.getString('buzz_color_scheme'), isNot('buzz'));
     });
 
+    testWidgets('preserves the stored accent when leaving Buzz', (
+      tester,
+    ) async {
+      final green = accentColors.indexWhere((accent) => accent.name == 'Green');
+      final legacyGreen = green - 1;
+      final instance = await _pumpPicker(
+        tester,
+        prefs: {
+          'buzz_theme_mode': 'system',
+          'buzz_color_scheme': 'buzz',
+          'buzz_accent_color': legacyGreen,
+        },
+      );
+
+      await _swipeToNextTheme(tester);
+      await tester.tap(find.byKey(const ValueKey('theme-preview-set')));
+      await tester.pumpAndSettle();
+
+      expect(instance.getString('buzz_color_scheme'), isNot('buzz'));
+      expect(instance.getInt('buzz_accent_color'), green);
+    });
+
     testWidgets('accent action scales and fades with theme availability', (
       tester,
     ) async {
