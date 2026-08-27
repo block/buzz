@@ -284,14 +284,41 @@ fn prefix_matches(token: &str, s: &str) -> bool {
     }
 }
 
+/// Return whether `model` is exactly three non-empty dot-separated components.
+///
+/// Databricks Unity Catalog model-service names are catalog data, not model
+/// family hints. Both capability interpreters use this shape check before
+/// family matching so suffixes such as `kimi-k3` cannot inherit endpoint
+/// capabilities accidentally.
+pub(crate) fn is_databricks_model_service_fqn(model: &str) -> bool {
+    let mut components = model.split('.');
+    let (Some(catalog), Some(schema), Some(service)) =
+        (components.next(), components.next(), components.next())
+    else {
+        return false;
+    };
+    [catalog, schema, service].into_iter().all(|component| {
+        !component.is_empty()
+            && !component.chars().any(char::is_whitespace)
+            && !component.contains('/')
+    }) && components.next().is_none()
+}
+
 /// Resolve the capability profile for a `(provider, raw_model_id)` pair.
 pub fn resolve(provider: &str, raw_model_id: &str) -> CapabilityResult {
     let m = manifest();
     let canon = canonical_provider(provider);
     let blank = raw_model_id.trim().is_empty();
 
+    // Unity Catalog FQNs are neutral model-service identities. Resolve them
+    // through the concrete-unknown fallback before any suffix can match a
+    // provider family rule. Routing and effort normalization then share this
+    // one answer in Rust and TypeScript.
+    let model_service_fqn =
+        canon == "databricks_v2" && is_databricks_model_service_fqn(raw_model_id);
+
     // 1. Provider-qualified exact-record lookup (case-insensitive on the id).
-    if !blank {
+    if !blank && !model_service_fqn {
         for rec in &m.exact_records {
             if rec.provider == canon && rec.raw_model_id.eq_ignore_ascii_case(raw_model_id) {
                 return CapabilityResult {
@@ -307,7 +334,7 @@ pub fn resolve(provider: &str, raw_model_id: &str) -> CapabilityResult {
     }
 
     // 2. Boundary-aware family match: longest token wins, lexicographic tie-break.
-    if !blank {
+    if !blank && !model_service_fqn {
         let model_lower = raw_model_id.to_ascii_lowercase();
         let stripped = strip_catalog_prefix(&model_lower, &m.family_tokens);
         let mut best: Option<(usize, &FamilyRule)> = None;
@@ -808,6 +835,21 @@ mod tests {
 
     // --- Migrated relational/invariant tests (see 42-test inventory) ---
     // These assert cross-input properties a single corpus vector cannot express.
+
+    #[test]
+    fn databricks_v2_fqn_uses_neutral_concrete_unknown_capabilities() {
+        let fqn = resolve("databricks_v2", "data_workflow_tools.goose.goose-kimi-k3");
+        let fallback = resolve("databricks_v2", "some-unknown-xyz");
+        assert_eq!(fqn.thinking_mode, fallback.thinking_mode);
+        assert_eq!(fqn.supported_efforts, fallback.supported_efforts);
+        assert_eq!(fqn.default_effort, fallback.default_effort);
+        assert_eq!(
+            fqn.databricks_v2_wire_route,
+            fallback.databricks_v2_wire_route
+        );
+        assert_eq!(fqn.normalization_policy, fallback.normalization_policy);
+        assert_eq!(fqn.registry_label, None);
+    }
 
     #[test]
     fn test_gpt5_numeric_date_suffix_matches_base_not_version() {

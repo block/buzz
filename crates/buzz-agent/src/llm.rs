@@ -170,16 +170,10 @@ impl Llm {
                         )
                     }
                     DatabricksV2Route::MlflowChatCompletions => {
-                        // UC model-service FQNs are not native provider model names. Build
-                        // against a neutral capability identity so family-name text in a
-                        // catalog/schema/service component cannot change request semantics,
-                        // then restore the actual FQN in the payload.
-                        let capability_model = databricks_v2_capability_model(effective_model);
                         let e = effort
-                            .map(|ef| normalize_effort_for_databricks_v2(ef, capability_model));
-                        let mut body =
-                            openai_body(cfg, system_prompt, history, tools, capability_model, e);
-                        body["model"] = json!(effective_model);
+                            .map(|ef| normalize_effort_for_databricks_v2(ef, effective_model));
+                        let body =
+                            openai_body(cfg, system_prompt, history, tools, effective_model, e);
                         (body, parse_openai as OpenAiParse)
                     }
                 })
@@ -330,10 +324,8 @@ impl Llm {
                                 parse_anthropic as OpenAiParse,
                             ),
                             DatabricksV2Route::MlflowChatCompletions => {
-                                let capability_model =
-                                    databricks_v2_capability_model(effective_model);
-                                let mut body = json!({
-                                    "model": capability_model,
+                                let body = json!({
+                                    "model": effective_model,
                                     "stream": false,
                                     "max_completion_tokens": max_output_tokens,
                                     "messages": [
@@ -341,7 +333,6 @@ impl Llm {
                                         { "role": "user", "content": user_prompt },
                                     ],
                                 });
-                                body["model"] = json!(effective_model);
                                 (body, parse_openai as OpenAiParse)
                             }
                         })
@@ -976,45 +967,9 @@ fn is_responses_required_error(body: &str) -> bool {
 
 /// Resolve the Databricks v2 AI Gateway wire route for `model`.
 ///
-/// Strict three-component Unity Catalog model-service FQNs are checked before
-/// the manifest, because their namespace is catalog data rather than a model
-/// family hint. Other IDs retain the manifest-owned route.
-fn databricks_v2_capability_model(model: &str) -> &str {
-    if is_model_service_fqn(model) {
-        "model-service"
-    } else {
-        model
-    }
-}
-
-/// Return whether `model` is exactly three non-empty dot-separated components.
-/// This is deliberately structural: model-service names are catalog data, so
-/// family words such as `claude` and `gpt-5` have no routing meaning here.
-pub(crate) fn is_model_service_fqn(model: &str) -> bool {
-    let mut components = model.split('.');
-    let (Some(catalog), Some(schema), Some(service)) =
-        (components.next(), components.next(), components.next())
-    else {
-        return false;
-    };
-    [catalog, schema, service].into_iter().all(|component| {
-        !component.is_empty()
-            && !component.chars().any(char::is_whitespace)
-            && !component.contains('/')
-    }) && components.next().is_none()
-}
-
-/// Resolve the Databricks v2 AI Gateway wire route for `model`.
-///
-/// A Unity Catalog model-service FQN always uses MLflow Chat Completions. The
-/// namespace is data, not a provider-family hint, so names containing `claude`
-/// or `gpt` must not reach native Anthropic/Responses routes. Non-FQN ids keep
-/// the existing manifest projection unchanged.
+/// The capability resolver owns Unity Catalog FQN classification so the Rust
+/// request path and desktop effort picker cannot disagree.
 fn databricks_v2_route(model: &str) -> DatabricksV2Route {
-    if is_model_service_fqn(model) {
-        return DatabricksV2Route::MlflowChatCompletions;
-    }
-
     use crate::model_capabilities::DatabricksV2Route as Manifest;
     match crate::model_capabilities::resolve("databricks_v2", model).databricks_v2_wire_route {
         Manifest::OpenaiResponses => DatabricksV2Route::OpenAiResponses,
@@ -3306,7 +3261,10 @@ mod tests {
             "catalog.schema.claude-gpt-5",
             "data_tools.goose.kimi-k3",
         ] {
-            assert!(is_model_service_fqn(model), "expected FQN shape: {model}");
+            assert!(
+                crate::model_capabilities::is_databricks_model_service_fqn(model),
+                "expected FQN shape: {model}"
+            );
             assert_eq!(
                 databricks_v2_route(model),
                 DatabricksV2Route::MlflowChatCompletions,
@@ -3332,7 +3290,7 @@ mod tests {
             "catalog.schema service",
         ] {
             assert!(
-                !is_model_service_fqn(model),
+                !crate::model_capabilities::is_databricks_model_service_fqn(model),
                 "unexpected FQN shape: {model}"
             );
             assert_eq!(

@@ -104,6 +104,21 @@ fn authenticated_empty_v2_catalog() -> Vec<ModelEntry> {
         .collect()
 }
 
+/// Heuristic chat-capability filter for v2 workspace endpoints.
+///
+/// The v2 catalog omits task metadata. Known embedding endpoint families cannot
+/// answer chat-completions requests, so do not offer them as selectable models.
+/// Unknown names remain visible; this filter is intentionally narrow.
+pub(crate) fn is_chat_capable_endpoint(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("embedding") {
+        return false;
+    }
+    !lower
+        .split('-')
+        .any(|segment| matches!(segment, "bge" | "gte"))
+}
+
 /// Discover available models for a Databricks provider.
 ///
 /// Returns an empty vector when an authenticated catalog is valid but no
@@ -795,7 +810,7 @@ pub(crate) fn parse_v2_endpoints_page(
         .iter()
         .filter_map(|endpoint| {
             let name = endpoint.get("name")?.as_str()?.to_string();
-            if name.is_empty() {
+            if name.is_empty() || !is_chat_capable_endpoint(&name) {
                 return None;
             }
             Some(V2Endpoint {
@@ -833,7 +848,7 @@ pub(crate) fn parse_uc_model_services_page(
         .filter_map(|service| {
             let resource_name = service.get("name")?.as_str()?;
             let fqn = resource_name.strip_prefix("model-services/")?;
-            if !crate::llm::is_model_service_fqn(fqn) {
+            if !crate::model_capabilities::is_databricks_model_service_fqn(fqn) {
                 return None;
             }
             Some(ModelEntry {
@@ -1596,7 +1611,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_parse_keeps_all_nonempty_endpoint_names_without_keyword_filtering() {
+    fn v2_parse_drops_embedding_endpoints() {
         let json = serde_json::json!({
             "endpoints": [
                 {"name": "databricks-bge-large-en"},
@@ -1611,13 +1626,7 @@ mod tests {
         let ids: Vec<&str> = models.iter().map(|m| m.entry.id.as_str()).collect();
         assert_eq!(
             ids,
-            vec![
-                "databricks-bge-large-en",
-                "databricks-gte-large-en",
-                "databricks-qwen3-embedding-0-6b",
-                "databricks-claude-opus-5",
-                "databricks-gemini-3-pro-image",
-            ]
+            vec!["databricks-claude-opus-5", "databricks-gemini-3-pro-image",]
         );
     }
 
