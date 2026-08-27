@@ -9,7 +9,7 @@ use crate::{
     managed_agents::{login_shell_path, resolve_command},
 };
 use nostr::{Keys, ToBech32};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -21,6 +21,13 @@ use url::Url;
 const LOCAL_GIT_TIMEOUT: Duration = Duration::from_secs(60);
 const REMOTE_GIT_TIMEOUT: Duration = Duration::from_secs(300);
 const MIN_GIT_VERSION: (u64, u64) = (2, 46);
+/// Deadline for a single `git --version` probe. Discovery runs on the
+/// caller's thread before any git work reaches `spawn_blocking`, so a broken
+/// candidate must fail fast instead of pinning the first auth-config build.
+const PROBE_GIT_TIMEOUT: Duration = Duration::from_secs(5);
+/// `git --version` prints one short line; cap the capture so an arbitrary
+/// binary on a candidate path cannot balloon memory.
+const PROBE_OUTPUT_LIMIT: u64 = 4096;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct GitVersion {
@@ -43,20 +50,69 @@ fn parse_git_version(output: &str) -> Option<GitVersion> {
 }
 
 fn probe_git_version(path: &Path) -> Result<GitVersion, String> {
+    probe_git_version_with_deadline(path, PROBE_GIT_TIMEOUT)
+}
+
+fn probe_git_version_with_deadline(path: &Path, timeout: Duration) -> Result<GitVersion, String> {
+    // Capture stdout in a regular file rather than a pipe: a file read never
+    // blocks on EOF, so a candidate that leaves a descendant holding the
+    // write end cannot stall discovery past the deadline.
+    let mut stdout_file =
+        tempfile::tempfile().map_err(|error| format!("{}: {error}", path.display()))?;
+    let stdout_handle = stdout_file
+        .try_clone()
+        .map_err(|error| format!("{}: {error}", path.display()))?;
     let mut command = Command::new(path);
     command
         .arg("--version")
         .env("LC_ALL", "C")
         .env("LANG", "C")
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout_handle))
+        .stderr(Stdio::null());
     crate::util::configure_no_window(&mut command);
-    let output = command
-        .output()
+    let mut child = command
+        .spawn()
         .map_err(|error| format!("{}: {error}", path.display()))?;
-    if !output.status.success() {
-        return Err(format!("{}: exited with {}", path.display(), output.status));
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if started.elapsed() > timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "{}: version probe timed out after {:?}",
+                        path.display(),
+                        timeout
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{}: failed to wait for version probe: {error}",
+                    path.display()
+                ));
+            }
+        }
+    };
+    if !status.success() {
+        return Err(format!("{}: exited with {status}", path.display()));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout_file
+        .seek(SeekFrom::Start(0))
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let mut bytes = Vec::new();
+    let _ = stdout_file
+        .by_ref()
+        .take(PROBE_OUTPUT_LIMIT)
+        .read_to_end(&mut bytes);
+    let stdout = String::from_utf8_lossy(&bytes);
     parse_git_version(&stdout).ok_or_else(|| {
         format!(
             "{}: unrecognized version output `{}`",
@@ -71,7 +127,10 @@ fn select_compatible_git(
     mut probe: impl FnMut(&Path) -> Result<GitVersion, String>,
 ) -> Result<PathBuf, String> {
     if candidates.is_empty() {
-        return Err("git was not found on PATH".to_string());
+        return Err(
+            "git was not found on PATH, the login-shell PATH, or the platform install locations"
+                .to_string(),
+        );
     }
 
     let mut found = Vec::new();
@@ -570,6 +629,47 @@ mod tests {
         .expect("compatible Git should be selected");
 
         assert_eq!(selected, current);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_probe_kills_a_hung_git_and_returns_promptly() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let fake_git = dir.path().join("git");
+        let mut file = std::fs::File::create(&fake_git).expect("create fake git");
+        write!(file, "#!/bin/sh\nsleep 600\n").expect("write fake git");
+        drop(file);
+        std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755))
+            .expect("mark fake git executable");
+
+        let started = std::time::Instant::now();
+        let error = super::probe_git_version_with_deadline(
+            &fake_git,
+            std::time::Duration::from_millis(200),
+        )
+        .expect_err("hung probe must time out");
+
+        assert!(error.contains("timed out"), "unexpected error: {error}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "probe did not return promptly: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn empty_candidate_error_reports_all_searched_locations() {
+        let error = select_compatible_git(vec![], |_| -> Result<GitVersion, String> {
+            unreachable!("no candidates to probe")
+        })
+        .expect_err("empty candidates must error");
+        assert!(
+            error.contains("login-shell PATH"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
