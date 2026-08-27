@@ -12,6 +12,16 @@ use std::time::{Duration, Instant};
 /// Poll interval while waiting for the child to exit.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Maximum bytes captured across stdout + stderr for one bounded probe.
+///
+/// Discovery output is tiny — a version string, an auth-status word, a PATH
+/// lookup. A probe that emits more than this is noisy or hostile, so the
+/// capture is failed closed (kill the tree, return `None`) rather than allowed
+/// to fill the disk during the process window or allocate an unbounded buffer
+/// at read time. The ceiling is *aggregate*, not per-stream, so a probe cannot
+/// double it by splitting output across stdout and stderr.
+const CAPTURE_LIMIT: u64 = 1 << 20; // 1 MiB
+
 /// Grace period between the initial `SIGTERM` and the escalating `SIGKILL` for a
 /// timed-out process group. Long enough for a well-behaved child to flush and
 /// exit cleanly, short enough that a signal-ignoring one is reaped promptly.
@@ -228,6 +238,14 @@ pub(crate) fn output_with_timeout(mut command: Command, timeout: Duration) -> Op
                     child.reap();
                     return None;
                 }
+                // Fail closed on a capture breach *while the child runs*, so a
+                // noisy or hostile probe cannot fill the disk over the process
+                // window — the process bound alone does not bound its output.
+                if captured_len(&stdout_file, &stderr_file) > CAPTURE_LIMIT {
+                    child.kill_tree();
+                    child.reap();
+                    return None;
+                }
                 std::thread::sleep(POLL_INTERVAL);
             }
             Err(_) => {
@@ -244,6 +262,13 @@ pub(crate) fn output_with_timeout(mut command: Command, timeout: Duration) -> Op
     child.kill_tree();
     child.reap();
 
+    // A child that exits within the deadline can still have written past the
+    // ceiling in a burst between polls; fail closed rather than allocate the
+    // full payload at read time.
+    if captured_len(&stdout_file, &stderr_file) > CAPTURE_LIMIT {
+        return None;
+    }
+
     Some(Output {
         status,
         stdout: read_captured(&mut stdout_file),
@@ -251,15 +276,25 @@ pub(crate) fn output_with_timeout(mut command: Command, timeout: Duration) -> Op
     })
 }
 
-/// Rewind a captured-output temp file and read it in full. Bounded because the
-/// file is regular: the read reaches EOF at the current write position.
+/// Total bytes written across both capture files so far. A failed `metadata`
+/// call counts as zero for that file — a stat error cannot manufacture a false
+/// breach, and the read-time [`read_captured`] bound is the backstop.
+fn captured_len(stdout_file: &std::fs::File, stderr_file: &std::fs::File) -> u64 {
+    let len = |f: &std::fs::File| f.metadata().map(|m| m.len()).unwrap_or(0);
+    len(stdout_file).saturating_add(len(stderr_file))
+}
+
+/// Rewind a captured-output temp file and read it, capped at [`CAPTURE_LIMIT`].
+/// Bounded twice over: the file is regular (the read reaches EOF at the current
+/// write position) *and* `take` refuses to allocate more than the ceiling even
+/// if the file grew, so `read_to_end` can never balloon the buffer.
 fn read_captured(file: &mut std::fs::File) -> Vec<u8> {
     use std::io::{Read as _, Seek as _, SeekFrom};
     if file.seek(SeekFrom::Start(0)).is_err() {
         return Vec::new();
     }
     let mut buf = Vec::new();
-    let _ = file.read_to_end(&mut buf);
+    let _ = file.take(CAPTURE_LIMIT).read_to_end(&mut buf);
     buf
 }
 
@@ -399,6 +434,40 @@ mod tests {
         );
     }
 
+    // Adversarial (capture bound): a child that emits far more than
+    // CAPTURE_LIMIT and then blocks, so it neither exits nor stops writing on
+    // its own. The in-flight ceiling check must fail the probe closed (None)
+    // and reap the tree — the process bound alone would let it keep filling the
+    // disk for the whole window. `head -c` writes a bounded 4 MiB (so the test
+    // never risks the disk) which already exceeds the 1 MiB ceiling; the trailing
+    // `sleep` keeps the child alive long enough for a poll to observe the breach.
+    #[cfg(unix)]
+    #[test]
+    fn fails_closed_when_capture_exceeds_limit() {
+        let over = CAPTURE_LIMIT * 4;
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", &format!("head -c {over} /dev/zero; sleep 30")]);
+        let result = run_watchdogged(cmd, Duration::from_secs(10), Duration::from_secs(15));
+        assert!(
+            result.is_none(),
+            "a probe exceeding the capture limit must fail closed"
+        );
+    }
+
+    // The complement of the bound: output at or under the ceiling still returns
+    // in full, so the limit rejects only genuine overruns.
+    #[cfg(unix)]
+    #[test]
+    fn returns_full_output_at_capture_limit() {
+        let mut cmd = Command::new("/bin/sh");
+        // Comfortably under 1 MiB, emitted in one burst then a clean exit.
+        cmd.args(["-c", "head -c 4096 /dev/zero"]);
+        let out = run_watchdogged(cmd, Duration::from_secs(5), Duration::from_secs(10))
+            .expect("output under the limit must be returned");
+        assert!(out.status.success());
+        assert_eq!(out.stdout.len(), 4096);
+    }
+
     // ---- Windows tree-ownership verification (Will's box) ----------------
     //
     // No CI lane executes Windows tests for this helper, so these are
@@ -448,10 +517,14 @@ mod tests {
 
     // Success path, run in a loop to hammer the spawn/assign race: a cmd.exe
     // root launches a detached PowerShell descendant that records its own PID
-    // and sleeps, then the root exits 0 immediately. Because the child is
-    // spawned CREATE_SUSPENDED and assigned to the job before it can run, the
-    // descendant is born inside the job; closing the job on success must reap
-    // it even though the root is already gone.
+    // and sleeps, then the root exits 0 — but only *after* a synchronous waiter
+    // confirms the PID file is non-empty. Without that wait the root exits in
+    // the same tick, the success path closes the kill-on-close job immediately,
+    // and the descendant is reaped mid-cold-start before it can record its PID
+    // — starving the test of the evidence the reaping actually worked. The wait
+    // (bounded by the timeout and the outer watchdog) closes that fixture race
+    // without weakening the guarantee under test: the descendant is still born
+    // inside the job and must be reaped by the job close after the root exits.
     #[cfg(windows)]
     #[test]
     #[ignore = "requires a Windows host; run manually with --ignored"]
@@ -463,15 +536,23 @@ mod tests {
                 .to_str()
                 .expect("utf-8 temp path")
                 .to_string();
-            // `start /b` backgrounds the PowerShell child; the root cmd exits at
-            // once. PowerShell records $PID then sleeps 30s.
-            let ps = format!(
+            // `start /b` backgrounds the PowerShell descendant (records $PID,
+            // sleeps 30s); the second, synchronous PowerShell blocks the root
+            // until that PID file is non-empty; then the root exits 0.
+            let child = format!(
                 "$PID | Out-File -Encoding ascii -FilePath '{pid_path}'; Start-Sleep -Seconds 30"
             );
-            let script = format!("start /b powershell -NoProfile -Command \"{ps}\" & exit 0");
+            let waiter = format!(
+                "while (-not (Test-Path '{pid_path}') -or (Get-Item '{pid_path}').Length -eq 0) {{ Start-Sleep -Milliseconds 50 }}"
+            );
+            let script = format!(
+                "start /b powershell -NoProfile -Command \"{child}\" & powershell -NoProfile -Command \"{waiter}\" & exit 0"
+            );
             let mut cmd = Command::new("cmd.exe");
             cmd.args(["/c", &script]);
-            let out = run_watchdogged(cmd, Duration::from_secs(5), Duration::from_secs(15))
+            // Timeout is generous: two cold-starting PowerShells must both run
+            // before the root exits, and none of that may hit the deadline.
+            let out = run_watchdogged(cmd, Duration::from_secs(20), Duration::from_secs(40))
                 .expect("the root exits, so this must return its output");
             assert!(
                 out.status.success(),
@@ -489,8 +570,11 @@ mod tests {
 
     // Timeout path: a cmd.exe root launches a detached PowerShell descendant
     // (records its PID, sleeps 300s) and then blocks forever itself. The helper
-    // must time out and close the job, reaping both. Asserts on the actual
-    // descendant PID reaching "gone".
+    // must time out and close the job, reaping both. The timeout is set well
+    // above a PowerShell cold start so the descendant records its PID before the
+    // deadline fires — otherwise the reap (working instantly) would kill the
+    // descendant mid-cold-start and the test could not read its PID. Asserts on
+    // the actual descendant PID reaching "gone".
     #[cfg(windows)]
     #[test]
     #[ignore = "requires a Windows host; run manually with --ignored"]
@@ -501,14 +585,15 @@ mod tests {
             .to_str()
             .expect("utf-8 temp path")
             .to_string();
-        let ps = format!(
+        let child = format!(
             "$PID | Out-File -Encoding ascii -FilePath '{pid_path}'; Start-Sleep -Seconds 300"
         );
-        let script =
-            format!("start /b powershell -NoProfile -Command \"{ps}\" & powershell -NoProfile -Command \"Start-Sleep -Seconds 300\"");
+        let script = format!(
+            "start /b powershell -NoProfile -Command \"{child}\" & powershell -NoProfile -Command \"Start-Sleep -Seconds 300\""
+        );
         let mut cmd = Command::new("cmd.exe");
         cmd.args(["/c", &script]);
-        let result = run_watchdogged(cmd, Duration::from_millis(500), Duration::from_secs(10));
+        let result = run_watchdogged(cmd, Duration::from_secs(8), Duration::from_secs(25));
         assert!(result.is_none(), "a timed-out tree must yield None");
 
         let descendant_pid = read_recorded_pid(&pid_path);
