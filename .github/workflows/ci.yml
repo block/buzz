@@ -817,13 +817,23 @@ jobs:
         #  - buzz-db relay_operators::tests: audit pre-image trail, per-target
         #    lock serialization, insertion-time audit ordering, and
         #    audit-failure rollback coupling.
+        #  - buzz-db relay_operators::tests last-operator invariant: sole DB
+        #    operator cannot self-demote or self-delete to zero, config presence
+        #    lifts the guard, and concurrent cross-target deletes racing to zero
+        #    leave exactly one operator (roster-wide advisory lock).
         #  - buzz-relay api::admin: NIP-98 staffing writes attributed audit rows,
         #    adversarial expirationSecs rejected at the resolve route, mixed-case
         #    staffing normalizes to one canonical row.
+        #
+        # --test-threads=1: the last-operator invariant counts the roster
+        # globally, and the sole-operator tests clear the roster then assert
+        # their operator is the only one. They must not race each other on the
+        # shared test roster, so this lane runs serially.
         run: |
           cargo nextest run \
             --archive-file target/ci/backend-integration-tests.tar.zst \
-            -E '(package(buzz-db) and test(=relay_operators::tests::roster_mutations_write_pre_image_audit_rows)) or (package(buzz-db) and test(=relay_operators::tests::concurrent_upserts_serialize_and_record_true_pre_image)) or (package(buzz-db) and test(=relay_operators::tests::audit_order_follows_seq_under_backward_clock)) or (package(buzz-db) and test(=relay_operators::tests::audit_insert_failure_rolls_back_roster_mutation)) or (package(buzz-relay) and test(=api::admin::tests::nip98_staffing_put_and_delete_write_attributed_audit_rows)) or (package(buzz-relay) and test(=api::admin::tests::resolve_route_rejects_adversarial_expiration_and_leaves_report_open)) or (package(buzz-relay) and test(=api::admin::tests::mixed_case_non_config_staffing_normalizes_to_one_row))' \
+            --test-threads=1 \
+            -E '(package(buzz-db) and test(=relay_operators::tests::roster_mutations_write_pre_image_audit_rows)) or (package(buzz-db) and test(=relay_operators::tests::concurrent_upserts_serialize_and_record_true_pre_image)) or (package(buzz-db) and test(=relay_operators::tests::audit_order_follows_seq_under_backward_clock)) or (package(buzz-db) and test(=relay_operators::tests::audit_insert_failure_rolls_back_roster_mutation)) or (package(buzz-db) and test(=relay_operators::tests::demoting_sole_db_operator_without_config_is_rejected)) or (package(buzz-db) and test(=relay_operators::tests::deleting_sole_db_operator_without_config_is_rejected)) or (package(buzz-db) and test(=relay_operators::tests::config_present_allows_deleting_last_db_operator)) or (package(buzz-db) and test(=relay_operators::tests::concurrent_deletes_racing_to_zero_leave_one_operator)) or (package(buzz-relay) and test(=api::admin::tests::nip98_staffing_put_and_delete_write_attributed_audit_rows)) or (package(buzz-relay) and test(=api::admin::tests::resolve_route_rejects_adversarial_expiration_and_leaves_report_open)) or (package(buzz-relay) and test(=api::admin::tests::mixed_case_non_config_staffing_normalizes_to_one_row))' \
             --run-ignored ignored-only
         env:
           DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz

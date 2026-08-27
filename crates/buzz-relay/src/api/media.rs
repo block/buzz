@@ -793,6 +793,21 @@ fn verified_inline_image_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// The browser-facing response policy for a feedback attachment, derived solely
+/// from a content sniff of the stored `prefix` bytes — never the reporter's
+/// `imeta` MIME. Returns the served `Content-Type` and `Content-Disposition`:
+/// verified passive raster renders `inline` with its sniffed type; every other
+/// payload is forced to `application/octet-stream` + `attachment` so the browser
+/// downloads it instead of running it. `X-Content-Type-Options: nosniff` is
+/// always applied by the caller so a forced attachment can never be sniffed back
+/// into an executable type. This is the load-bearing security seam.
+fn feedback_attachment_response_policy(prefix: &[u8]) -> (&'static str, &'static str) {
+    match verified_inline_image_type(prefix) {
+        Some(mime) => (mime, "inline"),
+        None => ("application/octet-stream", "attachment"),
+    }
+}
+
 /// Serve a feedback attachment to an admin operator without ever letting an
 /// attacker-controlled payload execute as a typed document.
 ///
@@ -819,14 +834,10 @@ pub(crate) async fn serve_feedback_attachment(
         .get_range(&key, 0, SNIFF_PREFIX_LEN - 1)
         .await
         .unwrap_or_default();
-    let inline_type = verified_inline_image_type(&prefix);
+    let (content_type, disposition) = feedback_attachment_response_policy(&prefix);
 
     let mut response = serve_blob_for_tenant(state, tenant, sha256, req_headers).await?;
     let headers = response.headers_mut();
-    let (content_type, disposition) = match inline_type {
-        Some(mime) => (mime, "inline"),
-        None => ("application/octet-stream", "attachment"),
-    };
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     headers.insert(
         header::CONTENT_DISPOSITION,
@@ -1051,6 +1062,47 @@ mod tests {
         );
         assert_eq!(verified_inline_image_type(b"%PDF-1.7"), None);
         assert_eq!(verified_inline_image_type(b""), None);
+    }
+
+    #[test]
+    fn feedback_attachment_response_policy_pins_browser_facing_contract() {
+        // Verified passive raster is the ONLY payload that serves inline, and it
+        // serves as its sniffed type — never a reporter-controlled MIME.
+        let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F', b'I', b'F'];
+        let gif = *b"GIF89a";
+        let mut webp = Vec::from(*b"RIFF");
+        webp.extend_from_slice(&[0, 0, 0, 0]);
+        webp.extend_from_slice(b"WEBP");
+        for (bytes, mime) in [
+            (&png[..], "image/png"),
+            (&jpeg[..], "image/jpeg"),
+            (&gif[..], "image/gif"),
+            (&webp[..], "image/webp"),
+        ] {
+            assert_eq!(
+                feedback_attachment_response_policy(bytes),
+                (mime, "inline"),
+                "verified raster must serve inline as its sniffed type"
+            );
+        }
+
+        // Every hostile or unrecognized payload is forced to a non-navigable
+        // download. This is the seam that keeps a hash-valid HTML/SVG feedback
+        // attachment from opening as an executing document on the admin origin.
+        for hostile in [
+            &b"<!DOCTYPE html><script>alert(1)</script>"[..],
+            &b"<svg xmlns=\"...\"><script>alert(1)</script></svg>"[..],
+            &b"%PDF-1.7"[..],
+            &b""[..],       // failed/empty sniff prefix — fail closed to download
+            &b"\x89PN"[..], // short/truncated prefix — not enough to verify
+        ] {
+            assert_eq!(
+                feedback_attachment_response_policy(hostile),
+                ("application/octet-stream", "attachment"),
+                "hostile/unrecognized bytes must force a download, never inline"
+            );
+        }
     }
 
     #[test]
