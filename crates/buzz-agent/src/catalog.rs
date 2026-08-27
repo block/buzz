@@ -12,7 +12,7 @@
 //! This helper never opens a browser. Callers choose whether to reject, degrade,
 //! or start a separate interactive authentication flow.
 
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use reqwest::Client;
 use serde_json::Value;
@@ -38,9 +38,47 @@ pub struct ModelEntry {
 const AUTHENTICATED_EMPTY_CATALOG_SUFFIX: &str = " (default catalog)";
 const MAX_CATALOG_PAGES: usize = 20;
 const MAX_CATALOG_ERROR_BODY_BYTES: usize = 4 * 1024;
+const MAX_CATALOG_RESPONSE_BODY_BYTES: usize = 2 * 1024 * 1024;
+const CATALOG_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const CATALOG_MAX_RETRIES: usize = 3;
+const CATALOG_RETRY_BACKOFF: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Copy)]
+struct CatalogRequestPolicy {
+    timeout: Duration,
+    max_retries: usize,
+    retry_backoff: Duration,
+}
+
+const DEFAULT_CATALOG_REQUEST_POLICY: CatalogRequestPolicy = CatalogRequestPolicy {
+    timeout: CATALOG_REQUEST_TIMEOUT,
+    max_retries: CATALOG_MAX_RETRIES,
+    retry_backoff: CATALOG_RETRY_BACKOFF,
+};
 const WORKSPACE_CATALOG_QUERY: &str = "?page_size=100";
 const UNITY_CATALOG_QUERY: &str = "?page_size=100&view=FULL";
 type CatalogPage<T> = Result<(Vec<T>, Option<String>), AgentError>;
+
+#[derive(Clone, Copy)]
+struct CatalogDescriptor<T> {
+    name: &'static str,
+    path: &'static str,
+    initial_query: &'static str,
+    parse_page: fn(&Value) -> CatalogPage<T>,
+}
+
+const WORKSPACE_CATALOG_DESCRIPTOR: CatalogDescriptor<V2Endpoint> = CatalogDescriptor {
+    name: "Databricks workspace endpoint catalog",
+    path: "/api/ai-gateway/v2/endpoints",
+    initial_query: WORKSPACE_CATALOG_QUERY,
+    parse_page: parse_v2_endpoints_page,
+};
+const UNITY_CATALOG_DESCRIPTOR: CatalogDescriptor<ModelEntry> = CatalogDescriptor {
+    name: "Databricks Unity Catalog model-service catalog",
+    path: "/api/2.1/unity-catalog/model-services",
+    initial_query: UNITY_CATALOG_QUERY,
+    parse_page: parse_uc_model_services_page,
+};
 
 /// Curated display label for a discovered Databricks endpoint or model-service
 /// id. Unknown ids deliberately pass through unchanged.
@@ -153,33 +191,14 @@ async fn fetch_v1_models(
     bearer: &str,
 ) -> Result<Vec<ModelEntry>, AgentError> {
     let url = format!("{host}/api/2.0/serving-endpoints");
-    let response = http
-        .get(&url)
-        .bearer_auth(bearer)
-        .send()
-        .await
-        .map_err(|e| {
-            AgentError::Llm(format!(
-                "Databricks serving-endpoints catalog request failed: {e}"
-            ))
-        })?;
-
-    let status = response.status();
-    if !status.is_success() {
-        return Err(catalog_http_error(
-            "Databricks serving-endpoints catalog",
-            status,
-            response,
-            bearer,
-        )
-        .await);
-    }
-
-    let json: Value = response.json().await.map_err(|e| {
-        AgentError::Llm(format!(
-            "Databricks serving-endpoints catalog response parse failed: {e}"
-        ))
-    })?;
+    let json = fetch_catalog_page(
+        http,
+        &url,
+        "Databricks serving-endpoints catalog",
+        bearer,
+        DEFAULT_CATALOG_REQUEST_POLICY,
+    )
+    .await?;
 
     parse_v1_endpoints(&json)
 }
@@ -264,24 +283,29 @@ async fn fetch_v2_models(
     filter: Option<&DatabricksModelFilter>,
     allow_partial_auth_failure: bool,
 ) -> Result<Vec<ModelEntry>, AgentError> {
-    let workspace = fetch_catalog_pages(
+    fetch_v2_models_with_policy(
         http,
         host,
         bearer,
-        "Databricks workspace endpoint catalog",
-        "/api/ai-gateway/v2/endpoints",
-        WORKSPACE_CATALOG_QUERY,
-        parse_v2_endpoints_page,
-    );
-    let unity_catalog = fetch_catalog_pages(
-        http,
-        host,
-        bearer,
-        "Databricks Unity Catalog model-service catalog",
-        "/api/2.1/unity-catalog/model-services",
-        UNITY_CATALOG_QUERY,
-        parse_uc_model_services_page,
-    );
+        filter,
+        allow_partial_auth_failure,
+        DEFAULT_CATALOG_REQUEST_POLICY,
+    )
+    .await
+}
+
+async fn fetch_v2_models_with_policy(
+    http: &Client,
+    host: &str,
+    bearer: &str,
+    filter: Option<&DatabricksModelFilter>,
+    allow_partial_auth_failure: bool,
+    policy: CatalogRequestPolicy,
+) -> Result<Vec<ModelEntry>, AgentError> {
+    let workspace =
+        fetch_catalog_pages_with_policy(http, host, bearer, WORKSPACE_CATALOG_DESCRIPTOR, policy);
+    let unity_catalog =
+        fetch_catalog_pages_with_policy(http, host, bearer, UNITY_CATALOG_DESCRIPTOR, policy);
 
     let (workspace, unity_catalog) = tokio::join!(workspace, unity_catalog);
     let (workspace, unity_catalog, both_succeeded) = match (workspace, unity_catalog) {
@@ -292,7 +316,7 @@ async fn fetch_v2_models(
             }
             tracing::warn!(
                 catalog = "unity-catalog model-services",
-                error = %error,
+                error_kind = catalog_error_kind(&error),
                 "Databricks model discovery degraded: catalog unavailable"
             );
             (workspace, Vec::new(), false)
@@ -303,7 +327,7 @@ async fn fetch_v2_models(
             }
             tracing::warn!(
                 catalog = "workspace ai-gateway v2 endpoints",
-                error = %error,
+                error_kind = catalog_error_kind(&error),
                 "Databricks model discovery degraded: catalog unavailable"
             );
             (Vec::new(), unity_catalog, false)
@@ -319,6 +343,19 @@ async fn fetch_v2_models(
         filter,
         both_succeeded && filter.is_none(),
     ))
+}
+
+fn catalog_error_kind(error: &AgentError) -> &'static str {
+    match error {
+        AgentError::InvalidParams(_) => "invalid-params",
+        AgentError::Llm(_) => "llm",
+        AgentError::LlmAuth(_) => "auth",
+        AgentError::LlmModelNotFound(_) => "model-not-found",
+        AgentError::LlmContextExceeded(_) => "context-exceeded",
+        AgentError::UnsupportedImageInput(_) => "unsupported-image",
+        AgentError::Mcp(_) => "mcp",
+        AgentError::Cancelled => "cancelled",
+    }
 }
 
 fn combined_catalog_error(workspace: AgentError, unity_catalog: AgentError) -> AgentError {
@@ -368,15 +405,19 @@ fn merge_v2_models(
     apply_model_filter(merged, filter)
 }
 
-async fn fetch_catalog_pages<T>(
+async fn fetch_catalog_pages_with_policy<T>(
     http: &Client,
     host: &str,
     bearer: &str,
-    catalog: &'static str,
-    path: &'static str,
-    initial_query: &str,
-    parse_page: fn(&Value) -> CatalogPage<T>,
+    descriptor: CatalogDescriptor<T>,
+    policy: CatalogRequestPolicy,
 ) -> Result<Vec<T>, AgentError> {
+    let CatalogDescriptor {
+        name: catalog,
+        path,
+        initial_query,
+        parse_page,
+    } = descriptor;
     let base_url = format!("{host}{path}");
     let mut all_items = Vec::new();
     let mut page_token: Option<String> = None;
@@ -390,22 +431,7 @@ async fn fetch_catalog_pages<T>(
             ),
             None => format!("{base_url}{initial_query}"),
         };
-        let response = http
-            .get(&url)
-            .bearer_auth(bearer)
-            .send()
-            .await
-            .map_err(|e| AgentError::Llm(format!("{catalog} request failed: {e}")))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            return Err(catalog_http_error(catalog, status, response, bearer).await);
-        }
-
-        let json: Value = response
-            .json()
-            .await
-            .map_err(|e| AgentError::Llm(format!("{catalog} response parse failed: {e}")))?;
+        let json = fetch_catalog_page(http, &url, catalog, bearer, policy).await?;
         let (items, next_token) = parse_page(&json)
             .map_err(|error| catalog_context_error(catalog, error, "response parse failed"))?;
         all_items.extend(items);
@@ -428,31 +454,223 @@ async fn fetch_catalog_pages<T>(
     )))
 }
 
-async fn catalog_http_error(
+struct ReadResponseBody {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+enum CatalogRequestError {
+    Auth,
+    Status {
+        status: reqwest::StatusCode,
+        body: String,
+    },
+    Transport(reqwest::Error),
+    Body(reqwest::Error),
+    InvalidJson(serde_json::Error),
+    BodyTooLarge,
+}
+
+async fn fetch_catalog_page(
+    http: &Client,
+    url: &str,
+    catalog: &str,
+    bearer: &str,
+    policy: CatalogRequestPolicy,
+) -> Result<Value, AgentError> {
+    let max_retries = policy.max_retries.max(1);
+    let error_body_limit = if bearer.len() > MAX_CATALOG_ERROR_BODY_BYTES {
+        0
+    } else {
+        MAX_CATALOG_ERROR_BODY_BYTES.saturating_add(bearer.len())
+    };
+
+    for attempt in 0..max_retries {
+        let result = tokio::time::timeout(policy.timeout, async {
+            let response = http
+                .get(url)
+                .bearer_auth(bearer)
+                .send()
+                .await
+                .map_err(CatalogRequestError::Transport)?;
+            let status = response.status();
+            if status == reqwest::StatusCode::UNAUTHORIZED {
+                // Preserve the auth contract: do not consume an auth-failure
+                // body because gateways may echo credential material. The
+                // bounded attempt ends at headers for this intentionally
+                // redacted branch; all other status/body paths below consume
+                // their response body inside the same deadline.
+                return Err(CatalogRequestError::Auth);
+            }
+            if !status.is_success() {
+                let mut response = response;
+                let body = read_catalog_error_body(&mut response, error_body_limit)
+                    .await
+                    .map_err(CatalogRequestError::Body)?;
+                return Err(CatalogRequestError::Status { status, body });
+            }
+
+            let mut response = response;
+            if response
+                .content_length()
+                .is_some_and(|length| length > MAX_CATALOG_RESPONSE_BODY_BYTES as u64)
+            {
+                return Err(CatalogRequestError::BodyTooLarge);
+            }
+            let body = read_response_body(&mut response, MAX_CATALOG_RESPONSE_BODY_BYTES)
+                .await
+                .map_err(CatalogRequestError::Body)?;
+            if body.truncated {
+                return Err(CatalogRequestError::BodyTooLarge);
+            }
+            serde_json::from_slice(&body.bytes).map_err(CatalogRequestError::InvalidJson)
+        })
+        .await;
+
+        match result {
+            Ok(Ok(json)) => return Ok(json),
+            Ok(Err(CatalogRequestError::Auth)) => {
+                return Err(AgentError::LlmAuth(format!("{catalog} HTTP 401")));
+            }
+            Ok(Err(CatalogRequestError::Status { status, body })) => {
+                if (status.as_u16() == 499 || status.is_server_error())
+                    && retry_catalog_attempt(
+                        catalog,
+                        attempt,
+                        max_retries,
+                        policy.retry_backoff,
+                        Some(status.as_u16()),
+                        "transient status",
+                    )
+                    .await
+                {
+                    continue;
+                }
+                return Err(catalog_http_error_body(catalog, status, &body, bearer));
+            }
+            Ok(Err(CatalogRequestError::Transport(error))) => {
+                if (error.is_timeout() || error.is_connect() || error.is_request())
+                    && retry_catalog_attempt(
+                        catalog,
+                        attempt,
+                        max_retries,
+                        policy.retry_backoff,
+                        None,
+                        "transport error",
+                    )
+                    .await
+                {
+                    continue;
+                }
+                return Err(AgentError::Llm(format!(
+                    "{catalog} request failed: {error}"
+                )));
+            }
+            Ok(Err(CatalogRequestError::Body(error))) => {
+                if retry_catalog_attempt(
+                    catalog,
+                    attempt,
+                    max_retries,
+                    policy.retry_backoff,
+                    None,
+                    "response body error",
+                )
+                .await
+                {
+                    continue;
+                }
+                return Err(AgentError::Llm(format!(
+                    "{catalog} response body read failed: {error}"
+                )));
+            }
+            Ok(Err(CatalogRequestError::InvalidJson(error))) => {
+                if retry_catalog_attempt(
+                    catalog,
+                    attempt,
+                    max_retries,
+                    policy.retry_backoff,
+                    None,
+                    "invalid JSON response",
+                )
+                .await
+                {
+                    continue;
+                }
+                return Err(AgentError::Llm(format!(
+                    "{catalog} response parse failed: {error}"
+                )));
+            }
+            Ok(Err(CatalogRequestError::BodyTooLarge)) => {
+                return Err(AgentError::Llm(format!(
+                    "{catalog} response exceeded {MAX_CATALOG_RESPONSE_BODY_BYTES} bytes"
+                )));
+            }
+            Err(_) => {
+                if retry_catalog_attempt(
+                    catalog,
+                    attempt,
+                    max_retries,
+                    policy.retry_backoff,
+                    None,
+                    "attempt timeout",
+                )
+                .await
+                {
+                    continue;
+                }
+                return Err(AgentError::Llm(format!(
+                    "{catalog} request timed out after {:?}",
+                    policy.timeout
+                )));
+            }
+        }
+    }
+
+    Err(AgentError::Llm(format!(
+        "{catalog} request failed after {max_retries} attempts"
+    )))
+}
+
+async fn retry_catalog_attempt(
+    catalog: &str,
+    attempt: usize,
+    max_attempts: usize,
+    backoff: Duration,
+    status: Option<u16>,
+    reason: &'static str,
+) -> bool {
+    if attempt + 1 >= max_attempts {
+        return false;
+    }
+
+    tracing::warn!(
+        catalog,
+        attempt = attempt + 1,
+        max_attempts,
+        status = ?status,
+        reason,
+        "Databricks model discovery catalog request retrying"
+    );
+    tokio::time::sleep(backoff).await;
+    true
+}
+
+fn catalog_http_error_body(
     catalog: &str,
     status: reqwest::StatusCode,
-    response: reqwest::Response,
+    body: &str,
     bearer: &str,
 ) -> AgentError {
-    if status.as_u16() == 401 {
-        // Do not read or include a provider body for auth failures. Some
-        // gateways echo authorization material in diagnostic payloads.
+    if status == reqwest::StatusCode::UNAUTHORIZED {
         return AgentError::LlmAuth(format!("{catalog} HTTP {status}"));
     }
 
     let body = if bearer.len() > MAX_CATALOG_ERROR_BODY_BYTES {
-        // A token longer than the diagnostic bound cannot be safely searched in
-        // a bounded prefix. Do not return a partial provider body that might
-        // expose any part of it.
         String::new()
+    } else if bearer.is_empty() {
+        body.to_string()
     } else {
-        let read_limit = MAX_CATALOG_ERROR_BODY_BYTES.saturating_add(bearer.len());
-        let body = read_catalog_error_body(response, read_limit).await;
-        if bearer.is_empty() {
-            body
-        } else {
-            body.replace(bearer, "[redacted]")
-        }
+        body.replace(bearer, "[redacted]")
     };
     let body = truncate_utf8_bytes(&body, MAX_CATALOG_ERROR_BODY_BYTES);
     let classification = if status.as_u16() == 499 || status.is_server_error() {
@@ -463,21 +681,51 @@ async fn catalog_http_error(
     AgentError::Llm(format!("{catalog} {classification} HTTP {status}: {body}"))
 }
 
-async fn read_catalog_error_body(mut response: reqwest::Response, limit: usize) -> String {
-    let mut body = Vec::with_capacity(limit);
-    while body.len() < limit {
-        match response.chunk().await {
-            Ok(Some(chunk)) => {
-                let take = chunk.len().min(limit - body.len());
-                body.extend_from_slice(&chunk[..take]);
-                if take < chunk.len() {
-                    break;
-                }
-            }
-            _ => break,
-        }
+async fn read_response_body(
+    response: &mut reqwest::Response,
+    limit: usize,
+) -> Result<ReadResponseBody, reqwest::Error> {
+    let mut bytes = Vec::with_capacity(limit.min(16 * 1024));
+    if limit == 0 {
+        return Ok(ReadResponseBody {
+            bytes,
+            truncated: true,
+        });
     }
-    String::from_utf8_lossy(&body).into_owned()
+
+    loop {
+        if bytes.len() == limit {
+            // Probe one frame past the bound. Without this read, a chunked body
+            // whose first chunk lands exactly on `limit` would be accepted
+            // without noticing the next frame.
+            let truncated = response.chunk().await?.is_some();
+            return Ok(ReadResponseBody { bytes, truncated });
+        }
+
+        let Some(chunk) = response.chunk().await? else {
+            return Ok(ReadResponseBody {
+                bytes,
+                truncated: false,
+            });
+        };
+        let remaining = limit - bytes.len();
+        if chunk.len() > remaining {
+            bytes.extend_from_slice(&chunk[..remaining]);
+            return Ok(ReadResponseBody {
+                bytes,
+                truncated: true,
+            });
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+}
+
+async fn read_catalog_error_body(
+    response: &mut reqwest::Response,
+    limit: usize,
+) -> Result<String, reqwest::Error> {
+    let body = read_response_body(response, limit).await?;
+    Ok(String::from_utf8_lossy(&body.bytes).into_owned())
 }
 
 fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
@@ -616,6 +864,21 @@ mod tests {
     use axum::{extract::Query, http::StatusCode, routing::get, Json, Router};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const TEST_CATALOG_DESCRIPTOR: CatalogDescriptor<V2Endpoint> = CatalogDescriptor {
+        name: "test catalog",
+        path: "/catalog",
+        initial_query: "?page_size=100",
+        parse_page: parse_v2_endpoints_page,
+    };
+
+    fn test_policy(timeout: Duration, max_retries: usize) -> CatalogRequestPolicy {
+        CatalogRequestPolicy {
+            timeout,
+            max_retries,
+            retry_backoff: Duration::ZERO,
+        }
+    }
 
     struct RefreshingTestTokenSource {
         refreshes: AtomicUsize,
@@ -843,14 +1106,12 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
 
-        let entries = fetch_catalog_pages(
+        let entries = fetch_catalog_pages_with_policy(
             &Client::new(),
             &host,
             "token",
-            "test catalog",
-            "/catalog",
-            "?page_size=100",
-            parse_v2_endpoints_page,
+            TEST_CATALOG_DESCRIPTOR,
+            DEFAULT_CATALOG_REQUEST_POLICY,
         )
         .await
         .unwrap();
@@ -870,14 +1131,12 @@ mod tests {
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        let error = fetch_catalog_pages(
+        let error = fetch_catalog_pages_with_policy(
             &Client::new(),
             &host,
             "token",
-            "test catalog",
-            "/catalog",
-            "?page_size=100",
-            parse_v2_endpoints_page,
+            TEST_CATALOG_DESCRIPTOR,
+            DEFAULT_CATALOG_REQUEST_POLICY,
         )
         .await
         .unwrap_err();
@@ -906,14 +1165,12 @@ mod tests {
             let _ = axum::serve(listener, app).await;
         });
 
-        let error = fetch_catalog_pages(
+        let error = fetch_catalog_pages_with_policy(
             &Client::new(),
             &host,
             "token",
-            "test catalog",
-            "/catalog",
-            "?page_size=100",
-            parse_v2_endpoints_page,
+            TEST_CATALOG_DESCRIPTOR,
+            DEFAULT_CATALOG_REQUEST_POLICY,
         )
         .await
         .unwrap_err();
@@ -923,6 +1180,269 @@ mod tests {
         assert_eq!(requests.load(Ordering::SeqCst), 20);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn v2_discovery_degrades_a_stalled_secondary_catalog() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route(
+                "/api/ai-gateway/v2/endpoints",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "endpoints": [{"name": "workspace-only"}],
+                        "next_page_token": null,
+                    }))
+                }),
+            )
+            .route(
+                "/api/2.1/unity-catalog/model-services",
+                get(|| async {
+                    // The handler never sends headers. The catalog attempt
+                    // deadline must still let the workspace result win.
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    Json(serde_json::json!({
+                        "model_services": [],
+                        "next_page_token": null,
+                    }))
+                }),
+            );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let started = std::time::Instant::now();
+        let models = fetch_v2_models_with_policy(
+            &Client::new(),
+            &host,
+            "token",
+            None,
+            false,
+            test_policy(Duration::from_millis(40), 1),
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "stalled catalog exceeded its request deadline: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["workspace-only"]
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_retries_499_and_5xx_then_recovers() {
+        for status in [
+            StatusCode::from_u16(499).unwrap(),
+            StatusCode::SERVICE_UNAVAILABLE,
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let host = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(AtomicUsize::new(0));
+            let requests_for_route = requests.clone();
+            let app = Router::new().route(
+                "/catalog",
+                get(move || {
+                    let attempt = requests_for_route.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        if attempt == 0 {
+                            Err((status, "provider body secret-token"))
+                        } else {
+                            Ok(Json(serde_json::json!({
+                                "endpoints": [{"name": "recovered"}],
+                                "next_page_token": null,
+                            })))
+                        }
+                    }
+                }),
+            );
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, app).await;
+            });
+
+            let entries = fetch_catalog_pages_with_policy(
+                &Client::new(),
+                &host,
+                "secret-token",
+                TEST_CATALOG_DESCRIPTOR,
+                test_policy(Duration::from_secs(1), 3),
+            )
+            .await
+            .unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].entry.id, "recovered");
+            assert_eq!(requests.load(Ordering::SeqCst), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn catalog_retries_malformed_json_then_recovers() {
+        use axum::response::IntoResponse;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_for_route = requests.clone();
+        let app = Router::new().route(
+            "/catalog",
+            get(move || {
+                let attempt = requests_for_route.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if attempt == 0 {
+                        (StatusCode::OK, "not-json").into_response()
+                    } else {
+                        Json(serde_json::json!({
+                            "endpoints": [{"name": "json-recovered"}],
+                            "next_page_token": null,
+                        }))
+                        .into_response()
+                    }
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let entries = fetch_catalog_pages_with_policy(
+            &Client::new(),
+            &host,
+            "token",
+            TEST_CATALOG_DESCRIPTOR,
+            test_policy(Duration::from_secs(1), 3),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert_eq!(entries[0].entry.id, "json-recovered");
+    }
+
+    #[tokio::test]
+    async fn catalog_transient_failure_exhausts_exactly_three_attempts_without_bearer_leak() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_for_route = requests.clone();
+        let app = Router::new().route(
+            "/catalog",
+            get(move || {
+                requests_for_route.fetch_add(1, Ordering::SeqCst);
+                async {
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "provider body secret-token",
+                    )
+                }
+            }),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let error = fetch_catalog_pages_with_policy(
+            &Client::new(),
+            &host,
+            "secret-token",
+            TEST_CATALOG_DESCRIPTOR,
+            test_policy(Duration::from_secs(1), 3),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        let message = error.to_string();
+        assert!(
+            message.contains("transient HTTP 503"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("provider body"),
+            "body context was lost: {message}"
+        );
+        assert!(
+            !message.contains("secret-token"),
+            "bearer leaked through catalog error: {message}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn catalog_retries_when_headers_arrive_but_response_body_stalls() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let host = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let headers_sent = Arc::new(AtomicUsize::new(0));
+        let requests_for_server = requests.clone();
+        let headers_for_server = headers_sent.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let attempt = requests_for_server.fetch_add(1, Ordering::SeqCst);
+                let headers_sent = headers_for_server.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match socket.read(&mut chunk).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => request.extend_from_slice(&chunk[..read]),
+                        }
+                    }
+
+                    if attempt == 0 {
+                        socket
+                            .write_all(
+                                b"HTTP/1.1 200 OK\r\n\
+                                  Content-Type: application/json\r\n\
+                                  Content-Length: 64\r\n\
+                                  Connection: close\r\n\r\n\
+                                  {\"endpoints\": [",
+                            )
+                            .await
+                            .ok();
+                        headers_sent.store(1, Ordering::SeqCst);
+                        // Keep the declared body incomplete. The outer attempt
+                        // timeout, not reqwest::send(), must terminate this read.
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                    } else {
+                        let body =
+                            r#"{"endpoints":[{"name":"body-recovered"}],"next_page_token":null}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                             Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        socket.write_all(response.as_bytes()).await.ok();
+                    }
+                });
+            }
+        });
+
+        let entries = fetch_catalog_pages_with_policy(
+            &Client::new(),
+            &host,
+            "token",
+            TEST_CATALOG_DESCRIPTOR,
+            test_policy(Duration::from_millis(40), 2),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(headers_sent.load(Ordering::SeqCst), 1);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert_eq!(entries[0].entry.id, "body-recovered");
+    }
     #[test]
     fn v1_filter_applies_to_raw_ids_after_endpoint_filtering() {
         let filter = DatabricksModelFilter::parse(Some("allowed-*")).unwrap();
@@ -945,10 +1465,33 @@ mod tests {
 
     #[test]
     fn catalog_error_body_is_bounded_and_redacts_bearer() {
-        // This pure assertion documents the byte-bound helper used after the
-        // provider response is read. The network path exercises the same
-        // redaction before truncation; keeping the helper pure makes the UTF-8
-        // boundary behavior explicit.
+        let bearer = "secret-token";
+        let provider_body = format!("prefix {bearer} {}", "x".repeat(8_192));
+        let status = reqwest::StatusCode::SERVICE_UNAVAILABLE;
+        let error = catalog_http_error_body("test catalog", status, &provider_body, bearer);
+        let message = error.to_string();
+        assert!(
+            message.contains("transient HTTP 503"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            message.contains("[redacted]"),
+            "bearer was not redacted: {message}"
+        );
+        assert!(!message.contains(bearer), "bearer leaked: {message}");
+        let prefix = format!("llm: test catalog transient HTTP {status}: ");
+        assert!(
+            message.starts_with(&prefix),
+            "unexpected catalog error prefix: message={message:?}, prefix={prefix:?}"
+        );
+        let diagnostic = &message[prefix.len()..];
+        assert!(
+            diagnostic.len() <= MAX_CATALOG_ERROR_BODY_BYTES,
+            "error body exceeded diagnostic bound: {}",
+            diagnostic.len()
+        );
+
+        // Keep the UTF-8 boundary behavior explicit as well.
         let value = format!("{}é", "x".repeat(MAX_CATALOG_ERROR_BODY_BYTES));
         let truncated = truncate_utf8_bytes(&value, MAX_CATALOG_ERROR_BODY_BYTES);
         assert_eq!(truncated.len(), MAX_CATALOG_ERROR_BODY_BYTES);

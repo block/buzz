@@ -1225,7 +1225,7 @@ async fn non_auth_discovery_failure_uses_configured_model_without_caching_fallba
         .await;
     assert!(h.recv_for(initialize).await.get("result").is_some());
 
-    for expected_attempts in 1..=2 {
+    for expected_attempts in [3, 6] {
         let request = h
             .send("session/new", json!({ "cwd": "/tmp", "mcpServers": [] }))
             .await;
