@@ -1084,6 +1084,52 @@ pub async fn execute_run(
     execute_steps(engine, community_id, run_id, def, trigger_ctx, 0, None).await
 }
 
+/// Execute a webhook run only while its database fencing token is current.
+///
+/// `None` means another request recovered the lease, or the fencing transition
+/// could not be confirmed. The caller must then abandon without finalizing the
+/// run. Capacity errors are returned inside `Some` so the caller terminalizes
+/// the run consistently with other execution paths.
+pub async fn execute_claimed_run(
+    engine: &WorkflowEngine,
+    community_id: CommunityId,
+    run_id: Uuid,
+    claim_token: Uuid,
+    def: &WorkflowDef,
+    trigger_ctx: &TriggerContext,
+) -> Option<Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)>> {
+    match engine
+        .db
+        .start_claimed_workflow_webhook_run(community_id, run_id, claim_token)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => return None,
+        Err(error) => {
+            warn!(run_id = %run_id, "failed to fence webhook run start: {error}");
+            return None;
+        }
+    }
+
+    let _permit = match acquire_claimed_run_permit(&engine.run_semaphore) {
+        Ok(permit) => permit,
+        Err(error) => return Some(Err(error)),
+    };
+
+    Some(execute_steps(engine, community_id, run_id, def, trigger_ctx, 0, None).await)
+}
+
+fn acquire_claimed_run_permit(
+    semaphore: &tokio::sync::Semaphore,
+) -> Result<tokio::sync::SemaphorePermit<'_>, (WorkflowError, crate::error::PartialProgress)> {
+    semaphore.try_acquire().map_err(|_| {
+        (
+            WorkflowError::CapacityExceeded,
+            crate::error::PartialProgress::default(),
+        )
+    })
+}
+
 /// Resume execution from a specific step index (used for approval resume).
 ///
 /// Acquires a concurrency permit from `engine.run_semaphore` before executing —
@@ -1301,6 +1347,20 @@ async fn execute_steps(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn claimed_run_capacity_exceeded_is_finalizable_error() {
+        let semaphore = tokio::sync::Semaphore::new(1);
+        let _held = semaphore.try_acquire().expect("hold only permit");
+
+        let (error, progress) = match acquire_claimed_run_permit(&semaphore) {
+            Err(error) => error,
+            Ok(_) => panic!("full capacity must return a finalizable error"),
+        };
+        assert!(matches!(error, WorkflowError::CapacityExceeded));
+        assert_eq!(progress.step_index, 0);
+        assert!(progress.trace.is_empty());
+    }
 
     fn make_trigger() -> TriggerContext {
         TriggerContext {

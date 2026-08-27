@@ -650,6 +650,17 @@ jobs:
         with:
           name: desktop-e2e-relay
           path: target/ci
+      - name: Workflow webhook migration smoke
+        run: |
+          docker exec -e PGPASSWORD="${BUZZ_TEST_POSTGRES_PASSWORD}" buzz-postgres \
+            psql -U buzz -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE DATABASE buzz_migration_smoke"
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-db) and test(run_migrations_applies_consolidated_initial_schema_on_fresh_database)' \
+            --run-ignored ignored-only
+        env:
+          BUZZ_TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz_migration_smoke
       - name: Apply schema and seed deployment community
         # MT: the relay resolves each request's tenant from the communities host
         # map and fails closed on an unmapped host. The reminder scheduler binds
@@ -689,7 +700,7 @@ jobs:
         # replaceable-event store seam. These tests require real Postgres and
         # are ignored by the infrastructure-free unit-test job.
         run: |
-          filter='package(buzz-db) and test(/tests::(parameterized_|concurrent_parameterized_)/)'
+          filter='package(buzz-db) and test(/tests::(parameterized_|concurrent_parameterized_|webhook_reservation_)/)'
           cargo nextest run \
             --archive-file target/ci/backend-integration-tests.tar.zst \
             -E "${filter}" \

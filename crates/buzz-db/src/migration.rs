@@ -48,6 +48,24 @@ pub(crate) async fn run_migrations_through(pool: &PgPool, target: i64) -> Result
 
 async fn run_migrations_locked(conn: &mut PgConnection) -> Result<()> {
     reject_legacy_nip_rs_cardinality_ambiguity(conn).await?;
+    let invalid_webhook_index: bool = sqlx::query_scalar(
+        "SELECT EXISTS (\
+             SELECT 1 FROM pg_index AS index_state \
+             JOIN pg_class AS index_class ON index_class.oid = index_state.indexrelid \
+             WHERE index_class.relnamespace = 'public'::regnamespace \
+               AND index_class.relname = 'idx_workflow_runs_webhook_idempotency' \
+               AND NOT index_state.indisvalid\
+         )",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    if invalid_webhook_index {
+        return Err(crate::DbError::InvalidData(
+            "invalid idx_workflow_runs_webhook_idempotency index; inspect \
+             pg_index.indisvalid and resolve it manually before retrying migrations"
+                .into(),
+        ));
+    }
     MIGRATOR.run(&mut *conn).await?;
     // The replica-fence proof (see `replica_fence`) requires the commit-time
     // `created_at` floor trigger from migration 0021 — correctly shaped — on
@@ -645,7 +663,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 32);
+        assert_eq!(migrations.len(), 35);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1107,6 +1125,98 @@ mod tests {
             .as_str()
             .contains("error_code"));
         assert!(include_str!("../../../schema/schema.sql").contains("error_code          TEXT"));
+    }
+
+    #[test]
+    fn workflow_webhook_idempotency_is_hashed_and_tenant_scoped() {
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 33)
+            .expect("embedded migration 0033");
+        let sql = migration.sql.as_str();
+        let normalized_migration = normalize_sql(sql);
+
+        assert!(normalized_migration.contains("add column webhook_idempotency_key_hash bytea"));
+        assert!(normalized_migration.contains("add column webhook_payload_hash bytea"));
+        assert!(normalized_migration.contains("add column webhook_definition_hash bytea"));
+        assert!(
+            normalized_migration.contains("add column webhook_execution_claimed_at timestamptz")
+        );
+        assert!(normalized_migration.contains("add column webhook_execution_claim_token uuid"));
+        let empty_hash_pair = "webhook_idempotency_key_hash is null \
+            and webhook_payload_hash is null \
+            and webhook_definition_hash is null \
+            and webhook_execution_claimed_at is null \
+            and webhook_execution_claim_token is null";
+        assert!(normalize_sql(sql).contains(empty_hash_pair));
+        let complete_hash_pair = "or ( webhook_idempotency_key_hash is not null \
+            and webhook_payload_hash is not null \
+            and webhook_definition_hash is not null \
+            and octet_length(webhook_idempotency_key_hash) = 32 \
+            and octet_length(webhook_payload_hash) = 32 \
+            and octet_length(webhook_definition_hash) = 32";
+        let complete_claim = "webhook_execution_claimed_at is null \
+            and webhook_execution_claim_token is null ) or ( \
+            webhook_execution_claimed_at is not null \
+            and webhook_execution_claim_token is not null";
+        assert!(normalized_migration.contains(complete_hash_pair));
+        assert!(normalized_migration.contains(complete_claim));
+        assert!(sql.contains("NOT VALID"));
+        assert!(!sql.contains("VALIDATE CONSTRAINT workflow_runs_webhook_idempotency_hashes"));
+        assert!(!sql.contains("idx_workflow_runs_webhook_idempotency"));
+
+        let validation_migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 34)
+            .expect("embedded migration 0034");
+        assert!(!validation_migration.no_tx);
+        assert!(validation_migration
+            .sql
+            .as_str()
+            .contains("VALIDATE CONSTRAINT workflow_runs_webhook_idempotency_hashes"));
+
+        let index_migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 35)
+            .expect("embedded migration 0035");
+        let index_sql = index_migration.sql.as_str();
+        let normalized_index = normalize_sql(index_sql);
+        assert!(index_migration.no_tx);
+        assert_eq!(index_sql.lines().next(), Some("-- no-transaction"));
+        assert!(normalized_index.contains(
+            "create unique index concurrently idx_workflow_runs_webhook_idempotency \
+             on workflow_runs \
+             (community_id, workflow_id, webhook_idempotency_key_hash) \
+             where webhook_idempotency_key_hash is not null"
+        ));
+
+        let runner_source = include_str!("migration.rs");
+        assert!(runner_source.contains("FROM pg_index AS index_state"));
+        assert!(runner_source.contains("JOIN pg_class AS index_class"));
+        assert!(runner_source.contains("AND NOT index_state.indisvalid"));
+        assert!(runner_source.contains("inspect pg_index.indisvalid"));
+
+        let desired_schema = include_str!("../../../schema/schema.sql");
+        assert!(desired_schema.contains("webhook_idempotency_key_hash BYTEA"));
+        assert!(desired_schema.contains("webhook_payload_hash BYTEA"));
+        assert!(desired_schema.contains("webhook_definition_hash BYTEA"));
+        assert!(desired_schema.contains("webhook_execution_claimed_at TIMESTAMPTZ"));
+        assert!(desired_schema.contains("webhook_execution_claim_token UUID"));
+        assert!(desired_schema.contains("workflow_runs_webhook_idempotency_hashes CHECK"));
+        let normalized_schema = normalize_sql(desired_schema);
+        assert!(normalized_schema.contains(empty_hash_pair));
+        assert!(normalized_schema.contains(complete_hash_pair));
+        assert!(normalized_schema.contains(complete_claim));
+        assert!(desired_schema.contains(
+            "ON workflow_runs (community_id, workflow_id, webhook_idempotency_key_hash)"
+        ));
+        assert!(desired_schema.contains("WHERE webhook_idempotency_key_hash IS NOT NULL"));
+
+        let schema_repair = include_str!("../../../scripts/attach-schema-partitions.sql");
+        assert!(schema_repair.contains("workflow_runs_webhook_idempotency_hashes"));
+        assert!(schema_repair.contains("webhook_definition_hash IS NOT NULL"));
+        let ci = include_str!("../../../.github/workflows/ci.yml");
+        assert!(!ci.contains("WHERE conname = 'workflow_runs_webhook_idempotency_hashes'"));
     }
 
     #[test]
@@ -1990,6 +2100,30 @@ mod tests {
             versions
         };
         assert_eq!(applied_versions(&pool).await, expected);
+
+        let constraint_validated: bool = sqlx::query_scalar(
+            "SELECT convalidated FROM pg_constraint \
+             WHERE conname = 'workflow_runs_webhook_idempotency_hashes' \
+               AND conrelid = 'workflow_runs'::regclass",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read webhook idempotency constraint state");
+        assert!(constraint_validated);
+
+        let (index_valid, index_unique): (bool, bool) = sqlx::query_as(
+            "SELECT index_state.indisvalid, index_state.indisunique \
+             FROM pg_index AS index_state \
+             JOIN pg_class AS index_class ON index_class.oid = index_state.indexrelid \
+             WHERE index_class.relnamespace = 'public'::regnamespace \
+               AND index_class.relname = 'idx_workflow_runs_webhook_idempotency'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read webhook idempotency index state");
+        assert!(index_valid);
+        assert!(index_unique);
+
         let sql = migration_sql();
         let tables = create_tables(sql.as_str());
         for table in [

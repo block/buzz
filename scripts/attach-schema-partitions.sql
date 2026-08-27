@@ -1,5 +1,7 @@
--- Attach partition child tables after pgschema apply.
+-- Repair pgschema omissions and attach partition child tables after apply.
 --
+-- pgschema also omits the named workflow_runs webhook CHECK when creating the
+-- table from scratch, so the same idempotent repair covers every bootstrap.
 -- pgschema currently emits existing partition children as standalone CREATE TABLE
 -- statements when applying schema/schema.sql in CI. The tables exist, but they
 -- are not attached to their partitioned parents, so inserts into events or
@@ -9,6 +11,43 @@
 
 DO $$
 BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'workflow_runs_webhook_idempotency_hashes'
+          AND conrelid = 'workflow_runs'::regclass
+    ) THEN
+        ALTER TABLE workflow_runs
+            ADD CONSTRAINT workflow_runs_webhook_idempotency_hashes
+                CHECK (
+                    (
+                        webhook_idempotency_key_hash IS NULL
+                        AND webhook_payload_hash IS NULL
+                        AND webhook_definition_hash IS NULL
+                        AND webhook_execution_claimed_at IS NULL
+                        AND webhook_execution_claim_token IS NULL
+                    )
+                    OR (
+                        webhook_idempotency_key_hash IS NOT NULL
+                        AND webhook_payload_hash IS NOT NULL
+                        AND webhook_definition_hash IS NOT NULL
+                        AND octet_length(webhook_idempotency_key_hash) = 32
+                        AND octet_length(webhook_payload_hash) = 32
+                        AND octet_length(webhook_definition_hash) = 32
+                        AND (
+                            (
+                                webhook_execution_claimed_at IS NULL
+                                AND webhook_execution_claim_token IS NULL
+                            )
+                            OR (
+                                webhook_execution_claimed_at IS NOT NULL
+                                AND webhook_execution_claim_token IS NOT NULL
+                            )
+                        )
+                    )
+                );
+    END IF;
+
     IF NOT EXISTS (
         SELECT 1 FROM pg_inherits
         WHERE inhparent = 'events'::regclass

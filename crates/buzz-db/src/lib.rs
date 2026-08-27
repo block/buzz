@@ -3561,6 +3561,51 @@ impl Db {
         .await
     }
 
+    /// Atomically reserve an idempotent webhook-triggered workflow run.
+    #[datastore_span(name = "reserve_workflow_webhook_run", system = "postgresql")]
+    pub async fn reserve_workflow_webhook_run(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        trigger_context: Option<&serde_json::Value>,
+        idempotency_key: &str,
+        payload: &[u8],
+        definition_hash: &[u8],
+    ) -> Result<workflow::WorkflowWebhookRunReservation> {
+        workflow::reserve_workflow_webhook_run(
+            &self.pool,
+            community_id,
+            workflow_id,
+            trigger_context,
+            idempotency_key,
+            payload,
+            definition_hash,
+        )
+        .await
+    }
+
+    /// Claim a pending idempotent webhook run and return its fencing token.
+    #[datastore_span(name = "claim_workflow_webhook_run", system = "postgresql")]
+    pub async fn claim_workflow_webhook_run(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+    ) -> Result<Option<Uuid>> {
+        workflow::claim_workflow_webhook_run(&self.pool, community_id, run_id).await
+    }
+
+    /// Start a claimed webhook run only while its fencing token is current.
+    #[datastore_span(name = "start_claimed_workflow_webhook_run", system = "postgresql")]
+    pub async fn start_claimed_workflow_webhook_run(
+        &self,
+        community_id: CommunityId,
+        run_id: Uuid,
+        claim_token: Uuid,
+    ) -> Result<bool> {
+        workflow::start_claimed_workflow_webhook_run(&self.pool, community_id, run_id, claim_token)
+            .await
+    }
+
     /// Fetch a single workflow run, scoped to its community.
     #[datastore_span(name = "get_workflow_run", system = "postgresql")]
     pub async fn get_workflow_run(
