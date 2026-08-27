@@ -179,6 +179,9 @@ pub struct WorkflowRecord {
     pub definition: serde_json::Value,
     /// SHA-256 hash of the canonical definition JSON.
     pub definition_hash: Vec<u8>,
+    /// Exact owner-signed kind:30620 event that materialized this revision.
+    /// NULL is retained for workflows created before revision capture.
+    pub definition_event_id: Option<Vec<u8>>,
     /// Current lifecycle status of the workflow definition.
     pub status: WorkflowStatus,
     /// Whether the workflow will fire on matching events.
@@ -203,6 +206,9 @@ pub struct WorkflowRunRecord {
     pub community_id: CommunityId,
     /// The workflow definition that was executed.
     pub workflow_id: Uuid,
+    /// Exact owner-signed kind:30620 revision selected when this run was created.
+    /// NULL is retained when the workflow has no captured revision yet.
+    pub definition_event_id: Option<Vec<u8>>,
     /// Current execution status of this run.
     pub status: RunStatus,
     /// Raw event ID bytes that triggered this run, if any.
@@ -316,7 +322,7 @@ pub async fn create_workflow(
 /// cross-channel overwrite primitive while still making retries idempotent.
 #[allow(clippy::too_many_arguments)]
 pub async fn upsert_workflow(
-    pool: &PgPool,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     community_id: CommunityId,
     id: Uuid,
     channel_id: Option<Uuid>,
@@ -324,16 +330,18 @@ pub async fn upsert_workflow(
     name: &str,
     definition_json: &str,
     definition_hash: &[u8],
+    definition_event_id: &[u8],
 ) -> Result<()> {
     let row = sqlx::query(
         r#"
         INSERT INTO workflows
-            (community_id, id, name, owner_pubkey, channel_id, definition, definition_hash, status, enabled)
-        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 'active', TRUE)
+            (community_id, id, name, owner_pubkey, channel_id, definition, definition_hash, definition_event_id, status, enabled)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, 'active', TRUE)
         ON CONFLICT (community_id, id) DO UPDATE
         SET name = EXCLUDED.name,
             definition = EXCLUDED.definition,
             definition_hash = EXCLUDED.definition_hash,
+            definition_event_id = EXCLUDED.definition_event_id,
             updated_at = NOW()
         WHERE workflows.owner_pubkey = EXCLUDED.owner_pubkey
           AND workflows.channel_id IS NOT DISTINCT FROM EXCLUDED.channel_id
@@ -347,7 +355,8 @@ pub async fn upsert_workflow(
     .bind(channel_id)
     .bind(definition_json)
     .bind(definition_hash)
-    .fetch_optional(pool)
+    .bind(definition_event_id)
+    .fetch_optional(&mut **tx)
     .await?;
 
     if row.is_none() {
@@ -372,7 +381,7 @@ pub async fn get_workflow(
 ) -> Result<WorkflowRecord> {
     let row = sqlx::query(
         r#"
-        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash,
+        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, definition_event_id,
                status::text AS status, enabled, created_at, updated_at
         FROM workflows
         WHERE community_id = $1 AND id = $2
@@ -403,7 +412,7 @@ pub async fn list_channel_workflows(
 
     let rows = sqlx::query(
         r#"
-        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash,
+        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, definition_event_id,
                status::text AS status, enabled, created_at, updated_at
         FROM workflows
         WHERE community_id = $1 AND channel_id = $2
@@ -434,7 +443,7 @@ pub async fn list_enabled_channel_workflows(
 ) -> Result<Vec<WorkflowRecord>> {
     let rows = sqlx::query(
         r#"
-        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash,
+        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, definition_event_id,
                status::text AS status, enabled, created_at, updated_at
         FROM workflows
         WHERE community_id = $1
@@ -462,7 +471,7 @@ pub async fn list_enabled_channel_workflows(
 pub async fn list_all_enabled_workflows(pool: &PgPool) -> Result<Vec<WorkflowRecord>> {
     let rows = sqlx::query(
         r#"
-        SELECT w.id, w.community_id, w.name, w.owner_pubkey, w.channel_id, w.definition, w.definition_hash,
+        SELECT w.id, w.community_id, w.name, w.owner_pubkey, w.channel_id, w.definition, w.definition_hash, w.definition_event_id,
                w.status::text AS status, w.enabled, w.created_at, w.updated_at
         FROM workflows w
         JOIN communities c ON c.id = w.community_id
@@ -804,6 +813,7 @@ pub async fn create_workflow_run(
     pool: &PgPool,
     community_id: CommunityId,
     workflow_id: Uuid,
+    definition_event_id: Option<&[u8]>,
     trigger_event_id: Option<&[u8]>,
     trigger_context: Option<&serde_json::Value>,
 ) -> Result<Uuid> {
@@ -812,13 +822,14 @@ pub async fn create_workflow_run(
     sqlx::query(
         r#"
         INSERT INTO workflow_runs
-            (community_id, id, workflow_id, status, trigger_event_id, current_step, execution_trace, trigger_context)
-        VALUES ($1, $2, $3, 'pending', $4, 0, '[]', $5)
+            (community_id, id, workflow_id, definition_event_id, status, trigger_event_id, current_step, execution_trace, trigger_context)
+        VALUES ($1, $2, $3, $4, 'pending', $5, 0, '[]', $6)
         "#,
     )
     .bind(community_id.as_uuid())
     .bind(id)
     .bind(workflow_id)
+    .bind(definition_event_id)
     .bind(trigger_event_id)
     .bind(trigger_context)
     .execute(pool)
@@ -835,7 +846,7 @@ pub async fn get_workflow_run(
 ) -> Result<WorkflowRunRecord> {
     let row = sqlx::query(
         r#"
-        SELECT community_id, id, workflow_id, status::text AS status, trigger_event_id, current_step,
+        SELECT community_id, id, workflow_id, definition_event_id, status::text AS status, trigger_event_id, current_step,
                execution_trace, trigger_context, started_at, completed_at, error_message, error_code, created_at
         FROM workflow_runs
         WHERE community_id = $1 AND id = $2
@@ -867,7 +878,7 @@ pub async fn list_workflow_runs_page(
     let limit = limit.clamp(1, LIST_MAX_LIMIT);
     let rows = sqlx::query(
         r#"
-        SELECT community_id, id, workflow_id, status::text AS status, trigger_event_id, current_step,
+        SELECT community_id, id, workflow_id, definition_event_id, status::text AS status, trigger_event_id, current_step,
                execution_trace, trigger_context, started_at, completed_at, error_message, error_code, created_at
         FROM workflow_runs
         WHERE community_id = $1 AND workflow_id = $2
@@ -1185,6 +1196,7 @@ fn row_to_workflow_record(row: sqlx::postgres::PgRow) -> Result<WorkflowRecord> 
         channel_id,
         definition: row.try_get("definition")?,
         definition_hash: row.try_get("definition_hash")?,
+        definition_event_id: row.try_get("definition_event_id")?,
         status,
         enabled,
         created_at: row.try_get("created_at")?,
@@ -1204,6 +1216,7 @@ fn row_to_run_record(row: sqlx::postgres::PgRow) -> Result<WorkflowRunRecord> {
         id,
         community_id: CommunityId::from_uuid(community_id),
         workflow_id,
+        definition_event_id: row.try_get("definition_event_id")?,
         status,
         trigger_event_id: row.try_get("trigger_event_id")?,
         current_step: row.try_get("current_step")?,
@@ -1249,7 +1262,7 @@ pub async fn find_by_owner_and_name(
 ) -> Result<Option<WorkflowRecord>> {
     let row = sqlx::query(
         r#"
-        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash,
+        SELECT id, community_id, name, owner_pubkey, channel_id, definition, definition_hash, definition_event_id,
                status::text AS status, enabled, created_at, updated_at
         FROM workflows
         WHERE community_id = $1 AND owner_pubkey = $2 AND name = $3
@@ -1277,6 +1290,7 @@ impl Db {
         &self,
         community_id: CommunityId,
         workflow_id: Uuid,
+        definition_event_id: Option<&[u8]>,
         trigger_event_id: Option<&[u8]>,
         trigger_context: Option<&serde_json::Value>,
     ) -> Result<Uuid> {
@@ -1284,6 +1298,7 @@ impl Db {
             &self.pool,
             community_id,
             workflow_id,
+            definition_event_id,
             trigger_event_id,
             trigger_context,
         )
@@ -1460,6 +1475,7 @@ impl Db {
             name,
             definition_json,
             definition_hash,
+            definition_event_id,
         )
         .await
     }
@@ -1469,6 +1485,7 @@ impl Db {
     #[datastore_span(name = "upsert_workflow", system = "postgresql")]
     pub async fn upsert_workflow(
         &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         community_id: CommunityId,
         id: Uuid,
         channel_id: Option<Uuid>,
@@ -1476,9 +1493,10 @@ impl Db {
         name: &str,
         definition_json: &str,
         definition_hash: &[u8],
+        definition_event_id: &[u8],
     ) -> Result<()> {
         crate::workflow::upsert_workflow(
-            &self.pool,
+            tx,
             community_id,
             id,
             channel_id,
@@ -1486,6 +1504,7 @@ impl Db {
             name,
             definition_json,
             definition_hash,
+            definition_event_id,
         )
         .await
     }
@@ -1608,6 +1627,7 @@ impl Db {
             name,
             definition_json,
             definition_hash,
+            definition_event_id,
         )
         .await
     }
@@ -1798,6 +1818,7 @@ mod postgres_tests {
             owner_pubkey: vec![0xab; 32],
             channel_id: Some(channel_id),
             definition: def.clone(),
+            definition_event_id: None,
             definition_hash: vec![0x01, 0x02, 0x03, 0x04],
             status: WorkflowStatus::Active,
             enabled: true,
@@ -1828,6 +1849,7 @@ mod postgres_tests {
             owner_pubkey: vec![0x00; 32],
             channel_id: None,
             definition: serde_json::json!({}),
+            definition_event_id: None,
             definition_hash: vec![],
             status: WorkflowStatus::Active,
             enabled: true,
@@ -1850,6 +1872,7 @@ mod postgres_tests {
             owner_pubkey: vec![0x01; 32],
             channel_id: None,
             definition: serde_json::json!({}),
+            definition_event_id: None,
             definition_hash: vec![0xAA],
             status: WorkflowStatus::Active,
             enabled: true,
@@ -1879,6 +1902,7 @@ mod postgres_tests {
                 owner_pubkey: vec![],
                 channel_id: None,
                 definition: serde_json::json!({}),
+                definition_event_id: None,
                 definition_hash: vec![],
                 status: status.clone(),
                 enabled: true,
@@ -1899,6 +1923,7 @@ mod postgres_tests {
             owner_pubkey: vec![],
             channel_id: None,
             definition: serde_json::json!({}),
+            definition_event_id: None,
             definition_hash: vec![],
             status: WorkflowStatus::Active,
             enabled: false,
@@ -1922,6 +1947,7 @@ mod postgres_tests {
             id,
             community_id: CommunityId::from_uuid(Uuid::new_v4()),
             workflow_id,
+            definition_event_id: None,
             status: RunStatus::Running,
             trigger_event_id: Some(trigger_event_id.clone()),
             current_step: 2,
@@ -1953,6 +1979,7 @@ mod postgres_tests {
             id: Uuid::new_v4(),
             community_id: CommunityId::from_uuid(Uuid::new_v4()),
             workflow_id: Uuid::new_v4(),
+            definition_event_id: None,
             status: RunStatus::Pending,
             trigger_event_id: None,
             current_step: 0,
@@ -1977,6 +2004,7 @@ mod postgres_tests {
             id: Uuid::new_v4(),
             community_id: CommunityId::from_uuid(Uuid::new_v4()),
             workflow_id: Uuid::new_v4(),
+            definition_event_id: None,
             status: RunStatus::Failed,
             trigger_event_id: None,
             current_step: 1,
@@ -2009,6 +2037,7 @@ mod postgres_tests {
             id: Uuid::new_v4(),
             community_id: CommunityId::from_uuid(Uuid::new_v4()),
             workflow_id: Uuid::new_v4(),
+            definition_event_id: None,
             status: RunStatus::Completed,
             trigger_event_id: None,
             current_step: 2,
@@ -2032,6 +2061,7 @@ mod postgres_tests {
             id: Uuid::new_v4(),
             community_id: CommunityId::from_uuid(Uuid::new_v4()),
             workflow_id: Uuid::new_v4(),
+            definition_event_id: None,
             status: RunStatus::Pending,
             trigger_event_id: None,
             current_step: 0,
@@ -2258,6 +2288,85 @@ mod postgres_tests {
         (workflow_id, community)
     }
 
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn revision_capture_is_additive_and_transactional() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let (workflow_id, _) = make_workflow_in(&pool, community).await;
+        let legacy = get_workflow(&pool, community, workflow_id)
+            .await
+            .expect("read legacy workflow");
+        assert!(legacy.definition_event_id.is_none());
+
+        let revision = [0x42; 32];
+        let legacy_run = create_workflow_run(&pool, community, workflow_id, None, None, None)
+            .await
+            .expect("create compatible legacy run");
+        let bound_run =
+            create_workflow_run(&pool, community, workflow_id, Some(&revision), None, None)
+                .await
+                .expect("create revision-bound run");
+        assert!(get_workflow_run(&pool, community, legacy_run)
+            .await
+            .expect("read legacy run")
+            .definition_event_id
+            .is_none());
+        assert_eq!(
+            get_workflow_run(&pool, community, bound_run)
+                .await
+                .expect("read bound run")
+                .definition_event_id
+                .as_deref(),
+            Some(revision.as_slice())
+        );
+
+        let mut tx = pool.begin().await.expect("begin revision update");
+        upsert_workflow(
+            &mut tx,
+            community,
+            workflow_id,
+            legacy.channel_id,
+            &legacy.owner_pubkey,
+            &legacy.name,
+            &legacy.definition.to_string(),
+            &legacy.definition_hash,
+            &revision,
+        )
+        .await
+        .expect("capture revision");
+        tx.rollback().await.expect("roll back revision update");
+        assert!(get_workflow(&pool, community, workflow_id)
+            .await
+            .expect("read rolled-back workflow")
+            .definition_event_id
+            .is_none());
+
+        let mut tx = pool.begin().await.expect("begin committed update");
+        upsert_workflow(
+            &mut tx,
+            community,
+            workflow_id,
+            legacy.channel_id,
+            &legacy.owner_pubkey,
+            &legacy.name,
+            &legacy.definition.to_string(),
+            &legacy.definition_hash,
+            &revision,
+        )
+        .await
+        .expect("capture committed revision");
+        tx.commit().await.expect("commit revision update");
+        assert_eq!(
+            get_workflow(&pool, community, workflow_id)
+                .await
+                .expect("read revision-bound workflow")
+                .definition_event_id
+                .as_deref(),
+            Some(revision.as_slice())
+        );
+    }
+
     /// Confinement: a duplicate workflow UUID existing in both community A and
     /// community B must claim independently. Claiming `(A, id, t)` must NOT
     /// consume `(B, id, t)` — B's identical instant stays claimable, and the
@@ -2380,7 +2489,7 @@ mod postgres_tests {
             .expect("claim wins");
 
         // Create the run the won claim is responsible for, then attach it.
-        let run_id = create_workflow_run(&pool, community, workflow_id, None, None)
+        let run_id = create_workflow_run(&pool, community, workflow_id, None, None, None)
             .await
             .expect("create run ok");
 
@@ -2409,7 +2518,7 @@ mod postgres_tests {
 
         // A second attach is a no-op: the `workflow_run_id IS NULL` guard means
         // an already-linked claim is never re-pointed to a different run.
-        let other_run = create_workflow_run(&pool, community, workflow_id, None, None)
+        let other_run = create_workflow_run(&pool, community, workflow_id, None, None, None)
             .await
             .expect("create second run ok");
         let reattached =
@@ -2690,10 +2799,10 @@ mod postgres_tests {
         insert_workflow_with_ids(&pool, community_a, workflow_id, channel_id, "wf-A").await;
         insert_workflow_with_ids(&pool, community_b, workflow_id, Uuid::new_v4(), "wf-B").await;
 
-        let run_a = create_workflow_run(&pool, community_a, workflow_id, None, None)
+        let run_a = create_workflow_run(&pool, community_a, workflow_id, None, None, None)
             .await
             .expect("run A");
-        let run_b = create_workflow_run(&pool, community_b, workflow_id, None, None)
+        let run_b = create_workflow_run(&pool, community_b, workflow_id, None, None, None)
             .await
             .expect("run B");
 
