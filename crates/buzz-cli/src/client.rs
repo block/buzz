@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::path::Path;
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -34,6 +35,9 @@ pub struct BlobDescriptor {
     /// Duration in seconds for video/audio (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<f64>,
+    /// Original local filename (added by the CLI after upload).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
 }
 
 /// Build an `imeta` tag array from a BlobDescriptor (NIP-92 media metadata).
@@ -57,23 +61,36 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     if let Some(dur) = d.duration {
         tag.push(format!("duration {dur}"));
     }
+    if let Some(ref filename) = d.filename {
+        tag.push(format!("filename {filename}"));
+    }
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "video/mp4",
-];
-
-/// Maximum file size for image uploads (50 MB).
+/// Maximum file size for buffered image and generic-file uploads (50 MB).
 const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+fn sanitized_filename(file_path: &str) -> Option<String> {
+    let filename: String = Path::new(file_path)
+        .file_name()?
+        .to_string_lossy()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(255)
+        .collect();
+    (!filename.is_empty()).then_some(filename)
+}
+
+fn with_original_filename(
+    mut descriptor: BlobDescriptor,
+    filename: &Option<String>,
+) -> BlobDescriptor {
+    descriptor.filename.clone_from(filename);
+    descriptor
+}
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -1134,10 +1151,6 @@ impl BuzzClient {
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
-
         // 3. Size check
         let max = if mime.starts_with("video/") {
             MAX_VIDEO_BYTES
@@ -1154,6 +1167,7 @@ impl BuzzClient {
 
         // 4. SHA-256
         let sha256 = hex::encode(Sha256::digest(&bytes));
+        let filename = sanitized_filename(file_path);
 
         // 5. PUT request to the BUD-02 /upload endpoint with a generous timeout.
         // Auth is signed per attempt — matches the per-attempt signing pattern in download_media.
@@ -1204,7 +1218,7 @@ impl BuzzClient {
         // (404 or 405), fall back to the legacy /media/upload endpoint.  The 404/405 switch
         // itself is not retried; only transient failures on the selected legacy endpoint are.
         match result {
-            Ok(desc) => return Ok(desc),
+            Ok(desc) => return Ok(with_original_filename(desc, &filename)),
             Err(CliError::Relay { status: s, body: _ })
                 if should_retry_legacy_upload(
                     reqwest::StatusCode::from_u16(s).unwrap_or(reqwest::StatusCode::NOT_FOUND),
@@ -1216,34 +1230,37 @@ impl BuzzClient {
         }
 
         let legacy_url = format!("{}/media/upload", self.relay_url);
-        self.with_retry_body(|| {
-            let upload_body = upload_body.clone();
-            let legacy_url = legacy_url.clone();
-            let mime = mime.clone();
-            let sha256 = sha256.clone();
-            async move {
-                let auth_header = sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
-                let resp = self
-                    .with_auth_tag(
-                        self.http
-                            .put(&legacy_url)
-                            .timeout(upload_timeout)
-                            .header("Authorization", auth_header)
-                            .header("Content-Type", &mime)
-                            .header("X-SHA-256", &sha256)
-                            .body(upload_body),
-                    )
-                    .send()
-                    .await?;
-                if !resp.status().is_success() {
-                    let status = resp.status().as_u16();
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(CliError::Relay { status, body });
+        let descriptor = self
+            .with_retry_body(|| {
+                let upload_body = upload_body.clone();
+                let legacy_url = legacy_url.clone();
+                let mime = mime.clone();
+                let sha256 = sha256.clone();
+                async move {
+                    let auth_header =
+                        sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
+                    let resp = self
+                        .with_auth_tag(
+                            self.http
+                                .put(&legacy_url)
+                                .timeout(upload_timeout)
+                                .header("Authorization", auth_header)
+                                .header("Content-Type", &mime)
+                                .header("X-SHA-256", &sha256)
+                                .body(upload_body),
+                        )
+                        .send()
+                        .await?;
+                    if !resp.status().is_success() {
+                        let status = resp.status().as_u16();
+                        let body = resp.text().await.unwrap_or_default();
+                        return Err(CliError::Relay { status, body });
+                    }
+                    resp.json::<BlobDescriptor>().await.map_err(CliError::from)
                 }
-                resp.json::<BlobDescriptor>().await.map_err(CliError::from)
-            }
-        })
-        .await
+            })
+            .await?;
+        Ok(with_original_filename(descriptor, &filename))
     }
 
     /// Download a Blossom media blob using BUD-01 `t=get` auth.
@@ -2328,8 +2345,9 @@ mod retry_policy_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
-        normalize_events, BuzzClient,
+        advance_query_cursor, build_imeta_tag, create_response_with_id_if_accepted,
+        extract_relay_response_field, normalize_events, sanitized_filename, BlobDescriptor,
+        BuzzClient,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
@@ -2363,6 +2381,33 @@ mod tests {
 
         assert!(output[0].get("sig").is_none());
         assert!(output[1].get("sig").is_none());
+    }
+
+    #[test]
+    fn imeta_includes_original_filename() {
+        let descriptor = BlobDescriptor {
+            url: "https://relay.example/media/hash.bin".into(),
+            sha256: "ab".repeat(32),
+            size: 12,
+            mime_type: "application/octet-stream".into(),
+            uploaded: 1,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+            filename: Some("survey.quill".into()),
+        };
+
+        assert!(build_imeta_tag(&descriptor).contains(&"filename survey.quill".to_string()));
+    }
+
+    #[test]
+    fn original_filename_is_control_free_and_bounded() {
+        let long_name = format!("{}\n.quill", "a".repeat(300));
+        let filename = sanitized_filename(&long_name).unwrap();
+
+        assert!(!filename.contains('\n'));
+        assert_eq!(filename.chars().count(), 255);
     }
 
     #[test]

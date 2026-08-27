@@ -608,6 +608,20 @@ pub struct SendMessageParams {
     pub mentions: Vec<String>,
 }
 
+fn attachment_markdown(filename: &str, mime: &str, url: &str) -> String {
+    if mime.starts_with("video/") {
+        format!("![video]({url})")
+    } else if mime.starts_with("image/") {
+        format!("![image]({url})")
+    } else {
+        let label = filename
+            .replace('\\', "\\\\")
+            .replace('[', "\\[")
+            .replace(']', "\\]");
+        format!("[{label}]({url})")
+    }
+}
+
 pub async fn cmd_send_message(
     client: &BuzzClient,
     mut p: SendMessageParams,
@@ -656,13 +670,9 @@ pub async fn cmd_send_message(
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
         media_tags.push(crate::client::build_imeta_tag(&desc));
-        if desc.mime_type.starts_with("video/") {
-            media_content.push_str("\n![video](");
-        } else {
-            media_content.push_str("\n![image](");
-        }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
+        let filename = desc.filename.as_deref().unwrap_or("attachment");
+        media_content.push('\n');
+        media_content.push_str(&attachment_markdown(filename, &desc.mime_type, &desc.url));
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
@@ -1056,11 +1066,11 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
-        format_events, match_profiles_by_name, merge_message_mentions, missing_members,
-        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
-        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
-        CliError, Uuid,
+        attachment_markdown, channel_id_from_event, cmd_get_thread, event_mention_pubkeys,
+        find_root_from_tags, format_events, match_profiles_by_name, merge_message_mentions,
+        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
+        thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1150,6 +1160,28 @@ mod tests {
     }
 
     #[test]
+    fn generic_attachment_renders_as_download_link() {
+        let line = attachment_markdown(
+            "survey.quill",
+            "application/octet-stream",
+            "https://relay/media/x.bin",
+        );
+        assert_eq!(line, "[survey.quill](https://relay/media/x.bin)");
+    }
+
+    #[test]
+    fn media_attachment_rendering_is_unchanged() {
+        assert_eq!(
+            attachment_markdown("photo.png", "image/png", "https://relay/media/photo.png"),
+            "![image](https://relay/media/photo.png)"
+        );
+        assert_eq!(
+            attachment_markdown("clip.mp4", "video/mp4", "https://relay/media/clip.mp4"),
+            "![video](https://relay/media/clip.mp4)"
+        );
+    }
+
+    #[test]
     fn selected_event_requires_a_valid_channel_tag() {
         let missing = json!({"tags": []});
         let malformed = json!({"tags": [["h", "not-a-uuid"]]});
@@ -1188,6 +1220,18 @@ mod tests {
             )
             .unwrap(),
             ID_A
+        );
+    }
+
+    #[test]
+    fn generic_attachment_escapes_markdown_label() {
+        assert_eq!(
+            attachment_markdown(
+                "survey[final].quill",
+                "application/octet-stream",
+                "https://relay/media/x.bin",
+            ),
+            "[survey\\[final\\].quill](https://relay/media/x.bin)"
         );
     }
 
