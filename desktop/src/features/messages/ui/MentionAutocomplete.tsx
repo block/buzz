@@ -76,6 +76,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   const optionsId = React.useId();
   const keepPinnedSwitchId = React.useId();
   const [optionsOpen, setOptionsOpen] = React.useState(false);
+  const handledOptionsRequestRef = React.useRef(0);
   const alwaysAddressShortcut = getPlatformKeysById("always-address-agent");
 
   React.useEffect(() => {
@@ -92,10 +93,17 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   }, [suggestions.length]);
 
   React.useEffect(() => {
-    if (openOptionsRequest > 0) {
-      setOptionsOpen(true);
+    if (openOptionsRequest <= handledOptionsRequestRef.current) return;
+    handledOptionsRequestRef.current = openOptionsRequest;
+
+    // The first request waits for the entrance to finish. Once visible, apply
+    // later requests in place so toggling a pin cannot replay that entrance.
+    if (optionsOpen) {
+      onOptionsRevealComplete?.(openOptionsRequest);
+      return;
     }
-  }, [openOptionsRequest]);
+    setOptionsOpen(true);
+  }, [onOptionsRevealComplete, openOptionsRequest, optionsOpen]);
 
   React.useEffect(() => {
     if (!onDismiss) return;
@@ -175,9 +183,9 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 <motion.div
                   animate={{ opacity: 1, y: 0 }}
                   className="w-72"
+                  data-testid="mention-options-settings"
                   id={optionsId}
                   initial={{ opacity: 0, y: 4 }}
-                  key={openOptionsRequest}
                   onAnimationComplete={() => {
                     if (openOptionsRequest > 0) {
                       onOptionsRevealComplete?.(openOptionsRequest);

@@ -177,7 +177,7 @@ test("options expand in place without replacing the people list", async () => {
   assert.ok(view.getByRole("button", { name: "Mention Agent Ada" }));
 });
 
-test("an automatic selection request reveals the setting before it changes", async () => {
+test("automatic selection loads the setting once, then updates it in place", async () => {
   const React = await import("react");
   const { render } = await import("@testing-library/react");
   const { MentionAutocomplete } = await import("./MentionAutocomplete.tsx");
@@ -213,15 +213,17 @@ test("an automatic selection request reveals the setting before it changes", asy
   const toggle = view.getByRole("switch", {
     name: "Automatically mention agents",
   });
+  const settings = view.getByTestId("mention-options-settings");
   assert.equal(toggle.getAttribute("data-state"), "unchecked");
 
   view.rerender(
     React.createElement(MentionAutocomplete, {
       ...props,
       keepMentionedAgentsPinned: true,
-      openOptionsRequest: 1,
+      openOptionsRequest: 2,
     }),
   );
+  assert.equal(view.getByTestId("mention-options-settings"), settings);
   assert.equal(toggle.getAttribute("data-state"), "checked");
 });
 
