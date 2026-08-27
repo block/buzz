@@ -922,21 +922,19 @@
       "registry_label": "Gemini 3.5 Flash",
       "thinking_mode": "none",
       "supported_efforts": [
-        "none",
         "minimal",
         "low",
         "medium",
-        "high",
-        "xhigh"
+        "high"
       ],
-      "default_effort": "medium",
+      "default_effort": null,
       "databricks_v2_wire_route": "mlflow-chat",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
-      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
-      "_source": "registry_labels",
-      "_reconciliation": "keep-fallback",
-      "_reconciliation_note": "No first-party google model-level entry exists for gemini-3-5-flash in the pinned payload. The only records are resellers that conflict: neon advertises effort [minimal, low, medium, high] while venice advertises [low, medium, high]. With no first-party anchor and divergent reseller effort sets, retain the databricks_v2 concrete_unknown fallback profile rather than adopt an arbitrary reseller list.",
-      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.google.models has no gemini-3-5-flash; providers.neon.models[\"gemini-3-5-flash\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"minimal\",\"low\",\"medium\",\"high\"]}] vs providers.venice.models[\"gemini-3-5-flash\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"low\",\"medium\",\"high\"]}]."
+      "normalization_policy": "openai-standard",
+      "_provenance": "supported_efforts+thinking_mode+default_effort+normalization_policy: adopted from models.dev first-party google model-level evidence (Kimi-K3 precedent); databricks_v2_wire_route+label: registry_labels",
+      "source": "models.dev google reasoning_options effort: minimal|low|medium|high",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "The Unity Catalog endpoint uses the hyphenated stem gemini-3-5-flash, while the pinned models.dev first-party google entry uses the dotted model id gemini-3.5-flash and advertises effort [minimal, low, medium, high]. Per the Kimi-K3 precedent, adopt this model-level effort evidence despite the spelling difference and the exact endpoint being absent from the models.dev databricks catalog. Databricks serves via MLflow Chat (reasoning_effort only), so thinking_mode stays none and default_effort is null.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.google.models[\"gemini-3.5-flash\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"minimal\",\"low\",\"medium\",\"high\"]}]"
     },
     {
       "provider": "databricks_v2",
@@ -944,21 +942,19 @@
       "registry_label": "Gemini 3.5 Flash Lite",
       "thinking_mode": "none",
       "supported_efforts": [
-        "none",
         "minimal",
         "low",
         "medium",
-        "high",
-        "xhigh"
+        "high"
       ],
-      "default_effort": "medium",
+      "default_effort": null,
       "databricks_v2_wire_route": "mlflow-chat",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
-      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
-      "_source": "registry_labels",
-      "_reconciliation": "keep-fallback",
-      "_reconciliation_note": "No first-party google model-level entry exists for gemini-3-5-flash-lite in the pinned payload. Only reseller records exist and they conflict: neon advertises effort [minimal, low, medium, high] while venice advertises an empty reasoning_options set. With no first-party anchor, retain the databricks_v2 concrete_unknown fallback profile.",
-      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.google.models has no gemini-3-5-flash-lite; providers.neon.models[\"gemini-3-5-flash-lite\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"minimal\",\"low\",\"medium\",\"high\"]}] vs providers.venice.models[\"gemini-3-5-flash-lite\"].reasoning_options=[]."
+      "normalization_policy": "openai-standard",
+      "_provenance": "supported_efforts+thinking_mode+default_effort+normalization_policy: adopted from models.dev first-party google model-level evidence (Kimi-K3 precedent); databricks_v2_wire_route+label: registry_labels",
+      "source": "models.dev google reasoning_options effort: minimal|low|medium|high",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "The Unity Catalog endpoint uses the hyphenated stem gemini-3-5-flash-lite, while the pinned models.dev first-party google entry uses the dotted model id gemini-3.5-flash-lite and advertises effort [minimal, low, medium, high]. Per the Kimi-K3 precedent, adopt this model-level effort evidence despite the spelling difference and the exact endpoint being absent from the models.dev databricks catalog. Databricks serves via MLflow Chat (reasoning_effort only), so thinking_mode stays none and default_effort is null.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.google.models[\"gemini-3.5-flash-lite\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"minimal\",\"low\",\"medium\",\"high\"]}]"
     },
     {
       "provider": "databricks_v2",
@@ -966,21 +962,19 @@
       "registry_label": "Gemini 3.6 Flash",
       "thinking_mode": "none",
       "supported_efforts": [
-        "none",
         "minimal",
         "low",
         "medium",
-        "high",
-        "xhigh"
+        "high"
       ],
-      "default_effort": "medium",
+      "default_effort": null,
       "databricks_v2_wire_route": "mlflow-chat",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
-      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
-      "_source": "registry_labels",
-      "_reconciliation": "keep-fallback",
-      "_reconciliation_note": "No first-party google model-level entry exists for gemini-3-6-flash in the pinned payload. Only reseller records exist and they conflict: neon advertises effort [minimal, low, medium, high] while venice advertises an empty reasoning_options set. With no first-party anchor, retain the databricks_v2 concrete_unknown fallback profile.",
-      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.google.models has no gemini-3-6-flash; providers.neon.models[\"gemini-3-6-flash\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"minimal\",\"low\",\"medium\",\"high\"]}] vs providers.venice.models[\"gemini-3-6-flash\"].reasoning_options=[]."
+      "normalization_policy": "openai-standard",
+      "_provenance": "supported_efforts+thinking_mode+default_effort+normalization_policy: adopted from models.dev first-party google model-level evidence (Kimi-K3 precedent); databricks_v2_wire_route+label: registry_labels",
+      "source": "models.dev google reasoning_options effort: minimal|low|medium|high",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "The Unity Catalog endpoint uses the hyphenated stem gemini-3-6-flash, while the pinned models.dev first-party google entry uses the dotted model id gemini-3.6-flash and advertises effort [minimal, low, medium, high]. Per the Kimi-K3 precedent, adopt this model-level effort evidence despite the spelling difference and the exact endpoint being absent from the models.dev databricks catalog. Databricks serves via MLflow Chat (reasoning_effort only), so thinking_mode stays none and default_effort is null.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.google.models[\"gemini-3.6-flash\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"minimal\",\"low\",\"medium\",\"high\"]}]"
     },
     {
       "provider": "databricks_v2",

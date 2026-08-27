@@ -2300,16 +2300,14 @@
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
-        "none",
         "minimal",
         "low",
         "medium",
-        "high",
-        "xhigh"
+        "high"
       ],
-      "default_effort": "medium",
+      "default_effort": null,
       "databricks_v2_wire_route": "mlflow-chat",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "normalization_policy": "openai-standard",
       "registry_label": "Gemini 3.5 Flash"
     }
   },
@@ -2321,16 +2319,14 @@
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
-        "none",
         "minimal",
         "low",
         "medium",
-        "high",
-        "xhigh"
+        "high"
       ],
-      "default_effort": "medium",
+      "default_effort": null,
       "databricks_v2_wire_route": "mlflow-chat",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "normalization_policy": "openai-standard",
       "registry_label": "Gemini 3.5 Flash Lite"
     }
   },
@@ -2342,16 +2338,14 @@
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
-        "none",
         "minimal",
         "low",
         "medium",
-        "high",
-        "xhigh"
+        "high"
       ],
-      "default_effort": "medium",
+      "default_effort": null,
       "databricks_v2_wire_route": "mlflow-chat",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "normalization_policy": "openai-standard",
       "registry_label": "Gemini 3.6 Flash"
     }
   },
