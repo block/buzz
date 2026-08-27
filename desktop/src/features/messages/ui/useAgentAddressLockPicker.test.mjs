@@ -301,8 +301,8 @@ test("selecting an agent from a typed query immediately auto-addresses it", asyn
       audience,
       audienceScope: "channel-scope",
       mentions,
-      onAutoPinAgentMention: (suggestion) =>
-        autoPinnedSuggestions.push(suggestion),
+      onAutoPinAgentMention: (suggestion, options) =>
+        autoPinnedSuggestions.push([suggestion, options]),
       onPulseAddressLock: (pubkey) => pulsedPubkeys.push(pubkey),
       richText,
     }),
@@ -322,7 +322,9 @@ test("selecting an agent from a typed query immediately auto-addresses it", asyn
       insertText: "@Agent Ada ",
     },
   ]);
-  assert.deepEqual(autoPinnedSuggestions, [suggestion]);
+  assert.deepEqual(autoPinnedSuggestions, [
+    [suggestion, { reinstateExcluded: true }],
+  ]);
   assert.deepEqual(addedPubkeys, []);
   assert.deepEqual(pulsedPubkeys, []);
   assert.equal(result.current.announcement, "");
@@ -543,6 +545,7 @@ test("selecting an explicitly unpinned agent inserts a mention until send", asyn
   );
   const appliedEdits = [];
   const addedPubkeys = [];
+  const autoPinnedSuggestions = [];
   const removedPubkeys = [];
   const pulsedPubkeys = [];
   const mentions = {
@@ -577,6 +580,8 @@ test("selecting an explicitly unpinned agent inserts a mention until send", asyn
         },
         audienceScope: "channel-scope",
         mentions,
+        onAutoPinAgentMention: (suggestion, options) =>
+          autoPinnedSuggestions.push([suggestion, options]),
         onPulseAddressLock: (pubkey) => pulsedPubkeys.push(pubkey),
         richText,
       }),
@@ -610,6 +615,16 @@ test("selecting an explicitly unpinned agent inserts a mention until send", asyn
     },
   ]);
   assert.deepEqual(addedPubkeys, []);
+  assert.deepEqual(autoPinnedSuggestions, [
+    [
+      {
+        pubkey: "agent-pubkey",
+        displayName: "Agent Ada",
+        isAgent: true,
+      },
+      { reinstateExcluded: false },
+    ],
+  ]);
   assert.deepEqual(pulsedPubkeys, []);
 });
 

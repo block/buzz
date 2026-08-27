@@ -363,7 +363,12 @@ function MessageComposerImpl({
       restoreAddressedAgentMentionsRef.current(pubkeys),
     onAddressedAgentsSendFailed: addressPulse.shakeMany,
     onAddressedAgentsSendSucceeded: (pubkeys, newlyPinnedPubkeys) => {
-      if (!keepMentionedAgentsPinned || newlyPinnedPubkeys.length === 0) return;
+      const currentAudience = new Set(persistentAudience.pubkeys);
+      const confirmedPinnedPubkeys = newlyPinnedPubkeys.filter((pubkey) =>
+        currentAudience.has(pubkey),
+      );
+      if (!keepMentionedAgentsPinned || confirmedPinnedPubkeys.length === 0)
+        return;
       const sentChannelId = channelId;
       if (restoreAddressedAgentMentionsFrameRef.current !== null) {
         cancelAnimationFrame(restoreAddressedAgentMentionsFrameRef.current);
@@ -372,7 +377,10 @@ function MessageComposerImpl({
         () => {
           restoreAddressedAgentMentionsFrameRef.current = null;
           if (channelIdRef.current !== sentChannelId) return;
-          restoreAddressedAgentMentionsRef.current(pubkeys, newlyPinnedPubkeys);
+          restoreAddressedAgentMentionsRef.current(
+            pubkeys,
+            confirmedPinnedPubkeys,
+          );
         },
       );
     },
@@ -476,8 +484,9 @@ function MessageComposerImpl({
       promoteExplicitlyAddressedAgents({
         pubkeys: suggestion.pubkey ? [suggestion.pubkey] : [],
       }),
-    onAutoPinAgentMention: (suggestion) => {
+    onAutoPinAgentMention: (suggestion, options) => {
       promoteMentionedAgents({
+        ...options,
         pubkeys: suggestion.pubkey ? [suggestion.pubkey] : [],
       });
     },

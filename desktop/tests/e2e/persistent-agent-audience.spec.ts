@@ -830,6 +830,7 @@ test("an unchecked agent remains excluded while automatic mentions stay enabled"
   await composer.getByTestId(`composer-address-lock-remove-${AGENT_A}`).click();
   await expect(input).toHaveText("");
   await input.fill("@Mor");
+  await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
   await input.press("Tab");
   await input.type("one time");
   await input.press("Enter");
@@ -840,7 +841,7 @@ test("an unchecked agent remains excluded while automatic mentions stay enabled"
   ).toHaveCount(0);
 });
 
-test("deleting an automatic mention turns off that agent's automatic mention state", async ({
+test("re-adding a deleted automatic mention restores its automatic mention state immediately", async ({
   page,
 }) => {
   await keepMentionedAgentsPinned(page);
@@ -863,14 +864,20 @@ test("deleting an automatic mention turns off that agent's automatic mention sta
   ).toHaveCount(0);
 
   await input.fill("@Mor");
+  await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
   await input.press("Tab");
-  await input.type("one time");
-  await input.press("Enter");
-
-  await expect(input).toHaveText("");
+  await expect(input).toHaveText("@Morgarita ");
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
-  ).toHaveCount(0);
+  ).toBeVisible();
+
+  await input.type("re-added");
+  await input.press("Enter");
+
+  await expect(input).toHaveText("@Morgarita ");
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toBeVisible();
 });
 
 test("implicit automatic mentions stay out of persisted drafts", async ({

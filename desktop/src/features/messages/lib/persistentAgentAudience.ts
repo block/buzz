@@ -108,21 +108,29 @@ export function getPersistentAgentAudienceRevision(scope: string): number {
 
 export function promotePersistentAgentAudienceIfUnchanged({
   expectedRevision,
+  reinstateExcluded = false,
   pubkeys,
   scope,
 }: {
   expectedRevision: number;
+  reinstateExcluded?: boolean;
   pubkeys: Iterable<string>;
   scope: string;
 }): { promotedPubkeys: string[]; revision: number } | null {
   if (getPersistentAgentAudienceRevision(scope) !== expectedRevision)
     return null;
-  const promotedPubkeys = normalizePubkeys(pubkeys).filter(
+  const normalizedPubkeys = normalizePubkeys(pubkeys);
+  const promotedPubkeys = normalizedPubkeys.filter(
     (pubkey) =>
       !(audiences[scope] ?? []).includes(pubkey) &&
-      !excludedPubkeysByScope.get(scope)?.has(pubkey),
+      (reinstateExcluded || !excludedPubkeysByScope.get(scope)?.has(pubkey)),
   );
   if (promotedPubkeys.length === 0) return null;
+  if (reinstateExcluded) {
+    const excluded = excludedPubkeysByScope.get(scope);
+    for (const pubkey of promotedPubkeys) excluded?.delete(pubkey);
+    if (excluded?.size === 0) excludedPubkeysByScope.delete(scope);
+  }
   setPersistentAgentAudience(scope, [
     ...(audiences[scope] ?? []),
     ...promotedPubkeys,

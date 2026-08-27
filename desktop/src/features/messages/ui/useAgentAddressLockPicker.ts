@@ -69,7 +69,10 @@ export function useAgentAddressLockPicker({
   audienceScope: string | null;
   mentions: UseMentionsResult;
   onAddressAgentMention?: (suggestion: MentionSuggestion) => void;
-  onAutoPinAgentMention?: (suggestion: MentionSuggestion) => void;
+  onAutoPinAgentMention?: (
+    suggestion: MentionSuggestion,
+    options: { reinstateExcluded: boolean },
+  ) => void;
   onPulseAddressLock: (pubkey: string) => void;
   profiles?: UserProfileLookup;
   richText: UseRichTextEditorResult;
@@ -84,9 +87,11 @@ export function useAgentAddressLockPicker({
     unpinnedAudienceScopeRef.current = audienceScope;
     unpinnedAgentPubkeysRef.current.clear();
   }
-  for (const pubkey of lockedAgentPubkeys) {
-    unpinnedAgentPubkeysRef.current.delete(pubkey);
-  }
+  React.useEffect(() => {
+    for (const pubkey of lockedAgentPubkeys) {
+      unpinnedAgentPubkeysRef.current.delete(pubkey);
+    }
+  }, [lockedAgentPubkeys]);
   const lockedAgentNamesRef = React.useRef(new Map<string, string>());
   const visibleAgentMentionPubkeysRef = React.useRef(new Set<string>());
   const mentionSyncScopeRef = React.useRef(audienceScope);
@@ -294,7 +299,9 @@ export function useAgentAddressLockPicker({
           applyAutocompleteEdit(mentions.insertMention(suggestion, cursor));
           if (wasUnpinned) unpinnedAgentPubkeysRef.current.delete(pubkey);
           trackMentionAddressedAgent(pubkey);
-          onAutoPinAgentMention?.(suggestion);
+          onAutoPinAgentMention?.(suggestion, {
+            reinstateExcluded: !wasUnpinned,
+          });
           return;
         }
 

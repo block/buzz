@@ -50,10 +50,12 @@ export function useAutoPinMentionedAgents({
         ? getPersistentAgentAudienceRevision(audienceScope)
         : 0,
       pubkeys,
+      reinstateExcluded,
       requirePreference,
     }: {
       expectedRevision?: number;
       pubkeys: readonly string[];
+      reinstateExcluded: boolean;
       requirePreference: boolean;
     }) => {
       if (!audienceScope || (requirePreference && !enabled)) return;
@@ -62,6 +64,7 @@ export function useAutoPinMentionedAgents({
       ].filter(Boolean);
       const promotion = promotePersistentAgentAudienceIfUnchanged({
         expectedRevision,
+        reinstateExcluded,
         pubkeys: normalizedPubkeys,
         scope: audienceScope,
       });
@@ -88,13 +91,25 @@ export function useAutoPinMentionedAgents({
     [audienceScope, enabled, getDisplayName, onPulse],
   );
   const promoteMentionedAgents = React.useCallback(
-    (promotion: { expectedRevision?: number; pubkeys: readonly string[] }) =>
-      promoteAgents({ ...promotion, requirePreference: true }),
+    (promotion: {
+      expectedRevision?: number;
+      pubkeys: readonly string[];
+      reinstateExcluded?: boolean;
+    }) =>
+      promoteAgents({
+        ...promotion,
+        reinstateExcluded: promotion.reinstateExcluded ?? false,
+        requirePreference: true,
+      }),
     [promoteAgents],
   );
   const promoteExplicitlyAddressedAgents = React.useCallback(
     (promotion: { expectedRevision?: number; pubkeys: readonly string[] }) =>
-      promoteAgents({ ...promotion, requirePreference: false }),
+      promoteAgents({
+        ...promotion,
+        reinstateExcluded: true,
+        requirePreference: false,
+      }),
     [promoteAgents],
   );
 
