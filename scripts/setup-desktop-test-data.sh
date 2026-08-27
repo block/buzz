@@ -16,8 +16,15 @@ CHARLIE_PUBKEY="554cef57437abac34522ac2c9f0490d685b72c80478cf9f7ed6f9570ee8624ea
 TYLER_PUBKEY="e5ebc6cdb579be112e336cc319b5989b4bb6af11786ea90dbe52b5f08d741b34"
 AGENT_PUBKEY="db0b028cd36f4d3e36c8300cce87252c1f7fc9495ffecc53f393fcac341ffd36"
 REVIEW_PUBKEY="${BUZZ_REVIEW_PUBKEY:-}"
-if [[ -n "$REVIEW_PUBKEY" && ! "$REVIEW_PUBKEY" =~ ^[0-9a-fA-F]{64}$ ]]; then
-  echo "BUZZ_REVIEW_PUBKEY must be exactly 64 hexadecimal characters." >&2
+REVIEW_CLEANUP_PUBKEY="${BUZZ_REVIEW_CLEANUP_PUBKEY:-}"
+for value in "$REVIEW_PUBKEY" "$REVIEW_CLEANUP_PUBKEY"; do
+  if [[ -n "$value" && ! "$value" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "Review pubkeys must be exactly 64 lowercase hexadecimal characters." >&2
+    exit 1
+  fi
+done
+if [[ -n "$REVIEW_PUBKEY" && -n "$REVIEW_CLEANUP_PUBKEY" ]]; then
+  echo "Fixture setup and review-principal cleanup are mutually exclusive." >&2
   exit 1
 fi
 
@@ -78,6 +85,17 @@ LIMIT 1
 if [[ ! "${COMMUNITY_ID}" =~ ^[0-9a-fA-F-]{36}$ ]]; then
   echo "Could not resolve community id for host ${COMMUNITY_HOST}." >&2
   exit 1
+fi
+
+if [[ -n "$REVIEW_CLEANUP_PUBKEY" ]]; then
+  run_sql "
+DELETE FROM channel_members
+WHERE community_id = '${COMMUNITY_ID}'
+  AND pubkey = decode('${REVIEW_CLEANUP_PUBKEY}','hex')
+;
+"
+  echo "Desktop e2e review principal removed."
+  exit 0
 fi
 
 UUID_GENERAL=$(uuid5_hex "buzz.channel.general")

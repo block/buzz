@@ -187,6 +187,7 @@ func normalizedRole(_ raw: String?) -> String? {
     if value.hasPrefix("AX") { value.removeFirst(2) }
     switch value.lowercased() {
     case "textarea", "text area": return "text-area"
+    case "webarea", "web area": return "web-area"
     default: return value.lowercased()
     }
 }
@@ -266,29 +267,40 @@ func describe(_ element: AXUIElement, locator: Locator) -> ElementDescription {
                        focused: boolAttribute(element, kAXFocusedAttribute), frame: frameAttribute(element))
 }
 
+func semanticContentBounds(pid: pid_t) -> CGRect? {
+    let app = AXUIElementCreateApplication(pid)
+    enableWebViewAccessibility(app)
+    let webArea = find(accessibilityRoots(app: app, pid: pid), locator: Locator(id: nil, role: "web-area", name: nil))
+    guard let frame = webArea.flatMap(frameAttribute) else { return nil }
+    return CGRect(x: frame.x, y: frame.y, width: frame.width, height: frame.height)
+}
+
+func transformSemanticNode(_ node: SemanticNode, contentBounds: CGRect) -> SemanticNode? {
+    guard node.viewport.width > 0, node.viewport.height > 0,
+          contentBounds.width > 0, contentBounds.height > 0 else { return nil }
+    let xScale = contentBounds.width / node.viewport.width
+    let yScale = contentBounds.height / node.viewport.height
+    return SemanticNode(
+        id: node.id,
+        role: node.role,
+        name: node.name,
+        enabled: node.enabled,
+        focused: node.focused,
+        frame: Rect(
+            x: contentBounds.minX + node.frame.x * xScale,
+            y: contentBounds.minY + node.frame.y * yScale,
+            width: node.frame.width * xScale,
+            height: node.frame.height * yScale
+        ),
+        viewport: node.viewport
+    )
+}
+
 func semanticNodes(path: String, pid: pid_t) -> [SemanticNode] {
     guard let data = FileManager.default.contents(atPath: path),
-          let nodes = try? JSONDecoder().decode([SemanticNode].self, from: data) else { return [] }
-    guard let (_, windowBounds) = try? windowInfo(pid: pid) else { return nodes }
-    return nodes.map { node in
-        guard node.viewport.width > 0, node.viewport.height > 0 else { return node }
-        let xScale = windowBounds.width / node.viewport.width
-        let yScale = windowBounds.height / node.viewport.height
-        return SemanticNode(
-            id: node.id,
-            role: node.role,
-            name: node.name,
-            enabled: node.enabled,
-            focused: node.focused,
-            frame: Rect(
-                x: windowBounds.minX + node.frame.x * xScale,
-                y: windowBounds.minY + node.frame.y * yScale,
-                width: node.frame.width * xScale,
-                height: node.frame.height * yScale
-            ),
-            viewport: node.viewport
-        )
-    }
+          let nodes = try? JSONDecoder().decode([SemanticNode].self, from: data),
+          let contentBounds = semanticContentBounds(pid: pid) else { return [] }
+    return nodes.compactMap { transformSemanticNode($0, contentBounds: contentBounds) }
 }
 
 func matches(_ element: SemanticNode, locator: Locator) -> Bool {
@@ -360,12 +372,42 @@ func captureWindow(pid: pid_t, path: String) throws {
     try bitmap.write(to: destination, options: .atomic)
 }
 
+func recordingHasVideoTrack(_ destination: URL) async -> Bool {
+    do {
+        return try await !AVURLAsset(url: destination).loadTracks(withMediaType: .video).isEmpty
+    } catch {
+        return false
+    }
+}
+
+func validateFinalizedRecording(
+    appendedFrameCount: Int,
+    destination: URL?,
+    hasVideoTrack: (URL) async -> Bool = recordingHasVideoTrack
+) async throws {
+    guard appendedFrameCount > 0 else {
+        throw DriverError.message("window recording contained no frames")
+    }
+    guard let destination else {
+        throw DriverError.message("window recording destination is missing")
+    }
+    let attributes = try FileManager.default.attributesOfItem(atPath: destination.path)
+    guard let size = attributes[.size] as? NSNumber, size.int64Value > 0 else {
+        throw DriverError.message("window recording is empty")
+    }
+    guard await hasVideoTrack(destination) else {
+        throw DriverError.message("window recording has no readable video track")
+    }
+}
+
 final class WindowRecorder: @unchecked Sendable {
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
     private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
     private var captureTask: Task<Void, Never>?
     private var captureError: Error?
+    private var appendedFrameCount = 0
+    private var destination: URL?
 
     private func trace(_ message: String) {
         let timestamp = ISO8601DateFormatter().string(from: Date())
@@ -401,6 +443,8 @@ final class WindowRecorder: @unchecked Sendable {
         guard assetWriter.startWriting() else { throw assetWriter.error ?? DriverError.message("AVAssetWriter failed to start") }
         assetWriter.startSession(atSourceTime: .zero)
         writer = assetWriter; input = writerInput; adaptor = pixelAdaptor
+        self.destination = destination
+        appendedFrameCount = 0
         trace("started CGWindow/AVAssetWriter backend window=\(windowID) size=\(width)x\(height)")
 
         captureTask = Task.detached { [weak self] in
@@ -416,21 +460,35 @@ final class WindowRecorder: @unchecked Sendable {
                         cadence: &cadence,
                         isReady: writerInput.isReadyForMoreMediaData,
                         append: { presentationTime in
-                            guard let image = CGWindowListCreateImage(bounds, .optionIncludingWindow, windowID, [.boundsIgnoreFraming, .bestResolution]),
-                                  let pool = pixelAdaptor.pixelBufferPool else { return true }
+                            guard let image = CGWindowListCreateImage(bounds, .optionIncludingWindow, windowID, [.boundsIgnoreFraming, .bestResolution]) else {
+                                self.captureError = DriverError.message("failed to capture window video frame")
+                                return false
+                            }
+                            guard let pool = pixelAdaptor.pixelBufferPool else {
+                                self.captureError = DriverError.message("window video pixel buffer pool is unavailable")
+                                return false
+                            }
                             var optionalBuffer: CVPixelBuffer?
                             guard CVPixelBufferPoolCreatePixelBuffer(nil, pool, &optionalBuffer) == kCVReturnSuccess,
-                                  let buffer = optionalBuffer else { return true }
+                                  let buffer = optionalBuffer else {
+                                self.captureError = DriverError.message("failed to allocate window video pixel buffer")
+                                return false
+                            }
                             CVPixelBufferLockBaseAddress(buffer, [])
                             defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
                             guard let base = CVPixelBufferGetBaseAddress(buffer),
                                   let context = CGContext(data: base, width: width, height: height,
                                                           bitsPerComponent: 8, bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
                                                           space: CGColorSpaceCreateDeviceRGB(),
-                                                          bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else { return true }
+                                                          bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue) else {
+                                self.captureError = DriverError.message("failed to create window video drawing context")
+                                return false
+                            }
                             context.interpolationQuality = .high
                             context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-                            return pixelAdaptor.append(buffer, withPresentationTime: presentationTime)
+                            let appended = pixelAdaptor.append(buffer, withPresentationTime: presentationTime)
+                            if appended { self.appendedFrameCount += 1 }
+                            return appended
                         }
                     ) {
                         self.captureError = assetWriter.error ?? DriverError.message("failed to append window video frame")
@@ -447,7 +505,15 @@ final class WindowRecorder: @unchecked Sendable {
         input?.markAsFinished()
         if let assetWriter = writer { await assetWriter.finishWriting() }
         let error = captureError ?? writer?.error
-        writer = nil; input = nil; adaptor = nil; captureError = nil
+        if error == nil {
+            do {
+                try await validateFinalizedRecording(appendedFrameCount: appendedFrameCount, destination: destination)
+            } catch {
+                self.writer = nil; input = nil; adaptor = nil; captureError = nil; destination = nil; appendedFrameCount = 0
+                throw error
+            }
+        }
+        writer = nil; input = nil; adaptor = nil; captureError = nil; destination = nil; appendedFrameCount = 0
         if let error { throw error }
         trace("finalized recording")
     }

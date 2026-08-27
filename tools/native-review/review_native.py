@@ -246,7 +246,7 @@ def scrubbed_environment(*, include_home: bool = False) -> dict[str, str]:
     return env
 
 
-def fixture_environment(isolation: dict[str, str], review_pubkey: str) -> dict[str, str]:
+def fixture_environment(isolation: dict[str, str], review_pubkey: str, *, cleanup: bool = False) -> dict[str, str]:
     """Return fixed local fixture coordinates without inheriting host credentials."""
     if not re.fullmatch(r"[a-f0-9]{64}", review_pubkey):
         raise HarnessError("fixture seeding requires a 64-character lowercase hex pubkey")
@@ -256,7 +256,7 @@ def fixture_environment(isolation: dict[str, str], review_pubkey: str) -> dict[s
         raise HarnessError("fixture seeding requires the isolated relay at loopback port 3030")
     return {
         **scrubbed_environment(include_home=True),
-        "BUZZ_REVIEW_PUBKEY": review_pubkey,
+        "BUZZ_REVIEW_CLEANUP_PUBKEY" if cleanup else "BUZZ_REVIEW_PUBKEY": review_pubkey,
         "BUZZ_COMMUNITY_HOST": f"{parsed.hostname}:{port}",
         "BUZZ_DB_HOST": "localhost",
         "BUZZ_DB_PORT": "5471",
@@ -367,14 +367,20 @@ def prepare_fixture(run_dir: pathlib.Path, isolation: dict[str, str]) -> dict[st
     fixture = {
         "kind": "local_review_channel", "identity_pubkey": public_match.group(1),
         "secret_path": str(secret_path), "relay_url": isolation["relay_url"],
-        "seed": "scripts/setup-desktop-test-data.sh", "cleanup_scope": "run-local app state and keyring only",
+        "seed": "scripts/setup-desktop-test-data.sh", "cleanup_scope": "run-local app, keyring, and fixture principal",
     }
     try:
         run([str(ROOT / "scripts/setup-desktop-test-data.sh")],
             env=fixture_environment(isolation, fixture["identity_pubkey"]), capture=False)
-    except Exception:
+    except Exception as seed_exc:
+        cleanup_errors = []
+        try:
+            run([str(ROOT / "scripts/setup-desktop-test-data.sh")],
+                env=fixture_environment(isolation, fixture["identity_pubkey"], cleanup=True), capture=False)
+        except Exception as cleanup_exc:
+            cleanup_errors.append(f"; review principal cleanup also failed: {cleanup_exc}")
         secret_path.unlink(missing_ok=True)
-        raise
+        raise HarnessError(f"fixture seed failed: {seed_exc}{''.join(cleanup_errors)}") from seed_exc
     (run_dir / "manifest" / "fixture.json").write_text(json.dumps({k: v for k, v in fixture.items() if k != "secret_path"}, indent=2))
     return fixture
 
@@ -549,6 +555,12 @@ def wait_expectation_not_before(driver: Driver, expectation: dict[str, Any], sta
         time.sleep(0.025)
 
 
+def valid_measurement(marker_ns: int | None, observation_ns: int | None) -> float | None:
+    if marker_ns is None or observation_ns is None:
+        return None
+    return (observation_ns - marker_ns) / 1_000_000
+
+
 def capture_step(driver: Driver, run_dir: pathlib.Path, slug: str, record: dict[str, Any]) -> dict[str, str]:
     artifacts: dict[str, str] = {}
     if record["screenshots"]:
@@ -574,6 +586,11 @@ def cleanup_review_state(run_dir: pathlib.Path, isolation: dict[str, str],
     except Exception as exc:
         errors.append(f"desktop state reset failed: {exc}")
     if fixture:
+        try:
+            run([str(ROOT / "scripts/setup-desktop-test-data.sh")],
+                env=fixture_environment(isolation, fixture["identity_pubkey"], cleanup=True), capture=False)
+        except Exception as exc:
+            errors.append(f"review principal database cleanup failed: {exc}")
         try:
             pathlib.Path(fixture["secret_path"]).unlink(missing_ok=True)
         except Exception as exc:
@@ -684,9 +701,8 @@ def run_journey(path: pathlib.Path, relay_url: str, output_root: pathlib.Path) -
                 step_receipt["finished_monotonic_ns"] = time.monotonic_ns()
                 step_receipt["duration_ms"] = (step_receipt["finished_monotonic_ns"] - step_start) / 1_000_000
                 if metric := step.get("measure"):
-                    marker = measurement_starts.get(metric)
-                    if marker is not None:
-                        value = ((observation_ns or step_receipt["finished_monotonic_ns"]) - marker) / 1_000_000
+                    value = valid_measurement(measurement_starts.get(metric), observation_ns)
+                    if value is not None:
                         step_receipt["measurement"] = metric
                         receipt["measurements"][metric] = {"value": value, "unit": "ms"}
                 step_receipt["artifacts"] = capture_step(driver, run_dir, slug, journey["record"])
