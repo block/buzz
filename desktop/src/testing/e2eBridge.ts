@@ -11986,6 +11986,8 @@ export function maybeInstallE2eTauriMocks() {
         };
       case "get_relay_ws_url":
         return getRelayWsUrl(activeConfig);
+      case "get_relay_lan_ws_url":
+        return null;
       case "get_default_relay_url":
         return getRelayWsUrl(activeConfig);
       case "auto_connect_default_relay_enabled":

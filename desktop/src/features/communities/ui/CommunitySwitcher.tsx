@@ -58,7 +58,7 @@ type CommunitySwitcherProps = {
   onAddCommunity: () => void;
   onUpdateCommunity: (
     id: string,
-    updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
+    updates: Partial<Pick<Community, "name" | "relayUrl" | "lanRelayUrl">>,
   ) => void;
   onRemoveCommunity: (id: string) => Promise<LeaveCommunityResult | undefined>;
 };

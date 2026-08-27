@@ -172,6 +172,70 @@ test.describe("community rail", () => {
       .toBe(COMMUNITY_B.id);
   });
 
+  test("saves an optional Campus / LAN relay without replacing the canonical URL", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page
+      .getByTestId(`community-rail-button-${COMMUNITY_A.id}`)
+      .click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Community settings" }).click();
+
+    const dialog = page.getByRole("dialog", { name: "Edit Community" });
+    await expect(dialog).toBeVisible();
+    await dialog
+      .locator("#edit-ws-lan-relay-url")
+      .fill("ws://10.24.11.82:3000");
+    await dialog.getByRole("button", { name: "Save Changes" }).click();
+
+    await expect(dialog).toHaveCount(0);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const raw = window.localStorage.getItem("buzz-communities");
+          const community = raw ? JSON.parse(raw)[0] : null;
+          return {
+            lanRelayUrl: community?.lanRelayUrl,
+            relayUrl: community?.relayUrl,
+          };
+        }),
+      )
+      .toEqual({
+        lanRelayUrl: "ws://10.24.11.82:3000",
+        relayUrl: COMMUNITY_A.relayUrl,
+      });
+
+    await page
+      .getByTestId(`community-rail-button-${COMMUNITY_A.id}`)
+      .click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Community settings" }).click();
+
+    const reopenedDialog = page.getByRole("dialog", { name: "Edit Community" });
+    await reopenedDialog
+      .locator("#edit-ws-relay-url")
+      .fill("wss://future-relay.example.com");
+    await reopenedDialog.getByRole("button", { name: "Save Changes" }).click();
+
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const raw = window.localStorage.getItem("buzz-communities");
+          const community = raw ? JSON.parse(raw)[0] : null;
+          return {
+            lanRelayUrl: community?.lanRelayUrl,
+            relayUrl: community?.relayUrl,
+          };
+        }),
+      )
+      .toEqual({
+        lanRelayUrl: "ws://10.24.11.82:3000",
+        relayUrl: "wss://future-relay.example.com",
+      });
+  });
+
   test("lets community admins open invite controls from the rail", async ({
     page,
   }) => {

@@ -1,6 +1,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import {
   createAuthEvent,
+  getRelayLanWsUrl,
   getRelayWsUrl,
   signRelayEvent,
 } from "@/shared/api/tauri";
@@ -543,10 +544,11 @@ export class RelayClient {
       if (!this.relayUrl) {
         this.relayUrl = await getRelayWsUrl();
       }
+      const lanRelayUrl = await getRelayLanWsUrl();
       const wsId = await invoke<number>("plugin:websocket|connect", {
         url: this.relayUrl,
         onMessage: this.onMessageChannel,
-        config: {},
+        config: { transportUrl: lanRelayUrl },
       });
       if (generation !== this.connectionGeneration) {
         void closeWebSocket(wsId, "stale connection attempt");

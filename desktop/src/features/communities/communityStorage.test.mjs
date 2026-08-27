@@ -8,9 +8,22 @@ import {
   loadCommunityDiscoveryAfterLeave,
   markCommunityDiscoveryAfterLeave,
   migrateLegacyCommunityStorage,
+  normalizeLanRelayUrl,
   saveCommunities,
   shouldAutoConnectDefaultRelay,
 } from "./communityStorage.ts";
+
+test("normalizeLanRelayUrl accepts private transports and rejects public endpoints", () => {
+  assert.equal(
+    normalizeLanRelayUrl("10.24.11.82:3000/"),
+    "ws://10.24.11.82:3000",
+  );
+  assert.equal(normalizeLanRelayUrl("  "), undefined);
+  assert.throws(() => normalizeLanRelayUrl("wss://10.24.11.82:3000"));
+  assert.throws(() => normalizeLanRelayUrl("ws://relay.example.com:3000"));
+  assert.throws(() => normalizeLanRelayUrl("ws://8.8.8.8:3000"));
+  assert.throws(() => normalizeLanRelayUrl("ws://10.24.11.82:3000/path"));
+});
 
 function createMemoryStorage(initial = {}) {
   const values = new Map(Object.entries(initial));

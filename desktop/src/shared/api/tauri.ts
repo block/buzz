@@ -369,6 +369,10 @@ export function getRelayWsUrl(): Promise<string> {
   return invokeTauri<string>("get_relay_ws_url");
 }
 
+export function getRelayLanWsUrl(): Promise<string | null> {
+  return invokeTauri<string | null>("get_relay_lan_ws_url");
+}
+
 export function getRelayHttpUrl(): Promise<string> {
   return invokeTauri<string>("get_relay_http_url");
 }
@@ -1136,12 +1140,14 @@ export async function cancelPairing(): Promise<void> {
 
 export async function applyCommunity(
   relayUrl: string,
+  lanRelayUrl?: string,
   nsec?: string,
   reposDir?: string,
   agentManagedProfiles?: boolean,
 ): Promise<void> {
   await invokeTauri("apply_workspace", {
     relayUrl,
+    lanRelayUrl: lanRelayUrl ?? null,
     nsec: nsec ?? null,
     reposDir: reposDir ?? null,
     agentManagedProfiles: agentManagedProfiles ?? false,

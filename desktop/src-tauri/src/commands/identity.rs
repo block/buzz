@@ -93,6 +93,15 @@ pub fn get_relay_ws_url(state: State<'_, AppState>) -> String {
 }
 
 #[tauri::command]
+pub fn get_relay_lan_ws_url(state: State<'_, AppState>) -> Result<Option<String>, String> {
+    state
+        .relay_lan_url_override
+        .lock()
+        .map(|url| url.clone())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn get_relay_http_url(state: State<'_, AppState>) -> String {
     relay_api_base_url_with_override(&state)
 }
