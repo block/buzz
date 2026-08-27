@@ -1,46 +1,5 @@
 # Changelog
 
-## Unreleased
-
-- **Breaking:** the relay admin moderation API (`/api/admin/v1`) now requires
-  explicit authentication configuration when `BUZZ_ADMIN_HOST` is set. Choose
-  one mode via `BUZZ_ADMIN_AUTH` (unset defaults to `nip98`):
-  - **`BUZZ_ADMIN_AUTH=nip98` (default):** NIP-98 HTTP Auth. Every request must
-    carry an `Authorization: Nostr <base64 event>` header containing a signed
-    kind-27235 event. Authorized principals resolve from `RELAY_OPERATOR_PUBKEYS`
-    (comma-separated 64-char hex pubkeys for config-backed Operators),
-    `RELAY_OWNER_PUBKEY` (implicit Operator fallback when `RELAY_OPERATOR_PUBKEYS`
-    is unset), and the `relay_operators` table (DB-managed Operator/Moderator
-    roster). The dashboard requires a NIP-07 browser extension (nos2x or Alby);
-    without one it shows an installation screen. Individual operator access is
-    revocable without rotating a shared secret.
-  - **`BUZZ_ADMIN_AUTH=disabled`:** admin API is unauthenticated. Use only when
-    the admin API is already protected by a VPN or private ingress. The relay
-    logs a `WARN` on every startup. The dashboard renders directly.
-  - Any unrecognised value for `BUZZ_ADMIN_AUTH` is a startup error
-    (typo-proofing). Token (bearer) authentication is not supported:
-    a lingering `BUZZ_ADMIN_TOKEN` is ignored with a startup warning — remove it
-    from the environment.
-  - `Host`/`Origin` matching is retained in all modes as defense-in-depth.
-  - **Migration from the previous `BUZZ_ADMIN_INSECURE_NO_AUTH=true`:** replace
-    with `BUZZ_ADMIN_AUTH=disabled`. The behavior is identical.
-- The relay NIP-11 relay-information document now advertises the admin API
-  origin in an optional `admin_api` field (`scheme://host[:port]`) whenever the
-  admin surface is configured (`BUZZ_ADMIN_HOST` set). The scheme follows the
-  same loopback rule as NIP-98 `u`-tag verification (`http` for
-  `localhost`/`127.x`/`[::1]`, else `https`). Clients can auto-discover the admin
-  console instead of requiring manual URL entry; the field is omitted entirely
-  when no admin surface is configured. IPv6 admin hosts must be bracketed
-  (`[::1]`, `[::1]:3000`); an unbracketed literal is a startup error because it
-  cannot form a valid URI authority.
-- `RELAY_OPERATOR_API_ORIGIN` is no longer required at boot when
-  `RELAY_OPERATOR_PUBKEYS` is set. The allowlist is shared by the NIP-98 admin
-  console (which needs no origin) and the community-provisioning endpoints
-  (which do). Setting the pubkeys for the admin console no longer forces an
-  origin; the relay logs a `WARN` naming the affected feature, and the
-  community-provisioning endpoints (`POST /operator/communities`) fail closed
-  at request time until `RELAY_OPERATOR_API_ORIGIN` is set.
-
 ## v0.5.20
 
 ### Desktop and shared changes
@@ -442,6 +401,7 @@
 - infra: bind development services to loopback ([#4871](https://github.com/block/buzz/pull/4871)) ([`65834d68d0d3441c4e628540d6d5c8b0a2e757c9`](https://github.com/block/buzz/commit/65834d68d0d3441c4e628540d6d5c8b0a2e757c9))
 
 [Compare desktop-v0.5.7...desktop-v0.5.8](https://github.com/block/buzz/compare/desktop-v0.5.7...desktop-v0.5.8)
+
 ## v0.5.7
 
 ### Desktop and shared changes
