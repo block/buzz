@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use buzz_core::kind::{KIND_MANAGED_AGENT, KIND_PRESENCE_SNAPSHOT, KIND_TEAM};
+use buzz_core::kind::{
+    KIND_MANAGED_AGENT, KIND_PRESENCE_SNAPSHOT, KIND_PRESENCE_UPDATE, KIND_TEAM,
+};
 use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -568,28 +570,30 @@ where
 ///
 /// A presence response is trusted as a **complete snapshot** for the requested
 /// `pubkeys` only when it parses as a JSON array in which *every* element is a
-/// well-formed presence event — a readable `p`-tag/author subject plus a
-/// string `content`. The relay drops the Redis presence key when an identity
-/// goes offline, so a trusted snapshot that omits a requested pubkey means that
-/// pubkey is offline — exactly the stale duplicate an operator needs flagged.
-/// Omitted pubkeys are therefore seeded as `offline`, then returned statuses
-/// overlay the seed.
+/// relay-synthesized presence event — a complete signed [`nostr::Event`] of
+/// kind [`KIND_PRESENCE_UPDATE`] whose `p`-tag subject is one of the requested
+/// `pubkeys` (see [`trusted_presence_snapshot`]). The relay drops the Redis
+/// presence key when an identity goes offline, so a trusted snapshot that omits
+/// a requested pubkey means that pubkey is offline — exactly the stale
+/// duplicate an operator needs flagged. Omitted pubkeys are therefore seeded as
+/// `offline`, then returned statuses overlay the seed.
 ///
-/// Anything less than a fully well-formed array — a failed/timed-out query,
-/// invalid top-level JSON, or an array containing a malformed element such as
-/// `[{}]`, `[null]`, or an event with unreadable `content` — makes presence
-/// enrichment untrusted: no offline seeding and no presence labels at all. A
-/// completed profile sibling still contributes its hints in that case. This
-/// refuses to invent an `offline` label from a response we cannot trust (a
-/// relay-side fake-empty success or a partially malformed body). Kept separate
-/// from IO so the trust boundary is directly unit-testable without a relay.
+/// Anything less than a fully trusted array — a failed/timed-out query, invalid
+/// top-level JSON, or an array containing any element that is not such an event
+/// (a vacuous object, `[{}]`, `[null]`, an event of the wrong kind, or one for
+/// an unrequested subject) — makes presence enrichment untrusted: no offline
+/// seeding and no presence labels at all. A completed profile sibling still
+/// contributes its hints in that case. This refuses to invent an `offline`
+/// label from a response we cannot trust (a relay-side fake-empty success or a
+/// partially malformed body). Kept separate from IO so the trust boundary is
+/// directly unit-testable without a relay.
 fn hints_from_results(
     pubkeys: &[String],
     presence_result: Result<String, CliError>,
     profile_result: Result<String, CliError>,
 ) -> HashMap<String, CandidateHint> {
     let (offline_seed, presence_events): (&[String], Vec<serde_json::Value>) =
-        match trusted_presence_snapshot(presence_result) {
+        match trusted_presence_snapshot(pubkeys, presence_result) {
             Some(events) => (pubkeys, events),
             None => (&[], Vec::new()),
         };
@@ -604,24 +608,38 @@ fn hints_from_results(
 /// Validate a presence query outcome as a trustworthy complete snapshot.
 ///
 /// Returns the parsed events only when the body parses as a JSON array and
-/// *every* element is a well-formed presence event: a non-empty subject
-/// (`presence_subject` reads the `p`-tag, falling back to the author) and a
-/// string `content`. A failed query, non-array JSON, or any malformed element
-/// yields `None` — the caller must then treat presence as untrusted and never
-/// infer `offline`. Validating every element (not just the top-level shape)
-/// is what stops `[{}]`, `[null]`, or a contentless event from masquerading as
-/// an authoritative snapshot.
+/// *every* element is a relay-synthesized presence snapshot for the requested
+/// set: a complete, well-formed [`nostr::Event`] of kind
+/// [`KIND_PRESENCE_UPDATE`] carrying a `p` tag whose subject is one of
+/// `pubkeys`. A failed query, non-array JSON, or any element that is not such
+/// an event yields `None` — the caller must then treat presence as untrusted
+/// and never infer `offline`.
+///
+/// Parsing each element as a full event (not just checking two fields) is what
+/// stops a vacuous object like `{"pubkey":"…","content":"online"}` — which
+/// lacks `id`/`sig`/`kind`/`created_at` — from masquerading as a snapshot, and
+/// the kind + subject-membership checks reject a fully-shaped event that is not
+/// a presence update or belongs to a subject we never asked about. Either would
+/// otherwise re-enable false `offline` seeding from an untrustworthy body.
 fn trusted_presence_snapshot(
+    pubkeys: &[String],
     presence_result: Result<String, CliError>,
 ) -> Option<Vec<serde_json::Value>> {
     let events: Vec<serde_json::Value> = presence_result
         .ok()
         .and_then(|r| serde_json::from_str(&r).ok())?;
-    let all_well_formed = events.iter().all(|event| {
-        !presence_subject(event).is_empty()
-            && event.get("content").and_then(|v| v.as_str()).is_some()
+    let requested: HashSet<&str> = pubkeys.iter().map(String::as_str).collect();
+    let all_trusted = events.iter().all(|value| {
+        let Ok(event) = serde_json::from_value::<nostr::Event>(value.clone()) else {
+            return false;
+        };
+        event.kind == nostr::Kind::Custom(KIND_PRESENCE_UPDATE as u16)
+            && event
+                .tags
+                .public_keys()
+                .any(|pk| requested.contains(pk.to_hex().as_str()))
     });
-    all_well_formed.then_some(events)
+    all_trusted.then_some(events)
 }
 
 /// Pure response-to-map conversion: takes the raw presence (kind:40902) and
@@ -2492,17 +2510,31 @@ mod tests {
         serde_json::to_string(events).unwrap()
     }
 
+    /// Build a relay-shaped presence snapshot event: a real signed
+    /// `nostr::Event` of kind `KIND_PRESENCE_UPDATE` whose `p` tag names
+    /// `subject`, matching exactly what `synthesize_presence` produces. Signed
+    /// by an arbitrary "relay" key so its author differs from the subject.
+    fn presence_event(subject: &str, status: &str) -> serde_json::Value {
+        let relay_keys =
+            nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000002")
+                .expect("valid relay test key");
+        let event = nostr::EventBuilder::new(
+            nostr::Kind::Custom(buzz_core::kind::KIND_PRESENCE_UPDATE as u16),
+            status,
+        )
+        .tags([nostr::Tag::parse(["p", subject]).expect("valid p tag")])
+        .sign_with_keys(&relay_keys)
+        .expect("signing presence event");
+        serde_json::to_value(&event).expect("event to json")
+    }
+
     #[test]
     fn hints_from_results_successful_partial_snapshot_seeds_absent_as_offline() {
         let online_pk = "a".repeat(64);
         let absent_pk = "b".repeat(64);
         let pubkeys = vec![online_pk.clone(), absent_pk.clone()];
         // Snapshot returns only the online instance; absent_pk is omitted.
-        let presence = events_json(&[json!({
-            "pubkey": "r".repeat(64),
-            "content": "online",
-            "tags": [["p", online_pk.clone()]],
-        })]);
+        let presence = events_json(&[presence_event(&online_pk, "online")]);
 
         let map = hints_from_results(&pubkeys, Ok(presence), Ok("[]".to_string()));
 
@@ -2628,6 +2660,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hints_from_results_vacuous_object_makes_snapshot_untrusted() {
+        // A syntactically-valid array whose element carries a plausible subject
+        // and string content but is NOT a complete signed event (no id/sig/kind
+        // /created_at) must not be trusted as a snapshot — otherwise it would
+        // re-seed every requested candidate `offline` from an unverifiable body.
+        let requested = "a".repeat(64);
+        let pubkeys = vec![requested.clone()];
+        let profile =
+            events_json(&[json!({ "pubkey": requested.clone(), "created_at": 1_705_276_800_u64 })]);
+        let vacuous = events_json(&[json!({ "pubkey": requested.clone(), "content": "online" })]);
+
+        let map = hints_from_results(&pubkeys, Ok(vacuous), Ok(profile));
+
+        assert!(
+            map.values().all(|h| h.presence.is_none()),
+            "a vacuous non-event object must yield no presence labels: {map:?}"
+        );
+        assert_eq!(
+            map[&requested].profile_updated_at,
+            Some(1_705_276_800),
+            "the completed profile sibling must still contribute hints: {map:?}"
+        );
+    }
+
+    #[test]
+    fn hints_from_results_unrequested_subject_makes_snapshot_untrusted() {
+        // A fully-shaped, correctly-signed presence event whose subject is NOT
+        // one of the requested pubkeys is not a snapshot of the requested set;
+        // trusting it would seed the requested duplicates `offline` from an
+        // answer about someone else entirely.
+        let requested = "a".repeat(64);
+        let other = "b".repeat(64);
+        let pubkeys = vec![requested.clone()];
+        let profile =
+            events_json(&[json!({ "pubkey": requested.clone(), "created_at": 1_705_276_800_u64 })]);
+        let presence = events_json(&[presence_event(&other, "online")]);
+
+        let map = hints_from_results(&pubkeys, Ok(presence), Ok(profile));
+
+        assert!(
+            map.values().all(|h| h.presence.is_none()),
+            "an event for an unrequested subject must yield no presence labels: {map:?}"
+        );
+        assert_eq!(
+            map[&requested].profile_updated_at,
+            Some(1_705_276_800),
+            "the completed profile sibling must still contribute hints: {map:?}"
+        );
+    }
+
     // --- join_bounded_queries: a completed lookup survives a hung sibling ---
 
     #[tokio::test(start_paused = true)]
@@ -2688,18 +2771,15 @@ mod tests {
 
         let online_pk = "a".repeat(64);
         let offline_pk = "b".repeat(64);
-        let relay_pk = "r".repeat(64);
 
         // Server dispatches on filter kind: presence (40902) returns one online
         // event immediately; profile (kind 0) hangs well past the timeout.
         let online_for_server = online_pk.clone();
-        let relay_for_server = relay_pk.clone();
         let app = Router::new()
             .route(
                 "/query",
                 post(move |State(()): State<()>, body: axum::body::Bytes| {
                     let online_pk = online_for_server.clone();
-                    let relay_pk = relay_for_server.clone();
                     async move {
                         let filters: Vec<Value> = serde_json::from_slice(&body).unwrap_or_default();
                         let kind = filters
@@ -2712,12 +2792,9 @@ mod tests {
                             // Profile query hangs past the 100ms test timeout.
                             tokio::time::sleep(std::time::Duration::from_secs(10)).await;
                         }
-                        let body = serde_json::to_string(&vec![json!({
-                            "pubkey": relay_pk,
-                            "content": "online",
-                            "tags": [["p", online_pk]],
-                        })])
-                        .unwrap();
+                        let body =
+                            serde_json::to_string(&vec![presence_event(&online_pk, "online")])
+                                .unwrap();
                         axum::response::Response::builder()
                             .header("content-type", "application/json")
                             .body(axum::body::Body::from(body))
