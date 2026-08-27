@@ -15,8 +15,10 @@
 //! It has no dependencies on other NIP-FI PRs. It defines no database schema,
 //! migration, runtime JWKS fetching, binding resolution, enrollment, or
 //! request/proof binding — those belong to later PRs. Identity is issuer-
-//! qualified `(iss, sub)` throughout, and no issuer URL, audience, or claim
-//! name is hardcoded: they are deployment configuration.
+//! qualified `(iss, sub)` throughout: the `sub` claim is the fixed subject
+//! coordinate and `nostr_pubkey` is the fixed key claim, never configurable,
+//! so no deployment can seal a mutable attribute as identity. Issuer URL and
+//! audience remain deployment configuration.
 
 /// The exact client-attached header field ([NIP-FI.md](../../../docs/nips/NIP-FI.md),
 /// "Client-attached transport"). `Authorization` remains reserved for NIP-98.

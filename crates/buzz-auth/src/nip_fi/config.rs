@@ -6,8 +6,10 @@
 //! exact `iss` value returned by JWT decoding; a single-issuer deployment is
 //! just a registry of length one.
 //!
-//! Buzz ships the generic OSS contract only: issuer URLs, audiences, and claim
-//! names are deployment configuration, never hardcoded.
+//! Buzz ships the generic OSS contract only: issuer URLs and audiences are
+//! deployment configuration. The identity claim names are fixed — `sub` is the
+//! subject coordinate and `nostr_pubkey` the bound key — so no deployment can
+//! promote a mutable attribute into identity.
 //!
 //! Two deployment-local but deterministic identities are defined here
 //! ([NIP-FI.md](../../../../docs/nips/NIP-FI.md), "Policy identity and

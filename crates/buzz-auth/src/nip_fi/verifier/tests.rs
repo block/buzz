@@ -928,35 +928,67 @@ fn revalidation_dependencies_carry_key_deadline_and_confidential_assertion() {
     assert!(assertion.authority_deadlines().contains(&deadline));
 }
 
-#[test]
-fn retained_key_revalidates_and_removed_key_denies() {
-    // FI-TRACE-JWKS-ADD / FI-TRACE-JWKS-REMOVE at the verifier seam: the same
-    // assertion re-verifies while its key snapshot is retained, and denies as
-    // an unreadable dependency once the key is removed from the source.
-    let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
-
-    let retained = verifier_with(dedicated_policy(ISSUER));
-    let first = retained
-        .verify(&token)
-        .expect("verifies under retained key");
-    let again = retained
-        .verify(
-            first
-                .revalidation_dependencies()
-                .confidential_assertion()
-                .compact_jws(),
-        )
-        .expect("re-verifies the exact retained assertion");
-    assert_eq!(first.identity().subject(), again.identity().subject());
-
-    // Remove the key: the source has no snapshot, so the same evidence denies
-    // as authorization-unavailable, never sealing under an absent key.
+/// A verifier for `ISSUER` serving a dedicated-assertion policy over one
+/// key snapshot at an explicit generation and JWKS — the changed-snapshot
+/// dimension the JWKS-ADD/REMOVE contracts turn on.
+fn dedicated_verifier_at(
+    generation: u64,
+    jwks: JwkSet,
+) -> FederatedAssertionVerifier<StaticIssuerKeySource> {
+    let key_set = AssertionKeySet::new(ISSUER.to_owned(), generation, jwks, future_deadline())
+        .expect("valid key set");
     let mut registry = IssuerRegistry::new();
     registry.insert(dedicated_policy(ISSUER));
-    let removed = FederatedAssertionVerifier::new(registry, StaticIssuerKeySource::new([]));
-    let err = removed.verify(&token).unwrap_err();
-    assert_eq!(err, VerifierError::KeySourceUnavailable);
-    assert_eq!(err.denial_class(), DenialClass::AuthorizationUnavailable);
+    FederatedAssertionVerifier::new(registry, StaticIssuerKeySource::new([key_set]))
+}
+
+#[test]
+fn retained_key_revalidates_under_changed_snapshot_and_replacement_denies() {
+    // FI-TRACE-JWKS-ADD / FI-TRACE-JWKS-REMOVE at the verifier seam. Both
+    // contracts turn on a *changed authenticated generation*, not on source
+    // outage (covered separately by
+    // `registered_issuer_without_key_snapshot_is_unavailable_not_rejected`).
+    // Mint once at generation 1, then revalidate the exact carried JWS against
+    // two distinct generation-2 snapshots.
+    let token = mint(Some("nip-fi+jwt"), TEST_KID, json!({ "sub": "u" }));
+    let first = dedicated_verifier_at(1, test_jwks(TEST_KID))
+        .verify(&token)
+        .expect("verifies at generation 1");
+    assert_eq!(
+        first.revalidation_dependencies().key_snapshot_generation(),
+        1
+    );
+    let carried = first
+        .revalidation_dependencies()
+        .confidential_assertion()
+        .compact_jws()
+        .to_owned();
+
+    // JWKS-ADD: a later generation that *retains* the signing key revalidates
+    // the byte-identical assertion, now bound to the new generation.
+    let revalidated = dedicated_verifier_at(2, test_jwks(TEST_KID))
+        .verify(&carried)
+        .expect("retained key revalidates under the changed snapshot");
+    assert_eq!(first.identity().subject(), revalidated.identity().subject());
+    assert_eq!(
+        revalidated
+            .revalidation_dependencies()
+            .key_snapshot_generation(),
+        2
+    );
+
+    // JWKS-REMOVE: a still-readable later generation containing *only a
+    // replacement key* (the original `kid` is gone) denies the same evidence
+    // as rejected — no `kid` match, never sealed under a substituted key. This
+    // is a changed snapshot, not a source outage.
+    let err = dedicated_verifier_at(
+        2,
+        jwks_with_coords("replacement-key", TEST_JWK_X_B, TEST_JWK_Y_B),
+    )
+    .verify(&carried)
+    .unwrap_err();
+    assert_eq!(err, VerifierError::AmbiguousKeyId);
+    assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
 }
 
 #[test]
