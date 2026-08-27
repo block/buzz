@@ -127,6 +127,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goTasks = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/tasks",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goProject = React.useCallback(
     (
       projectId: string,
@@ -472,6 +483,7 @@ export function useAppNavigation() {
     goPulse,
     goProfile,
     goSettings,
+    goTasks,
     goWorkflow,
     goWorkflows,
     openSearchHit,

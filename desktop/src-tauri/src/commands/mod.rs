@@ -63,6 +63,7 @@ mod qr_download;
 mod relay_members;
 mod relay_reconnect;
 mod social;
+pub mod tasks;
 mod team_snapshot;
 mod teams;
 mod updater;
