@@ -1125,8 +1125,8 @@ async fn query_events_authed(
         .await;
     }
 
-    if let Some(presence_events) = synthesize_presence(state, tenant, &filters).await {
-        return Ok(Json(Value::Array(presence_events)));
+    if let Some(presence_result) = synthesize_presence(state, tenant, &filters).await {
+        return presence_result.map(|events| Json(Value::Array(events)));
     }
 
     let mut events: Vec<Value> = Vec::new();
@@ -2176,12 +2176,18 @@ pub async fn workflow_webhook(
 /// presence from Redis instead of querying the DB (ephemeral events are never
 /// stored, and kind:40902 snapshots are relay-generated on demand).
 ///
-/// Returns `Some(events)` if handled, `None` to fall through to normal query.
+/// Returns `None` when the filters are not a presence query (fall through to
+/// the normal query path). Returns `Some(Ok(events))` when a presence snapshot
+/// was produced — an empty vec is an authoritative "all offline" answer.
+/// Returns `Some(Err(_))` when the backing Redis lookup failed: callers must
+/// propagate that as an error response rather than a fake-empty success, so a
+/// consumer cannot mistake a backend outage for an authoritative snapshot.
+#[allow(clippy::type_complexity)]
 async fn synthesize_presence(
     state: &AppState,
     tenant: &buzz_core::tenant::TenantContext,
     filters: &[nostr::Filter],
-) -> Option<Vec<Value>> {
+) -> Option<Result<Vec<Value>, (StatusCode, Json<Value>)>> {
     use buzz_core::kind::{KIND_PRESENCE_SNAPSHOT, KIND_PRESENCE_UPDATE};
 
     // Only intercept if every filter targets kind:20001 or 40902 with authors.
@@ -2201,22 +2207,23 @@ async fn synthesize_presence(
     }
 
     if all_pubkeys.is_empty() {
-        return Some(Vec::new());
+        return Some(Ok(Vec::new()));
     }
 
     // Dedup pubkeys.
     all_pubkeys.sort_by_key(|pk| pk.to_hex());
     all_pubkeys.dedup();
 
-    // Look up Redis.
-    let presence_map = state
-        .pubsub
-        .get_presence_bulk(tenant, &all_pubkeys)
-        .await
-        .unwrap_or_default();
+    // Look up Redis. A lookup failure must surface as an error, not a
+    // fake-empty success — otherwise a Redis outage is indistinguishable from
+    // an authoritative all-offline snapshot to the consumer.
+    let presence_map = match state.pubsub.get_presence_bulk(tenant, &all_pubkeys).await {
+        Ok(map) => map,
+        Err(e) => return Some(Err(internal_error(&format!("presence lookup: {e}")))),
+    };
 
     if presence_map.is_empty() {
-        return Some(Vec::new());
+        return Some(Ok(Vec::new()));
     }
 
     // Synthesize kind:20001 events signed by the relay.
@@ -2228,20 +2235,30 @@ async fn synthesize_presence(
     let mut events = Vec::with_capacity(presence_map.len());
     for (pubkey_hex, status) in &presence_map {
         // Build a synthetic event: relay-signed, content = status, p-tag = subject.
-        let tags = vec![nostr::Tag::parse(["p", pubkey_hex]).ok()?];
-        let event =
-            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
-                .tags(tags)
-                .custom_created_at(nostr::Timestamp::from(now))
-                .sign_with_keys(&state.relay_keypair)
-                .ok()?;
+        // A build/sign failure here is an internal fault, not a "not a presence
+        // query" signal, so surface it as an error rather than falling through.
+        let tags = match nostr::Tag::parse(["p", pubkey_hex]) {
+            Ok(tag) => vec![tag],
+            Err(e) => return Some(Err(internal_error(&format!("presence tag: {e}")))),
+        };
+        let event = match nostr::EventBuilder::new(
+            nostr::Kind::Custom(KIND_PRESENCE_UPDATE as u16),
+            status,
+        )
+        .tags(tags)
+        .custom_created_at(nostr::Timestamp::from(now))
+        .sign_with_keys(&state.relay_keypair)
+        {
+            Ok(event) => event,
+            Err(e) => return Some(Err(internal_error(&format!("presence sign: {e}")))),
+        };
 
         if let Ok(v) = serde_json::to_value(&event) {
             events.push(v);
         }
     }
 
-    Some(events)
+    Some(Ok(events))
 }
 
 // ── Moderation queue reads (L6 — Quinn) ───────────────────────────────────────

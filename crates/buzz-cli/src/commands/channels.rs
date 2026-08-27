@@ -566,32 +566,62 @@ where
 
 /// Convert the raw presence and profile query outcomes into a hint map.
 ///
-/// A *successful, parseable* presence response is treated as a **complete
-/// snapshot** for the requested `pubkeys`: the relay drops the Redis presence
-/// key when an identity goes offline, so any requested pubkey the snapshot
-/// omits is offline — exactly the stale duplicate an operator needs flagged.
-/// Those omitted pubkeys are therefore seeded as `offline`. A failed,
-/// timed-out, or malformed presence response yields no seed, so absence stays
-/// unlabeled rather than falsely inferring offline. Kept separate from IO so
-/// the seeding boundary is directly unit-testable without a relay.
+/// A presence response is trusted as a **complete snapshot** for the requested
+/// `pubkeys` only when it parses as a JSON array in which *every* element is a
+/// well-formed presence event — a readable `p`-tag/author subject plus a
+/// string `content`. The relay drops the Redis presence key when an identity
+/// goes offline, so a trusted snapshot that omits a requested pubkey means that
+/// pubkey is offline — exactly the stale duplicate an operator needs flagged.
+/// Omitted pubkeys are therefore seeded as `offline`, then returned statuses
+/// overlay the seed.
+///
+/// Anything less than a fully well-formed array — a failed/timed-out query,
+/// invalid top-level JSON, or an array containing a malformed element such as
+/// `[{}]`, `[null]`, or an event with unreadable `content` — makes presence
+/// enrichment untrusted: no offline seeding and no presence labels at all. A
+/// completed profile sibling still contributes its hints in that case. This
+/// refuses to invent an `offline` label from a response we cannot trust (a
+/// relay-side fake-empty success or a partially malformed body). Kept separate
+/// from IO so the trust boundary is directly unit-testable without a relay.
 fn hints_from_results(
     pubkeys: &[String],
     presence_result: Result<String, CliError>,
     profile_result: Result<String, CliError>,
 ) -> HashMap<String, CandidateHint> {
-    let (offline_seed, presence_events): (&[String], Vec<serde_json::Value>) = match presence_result
-        .ok()
-        .and_then(|r| serde_json::from_str::<Vec<serde_json::Value>>(&r).ok())
-    {
-        Some(events) => (pubkeys, events),
-        None => (&[], Vec::new()),
-    };
+    let (offline_seed, presence_events): (&[String], Vec<serde_json::Value>) =
+        match trusted_presence_snapshot(presence_result) {
+            Some(events) => (pubkeys, events),
+            None => (&[], Vec::new()),
+        };
     let profile_events: Vec<serde_json::Value> = profile_result
         .ok()
         .and_then(|r| serde_json::from_str(&r).ok())
         .unwrap_or_default();
 
     build_hint_map(offline_seed, &presence_events, &profile_events)
+}
+
+/// Validate a presence query outcome as a trustworthy complete snapshot.
+///
+/// Returns the parsed events only when the body parses as a JSON array and
+/// *every* element is a well-formed presence event: a non-empty subject
+/// (`presence_subject` reads the `p`-tag, falling back to the author) and a
+/// string `content`. A failed query, non-array JSON, or any malformed element
+/// yields `None` — the caller must then treat presence as untrusted and never
+/// infer `offline`. Validating every element (not just the top-level shape)
+/// is what stops `[{}]`, `[null]`, or a contentless event from masquerading as
+/// an authoritative snapshot.
+fn trusted_presence_snapshot(
+    presence_result: Result<String, CliError>,
+) -> Option<Vec<serde_json::Value>> {
+    let events: Vec<serde_json::Value> = presence_result
+        .ok()
+        .and_then(|r| serde_json::from_str(&r).ok())?;
+    let all_well_formed = events.iter().all(|event| {
+        !presence_subject(event).is_empty()
+            && event.get("content").and_then(|v| v.as_str()).is_some()
+    });
+    all_well_formed.then_some(events)
 }
 
 /// Pure response-to-map conversion: takes the raw presence (kind:40902) and
@@ -1510,8 +1540,8 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 mod tests {
     use super::{
         apply_cardinality_rule, assemble_roster_resolution, build_hint_map, build_template_report,
-        cmd_set_add_policy, finalize_roster_resolution, format_candidate, hints_from_results,
-        join_bounded_queries, name_matches, resolve_roster_with_archive_filter,
+        cmd_set_add_policy, fetch_candidate_hints, finalize_roster_resolution, format_candidate,
+        hints_from_results, join_bounded_queries, name_matches, resolve_roster_with_archive_filter,
         validate_ttl_seconds, validate_update_channel_fields, ArchivedExclusion, CandidateHint,
         ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
     };
@@ -2543,6 +2573,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn hints_from_results_malformed_element_makes_snapshot_untrusted() {
+        // A body that parses as an array but contains a malformed element
+        // (`{}`, `null`, or a contentless event) is NOT an authoritative
+        // snapshot: it must seed nothing, while the profile sibling survives.
+        let requested = "a".repeat(64);
+        let subject = "b".repeat(64);
+        let pubkeys = vec![requested.clone(), subject.clone()];
+        let profile =
+            events_json(&[json!({ "pubkey": requested.clone(), "created_at": 1_705_276_800_u64 })]);
+
+        for bad_body in [
+            "[{}]".to_string(),
+            "[null]".to_string(),
+            // A well-formed subject but non-string (unreadable) content.
+            events_json(&[json!({
+                "pubkey": "r".repeat(64),
+                "content": 42,
+                "tags": [["p", subject.clone()]],
+            })]),
+        ] {
+            let map = hints_from_results(&pubkeys, Ok(bad_body.clone()), Ok(profile.clone()));
+
+            assert!(
+                map.values().all(|h| h.presence.is_none()),
+                "malformed element {bad_body} must yield no presence labels: {map:?}"
+            );
+            assert_eq!(
+                map[&requested].profile_updated_at,
+                Some(1_705_276_800),
+                "the completed profile sibling must still contribute hints: {map:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hints_from_results_relay_error_response_seeds_nothing() {
+        // The relay surfaces a Redis-outage presence lookup as a non-2xx error,
+        // which the CLI query returns as `Err`. That must seed nothing — a
+        // backend failure is not an authoritative all-offline snapshot.
+        let pk = "c".repeat(64);
+        let pubkeys = vec![pk.clone()];
+
+        let map = hints_from_results(
+            &pubkeys,
+            Err(CliError::Other("presence lookup: redis down".to_string())),
+            Ok("[]".to_string()),
+        );
+
+        assert!(
+            map.get(&pk).is_none_or(|h| h.presence.is_none()),
+            "a relay-side presence failure must never be inferred as offline: {map:?}"
+        );
+    }
+
     // --- join_bounded_queries: a completed lookup survives a hung sibling ---
 
     #[tokio::test(start_paused = true)]
@@ -2584,6 +2669,96 @@ mod tests {
         assert!(
             profile.is_ok(),
             "the completed profile lookup must be retained despite the hung presence sibling"
+        );
+    }
+
+    /// Production-wiring seam: drive `fetch_candidate_hints` itself against a
+    /// controlled `/query` server where the presence query completes and the
+    /// profile query hangs past the timeout. The completed presence hint (an
+    /// `online` overlay plus `offline` seeds for the requested pubkeys) must
+    /// survive. This is what protects the `fetch_candidate_hints` call site: if
+    /// the old shared `timeout(join!(...))` is restored, the hung profile query
+    /// discards the completed presence result and the map comes back empty.
+    #[tokio::test]
+    async fn fetch_candidate_hints_completed_presence_survives_hung_profile_query() {
+        use axum::{extract::State, routing::post, Router};
+        use serde_json::Value;
+        use std::net::SocketAddr;
+        use tokio::net::TcpListener;
+
+        let online_pk = "a".repeat(64);
+        let offline_pk = "b".repeat(64);
+        let relay_pk = "r".repeat(64);
+
+        // Server dispatches on filter kind: presence (40902) returns one online
+        // event immediately; profile (kind 0) hangs well past the timeout.
+        let online_for_server = online_pk.clone();
+        let relay_for_server = relay_pk.clone();
+        let app = Router::new()
+            .route(
+                "/query",
+                post(move |State(()): State<()>, body: axum::body::Bytes| {
+                    let online_pk = online_for_server.clone();
+                    let relay_pk = relay_for_server.clone();
+                    async move {
+                        let filters: Vec<Value> = serde_json::from_slice(&body).unwrap_or_default();
+                        let kind = filters
+                            .first()
+                            .and_then(|f| f.get("kinds"))
+                            .and_then(|k| k.as_array())
+                            .and_then(|k| k.first())
+                            .and_then(Value::as_u64);
+                        if kind == Some(0) {
+                            // Profile query hangs past the 100ms test timeout.
+                            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                        }
+                        let body = serde_json::to_string(&vec![json!({
+                            "pubkey": relay_pk,
+                            "content": "online",
+                            "tags": [["p", online_pk]],
+                        })])
+                        .unwrap();
+                        axum::response::Response::builder()
+                            .header("content-type", "application/json")
+                            .body(axum::body::Body::from(body))
+                            .unwrap()
+                    }
+                }),
+            )
+            .with_state(());
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr: SocketAddr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let keys =
+            nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000001")
+                .expect("valid test key");
+        let client = BuzzClient::new(format!("http://{addr}"), keys, None, None)
+            .expect("client construction should not fail");
+
+        let map = fetch_candidate_hints(
+            &client,
+            &[online_pk.clone(), offline_pk.clone()],
+            std::time::Duration::from_millis(100),
+        )
+        .await;
+
+        // Presence completed: online overlay present, absent pubkey seeded offline.
+        assert_eq!(
+            map[&online_pk].presence.as_deref(),
+            Some("online"),
+            "the completed presence result must survive the hung profile query: {map:?}"
+        );
+        assert_eq!(
+            map[&offline_pk].presence.as_deref(),
+            Some("offline"),
+            "the trusted snapshot must seed the absent candidate offline: {map:?}"
+        );
+        // Profile hung → no profile timestamps.
+        assert!(
+            map.values().all(|h| h.profile_updated_at.is_none()),
+            "the hung profile query must contribute nothing: {map:?}"
         );
     }
 }
