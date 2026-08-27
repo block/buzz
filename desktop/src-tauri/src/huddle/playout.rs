@@ -49,6 +49,10 @@ const REMOTE_RELEASE_DEBOUNCE: std::time::Duration = std::time::Duration::from_m
 const REMOTE_SPEECH_LEVEL_DBOV: i8 = -55;
 /// Playout clock: NetEq emits 10 ms frames, so we tick at 10 ms.
 const PLAYOUT_TICK_MS: u64 = 10;
+/// Gap beyond which a `Burst` catch-up is pointless: NetEq holds at most
+/// 200 ms of audio, so a backlog older than this only replays silence and
+/// stalls the select loop. Detected gaps reset the interval instead.
+const PLAYOUT_STALE_RESET_MS: u64 = 300;
 
 /// How long after the last received packet we keep pulling frames out of a
 /// peer's NetEq into its rodio Player. NetEq always emits a frame on every
@@ -315,20 +319,55 @@ pub(crate) async fn run_playout_recv_loop(
     let mut speaker_level_tick =
         tokio::time::interval(std::time::Duration::from_millis(SPEAKER_LEVEL_TICK_MS));
     speaker_level_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Windows timers default to a 15.6 ms resolution, and tokio intervals
+    // fire ~14.6 ms late there on average (tokio-rs/tokio#5021). At that
+    // resolution the 10 ms playout tick below manages only ~62 of the 100
+    // required pulls per second (measured on Windows 11: 62.4 ticks/s
+    // without the raised resolution, 100.2 with it). Raise the resolution
+    // to 1 ms for the lifetime of the playout loop and hand it back on exit.
+    #[cfg(windows)]
+    let _timer_resolution = {
+        struct TimerResolutionGuard;
+        impl Drop for TimerResolutionGuard {
+            fn drop(&mut self) {
+                unsafe { windows_sys::Win32::Media::timeEndPeriod(1) };
+            }
+        }
+        // TIMERR_NOERROR == 0. Only pair a `timeEndPeriod` with a begin that
+        // actually succeeded; on failure we run at the default resolution and
+        // `Burst` below still recovers the mean rate.
+        (unsafe { windows_sys::Win32::Media::timeBeginPeriod(1) } == 0)
+            .then_some(TimerResolutionGuard)
+    };
+
     let mut playout_tick = tokio::time::interval(std::time::Duration::from_millis(PLAYOUT_TICK_MS));
-    // `Delay` (not `Skip`) so a brief stall in another select arm — e.g. the
-    // ws_tx_for_pongs mutex contending with the encode-side task on a Ping —
-    // doesn't drop a playout tick outright. Dropped ticks would leave the
-    // per-peer Player queues empty for 10 ms and the device mixer would
-    // produce audible silence. `Delay` catches up immediately when the loop
-    // returns to the select.
-    playout_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // `Burst` rather than `Delay` or `Skip`. `Delay` never shortens the
+    // ticks that follow a missed one ("ticks are not shortened"), so once
+    // the timer resolves coarsely or the WebView loads the core, the mean
+    // pull rate stays below 100/s for good: the per-peer Player queues
+    // starve (audible gaps, dropped words) while NetEq stays full and
+    // time-compresses playback indefinitely (metallic, sped-up voices).
+    // `Burst` makes up missed ticks immediately and holds the mean rate;
+    // the short catch-up bursts are absorbed by the existing queue
+    // recovery (hysteresis 10→4, emergency trim at 30). Catch-up is only
+    // useful within NetEq's reach though (200 ms): after a suspend or a
+    // stall longer than PLAYOUT_STALE_RESET_MS the backlog is stale, so we
+    // drop it and realign the cadence instead of replaying it.
+    playout_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
+    let mut last_playout_tick = tokio::time::Instant::now();
 
     loop {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => break,
             _ = playout_tick.tick() => {
+                let now = tokio::time::Instant::now();
+                if now.duration_since(last_playout_tick)
+                    > std::time::Duration::from_millis(PLAYOUT_STALE_RESET_MS)
+                {
+                    playout_tick.reset();
+                }
+                last_playout_tick = now;
                 // Drain one 10 ms frame from each *active* peer's NetEq into
                 // its Player. NetEq always emits a frame (Expand/silence when
                 // empty), so for peers that recently sent we keep the device
