@@ -1241,7 +1241,8 @@ fn turn_is_human_facing(
 /// Resolve the `--reply-to` anchor for a non-DM turn.
 ///
 /// Returns `Some(id)` only for human-facing turns (see [`turn_is_human_facing`]):
-///   - in a thread → the thread ROOT, keeping the reply flat at layer 1
+///   - in a thread → the triggering reply's direct parent, keeping the response
+///     at the sender's nesting level
 ///   - top-level   → the triggering event id, which becomes the new thread root
 ///
 /// Returns `None` for agent↔agent turns, leaving the agent free to nest deeply
@@ -1257,8 +1258,9 @@ fn resolve_reply_anchor(
     }
     Some(
         thread_tags
-            .root_event_id
+            .parent_event_id
             .clone()
+            .or_else(|| thread_tags.root_event_id.clone())
             .unwrap_or_else(|| triggering_event_id.to_string()),
     )
 }
@@ -1762,17 +1764,16 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
 
     // 2. Context hints (with a human-aware reply anchor).
     //
-    // Human-facing turns are anchored so replies stay readable at layer 1:
-    //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
+    // Human-facing turns are anchored so the response stays at the sender's
+    // nesting level:
+    //   - in a thread  → anchor to the triggering reply's direct parent
     //   - top-level     → anchor to the triggering event (it becomes the root)
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
-    // there. DMs are always 1:1 with a human, so they always anchor.
+    // there. DMs always anchor threaded replies.
     let sender_pubkey = last_event.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
+        // NIP-10 resolution sets root and parent together for every reply.
+        thread_tags.parent_event_id.clone()
     } else {
         resolve_reply_anchor(
             &sender_pubkey,
@@ -2421,13 +2422,12 @@ mod tests {
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
 
-        // Reply instruction points at the thread root of the steering message
-        // (thread_b), not the steering event's own id — this matches the
-        // human-aware reply anchoring from PR #1281: for human-facing turns in
-        // a thread, the anchor is always the thread root.
+        // Reply instruction points at the direct parent of the steering
+        // message (thread_b), not the steering event's own id. This keeps the
+        // response at the mentioner's nesting level.
         assert!(
             prompt.contains(&format!("--reply-to {thread_b}")),
-            "reply instruction should target the steering thread root: {prompt}"
+            "reply instruction should target the steering message's parent: {prompt}"
         );
         assert!(
             !prompt.contains(&format!("--reply-to {thread_a}")),
@@ -3876,6 +3876,7 @@ mod tests {
     const AGENT_A_PK: &str = "2222222222222222222222222222222222222222222222222222222222222222";
     const AGENT_B_PK: &str = "3333333333333333333333333333333333333333333333333333333333333333";
     const ROOT_ID: &str = "abc0000000000000000000000000000000000000000000000000000000000000";
+    const PARENT_ID: &str = "cde0000000000000000000000000000000000000000000000000000000000000";
     const TRIGGER_ID: &str = "def0000000000000000000000000000000000000000000000000000000000000";
 
     fn profile(is_agent: bool) -> PromptProfile {
@@ -3903,11 +3904,16 @@ mod tests {
     }
 
     #[test]
-    fn test_anchor_human_in_thread_uses_root() {
-        // Human asks inside a thread → anchor to the thread ROOT (flat at L1).
-        let tags = thread_tags(Some(ROOT_ID), &[AGENT_A_PK]);
+    fn test_anchor_human_in_thread_uses_parent() {
+        // Human asks inside a nested thread → anchor to the direct parent so
+        // the response is the triggering message's sibling.
+        let tags = ThreadTags {
+            root_event_id: Some(ROOT_ID.to_string()),
+            parent_event_id: Some(PARENT_ID.to_string()),
+            mentioned_pubkeys: vec![AGENT_A_PK.to_string()],
+        };
         let anchor = resolve_reply_anchor(HUMAN_PK, &tags, TRIGGER_ID, Some(&id_lookup()));
-        assert_eq!(anchor.as_deref(), Some(ROOT_ID));
+        assert_eq!(anchor.as_deref(), Some(PARENT_ID));
     }
 
     #[test]
@@ -4668,9 +4674,8 @@ mod tests {
             cancel_reason: None,
         };
 
-        // No profile lookup → sender treated as human → human-facing thread
-        // reply anchors to the thread ROOT (flat at layer 1), not the
-        // triggering event id.
+        // No profile lookup → sender treated as human. A direct reply to the
+        // root has the root as its parent, so the response stays at layer 1.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
             prompt.contains(&format!("--reply-to {root_id}")),
@@ -4694,11 +4699,14 @@ mod tests {
     fn test_reply_instruction_present_for_dm_thread_reply() {
         let ch = Uuid::new_v4();
         let root_id = "b".repeat(64);
+        let parent_id = "c".repeat(64);
         let event = make_event_with_tags(
             "thanks",
-            vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
+            vec![
+                vec!["e".into(), root_id, "".into(), "root".into()],
+                vec!["e".into(), parent_id.clone(), "".into(), "reply".into()],
+            ],
         );
-        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -4725,8 +4733,8 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
-            "DM thread reply should include reply instruction"
+            prompt.contains(&format!("--reply-to {parent_id}")),
+            "DM thread reply should target the sender's direct parent"
         );
     }
 
@@ -4796,7 +4804,7 @@ mod tests {
     }
 
     #[test]
-    fn test_human_thread_reply_anchors_to_root_not_triggering_or_parent() {
+    fn test_human_thread_reply_anchors_to_parent_not_triggering_or_root() {
         let ch = Uuid::new_v4();
         let root_id = "a".repeat(64);
         let parent_id = "b".repeat(64);
@@ -4819,20 +4827,20 @@ mod tests {
             cancel_reason: None,
         };
 
-        // Human-facing (no lookup) deep reply: anchor to the thread ROOT to
-        // keep the conversation flat — NOT the triggering event or parent.
+        // Human-facing (no lookup) deep reply: anchor to the direct parent so
+        // the response stays at the sender's nesting level.
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {root_id}")),
-            "human-facing nested reply should anchor to the thread root"
+            prompt.contains(&format!("--reply-to {parent_id}")),
+            "human-facing nested reply should anchor to the direct parent"
         );
         assert!(
             !prompt.contains(&format!("--reply-to {event_id}")),
             "instruction should NOT anchor to the triggering event id"
         );
         assert!(
-            !prompt.contains(&format!("--reply-to {parent_id}")),
-            "instruction should NOT anchor to the parent event id"
+            !prompt.contains(&format!("--reply-to {root_id}")),
+            "instruction should NOT flatten a nested reply to the thread root"
         );
     }
 

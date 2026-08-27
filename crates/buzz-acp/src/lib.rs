@@ -4479,6 +4479,8 @@ mod agent_draft_prompt_tests {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("UUID from `<context>`"));
         assert!(prompt.contains("reply destination supplied in the `<context>` block"));
+        assert!(prompt.contains("the triggering reply's direct parent"));
+        assert!(!prompt.contains("the root of the triggering thread"));
         assert!(!prompt.contains("`[Context]`"));
     }
 
