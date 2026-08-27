@@ -1,0 +1,173 @@
+name: Nix
+
+on:
+  push:
+    branches: [main, release]
+  pull_request:
+    paths:
+      - flake.nix
+      - flake.lock
+      - .github/workflows/nix.yml
+  schedule:
+    # Check for desktop release updates daily at 06:00 UTC
+    - cron: "0 6 * * *"
+
+concurrency:
+  group: nix-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  flake-check:
+    name: flake check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - run: nix flake check --no-build
+
+  build-cli-linux:
+    name: build buzz-cli (x86_64-linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - run: nix build .#buzz-cli --no-link --print-build-logs
+      - run: nix run .#buzz-cli -- --help
+
+  build-relay-linux:
+    name: build buzz-relay (x86_64-linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - run: nix build .#buzz-relay --no-link --print-build-logs
+
+  build-desktop-linux:
+    name: build buzz-desktop (x86_64-linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - run: nix build .#buzz-desktop --no-link --print-build-logs
+
+  build-cli-darwin:
+    name: build buzz-cli (aarch64-darwin)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - run: nix build .#buzz-cli --no-link --print-build-logs
+      - run: nix run .#buzz-cli -- --help
+
+  build-desktop-darwin:
+    name: build buzz-desktop (aarch64-darwin)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: DeterminateSystems/magic-nix-cache-action@v8
+      - run: nix build .#buzz-desktop --no-link --print-build-logs
+
+  update-desktop-hashes:
+    name: Update desktop release hashes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Fetch latest desktop release tag
+        id: latest
+        run: |
+          TAG=$(curl -s https://api.github.com/repos/block/buzz/releases/latest | jq -r '.tag_name' | grep '^desktop-v')
+          if [ -z "$TAG" ]; then
+            echo "No desktop-v* release found"
+            exit 0
+          fi
+          VERSION="${TAG#desktop-v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - name: Check if update needed
+        id: check
+        run: |
+          CURRENT=$(grep 'desktopVersion = "' flake.nix | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$CURRENT" = "${{ steps.latest.outputs.version }}" ]; then
+            echo "Up to date ($CURRENT)"
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+            echo "Updating from $CURRENT to ${{ steps.latest.outputs.version }}"
+          fi
+      - name: Prefetch hashes
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          VERSION="${{ steps.latest.outputs.version }}"
+          # Prefetch all three desktop assets
+          AARCH64_DARWIN=$(nix-prefetch-url --type sha256 "https://github.com/block/buzz/releases/download/desktop-v${VERSION}/Buzz_${VERSION}_aarch64.app.tar.gz")
+          X64_DARWIN=$(nix-prefetch-url --type sha256 "https://github.com/block/buzz/releases/download/desktop-v${VERSION}/Buzz_${VERSION}_x64.app.tar.gz")
+          AMD64_LINUX=$(nix-prefetch-url --type sha256 "https://github.com/block/buzz/releases/download/desktop-v${VERSION}/Buzz_${VERSION}_amd64.AppImage")
+
+          # Convert to SRI
+          AARCH64_DARWIN_SRI=$(nix hash to-sri --type sha256 "$AARCH64_DARWIN")
+          X64_DARWIN_SRI=$(nix hash to-sri --type sha256 "$X64_DARWIN")
+          AMD64_LINUX_SRI=$(nix hash to-sri --type sha256 "$AMD64_LINUX")
+
+          # Update flake.nix
+          sed -i "s/desktopVersion = \".*\"/desktopVersion = \"${VERSION}\"/" flake.nix
+          sed -i "s|\"sha256-[^\"]*\";  # aarch64-darwin placeholder|\"${AARCH64_DARWIN_SRI}\";|" flake.nix || true
+          # Use more robust replacement
+          python3 -c "
+          import re
+          with open('flake.nix', 'r') as f:
+              content = f.read()
+          content = re.sub(r'\"aarch64-darwin\" = \{[^}]*sha256 = \"[^\"]*\"', '\"aarch64-darwin\" = { file = \"Buzz_\${desktopVersion}_aarch64.app.tar.gz\"; sha256 = \"${AARCH64_DARWIN_SRI}\"', content)
+          content = re.sub(r'\"x86_64-darwin\" = \{[^}]*sha256 = \"[^\"]*\"', '\"x86_64-darwin\" = { file = \"Buzz_\${desktopVersion}_x64.app.tar.gz\"; sha256 = \"${X64_DARWIN_SRI}\"', content)
+          content = re.sub(r'\"x86_64-linux\" = \{[^}]*sha256 = \"[^\"]*\"', '\"x86_64-linux\" = { file = \"Buzz_\${desktopVersion}_amd64.AppImage\"; sha256 = \"${AMD64_LINUX_SRI}\"', content)
+          with open('flake.nix', 'w') as f:
+              f.write(content)
+          "
+      - name: Update flake.lock
+        if: steps.check.outputs.needs_update == 'true'
+        run: nix flake lock --update-input nixpkgs
+      - name: Create pull request
+        if: steps.check.outputs.needs_update == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore(nix): bump desktop release to ${{ steps.latest.outputs.version }}"
+          title: "chore(nix): bump desktop release to ${{ steps.latest.outputs.version }}"
+          body: |
+            Automated update of desktop release hashes.
+
+            Desktop version: ${{ steps.latest.outputs.version }}
+            Release tag: ${{ steps.latest.outputs.tag }}
+
+            Updated by the Nix workflow's scheduled hash automation.
+          branch: nix/update-desktop-hashes
+          delete-branch: true

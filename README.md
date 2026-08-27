@@ -132,6 +132,36 @@ The Windows build is not code-signed, so SmartScreen may show "Windows protected
 
 By default the app connects to `ws://localhost:3000`. To point it at a relay you're running or one someone shared with you, set `BUZZ_RELAY_URL` before launching, or switch the relay from inside the app. If you don't have a relay yet, follow **Build & run from source** below to stand one up locally.
 
+### Install via Nix (experimental)
+
+If you use the [Nix package manager](https://nixos.org/) (with flakes enabled), you can install the Buzz CLI, relay, and desktop app directly from this repo — no Rust toolchain or Node required.
+
+**CLI:**
+```bash
+nix run github:block/buzz#buzz-cli -- --help
+nix profile install github:block/buzz#buzz-cli   # install the `buzz` binary
+```
+
+**Relay/server:**
+```bash
+nix run github:block/buzz#buzz-relay -- --help
+nix profile install github:block/buzz#buzz-relay
+```
+
+**Desktop app** (prebuilt release binary, supported platforms only):
+```bash
+nix run github:block/buzz#buzz-desktop   # macOS Apple Silicon, macOS Intel, Linux x86_64
+```
+
+> **Note:** There is no prebuilt desktop binary for `aarch64-linux`. The CLI and relay are built from source on all four standard platforms (`x86_64-linux`, `aarch64-linux`, `x86_64-darwin`, `aarch64-darwin`); the desktop package wraps the official release artifacts where they exist.
+>
+> **Intel macOS:** `x86_64-darwin` is supported via a pinned nixpkgs revision. Nixpkgs unstable has dropped `x86_64-darwin`; the flake uses a pre-drop pin for that system. Nixpkgs 26.05 will be the last release to support Intel Darwin.
+
+**Development shell** (Rust toolchain + PostgreSQL + Redis):
+```bash
+nix develop github:block/buzz
+```
+
 ### I want my own hosted relay
 
 To run a relay for your team without managing servers, you can deploy one to Railway in a click:
