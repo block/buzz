@@ -101,13 +101,30 @@ export function InviteRedeemForm({
     () => parseInviteInput(inviteInput),
     [inviteInput],
   );
+  const isAddCommunity = variant === "add-community";
+  const normalizedLanRelayUrl = React.useMemo(() => {
+    if (!isAddCommunity || !lanRelayUrl.trim()) return undefined;
+    try {
+      return normalizeLanRelayUrl(lanRelayUrl);
+    } catch {
+      return null;
+    }
+  }, [isAddCommunity, lanRelayUrl]);
   const normalizedRelayUrl = React.useMemo(
     () =>
       onConnect &&
       (!parsed || (variant === "add-community" && !hasInviteRelay(parsed)))
-        ? normalizeRelayUrl(inviteInput)
+        ? (normalizeRelayUrl(inviteInput) ??
+          (isAddCommunity ? (normalizedLanRelayUrl ?? null) : null))
         : null,
-    [inviteInput, onConnect, parsed, variant],
+    [
+      inviteInput,
+      isAddCommunity,
+      normalizedLanRelayUrl,
+      onConnect,
+      parsed,
+      variant,
+    ],
   );
   const parsedInvite: ParsedInvite | null = normalizedRelayUrl ? null : parsed;
   const isBareCode = parsedInvite !== null && !hasInviteRelay(parsedInvite);
@@ -153,15 +170,6 @@ export function InviteRedeemForm({
         (isBareCode && bareCodeRelayUrl.trim().length > 0))) ||
     normalizedRelayUrl !== null;
   const isOnboardingSpotlight = variant === "onboarding-spotlight";
-  const isAddCommunity = variant === "add-community";
-  const normalizedLanRelayUrl = React.useMemo(() => {
-    if (!isAddCommunity || !lanRelayUrl.trim()) return undefined;
-    try {
-      return normalizeLanRelayUrl(lanRelayUrl);
-    } catch {
-      return null;
-    }
-  }, [isAddCommunity, lanRelayUrl]);
   const showInvalidInviteTip =
     isOnboardingSpotlight && inviteInput.trim().length > 0 && !canSubmit;
 
@@ -474,7 +482,7 @@ export function InviteRedeemForm({
             htmlFor="invite-input"
           >
             {isAddCommunity
-              ? "Community URL or invite link"
+              ? "Community URL or invite link (optional)"
               : "Invite link or code"}
           </label>
           <Input

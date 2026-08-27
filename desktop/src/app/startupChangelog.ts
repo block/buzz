@@ -10,6 +10,7 @@ export const STARTUP_CHANGELOG: StartupChangelogEntry[] = [
   {
     date: "2026-08-27",
     items: [
+      "加入 Community 时公网 Relay 地址改为可选，仅填写 LAN Relay 地址也可以完成连接。",
       "修复公网和内网 WebSocket 长连接心跳处理，降低空闲连接周期性断开的概率。",
       "修复连接写入失败后原生连接任务退出但前端未收到错误，恢复正常自动重连。",
       "网络断开时仍可退出当前 Community，不再被卡在无法访问的社区。",
