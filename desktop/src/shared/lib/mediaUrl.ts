@@ -74,6 +74,49 @@ function canonicalAuthority(url: string): string | null {
   }
 }
 
+function isPrivateMediaUrl(url: string): boolean {
+  try {
+    const hostname = new URL(url).hostname
+      .toLowerCase()
+      .replace(/^\[|\]$/g, "");
+    if (
+      hostname === "localhost" ||
+      hostname === "::1" ||
+      hostname.endsWith(".localhost") ||
+      hostname.endsWith(".local")
+    )
+      return true;
+    if (hostname.includes(":"))
+      return (
+        hostname.startsWith("fc") ||
+        hostname.startsWith("fd") ||
+        hostname.startsWith("fe8") ||
+        hostname.startsWith("fe9") ||
+        hostname.startsWith("fea") ||
+        hostname.startsWith("feb")
+      );
+    const octets = hostname.split(".").map(Number);
+    if (
+      octets.length !== 4 ||
+      octets.some(
+        (octet) => !Number.isInteger(octet) || octet < 0 || octet > 255,
+      )
+    )
+      return false;
+    const [first, second] = octets;
+    return (
+      first === 10 ||
+      first === 127 ||
+      (first === 169 && second === 254) ||
+      (first === 172 && second >= 16 && second <= 31) ||
+      (first === 192 && second === 168) ||
+      (first === 100 && second >= 64 && second <= 127)
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Monotonic cache generation, bumped on every `resetMediaCaches` (i.e.
  * workspace switch). Async lookups capture the current generation and may
@@ -365,7 +408,7 @@ export function rewriteRelayUrl(url: string): string {
     const relayOriginMatch = urlOrigin === cachedRelayOrigin;
     const aliasMatch =
       urlAuthority !== null && cachedRelayAuthorities.has(urlAuthority);
-    if (!relayOriginMatch && !aliasMatch) {
+    if (!relayOriginMatch && !aliasMatch && !isPrivateMediaUrl(url)) {
       return url;
     }
   }

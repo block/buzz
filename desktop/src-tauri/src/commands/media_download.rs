@@ -69,6 +69,7 @@ fn normalize_download_url_against_bases(
     if !bases
         .iter()
         .any(|base| authority == canonical_media_authority(base))
+        && !is_private_media_url(&parsed)
     {
         return Err("download URL must match the relay origin".to_string());
     }
@@ -84,6 +85,22 @@ fn normalize_download_url_against_bases(
     normalized.set_query(parsed.query());
     normalized.set_fragment(None);
     Ok(normalized.to_string())
+}
+
+fn is_private_media_url(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(address)) => {
+            address.is_private() || address.is_loopback() || address.is_link_local()
+        }
+        Some(url::Host::Ipv6(address)) => {
+            address.is_loopback() || address.is_unique_local() || address.is_unicast_link_local()
+        }
+        Some(url::Host::Domain(domain)) => {
+            let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+            domain == "localhost" || domain.ends_with(".localhost") || domain.ends_with(".local")
+        }
+        None => false,
+    }
 }
 
 fn canonical_media_authority(url: &url::Url) -> String {
@@ -843,10 +860,9 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_download_url_loopback_rejected() {
+    fn test_validate_download_url_loopback_media_allowed_as_alias() {
         let result = validate_download_url("http://127.0.0.1/media/abc.jpg", RELAY_BASE);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("relay origin"));
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -882,13 +898,12 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_download_url_http_still_requires_exact_relay_origin() {
+    fn test_validate_download_url_http_private_alias_allowed() {
         let result = validate_download_url(
             "http://192.168.50.21:4500/media/abc.jpg",
             "http://192.168.50.20:4500",
         );
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("relay origin"));
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -908,16 +923,32 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_download_url_rejects_unconfigured_alias() {
+    fn test_normalize_download_url_accepts_unconfigured_private_ip_alias() {
         let bases = vec![
             "https://public.example".to_string(),
             "http://10.24.11.82:3000".to_string(),
         ];
-        assert!(normalize_download_url_against_bases(
-            "https://10.24.11.83:3000/media/abc123.png",
-            &bases,
-        )
-        .is_err());
+        assert_eq!(
+            normalize_download_url_against_bases(
+                "https://10.24.11.83:3000/media/abc123.png",
+                &bases,
+            )
+            .unwrap(),
+            "https://public.example/media/abc123.png"
+        );
+    }
+
+    #[test]
+    fn test_normalize_download_url_accepts_unconfigured_private_alias() {
+        let bases = vec!["https://public.example".to_string()];
+        assert_eq!(
+            normalize_download_url_against_bases(
+                "https://192.168.50.20:3000/media/abc123.png",
+                &bases,
+            )
+            .unwrap(),
+            "https://public.example/media/abc123.png"
+        );
     }
 
     #[test]
@@ -972,12 +1003,9 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_download_url_private_host_video_rejected() {
-        // Off-relay private host serving a video must be rejected before any
-        // fetch — same SSRF gate as image download.
+    fn test_validate_download_url_private_host_video_allowed_as_alias() {
         let result = validate_download_url("http://127.0.0.1/media/clip.mp4", RELAY_BASE);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("relay origin"));
+        assert!(result.is_ok());
     }
 
     /// Redirect-hop SSRF guard: the media fetch client must NOT follow a 3xx,

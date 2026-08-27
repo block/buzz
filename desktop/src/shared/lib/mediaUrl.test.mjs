@@ -374,7 +374,10 @@ test("rewriteRelayUrl: repairs an advertised HTTPS URL for the same HTTP relay a
     );
 
     const differentPort = `https://10.24.11.82:3443/media/${HASH}.png`;
-    assert.equal(mediaUrl.rewriteRelayUrl(differentPort), differentPort);
+    assert.equal(
+      mediaUrl.rewriteRelayUrl(differentPort),
+      `http://127.0.0.1:54321/media/${HASH}.png`,
+    );
   } finally {
     globalThis.window = previousWindow;
   }
@@ -408,7 +411,7 @@ test("rewriteRelayUrl: proxies media from the configured LAN alias while connect
       `http://127.0.0.1:54321/media/${HASH}.png`,
     );
 
-    const unrelated = `https://10.24.11.83:3000/media/${HASH}.png`;
+    const unrelated = `https://other-relay.example/media/${HASH}.png`;
     assert.equal(mediaUrl.rewriteRelayUrl(unrelated), unrelated);
   } finally {
     globalThis.window = previousWindow;
@@ -425,6 +428,36 @@ test("rewriteRelayUrl: legacy relay-origin publishing still restricts unrelated 
 
     const unrelated = `https://cdn.example/media/${HASH}.png`;
     assert.equal(mediaUrl.rewriteRelayUrl(unrelated), unrelated);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
+test("rewriteRelayUrl: proxies an unconfigured private LAN media URL for external clients", async () => {
+  const previousWindow = globalThis.window;
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke(command) {
+        if (command === "get_media_proxy_port") return Promise.resolve(54321);
+        if (command === "get_relay_media_urls")
+          return Promise.resolve(["https://public.example"]);
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      },
+    },
+  };
+  try {
+    const mediaUrl = await import(
+      `./mediaUrl.ts?unconfiguredLan=${Date.now()}`
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(
+      mediaUrl.rewriteRelayUrl(`https://192.168.50.20:3000/media/${HASH}.png`),
+      `http://127.0.0.1:54321/media/${HASH}.png`,
+    );
+    assert.equal(
+      mediaUrl.rewriteRelayUrl(`https://cdn.example/media/${HASH}.png`),
+      `https://cdn.example/media/${HASH}.png`,
+    );
   } finally {
     globalThis.window = previousWindow;
   }
