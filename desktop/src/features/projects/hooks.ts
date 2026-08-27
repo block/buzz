@@ -78,11 +78,9 @@ export type {
   ProjectPullRequestCommentAnchor,
   Repository,
 };
-
 export type ProjectPullRequestCommentDecision = "request-changes";
 
 const HIDDEN_PROJECT_CARDS_KEY = "buzz.projects.hidden-cards.v1";
-
 export type RepoState = {
   branches: Array<{ name: string; commit: string }>;
   tags: Array<{ name: string; commit: string }>;
@@ -172,9 +170,11 @@ export async function fetchProjects(
   signal?: AbortSignal,
 ): Promise<Project[]> {
   // Delegates to `buildProjectsFromFetcher` in `projectEnumeration.ts`, which
-  // is the pure, Tauri-free core of this operation. That helper's javadoc
-  // explains the fail-closed tombstone contract and the NIP-OA owner-deletion
-  // relay-side-suppression decision.
+  // is the pure, Tauri-free core of this operation. Its javadoc explains
+  // fail-closed tombstones and NIP-OA owner-deletion suppression.
+  const viewerPubkey = await getIdentity()
+    .then((identity) => identity.pubkey)
+    .catch(() => undefined);
   const fetcher: FetchProjectEventsExhaustively =
     fetchExhaustively ??
     ((kinds, extraFilter) =>
@@ -182,6 +182,7 @@ export async function fetchProjects(
   return buildProjectsFromFetcher(fetcher, {
     relayOrigin: getCachedRelayOrigin(),
     hiddenAddresses: new Set(readHiddenProjectCards()),
+    viewerPubkey,
   });
 }
 
@@ -210,8 +211,10 @@ function eventToRepoState(event: RelayEvent): RepoState {
     updatedAt: event.created_at,
   };
 }
-
-async function fetchRepoState(project: Repository): Promise<RepoState | null> {
+/** Load the trusted relay state used to resolve a repository's live refs. */
+export async function fetchRepoState(
+  project: Repository,
+): Promise<RepoState | null> {
   const relaySelf = await getRelaySelf();
   const trustedAuthors = [
     ...new Set(
