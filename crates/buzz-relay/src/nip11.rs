@@ -56,6 +56,11 @@ pub struct RelayInfo {
     /// provider-agnostic; provider credentials remain server-side.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gif: Option<GifDescriptor>,
+    /// Relay-owned HiveTalk "Meetings" (LiveKit video) proxy. Present only when
+    /// the operator has set `BUZZ_HIVETALK_API_ROOT`. Carries no credential —
+    /// the integration is per-user.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meetings: Option<MeetingsDescriptor>,
     /// Relay's own signing pubkey (NIP-11 `self` field, NIP-43).
     #[serde(rename = "self", skip_serializing_if = "Option::is_none")]
     pub relay_self: Option<String>,
@@ -70,6 +75,15 @@ pub struct GifDescriptor {
     pub search: String,
     /// Relay-relative authenticated share-reporting endpoint.
     pub share: String,
+}
+
+/// Public capability descriptor for the relay-proxied HiveTalk Meetings API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MeetingsDescriptor {
+    /// Provider identifier understood by Buzz clients.
+    pub provider: String,
+    /// Relay-relative path prefix for the Meetings control-plane proxy.
+    pub proxy: String,
 }
 
 /// Protocol and resource limits advertised in the NIP-11 document.
@@ -165,6 +179,7 @@ impl RelayInfo {
         max_message_length: usize,
         pairing_relay_url: Option<&str>,
         gif_provider: Option<&str>,
+        meetings_provider: Option<&str>,
     ) -> Self {
         debug_assert!(
             !advertise_nip43 || relay_self.is_some(),
@@ -186,6 +201,14 @@ impl RelayInfo {
             }
         });
 
+        let meetings = meetings_provider.map(|provider| {
+            supported_extensions.push("buzz-meetings".to_string());
+            MeetingsDescriptor {
+                provider: provider.to_string(),
+                proxy: crate::api::meetings::MEETINGS_PREFIX.to_string(),
+            }
+        });
+
         Self {
             name: "Buzz Relay".to_string(),
             description: "Buzz — private team communication relay".to_string(),
@@ -200,6 +223,7 @@ impl RelayInfo {
             limitation: Some(relay_limitation(max_message_length)),
             pairing_relay_url: pairing_relay_url.map(str::to_string),
             gif,
+            meetings,
             relay_self: relay_self.map(|s| s.to_string()),
         }
     }
@@ -280,6 +304,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         state.config.max_frame_bytes,
         state.config.pairing_relay_url.as_deref(),
         state.config.klipy.as_ref().map(|_| "klipy"),
+        state.config.hivetalk.as_ref().map(|_| "hivetalk"),
     );
     let tenant_host = if state.config.push_gateway_delivery_url.is_some() {
         crate::tenant::bind_community(&state.db, raw_host)
@@ -372,6 +397,7 @@ const _RELAY_INFO_BUILD_STATIC_INPUT_FENCE: fn(
     usize,
     Option<&str>,
     Option<&str>,
+    Option<&str>,
 ) -> RelayInfo = RelayInfo::build;
 
 #[cfg(test)]
@@ -426,7 +452,7 @@ mod tests {
 
     #[test]
     fn build_advertises_buzz_repository_url() {
-        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None);
+        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
         assert_eq!(info.software, "https://github.com/block/buzz");
     }
 
@@ -439,6 +465,7 @@ mod tests {
             DEFAULT_MAX_FRAME_BYTES,
             Some("wss://pairing.buzz.xyz"),
             None,
+            None,
         );
         let json = serde_json::to_value(&info).expect("serialize");
         assert_eq!(
@@ -447,7 +474,7 @@ mod tests {
             Some("wss://pairing.buzz.xyz")
         );
 
-        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None);
+        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
         let json = serde_json::to_value(&info).expect("serialize");
         assert!(json.get("pairing_relay_url").is_none());
     }
@@ -461,6 +488,7 @@ mod tests {
             DEFAULT_MAX_FRAME_BYTES,
             None,
             Some("klipy"),
+            None,
         );
 
         let json = serde_json::to_value(&info).expect("serialize");
@@ -473,12 +501,41 @@ mod tests {
             .contains(&serde_json::json!("buzz-gif")));
         assert!(!json.to_string().contains("api_key"));
 
-        let unconfigured = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None);
+        let unconfigured =
+            RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
         assert!(unconfigured.gif.is_none());
         assert!(!unconfigured
             .supported_extensions
             .expect("extensions")
             .contains(&"buzz-gif".to_string()));
+    }
+
+    #[test]
+    fn meetings_descriptor_and_extension_are_config_gated() {
+        let info = RelayInfo::build(
+            None,
+            None,
+            false,
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            Some("hivetalk"),
+        );
+        let json = serde_json::to_value(&info).expect("serialize");
+        assert_eq!(json["meetings"]["provider"], "hivetalk");
+        assert_eq!(json["meetings"]["proxy"], "/meetings");
+        assert!(json["supported_extensions"]
+            .as_array()
+            .expect("extensions")
+            .contains(&serde_json::json!("buzz-meetings")));
+
+        let unconfigured =
+            RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
+        assert!(unconfigured.meetings.is_none());
+        assert!(!unconfigured
+            .supported_extensions
+            .expect("extensions")
+            .contains(&"buzz-meetings".to_string()));
     }
 
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard
@@ -493,6 +550,7 @@ mod tests {
             DEFAULT_MAX_FRAME_BYTES,
             None,
             None,
+            None,
         );
         assert_eq!(
             info.icon.as_deref(),
@@ -505,7 +563,8 @@ mod tests {
         );
 
         for icon in [None, Some("")] {
-            let info = RelayInfo::build(None, icon, false, DEFAULT_MAX_FRAME_BYTES, None, None);
+            let info =
+                RelayInfo::build(None, icon, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
             assert!(info.icon.is_none());
             let json = serde_json::to_value(&info).expect("serialize");
             assert!(
@@ -525,7 +584,7 @@ mod tests {
 
     #[test]
     fn max_message_length_uses_configured_frame_limit() {
-        let info = RelayInfo::build(None, None, false, 262_144, None, None);
+        let info = RelayInfo::build(None, None, false, 262_144, None, None, None);
         let limitation = info.limitation.expect("limitation");
         assert_eq!(limitation.max_message_length, Some(262_144));
     }
@@ -556,7 +615,7 @@ mod tests {
     /// Open relay, ephemeral key — both `self` and NIP-43 are absent.
     #[test]
     fn build_open_relay_ephemeral_key_omits_self_and_nip43() {
-        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None);
+        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
         assert!(info.relay_self.is_none());
         assert!(!info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
     }
@@ -569,7 +628,15 @@ mod tests {
     #[test]
     fn build_open_relay_stable_key_advertises_self_but_not_nip43() {
         let pk = "0000000000000000000000000000000000000000000000000000000000000001";
-        let info = RelayInfo::build(Some(pk), None, false, DEFAULT_MAX_FRAME_BYTES, None, None);
+        let info = RelayInfo::build(
+            Some(pk),
+            None,
+            false,
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+        );
         assert_eq!(info.relay_self.as_deref(), Some(pk));
         assert!(!info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
     }
@@ -578,7 +645,15 @@ mod tests {
     #[test]
     fn build_membership_relay_advertises_self_and_nip43() {
         let pk = "0000000000000000000000000000000000000000000000000000000000000001";
-        let info = RelayInfo::build(Some(pk), None, true, DEFAULT_MAX_FRAME_BYTES, None, None);
+        let info = RelayInfo::build(
+            Some(pk),
+            None,
+            true,
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+        );
         assert_eq!(info.relay_self.as_deref(), Some(pk));
         assert!(info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
     }
@@ -589,6 +664,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "advertise_nip43=true requires relay_self=Some")]
     fn build_nip43_without_self_panics_in_debug() {
-        let _ = RelayInfo::build(None, None, true, DEFAULT_MAX_FRAME_BYTES, None, None);
+        let _ = RelayInfo::build(None, None, true, DEFAULT_MAX_FRAME_BYTES, None, None, None);
     }
 }

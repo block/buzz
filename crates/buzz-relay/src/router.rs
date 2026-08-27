@@ -75,6 +75,60 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // Relay-owned third-party GIF metadata proxy (NIP-98 auth).
         .route(api::gifs::SEARCH_PATH, post(api::gifs::search))
         .route(api::gifs::SHARE_PATH, post(api::gifs::share))
+        // Relay-owned HiveTalk "Meetings" control-plane proxy. Pass-through
+        // only, holds no credential; every route 404s when
+        // BUZZ_HIVETALK_API_ROOT is unset.
+        .route("/meetings/auth/challenge", get(api::meetings::challenge))
+        .route("/meetings/plans", get(api::meetings::plans))
+        .route("/meetings/subscription", get(api::meetings::subscription))
+        .route("/meetings/subscribe", post(api::meetings::subscribe))
+        .route(
+            "/meetings/payment/status",
+            get(api::meetings::payment_status),
+        )
+        .route(
+            "/meetings/register-room",
+            post(api::meetings::register_room),
+        )
+        .route("/meetings/room-info", get(api::meetings::room_info))
+        .route(
+            "/meetings/rooms-by-pubkey",
+            get(api::meetings::rooms_by_pubkey),
+        )
+        .route("/meetings/list-rooms", get(api::meetings::list_rooms))
+        .route("/meetings/get-token", post(api::meetings::get_token))
+        .route("/meetings/room/edit", post(api::meetings::room_edit))
+        .route("/meetings/room/delete", post(api::meetings::room_delete))
+        .route(
+            "/meetings/room/stage/promote",
+            post(api::meetings::stage_promote),
+        )
+        .route(
+            "/meetings/room/stage/demote",
+            post(api::meetings::stage_demote),
+        )
+        .route(
+            "/meetings/room/moderator/promote",
+            post(api::meetings::moderator_promote),
+        )
+        .route(
+            "/meetings/room/moderator/demote",
+            post(api::meetings::moderator_demote),
+        )
+        .route("/meetings/kick-user", post(api::meetings::kick_user))
+        .route("/meetings/mute-user", post(api::meetings::mute_user))
+        .route(
+            "/meetings/room/notify-lock",
+            post(api::meetings::notify_lock),
+        )
+        .route(
+            "/meetings/room/mute-on-join",
+            post(api::meetings::mute_on_join),
+        )
+        .route(
+            "/meetings/room/audience-mode",
+            post(api::meetings::audience_mode),
+        )
         .route(
             "/workflows/{workflow_id}/runs",
             get(api::workflows::workflow_runs),

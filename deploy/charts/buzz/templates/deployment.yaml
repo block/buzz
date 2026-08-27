@@ -225,6 +225,10 @@ spec:
             - name: BUZZ_HUDDLE_AUDIO_AVAILABLE
               value: {{ include "buzz.huddleAudioAvailable" . | quote }}
 
+            {{- if .Values.relay.hivetalkApiRoot }}
+            - { name: BUZZ_HIVETALK_API_ROOT, value: {{ .Values.relay.hivetalkApiRoot | quote }} }
+            {{- end }}
+
             {{- with .Values.relay.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

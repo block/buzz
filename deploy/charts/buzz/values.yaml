@@ -127,6 +127,10 @@ relay:
   # replicaCount > 1. Explicit true with replicaCount > 1 means the operator
   # accepts/owns the external multi-pod audio/SFU behavior.
   huddleAudioAvailable: null
+  # HiveTalk "Meetings" (LiveKit video) control-plane proxy. Empty disables the
+  # feature: /meetings/* routes 404 and NIP-11 does not advertise it. Not a
+  # secret — the integration is per-user and the relay holds no HiveTalk key.
+  hivetalkApiRoot: ""
   ephemeralTtlOverride: 0
   # Per-upload-event records (`_uploads/` moderation side channel). Off by
   # default. Operators hosting communities for other people may have legal

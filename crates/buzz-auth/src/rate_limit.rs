@@ -62,6 +62,9 @@ pub enum LimitType {
     ApiCalls,
     /// Relay-proxied GIF metadata searches.
     GifSearches,
+    /// Relay-proxied HiveTalk "Meetings" money / quota / token actions
+    /// (subscribe, register-room, get-token, moderation).
+    MeetingActions,
     /// All WebSocket events (broader than `Messages`).
     WsEvents,
     /// Concurrent WebSocket connections from a single IP address.
@@ -75,6 +78,7 @@ impl LimitType {
             Self::Messages => "msg",
             Self::ApiCalls => "api",
             Self::GifSearches => "gif",
+            Self::MeetingActions => "meet",
             Self::WsEvents => "ws",
             Self::IpConnections => "conn",
         }
@@ -94,6 +98,10 @@ pub struct RateLimitConfig {
     /// Default: 30.
     #[serde(default = "default_gif_searches")]
     pub gif_searches_per_min: u64,
+    /// Maximum relay-proxied HiveTalk meeting actions per minute for each
+    /// pubkey (subscribe / register-room / get-token / moderation). Default: 10.
+    #[serde(default = "default_meeting_actions")]
+    pub meeting_actions_per_min: u64,
     /// Maximum HTTP API calls per minute for human users. Default: 300.
     #[serde(default = "default_human_api")]
     pub human_api_calls_per_min: u64,
@@ -120,6 +128,9 @@ fn default_human_msg() -> u64 {
 fn default_gif_searches() -> u64 {
     30
 }
+fn default_meeting_actions() -> u64 {
+    10
+}
 fn default_human_api() -> u64 {
     300
 }
@@ -144,6 +155,7 @@ impl Default for RateLimitConfig {
         Self {
             human_messages_per_min: default_human_msg(),
             gif_searches_per_min: default_gif_searches(),
+            meeting_actions_per_min: default_meeting_actions(),
             human_api_calls_per_min: default_human_api(),
             human_ws_events_per_sec: default_human_ws(),
             agent_standard_messages_per_min: default_agent_std_msg(),
