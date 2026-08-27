@@ -149,28 +149,6 @@ fn dedicated_policy_with_algorithms(algorithms: Vec<Algorithm>) -> IssuerPolicy 
     .expect("valid policy")
 }
 
-fn named_compat_policy_with(
-    required_claims: Vec<String>,
-    forbidden_claims: Vec<String>,
-) -> IssuerPolicy {
-    IssuerPolicy::new(
-        ISSUER.to_owned(),
-        vec![AUDIENCE.to_owned()],
-        TokenClass::NamedCompatibility {
-            required_claims,
-            forbidden_claims,
-        },
-        FreshnessClass::OfflineJwt,
-        "sub".to_owned(),
-        vec![Algorithm::ES256],
-        false,
-        60,
-        3600,
-        None,
-    )
-    .expect("valid policy")
-}
-
 fn verifier_with(policy: IssuerPolicy) -> FederatedAssertionVerifier<StaticIssuerKeySource> {
     let mut registry = IssuerRegistry::new();
     let issuer = policy.issuer().to_owned();
@@ -245,78 +223,23 @@ fn id_token_denies_even_when_iss_aud_sub_match() {
     assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
 }
 
-// ---- Named-compatibility exclusivity vs OIDC ID tokens -------------------
-
-fn named_compat_policy() -> IssuerPolicy {
-    IssuerPolicy::new(
-        ISSUER.to_owned(),
-        vec![AUDIENCE.to_owned()],
-        TokenClass::NamedCompatibility {
-            // Requiring the access-token-only `client_id` claim is what proves
-            // exclusivity with every OIDC ID token.
-            required_claims: vec![OAUTH_CLIENT_ID_CLAIM.to_owned()],
-            forbidden_claims: vec!["nonce".to_owned()],
-        },
-        FreshnessClass::OfflineJwt,
-        "sub".to_owned(),
-        vec![Algorithm::ES256],
-        false,
-        60,
-        3600,
-        None,
-    )
-    .expect("valid named-compat policy")
-}
+// ---- Named-compatibility mode removed ------------------------------------
 
 #[test]
-fn named_compat_policy_requires_client_id_claim() {
-    // A named-compat policy that does not require `client_id` cannot be proven
-    // mutually exclusive with ID tokens, so construction is rejected.
-    let err = IssuerPolicy::new(
-        ISSUER.to_owned(),
-        vec![AUDIENCE.to_owned()],
-        TokenClass::NamedCompatibility {
-            required_claims: vec!["scope".to_owned()],
-            forbidden_claims: vec!["nonce".to_owned()],
-        },
-        FreshnessClass::OfflineJwt,
-        "sub".to_owned(),
-        vec![Algorithm::ES256],
-        false,
-        60,
-        3600,
-        None,
-    )
-    .unwrap_err();
-    assert_eq!(err, IssuerPolicyError::NonExclusiveCompatibility);
-}
-
-#[test]
-fn named_compat_accepts_access_token_with_generic_typ() {
-    let verifier = verifier_with(named_compat_policy());
-    // Generic `typ=JWT` access token carrying `client_id`.
+fn generic_typ_with_client_id_denies() {
+    // A generic/absent-`typ` JWT carrying `client_id`, matching iss/aud/sub, is
+    // an OIDC-ID-token shape that a claim-presence "named-compatibility" policy
+    // would have wrongly accepted. With that mode removed, no policy accepts a
+    // non-`at+jwt`/non-`nip-fi+jwt` type: it denies on exact `typ` mismatch.
+    let verifier = verifier_with(access_token_policy());
     let token = mint(
         Some("JWT"),
         TEST_KID,
-        json!({ "sub": "user-123", "client_id": "app-1" }),
+        json!({ "sub": "user-123", "client_id": "app-1", "sub_type": "user" }),
     );
-    assert!(verifier.verify(&token).is_ok());
-}
-
-#[test]
-fn named_compat_denies_generic_oidc_id_token() {
-    let verifier = verifier_with(named_compat_policy());
-    // A realistic OIDC ID token: generic `typ`, matching iss/aud/sub, no
-    // `client_id`. It fails the required-claim rule.
-    let token = mint(
-        None,
-        TEST_KID,
-        json!({ "sub": "user-123", "nonce": "abc", "at_hash": "xyz" }),
-    );
-    assert_eq!(
-        verifier.verify(&token).unwrap_err(),
-        VerifierError::ClaimContractRejected
-    );
+    let err = verifier.verify(&token).unwrap_err();
+    assert_eq!(err, VerifierError::TokenTypeRejected);
+    assert_eq!(err.denial_class(), DenialClass::EvidenceRejected);
 }
 
 #[test]
@@ -493,6 +416,38 @@ fn wrong_audience_denies() {
     assert_eq!(
         verifier.verify(&token).unwrap_err(),
         VerifierError::InvalidSignatureOrClaims
+    );
+}
+
+#[test]
+fn key_restricted_to_encrypt_key_ops_denies() {
+    // A matching `kid` whose JWK restricts `key_ops` to `encrypt` cannot verify
+    // a signature (NIP-FI.md:166-169 rejects incompatible JWK usage). Absent a
+    // `key_ops` check the signature would validate under the same EC key.
+    let jwks: JwkSet = serde_json::from_value(json!({
+        "keys": [{
+            "kty": "EC",
+            "crv": "P-256",
+            "key_ops": ["encrypt"],
+            "alg": "ES256",
+            "kid": TEST_KID,
+            "x": TEST_JWK_X,
+            "y": TEST_JWK_Y,
+        }]
+    }))
+    .expect("valid JWKS");
+    let key_set = AssertionKeySet::new(ISSUER.to_owned(), 1, jwks, None).expect("valid key set");
+    let mut registry = IssuerRegistry::new();
+    registry.insert(access_token_policy());
+    let verifier = FederatedAssertionVerifier::new(registry, StaticIssuerKeySource::new([key_set]));
+    let token = mint(
+        Some("at+jwt"),
+        TEST_KID,
+        json!({ "sub": "u", "client_id": "a", "sub_type": "user" }),
+    );
+    assert_eq!(
+        verifier.verify(&token).unwrap_err(),
+        VerifierError::InvalidKey
     );
 }
 
@@ -928,28 +883,6 @@ fn assertion_policy_id_is_invariant_under_subject_class_value_permutation_and_du
         .unwrap(),
     );
     assert_eq!(base.id(), permuted.id());
-}
-
-#[test]
-fn assertion_policy_id_is_invariant_under_compat_claim_permutation_and_duplicates() {
-    let base = named_compat_policy_with(
-        vec!["client_id".to_owned(), "scope".to_owned()],
-        vec!["nonce".to_owned(), "at_hash".to_owned()],
-    );
-    let permuted = named_compat_policy_with(
-        vec![
-            "scope".to_owned(),
-            "client_id".to_owned(),
-            "client_id".to_owned(),
-        ],
-        vec!["at_hash".to_owned(), "nonce".to_owned()],
-    );
-    assert_eq!(base.id(), permuted.id());
-    let different = named_compat_policy_with(
-        vec!["client_id".to_owned()],
-        vec!["nonce".to_owned(), "at_hash".to_owned()],
-    );
-    assert_ne!(base.id(), different.id());
 }
 
 // ---- Canonical scope capture ---------------------------------------------

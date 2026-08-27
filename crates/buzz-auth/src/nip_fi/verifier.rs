@@ -15,11 +15,10 @@
 //! Corrections applied to the mined #1476 verifier, per the settled spec:
 //!
 //! - **Token class + `typ` enforcement**: a policy selects exactly one class
-//!   before parsing claims; `at+jwt`, `nip-fi+jwt`, and named-compatibility
-//!   `typ` values are enforced exactly, and the long-form `application/at+jwt`
-//!   is rejected.
+//!   before parsing claims; `at+jwt` and `nip-fi+jwt` `typ` values are enforced
+//!   exactly, and the long-form `application/at+jwt` is rejected.
 //! - **ID-token denial**: OIDC ID tokens deny even when `iss`, `aud`, `sub`
-//!   match, via `typ` mismatch and forbidden-claim exclusion.
+//!   match, via exact `typ` mismatch against every accepted class.
 //! - **Fixed `nostr_pubkey`**: accepted only as lowercase hex of exactly one
 //!   32-byte key; bech32 and other aliases deny.
 //! - **Spec-exact time arithmetic**: `now < exp`, `iat <= now + skew`,
@@ -34,7 +33,7 @@ use super::config::{
 };
 use super::denial::DenialClass;
 use chrono::{DateTime, TimeZone, Utc};
-use jsonwebtoken::jwk::{JwkSet, KeyAlgorithm, PublicKeyUse};
+use jsonwebtoken::jwk::{JwkSet, KeyAlgorithm, KeyOperations, PublicKeyUse};
 use jsonwebtoken::{decode, jwk::Jwk, Algorithm, DecodingKey, Validation};
 use nostr::PublicKey;
 use serde::de::{Deserializer, Error as _, MapAccess, Visitor};
@@ -579,17 +578,12 @@ fn enforce_token_type(class: &TokenClass, typ: Option<&str>) -> Result<(), Verif
             Some("nip-fi+jwt") => Ok(()),
             _ => Err(VerifierError::TokenTypeRejected),
         },
-        TokenClass::NamedCompatibility { .. } => match typ {
-            None | Some("JWT") => Ok(()),
-            _ => Err(VerifierError::TokenTypeRejected),
-        },
     }
 }
 
 /// Enforce class-specific claim rules: `at+jwt` `client_id` presence and
 /// resource-owner/client-subject classification via the issuer's
-/// [`SubjectClassContract`], and named-compatibility required/forbidden claims
-/// (which exclude OIDC ID tokens).
+/// [`SubjectClassContract`].
 fn enforce_claim_semantics(
     policy: &IssuerPolicy,
     claims: &Map<String, Value>,
@@ -620,17 +614,6 @@ fn enforce_claim_semantics(
             }
         }
         TokenClass::DedicatedNipFi => Ok(()),
-        TokenClass::NamedCompatibility {
-            required_claims,
-            forbidden_claims,
-        } => {
-            if required_claims.iter().any(|c| !claims.contains_key(c))
-                || forbidden_claims.iter().any(|c| claims.contains_key(c))
-            {
-                return Err(VerifierError::ClaimContractRejected);
-            }
-            Ok(())
-        }
     }
 }
 
@@ -698,11 +681,19 @@ fn validate_jwk(jwk: &Jwk, token_algorithm: Algorithm) -> Result<(), VerifierErr
         .public_key_use
         .as_ref()
         .is_none_or(|use_| use_ == &PublicKeyUse::Signature);
+    // NIP-FI.md:166-169 rejects incompatible JWK usage. When `key_ops` is
+    // present it MUST authorize `verify`; a key restricted to other operations
+    // (for example `encrypt`) cannot validate an assertion signature.
+    let key_ops_ok = jwk
+        .common
+        .key_operations
+        .as_ref()
+        .is_none_or(|ops| ops.contains(&KeyOperations::Verify));
     let algorithm_ok = jwk
         .common
         .key_algorithm
         .is_none_or(|alg| jwk_algorithm_matches(alg, token_algorithm));
-    if usage_ok && algorithm_ok {
+    if usage_ok && key_ops_ok && algorithm_ok {
         Ok(())
     } else {
         Err(VerifierError::InvalidKey)

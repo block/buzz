@@ -128,10 +128,9 @@ impl fmt::Debug for TransportContractId {
     }
 }
 
-/// The RFC 9068 / OAuth 2.0 access-token claim naming the OAuth client. Present
-/// on access tokens, absent on OIDC ID tokens — the generic (non-provider)
-/// marker that makes a named-compatibility policy mutually exclusive with ID
-/// tokens. Not deployment-configurable.
+/// The RFC 9068 / OAuth 2.0 access-token claim naming the OAuth client. An
+/// `at+jwt` access token MUST carry exactly one non-empty bounded value.
+/// Not deployment-configurable.
 pub const OAUTH_CLIENT_ID_CLAIM: &str = "client_id";
 
 /// Whether an issuer policy admits tokens whose subject represents the OAuth
@@ -271,18 +270,6 @@ pub enum TokenClass {
     },
     /// A dedicated Buzz assertion: protected `typ` is exactly `nip-fi+jwt`.
     DedicatedNipFi,
-    /// Named compatibility access token: absent or generic protected `typ=JWT`.
-    /// Only admissible under a policy whose required claims include
-    /// [`OAUTH_CLIENT_ID_CLAIM`], which OIDC ID tokens never carry — making the
-    /// class mutually exclusive with every ID token regardless of `typ`.
-    NamedCompatibility {
-        /// Claims that MUST be present; their absence denies. MUST include
-        /// [`OAUTH_CLIENT_ID_CLAIM`].
-        required_claims: Vec<String>,
-        /// Claims that MUST be absent; their presence denies. Optional
-        /// defense-in-depth (for example `nonce`, `at_hash`, `c_hash`).
-        forbidden_claims: Vec<String>,
-    },
 }
 
 impl TokenClass {
@@ -290,24 +277,6 @@ impl TokenClass {
         match self {
             Self::AccessTokenAtJwt { .. } => "at+jwt",
             Self::DedicatedNipFi => "nip-fi+jwt",
-            Self::NamedCompatibility { .. } => "named-compat",
-        }
-    }
-
-    /// Canonicalize the set-valued fields the verifier reads as membership
-    /// sets. Only [`Self::NamedCompatibility`]'s required/forbidden claim lists
-    /// vary by caller order or duplication; the subject-class value sets are
-    /// already canonicalized in [`SubjectClassContract::new`].
-    fn canonicalized(self) -> Self {
-        match self {
-            Self::NamedCompatibility {
-                required_claims,
-                forbidden_claims,
-            } => Self::NamedCompatibility {
-                required_claims: canonical_set(required_claims),
-                forbidden_claims: canonical_set(forbidden_claims),
-            },
-            other => other,
         }
     }
 }
@@ -371,10 +340,6 @@ pub enum IssuerPolicyError {
     /// `current-status` freshness requires a positive finite `maximum_status_age`.
     #[error("missing maximum status age")]
     MissingMaximumStatusAge,
-    /// A `NamedCompatibility` class did not require [`OAUTH_CLIENT_ID_CLAIM`] and
-    /// therefore cannot be proven mutually exclusive with OIDC ID tokens.
-    #[error("named compatibility policy is not exclusive")]
-    NonExclusiveCompatibility,
     /// A `SubjectClassContract`'s value sets were empty, unbounded, or overlapped,
     /// so subject classification could not be total and mutually exclusive.
     #[error("subject class contract is not exclusive")]
@@ -428,27 +393,15 @@ impl IssuerPolicy {
             }
             _ => {}
         }
-        if let TokenClass::NamedCompatibility {
-            required_claims, ..
-        } = &token_class
-        {
-            // Exclusivity with OIDC ID tokens is proven, not inferred from an
-            // arbitrary list: the policy MUST require the access-token-only
-            // `client_id` claim, which ID tokens never carry.
-            if !required_claims.iter().any(|c| c == OAUTH_CLIENT_ID_CLAIM) {
-                return Err(IssuerPolicyError::NonExclusiveCompatibility);
-            }
-        }
 
-        // The verifier consumes audiences, algorithms, and the compatibility
-        // claim lists as membership sets, so caller order and duplicates carry
-        // no accepted-assertion semantics. Canonicalize before storage and ID
-        // derivation so the policy ID is invariant under permutation and
-        // duplication (NIP-FI.md "Policy identity and snapshots"). Subject-class
-        // value sets are already canonicalized in `SubjectClassContract::new`.
+        // The verifier consumes audiences and algorithms as membership sets, so
+        // caller order and duplicates carry no accepted-assertion semantics.
+        // Canonicalize before storage and ID derivation so the policy ID is
+        // invariant under permutation and duplication (NIP-FI.md "Policy
+        // identity and snapshots"). Subject-class value sets are already
+        // canonicalized in `SubjectClassContract::new`.
         let audiences = canonical_set(audiences);
         let algorithms = canonical_algorithm_set(algorithms);
-        let token_class = token_class.canonicalized();
 
         let id = derive_assertion_policy_id(
             &issuer,
@@ -674,13 +627,6 @@ fn derive_assertion_policy_id(
                     .map(String::as_bytes),
             );
             hash_field(&mut hasher, subject_class.posture().tag().as_bytes());
-        }
-        TokenClass::NamedCompatibility {
-            required_claims,
-            forbidden_claims,
-        } => {
-            hash_seq(&mut hasher, required_claims.iter().map(String::as_bytes));
-            hash_seq(&mut hasher, forbidden_claims.iter().map(String::as_bytes));
         }
         TokenClass::DedicatedNipFi => {}
     }
