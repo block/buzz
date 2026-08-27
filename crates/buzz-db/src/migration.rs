@@ -649,7 +649,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 33);
+        assert_eq!(migrations.len(), 34);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1106,8 +1106,8 @@ mod tests {
         // The single-row heartbeat table is updated continuously. Prevent
         // autovacuum from truncating its heap so standby queries are not
         // cancelled by the ACCESS EXCLUSIVE truncation lock replay.
-        assert_eq!(migrations[32].version, 33);
-        let heartbeat_vacuum = migrations[32].sql.as_str();
+        assert_eq!(migrations[33].version, 34);
+        let heartbeat_vacuum = migrations[33].sql.as_str();
         assert!(heartbeat_vacuum.contains("ALTER TABLE replica_heartbeat"));
         assert!(heartbeat_vacuum.contains("vacuum_truncate = false"));
         assert!(desired_schema.contains("vacuum_truncate = false"));
