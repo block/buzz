@@ -377,6 +377,10 @@ export function getRelayHttpUrl(): Promise<string> {
   return invokeTauri<string>("get_relay_http_url");
 }
 
+export function getRelayMediaUrls(): Promise<string[]> {
+  return invokeTauri<string[]>("get_relay_media_urls");
+}
+
 export async function addChannelMembers(
   input: AddChannelMembersInput,
 ): Promise<AddChannelMembersResult> {

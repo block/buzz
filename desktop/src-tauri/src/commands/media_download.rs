@@ -15,7 +15,10 @@ use crate::commands::{
         decode_team_snapshot_from_bytes, MAX_TEAM_SNAPSHOT_JSON_BYTES, MAX_TEAM_SNAPSHOT_PNG_BYTES,
     },
 };
-use crate::relay::{classify_request_error, relay_api_base_url_with_override, relay_error_message};
+use crate::relay::{
+    classify_request_error, relay_api_base_url_with_override, relay_error_message,
+    relay_media_base_urls,
+};
 
 /// Maximum download size: 50 MiB. Prevents OOM from oversized responses.
 const MAX_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
@@ -26,22 +29,47 @@ const DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60)
 /// Validate that a URL is a legitimate relay media URL.
 ///
 /// - URL scheme is `https` or `http`
-/// - URL origin matches the relay base URL
+/// - URL authority matches the relay base URL
 /// - URL path matches `/media/{hash}.{ext}`
 fn validate_download_url(url: &str, relay_base: &str) -> Result<(), String> {
+    let relay_bases = [relay_base.to_string()];
+    validate_download_url_against_bases(url, &relay_bases)
+}
+
+/// Validate a relay media URL and normalize an alias URL to the primary relay
+/// authority before an authenticated native fetch. Media read tokens are
+/// scoped to the primary Host; sending that token to the original alias URL
+/// would fail the server-tag check even though both Hosts map to the same
+/// community.
+fn normalize_download_url_against_bases(
+    url: &str,
+    relay_bases: &[String],
+) -> Result<String, String> {
     let parsed = url::Url::parse(url).map_err(|_| "invalid URL".to_string())?;
-    let base = url::Url::parse(relay_base).map_err(|_| "invalid relay base URL".to_string())?;
+    let bases = relay_bases
+        .iter()
+        .map(|base| url::Url::parse(base).map_err(|_| "invalid relay base URL".to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
 
     // The configured relay may be an HTTP-only private/LAN deployment. This is
-    // safe at the SSRF boundary because the exact origin check below prevents
+    // safe at the SSRF boundary because the exact authority check below prevents
     // the caller from selecting any host other than the already configured
     // relay; the native client also refuses redirects before attaching auth.
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("download URL must use HTTP or HTTPS".to_string());
     }
 
-    // Origin must match relay.
-    if parsed.origin() != base.origin() {
+    // The relay may advertise the same media URL with http/https depending on
+    // its configured WebSocket scheme. Match exact authority while allowing
+    // that transport-scheme difference.
+    let authority = canonical_media_authority(&parsed);
+    let primary = bases
+        .first()
+        .ok_or_else(|| "no relay base URL configured".to_string())?;
+    if !bases
+        .iter()
+        .any(|base| authority == canonical_media_authority(base))
+    {
         return Err("download URL must match the relay origin".to_string());
     }
 
@@ -51,7 +79,19 @@ fn validate_download_url(url: &str, relay_base: &str) -> Result<(), String> {
         return Err("download URL must be a /media/ path".to_string());
     }
 
-    Ok(())
+    let mut normalized = primary.clone();
+    normalized.set_path(parsed.path());
+    normalized.set_query(parsed.query());
+    normalized.set_fragment(None);
+    Ok(normalized.to_string())
+}
+
+fn canonical_media_authority(url: &url::Url) -> String {
+    buzz_core_pkg::tenant::relay_url_authority(url.as_str())
+}
+
+fn validate_download_url_against_bases(url: &str, relay_bases: &[String]) -> Result<(), String> {
+    normalize_download_url_against_bases(url, relay_bases).map(|_| ())
 }
 
 /// Download an image from a URL and save it via a native save-file dialog.
@@ -62,8 +102,8 @@ pub async fn download_image(
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
     // SSRF protection: only allow downloads from the relay's /media/ path.
-    let relay_base = relay_api_base_url_with_override(&state);
-    validate_download_url(&url, &relay_base)?;
+    let relay_bases = relay_media_base_urls(&state);
+    let url = normalize_download_url_against_bases(&url, &relay_bases)?;
 
     // Infer filename from the URL path (e.g. "abcdef123.jpg" from a Blossom URL).
     let filename = url::Url::parse(&url)
@@ -109,8 +149,8 @@ pub async fn download_file(
     state: State<'_, AppState>,
 ) -> Result<bool, String> {
     // SSRF protection: only allow downloads from the relay's /media/ path.
-    let relay_base = relay_api_base_url_with_override(&state);
-    validate_download_url(&url, &relay_base)?;
+    let relay_bases = relay_media_base_urls(&state);
+    let url = normalize_download_url_against_bases(&url, &relay_bases)?;
 
     // The imeta filename is the only human-readable name we have; sanitize it
     // so directory traversal / control characters can never reach the dialog.
@@ -152,8 +192,8 @@ pub async fn fetch_media_bytes(
     url: String,
     state: State<'_, AppState>,
 ) -> Result<tauri::ipc::Response, String> {
-    let relay_base = relay_api_base_url_with_override(&state);
-    validate_download_url(&url, &relay_base)?;
+    let relay_bases = relay_media_base_urls(&state);
+    let url = normalize_download_url_against_bases(&url, &relay_bases)?;
 
     let bytes = fetch_blob_bytes(&url, &state).await?;
     detect_and_validate_mime(&bytes)?;
@@ -175,8 +215,8 @@ pub async fn copy_image_to_clipboard(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let relay_base = relay_api_base_url_with_override(&state);
-    validate_download_url(&url, &relay_base)?;
+    let relay_bases = relay_media_base_urls(&state);
+    let url = normalize_download_url_against_bases(&url, &relay_bases)?;
 
     let bytes = fetch_blob_bytes(&url, &state).await?;
     detect_and_validate_mime(&bytes)?;
@@ -455,8 +495,8 @@ pub async fn fetch_snapshot_bytes(
     state: State<'_, AppState>,
 ) -> Result<tauri::ipc::Response, String> {
     // ── Pre-fetch validation ──────────────────────────────────────────────
-    let relay_base = relay_api_base_url_with_override(&state);
-    validate_download_url(&url, &relay_base)?;
+    let relay_bases = relay_media_base_urls(&state);
+    let url = normalize_download_url_against_bases(&url, &relay_bases)?;
 
     // Sanitize the filename and verify it is a recognised snapshot extension.
     let filename = sanitize_filename(&filename);
@@ -849,6 +889,48 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("relay origin"));
+    }
+
+    #[test]
+    fn test_normalize_download_url_accepts_lan_alias_and_rebases_to_primary() {
+        let bases = vec![
+            "https://public.example".to_string(),
+            "http://10.24.11.82:3000".to_string(),
+        ];
+        assert_eq!(
+            normalize_download_url_against_bases(
+                "https://10.24.11.82:3000/media/abc123.png?download=1",
+                &bases,
+            )
+            .unwrap(),
+            "https://public.example/media/abc123.png?download=1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_download_url_rejects_unconfigured_alias() {
+        let bases = vec![
+            "https://public.example".to_string(),
+            "http://10.24.11.82:3000".to_string(),
+        ];
+        assert!(normalize_download_url_against_bases(
+            "https://10.24.11.83:3000/media/abc123.png",
+            &bases,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_normalize_download_url_uses_shared_authority_normalization() {
+        let bases = vec![
+            "https://PUBLIC.example:443".to_string(),
+            "http://relay.lan.:80".to_string(),
+        ];
+        assert_eq!(
+            normalize_download_url_against_bases("https://RELAY.LAN/media/abc123.png", &bases,)
+                .unwrap(),
+            "https://public.example/media/abc123.png"
+        );
     }
 
     #[test]

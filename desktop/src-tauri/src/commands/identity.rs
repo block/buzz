@@ -8,7 +8,9 @@ use crate::{
     app_state::AppState,
     models::IdentityInfo,
     nostr_bind,
-    relay::{self, relay_api_base_url_with_override, relay_ws_url_with_override},
+    relay::{
+        self, relay_api_base_url_with_override, relay_media_base_urls, relay_ws_url_with_override,
+    },
 };
 
 /// Encode `pubkey` as npub bech32 and truncate it for display: first 10 chars
@@ -104,6 +106,17 @@ pub fn get_relay_lan_ws_url(state: State<'_, AppState>) -> Result<Option<String>
 #[tauri::command]
 pub fn get_relay_http_url(state: State<'_, AppState>) -> String {
     relay_api_base_url_with_override(&state)
+}
+
+/// Return all HTTP authorities that can address the active workspace relay.
+///
+/// A workspace may expose one community through both a public relay URL and a
+/// private LAN URL. Media descriptors are stamped with the authority used by
+/// the uploader, so desktop clients must treat both URLs as the same relay
+/// when deciding whether to use the authenticated media proxy.
+#[tauri::command]
+pub fn get_relay_media_urls(state: State<'_, AppState>) -> Vec<String> {
+    relay_media_base_urls(&state)
 }
 
 #[tauri::command]

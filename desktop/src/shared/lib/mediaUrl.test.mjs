@@ -380,6 +380,89 @@ test("rewriteRelayUrl: repairs an advertised HTTPS URL for the same HTTP relay a
   }
 });
 
+test("rewriteRelayUrl: proxies media from the configured LAN alias while connected through the public relay", async () => {
+  const previousWindow = globalThis.window;
+
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke(command) {
+        if (command === "get_media_proxy_port") return Promise.resolve(54321);
+        if (command === "get_relay_media_urls") {
+          return Promise.resolve([
+            "https://content-swift-seemingly.ngrok-free.app",
+            "http://10.24.11.82:3000",
+          ]);
+        }
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      },
+    },
+  };
+
+  try {
+    const mediaUrl = await import(`./mediaUrl.ts?lanAlias=${Date.now()}`);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const historicLanUrl = `https://10.24.11.82:3000/media/${HASH}.png`;
+    assert.equal(
+      mediaUrl.rewriteRelayUrl(historicLanUrl),
+      `http://127.0.0.1:54321/media/${HASH}.png`,
+    );
+
+    const unrelated = `https://10.24.11.83:3000/media/${HASH}.png`;
+    assert.equal(mediaUrl.rewriteRelayUrl(unrelated), unrelated);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
+test("rewriteRelayUrl: legacy relay-origin publishing still restricts unrelated media hosts", async () => {
+  const previousWindow = globalThis.window;
+  globalThis.window = undefined;
+
+  try {
+    const mediaUrl = await import(`./mediaUrl.ts?legacyOrigin=${Date.now()}`);
+    mediaUrl.beginRelayOriginFetch()("https://relay.example");
+
+    const unrelated = `https://cdn.example/media/${HASH}.png`;
+    assert.equal(mediaUrl.rewriteRelayUrl(unrelated), unrelated);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
+test("rewriteRelayUrl: alias authority normalization matches relay host rules", async () => {
+  const previousWindow = globalThis.window;
+
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke(command) {
+        if (command === "get_media_proxy_port") return Promise.resolve(54321);
+        if (command === "get_relay_media_urls") {
+          return Promise.resolve([
+            "https://PUBLIC.example:443",
+            "http://relay.lan.:80",
+          ]);
+        }
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      },
+    },
+  };
+
+  try {
+    const mediaUrl = await import(
+      `./mediaUrl.ts?normalizedAlias=${Date.now()}`
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(
+      mediaUrl.rewriteRelayUrl(`https://RELAY.LAN/media/${HASH}.png`),
+      `http://127.0.0.1:54321/media/${HASH}.png`,
+    );
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
 test("rewriteRelayUrl: still passes external Blossom URLs through unchanged", async () => {
   const previousWindow = globalThis.window;
 

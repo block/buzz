@@ -31,6 +31,7 @@ let portPromise: Promise<number | null> | null = null;
  * canonicalized via {@link canonicalOrigin} so comparisons are stable.
  */
 let cachedRelayOrigin: string | null = null;
+let cachedRelayAuthorities = new Set<string>();
 
 /**
  * Canonicalize a URL to its origin with a lowercased scheme/host.
@@ -66,7 +67,8 @@ function canonicalAuthority(url: string): string | null {
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       return null;
     }
-    return parsed.host;
+    const hostname = parsed.hostname.toLowerCase().replace(/\.$/, "");
+    return parsed.port ? `${hostname}:${parsed.port}` : hostname;
   } catch {
     return null;
   }
@@ -103,11 +105,21 @@ function notifyMediaProxyPortListeners(): void {
  * convention. Notifies subscribers only on an actual snapshot change so
  * `useSyncExternalStore` doesn't churn.
  */
-function setRelayOrigin(origin: string | null, generation: number): void {
+function setRelayAuthorities(origins: string[], generation: number): void {
   if (generation !== cacheGeneration) return;
-  const canonical = origin === null ? null : canonicalOrigin(origin);
-  if (cachedRelayOrigin === canonical) return;
-  cachedRelayOrigin = canonical;
+  const next = new Set(
+    origins
+      .map(canonicalAuthority)
+      .filter((authority): authority is string => authority !== null),
+  );
+  const primary = origins[0] ? canonicalOrigin(origins[0]) : null;
+  const changed =
+    cachedRelayOrigin !== primary ||
+    next.size !== cachedRelayAuthorities.size ||
+    [...next].some((authority) => !cachedRelayAuthorities.has(authority));
+  if (!changed) return;
+  cachedRelayOrigin = primary;
+  cachedRelayAuthorities = next;
   notifyRelayOriginListeners();
 }
 
@@ -120,7 +132,8 @@ function setRelayOrigin(origin: string | null, generation: number): void {
  */
 export function beginRelayOriginFetch(): (origin: string | null) => void {
   const generation = cacheGeneration;
-  return (origin) => setRelayOrigin(origin, generation);
+  return (origin) =>
+    setRelayAuthorities(origin === null ? [] : [origin], generation);
 }
 
 /**
@@ -207,14 +220,17 @@ async function fetchProxyPort(): Promise<number | null> {
   const generation = cacheGeneration;
   const deadline = Date.now() + POLL_TIMEOUT_MS;
   while (Date.now() < deadline && generation === cacheGeneration) {
-    if (!cachedRelayOrigin) {
-      const publishRelayOrigin = beginRelayOriginFetch();
+    if (cachedRelayAuthorities.size === 0) {
       try {
-        const url = await withDeadline(
-          invoke<string>("get_relay_http_url"),
+        const urls = await withDeadline(
+          invoke<string[]>("get_relay_media_urls").catch(async () => [
+            await invoke<string>("get_relay_http_url"),
+          ]),
           deadline,
         );
-        if (url !== null) publishRelayOrigin(canonicalOrigin(url));
+        if (urls !== null) {
+          setRelayAuthorities(urls, generation);
+        }
       } catch {
         // invoke failed (e.g. Tauri IPC not ready yet) — keep retrying
       }
@@ -244,7 +260,7 @@ async function fetchProxyPort(): Promise<number | null> {
     // once the port is cached). Each invoke is bounded by the remaining
     // deadline (`withDeadline`) so a never-settling IPC call can't hang the
     // loop; every late origin result is generation-guarded.
-    if (cachedPort && cachedRelayOrigin) return cachedPort;
+    if (cachedPort && cachedRelayAuthorities.size > 0) return cachedPort;
 
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
@@ -288,8 +304,9 @@ export function resetMediaCaches(): void {
   if (hadCachedPort) {
     notifyMediaProxyPortListeners();
   }
-  if (cachedRelayOrigin !== null) {
+  if (cachedRelayOrigin !== null || cachedRelayAuthorities.size > 0) {
     cachedRelayOrigin = null;
+    cachedRelayAuthorities = new Set();
     notifyRelayOriginListeners();
   }
 }
@@ -342,13 +359,13 @@ export function rewriteRelayUrl(url: string): string {
   // Compare canonicalized origins: hosts are case-insensitive, and the relay
   // always returns lowercased media URLs even when the saved community URL
   // was typed with uppercase (e.g. wss://PENDING-SEED.communities.buzz.xyz).
-  if (cachedRelayOrigin) {
+  if (cachedRelayAuthorities.size > 0) {
     const urlOrigin = canonicalOrigin(url);
     const urlAuthority = canonicalAuthority(url);
-    const relayAuthority = canonicalAuthority(cachedRelayOrigin);
-    const sameAuthority =
-      urlAuthority !== null && urlAuthority === relayAuthority;
-    if (urlOrigin !== cachedRelayOrigin && !sameAuthority) {
+    const relayOriginMatch = urlOrigin === cachedRelayOrigin;
+    const aliasMatch =
+      urlAuthority !== null && cachedRelayAuthorities.has(urlAuthority);
+    if (!relayOriginMatch && !aliasMatch) {
       return url;
     }
   }

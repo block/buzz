@@ -54,6 +54,25 @@ pub fn relay_api_base_url_with_override(state: &AppState) -> String {
     }
 }
 
+/// Returns every configured HTTP base URL that addresses the active workspace
+/// relay. The primary relay is first, followed by the optional LAN fast-path.
+///
+/// Media descriptors contain the authority used by the uploader. Keeping the
+/// aliases together lets clients recognize both forms as the same community
+/// while still rejecting unrelated Blossom origins.
+pub fn relay_media_base_urls(state: &AppState) -> Vec<String> {
+    let mut urls = vec![relay_api_base_url_with_override(state)];
+    if let Ok(guard) = state.relay_lan_url_override.lock() {
+        if let Some(url) = guard.as_deref() {
+            let http = relay_http_base_url(url);
+            if !urls.iter().any(|candidate| candidate == &http) {
+                urls.push(http);
+            }
+        }
+    }
+    urls
+}
+
 /// Selects the relay a managed agent should use for a relay operation.
 ///
 /// Always the active workspace relay. The legacy per-record `relay_url` pin is
