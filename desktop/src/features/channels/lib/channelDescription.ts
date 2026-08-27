@@ -16,7 +16,11 @@ export function getChannelDescription(channel: Channel | null): string {
     (value) => value && value.trim().length > 0,
   );
 
-  const parts = [...prefixes, detail ?? null].filter(Boolean);
+  // Join the status prefixes with spaces, but keep the detail text's own
+  // line breaks intact (native `title` tooltips render newlines) and separate
+  // it from the prefixes with a newline so paragraphs stay readable.
+  const prefixText = prefixes.join(" ");
+  const parts = [prefixText || null, detail ?? null].filter(Boolean);
 
-  return parts.length > 0 ? parts.join(" ") : "Channel details and activity.";
+  return parts.length > 0 ? parts.join("\n") : "Channel details and activity.";
 }
