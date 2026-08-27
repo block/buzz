@@ -6,20 +6,27 @@
 //! `SIGTERM`, or a forked descendant that keeps a pipe open must not be able to
 //! stall discovery; that stall is what left "Check again" spinning forever.
 
-use std::process::{Command, ExitStatus, Output, Stdio};
+use std::io::{ErrorKind, Read};
+use std::process::{ChildStderr, ChildStdout, Command, ExitStatus, Output, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// Poll interval while waiting for the child to exit.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Maximum bytes captured across stdout + stderr for one bounded probe.
+/// Maximum bytes retained across stdout + stderr for one bounded probe.
 ///
 /// Discovery output is tiny — a version string, an auth-status word, a PATH
-/// lookup. A probe that emits more than this is noisy or hostile, so the
-/// capture is failed closed (kill the tree, return `None`) rather than allowed
-/// to fill the disk during the process window or allocate an unbounded buffer
-/// at read time. The ceiling is *aggregate*, not per-stream, so a probe cannot
-/// double it by splitting output across stdout and stderr.
+/// lookup. A probe that emits more than this is noisy or hostile. The ceiling
+/// is enforced *in the drain sink* (see [`spawn_drain`]): each stream is pulled
+/// on its own thread into a capped buffer, the limit is checked the moment a
+/// bounded read crosses it, and the probe is failed closed — so an over-cap
+/// payload is never retained in memory (and, since output goes to pipes not
+/// temp files, never written to disk). The ceiling is *aggregate*, not
+/// per-stream, so a probe cannot double it by splitting output across stdout
+/// and stderr.
 const CAPTURE_LIMIT: u64 = 1 << 20; // 1 MiB
 
 /// Grace period between the initial `SIGTERM` and the escalating `SIGKILL` for a
@@ -192,110 +199,178 @@ impl BoundedChild {
     fn reap(&mut self) {
         let _ = self.child.wait();
     }
+
+    /// Take the captured stdout pipe. `Some` because [`output_with_timeout`]
+    /// configures `Stdio::piped()` before spawn.
+    fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.child.stdout.take()
+    }
+
+    /// Take the captured stderr pipe.
+    fn take_stderr(&mut self) -> Option<ChildStderr> {
+        self.child.stderr.take()
+    }
+}
+
+/// Drain one child stream on its own thread into a buffer capped by the shared
+/// aggregate budget, so the sink itself — not a post-hoc size sample — enforces
+/// [`CAPTURE_LIMIT`].
+///
+/// The thread reads to EOF, which is what makes the join in
+/// [`output_with_timeout`] safe: it is only ever joined *after* the tree has
+/// been killed, so every writer (the child and any descendant that inherited
+/// the pipe) is gone and the read returns EOF instead of blocking forever —
+/// the exact hang that made the round-2 code abandon pipes for temp files.
+/// Draining continuously also keeps the pipe buffer from filling, so the child
+/// can never block on a full pipe while we poll it.
+///
+/// Retention is bounded: `total` reserves a disjoint byte range per chunk
+/// across both streams, so the sum of both buffers never exceeds the aggregate
+/// cap. Once the cap is crossed, `overflow` is set and further bytes are read
+/// (to reach EOF) but discarded. A non-`Interrupted` read error returns `Err`,
+/// which the caller treats as fail-closed.
+fn spawn_drain<R: Read + Send + 'static>(
+    mut reader: R,
+    total: Arc<AtomicU64>,
+    overflow: Arc<AtomicBool>,
+) -> JoinHandle<std::io::Result<Vec<u8>>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => return Ok(buf),
+                Ok(n) => {
+                    // Atomically reserve [prev, prev + n) of the shared budget;
+                    // `prev` is unique per call, so the two streams keep
+                    // disjoint ranges and their retained bytes sum to <= cap.
+                    let prev = total.fetch_add(n as u64, Ordering::Relaxed);
+                    if prev.saturating_add(n as u64) > CAPTURE_LIMIT {
+                        overflow.store(true, Ordering::Relaxed);
+                        let keep = CAPTURE_LIMIT.saturating_sub(prev).min(n as u64) as usize;
+                        buf.extend_from_slice(&chunk[..keep]);
+                        // Keep reading to EOF (post-kill) but retain nothing more.
+                    } else {
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                }
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+    })
 }
 
 /// Run `command` to completion, bounded by `timeout`.
 ///
 /// Returns `Some(output)` when the child exits within the deadline, `None` when
-/// it fails to spawn or is killed for exceeding it. Guarantees a bounded return
-/// regardless of child cooperation:
+/// it fails to spawn, exceeds the deadline, or breaches the capture ceiling.
+/// Guarantees a bounded return regardless of child cooperation:
 ///
-/// - **No pipe-drain hang.** Stdout and stderr are captured to regular temp
-///   files rather than pipes. A pipe's read blocks until every writer — the
-///   child *and* any descendant that inherited the write end — closes it; a
-///   forked worker outliving its parent could hold it open forever. A regular
-///   file returns EOF at its current write position no matter who inherits the
-///   descriptor, so the post-exit read is bounded on every platform. There are
-///   no background drain threads to join, so no drain-thread hang exists.
+/// - **Sink-enforced capture bound.** Stdout and stderr are piped to two drain
+///   threads that read into buffers capped by a shared aggregate budget
+///   ([`spawn_drain`]); nothing over [`CAPTURE_LIMIT`] is ever retained. On a
+///   breach the poll loop fails closed — kill the tree, return `None` — so a
+///   noisy or hostile probe cannot force unbounded memory (and, with pipes
+///   rather than temp files, cannot fill the disk either). Continuous draining
+///   also keeps the pipe buffer from filling, so the child can never block on a
+///   full pipe while we poll.
+/// - **No pipe-drain hang — via a strict ordering invariant.** A pipe read
+///   blocks until every writer (the child *and* any descendant that inherited
+///   the write end) closes it. This code joins the drains *only after*
+///   [`BoundedChild::kill_tree`] has torn the whole tree down (Unix process
+///   group / Windows kill-on-close Job Object), so by the time we join, every
+///   writer is dead and each read has hit EOF. **Kill-before-join is the
+///   load-bearing invariant** — reversing it reintroduces the round-1 hang
+///   where a backgrounded worker held the pipe open forever. This is why the
+///   round-2 switch to temp files is no longer needed.
 /// - **No wait hang.** The child is polled with [`Child::try_wait`] against the
 ///   deadline rather than blocked on with `wait()`.
 /// - **Hard tree termination on every exit path.** [`BoundedChild`] owns the
-///   child's whole descendant tree (Unix process group / Windows Job Object)
-///   and tears it down whether the child times out, errors, *or exits
-///   successfully*, before the captured output is read. Success is not an
-///   exemption: a login-shell rc file or an auth CLI can legitimately background
-///   a descendant (`worker &`) that would otherwise outlive discovery. The
-///   timeout path additionally sends a graceful `SIGTERM` and a bounded grace
-///   period before the final kill.
+///   child's whole descendant tree and tears it down whether the child times
+///   out, errors, breaches the cap, *or exits successfully*, before the drains
+///   are joined. Success is not an exemption: a login-shell rc file or an auth
+///   CLI can legitimately background a descendant (`worker &`) that would
+///   otherwise outlive discovery and hold the pipe open. The timeout path
+///   additionally sends a graceful `SIGTERM` and a bounded grace period before
+///   the final kill.
 pub(crate) fn output_with_timeout(mut command: Command, timeout: Duration) -> Option<Output> {
-    let mut stdout_file = tempfile::tempfile().ok()?;
-    let mut stderr_file = tempfile::tempfile().ok()?;
-
     command
         .stdin(Stdio::null())
-        .stdout(stdout_file.try_clone().ok()?)
-        .stderr(stderr_file.try_clone().ok()?);
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     let mut child = BoundedChild::spawn(command)?;
+
+    // Shared drain state: one aggregate byte budget across both streams and one
+    // overflow flag the poll loop watches so a streaming producer that never
+    // exits is failed closed the moment it crosses the cap.
+    let total = Arc::new(AtomicU64::new(0));
+    let overflow = Arc::new(AtomicBool::new(false));
+    let stdout_drain = child
+        .take_stdout()
+        .map(|s| spawn_drain(s, total.clone(), overflow.clone()));
+    let stderr_drain = child
+        .take_stderr()
+        .map(|s| spawn_drain(s, total.clone(), overflow.clone()));
 
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(status)) => break Some(status),
             Ok(None) => {
                 if Instant::now() >= deadline {
                     child.terminate_timed_out();
-                    child.reap();
-                    return None;
+                    break None;
                 }
-                // Fail closed on a capture breach *while the child runs*, so a
-                // noisy or hostile probe cannot fill the disk over the process
-                // window — the process bound alone does not bound its output.
-                if captured_len(&stdout_file, &stderr_file) > CAPTURE_LIMIT {
+                // Fail closed on a capture breach *while the child runs*: the
+                // drain kept nothing over the cap, and killing the tree lets the
+                // drains reach EOF so the join below cannot hang.
+                if overflow.load(Ordering::Relaxed) {
                     child.kill_tree();
-                    child.reap();
-                    return None;
+                    break None;
                 }
                 std::thread::sleep(POLL_INTERVAL);
             }
             Err(_) => {
                 child.kill_tree();
-                child.reap();
-                return None;
+                break None;
             }
         }
     };
 
-    // Leader exited within the deadline. Tear the tree down before reading, so
-    // no descendant it backgrounded keeps the captured-output descriptors (or a
-    // busy loop) alive after discovery reports success.
+    // Tree down (timeout/error/overflow already killed it above; a clean exit
+    // may still have backgrounded a descendant holding the pipe). Kill is
+    // idempotent, so calling it here on the success path is safe and is what
+    // guarantees the joins below hit EOF instead of blocking.
     child.kill_tree();
     child.reap();
 
-    // A child that exits within the deadline can still have written past the
-    // ceiling in a burst between polls; fail closed rather than allocate the
-    // full payload at read time.
-    if captured_len(&stdout_file, &stderr_file) > CAPTURE_LIMIT {
+    // Kill-before-join: every writer is now gone, so these joins return EOF.
+    let stdout = join_drain(stdout_drain);
+    let stderr = join_drain(stderr_drain);
+
+    // Fail closed if the child exited within the deadline but overran the cap in
+    // a final burst, or if either drain hit a read error (join_drain -> None).
+    let (status, stdout, stderr) = (status?, stdout?, stderr?);
+    if overflow.load(Ordering::Relaxed) {
         return None;
     }
 
     Some(Output {
         status,
-        stdout: read_captured(&mut stdout_file),
-        stderr: read_captured(&mut stderr_file),
+        stdout,
+        stderr,
     })
 }
 
-/// Total bytes written across both capture files so far. A failed `metadata`
-/// call counts as zero for that file — a stat error cannot manufacture a false
-/// breach, and the read-time [`read_captured`] bound is the backstop.
-fn captured_len(stdout_file: &std::fs::File, stderr_file: &std::fs::File) -> u64 {
-    let len = |f: &std::fs::File| f.metadata().map(|m| m.len()).unwrap_or(0);
-    len(stdout_file).saturating_add(len(stderr_file))
-}
-
-/// Rewind a captured-output temp file and read it, capped at [`CAPTURE_LIMIT`].
-/// Bounded twice over: the file is regular (the read reaches EOF at the current
-/// write position) *and* `take` refuses to allocate more than the ceiling even
-/// if the file grew, so `read_to_end` can never balloon the buffer.
-fn read_captured(file: &mut std::fs::File) -> Vec<u8> {
-    use std::io::{Read as _, Seek as _, SeekFrom};
-    if file.seek(SeekFrom::Start(0)).is_err() {
-        return Vec::new();
+/// Join a drain thread, returning its captured bytes. `None` (fail closed) if
+/// the stream was absent, the thread panicked, or the read errored.
+fn join_drain(drain: Option<JoinHandle<std::io::Result<Vec<u8>>>>) -> Option<Vec<u8>> {
+    match drain {
+        Some(handle) => handle.join().ok()?.ok(),
+        None => Some(Vec::new()),
     }
-    let mut buf = Vec::new();
-    let _ = file.take(CAPTURE_LIMIT).read_to_end(&mut buf);
-    buf
 }
 
 #[cfg(test)]
@@ -434,23 +509,29 @@ mod tests {
         );
     }
 
-    // Adversarial (capture bound): a child that emits far more than
-    // CAPTURE_LIMIT and then blocks, so it neither exits nor stops writing on
-    // its own. The in-flight ceiling check must fail the probe closed (None)
-    // and reap the tree — the process bound alone would let it keep filling the
-    // disk for the whole window. `head -c` writes a bounded 4 MiB (so the test
-    // never risks the disk) which already exceeds the 1 MiB ceiling; the trailing
-    // `sleep` keeps the child alive long enough for a poll to observe the breach.
+    // Adversarial (capture bound): a producer that streams zero bytes
+    // *indefinitely* — it never exits and never stops writing on its own, so
+    // the only thing that can end the probe is the in-flight ceiling check
+    // tripping `overflow`, killing the tree, and failing closed (None).
+    //
+    // The discriminator is `timeout >> bound`: the deadline is 60s but the
+    // watchdog fails the test at 10s, so a return within the bound proves the
+    // *cap* ended the probe, not the timeout. Neuter the overflow check and the
+    // helper runs until the 60s deadline, blowing the 10s watchdog. Pipe
+    // backpressure cannot end it either: the drains pull continuously, so `cat`
+    // would keep writing forever. Retention stays bounded by construction —
+    // `spawn_drain` reserves a disjoint byte range per chunk against the shared
+    // budget and discards everything past `CAPTURE_LIMIT` — so no over-cap
+    // payload is ever materialized even though the producer is infinite.
     #[cfg(unix)]
     #[test]
     fn fails_closed_when_capture_exceeds_limit() {
-        let over = CAPTURE_LIMIT * 4;
         let mut cmd = Command::new("/bin/sh");
-        cmd.args(["-c", &format!("head -c {over} /dev/zero; sleep 30")]);
-        let result = run_watchdogged(cmd, Duration::from_secs(10), Duration::from_secs(15));
+        cmd.args(["-c", "exec cat /dev/zero"]);
+        let result = run_watchdogged(cmd, Duration::from_secs(60), Duration::from_secs(10));
         assert!(
             result.is_none(),
-            "a probe exceeding the capture limit must fail closed"
+            "an unbounded producer must fail closed on the capture cap, well before the deadline"
         );
     }
 
@@ -569,12 +650,19 @@ mod tests {
     }
 
     // Timeout path: a cmd.exe root launches a detached PowerShell descendant
-    // (records its PID, sleeps 300s) and then blocks forever itself. The helper
-    // must time out and close the job, reaping both. The timeout is set well
-    // above a PowerShell cold start so the descendant records its PID before the
-    // deadline fires — otherwise the reap (working instantly) would kill the
-    // descendant mid-cold-start and the test could not read its PID. Asserts on
-    // the actual descendant PID reaching "gone".
+    // (records its PID, sleeps 300s), then — via a second, synchronous
+    // PowerShell — blocks until that PID file is non-empty before entering its
+    // own long block. The helper must time out and close the job, reaping both.
+    //
+    // The synchronous waiter is the evidence, not the timeout: the descendant's
+    // PID is recorded *before* the root can reach the block the deadline fires
+    // in, so the reap (working instantly) can never kill the descendant
+    // mid-cold-start and starve the test of the PID it reads. The old fixture
+    // relied on "8s exceeds a cold start" — tolerance that fails on a slow host,
+    // exactly Will's failure mode. The timeout is generous so the two cold
+    // PowerShells and the wait all complete well within it; the deadline then
+    // fires during the *long block*, and the outer watchdog stays the bound.
+    // Asserts on the actual descendant PID reaching "gone".
     #[cfg(windows)]
     #[test]
     #[ignore = "requires a Windows host; run manually with --ignored"]
@@ -588,12 +676,15 @@ mod tests {
         let child = format!(
             "$PID | Out-File -Encoding ascii -FilePath '{pid_path}'; Start-Sleep -Seconds 300"
         );
+        let waiter = format!(
+            "while (-not (Test-Path '{pid_path}') -or (Get-Item '{pid_path}').Length -eq 0) {{ Start-Sleep -Milliseconds 50 }}; Start-Sleep -Seconds 300"
+        );
         let script = format!(
-            "start /b powershell -NoProfile -Command \"{child}\" & powershell -NoProfile -Command \"Start-Sleep -Seconds 300\""
+            "start /b powershell -NoProfile -Command \"{child}\" & powershell -NoProfile -Command \"{waiter}\""
         );
         let mut cmd = Command::new("cmd.exe");
         cmd.args(["/c", &script]);
-        let result = run_watchdogged(cmd, Duration::from_secs(8), Duration::from_secs(25));
+        let result = run_watchdogged(cmd, Duration::from_secs(20), Duration::from_secs(40));
         assert!(result.is_none(), "a timed-out tree must yield None");
 
         let descendant_pid = read_recorded_pid(&pid_path);
