@@ -124,6 +124,46 @@ const EXIT_TRANSITION = {
  */
 const REDUCED_MOTION_TRANSITION = { duration: 0.12, ease: "linear" } as const;
 
+function useViewportRightInsetPx(
+  overlayRef: React.RefObject<HTMLDivElement | null>,
+) {
+  const [rightInsetPx, setRightInsetPx] = React.useState(0);
+
+  React.useLayoutEffect(() => {
+    const layoutRoot = overlayRef.current?.parentElement;
+    if (!layoutRoot) return;
+
+    const updateRightInset = () => {
+      const bounds = layoutRoot.getBoundingClientRect();
+      const overflowPx = Math.max(0, bounds.right - window.innerWidth);
+      const nextRightInsetPx = Math.min(bounds.width, Math.ceil(overflowPx));
+      setRightInsetPx((current) =>
+        current === nextRightInsetPx ? current : nextRightInsetPx,
+      );
+    };
+
+    updateRightInset();
+    window.addEventListener("resize", updateRightInset);
+
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(updateRightInset);
+    let ancestor: HTMLElement | null = layoutRoot;
+    while (ancestor) {
+      observer?.observe(ancestor);
+      ancestor = ancestor.parentElement;
+    }
+
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", updateRightInset);
+    };
+  }, [overlayRef]);
+
+  return rightInsetPx;
+}
+
 /**
  * Right-anchored thread drawer that overlays the channel content area.
  *
@@ -155,7 +195,9 @@ export function FocusThreadDrawer({
   const prefersReducedMotion = useReducedMotion();
   const travelPx = prefersReducedMotion ? 0 : THREAD_FOCUS_DRAWER_TRAVEL_PX;
   const drawerRef = React.useRef<HTMLDivElement>(null);
+  const overlayRef = React.useRef<HTMLDivElement>(null);
   const previousFocusRef = React.useRef<HTMLElement | null>(null);
+  const viewportRightInsetPx = useViewportRightInsetPx(overlayRef);
 
   React.useEffect(() => {
     if (!escapeEnabled) return;
@@ -209,6 +251,8 @@ export function FocusThreadDrawer({
     <div
       className="absolute inset-0 z-41"
       data-testid="focus-thread-drawer-overlay"
+      ref={overlayRef}
+      style={{ right: viewportRightInsetPx }}
     >
       <motion.button
         animate={{ opacity: 1 }}

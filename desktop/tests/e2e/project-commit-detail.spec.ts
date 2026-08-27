@@ -903,6 +903,37 @@ test("project workspace sheet stays independent from an open thread", async ({
   await expect(coveredThreadSurface).not.toHaveAttribute("inert", "");
   await expect(coveredThreadSurface).not.toHaveAttribute("aria-hidden", "true");
 
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = "140%";
+  });
+  await page.getByTestId("project-home-context-tasks").click();
+  await expect(page.getByTestId("project-home-workspace-sheet")).toBeVisible();
+  const enlargedTextWorkspaceClose = page
+    .getByTestId("focus-thread-drawer")
+    .getByTestId("auxiliary-panel-close");
+  await expect
+    .poll(() =>
+      enlargedTextWorkspaceClose.evaluate((element) => {
+        const bounds = element.getBoundingClientRect();
+        return {
+          leftInsideViewport: bounds.left >= 0,
+          rightInsideViewport: bounds.right <= window.innerWidth,
+          viewportWidth: window.innerWidth,
+        };
+      }),
+    )
+    .toEqual({
+      leftInsideViewport: true,
+      rightInsideViewport: true,
+      viewportWidth: 820,
+    });
+  await enlargedTextWorkspaceClose.click();
+  await expect(page.getByTestId("project-home-workspace-sheet")).toHaveCount(0);
+  await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+  await page.evaluate(() => {
+    document.documentElement.style.removeProperty("font-size");
+  });
+
   await page.setViewportSize({ height: 1080, width: 1920 });
   const splitThreadPane = page
     .locator(
