@@ -562,7 +562,8 @@ fn key_material_binding_covers_every_accepted_algorithm() {
     // of every other family/curve, so any single mapping mutation goes red.
     use jsonwebtoken::jwk::{
         AlgorithmParameters, EllipticCurve, EllipticCurveKeyParameters, EllipticCurveKeyType,
-        OctetKeyPairParameters, OctetKeyPairType, RSAKeyParameters, RSAKeyType,
+        OctetKeyPairParameters, OctetKeyPairType, OctetKeyParameters, OctetKeyType,
+        RSAKeyParameters, RSAKeyType,
     };
 
     // One representative parameter set per distinguishable key material.
@@ -588,7 +589,33 @@ fn key_material_binding_covers_every_accepted_algorithm() {
         n: String::new(),
         e: String::new(),
     });
-    let all = [&ec_p256, &ec_p384, &okp_ed25519, &rsa];
+    // Materials no accepted algorithm may ever match, so a widening regression
+    // to an unrepresented family/curve is caught: another EC curve, an OKP with
+    // a non-Ed25519 curve, and a symmetric key.
+    let ec_p521 = AlgorithmParameters::EllipticCurve(EllipticCurveKeyParameters {
+        key_type: EllipticCurveKeyType::EC,
+        curve: EllipticCurve::P521,
+        x: String::new(),
+        y: String::new(),
+    });
+    let okp_p256 = AlgorithmParameters::OctetKeyPair(OctetKeyPairParameters {
+        key_type: OctetKeyPairType::OctetKeyPair,
+        curve: EllipticCurve::P256,
+        x: String::new(),
+    });
+    let oct = AlgorithmParameters::OctetKey(OctetKeyParameters {
+        key_type: OctetKeyType::Octet,
+        value: String::new(),
+    });
+    let all = [
+        &ec_p256,
+        &ec_p384,
+        &okp_ed25519,
+        &rsa,
+        &ec_p521,
+        &okp_p256,
+        &oct,
+    ];
 
     // (algorithm, the one material shape it must accept).
     let cases = [
