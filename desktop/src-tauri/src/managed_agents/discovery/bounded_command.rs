@@ -243,10 +243,12 @@ fn set_nonblocking<F: std::os::unix::io::AsRawFd>(f: &F) -> bool {
 /// Continuous draining keeps the pipe buffer from filling, so the child can
 /// never block on a full pipe while we poll it. Retention is bounded: `total`
 /// reserves a disjoint byte range per chunk across both streams, so the sum of
-/// both buffers never exceeds the aggregate cap. Once the cap is crossed,
-/// `overflow` is set and further bytes are read but discarded. A read error
-/// other than `Interrupted`/`WouldBlock` returns `Err`, which the caller treats
-/// as fail-closed.
+/// both buffers never exceeds the aggregate cap. The moment a read crosses the
+/// cap, `overflow` is set and the drain returns immediately — it does not keep
+/// reading, so a writer that keeps the pipe continuously readable cannot spin
+/// this loop forever (it must cross the finite cap). A read error other than
+/// `Interrupted`/`WouldBlock` returns `Err`, which the caller treats as
+/// fail-closed.
 ///
 /// **Bounded completion differs by platform, because tree ownership does.**
 /// - **Unix:** the read end is nonblocking (see [`set_nonblocking`]). A killed
@@ -288,10 +290,19 @@ fn spawn_drain<R: Read + Send + 'static>(
                         overflow.store(true, Ordering::Relaxed);
                         let keep = CAPTURE_LIMIT.saturating_sub(prev).min(n as u64) as usize;
                         buf.extend_from_slice(&chunk[..keep]);
-                        // Keep reading to drain the pipe but retain nothing more.
-                    } else {
-                        buf.extend_from_slice(&chunk[..n]);
+                        // Overflow: the result is already fail-closed, so nothing
+                        // still in the pipe is worth preserving. Return NOW rather
+                        // than draining to EOF — this is what bounds the `Ok(n)`
+                        // path against a writer that keeps the pipe continuously
+                        // readable, which would otherwise never reach the
+                        // `WouldBlock`/`stop` check below and hang the join. It is
+                        // safe to stop draining: the poll loop sees `overflow` and
+                        // kills the tree, and a writer that then blocks on a full
+                        // pipe dies to `killpg`/job-close. Do NOT "fix" that
+                        // blocked-writer case by resuming an unbounded drain here.
+                        return Ok(buf);
                     }
+                    buf.extend_from_slice(&chunk[..n]);
                 }
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                 // Nonblocking read (Unix only): no bytes available right now.
@@ -589,6 +600,59 @@ mod tests {
         );
     }
 
+    // Deterministic seam regression (Thufir's finding): a drain fed a reader
+    // that stays continuously readable — every `read` returns `Ok(8192)`, never
+    // `WouldBlock` — must still complete, because the `stop`/`WouldBlock` check
+    // alone never fires on such a reader. The bound comes from the `Ok(n)` path
+    // returning the instant the aggregate cap is crossed. No real process and no
+    // scheduler timing: the reader is a pure in-test `Read` impl, so this pins
+    // the control flow rather than relying on a descendant eventually blocking.
+    // With the round-9-initial code (which kept reading after overflow) the
+    // drain never returns and the join below hangs past the watchdog.
+    #[test]
+    fn overflow_bounds_a_continuously_readable_drain() {
+        /// A reader that is always ready with a full 8192-byte chunk. It never
+        /// returns 0 (EOF) or `WouldBlock`, so only the overflow return can end
+        /// a drain reading it.
+        struct AlwaysReady;
+        impl Read for AlwaysReady {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                for b in buf.iter_mut() {
+                    *b = b'x';
+                }
+                Ok(buf.len())
+            }
+        }
+
+        let total = Arc::new(AtomicU64::new(0));
+        let overflow = Arc::new(AtomicBool::new(false));
+        // `stop` set from the start: a correct drain must NOT depend on it here,
+        // since a continuously-ready reader never hits the `WouldBlock` arm that
+        // consults it. The overflow return is the only thing that can bound it.
+        let stop = Arc::new(AtomicBool::new(true));
+        let drain = spawn_drain(AlwaysReady, total.clone(), overflow.clone(), stop);
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(drain.join());
+        });
+        let joined = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a continuously-readable drain must be bounded by the capture cap");
+        let buf = joined
+            .expect("drain thread must not panic")
+            .expect("drain read must not error");
+        assert!(
+            overflow.load(Ordering::Relaxed),
+            "the drain must have tripped overflow"
+        );
+        assert!(
+            buf.len() as u64 <= CAPTURE_LIMIT,
+            "retained bytes {} must not exceed the cap {CAPTURE_LIMIT}",
+            buf.len()
+        );
+    }
+
     // Adversarial (group escape): the leader backgrounds a descendant that
     // calls `setsid()` — leaving the leader's process group while retaining the
     // inherited stdout — then sleeps 300s; the leader itself loops forever, so
@@ -718,9 +782,10 @@ mod tests {
     }
 
     /// Read a PID that a probe wrote to `path`, retrying briefly since the
-    /// descendant records it asynchronously.
+    /// descendant records it asynchronously. Dumps `logs` on failure so a remote
+    /// run diagnoses itself instead of panicking blind.
     #[cfg(windows)]
-    fn read_recorded_pid(path: &str) -> u32 {
+    fn read_recorded_pid(path: &str, logs: &[&str]) -> u32 {
         for _ in 0..200 {
             if let Ok(text) = std::fs::read_to_string(path) {
                 if let Ok(pid) = text.trim().parse::<u32>() {
@@ -729,105 +794,194 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        panic!("descendant never recorded its PID at {path}");
+        panic!(
+            "descendant never recorded its PID at {path}\n{}",
+            dump_logs(logs)
+        );
     }
 
-    // Success path, run in a loop to hammer the spawn/assign race: a cmd.exe
-    // root launches a detached PowerShell descendant that records its own PID
-    // and sleeps, then the root exits 0 — but only *after* a synchronous waiter
-    // confirms the PID file is non-empty. Without that wait the root exits in
-    // the same tick, the success path closes the kill-on-close job immediately,
-    // and the descendant is reaped mid-cold-start before it can record its PID
-    // — starving the test of the evidence the reaping actually worked. The wait
-    // (bounded by the timeout and the outer watchdog) closes that fixture race
-    // without weakening the guarantee under test: the descendant is still born
-    // inside the job and must be reaped by the job close after the root exits.
+    /// Write a PowerShell payload to `path` as a `.ps1` file. Invoking these via
+    /// `powershell -File` avoids the Rust-std → cmd.exe → powershell quoting
+    /// gauntlet that silently mangled the inline `-Command` fixtures (the root
+    /// exited without its payload ever running), so the payload reaches
+    /// PowerShell verbatim.
+    #[cfg(windows)]
+    fn write_ps1(path: &std::path::Path, body: &str) {
+        std::fs::write(path, body).expect("write .ps1 payload");
+    }
+
+    /// Collect the named transcript files (each written by the fixture's
+    /// PowerShell) into one string for a self-diagnosing assert message. Missing
+    /// files are reported as such rather than skipped.
+    #[cfg(windows)]
+    fn dump_logs(paths: &[&str]) -> String {
+        let mut out = String::from("---- fixture transcripts ----\n");
+        for p in paths {
+            out.push_str(&format!("[{p}]\n"));
+            match std::fs::read_to_string(p) {
+                Ok(text) if text.is_empty() => out.push_str("(empty)\n"),
+                Ok(text) => {
+                    out.push_str(&text);
+                    if !text.ends_with('\n') {
+                        out.push('\n');
+                    }
+                }
+                Err(e) => out.push_str(&format!("(unreadable: {e})\n")),
+            }
+        }
+        out
+    }
+
+    // Success path, run in a loop to hammer the spawn/assign race. A PowerShell
+    // root (no cmd.exe anywhere) launches a hidden, detached PowerShell
+    // descendant via `Start-Process -WindowStyle Hidden`; the descendant records
+    // its own PID and sleeps. The root then waits synchronously until the PID
+    // file is non-empty before exiting 0 — without that wait the root would exit
+    // in the same tick, the success path would close the kill-on-close job
+    // immediately, and the descendant would be reaped mid-cold-start before it
+    // could record its PID, starving the test of its evidence. The descendant is
+    // still born inside the job (suspend → assign → resume, no breakaway), so the
+    // reaping guarantee under test is unchanged; only the delivery mechanism (a
+    // `.ps1` via `-File`, not a mangled inline `-Command`) is fixed. Every assert
+    // dumps the PowerShell transcripts so a remote failure is self-diagnosing.
     #[cfg(windows)]
     #[test]
     #[ignore = "requires a Windows host; run manually with --ignored"]
     fn reaps_backgrounded_descendant_on_success_windows() {
         for iteration in 0..25 {
-            let pid_file = tempfile::NamedTempFile::new().expect("temp file for descendant pid");
-            let pid_path = pid_file
-                .path()
-                .to_str()
-                .expect("utf-8 temp path")
-                .to_string();
-            // `start /b` backgrounds the PowerShell descendant (records $PID,
-            // sleeps 30s); the second, synchronous PowerShell blocks the root
-            // until that PID file is non-empty; then the root exits 0.
-            let child = format!(
-                "$PID | Out-File -Encoding ascii -FilePath '{pid_path}'; Start-Sleep -Seconds 30"
+            let dir = tempfile::tempdir().expect("temp dir for fixture scripts");
+            let pid_path = dir.path().join("descendant.pid");
+            let child_ps1 = dir.path().join("child.ps1");
+            let root_ps1 = dir.path().join("root.ps1");
+            let root_log = dir.path().join("root.log");
+            let child_log = dir.path().join("child.log");
+            let pid_s = pid_path.to_str().expect("utf-8 pid path");
+            let root_log_s = root_log.to_str().expect("utf-8 root log");
+            let child_log_s = child_log.to_str().expect("utf-8 child log");
+
+            write_ps1(
+                &child_ps1,
+                &format!(
+                    "$PID | Set-Content -Encoding ascii -Path '{pid_s}'\n\
+                     Add-Content -Path '{child_log_s}' -Value \"descendant $PID started\"\n\
+                     Start-Sleep -Seconds 30\n"
+                ),
             );
-            let waiter = format!(
-                "while (-not (Test-Path '{pid_path}') -or (Get-Item '{pid_path}').Length -eq 0) {{ Start-Sleep -Milliseconds 50 }}"
-            );
-            let script = format!(
-                "start /b powershell -NoProfile -Command \"{child}\" & powershell -NoProfile -Command \"{waiter}\" & exit 0"
-            );
-            let mut cmd = Command::new("cmd.exe");
-            cmd.args(["/c", &script]);
-            // Timeout is generous: two cold-starting PowerShells must both run
-            // before the root exits, and none of that may hit the deadline.
-            let out = run_watchdogged(cmd, Duration::from_secs(20), Duration::from_secs(40))
-                .expect("the root exits, so this must return its output");
-            assert!(
-                out.status.success(),
-                "iteration {iteration}: root must exit 0"
+            write_ps1(
+                &root_ps1,
+                &format!(
+                    "Add-Content -Path '{root_log_s}' -Value \"root $PID launching descendant\"\n\
+                     Start-Process -FilePath 'powershell' -WindowStyle Hidden -ArgumentList \
+                     '-NoProfile','-ExecutionPolicy','Bypass','-File','{child}'\n\
+                     $deadline = (Get-Date).AddSeconds(15)\n\
+                     while (((-not (Test-Path '{pid_s}')) -or ((Get-Item '{pid_s}').Length -eq 0)) \
+                     -and (Get-Date) -lt $deadline) {{ Start-Sleep -Milliseconds 50 }}\n\
+                     Add-Content -Path '{root_log_s}' -Value \"root observed pid file, exiting\"\n\
+                     exit 0\n",
+                    child = child_ps1.to_str().expect("utf-8 child path"),
+                ),
             );
 
-            let descendant_pid = read_recorded_pid(&pid_path);
+            let mut cmd = Command::new("powershell");
+            cmd.args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                root_ps1.to_str().expect("utf-8 root path"),
+            ]);
+            let out = run_watchdogged(cmd, Duration::from_secs(20), Duration::from_secs(40))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "iteration {iteration}: root exits, so this must return output\n{}",
+                        dump_logs(&[root_log_s, child_log_s])
+                    )
+                });
+            assert!(
+                out.status.success(),
+                "iteration {iteration}: root must exit 0\nstdout={}\nstderr={}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+                dump_logs(&[root_log_s, child_log_s])
+            );
+
+            let descendant_pid = read_recorded_pid(pid_s, &[root_log_s, child_log_s]);
             std::thread::sleep(Duration::from_millis(300));
             assert!(
                 !pid_alive(descendant_pid),
-                "iteration {iteration}: descendant {descendant_pid} must be reaped on success, but it survived"
+                "iteration {iteration}: descendant {descendant_pid} must be reaped on success, but it survived\n{}",
+                dump_logs(&[root_log_s, child_log_s])
             );
         }
     }
 
-    // Timeout path: a cmd.exe root launches a detached PowerShell descendant
-    // (records its PID, sleeps 300s), then — via a second, synchronous
-    // PowerShell — blocks until that PID file is non-empty before entering its
-    // own long block. The helper must time out and close the job, reaping both.
-    //
-    // The synchronous waiter is the evidence, not the timeout: the descendant's
-    // PID is recorded *before* the root can reach the block the deadline fires
-    // in, so the reap (working instantly) can never kill the descendant
-    // mid-cold-start and starve the test of the PID it reads. The old fixture
-    // relied on "8s exceeds a cold start" — tolerance that fails on a slow host,
-    // exactly Will's failure mode. The timeout is generous so the two cold
-    // PowerShells and the wait all complete well within it; the deadline then
-    // fires during the *long block*, and the outer watchdog stays the bound.
-    // Asserts on the actual descendant PID reaching "gone".
+    // Timeout path: a PowerShell root launches a hidden, detached PowerShell
+    // descendant (records its PID, sleeps 300s), waits synchronously until the
+    // PID file is non-empty, then enters its own 300s block so the helper's
+    // deadline fires inside it. The helper must time out and close the job,
+    // reaping both. The synchronous wait is the evidence — the descendant's PID
+    // is recorded before the root reaches the block the deadline fires in, so the
+    // reap cannot kill it mid-cold-start and starve the assert. Same `.ps1`
+    // delivery as the success fixture (no cmd tokenizer), and every assert dumps
+    // the transcripts.
     #[cfg(windows)]
     #[test]
     #[ignore = "requires a Windows host; run manually with --ignored"]
     fn reaps_descendant_on_timeout_windows() {
-        let pid_file = tempfile::NamedTempFile::new().expect("temp file for descendant pid");
-        let pid_path = pid_file
-            .path()
-            .to_str()
-            .expect("utf-8 temp path")
-            .to_string();
-        let child = format!(
-            "$PID | Out-File -Encoding ascii -FilePath '{pid_path}'; Start-Sleep -Seconds 300"
-        );
-        let waiter = format!(
-            "while (-not (Test-Path '{pid_path}') -or (Get-Item '{pid_path}').Length -eq 0) {{ Start-Sleep -Milliseconds 50 }}; Start-Sleep -Seconds 300"
-        );
-        let script = format!(
-            "start /b powershell -NoProfile -Command \"{child}\" & powershell -NoProfile -Command \"{waiter}\""
-        );
-        let mut cmd = Command::new("cmd.exe");
-        cmd.args(["/c", &script]);
-        let result = run_watchdogged(cmd, Duration::from_secs(20), Duration::from_secs(40));
-        assert!(result.is_none(), "a timed-out tree must yield None");
+        let dir = tempfile::tempdir().expect("temp dir for fixture scripts");
+        let pid_path = dir.path().join("descendant.pid");
+        let child_ps1 = dir.path().join("child.ps1");
+        let root_ps1 = dir.path().join("root.ps1");
+        let root_log = dir.path().join("root.log");
+        let child_log = dir.path().join("child.log");
+        let pid_s = pid_path.to_str().expect("utf-8 pid path");
+        let root_log_s = root_log.to_str().expect("utf-8 root log");
+        let child_log_s = child_log.to_str().expect("utf-8 child log");
 
-        let descendant_pid = read_recorded_pid(&pid_path);
+        write_ps1(
+            &child_ps1,
+            &format!(
+                "$PID | Set-Content -Encoding ascii -Path '{pid_s}'\n\
+                 Add-Content -Path '{child_log_s}' -Value \"descendant $PID started\"\n\
+                 Start-Sleep -Seconds 300\n"
+            ),
+        );
+        write_ps1(
+            &root_ps1,
+            &format!(
+                "Add-Content -Path '{root_log_s}' -Value \"root $PID launching descendant\"\n\
+                 Start-Process -FilePath 'powershell' -WindowStyle Hidden -ArgumentList \
+                 '-NoProfile','-ExecutionPolicy','Bypass','-File','{child}'\n\
+                 $deadline = (Get-Date).AddSeconds(15)\n\
+                 while (((-not (Test-Path '{pid_s}')) -or ((Get-Item '{pid_s}').Length -eq 0)) \
+                 -and (Get-Date) -lt $deadline) {{ Start-Sleep -Milliseconds 50 }}\n\
+                 Add-Content -Path '{root_log_s}' -Value \"root observed pid file, blocking\"\n\
+                 Start-Sleep -Seconds 300\n",
+                child = child_ps1.to_str().expect("utf-8 child path"),
+            ),
+        );
+
+        let mut cmd = Command::new("powershell");
+        cmd.args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            root_ps1.to_str().expect("utf-8 root path"),
+        ]);
+        let result = run_watchdogged(cmd, Duration::from_secs(20), Duration::from_secs(40));
+        assert!(
+            result.is_none(),
+            "a timed-out tree must yield None\n{}",
+            dump_logs(&[root_log_s, child_log_s])
+        );
+
+        let descendant_pid = read_recorded_pid(pid_s, &[root_log_s, child_log_s]);
         std::thread::sleep(Duration::from_millis(300));
         assert!(
             !pid_alive(descendant_pid),
-            "descendant {descendant_pid} must be job-killed on timeout, but it survived"
+            "descendant {descendant_pid} must be job-killed on timeout, but it survived\n{}",
+            dump_logs(&[root_log_s, child_log_s])
         );
     }
 }
