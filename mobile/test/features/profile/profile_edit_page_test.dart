@@ -234,6 +234,10 @@ void main() {
       'placeholder': 'Display name',
       'multiline': false,
       'brightness': 'dark',
+      'pageBackgroundArgb': AppTheme.dark().colorScheme.surfaceContainerHighest
+          .toARGB32(),
+      'containerBackgroundArgb': AppTheme.dark().colorScheme.surface.toARGB32(),
+      'containerCornerRadius': Radii.container,
       'allowUnchangedSubmission': false,
     });
     expect(notifier.savedDisplayNames, ['Alice Native']);
@@ -243,6 +247,8 @@ void main() {
   testWidgets('shows profile fields and saves each one from a sheet', (
     tester,
   ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final notifier = _FakeProfileNotifier();
     await tester.pumpWidget(
       WidgetHelpers.testable(
@@ -288,6 +294,7 @@ void main() {
     expect(notifier.savedDescriptions, [
       'Making collaboration feel effortless.',
     ]);
+    debugDefaultTargetPlatformOverride = null;
   });
 
   testWidgets('uses an icon-free grouped card with inset dividers', (

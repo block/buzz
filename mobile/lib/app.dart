@@ -389,16 +389,25 @@ class App extends HookConsumerWidget {
   }
 }
 
-Widget _buildSettingsPage(BuildContext context) => SettingsPage(
-  profileHeader: const SettingsProfileHeader(),
-  profileEditPageBuilder: (_) =>
-      const ProfileEditPage(startInPhotoEditor: true),
-  onEditDisplayName: showProfileDisplayNameEditor,
-  onEditProfileDescription: showProfileDescriptionEditor,
-  invitePageBuilder: (_) => const CommunityInvitePage(),
-  identityRecoveryPageBuilder: (_) =>
-      const PairingPage(addingCommunity: true, identityRecoveryOnly: true),
-);
+Widget _buildSettingsPage(BuildContext context) => const _SettingsPageContent();
+
+class _SettingsPageContent extends ConsumerWidget {
+  const _SettingsPageContent();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return SettingsPage(
+      profileHeader: const SettingsProfileHeader(),
+      profileEditPageBuilder: (_) =>
+          const ProfileEditPage(startInPhotoEditor: true),
+      onEditDisplayName: showProfileDisplayNameEditor,
+      onEditProfileDescription: showProfileDescriptionEditor,
+      invitePageBuilder: (_) => const CommunityInvitePage(),
+      identityRecoveryPageBuilder: (_) =>
+          const PairingPage(addingCommunity: true, identityRecoveryOnly: true),
+    );
+  }
+}
 
 class _SplashScreen extends StatelessWidget {
   const _SplashScreen();

@@ -116,6 +116,44 @@ void main() {
     expect(opened, ['name', 'description']);
   });
 
+  testWidgets('places Theme second in the Community section', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [
+          savedPrefsProvider.overrideWithValue(prefs),
+          currentCommunityRoleProvider.overrideWithValue(
+            const AsyncData<CommunityMemberRole?>(CommunityMemberRole.admin),
+          ),
+        ],
+        child: MaterialApp(
+          theme: AppTheme.light(),
+          home: SettingsPage(
+            profileHeader: const SizedBox.shrink(),
+            invitePageBuilder: (_) => const SizedBox.shrink(),
+            identityRecoveryPageBuilder: (_) => const SizedBox.shrink(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Theme'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('Theme')).dy,
+      greaterThan(tester.getTopLeft(find.text('Invite to community')).dy),
+    );
+    expect(find.byKey(const ValueKey('community-theme-row')), findsOneWidget);
+    expect(find.text('Appearance'), findsNothing);
+    expect(find.text('Style · This community'), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('community-theme-row')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('theme-preview-pages')), findsOneWidget);
+  });
+
   testWidgets('uses the native glass close control on iOS', (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
     addTearDown(() => debugDefaultTargetPlatformOverride = null);

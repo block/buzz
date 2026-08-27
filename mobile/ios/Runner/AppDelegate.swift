@@ -138,6 +138,15 @@ import UserNotifications
       )
     }
 
+    if let themePaginationGlassRegistrar = engineBridge.pluginRegistry.registrar(
+      forPlugin: "BuzzThemePaginationGlassControl"
+    ) {
+      themePaginationGlassRegistrar.register(
+        ThemePaginationGlassControlFactory(messenger: messenger),
+        withId: "buzz/theme_pagination_glass"
+      )
+    }
+
     let nativeAttachmentRegistrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "BuzzNativeAttachmentPopover"
     )

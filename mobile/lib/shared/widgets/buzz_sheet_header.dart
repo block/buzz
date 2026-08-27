@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../theme/theme.dart';
+import 'buzz_navigation_metrics.dart';
 import 'ios_glass_navigation_button.dart';
 
 /// A titled sheet header with balanced actions and an exactly centered title.
@@ -34,7 +35,7 @@ class BuzzSheetHeader extends StatelessWidget {
         bottom: Grid.xs,
       ),
       child: SizedBox(
-        height: 56,
+        height: buzzNavigationRowHeight,
         child: Stack(
           alignment: Alignment.topCenter,
           children: [
@@ -87,14 +88,14 @@ class _SheetCloseButton extends StatelessWidget {
         icon: IosGlassNavigationIcon.close,
         semanticLabel: 'Close sheet',
         onPressed: closeSheet,
-        width: 44,
-        height: 44,
+        width: buzzNavigationActionSize,
+        height: buzzNavigationActionSize,
         foregroundColor: context.colors.primary,
       );
     }
 
     return SizedBox.square(
-      dimension: 44,
+      dimension: buzzNavigationActionSize,
       child: IconButton(
         tooltip: 'Close sheet',
         onPressed: closeSheet,
