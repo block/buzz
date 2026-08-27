@@ -20,6 +20,7 @@ import 'unread_badge/observed_unread_event.dart';
 import 'unread_badge/should_notify_for_event.dart';
 
 part 'channel_directory.dart';
+part 'channels_provider_lifecycle.dart';
 
 const _channelTypeOrder = {'stream': 0, 'forum': 1, 'dm': 2};
 const _unreadCatchUpLimit = 1000;
@@ -56,6 +57,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   String? _memberSnapshotPubkey;
   Map<String, List<ChannelMember>> _memberSnapshotsByChannelId = const {};
   List<NostrEvent> _directoryMetas = const [];
+  Set<String> _hiddenDmIds = const {};
 
   /// Fences directory responses to the relay and identity that requested them.
   late final _ChannelRefreshCoordinator _refreshCoordinator =
@@ -70,6 +72,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
 
   Map<String, int> get latestObservedByChannel =>
       Map.unmodifiable(_latestObservedByChannel);
+
+  Set<String> get hiddenDmIds => Set.unmodifiable(_hiddenDmIds);
+
+  bool get hasLoaded => _hasLoaded;
 
   Map<String, Map<String, ObservedUnreadEvent>>
   get observedUnreadEventsByChannel =>
@@ -88,6 +94,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       _memberSnapshotPubkey = pubkey;
       _memberSnapshotsByChannelId = const {};
       _directoryMetas = const [];
+      _hiddenDmIds = const {};
       // Retire any in-flight directory request: its response describes the
       // previous relay or identity and must not reach this scope's state.
       _refreshCoordinator.retireInFlight();
@@ -220,6 +227,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     );
 
     final hiddenDmIds = await _fenced(fence, _fetchHiddenDmIds(session, myPk));
+    _hiddenDmIds = Set.unmodifiable(hiddenDmIds);
     // Fetch the authoritative membership snapshots before filtering Huddle
     // backing channels. The relay-signed kind:39000 metadata identifies the
     // relay, not the channel creator; the owner role in kind:39002 is the
@@ -979,18 +987,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
           ? AsyncError(error, stackTrace)
           : AsyncData(previousChannels);
     }
-  }
-
-  void _clearLiveSubscriptions() {
-    _subscriptionVersion++;
-    _desiredLiveChannelIds = const {};
-    for (final unsubscribe in _unsubscribersByChannel.values) {
-      unsubscribe();
-    }
-    _unsubscribersByChannel.clear();
-    _subscriptionRelayBaseUrl = null;
-    _backstopTimer?.cancel();
-    _backstopTimer = null;
   }
 }
 

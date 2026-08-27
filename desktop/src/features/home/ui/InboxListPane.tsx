@@ -1,4 +1,12 @@
-import { Bell, Clock, Ellipsis, ExternalLink, MailOpen } from "lucide-react";
+import {
+  AlertCircle,
+  Bell,
+  Clock,
+  Ellipsis,
+  ExternalLink,
+  LoaderCircle,
+  MailOpen,
+} from "lucide-react";
 import * as React from "react";
 
 import {
@@ -215,6 +223,8 @@ type InboxListPaneProps = {
   onMarkRead: (itemId: string) => void;
   onMarkUnread: (itemId: string) => void;
   onOpenDirect: (item: InboxItem) => void;
+  isReopenPending?: (channelId: string | null | undefined) => boolean;
+  isReopenErrored?: (channelId: string | null | undefined) => boolean;
   onRemindLater: (item: InboxItem) => void;
   onSelect: (itemId: string) => void;
   onSelectDraft: (draftKey: string) => void;
@@ -243,6 +253,8 @@ export function InboxListPane({
   onMarkRead,
   onMarkUnread,
   onOpenDirect,
+  isReopenPending,
+  isReopenErrored,
   onRemindLater,
   onSelect,
   onSelectDraft,
@@ -303,6 +315,14 @@ export function InboxListPane({
         (eventId) => activeReminderEventIds?.has(eventId) ?? false,
       );
     const hasChannelTarget = Boolean(item.item.channelId);
+    const isReopening = isReopenPending?.(item.item.channelId) ?? false;
+    const hasReopenError = isReopenErrored?.(item.item.channelId) ?? false;
+    const canOpen = hasChannelTarget && !isReopening;
+    const openLabel = !hasChannelTarget
+      ? "No channel link"
+      : isReopening
+        ? "Reopening…"
+        : "Open in channel";
     const typeLabel = getInboxTypeLabel(item);
     const videoReviewCommentRootId = getInboxVideoReviewCommentRootId(item);
     const isSenderAgent =
@@ -431,6 +451,47 @@ export function InboxListPane({
                 </div>
               ) : null}
 
+              {isReopening || hasReopenError ? (
+                <div
+                  aria-live="polite"
+                  className={cn(
+                    "mt-1 flex items-center gap-1 text-2xs font-medium",
+                    hasReopenError
+                      ? "text-destructive"
+                      : "text-muted-foreground",
+                  )}
+                  data-testid={`home-inbox-reopen-status-${item.id}`}
+                  role="status"
+                >
+                  {isReopening ? (
+                    <>
+                      <LoaderCircle className="h-3 w-3 shrink-0 animate-spin" />
+                      Reopening…
+                    </>
+                  ) : (
+                    <>
+                      <AlertCircle className="h-3 w-3 shrink-0" />
+                      Couldn’t reopen
+                      {canOpen ? (
+                        <button
+                          className="ml-0.5 rounded font-semibold underline underline-offset-2 hover:no-underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                          data-testid={`home-inbox-reopen-retry-${item.id}`}
+                          onClick={(event) => {
+                            // The row wrapper selects on click; stop it so
+                            // Retry only re-issues the reopen for this row.
+                            event.stopPropagation();
+                            onOpenDirect(item);
+                          }}
+                          type="button"
+                        >
+                          Retry
+                        </button>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+              ) : null}
+
               <div
                 className={cn(
                   "mt-1.5 text-message [&_a]:font-medium [&_a]:text-current",
@@ -468,8 +529,8 @@ export function InboxListPane({
             </InboxRowActionButton>
           )}
           <InboxRowActionButton
-            disabled={!hasChannelTarget}
-            label={hasChannelTarget ? "Open in channel" : "No channel link"}
+            disabled={!canOpen}
+            label={openLabel}
             onClick={() => onOpenDirect(item)}
           >
             <ExternalLink className="!h-4 !w-4" />
@@ -509,15 +570,15 @@ export function InboxListPane({
           )}
           <ContextMenuSeparator />
           <ContextMenuItem
-            disabled={!hasChannelTarget}
+            disabled={!canOpen}
             onClick={() => {
-              if (hasChannelTarget) {
+              if (canOpen) {
                 onOpenDirect(item);
               }
             }}
           >
             <ExternalLink className="h-4 w-4" />
-            {hasChannelTarget ? "Open in channel" : "No channel link"}
+            {openLabel}
           </ContextMenuItem>
           <ContextMenuItem
             disabled={!hasChannelTarget}
