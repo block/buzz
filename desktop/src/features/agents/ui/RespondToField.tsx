@@ -7,7 +7,11 @@ import {
 import { truncatePubkey } from "@/shared/lib/pubkey";
 import { PubKey } from "@/shared/ui/PubKey";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
-import { useUserSearchQuery } from "@/features/profile/hooks";
+import {
+  useFlattenedUserSearchResults,
+  useInfiniteUserSearchQuery,
+  useUserSearchFetchMoreOnScroll,
+} from "@/features/profile/hooks";
 import type { RespondToMode, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
@@ -66,10 +70,13 @@ function formatSearchUserName(user: UserSearchResult) {
 function formatSearchUserSecondary(user: UserSearchResult) {
   const displayName = user.displayName?.trim();
   const nip05Handle = user.nip05Handle?.trim();
-  if (displayName && nip05Handle) {
-    return nip05Handle;
-  }
-  return truncatePubkey(user.pubkey);
+  return displayName && nip05Handle ? nip05Handle : null;
+}
+
+function formatSearchUserAccessibleName(user: UserSearchResult) {
+  const name = formatSearchUserName(user);
+  const secondary = formatSearchUserSecondary(user);
+  return `Add ${name}${secondary ? `, ${secondary}` : ""}, public key ${user.pubkey}`;
 }
 
 const RESPOND_TO_OPTIONS: PersonaDropdownOption[] = [
@@ -123,20 +130,40 @@ export function CreateAgentRespondToField({
     () => new Set(allowlist.map((p) => p.toLowerCase())),
     [allowlist],
   );
-  const userSearchQuery = useUserSearchQuery(deferredQuery, {
+  const userSearchQuery = useInfiniteUserSearchQuery(deferredQuery, {
     enabled: mode === "allowlist" && deferredQuery.length > 0,
-    limit: 8,
+    limit: 50,
   });
   const isArchivedDiscovery = useIsArchivedPredicate();
+  const userSearchResults = useFlattenedUserSearchResults(userSearchQuery.data);
   const searchResults = React.useMemo(
     () =>
-      (userSearchQuery.data ?? []).filter(
+      userSearchResults.filter(
         (user) =>
           !allowlistSet.has(user.pubkey.toLowerCase()) &&
           !isArchivedDiscovery(user.pubkey),
       ),
-    [allowlistSet, isArchivedDiscovery, userSearchQuery.data],
+    [allowlistSet, isArchivedDiscovery, userSearchResults],
   );
+  const searchViewportRef = React.useRef<HTMLDivElement>(null);
+  React.useEffect(() => {
+    const viewport = searchViewportRef.current;
+    if (
+      !viewport ||
+      !userSearchQuery.hasNextPage ||
+      userSearchQuery.isFetchingNextPage ||
+      viewport.scrollHeight > viewport.clientHeight
+    ) {
+      return;
+    }
+
+    void userSearchQuery.fetchNextPage();
+  }, [
+    userSearchQuery.fetchNextPage,
+    userSearchQuery.hasNextPage,
+    userSearchQuery.isFetchingNextPage,
+  ]);
+  const handleSearchScroll = useUserSearchFetchMoreOnScroll(userSearchQuery);
 
   const pasteParsed = React.useMemo(
     () => parsePubkeyInput(pasteText),
@@ -254,6 +281,8 @@ export function CreateAgentRespondToField({
           onAddFromPaste={handleAddFromPaste}
           onAddRawPubkey={handleAddRawPubkey}
           onAddSearchResult={handleAddSearchResult}
+          onSearchScroll={handleSearchScroll}
+          searchViewportRef={searchViewportRef}
           onPasteTextChange={setPasteText}
           onQueryChange={setQuery}
           onRemove={handleRemove}
@@ -288,6 +317,8 @@ function AllowlistPicker({
   onAddFromPaste,
   onAddRawPubkey,
   onAddSearchResult,
+  onSearchScroll,
+  searchViewportRef,
   onPasteTextChange,
   onQueryChange,
   onRemove,
@@ -309,6 +340,8 @@ function AllowlistPicker({
   onAddFromPaste: () => void;
   onAddRawPubkey: (pubkey: string) => void;
   onAddSearchResult: (user: UserSearchResult) => void;
+  onSearchScroll: (event: React.UIEvent<HTMLDivElement>) => void;
+  searchViewportRef: React.RefObject<HTMLDivElement | null>;
   onPasteTextChange: (value: string) => void;
   onQueryChange: (value: string) => void;
   onRemove: (pubkey: string) => void;
@@ -405,63 +438,81 @@ function AllowlistPicker({
               <p className="px-2 py-1 text-sm text-muted-foreground">
                 Searching…
               </p>
-            ) : searchResults.length > 0 ? (
-              <div className="max-h-44 space-y-1 overflow-y-auto">
-                {searchResults.map((result) => (
+            ) : (
+              <div
+                className="max-h-44 space-y-1 overflow-y-auto"
+                onScroll={onSearchScroll}
+                ref={searchViewportRef}
+              >
+                {searchResults.length > 0 ? (
+                  searchResults.map((result) => (
+                    <div
+                      className="flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left transition-colors hover:bg-accent hover:text-accent-foreground"
+                      data-testid={`agent-respond-to-result-${result.pubkey}`}
+                      key={result.pubkey}
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <UserAvatar
+                          avatarUrl={result.avatarUrl}
+                          displayName={formatSearchUserName(result)}
+                          size="xs"
+                        />
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium leading-5">
+                            {formatSearchUserName(result)}
+                          </p>
+                          {formatSearchUserSecondary(result) ? (
+                            <p className="truncate text-xs text-muted-foreground">
+                              {formatSearchUserSecondary(result)}
+                            </p>
+                          ) : null}
+                          <PubKey
+                            className="text-xs text-muted-foreground"
+                            pubkey={result.pubkey}
+                            testId={`agent-respond-to-result-pubkey-${result.pubkey}`}
+                          />
+                        </div>
+                      </div>
+                      <button
+                        aria-label={formatSearchUserAccessibleName(result)}
+                        className="text-xs text-muted-foreground"
+                        onClick={() => onAddSearchResult(result)}
+                        type="button"
+                      >
+                        Add
+                      </button>
+                    </div>
+                  ))
+                ) : queryIsHexPubkey ? (
                   <button
                     className="flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left transition-colors hover:bg-accent hover:text-accent-foreground"
-                    data-testid={`agent-respond-to-result-${result.pubkey}`}
-                    key={result.pubkey}
-                    onClick={() => onAddSearchResult(result)}
+                    data-testid="agent-respond-to-add-raw-pubkey"
+                    onClick={() => onAddRawPubkey(deferredQuery.toLowerCase())}
                     type="button"
                   >
                     <div className="flex items-center gap-2 min-w-0">
                       <UserAvatar
-                        avatarUrl={result.avatarUrl}
-                        displayName={formatSearchUserName(result)}
+                        avatarUrl={null}
+                        displayName={truncatePubkey(deferredQuery)}
                         size="xs"
                       />
                       <div className="min-w-0">
                         <p className="truncate text-sm font-medium leading-5">
-                          {formatSearchUserName(result)}
+                          {truncatePubkey(deferredQuery)}
                         </p>
                         <p className="truncate text-xs text-muted-foreground">
-                          {formatSearchUserSecondary(result)}
+                          Add pubkey directly
                         </p>
                       </div>
                     </div>
                     <span className="text-xs text-muted-foreground">Add</span>
                   </button>
-                ))}
+                ) : (
+                  <p className="px-2 py-1 text-sm text-muted-foreground">
+                    No matching users.
+                  </p>
+                )}
               </div>
-            ) : queryIsHexPubkey ? (
-              <button
-                className="flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left transition-colors hover:bg-accent hover:text-accent-foreground"
-                data-testid="agent-respond-to-add-raw-pubkey"
-                onClick={() => onAddRawPubkey(deferredQuery.toLowerCase())}
-                type="button"
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <UserAvatar
-                    avatarUrl={null}
-                    displayName={truncatePubkey(deferredQuery)}
-                    size="xs"
-                  />
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium leading-5">
-                      {truncatePubkey(deferredQuery)}
-                    </p>
-                    <p className="truncate text-xs text-muted-foreground">
-                      Add pubkey directly
-                    </p>
-                  </div>
-                </div>
-                <span className="text-xs text-muted-foreground">Add</span>
-              </button>
-            ) : (
-              <p className="px-2 py-1 text-sm text-muted-foreground">
-                No matching users.
-              </p>
             )}
           </div>
         ) : null}
