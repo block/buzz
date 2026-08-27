@@ -13,7 +13,6 @@ import {
   listProjectLocalRepositories,
 } from "@/shared/api/projectGit";
 import {
-  KIND_DELETION,
   KIND_GIT_ISSUE,
   KIND_GIT_PATCH,
   KIND_GIT_PR_UPDATE,
@@ -59,15 +58,21 @@ import {
 } from "./projectPullRequests.mjs";
 import { fetchProjectsWorkItems } from "./projectWorkItems";
 import {
+  projectDeletionMutationOptions,
+  projectsQueryKey,
+} from "./projectDeletionMutation";
+import {
   eventToRepository,
   type Project,
   type Repository,
 } from "./projectModels";
 import { fetchProjectHomeForChannel, fetchProjects } from "./projectFetch";
-import { persistProjectSnapshot, PROJECTS_QUERY_KEY } from "./projectSnapshot";
+import { persistProjectSnapshot } from "./projectSnapshot";
 import { projectMatchesRouteId } from "./projectRoutes";
 
 export { fetchProjects } from "./projectFetch";
+export { projectsQueryKey };
+
 export type {
   Project,
   ProjectIssue,
@@ -582,27 +587,6 @@ async function fetchProjectActivitySummaries(
   );
 }
 
-async function deleteProject(project: Project): Promise<void> {
-  const identity = await getIdentity();
-  if (identity.pubkey.toLowerCase() !== project.owner.toLowerCase()) {
-    throw new Error("Only the project owner can delete this project.");
-  }
-
-  const event = await signRelayEvent({
-    kind: KIND_DELETION,
-    content: `Delete project ${project.name}`,
-    tags: [["a", project.projectAddress]],
-  });
-
-  await relayClient.publishEvent(
-    event,
-    "Timed out deleting project.",
-    "Failed to delete project.",
-  );
-}
-
-export const projectsQueryKey = PROJECTS_QUERY_KEY;
-
 /**
  * Freshness windows for the Projects surface. Every local write path
  * invalidates its keys explicitly (issue/PR mutations, project creation,
@@ -968,13 +952,5 @@ export function useProjectActivitySummariesQuery(projects: Project[]) {
 export function useDeleteProjectMutation() {
   const queryClient = useQueryClient();
 
-  return useMutation({
-    mutationFn: deleteProject,
-    onSuccess: (_data, project) => {
-      queryClient.setQueryData<Project[]>(projectsQueryKey, (current = []) =>
-        current.filter((item) => item.id !== project.id),
-      );
-      void queryClient.invalidateQueries({ queryKey: projectsQueryKey });
-    },
-  });
+  return useMutation(projectDeletionMutationOptions(queryClient));
 }

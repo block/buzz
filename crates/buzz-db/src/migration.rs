@@ -175,7 +175,11 @@ async fn reject_legacy_nip_rs_cardinality_ambiguity(conn: &mut PgConnection) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+    use std::{
+        collections::BTreeSet,
+        fs,
+        path::{Path, PathBuf},
+    };
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
@@ -645,7 +649,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 32);
+        assert_eq!(migrations.len(), 34);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -843,6 +847,18 @@ mod tests {
         assert!(migrations[13].sql.as_str().contains("30350"));
         assert!(migrations[13].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30350"));
+
+        // NIP-PMA kind:30179 FTS exclusion (0033): same wrap-the-existing-
+        // expression shape as 0014 so brownfield databases stop tokenizing
+        // private managed-agent ciphertext without a policy rewrite. (The
+        // migration itself still rewrites the events heap and rebuilds the
+        // GIN index — see the 0033 header for the operational cost.)
+        assert_eq!(migrations[32].version, 33);
+        assert!(migrations[32].sql.as_str().contains("kind = 30179"));
+        assert!(migrations[32].sql.as_str().contains("search_tsv"));
+        assert!(!migrations[0].sql.as_str().contains("30179"));
+        assert!(include_str!("../../../schema/schema.sql")
+            .contains("kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200)"));
 
         // Public push-gateway authority is intentionally deployment-global and
         // durable: immediate revocation and hostile-relay admission cannot be
@@ -1085,6 +1101,85 @@ mod tests {
         assert_eq!(
             extract_roster_fence(roster_fence),
             extract_roster_fence(desired_schema)
+        );
+
+        // The single-row heartbeat table is updated continuously. Prevent
+        // autovacuum from truncating its heap so standby queries are not
+        // cancelled by the ACCESS EXCLUSIVE truncation lock replay.
+        assert_eq!(migrations[33].version, 34);
+        let heartbeat_vacuum = migrations[33].sql.as_str();
+        assert!(heartbeat_vacuum.contains("ALTER TABLE replica_heartbeat"));
+        assert!(heartbeat_vacuum.contains("vacuum_truncate = false"));
+        assert!(desired_schema.contains("vacuum_truncate = false"));
+
+        // pgschema intentionally reconciles DDL, not seed DML or table storage
+        // parameters. Its post-apply reconciliation must restore and verify
+        // both parts of the live heartbeat contract for fresh bootstraps.
+        let pgschema_reconciliation =
+            include_str!("../../../scripts/reconcile-schema-after-pgschema.sql");
+        assert!(pgschema_reconciliation
+            .contains("ALTER TABLE replica_heartbeat SET (vacuum_truncate = false)"));
+        assert!(pgschema_reconciliation.contains("INSERT INTO replica_heartbeat (id) VALUES (1)"));
+        assert!(pgschema_reconciliation.contains("ON CONFLICT (id) DO NOTHING"));
+        assert!(pgschema_reconciliation.contains("pg_class"));
+        assert!(pgschema_reconciliation.contains("reloptions"));
+    }
+
+    #[test]
+    fn every_pgschema_apply_runs_post_apply_reconciliation() {
+        fn files_under(root: &Path) -> Vec<PathBuf> {
+            let mut pending = vec![root.to_owned()];
+            let mut files = Vec::new();
+
+            while let Some(path) = pending.pop() {
+                for entry in fs::read_dir(&path)
+                    .unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()))
+                {
+                    let path = entry.expect("directory entry").path();
+                    if path.is_dir() {
+                        pending.push(path);
+                    } else {
+                        files.push(path);
+                    }
+                }
+            }
+
+            files
+        }
+
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let roots = [
+            repo_root.join("scripts"),
+            repo_root.join(".github/workflows"),
+        ];
+        let mut apply_count = 0;
+
+        for path in roots.iter().flat_map(|root| files_under(root)) {
+            let Ok(contents) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let lines: Vec<_> = contents.lines().collect();
+
+            for (index, line) in lines.iter().enumerate() {
+                if !line.contains("./bin/pgschema apply") {
+                    continue;
+                }
+
+                apply_count += 1;
+                let following_lines = &lines[index + 1..(index + 7).min(lines.len())];
+                assert!(
+                    following_lines.iter().any(|line| line.contains(
+                        "scripts/reconcile-schema-after-pgschema.sql"
+                    )),
+                    "{} must run scripts/reconcile-schema-after-pgschema.sql immediately after pgschema apply",
+                    path.display()
+                );
+            }
+        }
+
+        assert!(
+            apply_count > 0,
+            "expected at least one pgschema apply caller"
         );
     }
 
@@ -1915,7 +2010,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn populated_upgrade_preserves_search_policy_except_for_push_leases() {
+    async fn populated_upgrade_preserves_search_policy_except_for_private_kinds() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
         MIGRATOR
@@ -1931,7 +2026,7 @@ mod tests {
             .await
             .expect("insert community");
 
-        for (marker, kind) in [(1_u8, 1_i32), (2_u8, 30_350_i32)] {
+        for (marker, kind) in [(1_u8, 1_i32), (2_u8, 30_350_i32), (3_u8, 30_179_i32)] {
             sqlx::query(
                 "INSERT INTO events \
                  (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at) \
@@ -1958,19 +2053,37 @@ mod tests {
         .fetch_all(&pool)
         .await
         .expect("read pre-push search behavior");
-        assert_eq!(before, vec![(1, true), (30_350, true)]);
+        assert_eq!(before, vec![(1, true), (30_179, true), (30_350, true)]);
+
+        // 0014 fixes 30350 only. A brownfield database that stopped here still
+        // tokenized kind:30179 ciphertext — the gap 0033 closes.
+        MIGRATOR
+            .run_to(32, &pool)
+            .await
+            .expect("apply migrations through 32");
+        let pre_0033: Vec<(i32, Option<bool>)> = sqlx::query_as(
+            "SELECT kind, search_tsv @@ plainto_tsquery('simple', 'needle') \
+             FROM events ORDER BY kind",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read pre-0033 search behavior");
+        assert_eq!(
+            pre_0033,
+            vec![(1, Some(true)), (30_179, Some(true)), (30_350, None)]
+        );
 
         run_migrations(&pool)
             .await
-            .expect("apply push migrations to populated database");
+            .expect("apply remaining migrations to populated database");
         let after: Vec<(i32, Option<bool>)> = sqlx::query_as(
             "SELECT kind, search_tsv @@ plainto_tsquery('simple', 'needle') \
              FROM events ORDER BY kind",
         )
         .fetch_all(&pool)
         .await
-        .expect("read post-push search behavior");
-        assert_eq!(after, vec![(1, Some(true)), (30_350, None)]);
+        .expect("read post-upgrade search behavior");
+        assert_eq!(after, vec![(1, Some(true)), (30_179, None), (30_350, None)]);
     }
 
     #[tokio::test]
