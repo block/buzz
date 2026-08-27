@@ -948,23 +948,17 @@ async fn list_operators(
         }
     }
 
-    // 3. DB rows. Config outranks DB: if a DB entry is already covered by config,
-    //    add "db" to its sources rather than creating a duplicate.
+    // 3. DB rows. Config and owner fallback both outrank DB: if a DB row's
+    //    pubkey already has an effective entry (config OR owner fallback), add
+    //    "db" to its sources rather than creating a duplicate. Matching against
+    //    the accumulated entries — not just config — is what folds an owner
+    //    whose pubkey also carries a DB row into a single combined-source entry.
     let db_rows = state.db.list_relay_operators().await?;
-    let config_pubkeys: std::collections::HashSet<&str> = state
-        .config
-        .relay_operator_pubkeys
-        .iter()
-        .map(String::as_str)
-        .collect();
-
     for row in db_rows {
         let hex = hex::encode(&row.pubkey);
-        if config_pubkeys.contains(hex.as_str()) {
-            // Config already grants Operator; annotate sources but don't demote.
-            if let Some(e) = entries.iter_mut().find(|e| e.pubkey == hex) {
-                e.sources.push("db".to_string());
-            }
+        if let Some(e) = entries.iter_mut().find(|e| e.pubkey == hex) {
+            // Higher-ranked grant already present; annotate source, don't demote.
+            e.sources.push("db".to_string());
         } else {
             entries.push(OperatorEntry {
                 pubkey: hex,
@@ -2320,6 +2314,134 @@ mod tests {
         assert_eq!(probe["source"], "owner_fallback");
         assert_eq!(probe["canAct"], true);
         assert_eq!(probe["canStaff"], true);
+    }
+
+    /// Owner fallback active (RELAY_OPERATOR_PUBKEYS empty) AND a DB operator
+    /// row exists for the same owner pubkey: GET /operators must fold both into
+    /// a SINGLE entry carrying both sources, never two rows for one pubkey.
+    #[tokio::test]
+    #[ignore = "requires Postgres — owner fallback + DB row for the same pubkey fold to one entry"]
+    async fn operators_fold_owner_fallback_and_db_row_for_same_pubkey() {
+        let owner_keys = nostr::Keys::generate();
+        let owner_hex = owner_keys.public_key().to_hex();
+        let owner_bytes = owner_keys.public_key().to_bytes().to_vec();
+
+        let mut config = crate::config::Config::from_env().expect("default config");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.relay_operator_pubkeys = vec![]; // activates owner fallback B
+        config.relay_owner_pubkey = Some(owner_hex.clone());
+        config.admin = Some(crate::config::AdminConfig {
+            host: "admin.example".to_string(),
+            auth: crate::config::AdminAuth::Nip98,
+            web_dir: None,
+        });
+        let pool = sqlx::PgPool::connect(
+            &std::env::var("BUZZ_TEST_DATABASE_URL")
+                .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()),
+        )
+        .await
+        .expect("connect to test DB");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (mut state, _audit_shutdown) = crate::state::AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        state.nip98_replay = Arc::new(AlwaysFreshReplayGuard);
+        let state = Arc::new(state);
+
+        // Clean any prior row for this pubkey, then insert a DB grant so the
+        // owner pubkey is reachable via BOTH owner fallback and a DB row.
+        sqlx::query("DELETE FROM relay_operators WHERE pubkey = $1")
+            .bind(&owner_bytes)
+            .execute(&pool)
+            .await
+            .expect("clear prior operator row");
+        state
+            .db
+            .upsert_relay_operator(&owner_bytes, "moderator", &owner_bytes)
+            .await
+            .expect("insert DB operator row for owner");
+
+        let response = status_for(
+            state,
+            Request::builder()
+                .method("GET")
+                .uri("/operators")
+                .header(header::HOST, "admin.example")
+                .header(
+                    header::AUTHORIZATION,
+                    make_nostr_auth(&owner_keys, "/operators"),
+                )
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "GET /operators must succeed"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 8192)
+            .await
+            .unwrap();
+        let entries: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+
+        let owner_entries: Vec<&serde_json::Value> = entries
+            .iter()
+            .filter(|e| e["pubkey"] == serde_json::json!(owner_hex))
+            .collect();
+        assert_eq!(
+            owner_entries.len(),
+            1,
+            "owner pubkey must appear exactly once, got {owner_entries:?}"
+        );
+        let entry = owner_entries[0];
+        // Owner fallback must not be demoted by the moderator DB row.
+        assert_eq!(
+            entry["effectiveRole"], "operator",
+            "owner fallback keeps operator role, never demotes to the DB moderator row"
+        );
+        let sources: Vec<String> = entry["sources"]
+            .as_array()
+            .expect("sources array")
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            sources.contains(&"owner_fallback".to_string()) && sources.contains(&"db".to_string()),
+            "combined entry must report both sources, got {sources:?}"
+        );
+
+        sqlx::query("DELETE FROM relay_operators WHERE pubkey = $1")
+            .bind(&owner_bytes)
+            .execute(&pool)
+            .await
+            .expect("cleanup operator row");
     }
 
     /// Fallback B does NOT activate when RELAY_OPERATOR_PUBKEYS is non-empty:

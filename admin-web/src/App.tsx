@@ -9,12 +9,14 @@ import {
 import {
   type AuthMode,
   ApiFailure,
+  mutate,
   probeAuthMode,
   request,
   requestObjectUrl,
 } from "./api";
 import type {
   FeedbackDetail,
+  FeedbackStatus,
   FeedbackSummary,
   Report,
   ReportDetail as ReportDetailData,
@@ -225,19 +227,20 @@ function FeedbackList({ authMode }: { authMode: AuthMode }) {
   const [community, setCommunity] = useState("all");
   const [timeRange, setTimeRange] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
-  const [statuses, setStatuses] = useState(loadFeedbackStatuses);
+  // Successful PATCH responses override the server-loaded status so the row
+  // reflects the new value without a full refetch. Keyed by feedback id.
+  const [overrides, setOverrides] = useState<Record<string, FeedbackStatus>>(
+    {},
+  );
 
-  const updateStatus = (id: string, event: ChangeEvent<HTMLInputElement>) => {
-    const checked = event.target.checked;
-    setStatuses((current) => {
-      const next = {
-        ...current,
-        [id]: checked,
-      };
-      saveFeedbackStatuses(next);
-      return next;
-    });
-  };
+  // Mutations require a named principal; disabled mode's server rejects them
+  // (probe reports canAct: false), so the write control is hidden there rather
+  // than offering an action that can only fail.
+  const canWrite = authMode === "nip98";
+
+  const applyStatus = useCallback((id: string, status: FeedbackStatus) => {
+    setOverrides((current) => ({ ...current, [id]: status }));
+  }, []);
 
   return (
     <Page
@@ -255,7 +258,7 @@ function FeedbackList({ authMode }: { authMode: AuthMode }) {
               community={community}
               timeRange={timeRange}
               statusFilter={statusFilter}
-              statuses={statuses}
+              overrides={overrides}
             >
               {({ communities, filtered }) => (
                 <>
@@ -307,8 +310,9 @@ function FeedbackList({ authMode }: { authMode: AuthMode }) {
                         }
                       >
                         <option value="all">Any status</option>
-                        <option value="pending">Needs action</option>
-                        <option value="acted-on">Acted on</option>
+                        <option value="new">New</option>
+                        <option value="reviewed">Reviewed</option>
+                        <option value="archived">Archived</option>
                       </select>
                     </label>
                   </div>
@@ -333,22 +337,18 @@ function FeedbackList({ authMode }: { authMode: AuthMode }) {
                               <CategoryTag category={item.category} />
                               <strong>{item.bodySummary}</strong>
                               <span className="record-provenance">
-                                {item.communityHost}
+                                <Provenance host={item.communityHost} />
                                 <code>{short(item.submitterPubkey)}</code>
                               </span>
                             </div>
                           </Link>
-                          <label className="feedback-status">
-                            <input
-                              type="checkbox"
-                              checked={statuses[item.id] ?? false}
-                              onChange={(event) => updateStatus(item.id, event)}
-                            />
-                            Acted on
-                            <span className="visually-hidden">
-                              feedback from {item.communityHost}
-                            </span>
-                          </label>
+                          <FeedbackStatusControl
+                            id={item.id}
+                            status={overrides[item.id] ?? item.status}
+                            authMode={authMode}
+                            canWrite={canWrite}
+                            onApplied={applyStatus}
+                          />
                           <div className="record-date">
                             <span>Received</span>
                             <time>{date(item.receivedAt)}</time>
@@ -358,7 +358,7 @@ function FeedbackList({ authMode }: { authMode: AuthMode }) {
                             className="record-open-link"
                           >
                             <span className="visually-hidden">
-                              Open feedback from {item.communityHost}
+                              Open feedback from {hostLabel(item.communityHost)}
                             </span>
                             <ArrowIcon />
                           </Link>
@@ -378,13 +378,101 @@ function FeedbackList({ authMode }: { authMode: AuthMode }) {
   );
 }
 
+const STATUS_LABELS: Record<FeedbackStatus, string> = {
+  new: "New",
+  reviewed: "Reviewed",
+  archived: "Archived",
+};
+
+const STATUS_OPTIONS: FeedbackStatus[] = ["new", "reviewed", "archived"];
+
+/// The per-row lifecycle control. In writable mode it PATCHes the relay and
+/// adopts the status from the PATCH response (never optimistically — a failed
+/// write leaves the prior status and surfaces an error). In read-only mode it
+/// shows the authoritative status as a static badge, since disabled-mode
+/// mutations are rejected server-side.
+function FeedbackStatusControl({
+  id,
+  status,
+  authMode,
+  canWrite,
+  onApplied,
+}: {
+  id: string;
+  status: FeedbackStatus;
+  authMode: AuthMode;
+  canWrite: boolean;
+  onApplied: (id: string, status: FeedbackStatus) => void;
+}) {
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState(false);
+
+  if (!canWrite) {
+    return (
+      <span className="feedback-status">
+        <span className={`status status-${status}`}>
+          {STATUS_LABELS[status]}
+        </span>
+      </span>
+    );
+  }
+
+  const onChange = async (event: ChangeEvent<HTMLSelectElement>) => {
+    const next = event.target.value as FeedbackStatus;
+    setPending(true);
+    setError(false);
+    try {
+      const updated = await mutate<{ status: FeedbackStatus }>(
+        `/feedback/${encodeURIComponent(id)}`,
+        "PATCH",
+        { status: next },
+        authMode,
+      );
+      onApplied(id, updated.status);
+    } catch {
+      setError(true);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <label className="feedback-status">
+      <span className="visually-hidden">Status</span>
+      <select value={status} onChange={onChange} disabled={pending}>
+        {STATUS_OPTIONS.map((option) => (
+          <option key={option} value={option}>
+            {STATUS_LABELS[option]}
+          </option>
+        ))}
+      </select>
+      {error ? (
+        <span className="status-error" role="alert">
+          Update failed
+        </span>
+      ) : null}
+    </label>
+  );
+}
+
+/// Feedback whose source community was purged carries no host. Render an
+/// explicit provenance-unavailable marker rather than an empty slot.
+function Provenance({ host }: { host: string | null }) {
+  if (host) return host;
+  return <span className="provenance-unavailable">Community unavailable</span>;
+}
+
+function hostLabel(host: string | null): string {
+  return host ?? "an unavailable community";
+}
+
 function FeedbackResults({
   items,
   query,
   community,
   timeRange,
   statusFilter,
-  statuses,
+  overrides,
   children,
 }: {
   items: FeedbackSummary[];
@@ -392,7 +480,7 @@ function FeedbackResults({
   community: string;
   timeRange: string;
   statusFilter: string;
-  statuses: FeedbackStatuses;
+  overrides: Record<string, FeedbackStatus>;
   children: (results: {
     communities: string[];
     filtered: FeedbackSummary[];
@@ -400,14 +488,14 @@ function FeedbackResults({
 }) {
   const results = useMemo(() => {
     const communities = [...new Set(items.map((item) => item.communityHost))]
-      .filter(Boolean)
+      .filter((host): host is string => Boolean(host))
       .sort((left, right) => left.localeCompare(right));
     const normalizedQuery = query.trim().toLocaleLowerCase();
     const after = timeRangeStart(timeRange);
     const filtered = items.filter((item) => {
+      const status = overrides[item.id] ?? item.status;
       if (community !== "all" && item.communityHost !== community) return false;
-      if (statusFilter === "pending" && statuses[item.id]) return false;
-      if (statusFilter === "acted-on" && !statuses[item.id]) return false;
+      if (statusFilter !== "all" && status !== statusFilter) return false;
       if (after !== undefined) {
         const receivedAt = new Date(item.receivedAt).valueOf();
         if (Number.isNaN(receivedAt) || receivedAt < after) return false;
@@ -415,13 +503,13 @@ function FeedbackResults({
       if (!normalizedQuery) return true;
       return [
         item.bodySummary,
-        item.communityHost,
+        item.communityHost ?? "",
         item.category ?? "uncategorized",
         item.submitterPubkey,
       ].some((value) => value.toLocaleLowerCase().includes(normalizedQuery));
     });
     return { communities, filtered };
-  }, [items, query, community, timeRange, statusFilter, statuses]);
+  }, [items, query, community, timeRange, statusFilter, overrides]);
   return children(results);
 }
 
@@ -446,11 +534,16 @@ function FeedbackDetailView({
     >
       <StateView resource={resource}>
         {(feedback) => {
-          const attachments = feedbackAttachments(
-            feedback.id,
-            feedback.tags,
-            feedback.communityHost,
-          );
+          // Without an authoritative host we cannot validate attachment URLs or
+          // derive their fetch paths safely, so we render none and mark the
+          // provenance unavailable rather than guessing an origin.
+          const attachments = feedback.communityHost
+            ? feedbackAttachments(
+                feedback.id,
+                feedback.tags,
+                feedback.communityHost,
+              )
+            : [];
           const body = stripAttachmentMarkdown(feedback.body, attachments);
           return (
             <article className="detail">
@@ -460,7 +553,9 @@ function FeedbackDetailView({
                 </span>
                 <div>
                   <CategoryTag category={feedback.category} />
-                  <h2>{feedback.communityHost}</h2>
+                  <h2>
+                    <Provenance host={feedback.communityHost} />
+                  </h2>
                 </div>
               </div>
               <dl>
@@ -501,8 +596,6 @@ function FeedbackDetailView({
   );
 }
 
-type FeedbackStatuses = Record<string, boolean>;
-
 interface FeedbackAttachment {
   path: string;
   sourceUrl: string;
@@ -511,25 +604,6 @@ interface FeedbackAttachment {
   size?: number;
   dimensions?: string;
   filename?: string;
-}
-
-const FEEDBACK_STATUS_KEY = "buzz-admin-feedback-status";
-
-function loadFeedbackStatuses(): FeedbackStatuses {
-  try {
-    const stored = localStorage.getItem(FEEDBACK_STATUS_KEY);
-    return stored ? (JSON.parse(stored) as FeedbackStatuses) : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveFeedbackStatuses(statuses: FeedbackStatuses) {
-  try {
-    localStorage.setItem(FEEDBACK_STATUS_KEY, JSON.stringify(statuses));
-  } catch {
-    // The controls remain useful for the current session if storage is blocked.
-  }
 }
 
 function timeRangeStart(range: string) {

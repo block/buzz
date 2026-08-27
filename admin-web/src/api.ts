@@ -24,25 +24,45 @@ export type AuthMode = "nip98" | "disabled";
 /// rejects the second, and the 401 retry re-signs the same fields and can
 /// never recover. The verifier ignores unknown tags, so the nonce is inert to
 /// verification and serves only to make each signed event unique.
-async function signNip98(url: string, method: string): Promise<string> {
+///
+/// For body-bearing methods the caller passes `body`; a `payload` tag carrying
+/// the hex SHA-256 of the exact bytes is added and signed. The relay's verifier
+/// rejects a body-bearing request whose `payload` tag is absent or mismatched
+/// (auth.rs), so the hash must be over the identical bytes the request sends.
+async function signNip98(
+  url: string,
+  method: string,
+  body?: Uint8Array,
+): Promise<string> {
   const nostr = (window as Window & typeof globalThis & { nostr?: Nostr98 })
     .nostr;
   if (!nostr) throw new Error("No NIP-07 extension available");
   const nonce = crypto.getRandomValues(new Uint8Array(16));
-  const nonceHex = Array.from(nonce, (b) =>
-    b.toString(16).padStart(2, "0"),
-  ).join("");
+  const nonceHex = toHex(nonce);
+  const tags: string[][] = [
+    ["u", url],
+    ["method", method],
+    ["nonce", nonceHex],
+  ];
+  if (body !== undefined) {
+    tags.push(["payload", await sha256Hex(body)]);
+  }
   const event = await nostr.signEvent({
     kind: 27235,
     created_at: Math.floor(Date.now() / 1000),
-    tags: [
-      ["u", url],
-      ["method", method],
-      ["nonce", nonceHex],
-    ],
+    tags,
     content: "",
   });
   return `Nostr ${btoa(JSON.stringify(event))}`;
+}
+
+function toHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", bytes as BufferSource);
+  return toHex(new Uint8Array(digest));
 }
 
 // Minimal type for the NIP-07 window.nostr interface.
@@ -67,14 +87,23 @@ async function send(
   path: string,
   accept: string,
   authMode: AuthMode,
+  init?: { method?: string; body?: Uint8Array; contentType?: string },
 ): Promise<Response> {
-  const doRequest = async (extraHeaders?: Record<string, string>) => {
-    const headers: Record<string, string> = { accept, ...extraHeaders };
+  const method = init?.method ?? "GET";
+  const body = init?.body;
+  const doRequest = async () => {
+    const headers: Record<string, string> = { accept };
+    if (init?.contentType) headers["content-type"] = init.contentType;
     if (authMode === "nip98") {
       const url = `${location.protocol}//${location.host}${PREFIX}${path}`;
-      headers.authorization = await signNip98(url, "GET");
+      headers.authorization = await signNip98(url, method, body);
     }
-    return fetch(`${PREFIX}${path}`, { credentials: "same-origin", headers });
+    return fetch(`${PREFIX}${path}`, {
+      method,
+      credentials: "same-origin",
+      headers,
+      body: body as BodyInit | undefined,
+    });
   };
 
   let response = await doRequest();
@@ -100,6 +129,24 @@ async function send(
 
 export async function request<T>(path: string, authMode: AuthMode): Promise<T> {
   const response = await send(path, "application/json", authMode);
+  return response.json() as Promise<T>;
+}
+
+/// Send a body-bearing mutation (PATCH/PUT/POST) and parse the JSON response.
+/// The body is serialized once and signed over those exact bytes so the NIP-98
+/// `payload` tag matches what the relay verifies.
+export async function mutate<T>(
+  path: string,
+  method: string,
+  body: unknown,
+  authMode: AuthMode,
+): Promise<T> {
+  const bytes = new TextEncoder().encode(JSON.stringify(body));
+  const response = await send(path, "application/json", authMode, {
+    method,
+    body: bytes,
+    contentType: "application/json",
+  });
   return response.json() as Promise<T>;
 }
 
