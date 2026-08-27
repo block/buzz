@@ -271,6 +271,7 @@ describe("visibility-gated hooks", () => {
       window: dom.window,
     });
     const observed = [];
+    const domWindow = globalThis.window;
     function Harness() {
       const refetchInterval = useFocusedRefetchInterval(1_000);
       React.useEffect(() => {
@@ -287,9 +288,18 @@ describe("visibility-gated hooks", () => {
     focused = true;
     await act(async () => window.dispatchEvent(new window.Event("focus")));
     assert.deepEqual(observed, [1_000, false]);
-    await act(
-      async () => new Promise((resolve) => window.setTimeout(resolve, 10)),
-    );
+    // The resume notification runs after the activation turn yields
+    // (task -> frame -> task in scheduleAfterForegroundReady). Under load the
+    // chained 0ms timers can exceed any fixed real-time wait, so poll with a
+    // deadline instead of sleeping a constant 10ms.
+    const resumeDeadline = Date.now() + 5_000;
+    while (
+      observed.length < 3 &&
+      Date.now() < resumeDeadline &&
+      globalThis.window === domWindow
+    ) {
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    }
     assert.deepEqual(observed, [1_000, false, 1_000]);
 
     await act(async () => root.unmount());

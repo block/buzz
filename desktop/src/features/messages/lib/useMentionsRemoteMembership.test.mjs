@@ -157,6 +157,7 @@ function mountMentions() {
       queries: { retry: false, gcTime: Number.POSITIVE_INFINITY },
     },
   });
+  queryClients.push(client);
   return renderHook(
     () =>
       useMentions(CHANNEL_ID, undefined, undefined, { channelType: "stream" }),
@@ -195,8 +196,17 @@ async function openPicker(view, query) {
   );
 }
 
+// QueryClients created by mountMentions. React-query schedules a 5-minute GC
+// timer per query when its last observer unmounts; without clear() those
+// timers keep the event loop (and the test runner) alive for ~300s after the
+// last assertion. Each test clears its own clients before the next mount.
+const queryClients = [];
+
 afterEach(async () => {
   cleanup();
+  for (const client of queryClients.splice(0)) {
+    await client.clear();
+  }
   dom.window.localStorage.clear();
 });
 
