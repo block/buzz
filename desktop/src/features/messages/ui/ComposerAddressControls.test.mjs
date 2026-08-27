@@ -111,9 +111,15 @@ test("mention control expands with automatically mentioned agents", async () => 
     );
   }
   const remove = view.getByTestId("composer-address-lock-remove-agent-pubkey");
+  const removeChrome = remove.querySelector("span.absolute");
   assert.match(
-    remove.querySelector("span.absolute")?.className ?? "",
+    removeChrome?.className ?? "",
     /group-hover\/address:opacity-100/,
+  );
+  assert.match(removeChrome?.className ?? "", /(?:^|\s)bg-foreground(?:\s|$)/);
+  assert.doesNotMatch(
+    removeChrome?.className ?? "",
+    /(?:^|\s)bg-foreground\/80(?:\s|$)/,
   );
   fireEvent.click(remove);
   assert.deepEqual(removed, ["agent-pubkey"]);

@@ -263,7 +263,7 @@ export function ComposerMentionButton({
                               shakeVersionByPubkey[agent.pubkey] ?? 0
                             }
                           />
-                          <span className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-full bg-foreground/80 text-background opacity-0 transition-opacity group-hover/address:opacity-100 group-focus-visible/address:opacity-100">
+                          <span className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-full bg-foreground text-background opacity-0 transition-opacity group-hover/address:opacity-100 group-focus-visible/address:opacity-100">
                             <X aria-hidden="true" className="h-3 w-3" />
                           </span>
                         </motion.button>

@@ -428,7 +428,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                           : "Automatically mention"}
                       </span>
                       {alwaysAddressShortcut ? (
-                        <kbd className="flex items-center gap-0.5 rounded border border-primary-foreground/20 bg-primary-foreground/10 px-1 py-0 font-mono text-sm text-primary-foreground/70">
+                        <kbd className="flex items-center gap-0.5 rounded border border-secondary-foreground/20 bg-secondary-foreground/10 px-1 py-0 font-mono text-sm text-secondary-foreground">
                           {(alwaysAddressShortcut.includes("+")
                             ? alwaysAddressShortcut.split("+")
                             : Array.from(alwaysAddressShortcut)
