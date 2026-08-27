@@ -490,12 +490,13 @@ struct CandidateHint {
 }
 
 /// Fetch best-effort presence (kind:40902) and kind:0 metadata for each
-/// pubkey in `pubkeys`, running both queries concurrently and bounding the
-/// whole enrichment phase by `timeout`. Returns a map from pubkey to hints;
-/// pubkeys with failed or absent lookups are absent from the map rather than
-/// causing an error — callers must handle the missing-hint case. On timeout
-/// or relay error, returns whatever partial hints were collected (possibly
-/// an empty map) so the caller can still print bare pubkeys promptly.
+/// pubkey in `pubkeys`. Each query is bounded *independently* by `timeout` and
+/// the two outcomes are joined, so a lookup that completes survives a sibling
+/// that hangs (see [`join_bounded_queries`]). Returns a map from pubkey to
+/// hints; pubkeys with failed or absent lookups are absent from the map rather
+/// than causing an error — callers must handle the missing-hint case. On
+/// timeout or relay error, returns whatever partial hints were collected
+/// (possibly an empty map) so the caller can still print bare pubkeys promptly.
 ///
 /// Only called when duplicate candidates have been detected: happy-path
 /// resolutions perform zero hint queries.
@@ -521,29 +522,72 @@ async fn fetch_candidate_hints(
         "limit": pubkeys.len(),
     });
 
-    // Run both queries concurrently and bound by the overall timeout.
-    let (presence_result, profile_result) = tokio::time::timeout(timeout, async {
-        tokio::join!(
-            client.query(&presence_filter),
-            client.query(&profile_filter),
-        )
-    })
-    .await
-    .unwrap_or((
-        Err(crate::error::CliError::Other("hint timeout".to_string())),
-        Err(crate::error::CliError::Other("hint timeout".to_string())),
-    ));
+    let (presence_result, profile_result) = join_bounded_queries(
+        timeout,
+        client.query(&presence_filter),
+        client.query(&profile_filter),
+    )
+    .await;
 
-    let presence_events: Vec<serde_json::Value> = presence_result
+    hints_from_results(pubkeys, presence_result, profile_result)
+}
+
+/// Run two relay queries concurrently, bounding *each* independently by
+/// `timeout` and joining the outcomes. A per-query timeout maps to `Err`, so a
+/// completed lookup is never discarded because its sibling hung — the fail-soft
+/// contract requires partial enrichment to survive. The whole call still
+/// returns within `timeout` because neither branch can outlast it.
+async fn join_bounded_queries<P, Q>(
+    timeout: std::time::Duration,
+    presence: P,
+    profile: Q,
+) -> (Result<String, CliError>, Result<String, CliError>)
+where
+    P: std::future::Future<Output = Result<String, CliError>>,
+    Q: std::future::Future<Output = Result<String, CliError>>,
+{
+    tokio::join!(
+        async {
+            tokio::time::timeout(timeout, presence)
+                .await
+                .unwrap_or_else(|_| Err(CliError::Other("presence hint timeout".to_string())))
+        },
+        async {
+            tokio::time::timeout(timeout, profile)
+                .await
+                .unwrap_or_else(|_| Err(CliError::Other("profile hint timeout".to_string())))
+        },
+    )
+}
+
+/// Convert the raw presence and profile query outcomes into a hint map.
+///
+/// A *successful, parseable* presence response is treated as a **complete
+/// snapshot** for the requested `pubkeys`: the relay drops the Redis presence
+/// key when an identity goes offline, so any requested pubkey the snapshot
+/// omits is offline — exactly the stale duplicate an operator needs flagged.
+/// Those omitted pubkeys are therefore seeded as `offline`. A failed,
+/// timed-out, or malformed presence response yields no seed, so absence stays
+/// unlabeled rather than falsely inferring offline. Kept separate from IO so
+/// the seeding boundary is directly unit-testable without a relay.
+fn hints_from_results(
+    pubkeys: &[String],
+    presence_result: Result<String, CliError>,
+    profile_result: Result<String, CliError>,
+) -> HashMap<String, CandidateHint> {
+    let (offline_seed, presence_events): (&[String], Vec<serde_json::Value>) = match presence_result
         .ok()
-        .and_then(|r| serde_json::from_str(&r).ok())
-        .unwrap_or_default();
+        .and_then(|r| serde_json::from_str::<Vec<serde_json::Value>>(&r).ok())
+    {
+        Some(events) => (pubkeys, events),
+        None => (&[], Vec::new()),
+    };
     let profile_events: Vec<serde_json::Value> = profile_result
         .ok()
         .and_then(|r| serde_json::from_str(&r).ok())
         .unwrap_or_default();
 
-    build_hint_map(&presence_events, &profile_events)
+    build_hint_map(offline_seed, &presence_events, &profile_events)
 }
 
 /// Pure response-to-map conversion: takes the raw presence (kind:40902) and
@@ -551,13 +595,33 @@ async fn fetch_candidate_hints(
 /// per-pubkey hint map. Extracted as a sync function so it is directly
 /// unit-testable without a relay.
 ///
+/// `offline_seed` names the pubkeys whose presence was requested via a
+/// response the caller trusts as a complete snapshot; each is pre-labeled
+/// `offline` before overlaying returned statuses, so a duplicate the relay
+/// omitted (its Redis key was dropped on going offline) is still flagged
+/// `offline` rather than left blank. Pass an empty slice when the presence
+/// response failed, timed out, or was malformed — never infer offline then.
+///
 /// Presence subject is the `p`-tag value when present (relay signs the event
 /// and embeds the agent pubkey there), otherwise the event author.
 fn build_hint_map(
+    offline_seed: &[String],
     presence_events: &[serde_json::Value],
     profile_events: &[serde_json::Value],
 ) -> HashMap<String, CandidateHint> {
     let mut hints: HashMap<String, CandidateHint> = HashMap::new();
+
+    // Seed requested pubkeys as offline: a trusted snapshot that omits a
+    // requested pubkey means that identity is offline.
+    for pubkey in offline_seed {
+        hints
+            .entry(pubkey.clone())
+            .or_insert(CandidateHint {
+                presence: None,
+                profile_updated_at: None,
+            })
+            .presence = Some("offline".to_string());
+    }
 
     for event in presence_events {
         let subject = presence_subject(event).to_string();
@@ -568,13 +632,17 @@ fn build_hint_map(
             .get("content")
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        hints
-            .entry(subject)
-            .or_insert(CandidateHint {
-                presence: None,
-                profile_updated_at: None,
-            })
-            .presence = status;
+        // Only overlay a real status string; a returned event with no readable
+        // content must not erase an offline seed for the same pubkey.
+        if let Some(status) = status {
+            hints
+                .entry(subject)
+                .or_insert(CandidateHint {
+                    presence: None,
+                    profile_updated_at: None,
+                })
+                .presence = Some(status);
+        }
     }
 
     for event in profile_events {
@@ -1438,10 +1506,10 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 mod tests {
     use super::{
         apply_cardinality_rule, assemble_roster_resolution, build_hint_map, build_template_report,
-        cmd_set_add_policy, finalize_roster_resolution, format_candidate, name_matches,
-        resolve_roster_with_archive_filter, validate_ttl_seconds, validate_update_channel_fields,
-        ArchivedExclusion, CandidateHint, ChannelSummary, ResolvedAgent, RosterResolution,
-        SkippedSlug,
+        cmd_set_add_policy, finalize_roster_resolution, format_candidate, hints_from_results,
+        join_bounded_queries, name_matches, resolve_roster_with_archive_filter,
+        validate_ttl_seconds, validate_update_channel_fields, ArchivedExclusion, CandidateHint,
+        ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
     };
     use crate::client::BuzzClient;
     use crate::CliError;
@@ -2136,7 +2204,7 @@ mod tests {
             "content": "online",
             "tags": [["p", agent_pk]],
         })];
-        let map = build_hint_map(&presence, &[]);
+        let map = build_hint_map(&[], &presence, &[]);
         assert!(
             !map.contains_key(&relay_pk),
             "relay author must not be the key: {map:?}"
@@ -2161,7 +2229,7 @@ mod tests {
             "pubkey": pk,
             "created_at": 1_705_276_800_u64,
         })];
-        let map = build_hint_map(&[], &profile);
+        let map = build_hint_map(&[], &[], &profile);
         assert!(map.contains_key(&pk), "pubkey must be in map: {map:?}");
         assert_eq!(
             map[&pk].profile_updated_at,
@@ -2184,7 +2252,7 @@ mod tests {
             "content": "offline",
             "tags": [],
         })];
-        let map = build_hint_map(&presence, &[]);
+        let map = build_hint_map(&[], &presence, &[]);
         assert!(map.contains_key(&pk), "pubkey must be in map: {map:?}");
         assert_eq!(
             map[&pk].presence.as_deref(),
@@ -2209,7 +2277,7 @@ mod tests {
             json!({"created_at": 1_705_276_800_u64}), // no pubkey
             json!({"pubkey": null, "created_at": 1_705_276_800_u64}),
         ];
-        let map = build_hint_map(&malformed_presence, &malformed_profile);
+        let map = build_hint_map(&[], &malformed_presence, &malformed_profile);
         assert!(
             map.is_empty(),
             "malformed entries must yield empty map: {map:?}"
@@ -2219,7 +2287,7 @@ mod tests {
     #[test]
     fn build_hint_map_both_failures_yield_empty_map() {
         // Both slices empty simulates a total timeout / relay error.
-        let map = build_hint_map(&[], &[]);
+        let map = build_hint_map(&[], &[], &[]);
         assert!(map.is_empty(), "empty inputs must yield empty map");
     }
 
@@ -2375,6 +2443,141 @@ mod tests {
         assert!(
             result.is_err(),
             "untrusted archive + duplicates is still an error"
+        );
+    }
+
+    // --- hints_from_results offline-seeding boundary ---
+    // A successful presence snapshot is complete: the relay drops the Redis
+    // presence key on offline, so a requested pubkey the snapshot omits is
+    // offline. A failed/malformed presence response must NOT infer offline.
+
+    /// Serialize presence/profile events the way the relay returns them.
+    fn events_json(events: &[serde_json::Value]) -> String {
+        serde_json::to_string(events).unwrap()
+    }
+
+    #[test]
+    fn hints_from_results_successful_partial_snapshot_seeds_absent_as_offline() {
+        let online_pk = "a".repeat(64);
+        let absent_pk = "b".repeat(64);
+        let pubkeys = vec![online_pk.clone(), absent_pk.clone()];
+        // Snapshot returns only the online instance; absent_pk is omitted.
+        let presence = events_json(&[json!({
+            "pubkey": "r".repeat(64),
+            "content": "online",
+            "tags": [["p", online_pk.clone()]],
+        })]);
+
+        let map = hints_from_results(&pubkeys, Ok(presence), Ok("[]".to_string()));
+
+        assert_eq!(
+            map[&online_pk].presence.as_deref(),
+            Some("online"),
+            "returned status must overlay the seed"
+        );
+        assert_eq!(
+            map[&absent_pk].presence.as_deref(),
+            Some("offline"),
+            "a requested pubkey omitted from a successful snapshot is offline"
+        );
+    }
+
+    #[test]
+    fn hints_from_results_successful_empty_snapshot_seeds_all_offline() {
+        let pk_a = "c".repeat(64);
+        let pk_b = "d".repeat(64);
+        let pubkeys = vec![pk_a.clone(), pk_b.clone()];
+
+        // Empty-but-successful snapshot: every requested pubkey is offline.
+        let map = hints_from_results(&pubkeys, Ok("[]".to_string()), Ok("[]".to_string()));
+
+        assert_eq!(map[&pk_a].presence.as_deref(), Some("offline"));
+        assert_eq!(map[&pk_b].presence.as_deref(), Some("offline"));
+    }
+
+    #[test]
+    fn hints_from_results_failed_presence_yields_no_offline_label() {
+        let pk = "e".repeat(64);
+        let pubkeys = vec![pk.clone()];
+        let profile =
+            events_json(&[json!({ "pubkey": pk.clone(), "created_at": 1_705_276_800_u64 })]);
+
+        let map = hints_from_results(
+            &pubkeys,
+            Err(CliError::Other("presence hint timeout".to_string())),
+            Ok(profile),
+        );
+
+        assert!(
+            map[&pk].presence.is_none(),
+            "a failed presence lookup must never be inferred as offline"
+        );
+        assert_eq!(
+            map[&pk].profile_updated_at,
+            Some(1_705_276_800),
+            "the completed profile lookup must survive the failed presence sibling"
+        );
+    }
+
+    #[test]
+    fn hints_from_results_malformed_presence_yields_no_offline_label() {
+        let pk = "f".repeat(64);
+        let pubkeys = vec![pk.clone()];
+
+        // Unparseable presence body → not a trusted snapshot → no seeding.
+        let map = hints_from_results(
+            &pubkeys,
+            Ok("not json".to_string()),
+            Err(CliError::Other("profile hint timeout".to_string())),
+        );
+
+        assert!(
+            map.get(&pk).is_none_or(|h| h.presence.is_none()),
+            "malformed presence must not infer offline: {map:?}"
+        );
+    }
+
+    // --- join_bounded_queries: a completed lookup survives a hung sibling ---
+
+    #[tokio::test(start_paused = true)]
+    async fn join_bounded_queries_completed_presence_survives_hung_profile() {
+        let timeout = std::time::Duration::from_secs(3);
+        let (presence, profile) = join_bounded_queries(
+            timeout,
+            // Presence completes immediately.
+            async { Ok::<String, CliError>("[]".to_string()) },
+            // Profile hangs past the timeout.
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                Ok::<String, CliError>("[]".to_string())
+            },
+        )
+        .await;
+
+        assert!(
+            presence.is_ok(),
+            "the completed presence lookup must be retained, not discarded by the hung sibling"
+        );
+        assert!(profile.is_err(), "the hung profile lookup must time out");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn join_bounded_queries_completed_profile_survives_hung_presence() {
+        let timeout = std::time::Duration::from_secs(3);
+        let (presence, profile) = join_bounded_queries(
+            timeout,
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                Ok::<String, CliError>("[]".to_string())
+            },
+            async { Ok::<String, CliError>("[]".to_string()) },
+        )
+        .await;
+
+        assert!(presence.is_err(), "the hung presence lookup must time out");
+        assert!(
+            profile.is_ok(),
+            "the completed profile lookup must be retained despite the hung presence sibling"
         );
     }
 }
