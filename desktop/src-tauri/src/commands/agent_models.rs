@@ -4,7 +4,7 @@ use nostr::Keys;
 use serde::Deserialize;
 use tauri::{AppHandle, State};
 
-use super::agent_model_process::run_agent_models_command;
+use super::agent_model_process::{run_agent_models_command, run_buzz_agent_native_models};
 use super::managed_agent_definition::apply_model_provider_prompt_update;
 // The map-only lookup is reached solely from the base-URL helpers that exist for
 // their unit tests; discovery itself always goes through the process-env variant.
@@ -92,7 +92,7 @@ pub async fn get_agent_models(
         provider: saved_provider,
         provider_env_var,
         env: merged_env,
-        command: _,
+        command: runtime_command,
     } = discovery;
 
     let merged_env = discovery_env_with_baked_floor(merged_env);
@@ -139,6 +139,19 @@ pub async fn get_agent_models(
         &merged_env,
         persisted_model.clone(),
         DatabricksAuthIntent::InteractiveModelPicker,
+    )
+    .await?
+    {
+        return Ok(models);
+    }
+
+    // The agent binary owns every provider transport; providers without a
+    // desktop HTTP helper discover here.
+    if let Some(models) = run_buzz_agent_native_models(
+        &runtime_command,
+        &agent_command,
+        merged_env.clone(),
+        persisted_model.clone(),
     )
     .await?
     {
@@ -317,6 +330,16 @@ pub async fn discover_agent_models(
         DatabricksAuthIntent::PassiveDraftDiscovery,
     )
     .await?
+    {
+        return Ok(models);
+    }
+
+    // `buzz-agent models` needs no configured model, so it serves the draft
+    // dialog. The ACP path below requires one and would fail with
+    // "config: <PROVIDER>_MODEL required".
+    if let Some(models) =
+        run_buzz_agent_native_models(agent_command, &resolved_agent, merged_env.clone(), None)
+            .await?
     {
         return Ok(models);
     }

@@ -962,3 +962,38 @@ fn databricks_static_token_error_redacts_echoed_token() {
         "error lost its remediation: {error}"
     );
 }
+
+// ── buzz-agent native model discovery (`buzz-agent models`) ──────────────────
+
+use crate::commands::agent_model_process::parse_native_models_output;
+
+#[test]
+fn parse_native_models_output_builds_response() {
+    let stdout =
+        br#"[{"id":"llama3-3-70b","name":"llama3-3-70b"},{"id":"kimi-k3","name":"kimi-k3"}]"#;
+    let response = parse_native_models_output(stdout, Some("kimi-k3".to_string()))
+        .expect("valid JSON parses")
+        .expect("non-empty catalog yields a response");
+    assert_eq!(response.agent_name, "buzz-agent");
+    assert!(response.supports_switching);
+    assert_eq!(response.selected_model.as_deref(), Some("kimi-k3"));
+    let ids: Vec<&str> = response.models.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["llama3-3-70b", "kimi-k3"]);
+}
+
+#[test]
+fn parse_native_models_output_empty_catalog_falls_through() {
+    // `[]` means no live catalog; callers fall through to the ACP
+    // subprocess instead of an empty dropdown.
+    let response = parse_native_models_output(b"[]", None).expect("empty array is valid");
+    assert!(response.is_none());
+}
+
+#[test]
+fn parse_native_models_output_rejects_malformed_json() {
+    let error = parse_native_models_output(b"not json", None).unwrap_err();
+    assert!(
+        error.contains("failed to parse buzz-agent models JSON"),
+        "{error}"
+    );
+}

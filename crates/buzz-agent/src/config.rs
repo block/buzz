@@ -427,6 +427,11 @@ pub enum Provider {
     DatabricksV2,
     /// OpenRouter multi-provider gateway. Routes to `{base_url}/chat/completions` with bearer auth. Wire format is OpenAI-chat-compatible.
     OpenRouter,
+    /// Maple (OpenSecret) confidential inference. Routes to
+    /// `{base_url}/v1/chat/completions` through the opensecret SDK's attested,
+    /// encrypted enclave session. Wire format inside the envelope is
+    /// OpenAI-chat-compatible.
+    Maple,
 }
 
 /// Which OpenAI-family HTTP API to call. Set via `OPENAI_COMPAT_API`
@@ -525,6 +530,10 @@ pub struct Config {
     /// Set via `BUZZ_AGENT_THINKING_SUMMARY`. Ignored on Anthropic, Chat
     /// Completions, and OpenRouter routes.
     pub thinking_summary: ThinkingSummary,
+    /// Verify Maple's attestation against the development PCR0 trust roots
+    /// instead of production. Only read when `provider = Maple`. Set via
+    /// `MAPLE_PCR0_ENVIRONMENT=development`.
+    pub maple_pcr0_development: bool,
     /// Emit Anthropic `cache_control` breakpoints on the stable prefix
     /// (tools + system prompt) and the rolling conversation tail. Default on;
     /// disable with `BUZZ_AGENT_PROMPT_CACHING=0`. Consulted on every route that
@@ -537,66 +546,23 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
-        let databricks_host = env("DATABRICKS_HOST");
-        let databricks_model = env("DATABRICKS_MODEL");
-        let provider = resolve_provider(
-            env("BUZZ_AGENT_PROVIDER").as_deref(),
-            env("ANTHROPIC_API_KEY").as_deref(),
-            env("OPENAI_COMPAT_API_KEY").as_deref(),
-            env("OPENROUTER_API_KEY").as_deref(),
-        )?;
+        let provider = resolve_provider_from_env()?;
+        let conn = provider_connection_from_env(provider, ConnectionPurpose::Inference)?;
 
         // Universal model override — takes priority over provider-specific model
         // env vars (ANTHROPIC_MODEL, OPENAI_COMPAT_MODEL, DATABRICKS_MODEL) when
         // present. Set by the desktop from the persona/record to express explicit
         // user intent; provider-specific vars serve as defaults for CLI/standalone use.
         let buzz_agent_model = env("BUZZ_AGENT_MODEL");
-
-        // OPENAI_COMPAT_API is only read when provider=openai, so a stray
-        // bad value can't break an Anthropic-only deployment.
-        //
-        // Databricks borrows api_key as the *optional* `DATABRICKS_TOKEN` escape
-        // hatch — empty means "use OAuth PKCE." Legacy Databricks encodes the
-        // model in the URL path; Databricks v2 keeps it in the request body.
-        let (api_key, model, base_url, openai_api) = match provider {
-            Provider::Anthropic => (
-                req("ANTHROPIC_API_KEY")?,
-                resolve_model(
-                    buzz_agent_model.as_deref(),
-                    env("ANTHROPIC_MODEL").as_deref(),
-                )
-                .ok_or_else(|| "config: ANTHROPIC_MODEL required".to_string())?,
-                env_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
-                OpenAiApi::Auto, // unused for Anthropic
-            ),
-            Provider::OpenAi => (
-                req("OPENAI_COMPAT_API_KEY")?,
-                resolve_model(
-                    buzz_agent_model.as_deref(),
-                    env("OPENAI_COMPAT_MODEL").as_deref(),
-                )
-                .ok_or_else(|| "config: OPENAI_COMPAT_MODEL required".to_string())?,
-                env_or("OPENAI_COMPAT_BASE_URL", "https://api.openai.com/v1"),
-                parse_openai_api(env("OPENAI_COMPAT_API").as_deref())?,
-            ),
-            Provider::Databricks | Provider::DatabricksV2 => (
-                env("DATABRICKS_TOKEN").unwrap_or_default(),
-                resolve_model(buzz_agent_model.as_deref(), databricks_model.as_deref())
-                    .ok_or_else(|| "config: DATABRICKS_MODEL required".to_string())?,
-                databricks_host.ok_or_else(|| "config: DATABRICKS_HOST required".to_string())?,
-                OpenAiApi::Chat, // only read by OpenAI/legacy Databricks dispatch
-            ),
-            Provider::OpenRouter => (
-                req("OPENROUTER_API_KEY")?,
-                resolve_model(
-                    buzz_agent_model.as_deref(),
-                    env("OPENROUTER_MODEL").as_deref(),
-                )
-                .ok_or_else(|| "config: OPENROUTER_MODEL required".to_string())?,
-                env_or("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
-                OpenAiApi::Chat, // OpenRouter uses Chat Completions only
-            ),
-        };
+        let model = resolve_model(buzz_agent_model.as_deref(), conn.provider_model.as_deref())
+            .ok_or_else(|| format!("config: {} required", conn.model_env_var))?;
+        let ProviderConnection {
+            api_key,
+            base_url,
+            openai_api,
+            maple_pcr0_development,
+            ..
+        } = conn;
         let system_prompt = match (env("BUZZ_AGENT_SYSTEM_PROMPT"), env("BUZZ_AGENT_SYSTEM_PROMPT_FILE")) {
             (Some(_), Some(_)) => return Err(
                 "config: BUZZ_AGENT_SYSTEM_PROMPT and BUZZ_AGENT_SYSTEM_PROMPT_FILE are mutually exclusive".into()),
@@ -612,6 +578,7 @@ impl Config {
             base_url,
             anthropic_api_version: env_or("ANTHROPIC_API_VERSION", "2023-06-01"),
             openai_api,
+            maple_pcr0_development,
             max_rounds: parse_env("BUZZ_AGENT_MAX_ROUNDS", 0)?,
             max_output_tokens: parse_env("BUZZ_AGENT_MAX_OUTPUT_TOKENS", 65_536)?,
             max_token_recoveries: parse_env("BUZZ_AGENT_MAX_TOKEN_RECOVERIES", 3u32)?,
@@ -654,12 +621,25 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Same env vars as [`Config::from_env`], but no model is required:
+    /// `buzz-agent models` runs before a model has been chosen. The ACP
+    /// server path keeps using `from_env`, since a running agent always has
+    /// a model.
+    pub fn discovery_from_env() -> Result<Self, String> {
+        let provider = resolve_provider_from_env()?;
+        let conn = provider_connection_from_env(provider, ConnectionPurpose::Discovery)?;
+        let mut cfg = Self::for_discovery(provider, conn.api_key, conn.base_url);
+        cfg.openai_api = conn.openai_api;
+        cfg.maple_pcr0_development = conn.maple_pcr0_development;
+        Ok(cfg)
+    }
+
     /// Construct a minimal `Config` for model-catalog discovery.
     ///
     /// Only the fields used by [`build_token_source`](crate::llm::build_token_source)
     /// and the catalog HTTP helpers are meaningful; all others are set to
-    /// inert defaults. Never call `from_env` for discovery — it requires
-    /// `DATABRICKS_MODEL` and other fields that are irrelevant here.
+    /// inert defaults. Never call `from_env` for discovery; use
+    /// [`Config::discovery_from_env`] instead.
     pub fn for_discovery(provider: Provider, api_key: String, base_url: String) -> Self {
         Self {
             provider,
@@ -669,6 +649,7 @@ impl Config {
             system_prompt: String::new(),
             anthropic_api_version: "2023-06-01".into(),
             openai_api: OpenAiApi::Chat,
+            maple_pcr0_development: false,
             max_rounds: 0,
             max_output_tokens: 1,
             max_token_recoveries: 0,
@@ -839,6 +820,10 @@ fn resolve_provider(
                 "databricks_v2" | "databricks-v2" => Ok(Provider::DatabricksV2),
                 "openrouter" if present_nonempty(openrouter_key) => Ok(Provider::OpenRouter),
                 "openrouter" => Err("config: OPENROUTER_API_KEY required".into()),
+                // No key check here: Maple may be resolved for keyless model
+                // discovery. `provider_connection_from_env` enforces the key
+                // when the purpose is inference.
+                "maple" => Ok(Provider::Maple),
                 _ => Err(format!(
                     "config: BUZZ_AGENT_PROVIDER={raw} not supported"
                 )),
@@ -847,6 +832,121 @@ fn resolve_provider(
         None => Err(
             "config: BUZZ_AGENT_PROVIDER is required — set it to your provider (e.g. anthropic, openai, databricks)".into(),
         ),
+    }
+}
+
+/// Resolve the provider from the standard env vars (`BUZZ_AGENT_PROVIDER`
+/// plus each provider's key). Shared by `from_env` and `discovery_from_env`.
+fn resolve_provider_from_env() -> Result<Provider, String> {
+    resolve_provider(
+        env("BUZZ_AGENT_PROVIDER").as_deref(),
+        env("ANTHROPIC_API_KEY").as_deref(),
+        env("OPENAI_COMPAT_API_KEY").as_deref(),
+        env("OPENROUTER_API_KEY").as_deref(),
+    )
+}
+
+/// Per-provider connection settings from env: everything `from_env` needs
+/// except the model. Split out so [`Config::discovery_from_env`] can build a
+/// connection without one.
+struct ProviderConnection {
+    api_key: String,
+    base_url: String,
+    openai_api: OpenAiApi,
+    /// Development PCR0 trust roots. Only read for `Provider::Maple`.
+    maple_pcr0_development: bool,
+    /// Provider-specific model env var (e.g. `DATABRICKS_MODEL`), the
+    /// default when `BUZZ_AGENT_MODEL` is absent.
+    provider_model: Option<String>,
+    /// Name of that env var, for the "required" error message.
+    model_env_var: &'static str,
+}
+
+/// Inference always needs a credential. Discovery may run before the user
+/// has one: Maple's enclave lists models for any attested session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConnectionPurpose {
+    Inference,
+    Discovery,
+}
+
+/// Resolve one provider's connection settings from env.
+///
+/// `OPENAI_COMPAT_API` is only read when provider=openai, so a stray bad
+/// value can't break an Anthropic-only deployment. Databricks borrows
+/// `api_key` as the optional `DATABRICKS_TOKEN` escape hatch; empty means
+/// "use OAuth PKCE." Legacy Databricks encodes the model in the URL path,
+/// Databricks v2 in the request body.
+fn provider_connection_from_env(
+    provider: Provider,
+    purpose: ConnectionPurpose,
+) -> Result<ProviderConnection, String> {
+    Ok(match provider {
+        Provider::Anthropic => ProviderConnection {
+            api_key: req("ANTHROPIC_API_KEY")?,
+            base_url: env_or("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+            openai_api: OpenAiApi::Auto, // unused for Anthropic
+            maple_pcr0_development: false,
+            provider_model: env("ANTHROPIC_MODEL"),
+            model_env_var: "ANTHROPIC_MODEL",
+        },
+        Provider::OpenAi => ProviderConnection {
+            api_key: req("OPENAI_COMPAT_API_KEY")?,
+            base_url: env_or("OPENAI_COMPAT_BASE_URL", "https://api.openai.com/v1"),
+            openai_api: parse_openai_api(env("OPENAI_COMPAT_API").as_deref())?,
+            maple_pcr0_development: false,
+            provider_model: env("OPENAI_COMPAT_MODEL"),
+            model_env_var: "OPENAI_COMPAT_MODEL",
+        },
+        Provider::Databricks | Provider::DatabricksV2 => ProviderConnection {
+            api_key: env("DATABRICKS_TOKEN").unwrap_or_default(),
+            base_url: env("DATABRICKS_HOST")
+                .ok_or_else(|| "config: DATABRICKS_HOST required".to_string())?,
+            openai_api: OpenAiApi::Chat, // only read by OpenAI/legacy Databricks dispatch
+            maple_pcr0_development: false,
+            provider_model: env("DATABRICKS_MODEL"),
+            model_env_var: "DATABRICKS_MODEL",
+        },
+        Provider::OpenRouter => ProviderConnection {
+            api_key: req("OPENROUTER_API_KEY")?,
+            base_url: env_or("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+            openai_api: OpenAiApi::Chat, // OpenRouter uses Chat Completions only
+            maple_pcr0_development: false,
+            provider_model: env("OPENROUTER_MODEL"),
+            model_env_var: "OPENROUTER_MODEL",
+        },
+        Provider::Maple => ProviderConnection {
+            api_key: match purpose {
+                ConnectionPurpose::Inference => req("MAPLE_API_KEY")?,
+                // Empty means "attested session, no credential"; see
+                // `build_maple_client`.
+                ConnectionPurpose::Discovery => env("MAPLE_API_KEY").unwrap_or_default(),
+            },
+            base_url: env_or("MAPLE_BASE_URL", "https://enclave.trymaple.ai"),
+            openai_api: OpenAiApi::Chat, // Maple uses Chat Completions only
+            maple_pcr0_development: parse_maple_pcr0_environment(
+                env("MAPLE_PCR0_ENVIRONMENT").as_deref(),
+            )?,
+            provider_model: env("MAPLE_MODEL"),
+            model_env_var: "MAPLE_MODEL",
+        },
+    })
+}
+
+/// Parse `MAPLE_PCR0_ENVIRONMENT`. Returns `true` for the development trust
+/// roots. Pure (env-free) for testability; the caller hands in the raw value.
+fn parse_maple_pcr0_environment(raw: Option<&str>) -> Result<bool, String> {
+    match raw
+        .unwrap_or("production")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "production" | "" => Ok(false),
+        "development" => Ok(true),
+        other => Err(format!(
+            "config: MAPLE_PCR0_ENVIRONMENT={other} not supported (use production|development)"
+        )),
     }
 }
 
@@ -2183,6 +2283,37 @@ mod tests {
     fn resolve_provider_openrouter_missing_key() {
         let err = resolve_provider(Some("openrouter"), None, None, None).unwrap_err();
         assert!(err.contains("OPENROUTER_API_KEY"));
+    }
+
+    /// Maple resolves without a key; the inference key requirement lives in
+    /// `provider_connection_from_env`, not here.
+    #[test]
+    fn resolve_provider_maple_does_not_gate_on_key() {
+        assert_eq!(
+            resolve_provider(Some("maple"), None, None, None).unwrap(),
+            Provider::Maple
+        );
+        assert_eq!(
+            resolve_provider(Some("MAPLE"), None, None, None).unwrap(),
+            Provider::Maple
+        );
+    }
+
+    #[test]
+    fn parse_maple_pcr0_environment_values() {
+        // Absent and explicit production select the production trust roots.
+        assert_eq!(parse_maple_pcr0_environment(None), Ok(false));
+        assert_eq!(parse_maple_pcr0_environment(Some("production")), Ok(false));
+        assert_eq!(parse_maple_pcr0_environment(Some("")), Ok(false));
+        // Development is case-insensitive and whitespace-tolerant.
+        assert_eq!(parse_maple_pcr0_environment(Some("development")), Ok(true));
+        assert_eq!(
+            parse_maple_pcr0_environment(Some(" Development ")),
+            Ok(true)
+        );
+        // Anything else is a hard startup error, matching provider handling.
+        let err = parse_maple_pcr0_environment(Some("staging")).unwrap_err();
+        assert!(err.contains("MAPLE_PCR0_ENVIRONMENT=staging"), "{err}");
     }
 
     // ── pricing_authority: canonical URL → bare-host registry token ──────────

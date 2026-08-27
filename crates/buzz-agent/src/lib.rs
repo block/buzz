@@ -13,7 +13,7 @@ mod permission;
 pub mod types;
 mod wire;
 
-pub use catalog::{discover_databricks_models, ModelEntry};
+pub use catalog::{discover_databricks_models, discover_models, ModelEntry};
 pub use config::Provider;
 pub use types::AgentError;
 
@@ -154,6 +154,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             .build()?
             .block_on(auth_subcommand(&args[2..]));
     }
+    if matches!(args.get(1).map(String::as_str), Some("models")) {
+        return tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?
+            .block_on(models_subcommand());
+    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
@@ -165,6 +171,27 @@ pub async fn authenticate_databricks(host: &str) -> Result<(), AgentError> {
     auth::PkceOAuthTokenSource::new(llm::databricks_pkce_config(host))?
         .interactive_login()
         .await
+}
+
+/// `buzz-agent models`: live model discovery for frontends. The desktop's
+/// model picker runs it for draft configs.
+///
+/// Reads the same provider env vars as the ACP server but needs no model.
+/// Prints a JSON array of `{"id","name"}` objects on stdout; providers with
+/// no live catalog print `[]` and the caller falls back to its own options.
+/// Failures exit non-zero with the error on stderr.
+async fn models_subcommand() -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = Config::discovery_from_env()?;
+    let models = catalog::discover_models(&cfg)
+        .await
+        .map_err(|error| error.to_string())?
+        .unwrap_or_default();
+    let out: Vec<Value> = models
+        .iter()
+        .map(|m| json!({ "id": m.id, "name": m.name }))
+        .collect();
+    println!("{}", Value::Array(out));
+    Ok(())
 }
 
 /// `buzz-agent auth <provider>` — run the interactive auth flow for a
@@ -383,13 +410,13 @@ async fn resolve_models_catalog(
     cache.get_or_try_init(|| discover).await.cloned()
 }
 
-/// Return the configured model as a one-entry catalog for this response.
+/// Return the configured model as a one-entry catalog.
 ///
-/// This value is never written to `models_cache`; failed discovery must be retried by
-/// the next session rather than pinning degraded state for the process lifetime.
-///
-/// Only reached from the Databricks provider arm below, so the curated label is
-/// looked up from the Databricks manifest; `id` stays the raw configured value.
+/// Used as the cached result when `discover_models` returns `Ok(None)`
+/// (the configured model is process-constant, so caching it is fine), and
+/// as the uncached fallback when live discovery fails, so the next session
+/// retries instead of keeping degraded state. The label lookup only hits
+/// for Databricks ids; other providers keep the raw model as `name`.
 fn configured_model_fallback(model: &str) -> Vec<ModelEntry> {
     let model = model.trim().to_string();
     let name = crate::model_capabilities::databricks_registry_label(&model)
@@ -465,42 +492,45 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
     // failures and other catalog failures use only the configured model for this
     // response, without caching, so session/prompt can run the existing PKCE flow.
     let available_models: Vec<Value> = {
-        use crate::config::Provider;
-        match app.cfg.provider {
-            Provider::Databricks | Provider::DatabricksV2 => {
-                let models = match resolve_models_catalog(
-                    &app.models_cache,
-                    discover_databricks_models(&app.cfg),
-                )
-                .await
-                {
-                    Ok(models) => models,
-                    Err(error @ AgentError::LlmAuth(_)) if !app.cfg.api_key.is_empty() => {
-                        return reject(wire_tx, id, error.json_rpc_code(), &error.to_string())
-                            .await;
-                    }
-                    Err(error @ AgentError::LlmAuth(_)) => {
-                        tracing::warn!(
-                            error = %error,
-                            "Databricks OAuth model catalog unavailable; using configured model"
-                        );
-                        configured_model_fallback(&app.cfg.model)
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            error = %error,
-                            "Databricks model catalog unavailable; using configured model"
-                        );
-                        configured_model_fallback(&app.cfg.model)
-                    }
-                };
-                models
-                    .iter()
-                    .map(|m| json!({ "modelId": m.id, "name": m.name }))
-                    .collect()
+        // catalog::discover_models owns the per-provider dispatch;
+        // no-catalog providers resolve to the configured model without
+        // touching the cache.
+        let models = match resolve_models_catalog(&app.models_cache, async {
+            catalog::discover_models(&app.cfg).await.map(|discovered| {
+                discovered.unwrap_or_else(|| configured_model_fallback(&app.cfg.model))
+            })
+        })
+        .await
+        {
+            Ok(models) => models,
+            // A static credential cannot recover interactively; reject so
+            // the frontend shows the credential error.
+            Err(error @ AgentError::LlmAuth(_)) if !app.cfg.api_key.is_empty() => {
+                return reject(wire_tx, id, error.json_rpc_code(), &error.to_string()).await;
             }
-            _ => vec![json!({ "modelId": app.cfg.model, "name": app.cfg.model })],
-        }
+            // OAuth-recoverable (Databricks PKCE): degrade to the configured
+            // model; session/prompt can run the interactive flow later.
+            Err(error @ AgentError::LlmAuth(_)) => {
+                tracing::warn!(
+                    error = %error,
+                    provider = ?app.cfg.provider,
+                    "model catalog auth unavailable; using configured model"
+                );
+                configured_model_fallback(&app.cfg.model)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    provider = ?app.cfg.provider,
+                    "model catalog unavailable; using configured model"
+                );
+                configured_model_fallback(&app.cfg.model)
+            }
+        };
+        models
+            .iter()
+            .map(|m| json!({ "modelId": m.id, "name": m.name }))
+            .collect()
     };
 
     let mcp = match McpRegistry::spawn_all(&app.cfg, &p.mcp_servers, &p.cwd).await {

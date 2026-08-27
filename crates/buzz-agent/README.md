@@ -61,6 +61,12 @@ BUZZ_AGENT_PROVIDER=databricks \
 DATABRICKS_HOST=https://dbc-...cloud.databricks.com \
 DATABRICKS_MODEL=goose-claude-4-6-sonnet \
   ./target/release/buzz-agent
+
+# Or Maple (OpenSecret) confidential inference, attested and end-to-end encrypted
+BUZZ_AGENT_PROVIDER=maple \
+MAPLE_API_KEY=... \
+MAPLE_MODEL=llama3-3-70b \
+  ./target/release/buzz-agent
 ```
 
 That's the whole setup. The agent reads JSON-RPC frames from stdin, writes them to stdout, and logs to stderr.
@@ -135,7 +141,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `openrouter`, `databricks`, or `databricks_v2`. No implicit fallback — the agent errors at startup when this is unset. |
+| `BUZZ_AGENT_PROVIDER` | — | Required. `anthropic`, `openai`, `openrouter`, `maple`, `databricks`, or `databricks_v2`. No implicit fallback — the agent errors at startup when this is unset. |
 | `ANTHROPIC_API_KEY` | — | Required when provider=anthropic. |
 | `ANTHROPIC_MODEL` | — | Required when provider=anthropic. |
 | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | |
@@ -147,6 +153,10 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `OPENROUTER_API_KEY` | — | Required when provider=openrouter. |
 | `OPENROUTER_MODEL` | — | Required when provider=openrouter. Use OpenRouter's `vendor/model` id, e.g. `anthropic/claude-sonnet-4.5`. |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | |
+| `MAPLE_API_KEY` | — | Required when provider=maple. |
+| `MAPLE_MODEL` | — | Required when provider=maple. |
+| `MAPLE_BASE_URL` | `https://enclave.trymaple.ai` | The enclave endpoint the opensecret SDK attests against. |
+| `MAPLE_PCR0_ENVIRONMENT` | `production` | `production` \| `development`. Which PCR0 trust roots verify the enclave's attestation document. |
 | `DATABRICKS_HOST` | — | Required when provider=databricks or provider=databricks_v2. |
 | `DATABRICKS_MODEL` | — | Required when provider=databricks or provider=databricks_v2. |
 | `DATABRICKS_TOKEN` | — | Optional static bearer escape hatch. If unset, Databricks uses browser OAuth + refresh cache. |
@@ -240,10 +250,11 @@ lifecycle hook — see [MCP_DRIVEN_HOOKS.md](../../docs/MCP_DRIVEN_HOOKS.md).
 | Ollama | `openai` | `POST {base}/chat/completions` | llama3.1, qwen2.5-coder |
 | Block Gateway | `openai` | `POST {base}/chat/completions` | gpt-5, claude |
 | OpenRouter | `openrouter` | `POST {base}/chat/completions` | anything they route (extended-thinking replay, provider-agnostic tool calling) |
+| Maple (OpenSecret) | `maple` | `POST {base}/v1/chat/completions` (attested + encrypted) | TEE-hosted open models (llama, deepseek, qwen, …) |
 | Databricks | `databricks` | `POST {host}/serving-endpoints/{model}/invocations` | goose-claude-4-6-sonnet |
 | Databricks AI Gateway v2 | `databricks_v2` | `POST {host}/ai-gateway/{provider}/v1/...` | databricks-gpt-5-5, databricks-claude-opus-4-7 |
 
-If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, `BUZZ_AGENT_PROVIDER=openai` is selected without `OPENAI_COMPAT_API_KEY`, or `BUZZ_AGENT_PROVIDER=openrouter` is selected without `OPENROUTER_API_KEY`, the agent returns an error — there is no implicit fallback to another provider.
+If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, `BUZZ_AGENT_PROVIDER=openai` is selected without `OPENAI_COMPAT_API_KEY`, `BUZZ_AGENT_PROVIDER=openrouter` is selected without `OPENROUTER_API_KEY`, or `BUZZ_AGENT_PROVIDER=maple` is selected without `MAPLE_API_KEY`, the agent returns an error — there is no implicit fallback to another provider.
 
 `provider=openai` speaks two HTTP dialects: the [Responses API](https://platform.openai.com/docs/api-reference/responses) (`/v1/responses`, required for GPT-5 / o-series tool-calling on OpenAI's own service) and the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat) (`/chat/completions`, the broadly-supported OpenAI-compatible wire format).
 
@@ -256,7 +267,21 @@ By default (`OPENAI_COMPAT_API=auto`) the agent picks **Responses** when `OPENAI
 - `anthropic/*` models get Anthropic-style `cache_control` breakpoints injected on the system message and the last two user messages.
 - Retryable statuses (429 and typed `provider_overloaded` 503) honor the documented `Retry-After` header (clamped to a small ceiling — see `RETRY_AFTER_CAP_SECS` in `llm.rs` — since the sleep happens outside `BUZZ_AGENT_LLM_TIMEOUT_SECS`); 502 and untyped 503 retry with jittered backoff instead. `401` is treated as an expired/invalid key and refreshed once, while `402` (no credits) and `403` (guardrail/moderation/permission) fail immediately without retry.
 
+`provider=maple` speaks OpenAI's Chat Completions wire format, but every request travels through the [opensecret](https://crates.io/crates/opensecret) SDK instead of a plain HTTPS POST: the SDK verifies the enclave's AWS Nitro attestation document against pinned PCR0 trust roots, performs an X25519 key exchange with the attested enclave, and end-to-end encrypts the request and response bodies. The handshake runs lazily on the first request and re-runs transparently when the enclave session goes stale. One divergence from the shared OpenAI path: a `401`/`403` fails immediately without a refresh retry, since a static Maple API key cannot mint a different token.
+
 `Provider` is a Rust `enum` with one `match` in `Llm::complete`. There is no trait, no `Box<dyn>`, no async-trait. Adding a provider is a `match` arm and one `body`/`parse` pair in `llm.rs`.
+
+### Model discovery
+
+`buzz-agent models` prints the provider's live model catalog as a JSON array of `{"id","name"}` objects on stdout. It reads the same provider env vars as the ACP server but does **not** require a model. Providers without a live agent-side catalog (Anthropic, OpenAI, OpenRouter; frontends list those over plain HTTP) print `[]`. Failures exit non-zero with the error on stderr.
+
+For Maple, `MAPLE_API_KEY` is optional here: the enclave lists models for any attested session, so a picker can fill in before the user has a key. An enclave that still requires a credential answers a keyless call with `config: MAPLE_API_KEY required`.
+
+```bash
+BUZZ_AGENT_PROVIDER=databricks_v2 DATABRICKS_HOST=https://dbc-...cloud.databricks.com buzz-agent models
+```
+
+The per-provider dispatch lives in `catalog.rs` (`discover_models`) and also backs the `availableModels` list in the ACP `session/new` response, so a provider added there reaches every frontend, including Buzz Desktop's model picker.
 
 ## MCP Servers
 

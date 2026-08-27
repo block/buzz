@@ -2,6 +2,9 @@ use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use bytes::Bytes;
+use futures_util::StreamExt;
+use opensecret::{OpenSecretClient, Pcr0Environment};
 use reqwest::Client;
 use serde_json::{json, Map, Value};
 
@@ -48,6 +51,10 @@ pub struct Llm {
     /// Databricks otherwise. Anthropic doesn't use this — it always
     /// reads `cfg.api_key` directly because the API expects `x-api-key`.
     auth: Arc<dyn TokenSource>,
+    /// OpenSecret client for `Provider::Maple`, `None` for other providers.
+    /// The SDK owns the enclave session and re-attests on expiry inside
+    /// `send_inference_request`, so no session state lives here.
+    maple: Option<OpenSecretClient>,
 }
 
 /// Connect-phase timeout applied to every outgoing LLM HTTP request.
@@ -68,10 +75,12 @@ impl Llm {
             .build()
             .map_err(|e| AgentError::Llm(format!("http: {e}")))?;
         let auth = build_token_source(cfg)?;
+        let maple = build_maple_client(cfg)?;
         Ok(Self {
             http,
             auto_upgraded: AtomicBool::new(false),
             auth,
+            maple,
         })
     }
 
@@ -113,6 +122,15 @@ impl Llm {
                 self.post_openrouter(cfg, &body)
                     .await
                     .and_then(parse_openai_with_reasoning_details)
+            }
+            Provider::Maple => {
+                // OpenAI Chat wire format inside the encrypted envelope.
+                // "maple" has no manifest records yet, so effort
+                // normalization falls to the `_default` provider fallback.
+                let e =
+                    effort.map(|ef| normalize_effort_for_provider("maple", effective_model, ef));
+                let body = openai_body(cfg, system_prompt, history, tools, effective_model, e);
+                self.post_maple(cfg, &body).await.and_then(parse_openai)
             }
             Provider::OpenAi | Provider::Databricks => {
                 let provider_str = match cfg.provider {
@@ -269,6 +287,18 @@ impl Llm {
                     );
                     let v = self.post_openrouter(cfg, &body).await?;
                     Ok(parse_openai(v)?.text)
+                }
+                Provider::Maple => {
+                    let body = json!({
+                        "model": effective_model,
+                        "stream": false,
+                        "max_completion_tokens": max_output_tokens,
+                        "messages": [
+                            { "role": "system", "content": system_prompt },
+                            { "role": "user", "content": user_prompt },
+                        ],
+                    });
+                    Ok(parse_openai(self.post_maple(cfg, &body).await?)?.text)
                 }
                 Provider::OpenAi | Provider::Databricks => {
                     let r = self
@@ -539,6 +569,154 @@ impl Llm {
                 result => return result,
             }
         }
+    }
+
+    /// POST one Chat Completions body through the attested Maple transport.
+    ///
+    /// Retries follow `post()`: 429/5xx and transport failures retry with
+    /// jittered backoff, a timeout raises the next attempt's budget,
+    /// malformed 2xx bodies retry, everything else is terminal. Auth
+    /// rejections are terminal immediately: the SDK already retried once
+    /// through its own credential recovery, and a static API key cannot
+    /// produce a different token, so a retry would only duplicate the
+    /// request.
+    async fn post_maple(&self, cfg: &Config, body: &Value) -> Result<Value, AgentError> {
+        let client = self.maple.as_ref().ok_or_else(|| {
+            AgentError::Llm("maple: client not initialized for this provider".into())
+        })?;
+        let body_bytes =
+            serde_json::to_vec(body).map_err(|e| AgentError::Llm(format!("serialize: {e}")))?;
+        let call_start = std::time::Instant::now();
+        let mut timeout_failures: u32 = 0;
+        for attempt in 0..MAX_RETRIES {
+            let per_request_timeout = escalated_timeout(cfg.llm_timeout, timeout_failures);
+            let last_attempt = attempt + 1 >= MAX_RETRIES;
+            // The SDK's HTTP client sets no timeout, so the whole
+            // exchange, attestation handshake included, runs under one
+            // per-attempt budget.
+            let outcome = tokio::time::timeout(
+                per_request_timeout,
+                maple_chat_completion(client, &body_bytes),
+            )
+            .await;
+            let (status, response_body) = match outcome {
+                Err(_elapsed) => {
+                    timeout_failures += 1;
+                    if !last_attempt {
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max_attempts = MAX_RETRIES,
+                            timeout_failures,
+                            "llm: maple request timeout, retrying with escalated budget"
+                        );
+                        backoff_with_jitter(attempt).await;
+                        continue;
+                    }
+                    return Err(terminal_llm_error(
+                        call_start.elapsed(),
+                        attempt + 1,
+                        &timeout_message(false, per_request_timeout, TimeoutPhase::BodyRead),
+                    ));
+                }
+                Ok(Err(MapleCallError::Terminal(message))) => {
+                    return Err(AgentError::Llm(message));
+                }
+                Ok(Err(MapleCallError::Sdk(error))) => {
+                    if !last_attempt && is_retryable_maple_sdk_error(&error) {
+                        if matches!(&error, opensecret::Error::Http(e) if e.is_timeout()) {
+                            timeout_failures += 1;
+                        }
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max_attempts = MAX_RETRIES,
+                            error = %error,
+                            "llm: maple transport error, retrying"
+                        );
+                        backoff_with_jitter(attempt).await;
+                        continue;
+                    }
+                    return Err(maple_sdk_terminal_error(
+                        error,
+                        call_start.elapsed(),
+                        attempt + 1,
+                    ));
+                }
+                Ok(Ok(exchange)) => exchange,
+            };
+            let code = status.as_u16();
+            if code == 401 || code == 403 {
+                return Err(AgentError::LlmAuth(format!(
+                    "{status}: {} — update key in agent settings",
+                    String::from_utf8_lossy(&response_body)
+                )));
+            }
+            if status.is_server_error() || code == 429 || code == 499 {
+                let body_text = String::from_utf8_lossy(&response_body);
+                if !last_attempt {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        max_attempts = MAX_RETRIES,
+                        %status,
+                        "llm: maple retryable status, retrying"
+                    );
+                    backoff_with_jitter(attempt).await;
+                    continue;
+                }
+                return Err(terminal_llm_error(
+                    call_start.elapsed(),
+                    attempt + 1,
+                    &format!("exhausted retries: {status}: {body_text}"),
+                ));
+            }
+            if code == 404 {
+                return Err(AgentError::LlmModelNotFound(format!(
+                    "{status}: {}",
+                    String::from_utf8_lossy(&response_body)
+                )));
+            }
+            if !status.is_success() {
+                let body_text = String::from_utf8_lossy(&response_body).into_owned();
+                if code == 400 && is_context_length_error(&body_text) {
+                    return Err(AgentError::LlmContextExceeded(format!(
+                        "{status}: {body_text}"
+                    )));
+                }
+                if code == 400 && is_unsupported_image_input_error(&body_text) {
+                    return Err(AgentError::UnsupportedImageInput(body_text));
+                }
+                return Err(AgentError::Llm(format!("{status}: {body_text}")));
+            }
+            match serde_json::from_slice(&response_body) {
+                Ok(value) => return Ok(value),
+                Err(e) => {
+                    // As in `post()`: a 2xx body that fails to parse is
+                    // treated as transient and re-sent; no tool call was
+                    // extracted from it.
+                    if !last_attempt {
+                        tracing::warn!(
+                            attempt = attempt + 1,
+                            max_attempts = MAX_RETRIES,
+                            error = %e,
+                            "llm: maple malformed response body, retrying"
+                        );
+                        backoff_with_jitter(attempt).await;
+                        continue;
+                    }
+                    return Err(terminal_llm_error(
+                        call_start.elapsed(),
+                        attempt + 1,
+                        &format!("json: {e}"),
+                    ));
+                }
+            }
+        }
+        // Unreachable in practice: every iteration returns or continues.
+        // See the matching tail in `post()`.
+        Err(terminal_llm_error(
+            call_start.elapsed(),
+            MAX_RETRIES,
+            "exhausted retries",
+        ))
     }
 
     /// If `err` names `/v1/responses` / "use the Responses API", latch a
@@ -2071,13 +2249,16 @@ pub(crate) fn databricks_pkce_config(host: &str) -> PkceOAuthConfig {
 ///   never read for Anthropic requests (those go through `post_anthropic` with
 ///   `x-api-key`), but Llm holds one to keep the field non-`Option`.
 /// - `Provider::OpenAi`: a static source over `OPENAI_COMPAT_API_KEY`.
+/// - `Provider::Maple`: a static source over `MAPLE_API_KEY`. Never read for
+///   Maple requests (the opensecret client carries the key); held to keep
+///   the field non-`Option`, as for Anthropic.
 /// - `Provider::Databricks`: if `DATABRICKS_TOKEN` is set, a static source.
 ///   Otherwise a `PkceOAuthTokenSource` pointed at the workspace's OIDC
 ///   discovery URL. First request without a cached token triggers a browser
 ///   flow; subsequent requests use the cache + refresh transparently.
 pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> {
     match cfg.provider {
-        Provider::Anthropic | Provider::OpenAi | Provider::OpenRouter => {
+        Provider::Anthropic | Provider::OpenAi | Provider::OpenRouter | Provider::Maple => {
             Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())))
         }
         Provider::Databricks | Provider::DatabricksV2 => {
@@ -2103,9 +2284,11 @@ pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, A
 pub(crate) fn summary_completion_cap(provider: Provider, max_output_tokens: u32) -> u32 {
     match provider {
         Provider::OpenRouter => max_output_tokens.saturating_mul(2),
-        Provider::Anthropic | Provider::OpenAi | Provider::Databricks | Provider::DatabricksV2 => {
-            max_output_tokens
-        }
+        Provider::Anthropic
+        | Provider::OpenAi
+        | Provider::Databricks
+        | Provider::DatabricksV2
+        | Provider::Maple => max_output_tokens,
     }
 }
 
@@ -2475,6 +2658,137 @@ async fn openrouter_post(
     ))
 }
 
+/// Build the attested OpenSecret client when the provider is Maple.
+///
+/// Construction validates the base URL and picks the PCR0 trust roots; no
+/// network I/O. Localhost base URLs switch the SDK to mock attestation (its
+/// own rule); anything else requires HTTPS and a verified Nitro attestation
+/// document before any request body leaves the process.
+///
+/// An empty `api_key` builds a keyless client. The enclave lists models for
+/// an attested session without a credential, so discovery can run before the
+/// user enters a key. Inference configs always carry a key; an empty one
+/// must not become a bogus `Bearer ` header.
+pub(crate) fn build_maple_client(cfg: &Config) -> Result<Option<OpenSecretClient>, AgentError> {
+    if cfg.provider != Provider::Maple {
+        return Ok(None);
+    }
+    let environment = if cfg.maple_pcr0_development {
+        Pcr0Environment::Development
+    } else {
+        Pcr0Environment::Production
+    };
+    let client = if cfg.api_key.trim().is_empty() {
+        OpenSecretClient::new_with_pcr0_environment(cfg.base_url.clone(), environment)
+    } else {
+        OpenSecretClient::new_with_api_key_and_pcr0_environment(
+            cfg.base_url.clone(),
+            cfg.api_key.clone(),
+            environment,
+        )
+    };
+    client
+        .map(Some)
+        .map_err(|e| AgentError::Llm(format!("maple: {e}")))
+}
+
+/// Failure modes of one Maple exchange: SDK faults (classified by
+/// `is_retryable_maple_sdk_error`) versus local hard stops like the response
+/// size cap.
+enum MapleCallError {
+    Sdk(opensecret::Error),
+    Terminal(String),
+}
+
+/// One encrypted Chat Completions exchange through the opensecret SDK.
+///
+/// Returns the decrypted status and body bytes; the caller classifies
+/// non-2xx statuses and parses the JSON. Success bodies are capped at
+/// `MAX_LLM_RESPONSE_BYTES` (a hard error, as in `post()`); error bodies are
+/// diagnostics, truncated at `MAX_LLM_ERROR_BODY_BYTES`.
+async fn maple_chat_completion(
+    client: &OpenSecretClient,
+    body_bytes: &[u8],
+) -> Result<(http::StatusCode, Vec<u8>), MapleCallError> {
+    let request = http::Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/chat/completions")
+        .body(Bytes::copy_from_slice(body_bytes))
+        .map_err(|e| MapleCallError::Terminal(format!("maple: build request: {e}")))?;
+    let response = client
+        .send_inference_request(request)
+        .await
+        .map_err(MapleCallError::Sdk)?;
+    let status = response.status();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut body = response.into_body();
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.map_err(MapleCallError::Sdk)?;
+        if status.is_success() {
+            if buf.len() + chunk.len() > MAX_LLM_RESPONSE_BYTES {
+                return Err(MapleCallError::Terminal(format!(
+                    "response exceeded {MAX_LLM_RESPONSE_BYTES} bytes"
+                )));
+            }
+            buf.extend_from_slice(&chunk);
+        } else {
+            let room = MAX_LLM_ERROR_BODY_BYTES.saturating_sub(buf.len());
+            let take = chunk.len().min(room);
+            buf.extend_from_slice(&chunk[..take]);
+            if take < chunk.len() {
+                break;
+            }
+        }
+    }
+    Ok((status, buf))
+}
+
+/// `true` when an identical retry may succeed: transport failures under the
+/// SDK, and 429/5xx `Api` errors from the attestation-handshake endpoints.
+/// Attestation, session, and crypto failures are terminal; the SDK already
+/// retried one re-attestation before surfacing them.
+fn is_retryable_maple_sdk_error(error: &opensecret::Error) -> bool {
+    match error {
+        // The SDK pins its own reqwest version, so its error type differs
+        // from the workspace's and cannot flow through
+        // `is_retryable_transport_error`.
+        opensecret::Error::Http(e) => e.is_timeout() || e.is_connect() || e.is_request(),
+        opensecret::Error::Api { status, .. } => {
+            *status == 429 || *status == 499 || (500..600).contains(status)
+        }
+        _ => false,
+    }
+}
+
+/// Map a terminal opensecret SDK error onto `AgentError`. Attestation
+/// failures say the request was never sent. 401/403 map to `LlmAuth` so the
+/// desktop shows its credential prompt.
+fn maple_sdk_terminal_error(
+    error: opensecret::Error,
+    elapsed: std::time::Duration,
+    attempts: u32,
+) -> AgentError {
+    match error {
+        opensecret::Error::AttestationVerificationFailed(message) => AgentError::Llm(format!(
+            "maple: enclave attestation verification failed — request not sent: {message}"
+        )),
+        opensecret::Error::Api {
+            status: status @ (401 | 403),
+            message,
+        } => AgentError::LlmAuth(format!("{status}: {message}")),
+        // The SDK's reqwest error differs from the workspace's type, so
+        // `classify_transport_error` cannot be reused. Timeouts never
+        // originate here; the per-attempt budget in `post_maple` fires.
+        opensecret::Error::Http(e) => {
+            terminal_llm_error(elapsed, attempts, &format!("transport: {e}"))
+        }
+        opensecret::Error::Api { status, message } => {
+            terminal_llm_error(elapsed, attempts, &format!("maple: {status}: {message}"))
+        }
+        other => AgentError::Llm(format!("maple: {other}")),
+    }
+}
+
 fn apply_openrouter_mutations(
     body: &mut Value,
     effort: Option<ThinkingEffort>,
@@ -2620,6 +2934,7 @@ mod tests {
             base_url: "http://example.invalid".into(),
             anthropic_api_version: "2023-06-01".into(),
             openai_api: OpenAiApi::Chat,
+            maple_pcr0_development: false,
             hints_enabled: true,
             thinking_effort: None,
             thinking_summary: ThinkingSummary::Auto,
@@ -5781,6 +6096,7 @@ mod tests {
                 .unwrap(),
             auto_upgraded: std::sync::atomic::AtomicBool::new(false),
             auth,
+            maple: None,
         }
     }
 
@@ -6232,6 +6548,100 @@ mod tests {
         );
         assert_eq!(body["max_completion_tokens"], 1024);
         assert!(body.get("max_tokens").is_none());
+    }
+
+    // ---- Maple (OpenSecret) ----
+
+    #[test]
+    fn maple_client_is_built_only_for_the_maple_provider() {
+        assert!(build_maple_client(&cfg(Provider::OpenAi))
+            .expect("non-Maple providers skip construction")
+            .is_none());
+
+        let mut maple_cfg = cfg(Provider::Maple);
+        maple_cfg.base_url = "https://enclave.trymaple.ai".into();
+        assert!(build_maple_client(&maple_cfg)
+            .expect("valid HTTPS base URL constructs")
+            .is_some());
+
+        // Keyless discovery: an attested but unauthenticated client, not an
+        // empty bearer.
+        maple_cfg.api_key = String::new();
+        assert!(build_maple_client(&maple_cfg)
+            .expect("keyless client constructs")
+            .is_some());
+
+        // The SDK requires HTTPS for non-loopback hosts; a plain-HTTP remote
+        // base URL is a startup error, not a first-request surprise.
+        maple_cfg.base_url = "http://enclave.trymaple.ai".into();
+        match build_maple_client(&maple_cfg) {
+            Err(AgentError::Llm(s)) => assert!(s.starts_with("maple: "), "{s}"),
+            Err(other) => panic!("expected AgentError::Llm, got: {other:?}"),
+            Ok(_) => panic!("plain-HTTP remote base URL must be rejected"),
+        }
+    }
+
+    /// 429/5xx from the handshake endpoints retry; attestation and crypto
+    /// failures are terminal.
+    #[test]
+    fn maple_sdk_error_retryability() {
+        for status in [429u16, 499, 500, 503] {
+            assert!(
+                is_retryable_maple_sdk_error(&opensecret::Error::Api {
+                    status,
+                    message: "busy".into()
+                }),
+                "{status} should be retryable"
+            );
+        }
+        for error in [
+            opensecret::Error::Api {
+                status: 400,
+                message: "bad".into(),
+            },
+            opensecret::Error::AttestationVerificationFailed("pcr0 mismatch".into()),
+            opensecret::Error::Session("stale".into()),
+            opensecret::Error::Decryption("bad tag".into()),
+        ] {
+            assert!(!is_retryable_maple_sdk_error(&error), "{error} is terminal");
+        }
+    }
+
+    #[test]
+    fn maple_terminal_errors_map_onto_the_agent_taxonomy() {
+        let auth = maple_sdk_terminal_error(
+            opensecret::Error::Api {
+                status: 401,
+                message: "invalid api key".into(),
+            },
+            Duration::from_secs(1),
+            1,
+        );
+        assert!(
+            matches!(auth, AgentError::LlmAuth(ref s) if s.contains("invalid api key")),
+            "{auth:?}"
+        );
+
+        let attestation = maple_sdk_terminal_error(
+            opensecret::Error::AttestationVerificationFailed("pcr0 mismatch".into()),
+            Duration::from_secs(1),
+            1,
+        );
+        assert!(
+            matches!(
+                attestation,
+                AgentError::Llm(ref s)
+                    if s.contains("attestation verification failed") && s.contains("pcr0 mismatch")
+            ),
+            "{attestation:?}"
+        );
+    }
+
+    /// Maple's summarize path requests exactly the caller's budget, with no
+    /// separate reasoning allowance like OpenRouter.
+    #[test]
+    fn maple_summary_completion_cap_is_the_callers_budget() {
+        assert_eq!(summary_completion_cap(Provider::Maple, 2048), 2048);
     }
 
     // ---- A5: error-inside-200 ----

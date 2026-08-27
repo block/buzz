@@ -26,6 +26,21 @@ test("model discovery status names missing OpenAI-compatible credentials", () =>
   assert.match(status?.message ?? "", /OpenAI models/);
 });
 
+test("model discovery status handles any provider's missing API key generically", () => {
+  // A provider without branded copy falls to the generic
+  // `config: <KEY>_API_KEY required` matcher.
+  const status = formatModelDiscoveryErrorStatus(
+    new Error(
+      "buzz-agent models failed (exit 1): config: ACME_API_KEY required",
+    ),
+    "acme",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /ACME_API_KEY/);
+  assert.match(status?.message ?? "", /API key/);
+});
+
 test("Buzz shared compute names the empty state and next action", () => {
   const status = formatModelDiscoveryErrorStatus(
     new Error("no Buzz shared compute serving members are available"),

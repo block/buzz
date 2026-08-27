@@ -116,6 +116,17 @@ export function formatModelDiscoveryErrorStatus(
     };
   }
 
+  // Generic provider-key gate: buzz-agent reports a missing credential as
+  // `config: <PROVIDER>_API_KEY required`. The branded Anthropic/OpenAI
+  // cases above stay because their copy names the vendor.
+  const requiredKey = message.match(/config: ([A-Z0-9_]+_API_KEY) required/);
+  if (requiredKey) {
+    return {
+      message: `Enter an API key (${requiredKey[1]}) to load live models.`,
+      tone: "warning",
+    };
+  }
+
   if (
     message.includes("DATABRICKS_HOST required") ||
     message.includes("DATABRICKS_MODEL required") ||

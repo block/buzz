@@ -571,6 +571,7 @@ mod tests {
             Provider::OpenAi,
             Provider::Databricks,
             Provider::DatabricksV2,
+            Provider::Maple,
         ] {
             assert_eq!(
                 summary_completion_cap(provider, HANDOFF_MAX_OUTPUT_TOKENS),

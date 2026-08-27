@@ -482,6 +482,7 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
         Some("anthropic") => Some("ANTHROPIC_MODEL"),
         Some("openai") | Some("openai-compat") => Some("OPENAI_COMPAT_MODEL"),
         Some("openrouter") => Some("OPENROUTER_MODEL"),
+        Some("maple") => Some("MAPLE_MODEL"),
         _ => None,
     };
     let model_present = effective
@@ -528,6 +529,12 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
             if env_key_missing("OPENROUTER_API_KEY") => {
                 missing.push(Requirement::EnvKey {
                     key: "OPENROUTER_API_KEY".to_string(),
+                });
+            }
+        Some("maple")
+            if env_key_missing("MAPLE_API_KEY") => {
+                missing.push(Requirement::EnvKey {
+                    key: "MAPLE_API_KEY".to_string(),
                 });
             }
         _ => {
@@ -1679,58 +1686,6 @@ mod tests {
                 field: "model".to_string()
             }));
     }
-
-    // ── OpenRouter readiness ─────────────────────────────────────────────
-
-    #[test]
-    fn buzz_agent_openrouter_with_all_fields_is_ready() {
-        let env = make_env(
-            "buzz-agent",
-            env_with(&[
-                ("BUZZ_AGENT_PROVIDER", "openrouter"),
-                ("BUZZ_AGENT_MODEL", "anthropic/claude-sonnet-4"),
-                ("OPENROUTER_API_KEY", "sk-or-test-key"),
-            ]),
-        );
-        let result = agent_readiness(&env);
-        assert!(
-            result.is_ready(),
-            "openrouter with all fields should be ready"
-        );
-    }
-
-    #[test]
-    fn buzz_agent_openrouter_missing_key_returns_not_ready() {
-        let env = make_env(
-            "buzz-agent",
-            env_with(&[
-                ("BUZZ_AGENT_PROVIDER", "openrouter"),
-                ("BUZZ_AGENT_MODEL", "anthropic/claude-sonnet-4"),
-            ]),
-        );
-        let result = agent_readiness(&env);
-        assert!(!result.is_ready());
-        assert!(result.requirements().contains(&Requirement::EnvKey {
-            key: "OPENROUTER_API_KEY".to_string()
-        }));
-    }
-
-    #[test]
-    fn buzz_agent_openrouter_with_provider_model_fallback_is_ready() {
-        let env = make_env(
-            "buzz-agent",
-            env_with(&[
-                ("BUZZ_AGENT_PROVIDER", "openrouter"),
-                ("OPENROUTER_MODEL", "google/gemini-2.5-flash"),
-                ("OPENROUTER_API_KEY", "sk-or-test-key"),
-            ]),
-        );
-        let result = agent_readiness(&env);
-        assert!(
-            result.is_ready(),
-            "OPENROUTER_MODEL fallback should satisfy model requirement"
-        );
-    }
 }
 
 // Goose file-config-aware requirement tests live in a sibling file so this
@@ -1738,3 +1693,8 @@ mod tests {
 #[cfg(test)]
 #[path = "readiness_goose_file_config_tests.rs"]
 mod goose_file_config_tests;
+
+// Per-provider readiness tests (OpenRouter, Maple), same convention.
+#[cfg(test)]
+#[path = "readiness_provider_tests.rs"]
+mod provider_tests;
