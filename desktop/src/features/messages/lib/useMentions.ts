@@ -882,8 +882,12 @@ export function useMentions(
   const handleMentionKeyDown = React.useCallback(
     (
       event: React.KeyboardEvent,
+      // `isCodeContext` is only consulted for Space: inside code the typed
+      // text must stay literal, so Space is left to the editor.
+      opts?: { isCodeContext?: () => boolean },
     ): { handled: boolean; suggestion?: MentionSuggestion } => {
-      const exactMentionSpace = isPlainSpace(event.nativeEvent);
+      const exactMentionSpace =
+        isPlainSpace(event.nativeEvent) && !opts?.isCodeContext?.();
       if (!isMentionOpen && !exactMentionSpace) return { handled: false };
       if (event.key === "ArrowDown") {
         event.preventDefault();

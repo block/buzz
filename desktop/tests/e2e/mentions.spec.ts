@@ -607,6 +607,84 @@ test("Shift+Space leaves an exact agent name plain and emits no mention tag", as
     .toEqual([]);
 });
 
+// The three tests below pin the code-context gate on the Space commit. They
+// key off casing, because a commit rewrites the draft to the candidate's
+// canonical display name: a surviving "@ALICE" means the typed text was left
+// alone. Chip decorations are deliberately not asserted — they already render
+// over known names inside code, which is a separate pre-existing gap.
+test("Space inside a code block leaves an exact agent name literal", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await page.keyboard.type("```");
+  await page.keyboard.press("Enter");
+  await expect(input.locator("pre")).toBeVisible();
+
+  await page.keyboard.type("deploy @ALICE");
+  await page.keyboard.press(" ");
+  await page.keyboard.type("now");
+
+  await expect(input.locator("pre")).toHaveText("deploy @ALICE now");
+
+  await page.getByTestId("send-message").click();
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "```\ndeploy @ALICE now\n```"))
+    .toEqual([]);
+});
+
+test("Space inside an inline code span leaves an exact agent name literal", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.click();
+  // The closing backtick turns the span into a code mark, which drops the
+  // backticks from the text the mention pipeline reads.
+  await page.keyboard.type("run `@ALICE`");
+  await expect(input.locator("code")).toHaveText("@ALICE");
+
+  await page.keyboard.press(" ");
+  await page.keyboard.type("now");
+
+  await expect(input.locator("code")).toHaveText("@ALICE");
+  await expect(input).toHaveText("run @ALICE now");
+
+  await page.getByTestId("send-message").click();
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "run `@ALICE` now"))
+    .toEqual([]);
+});
+
+test("Space still resolves an exact agent name typed after a code span", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.click();
+  await page.keyboard.type("run `deploy` @ALICE");
+  await page.keyboard.press(" ");
+  await page.keyboard.type("now");
+
+  const content = "run `deploy` @alice now";
+  await expect(input).toHaveText("run deploy @alice now");
+
+  await page.getByTestId("send-message").click();
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, content))
+    .toContain(TEST_IDENTITIES.alice.pubkey);
+});
+
 test("thread autocomplete keeps multiple long names readable in a narrow panel", async ({
   page,
 }) => {

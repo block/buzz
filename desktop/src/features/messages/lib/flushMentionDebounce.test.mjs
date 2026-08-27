@@ -105,6 +105,25 @@ test("flushMentionDebounce resolves an exact typed mention for Space", () => {
   assert.equal(flushed?.startIndex, 4);
 });
 
+test("flushMentionDebounce resolves an exact typed mention in any case", () => {
+  const flushed = flushMentionDebounce({
+    debounceTimerRef: ref(null),
+    latestValueRef: ref("Ask @BETA"),
+    latestCursorRef: ref("Ask @BETA".length),
+    searchableNamesLowerRef: ref(["beta"]),
+    candidates: [candidate()],
+    activePersonaIds: new Set(),
+    agentProvenanceReady: true,
+    channelType: "group",
+    requireExact: true,
+  });
+
+  // Casing is what tells a committed mention apart from literal text: the
+  // commit rewrites the draft to the candidate's canonical display name.
+  assert.equal(flushed?.type, "match");
+  assert.equal(flushed?.suggestion.displayName, "Beta");
+});
+
 test("flushMentionDebounce does not complete a partial name for Space", () => {
   const flushed = flushMentionDebounce({
     debounceTimerRef: ref(null),
