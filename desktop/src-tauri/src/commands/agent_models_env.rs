@@ -25,6 +25,22 @@ pub(super) fn env_or_process_value(env: &BTreeMap<String, String>, key: &str) ->
     })
 }
 
+/// Read a value from the merged discovery env, preserving an explicit blank
+/// override. Only when the merged map has no such key does the inherited
+/// process environment provide a fallback. This mirrors the child process,
+/// where a merged key overrides the inherited environment even when blank.
+pub(super) fn env_value_or_process_if_absent(
+    env: &BTreeMap<String, String>,
+    key: &str,
+) -> Option<String> {
+    match env.get(key) {
+        Some(value) => Some(value.trim().to_string()),
+        None => std::env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string()),
+    }
+}
+
 /// Clone `env` with `key` set to the value a request actually used, so error
 /// redaction masks the inherited process value and not just the mapped one.
 pub(super) fn redaction_env_with_value(
