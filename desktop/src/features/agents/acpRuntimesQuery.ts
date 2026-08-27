@@ -195,11 +195,14 @@ export async function refreshAcpRuntimes(
       staleTime: 0,
       gcTime: 0,
     });
-    queryClient.setQueryData(acpRuntimesQueryKey, result);
-    // A hot-surface cheap fetch may already be in flight on the shared key; cancel
-    // it so its (older, cached) result cannot land after and clobber the fresh
-    // forced catalog we just wrote.
+    // Cancel and *await* the in-flight cheap query on the shared key BEFORE
+    // writing the forced result. `cancelQueries` defaults to `revert: true`, so
+    // cancellation restores the cheap query's pre-fetch state; doing it after
+    // `setQueryData` would let that revert land last and clobber the fresh
+    // forced catalog, and the gate would then settle on the stale state. With
+    // the cancel awaited first, our `setQueryData` is the final write.
     await queryClient.cancelQueries({ queryKey: acpRuntimesQueryKey });
+    queryClient.setQueryData(acpRuntimesQueryKey, result);
     // Any forced success proves the catalog is warm: settle the boot-warm gate
     // and clear the last error, so cheap consumers stop overlaying loading/error.
     lastForcedError = null;

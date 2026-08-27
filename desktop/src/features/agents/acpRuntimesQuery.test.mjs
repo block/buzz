@@ -179,7 +179,7 @@ globalThis.__TAURI_INTERNALS__ = {
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { act } from "react";
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { QueryClientProvider } from "@tanstack/react-query";
 
 import {
@@ -414,6 +414,59 @@ describe("refreshAcpRuntimes cannot dedup onto an in-flight cheap request", () =
       "shared cache must hold the forced result, not the later cheap one",
     );
 
+    queryClient.unmount();
+  });
+
+  it("an in-flight cheap query cannot clobber the forced result after refresh", async () => {
+    // Carl's settle-order finding: a cheap query in flight on the shared key
+    // must not land its (older) result after the forced catalog is written.
+    // `refreshAcpRuntimes` cancels the shared-key query before settling; this
+    // proves the cancel is load-bearing by holding a real cheap observer
+    // fetching, running the forced refresh, then resolving the cheap request
+    // late — its result must not overwrite the forced catalog, and the gate
+    // must settle on the forced state. (Removing the `cancelQueries` call makes
+    // the late cheap result win and fails this test.)
+    const queryClient = makeQueryClient();
+    queryClient.mount();
+
+    // Seed a pre-existing cold catalog, then start a mounted cheap observer that
+    // refetches and is held pending — the real in-flight shape.
+    queryClient.setQueryData(acpRuntimesQueryKey, [
+      rawEntry("codex", "unknown"),
+    ]);
+    const cheap = deferred();
+    discoverHandler = (args) => {
+      if (args?.force === false) return cheap.promise;
+      return Promise.resolve([rawEntry("codex", "logged_in")]);
+    };
+    const observer = new QueryObserver(queryClient, {
+      queryKey: acpRuntimesQueryKey,
+      queryFn: () => discoverAcpRuntimes(),
+      staleTime: 0,
+    });
+    const unsubscribe = observer.subscribe(() => {});
+    await new Promise((r) => setImmediate(r));
+
+    // Forced refresh completes and settles while the cheap observer is fetching.
+    await refreshAcpRuntimes(queryClient);
+
+    // The cheap request resolves afterward; its result must be dropped.
+    cheap.resolve([rawEntry("codex", "unknown")]);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    assert.equal(
+      queryClient.getQueryData(acpRuntimesQueryKey)?.[0]?.authStatus.status,
+      "logged_in",
+      "shared cache must remain the forced result after a late cheap resolution",
+    );
+    assert.equal(
+      getBootWarmSnapshot().status,
+      "settled",
+      "the gate must settle on the forced catalog, not the stale cheap state",
+    );
+
+    unsubscribe();
     queryClient.unmount();
   });
 });
