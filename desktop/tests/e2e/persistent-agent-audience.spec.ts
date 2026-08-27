@@ -85,11 +85,11 @@ async function readComposerCaret(input: Locator) {
   });
 }
 
-async function pressPrimaryShift(page: Page, key: "M") {
+async function pressPrimaryShiftM(page: Page) {
   const isMac = await page.evaluate(() =>
     /mac|iphone|ipad|ipod/i.test(navigator.platform),
   );
-  await page.keyboard.press(`${isMac ? "Meta" : "Control"}+Shift+${key}`);
+  await page.keyboard.press(`${isMac ? "Meta" : "Control"}+Shift+M`);
 }
 
 async function readOutgoingMentionPubkeys(page: Page, content: string) {
@@ -447,7 +447,7 @@ test("disabling automatic mentions leaves the composer empty after send", async 
     .toContain(AGENT_A);
 });
 
-test("primary+Shift+M addresses the default agent, then selects the highlighted agent", async ({
+test("primary+Shift+M addresses the default agent, then toggles the highlighted agent in place", async ({
   page,
 }) => {
   await keepMentionedAgentsPinned(page);
@@ -457,16 +457,16 @@ test("primary+Shift+M addresses the default agent, then selects the highlighted 
   const composer = channelComposer(page);
   const input = composer.getByTestId("message-input");
   await input.fill("draft text");
-  await pressPrimaryShift(page, "M");
+  await pressPrimaryShiftM(page);
 
   await expect(input).toHaveText("@alice draft text");
   await expect(input.locator(".agent-mention-highlight")).toHaveText("alice");
   await expect(
     page.getByTestId("composer-auto-pin-confirmation"),
   ).toContainText("alice will be mentioned automatically");
-  await pressPrimaryShift(page, "M");
+  await pressPrimaryShiftM(page);
   await expect(input).toHaveText("draft text");
-  await pressPrimaryShift(page, "M");
+  await pressPrimaryShiftM(page);
   await expect(input).toHaveText("@alice draft text");
   await expect(
     composer
@@ -479,9 +479,9 @@ test("primary+Shift+M addresses the default agent, then selects the highlighted 
   await expect(menu.getByTestId(`mention-suggestion-${AGENT_B}`)).toHaveClass(
     /(?:^|\s)bg-accent(?:\s|$)/,
   );
-  await pressPrimaryShift(page, "M");
+  await pressPrimaryShiftM(page);
 
-  await expect(menu).toHaveCount(0);
+  await expect(menu).toBeVisible();
   await expect(input).toHaveText("@Vogue ");
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_B}`),
@@ -508,13 +508,13 @@ test("primary+Shift+M favors the most recently mentioned eligible agent", async 
   await input.press("ArrowLeft");
   await input.press("ArrowLeft");
   await expect.poll(() => readComposerCaret(input)).toBe(8);
-  await pressPrimaryShift(page, "M");
+  await pressPrimaryShiftM(page);
 
   await expect(input).toHaveText("@Vogue draft text");
   await expect.poll(() => readComposerCaret(input)).toBe(15);
-  await pressPrimaryShift(page, "M");
+  await pressPrimaryShiftM(page);
   await expect(input).toHaveText("draft text");
-  await pressPrimaryShift(page, "M");
+  await pressPrimaryShiftM(page);
   await expect(input).toHaveText("@Vogue draft text");
 });
 
@@ -1215,7 +1215,7 @@ test("captures the lightweight auto-pin popover", async ({ page }) => {
   const composer = channelComposer(page);
   const input = composer.getByTestId("message-input");
   await input.fill("draft text");
-  await pressPrimaryShift(page, "M");
+  await pressPrimaryShiftM(page);
   await expect(input).toHaveText("@alice draft text");
 
   const addressControl = composer

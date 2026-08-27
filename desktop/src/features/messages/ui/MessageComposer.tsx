@@ -547,7 +547,6 @@ function MessageComposerImpl({
     lockedAgent: lockedAgents[0],
     mentions,
     onOpenPicker: mentionPicker.openMentionPicker,
-    onSelect: selectMentionSuggestion,
     onToggle: toggleAlwaysAddressAgent,
   });
   const submitMessage = React.useCallback(async () => {
