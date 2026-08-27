@@ -3228,7 +3228,7 @@ function mockObservedUnreadProjections(
       badgeCount: 0,
       appBadgeCount: 0,
       topLevelUnread: false,
-      highPriorityUnread: false,
+      highPriorityCount: 0,
     });
   }
   for (const event of scope.events.values()) {
@@ -3250,14 +3250,14 @@ function mockObservedUnreadProjections(
       badgeCount: 0,
       appBadgeCount: 0,
       topLevelUnread: false,
-      highPriorityUnread: false,
+      highPriorityCount: 0,
     };
     projection.latest = Math.max(projection.latest, event.createdAt);
     projection.count += 1;
     projection.badgeCount += event.countsTowardBadge ? 1 : 0;
     projection.appBadgeCount += event.countsTowardAppBadge ? 1 : 0;
     projection.topLevelUnread ||= event.rootId === null;
-    projection.highPriorityUnread ||= event.highPriority;
+    projection.highPriorityCount += event.highPriority ? 1 : 0;
     channels.set(event.channelId, projection);
   }
   return [...channels.values()].sort((left, right) =>

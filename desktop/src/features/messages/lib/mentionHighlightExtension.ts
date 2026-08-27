@@ -58,25 +58,71 @@ export function shouldAdvanceMentionCaret({
   return next !== from && settling;
 }
 
+export type MentionTextInsertion = {
+  insertAt: number;
+  text: string;
+};
+
+const SPACE_RUN = /^[ \u00A0]+$/;
+const OUTER_SPACES = /^[ \u00A0]+|[ \u00A0]+$/g;
+
 /**
- * Where to insert typed text when the caret (or a one-character selection)
- * sits on the trailing space after an `@name` / `#channel` token.
- * A selected trailing space would otherwise be replaced, producing
- * `@bobhello`.
+ * Position just after the trailing space of the mention token that `pos` is
+ * adjacent to, or `null` when `pos` is nowhere near one.
+ *
+ * `pos` may sit at the token end (before the space) or already past the
+ * space: when Chromium rewrites the whitespace run around the caret it
+ * anchors the replacement at either edge, and both mean the same boundary.
  */
-export function insertPosForMentionTextInput(
+function mentionTrailingSpaceBoundary(
+  doc: ProseMirrorNode,
+  pos: number,
+): number | null {
+  const afterSpace = selectionAfterMentionTrailingSpace(doc, pos);
+  if (afterSpace !== pos) return afterSpace;
+  if (pos > 0 && selectionAfterMentionTrailingSpace(doc, pos - 1) === pos) {
+    return pos;
+  }
+  return null;
+}
+
+/**
+ * Where (and what) to insert when typed text arrives at the trailing space
+ * after an `@name` / `#channel` token.
+ *
+ * - Caret on the space: insert after it, so the next keystroke lands after
+ *   the token (`@bobhello` fix).
+ * - Whitespace replaced next to that space: keep every space the document
+ *   already has and insert only the typed characters after the token's
+ *   trailing space.
+ *
+ * The second rule matters because typing between the mention's trailing
+ * space and a pre-existing draft space makes Chromium re-emit the whole
+ * whitespace run — `replace("  " -> " a")`, usually with a non-breaking
+ * space, and anchored at either edge of the run. Applying any of those
+ * verbatim deletes the draft's space (`hello @bob abcworld`).
+ *
+ * Only whitespace is ever redirected, and only while autocomplete is
+ * settling — a window in which the user cannot have selected anything,
+ * because a selection cancels settlement. So a replacement arriving here
+ * is the browser normalizing whitespace, never an intentional delete, and
+ * preserving the document's spaces is the whole invariant. Recognizing one
+ * specific rewrite shape instead is what left the draft space exposed.
+ */
+export function insertionForMentionTextInput(
   doc: ProseMirrorNode,
   from: number,
   to: number,
-): number | null {
-  const next = selectionAfterMentionTrailingSpace(doc, from);
+  text: string,
+): MentionTextInsertion | null {
   if (from === to) {
-    return next === from ? null : next;
+    const next = selectionAfterMentionTrailingSpace(doc, from);
+    return next === from ? null : { insertAt: next, text };
   }
-  if (to === next && next === from + 1) {
-    return next;
-  }
-  return null;
+  const boundary = mentionTrailingSpaceBoundary(doc, from);
+  if (boundary === null) return null;
+  if (!SPACE_RUN.test(doc.textBetween(from, to, "\n", "\0"))) return null;
+  return { insertAt: boundary, text: text.replace(OUTER_SPACES, "") };
 }
 
 /**
@@ -84,14 +130,15 @@ export function insertPosForMentionTextInput(
  * deliberate ArrowLeft or chip click, honor the caret so `x` lands in the
  * token (`@bobx`) instead of after the space (`@bob x`).
  */
-export function mentionTextInputInsertPos(
+export function mentionTextInputInsertion(
   doc: ProseMirrorNode,
   from: number,
   to: number,
+  text: string,
   settling: boolean,
-): number | null {
+): MentionTextInsertion | null {
   if (!settling) return null;
-  return insertPosForMentionTextInput(doc, from, to);
+  return insertionForMentionTextInput(doc, from, to, text);
 }
 
 /** Caret just after a mention trailing space: ArrowLeft lands on the token end. */
@@ -396,18 +443,22 @@ export const MentionHighlightExtension = Extension.create({
             return this.getState(state) ?? DecorationSet.empty;
           },
           handleTextInput(view, from, to, text) {
-            const insertAt = mentionTextInputInsertPos(
+            const insertion = mentionTextInputInsertion(
               view.state.doc,
               from,
               to,
+              text,
               settlement.peek() !== null,
             );
-            if (insertAt == null) {
+            if (insertion == null) {
               settlement.cancel();
               return false;
             }
-            const tr = view.state.tr.insertText(text, insertAt);
-            const caret = tr.mapping.map(insertAt, 1);
+            const tr = view.state.tr.insertText(
+              insertion.text,
+              insertion.insertAt,
+            );
+            const caret = tr.mapping.map(insertion.insertAt, 1);
             tr.setSelection(TextSelection.create(tr.doc, caret));
             view.dispatch(tr);
             settlement.cancel();

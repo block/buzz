@@ -131,7 +131,7 @@ pub(crate) struct ChannelProjection {
     badge_count: u64,
     app_badge_count: u64,
     top_level_unread: bool,
-    high_priority_unread: bool,
+    high_priority_count: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -359,7 +359,7 @@ fn projections(tx: &Transaction<'_>, scope: &str) -> Result<Vec<ChannelProjectio
                 badge_count: 0,
                 app_badge_count: 0,
                 top_level_unread: false,
-                high_priority_unread: false,
+                high_priority_count: 0,
             },
         );
     }
@@ -396,14 +396,14 @@ fn projections(tx: &Transaction<'_>, scope: &str) -> Result<Vec<ChannelProjectio
                 badge_count: 0,
                 app_badge_count: 0,
                 top_level_unread: false,
-                high_priority_unread: false,
+                high_priority_count: 0,
             });
         entry.latest = entry.latest.max(created);
         entry.count += 1;
         entry.badge_count += u64::from(badge);
         entry.app_badge_count += u64::from(app);
         entry.top_level_unread |= root.is_none();
-        entry.high_priority_unread |= high;
+        entry.high_priority_count += u64::from(high);
     }
     let mut result: Vec<_> = by_channel.into_values().collect();
     result.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
@@ -873,12 +873,12 @@ mod tests {
                 badge_count: 1,
                 app_badge_count: 1,
                 top_level_unread: true,
-                high_priority_unread: false,
+                high_priority_count: 0,
             }],
             removed: vec!["old".into()],
         })
         .unwrap();
-        let expected = serde_json::json!({"kind":"delta","scope":{"pubkey":"PK","relayUrl":"wss://relay/"},"generation":"gen","baseRevision":4,"revision":5,"ackedSequence":7,"upserts":[{"channelId":"ch","latest":42,"count":2,"badgeCount":1,"appBadgeCount":1,"topLevelUnread":true,"highPriorityUnread":false}],"removed":["old"]});
+        let expected = serde_json::json!({"kind":"delta","scope":{"pubkey":"PK","relayUrl":"wss://relay/"},"generation":"gen","baseRevision":4,"revision":5,"ackedSequence":7,"upserts":[{"channelId":"ch","latest":42,"count":2,"badgeCount":1,"appBadgeCount":1,"topLevelUnread":true,"highPriorityCount":0}],"removed":["old"]});
         assert_eq!(actual, expected);
     }
 }

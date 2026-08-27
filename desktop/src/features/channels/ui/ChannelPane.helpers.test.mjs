@@ -42,6 +42,22 @@ test("focus idle drawers yield to every higher-priority auxiliary surface", () =
   }
 });
 
+test("an explicit thread override keeps the idle panel in its own focus drawer", () => {
+  assert.equal(
+    shouldUseFocusIdleDrawer({
+      channelManagementOpen: false,
+      hasAgentSession: false,
+      hasIdleAuxiliaryPanel: true,
+      hasIdlePanelCloseHandler: true,
+      hasProfilePanel: false,
+      hasThreadSurface: true,
+      overrideThread: true,
+      useSplitAuxiliaryPane: false,
+    }),
+    true,
+  );
+});
+
 test("getChannelIntroKind names project homes ahead of regular streams", () => {
   assert.equal(getChannelIntroKind(channel(), true), "project channel");
   assert.equal(getChannelIntroKind(channel(), false), "regular channel");
