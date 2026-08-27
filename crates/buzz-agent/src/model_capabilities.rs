@@ -192,6 +192,7 @@ impl ProviderFallbacks {
 #[serde(deny_unknown_fields)]
 struct Manifest {
     family_tokens: Vec<String>,
+    label_family_tokens: Vec<String>,
     family_rules: Vec<FamilyRule>,
     databricks_v2_known_models: Vec<String>,
     exact_records: Vec<ExactRecord>,
@@ -200,6 +201,9 @@ struct Manifest {
     #[serde(rename = "_comment", default)]
     #[allow(dead_code)]
     comment: Option<String>,
+    #[serde(rename = "_comment_label_family_tokens", default)]
+    #[allow(dead_code)]
+    comment_label_family_tokens: Option<String>,
     #[serde(rename = "_comment_databricks_v2_known_models", default)]
     #[allow(dead_code)]
     comment_known_models: Option<String>,
@@ -383,7 +387,7 @@ pub fn databricks_v2_known_models() -> &'static [String] {
 /// record label contract.
 pub fn databricks_registry_label(raw_model_id: &str) -> Option<&'static str> {
     let m = manifest();
-    registry_label_for_databricks_records(raw_model_id, &m.exact_records, &m.family_tokens)
+    registry_label_for_databricks_records(raw_model_id, &m.exact_records, &m.label_family_tokens)
 }
 
 fn registry_label_for_databricks_records<'a>(
@@ -424,6 +428,9 @@ fn registry_label_for_databricks_records<'a>(
 fn validate_manifest(m: &Manifest) -> Result<(), String> {
     if m.family_tokens.is_empty() {
         return Err("family_tokens must be non-empty".to_string());
+    }
+    if m.label_family_tokens.is_empty() {
+        return Err("label_family_tokens must be non-empty".to_string());
     }
 
     let check_efforts = |ctx: &str,
@@ -707,6 +714,9 @@ mod tests {
     Q::Vector { id: "dbv2-uc-fqn-meta-llama-strip-probe", provider: "databricks_v2", raw_model_id: "system.ai.meta-llama-3-3-70b-instruct", note: Some("Probes strip parity on a UC FQN where the llama- token strips through meta-.") },
     Q::Vector { id: "dbv2-uc-goose-deepseek-strip-probe", provider: "databricks_v2", raw_model_id: "data_workflow_tools.goose.goose-deepseek-v4-pro-0813", note: Some("Probes strip parity on a goose- prefixed UC FQN carrying the deepseek- token.") },
     Q::Vector { id: "dbv2-uc-fqn-inkling-strip-probe", provider: "databricks_v2", raw_model_id: "system.ai.inkling", note: Some("Probes strip parity on a UC FQN carrying the bare inkling token.") },
+    Q::Section { group: "Label/capability token isolation probes (#6955 review pass 1)", note: Some("Pins that label_family_tokens (the UC-humanization superset) never leaks into capability resolve(): capability stripping still uses only claude-/gpt-/kimi-, so a label token appearing before a gpt- marker must NOT displace the gpt-5-pro exact profile.") },
+    Q::Vector { id: "isolation-openai-gemini-gpt-5-pro-probe", provider: "openai", raw_model_id: "tenant-gemini-gpt-5-pro", note: Some("The gemini- label token must not strip here; capability resolve keeps the gpt-5-pro high-only profile.") },
+    Q::Vector { id: "isolation-openai-qwenchanted-gpt-5-pro-probe", provider: "openai", raw_model_id: "tenant-qwenchanted-gpt-5-pro", note: Some("The bare qwen label token must not fire mid-segment; capability resolve keeps the gpt-5-pro high-only profile.") },
     ];
 
     /// A section marker in the generated corpus (`_group` + optional `_note`).
@@ -802,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn corpus_has_exactly_133_executable_vectors() {
+    fn corpus_has_exactly_135_executable_vectors() {
         // Locks the vector count so a silent INPUTS edit can't quietly drop
         // coverage; must equal the gate in the TS harness
         // (modelCapabilitiesCorpus.test.mjs).
@@ -811,7 +821,7 @@ mod tests {
             .filter(|q| matches!(q, Q::Vector { .. }))
             .count();
         assert_eq!(
-            vectors, 133,
+            vectors, 135,
             "corpus executable-vector count changed; update this gate deliberately"
         );
     }

@@ -174,6 +174,7 @@ const ProviderFallbacksSchema = z
 export const ManifestSchema = z
   .object({
     family_tokens: z.array(z.string()).min(1),
+    label_family_tokens: z.array(z.string()).min(1),
     family_rules: z.array(FamilyRuleSchema),
     databricks_v2_known_models: z.array(z.string()),
     exact_records: z.array(ExactRecordSchema),
@@ -181,6 +182,7 @@ export const ManifestSchema = z
     // Root documentation keys; modeled for strict parsing, not read at runtime.
     // Mirrors the Rust `Manifest` doc fields under `deny_unknown_fields`.
     _comment: z.string().optional(),
+    _comment_label_family_tokens: z.string().optional(),
     _comment_databricks_v2_known_models: z.string().optional(),
     _sources: z.record(z.string(), z.string()).optional(),
   })
@@ -400,6 +402,6 @@ export function databricksRegistryLabel(rawModelId: string): string | null {
   return databricksRegistryLabelForRecords(
     rawModelId,
     MANIFEST.exact_records,
-    MANIFEST.family_tokens,
+    MANIFEST.label_family_tokens,
   );
 }

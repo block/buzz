@@ -2363,16 +2363,12 @@
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
-        "none",
-        "minimal",
         "low",
-        "medium",
-        "high",
-        "xhigh"
+        "high"
       ],
-      "default_effort": "medium",
+      "default_effort": null,
       "databricks_v2_wire_route": "mlflow-chat",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "normalization_policy": "openai-standard",
       "registry_label": "Gemini 3 Pro Image"
     }
   },
@@ -2384,16 +2380,13 @@
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
-        "none",
-        "minimal",
         "low",
-        "medium",
         "high",
-        "xhigh"
+        "max"
       ],
-      "default_effort": "medium",
+      "default_effort": null,
       "databricks_v2_wire_route": "mlflow-chat",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "normalization_policy": "openai-standard",
       "registry_label": "DeepSeek V4 Flash"
     }
   },
@@ -2405,16 +2398,12 @@
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
-        "none",
-        "minimal",
-        "low",
-        "medium",
         "high",
-        "xhigh"
+        "max"
       ],
-      "default_effort": "medium",
+      "default_effort": null,
       "databricks_v2_wire_route": "mlflow-chat",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "normalization_policy": "openai-standard",
       "registry_label": "DeepSeek V4 Pro"
     }
   },
@@ -2426,16 +2415,13 @@
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
-        "none",
-        "minimal",
         "low",
-        "medium",
         "high",
-        "xhigh"
+        "max"
       ],
-      "default_effort": "medium",
+      "default_effort": null,
       "databricks_v2_wire_route": "mlflow-chat",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "normalization_policy": "openai-standard",
       "registry_label": "GLM-5.3 Flash"
     }
   },
@@ -2447,16 +2433,14 @@
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
-        "none",
-        "minimal",
         "low",
         "medium",
         "high",
         "xhigh"
       ],
-      "default_effort": "medium",
+      "default_effort": null,
       "databricks_v2_wire_route": "mlflow-chat",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "normalization_policy": "openai-standard",
       "registry_label": "Grok 4.6"
     }
   },
@@ -2594,16 +2578,15 @@
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [
-        "none",
-        "minimal",
         "low",
         "medium",
         "high",
-        "xhigh"
+        "xhigh",
+        "max"
       ],
-      "default_effort": "medium",
+      "default_effort": null,
       "databricks_v2_wire_route": "mlflow-chat",
-      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "normalization_policy": "openai-standard",
       "registry_label": "Inkling"
     }
   },
@@ -2688,6 +2671,42 @@
       "default_effort": "medium",
       "databricks_v2_wire_route": "mlflow-chat",
       "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "_group": "Label/capability token isolation probes (#6955 review pass 1)",
+    "_note": "Pins that label_family_tokens (the UC-humanization superset) never leaks into capability resolve(): capability stripping still uses only claude-/gpt-/kimi-, so a label token appearing before a gpt- marker must NOT displace the gpt-5-pro exact profile."
+  },
+  {
+    "id": "isolation-openai-gemini-gpt-5-pro-probe",
+    "provider": "openai",
+    "raw_model_id": "tenant-gemini-gpt-5-pro",
+    "_note": "The gemini- label token must not strip here; capability resolve keeps the gpt-5-pro high-only profile.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "high"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "not-applicable",
+      "normalization_policy": "openai-standard",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "isolation-openai-qwenchanted-gpt-5-pro-probe",
+    "provider": "openai",
+    "raw_model_id": "tenant-qwenchanted-gpt-5-pro",
+    "_note": "The bare qwen label token must not fire mid-segment; capability resolve keeps the gpt-5-pro high-only profile.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "high"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "not-applicable",
+      "normalization_policy": "openai-standard",
       "registry_label": null
     }
   }
