@@ -258,6 +258,22 @@ impl SubjectClassContract {
 
 /// The single token class an issuer policy accepts before parsing claims.
 /// Policy selects exactly one; failure under one class never triggers another.
+///
+/// Only `at+jwt` and `nip-fi+jwt` are offered. There is deliberately no
+/// generic/absent-`typ` "named compatibility" variant: such a class cannot be
+/// proven disjoint from an OIDC ID token by claim presence alone (an issuer can
+/// mint an ID token carrying `client_id`), and the only authenticated
+/// discriminator is `typ`, which that mode declines to constrain. Its absence
+/// is a live regression — an external crate that names the removed variant
+/// fails to compile:
+///
+/// ```compile_fail
+/// use buzz_auth::TokenClass;
+/// let _forge = TokenClass::NamedCompatibility {
+///     required_claims: vec!["client_id".to_owned()],
+///     forbidden_claims: vec![],
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TokenClass {
     /// RFC 9068 `at+jwt` access token: protected `typ` is exactly `at+jwt`.
