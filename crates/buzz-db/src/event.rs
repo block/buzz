@@ -70,6 +70,9 @@ pub struct EventQuery {
     /// Restrict results to events with an `e` tag referencing any of these event IDs (hex).
     /// Uses JSONB containment (`tags @> ...`) against the `tags` column.
     pub e_tags: Option<Vec<String>>,
+    /// Restrict results to events with an exact custom tag pair.
+    /// Uses JSONB containment against `tags` before SQL `LIMIT`.
+    pub custom_tag: Option<(String, String)>,
     /// Restrict results to events in any of these channels. By default,
     /// channel-less global events are retained so this can enforce a viewer's
     /// accessible-channel scope without hiding global events. Set
@@ -128,6 +131,7 @@ impl EventQuery {
             authors: None,
             ids: None,
             e_tags: None,
+            custom_tag: None,
             channel_ids: None,
             channel_ids_include_global: true,
             max_limit: None,
@@ -519,6 +523,12 @@ pub(crate) async fn query_events_on(
             }
             qb.push(")");
         }
+    }
+
+    if let Some((ref name, ref value)) = q.custom_tag {
+        let containment = serde_json::json!([[name, value]]);
+        qb.push(format!(" AND {col_prefix}tags @> "))
+            .push_bind(containment);
     }
 
     if let Some(s) = q.since {

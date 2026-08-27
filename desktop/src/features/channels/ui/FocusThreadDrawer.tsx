@@ -11,8 +11,14 @@ import { cn } from "@/shared/lib/cn";
 type FocusThreadDrawerProps = {
   channelName: string;
   children: React.ReactNode;
-  hasActiveEdit: boolean;
+  /** Prevent a covered drawer from handling Escape before its overlay. */
+  escapeEnabled?: boolean;
+  /** Accessible name for the drawer. Channel threads leave the default. */
+  label?: string;
+  hasActiveEdit?: boolean;
   onClose: () => void;
+  /** Resolve an explicit focus target after this drawer has been dismissed. */
+  restoreFocusTarget?: () => HTMLElement | null;
 };
 
 /**
@@ -118,6 +124,46 @@ const EXIT_TRANSITION = {
  */
 const REDUCED_MOTION_TRANSITION = { duration: 0.12, ease: "linear" } as const;
 
+function useViewportRightInsetPx(
+  overlayRef: React.RefObject<HTMLDivElement | null>,
+) {
+  const [rightInsetPx, setRightInsetPx] = React.useState(0);
+
+  React.useLayoutEffect(() => {
+    const layoutRoot = overlayRef.current?.parentElement;
+    if (!layoutRoot) return;
+
+    const updateRightInset = () => {
+      const bounds = layoutRoot.getBoundingClientRect();
+      const overflowPx = Math.max(0, bounds.right - window.innerWidth);
+      const nextRightInsetPx = Math.min(bounds.width, Math.ceil(overflowPx));
+      setRightInsetPx((current) =>
+        current === nextRightInsetPx ? current : nextRightInsetPx,
+      );
+    };
+
+    updateRightInset();
+    window.addEventListener("resize", updateRightInset);
+
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(updateRightInset);
+    let ancestor: HTMLElement | null = layoutRoot;
+    while (ancestor) {
+      observer?.observe(ancestor);
+      ancestor = ancestor.parentElement;
+    }
+
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", updateRightInset);
+    };
+  }, [overlayRef]);
+
+  return rightInsetPx;
+}
+
 /**
  * Right-anchored thread drawer that overlays the channel content area.
  *
@@ -140,15 +186,22 @@ const REDUCED_MOTION_TRANSITION = { duration: 0.12, ease: "linear" } as const;
 export function FocusThreadDrawer({
   channelName,
   children,
-  hasActiveEdit,
+  escapeEnabled = true,
+  label = "Thread",
+  hasActiveEdit = false,
   onClose,
+  restoreFocusTarget,
 }: FocusThreadDrawerProps) {
   const prefersReducedMotion = useReducedMotion();
   const travelPx = prefersReducedMotion ? 0 : THREAD_FOCUS_DRAWER_TRAVEL_PX;
   const drawerRef = React.useRef<HTMLDivElement>(null);
+  const overlayRef = React.useRef<HTMLDivElement>(null);
   const previousFocusRef = React.useRef<HTMLElement | null>(null);
+  const viewportRightInsetPx = useViewportRightInsetPx(overlayRef);
 
   React.useEffect(() => {
+    if (!escapeEnabled) return;
+
     function handleEscape(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
       const target = event.target;
@@ -168,7 +221,7 @@ export function FocusThreadDrawer({
     return () => {
       window.removeEventListener("keydown", handleEscape, { capture: true });
     };
-  }, [hasActiveEdit, onClose]);
+  }, [escapeEnabled, hasActiveEdit, onClose]);
 
   React.useLayoutEffect(() => {
     previousFocusRef.current =
@@ -180,6 +233,11 @@ export function FocusThreadDrawer({
     return () => {
       const previousFocus = previousFocusRef.current;
       requestAnimationFrame(() => {
+        const explicitTarget = restoreFocusTarget?.();
+        if (explicitTarget) {
+          explicitTarget.focus({ preventScroll: true });
+          return;
+        }
         // A real dismissal keeps focus mode selected; a presentation switch
         // has already selected split mode and owns focus inside the new panel.
         if (getThreadViewMode() === "focus") {
@@ -187,12 +245,14 @@ export function FocusThreadDrawer({
         }
       });
     };
-  }, []);
+  }, [restoreFocusTarget]);
 
   return (
     <div
       className="absolute inset-0 z-41"
       data-testid="focus-thread-drawer-overlay"
+      ref={overlayRef}
+      style={{ right: viewportRightInsetPx }}
     >
       <motion.button
         animate={{ opacity: 1 }}
@@ -228,9 +288,9 @@ export function FocusThreadDrawer({
           // share a radius — a smaller one here would put two radii on one
           // element. `shadow-panel-left` draws the left edge and its corners;
           // see the token for why a `border-l` cannot.
-          "absolute inset-y-0 right-0 flex flex-col overflow-hidden rounded-l-2xl bg-background shadow-panel-left",
+          "absolute inset-y-0 right-0 flex flex-col overflow-hidden rounded-l-2xl bg-background shadow-panel-left outline-hidden",
         )}
-        aria-label="Thread"
+        aria-label={label}
         data-testid="focus-thread-drawer"
         ref={drawerRef}
         role="complementary"

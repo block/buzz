@@ -312,6 +312,40 @@ test("Tab inserts a one-time agent mention by default", async ({ page }) => {
   ).toHaveCount(0);
 });
 
+test("disabling automatic mentions leaves the composer empty after send", async ({
+  page,
+}) => {
+  await keepMentionedAgentsPinned(page);
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  await composer.getByTestId("message-insert-mention").click();
+  await composer.getByTestId("mention-options-trigger").click();
+  const preference = composer.getByTestId("mention-keep-agents-pinned-toggle");
+  await expect(preference).toHaveAttribute("data-state", "checked");
+  await preference.click();
+  await expect(preference).toHaveAttribute("data-state", "unchecked");
+  await input.press("Escape");
+
+  await input.fill("@Mor");
+  await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
+  await input.press("Tab");
+  await input.type("test");
+  await expect(input).toHaveText("@Morgarita test");
+  await input.press("Enter");
+
+  await expect(input).toHaveText("");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(0);
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@Morgarita test"))
+    .toContain(AGENT_A);
+});
+
 test("primary+Shift+M addresses the default agent, then selects the highlighted agent", async ({
   page,
 }) => {
@@ -457,7 +491,7 @@ test("the mention button opens settings and can undo an address", async ({
 
   await input.type("later");
   await input.press("Enter");
-  await expect(input).toHaveText("@Morgarita ");
+  await expect(input).toHaveText("");
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "@Morgarita later"))
     .toContain(AGENT_A);
@@ -466,7 +500,7 @@ test("the mention button opens settings and can undo an address", async ({
   ).toHaveCount(0);
 });
 
-test("always-mentioned agents remain in the mention button while Enter-send resolves", async ({
+test("always-mentioned agents remain selected without replaying their animation while Enter-send resolves", async ({
   page,
 }) => {
   await installAudienceFixtures(page, {
@@ -515,7 +549,7 @@ test("always-mentioned agents remain in the mention button while Enter-send reso
     .not.toContain("");
   await expect(avatar).toHaveAttribute(
     "data-pulse-version",
-    String(initialPulseVersion + 1),
+    String(initialPulseVersion),
     { timeout: 500 },
   );
   await expect(
@@ -553,7 +587,7 @@ test("always-mentioned agents remain in the mention button while Enter-send reso
   ).toHaveCount(1);
 });
 
-test("a failed always-mentioned send shakes the composer avatar", async ({
+test("a failed always-mentioned send shakes the composer avatar without replaying its selection animation", async ({
   page,
 }) => {
   await installAudienceFixtures(page, {
@@ -576,7 +610,7 @@ test("a failed always-mentioned send shakes the composer avatar", async ({
 
   await expect(avatar).toHaveAttribute(
     "data-pulse-version",
-    String(initialPulseVersion + 1),
+    String(initialPulseVersion),
     { timeout: 500 },
   );
   await expect(input).toHaveText("@Morgarita please retry");

@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { fetchProjectsWorkItems } from "./projectWorkItems.ts";
+import {
+  fetchProjectsWorkItems,
+  projectsWithWorkItemRepositories,
+} from "./projectWorkItems.ts";
 
 // ── Work-item deduplication ─────────────────────────────────────────────────
 //
@@ -27,8 +30,31 @@ const projectB = {
   repositories: [{ repoAddress: REPO_ADDRESS }],
 };
 
+test("work-item scope keeps explicit and repository-only read models", () => {
+  const explicitProject = {
+    id: "explicit",
+    legacy: false,
+    repositories: [{ repoAddress: REPO_ADDRESS }],
+  };
+  const repositoryOnlyProject = {
+    id: "repository-only",
+    legacy: true,
+    repositories: [{ repoAddress: `30617:${REPO_OWNER}:standalone` }],
+  };
+  const emptyProject = { id: "empty", legacy: false, repositories: [] };
+
+  assert.deepEqual(
+    projectsWithWorkItemRepositories([
+      explicitProject,
+      repositoryOnlyProject,
+      emptyProject,
+    ]).map((project) => project.id),
+    ["explicit", "repository-only"],
+  );
+});
+
 // Minimal valid NIP-34 issue event for the shared repo.
-function makeIssue(id, updatedAt = 100) {
+function makeIssue(id, updatedAt = 100, repoAddress = REPO_ADDRESS) {
   return {
     id,
     kind: 1621,
@@ -36,11 +62,33 @@ function makeIssue(id, updatedAt = 100) {
     created_at: updatedAt,
     content: "An issue",
     tags: [
-      ["a", REPO_ADDRESS],
+      ["a", repoAddress],
       ["subject", "Fix the thing"],
     ],
   };
 }
+
+test("fetchProjectsWorkItems accumulates issues from every project repository", async () => {
+  const secondAddress = `30617:${REPO_OWNER}:desktop`;
+  const project = {
+    repositories: [
+      { repoAddress: REPO_ADDRESS },
+      { repoAddress: secondAddress },
+    ],
+  };
+  const result = await fetchProjectsWorkItems(
+    [project],
+    makeFetchEvents([
+      makeIssue(ISSUE_ID, 100, REPO_ADDRESS),
+      makeIssue("j".repeat(64), 90, secondAddress),
+    ]),
+  );
+
+  assert.deepEqual(
+    result.issues.items.map(({ repository }) => repository.repoAddress).sort(),
+    [REPO_ADDRESS, secondAddress].sort(),
+  );
+});
 
 // Minimal valid NIP-34 pull request event for the shared repo.
 function makePR(id, updatedAt = 100) {

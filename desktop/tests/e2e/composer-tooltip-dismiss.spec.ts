@@ -102,6 +102,6 @@ test("emoji picker tooltip dismisses when cursor leaves the trigger", async ({
   await expectTooltipDismissesOnLeave(
     page,
     page.getByTestId("composer-emoji-button"),
-    "Insert emoji",
+    "Emoji",
   );
 });

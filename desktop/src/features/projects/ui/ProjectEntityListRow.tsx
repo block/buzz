@@ -295,7 +295,7 @@ export function ProjectEntityListRow({
       {affiliation ? (
         <span
           className={cn(
-            "hidden w-36 shrink-0 truncate text-right text-xs text-muted-foreground/65 md:block",
+            "hidden w-36 shrink-0 truncate text-left text-xs text-muted-foreground/65 md:block",
             affiliationClassName,
           )}
           data-projects-text-priority="secondary"
@@ -314,18 +314,22 @@ export function ProjectEntityListRow({
       >
         {peopleContent}
       </span>
-      {count != null ? (
+      {count != null || countTestId ? (
         <span
           className="flex w-12 shrink-0 items-center gap-1 text-xs text-muted-foreground/65"
           data-projects-text-priority="secondary"
           data-testid={countTestId}
           title={countTitle}
         >
-          <MessageSquare className="h-3.5 w-3.5" />
-          <span className="tabular-nums">
-            {count}
-            {countSuffix}
-          </span>
+          {count != null ? (
+            <>
+              <MessageSquare className="h-3.5 w-3.5" />
+              <span className="tabular-nums">
+                {count}
+                {countSuffix}
+              </span>
+            </>
+          ) : null}
         </span>
       ) : null}
       {beforeDate ? (

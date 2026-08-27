@@ -370,6 +370,13 @@ type E2eConfig = {
     /** Delay (ms) after snapshotting a thread-replies page so E2E tests can
      *  deliver live reply/aux events while an older response is in flight. */
     threadRepliesDelayMs?: number;
+    /** Hold every `get_thread_replies` response until
+     *  `__BUZZ_E2E_RELEASE_THREAD_REPLIES__()` is called. Unlike
+     *  `threadRepliesDelayMs` (a timer that self-heals inside Playwright's
+     *  auto-retry window), this is a manual gate: the thread-aux backfill
+     *  provably never lands until the test releases it, so a spec can assert
+     *  the panel's head state before any backfill can heal it. */
+    deferThreadReplies?: boolean;
     usersBatchDelayMs?: number;
     /** Delay (ms) applied to continuation channel-window requests so e2e
      *  tests can observe the in-flight prepend window. 0/undefined = instant. */
@@ -1247,6 +1254,8 @@ declare global {
       kind: number;
       tags: string[][];
     }>;
+    /** Omits kind 30621 seeds while retaining standalone kind 30617 repositories. */
+    __BUZZ_E2E_REPOSITORY_ONLY_PROJECTS__?: boolean;
     /** Project-scoped events accepted by the mock relay. */
     __BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?: Array<{
       content: string;
@@ -1440,6 +1449,12 @@ declare global {
     __BUZZ_E2E_RELEASE_LINK_PREVIEW_METADATA__?: () => number;
     /** Release link-preview uploads held before mock-native registration. */
     __BUZZ_E2E_RELEASE_LINK_PREVIEW_UPLOADS__?: () => number;
+    /** Flush every `get_thread_replies` call held by `deferThreadReplies`.
+     *  Returns the number of held requests released. */
+    __BUZZ_E2E_RELEASE_THREAD_REPLIES__?: () => number;
+    /** Number of `get_thread_replies` calls currently held by
+     *  `deferThreadReplies`. */
+    __BUZZ_E2E_THREAD_REPLIES_PENDING__?: () => number;
     /** Uploads that passed mock-native registration and began relay work. */
     __BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__?: number;
   }
@@ -1521,6 +1536,7 @@ const OWNED_RELAY_AGENT_PUBKEY =
   "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
 const MOCK_IDENTITY_PUBKEY = DEFAULT_MOCK_IDENTITY.pubkey;
 const STARTER_GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+const STARTER_PROJECT_HOME_CHANNEL_ID = "cf63feec-21bb-5bf0-a2f8-0e4c3de8ec73";
 const STARTER_WELCOME_CHANNEL_ID = "5f0b1b3c-2a37-5366-9b8c-31a4b21d8e77";
 const STARTER_GENERAL_CHANNEL_NAME = "general";
 const STARTER_WELCOME_CHANNEL_NAME = "welcome-everyone";
@@ -1548,6 +1564,7 @@ type DeferredGetEvent = {
 let deferredGetEventQueue: DeferredGetEvent[] = [];
 let deferredLinkPreviewMetadataQueue: Array<() => void> = [];
 let deferredLinkPreviewUploadQueue: Array<() => void> = [];
+let deferredThreadRepliesQueue: Array<() => void> = [];
 let cancelledMediaUploadIds = new Set<string>();
 let deferNextChannelsRead = false;
 let deferredChannelsReadResolve: (() => void) | null = null;
@@ -2679,6 +2696,28 @@ const mockChannels: MockChannel[] = [
     ],
   }),
   createMockChannel({
+    id: STARTER_PROJECT_HOME_CHANNEL_ID,
+    name: "buzz",
+    channel_type: "stream",
+    visibility: "open",
+    description: "Project home for the Buzz community platform.",
+    topic: null,
+    purpose: null,
+    last_message_at: null,
+    archived_at: null,
+    created_by: MOCK_IDENTITY_PUBKEY,
+    topic_set_by: null,
+    topic_set_at: null,
+    purpose_set_by: null,
+    purpose_set_at: null,
+    topic_required: false,
+    max_members: null,
+    nip29_group_id: null,
+    created_minutes_ago: 1440,
+    updated_minutes_ago: 1440,
+    members: [createMockMember(MOCK_IDENTITY_PUBKEY, "owner", 1440)],
+  }),
+  createMockChannel({
     id: STARTER_WELCOME_CHANNEL_ID,
     name: STARTER_WELCOME_CHANNEL_NAME,
     channel_type: "stream",
@@ -3189,7 +3228,7 @@ function mockObservedUnreadProjections(
       badgeCount: 0,
       appBadgeCount: 0,
       topLevelUnread: false,
-      highPriorityUnread: false,
+      highPriorityCount: 0,
     });
   }
   for (const event of scope.events.values()) {
@@ -3211,14 +3250,14 @@ function mockObservedUnreadProjections(
       badgeCount: 0,
       appBadgeCount: 0,
       topLevelUnread: false,
-      highPriorityUnread: false,
+      highPriorityCount: 0,
     };
     projection.latest = Math.max(projection.latest, event.createdAt);
     projection.count += 1;
     projection.badgeCount += event.countsTowardBadge ? 1 : 0;
     projection.appBadgeCount += event.countsTowardAppBadge ? 1 : 0;
     projection.topLevelUnread ||= event.rootId === null;
-    projection.highPriorityUnread ||= event.highPriority;
+    projection.highPriorityCount += event.highPriority ? 1 : 0;
     channels.set(event.channelId, projection);
   }
   return [...channels.values()].sort((left, right) =>
@@ -5161,6 +5200,11 @@ async function handleGetThreadReplies(
   if (delayMs > 0) {
     await new Promise((resolve) => window.setTimeout(resolve, delayMs));
   }
+  if (config?.mock?.deferThreadReplies) {
+    await new Promise<void>((resolve) => {
+      deferredThreadRepliesQueue.push(resolve);
+    });
+  }
 
   return { events: page, next_cursor: nextCursor };
 }
@@ -5890,7 +5934,7 @@ function buildMockProjectEvents(): RelayEvent[] {
           [
             "buzz-channel",
             getConfig()?.mock?.projectAccessChannelId ??
-              "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+              STARTER_PROJECT_HOME_CHANNEL_ID,
           ],
           ["clone", seed.cloneUrl],
           ...(seed.webUrl ? [["web", seed.webUrl]] : []),
@@ -5968,24 +6012,32 @@ function buildMockProjectEvents(): RelayEvent[] {
     }
   }
 
-  const projectOwner =
-    window.__BUZZ_E2E_PROJECT_OWNER_OVERRIDE__ ?? MOCK_PROJECT_SEEDS[0].owner;
-  events.push(
-    createMockEvent(
-      KIND_PROJECT_ANNOUNCEMENT,
-      "",
-      [
-        ["d", "buzz"],
-        ["name", "buzz"],
-        ["description", "The complete Buzz community platform."],
-        ["a", `${KIND_REPO_ANNOUNCEMENT}:${projectOwner}:buzz`],
-        ["a", `${KIND_REPO_ANNOUNCEMENT}:${ALICE_PUBKEY}:relay-tools`],
-      ],
-      projectOwner,
-      now,
-      "project-buzz".padEnd(64, "0"),
-    ),
-  );
+  if (!window.__BUZZ_E2E_REPOSITORY_ONLY_PROJECTS__) {
+    const projectOwner =
+      window.__BUZZ_E2E_PROJECT_OWNER_OVERRIDE__ ?? MOCK_PROJECT_SEEDS[0].owner;
+    events.push(
+      createMockEvent(
+        KIND_PROJECT_ANNOUNCEMENT,
+        "",
+        [
+          ["d", "buzz"],
+          ["name", "buzz"],
+          ["description", "The complete Buzz community platform."],
+          ["a", `${KIND_REPO_ANNOUNCEMENT}:${projectOwner}:buzz`],
+          ["a", `${KIND_REPO_ANNOUNCEMENT}:${ALICE_PUBKEY}:relay-tools`],
+          [
+            "buzz-channel",
+            getConfig()?.mock?.projectAccessChannelId ??
+              STARTER_PROJECT_HOME_CHANNEL_ID,
+          ],
+          ["buzz-related-channel", "9dae0116-799b-5071-a0a8-fdd30a91a35d"],
+        ],
+        projectOwner,
+        now,
+        "project-buzz".padEnd(64, "0"),
+      ),
+    );
+  }
 
   return events;
 }
@@ -7398,6 +7450,8 @@ async function handleAddChannelMembers(
     channelId: string;
     pubkeys: string[];
     role?: RawChannelMember["role"];
+    expectedRelayUrl?: string | null;
+    expectedSignerPubkey?: string | null;
   },
   config: E2eConfig | undefined,
 ): Promise<RawAddChannelMembersResponse> {
@@ -7407,6 +7461,8 @@ async function handleAddChannelMembers(
       window.setTimeout(resolve, addChannelMembersDelayMs),
     );
   }
+  assertExpectedRelayScope(args.expectedRelayUrl, config);
+  assertExpectedSigner(args.expectedSignerPubkey, config);
   const configuredErrors = config?.mock?.addChannelMembersErrors;
   if (configuredErrors && configuredErrors.length > 0) {
     const index = Math.min(
@@ -10709,6 +10765,7 @@ export function maybeInstallE2eTauriMocks() {
   deferredSendMessageLiveEchoes.length = 0;
   deferredLinkPreviewMetadataQueue = [];
   deferredLinkPreviewUploadQueue = [];
+  deferredThreadRepliesQueue = [];
   cancelledMediaUploadIds = new Set<string>();
   window.__BUZZ_E2E_LINK_PREVIEW_UPLOAD_STARTS__ = 0;
   window.__BUZZ_E2E_RELEASE_LINK_PREVIEW_METADATA__ = () => {
@@ -10721,6 +10778,13 @@ export function maybeInstallE2eTauriMocks() {
     for (const release of queued) release();
     return queued.length;
   };
+  window.__BUZZ_E2E_RELEASE_THREAD_REPLIES__ = () => {
+    const queued = deferredThreadRepliesQueue.splice(0);
+    for (const release of queued) release();
+    return queued.length;
+  };
+  window.__BUZZ_E2E_THREAD_REPLIES_PENDING__ = () =>
+    deferredThreadRepliesQueue.length;
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
