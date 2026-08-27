@@ -470,21 +470,25 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
-    /// Run `output_with_timeout` under an independent wall-clock watchdog. The
-    /// helper is driven on its own thread; if it fails to return within `bound`
-    /// the test fails instead of hanging forever. This is the real outer bound —
-    /// an inline `elapsed() < bound` assertion is never reached if the helper
-    /// itself hangs.
+    /// Drive `output_with_timeout` on its own thread under an independent
+    /// wall-clock `bound` — the real outer bound, unreachable by an inline `elapsed()` assertion if the helper hangs.
+    /// The raw result lets the Windows sites fold transcripts into the expiry panic.
     #[cfg(any(unix, windows))]
-    fn run_watchdogged(cmd: Command, timeout: Duration, bound: Duration) -> Option<Output> {
+    fn run_watchdogged_raw(
+        cmd: Command,
+        timeout: Duration,
+        bound: Duration,
+    ) -> Result<Option<Output>, mpsc::RecvTimeoutError> {
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let _ = tx.send(output_with_timeout(cmd, timeout));
         });
-        match rx.recv_timeout(bound) {
-            Ok(result) => result,
-            Err(_) => panic!("output_with_timeout did not return within {bound:?}"),
-        }
+        rx.recv_timeout(bound)
+    }
+    #[cfg(unix)]
+    fn run_watchdogged(cmd: Command, timeout: Duration, bound: Duration) -> Option<Output> {
+        run_watchdogged_raw(cmd, timeout, bound)
+            .unwrap_or_else(|_| panic!("output_with_timeout did not return within {bound:?}"))
     }
 
     /// True while a Unix process (or a reaped-but-not-waited zombie under this
@@ -890,7 +894,9 @@ mod tests {
                 "-File",
                 root_ps1.to_str().expect("utf-8 root path"),
             ]);
-            let out = run_watchdogged(cmd, Duration::from_secs(20), Duration::from_secs(40))
+            let out = run_watchdogged_raw(cmd, Duration::from_secs(20), Duration::from_secs(40))
+                .ok()
+                .flatten()
                 .unwrap_or_else(|| {
                     panic!(
                         "iteration {iteration}: root exits, so this must return output\n{}",
@@ -969,7 +975,13 @@ mod tests {
             "-File",
             root_ps1.to_str().expect("utf-8 root path"),
         ]);
-        let result = run_watchdogged(cmd, Duration::from_secs(20), Duration::from_secs(40));
+        let result = run_watchdogged_raw(cmd, Duration::from_secs(20), Duration::from_secs(40))
+            .unwrap_or_else(|_| {
+                panic!(
+                    "watchdog expired — output_with_timeout hung on the timeout path\n{}",
+                    dump_logs(&[root_log_s, child_log_s])
+                )
+            });
         assert!(
             result.is_none(),
             "a timed-out tree must yield None\n{}",
