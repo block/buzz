@@ -216,11 +216,11 @@ export function ComposerMentionButton({
                 className="flex items-center gap-1 overflow-hidden"
                 data-testid="composer-address-locks"
                 exit={{ opacity: 0, width: 0 }}
-                initial={false}
+                initial={shouldReduceMotion ? false : { opacity: 0, width: 0 }}
                 transition={
                   shouldReduceMotion
                     ? { duration: 0 }
-                    : { duration: 0.18, ease: "easeOut" }
+                    : { duration: 0.12, ease: "easeOut" }
                 }
               >
                 <AnimatePresence mode="popLayout">
