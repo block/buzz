@@ -3,7 +3,9 @@ import json
 import pathlib
 import subprocess
 import tempfile
+import threading
 import unittest
+import urllib.request
 from unittest import mock
 
 MODULE_PATH = pathlib.Path(__file__).parents[1] / "ios_review.py"
@@ -100,6 +102,11 @@ class IosReviewTests(unittest.TestCase):
         for name in sentinels:
             self.assertNotIn(name, environment)
 
+    def test_flutter_environment_carries_private_proceed_url(self):
+        environment = ios_review.flutter_environment("http://127.0.0.1:1/proceed/token")
+        self.assertEqual(environment["BUZZ_NATIVE_REVIEW_PROCEED_URL"], "http://127.0.0.1:1/proceed/token")
+        self.assertEqual(environment["SIMCTL_CHILD_BUZZ_NATIVE_REVIEW_PROCEED_URL"], environment["BUZZ_NATIVE_REVIEW_PROCEED_URL"])
+
     def test_run_scrubs_host_credentials_by_default(self):
         sentinels = {"BUZZ_PRIVATE_KEY": "secret", "SSH_AUTH_SOCK": "/tmp/agent", "GITHUB_TOKEN": "secret"}
         with mock.patch.dict(ios_review.os.environ, sentinels, clear=False), \
@@ -108,6 +115,81 @@ class IosReviewTests(unittest.TestCase):
         environment = run.call_args.kwargs["env"]
         for name in sentinels:
             self.assertNotIn(name, environment)
+
+    def test_proceed_gate_waits_for_explicit_recorder_release(self):
+        server, url = ios_review.proceed_server()
+        result = []
+
+        def request_proceed():
+            with urllib.request.urlopen(url, timeout=2) as response:
+                result.append(response.status)
+
+        request = threading.Thread(target=request_proceed)
+        request.start()
+        try:
+            self.assertFalse(server.review_ready.is_set())
+            request.join(timeout=0.05)
+            self.assertTrue(request.is_alive())
+            ios_review.release_journey(server)
+            request.join(timeout=1)
+            self.assertFalse(request.is_alive())
+            self.assertEqual(result, [204])
+        finally:
+            ios_review.release_journey(server)
+            server.shutdown()
+            server.server_close()
+            request.join(timeout=1)
+
+    def test_state_evidence_requires_every_reviewed_transition_in_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = pathlib.Path(directory) / "flutter.log"
+            log.write_text("\n".join(
+                f"{ios_review.STATE_MARKER_PREFIX}{state}" for state in
+                ["initial-hidden", "revealed", "edited", "final-hidden"]
+            ))
+            self.assertEqual(
+                [step["name"] for step in ios_review.evidence_steps(log)],
+                ["initial-hidden", "revealed", "edited", "final-hidden"],
+            )
+            log.write_text(f"{ios_review.STATE_MARKER_PREFIX}final-hidden\n")
+            with self.assertRaisesRegex(ios_review.ReviewError, "evidence incomplete"):
+                ios_review.evidence_steps(log)
+
+    def test_second_reap_timeout_is_collected_without_aborting_teardown(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired("flutter", 10),
+            subprocess.TimeoutExpired("flutter", 5),
+        ]
+        errors = ios_review.terminate_child(process, "Flutter")
+        self.assertEqual(errors, ["Flutter required SIGKILL", "Flutter did not exit after SIGKILL"])
+        process.kill.assert_called_once()
+
+    def test_all_simctl_commands_and_flutter_waits_are_bounded(self):
+        source = MODULE_PATH.read_text()
+        self.assertIn(
+            '["xcrun", "simctl", "list", "devicetypes", "runtimes", "-j"],\n'
+            '        timeout=SIMCTL_TIMEOUT_SECONDS',
+            source,
+        )
+        self.assertIn(
+            'device_type["identifier"], runtime["identifier"]],\n'
+            '        timeout=SIMCTL_TIMEOUT_SECONDS',
+            source,
+        )
+        self.assertIn(
+            '"bootstatus", udid, "-b"], capture=False, '
+            'timeout=BOOT_TIMEOUT_SECONDS',
+            source,
+        )
+        self.assertIn(
+            "flutter_process.wait(timeout=FLUTTER_TIMEOUT_SECONDS)", source
+        )
+        self.assertIn(
+            '"screenshot", str(screenshot)], timeout=SIMCTL_TIMEOUT_SECONDS',
+            source,
+        )
 
     def test_recording_readiness_requires_journey_marker(self):
         process = FakeFlutterProcess()
@@ -151,6 +233,7 @@ class IosReviewTests(unittest.TestCase):
              mock.patch.object(ios_review, "run", side_effect=fake_run), \
              mock.patch.object(ios_review, "wait_for_recording_ready"), \
              mock.patch.object(ios_review, "wait_for_recording"), \
+             mock.patch.object(ios_review, "evidence_steps", return_value=[{"name": "state", "status": "passed"}]), \
              mock.patch.object(ios_review, "finalize_recording") as finalize_recording, \
              mock.patch.object(ios_review.subprocess, "Popen", side_effect=[flutter, recorder]):
             with self.assertRaisesRegex(ios_review.ReviewError, "exit 1"):
@@ -163,7 +246,7 @@ class IosReviewTests(unittest.TestCase):
         self.assertEqual(receipt["status"], "failed")
         self.assertEqual(receipt["cleanup"], {"status": "passed", "errors": []})
         self.assertEqual(receipt["artifacts"], {
-            "video": "video.mp4", "log": "flutter.log", "screenshot": "final.png"
+            "video": "video.mp4", "log": "flutter.log"
         })
         self.assertEqual(receipt["isolation"]["device"], {
             "name": "Buzz Native Review owned-run", "device_type": "iPhone Test",
@@ -213,6 +296,7 @@ class IosReviewTests(unittest.TestCase):
              mock.patch.object(ios_review, "run", side_effect=fake_run), \
              mock.patch.object(ios_review, "wait_for_recording_ready"), \
              mock.patch.object(ios_review, "wait_for_recording"), \
+             mock.patch.object(ios_review, "evidence_steps", return_value=[{"name": "state", "status": "passed"}]), \
              mock.patch.object(ios_review.subprocess, "Popen", side_effect=[flutter, recorder]):
             with self.assertRaisesRegex(ios_review.ReviewError, "recorder failed with exit 9"):
                 ios_review.run_review(ios_review.DEFAULT_TEST, "iPhone Test", pathlib.Path(directory))
@@ -254,6 +338,7 @@ class IosReviewTests(unittest.TestCase):
              mock.patch.object(ios_review, "run", side_effect=fake_run), \
              mock.patch.object(ios_review, "wait_for_recording_ready"), \
              mock.patch.object(ios_review, "wait_for_recording", side_effect=fake_wait_for_recording), \
+             mock.patch.object(ios_review, "evidence_steps", return_value=[{"name": "state", "status": "passed"}]), \
              mock.patch.object(ios_review.subprocess, "Popen", side_effect=[flutter, recorder]):
             with self.assertRaisesRegex(ios_review.ReviewError, "timed out validating simulator video"):
                 ios_review.run_review(ios_review.DEFAULT_TEST, "iPhone Test", pathlib.Path(directory))
