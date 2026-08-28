@@ -46,6 +46,7 @@ import { useLinkEditor } from "@/features/messages/lib/useLinkEditor";
 import { useComposerSpoilerParticles } from "@/features/messages/lib/useComposerSpoilerParticles";
 import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
 import { cn } from "@/shared/lib/cn";
+import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { ChannelAutocomplete } from "./ChannelAutocomplete";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
 import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
@@ -124,8 +125,8 @@ function MessageComposerImpl({
     setIsFormattingOpen(pressed);
   }, []);
   const drafts = useDrafts();
-  const implicitAgentMentionNamesByDraftRef = React.useRef(
-    new Map<string, readonly string[]>(),
+  const implicitAgentMentionPrefixByDraftRef = React.useRef(
+    new Map<string, string>(),
   );
   const identityQuery = useIdentityQuery();
   const effectiveDraftKey = draftKey ?? channelId;
@@ -209,11 +210,12 @@ function MessageComposerImpl({
     setSpoileredAttachmentUrls,
     spoileredAttachmentUrlsRef,
     syncComposerContentFromEditor,
-    getImplicitAgentMentionNames: () =>
+    getImplicitAgentMentionPrefix: () =>
       effectiveDraftKey
-        ? (implicitAgentMentionNamesByDraftRef.current.get(effectiveDraftKey) ??
-          [])
-        : [],
+        ? (implicitAgentMentionPrefixByDraftRef.current.get(
+            effectiveDraftKey,
+          ) ?? "")
+        : "",
   });
   // biome-ignore lint/correctness/useExhaustiveDependencies: effectiveDraftKey is the sole trigger
   React.useEffect(() => {
@@ -468,10 +470,13 @@ function MessageComposerImpl({
   addressedMentionRestore.restoreAddressedAgentMentionsRef.current =
     restoreAddressedAgentMentions;
   if (effectiveDraftKey) {
-    implicitAgentMentionNamesByDraftRef.current.set(
+    implicitAgentMentionPrefixByDraftRef.current.set(
       effectiveDraftKey,
-      lockedAgents.map((agent) => agent.displayName),
+      lockedAgents.length > 0
+        ? `${lockedAgents.map((agent) => `@${agent.displayName}`).join(" ")} `
+        : "",
     );
+    trimMapToSize(implicitAgentMentionPrefixByDraftRef.current, 200);
   }
   React.useLayoutEffect(() => {
     if (!audienceScope || editTarget != null) return;

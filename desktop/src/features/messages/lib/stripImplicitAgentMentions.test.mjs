@@ -1,39 +1,45 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { stripImplicitAgentMentions } from "./stripImplicitAgentMentions.ts";
+import { stripImplicitAgentMentionPrefix } from "./stripImplicitAgentMentions.ts";
 
-test("removes a synthesized leading agent mention", () => {
+test("removes the exact synthesized leading prefix", () => {
   assert.equal(
-    stripImplicitAgentMentions("@Morgarita draft text", ["Morgarita"]),
+    stripImplicitAgentMentionPrefix("@Morgarita draft text", "@Morgarita "),
     "draft text",
   );
 });
 
-test("removes the complete synthesized prefix for multiple agents", () => {
+test("removes the complete captured prefix for multiple agents", () => {
   assert.equal(
-    stripImplicitAgentMentions("@Morgarita @Vogue draft text", [
-      "Morgarita",
-      "Vogue",
-    ]),
+    stripImplicitAgentMentionPrefix(
+      "@Morgarita @Vogue draft text",
+      "@Morgarita @Vogue ",
+    ),
     "draft text",
   );
 });
 
-test("removes an implicit-only mention after markdown drops its separator", () => {
-  assert.equal(stripImplicitAgentMentions("@Morgarita", ["Morgarita"]), "");
-});
-
-test("preserves matching mentions outside the synthesized prefix", () => {
+test("removes an implicit-only mention when markdown drops its separator", () => {
   assert.equal(
-    stripImplicitAgentMentions("draft for @Morgarita", ["Morgarita"]),
-    "draft for @Morgarita",
+    stripImplicitAgentMentionPrefix("@Morgarita", "@Morgarita "),
+    "",
   );
 });
 
-test("preserves an unknown leading mention", () => {
+test("preserves an identical authored mention after the synthesized prefix", () => {
   assert.equal(
-    stripImplicitAgentMentions("@Alice ask @Morgarita", ["Morgarita"]),
+    stripImplicitAgentMentionPrefix(
+      "@Morgarita @Morgarita authored duplicate",
+      "@Morgarita ",
+    ),
+    "@Morgarita authored duplicate",
+  );
+});
+
+test("preserves content when the captured prefix does not match exactly", () => {
+  assert.equal(
+    stripImplicitAgentMentionPrefix("@Alice ask @Morgarita", "@Morgarita "),
     "@Alice ask @Morgarita",
   );
 });

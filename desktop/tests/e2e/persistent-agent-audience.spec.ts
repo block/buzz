@@ -1100,6 +1100,42 @@ test("implicit automatic mentions stay out of persisted drafts", async ({
     .toBe("draft text continues");
 });
 
+test("an authored duplicate leading mention survives draft restoration", async ({
+  page,
+}) => {
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+  await automaticallyMention(channelComposer(page), "Morgarita");
+  const input = channelComposer(page).getByTestId("message-input");
+  await input.pressSequentially("@Morgarita authored duplicate");
+
+  await openThread(page);
+  await openGeneral(page);
+
+  await expect(input).toHaveText("@Morgarita @Morgarita authored duplicate");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(1);
+
+  await page.goto(`/#/channels/${RANDOM_CHANNEL_ID}`, {
+    waitUntil: "domcontentloaded",
+  });
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await expect
+    .poll(() =>
+      page.evaluate((channelId) => {
+        for (const storageKey of Object.keys(window.localStorage)) {
+          if (!storageKey.startsWith("buzz-drafts.v2:")) continue;
+          const drafts = JSON.parse(
+            window.localStorage.getItem(storageKey) ?? "{}",
+          ) as Record<string, { channelId?: string; content?: string }>;
+          const draft = drafts[channelId];
+          if (draft?.channelId === channelId) return draft.content ?? "";
+        }
+        return "";
+      }, CHANNEL_ID),
+    )
+    .toBe("@Morgarita authored duplicate");
+});
+
 test("a restored multi-word automatic mention remains a chip with the caret after its space", async ({
   page,
 }) => {

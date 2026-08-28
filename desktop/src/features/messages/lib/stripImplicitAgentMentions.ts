@@ -1,25 +1,15 @@
 /**
- * Removes the leading mention prefix synthesized by automatic agent addressing.
- * Only the contiguous composer prefix is considered; identical mentions later in
- * the draft remain authored content.
+ * Removes the exact leading prefix synthesized by automatic agent addressing.
+ * The captured prefix is provenance: an identical authored mention immediately
+ * after it must remain draft content.
  */
-export function stripImplicitAgentMentions(
+export function stripImplicitAgentMentionPrefix(
   content: string,
-  displayNames: readonly string[],
+  implicitPrefix: string,
 ): string {
-  let stripped = content;
-  const names = [...new Set(displayNames.map((name) => name.trim()))]
-    .filter(Boolean)
-    .sort((left, right) => right.length - left.length);
-
-  while (stripped.startsWith("@")) {
-    const name = names.find(
-      (candidate) =>
-        stripped === `@${candidate}` || stripped.startsWith(`@${candidate} `),
-    );
-    if (!name) break;
-    stripped = stripped.slice(name.length + (stripped === `@${name}` ? 1 : 2));
+  if (!implicitPrefix) return content;
+  if (content.startsWith(implicitPrefix)) {
+    return content.slice(implicitPrefix.length);
   }
-
-  return stripped;
+  return content === implicitPrefix.trimEnd() ? "" : content;
 }

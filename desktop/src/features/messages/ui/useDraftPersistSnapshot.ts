@@ -1,6 +1,6 @@
 import * as React from "react";
 
-import { stripImplicitAgentMentions } from "@/features/messages/lib/stripImplicitAgentMentions";
+import { stripImplicitAgentMentionPrefix } from "@/features/messages/lib/stripImplicitAgentMentions";
 
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import type { QueuedMediaAttachment } from "@/features/messages/lib/backgroundMediaUploadStore";
@@ -61,8 +61,8 @@ type UseDraftPersistLifecycleParams = {
    * closure to capture the latest text before the effect fires.
    */
   syncComposerContentFromEditor: () => string;
-  /** Agent mention prefixes inserted by automatic addressing, not authored draft text. */
-  getImplicitAgentMentionNames?: () => readonly string[];
+  /** Exact editor prefix inserted by automatic addressing, including separator. */
+  getImplicitAgentMentionPrefix?: () => string;
 };
 
 type UseDraftPersistLifecycleResult = {
@@ -124,15 +124,15 @@ export function useDraftPersistLifecycle({
   setSpoileredAttachmentUrls,
   spoileredAttachmentUrlsRef,
   syncComposerContentFromEditor,
-  getImplicitAgentMentionNames,
+  getImplicitAgentMentionPrefix,
 }: UseDraftPersistLifecycleParams): UseDraftPersistLifecycleResult {
   const persistedContent = React.useCallback(
     (content: string) =>
-      stripImplicitAgentMentions(
+      stripImplicitAgentMentionPrefix(
         content,
-        getImplicitAgentMentionNames?.() ?? [],
+        getImplicitAgentMentionPrefix?.() ?? "",
       ),
-    [getImplicitAgentMentionNames],
+    [getImplicitAgentMentionPrefix],
   );
 
   const pendingImetaForPersistRef = React.useRef<ImetaMedia[]>([]);
