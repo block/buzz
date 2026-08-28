@@ -1196,8 +1196,8 @@ mod postgres_tests {
 
         // Durable workflow wakes are recipient-gated and must remain outside
         // full-text search on both fresh and brownfield databases.
-        assert_eq!(migrations[35].version, 36);
-        let workflow_wake_fts = migrations[35].sql.as_str();
+        assert_eq!(migrations[40].version, 41);
+        let workflow_wake_fts = migrations[40].sql.as_str();
         assert!(workflow_wake_fts.contains("kind = 44620"));
         assert!(desired_schema.contains("44200, 44620"));
 
