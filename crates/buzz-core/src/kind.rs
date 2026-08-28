@@ -856,6 +856,9 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
             | KIND_DM_VISIBILITY
             | KIND_THREAD_SUMMARY
             | KIND_WINDOW_BOUNDS
+            | KIND_AGENT_WORKFLOW_RUN
+            | KIND_AGENT_WORKFLOW_TASK
+            | KIND_AGENT_WORKFLOW_TRANSITION
     )
 }
 
@@ -925,6 +928,20 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for &k in ALL_KINDS {
             assert!(seen.insert(k), "duplicate kind value: {k}");
+        }
+    }
+
+    #[test]
+    fn only_coordinator_workflow_events_are_relay_only() {
+        for kind in [
+            KIND_AGENT_WORKFLOW_RUN,
+            KIND_AGENT_WORKFLOW_TASK,
+            KIND_AGENT_WORKFLOW_TRANSITION,
+        ] {
+            assert!(is_relay_only_kind(kind));
+        }
+        for kind in [KIND_AGENT_WORKFLOW_CHECKPOINT, KIND_AGENT_WORKFLOW_ARTIFACT] {
+            assert!(!is_relay_only_kind(kind));
         }
     }
 

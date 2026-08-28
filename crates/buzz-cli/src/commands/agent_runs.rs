@@ -14,10 +14,8 @@ const RUN_RECEIPT_KINDS: [u32; 4] = [
 
 #[derive(Clone, Copy)]
 enum ReceiptKind {
-    Task,
     Checkpoint,
     Artifact,
-    Transition,
 }
 
 /// Read the latest durable run snapshot without steering an agent.
@@ -65,24 +63,6 @@ fn history_filter(run: uuid::Uuid, limit: Option<u32>) -> serde_json::Value {
     })
 }
 
-/// Publish the latest channel-visible durable run snapshot.
-async fn publish_snapshot(
-    client: &BuzzClient,
-    coordinates: RunCoordinates<'_>,
-    participants: &[String],
-    content: &str,
-) -> Result<(), CliError> {
-    let channel = parse_uuid(coordinates.channel)?;
-    let workflow = parse_uuid(coordinates.workflow)?;
-    let run = parse_uuid(coordinates.run)?;
-    let content = read_or_stdin(content)?;
-    let participants = participant_refs(participants);
-    let builder =
-        buzz_sdk::build_agent_workflow_run(channel, workflow, run, &participants, &content)
-            .map_err(sdk_err)?;
-    publish(client, builder).await
-}
-
 /// Publish an append-only durable run receipt signed by the current identity.
 async fn publish_receipt(
     client: &BuzzClient,
@@ -98,14 +78,6 @@ async fn publish_receipt(
     let content = read_or_stdin(content)?;
     let participants = participant_refs(participants);
     let builder = match kind {
-        ReceiptKind::Task => buzz_sdk::build_agent_workflow_task(
-            channel,
-            workflow,
-            run,
-            required_task(task)?,
-            &participants,
-            &content,
-        ),
         ReceiptKind::Checkpoint => buzz_sdk::build_agent_workflow_checkpoint(
             channel,
             workflow,
@@ -119,13 +91,6 @@ async fn publish_receipt(
             workflow,
             run,
             required_task(task)?,
-            &participants,
-            &content,
-        ),
-        ReceiptKind::Transition => buzz_sdk::build_agent_workflow_transition(
-            channel,
-            workflow,
-            run,
             &participants,
             &content,
         ),
@@ -169,45 +134,6 @@ pub(crate) async fn dispatch(
     match cmd {
         AgentRunsCmd::Status { run } => status(client, &run).await,
         AgentRunsCmd::History { run, limit } => history(client, &run, limit).await,
-        AgentRunsCmd::Snapshot {
-            channel,
-            workflow,
-            run,
-            participant,
-            content,
-        } => {
-            publish_snapshot(
-                client,
-                RunCoordinates {
-                    channel: &channel,
-                    workflow: &workflow,
-                    run: &run,
-                },
-                &participant,
-                &content,
-            )
-            .await
-        }
-        AgentRunsCmd::Task {
-            channel,
-            workflow,
-            run,
-            task,
-            participant,
-            content,
-        } => {
-            publish_cli_receipt(
-                client,
-                ReceiptKind::Task,
-                &channel,
-                &workflow,
-                &run,
-                Some(&task),
-                &participant,
-                &content,
-            )
-            .await
-        }
         AgentRunsCmd::Checkpoint {
             channel,
             workflow,
@@ -243,25 +169,6 @@ pub(crate) async fn dispatch(
                 &workflow,
                 &run,
                 Some(&task),
-                &participant,
-                &content,
-            )
-            .await
-        }
-        AgentRunsCmd::Transition {
-            channel,
-            workflow,
-            run,
-            participant,
-            content,
-        } => {
-            publish_cli_receipt(
-                client,
-                ReceiptKind::Transition,
-                &channel,
-                &workflow,
-                &run,
-                None,
                 &participant,
                 &content,
             )

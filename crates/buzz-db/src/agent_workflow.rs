@@ -414,7 +414,7 @@ pub async fn claim_task(
     sqlx::query(
         "UPDATE workflow_run_tasks AS task \
          SET status='running',agent_pubkey=$4,attempt=attempt+1,\
-         started_at=COALESCE(started_at,NOW()),version=version+1,updated_at=NOW() \
+         started_at=NOW(),version=version+1,updated_at=NOW() \
          WHERE task.community_id=$1 AND task.id=$2 AND task.version=$3 \
            AND task.status IN ('pending','assigned','retry_scheduled') \
            AND (task.not_before IS NULL OR task.not_before<=NOW()) \
@@ -441,6 +441,148 @@ pub async fn claim_task(
     .transpose()
 }
 
+/// Atomically complete an eligible ingestion task, persist its immutable
+/// manifest artifact, and bind the manifest hash to run state.
+#[allow(clippy::too_many_arguments)]
+pub async fn complete_ingestion_task(
+    pool: &PgPool,
+    community: CommunityId,
+    task_id: Uuid,
+    expected: i64,
+    kind: &str,
+    artifact_sha256: &[u8],
+    manifest_hash: &[u8],
+    inline_content: &Value,
+    metadata: &Value,
+    idempotency_key: &str,
+) -> Result<Option<(AgentTask, AgentArtifact)>> {
+    let mut transaction = pool.begin().await?;
+    let Some(task_row) = sqlx::query(
+        "UPDATE workflow_run_tasks AS task \
+         SET status='completed',completed_at=NOW(),version=version+1,updated_at=NOW() \
+         WHERE task.community_id=$1 AND task.id=$2 AND task.version=$3 \
+           AND task.status='pending' \
+           AND NOT EXISTS (\
+             SELECT 1 FROM jsonb_array_elements_text(task.depends_on) dependency(task_key) \
+             LEFT JOIN workflow_run_tasks prerequisite \
+               ON prerequisite.community_id=task.community_id \
+              AND prerequisite.run_id=task.run_id \
+              AND prerequisite.task_key=dependency.task_key \
+             WHERE prerequisite.id IS NULL OR prerequisite.status<>'completed'\
+           ) \
+         RETURNING id,run_id,task_key,phase,agent_pubkey,status,attempt,max_attempts,input,\
+          output_schema,idempotency_key,parent_task_id,depends_on,not_before,started_at,\
+          completed_at,error_code,error_message,version,created_at,updated_at",
+    )
+    .bind(community.as_uuid())
+    .bind(task_id)
+    .bind(expected)
+    .fetch_optional(&mut *transaction)
+    .await?
+    else {
+        transaction.rollback().await?;
+        return Ok(None);
+    };
+    let task = map_task(task_row)?;
+    let artifact_row = sqlx::query(
+        "INSERT INTO workflow_run_artifacts \
+         (community_id,run_id,task_id,kind,version,content_type,uri,sha256,inline_content,metadata,created_by,idempotency_key) \
+         VALUES ($1,$2,$3,$4,1,'application/json',NULL,$5,$6,$7,NULL,$8) \
+         ON CONFLICT (community_id,run_id,idempotency_key) DO UPDATE \
+         SET idempotency_key=EXCLUDED.idempotency_key \
+         RETURNING id,run_id,task_id,kind,version,content_type,uri,sha256,inline_content,metadata,created_by,idempotency_key,created_at",
+    )
+    .bind(community.as_uuid())
+    .bind(task.run_id)
+    .bind(task.id)
+    .bind(kind)
+    .bind(artifact_sha256)
+    .bind(inline_content)
+    .bind(metadata)
+    .bind(idempotency_key)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let artifact = map_artifact(artifact_row)?;
+    if artifact.task_id != Some(task.id)
+        || artifact.kind != kind
+        || artifact.version != 1
+        || artifact.content_type != "application/json"
+        || artifact.uri.is_some()
+        || artifact.sha256 != artifact_sha256
+        || artifact.inline_content.as_ref() != Some(inline_content)
+        || artifact.metadata != *metadata
+        || artifact.created_by.is_some()
+    {
+        transaction.rollback().await?;
+        return Err(DbError::InvalidData(
+            "ingestion artifact conflicts with persisted blueprint".into(),
+        ));
+    }
+    let state_updated = sqlx::query(
+        "UPDATE workflow_run_state SET manifest_hash=$3,updated_at=NOW() \
+         WHERE community_id=$1 AND run_id=$2 \
+           AND (manifest_hash IS NULL OR manifest_hash=$3)",
+    )
+    .bind(community.as_uuid())
+    .bind(task.run_id)
+    .bind(manifest_hash)
+    .execute(&mut *transaction)
+    .await?
+    .rows_affected();
+    if state_updated != 1 {
+        transaction.rollback().await?;
+        return Err(DbError::InvalidData(
+            "document manifest hash conflicts with durable run state".into(),
+        ));
+    }
+    transaction.commit().await?;
+    Ok(Some((task, artifact)))
+}
+
+/// Defer an eligible coordinator task after a transient adapter failure.
+pub async fn defer_ready_task(
+    pool: &PgPool,
+    community: CommunityId,
+    task_id: Uuid,
+    expected: i64,
+    not_before: DateTime<Utc>,
+    code: &str,
+    message: &str,
+) -> Result<Option<AgentTask>> {
+    sqlx::query(
+        "UPDATE workflow_run_tasks AS task \
+         SET attempt=attempt+1,\
+             status=CASE WHEN attempt+1>=max_attempts THEN 'failed' ELSE 'retry_scheduled' END,\
+             not_before=CASE WHEN attempt+1>=max_attempts THEN NULL ELSE $4 END,\
+             error_code=$5,error_message=$6,\
+             completed_at=CASE WHEN attempt+1>=max_attempts THEN NOW() ELSE NULL END,\
+             version=version+1,updated_at=NOW() \
+         WHERE task.community_id=$1 AND task.id=$2 AND task.version=$3 \
+           AND task.status IN ('pending','retry_scheduled') \
+           AND (task.not_before IS NULL OR task.not_before<=NOW()) \
+           AND NOT EXISTS (\
+             SELECT 1 FROM jsonb_array_elements_text(task.depends_on) dependency(task_key) \
+             LEFT JOIN workflow_run_tasks prerequisite \
+               ON prerequisite.community_id=task.community_id \
+              AND prerequisite.run_id=task.run_id \
+              AND prerequisite.task_key=dependency.task_key \
+             WHERE prerequisite.id IS NULL OR prerequisite.status<>'completed'\
+           ) \
+         RETURNING id,run_id,task_key,phase,agent_pubkey,status,attempt,max_attempts,input,\
+          output_schema,idempotency_key,parent_task_id,depends_on,not_before,started_at,\
+          completed_at,error_code,error_message,version,created_at,updated_at",
+    )
+    .bind(community.as_uuid())
+    .bind(task_id)
+    .bind(expected)
+    .bind(not_before)
+    .bind(code)
+    .bind(message)
+    .fetch_optional(pool)
+    .await?
+    .map(map_task)
+    .transpose()
+}
 /// Block an unsupported coordinator task only after every dependency completes.
 pub async fn block_ready_task(
     pool: &PgPool,
@@ -493,7 +635,8 @@ pub async fn complete_ready_task(
         "UPDATE workflow_run_tasks AS task \
          SET status='completed',completed_at=NOW(),version=version+1,updated_at=NOW() \
          WHERE task.community_id=$1 AND task.id=$2 AND task.version=$3 \
-           AND task.status='pending' \
+           AND task.status IN ('pending','retry_scheduled') \
+           AND (task.not_before IS NULL OR task.not_before<=NOW()) \
            AND NOT EXISTS (\
              SELECT 1 FROM jsonb_array_elements_text(task.depends_on) dependency(task_key) \
              LEFT JOIN workflow_run_tasks prerequisite \
@@ -750,7 +893,7 @@ fn map_run_state(r: sqlx::postgres::PgRow) -> Result<AgentRunState> {
         updated_at: r.try_get("updated_at")?,
     })
 }
-fn map_task(r: sqlx::postgres::PgRow) -> Result<AgentTask> {
+pub(crate) fn map_task(r: sqlx::postgres::PgRow) -> Result<AgentTask> {
     let s: String = r.try_get("status")?;
     Ok(AgentTask {
         id: r.try_get("id")?,
@@ -776,7 +919,7 @@ fn map_task(r: sqlx::postgres::PgRow) -> Result<AgentTask> {
         updated_at: r.try_get("updated_at")?,
     })
 }
-fn map_artifact(r: sqlx::postgres::PgRow) -> Result<AgentArtifact> {
+pub(crate) fn map_artifact(r: sqlx::postgres::PgRow) -> Result<AgentArtifact> {
     Ok(AgentArtifact {
         id: r.try_get("id")?,
         run_id: r.try_get("run_id")?,
@@ -793,7 +936,7 @@ fn map_artifact(r: sqlx::postgres::PgRow) -> Result<AgentArtifact> {
         created_at: r.try_get("created_at")?,
     })
 }
-fn map_checkpoint(r: sqlx::postgres::PgRow) -> Result<AgentCheckpoint> {
+pub(crate) fn map_checkpoint(r: sqlx::postgres::PgRow) -> Result<AgentCheckpoint> {
     Ok(AgentCheckpoint {
         id: r.try_get("id")?,
         run_id: r.try_get("run_id")?,
@@ -804,7 +947,7 @@ fn map_checkpoint(r: sqlx::postgres::PgRow) -> Result<AgentCheckpoint> {
         created_at: r.try_get("created_at")?,
     })
 }
-fn map_transition(r: sqlx::postgres::PgRow) -> Result<AgentRunTransition> {
+pub(crate) fn map_transition(r: sqlx::postgres::PgRow) -> Result<AgentRunTransition> {
     Ok(AgentRunTransition {
         id: r.try_get("id")?,
         run_id: r.try_get("run_id")?,

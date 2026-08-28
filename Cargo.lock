@@ -1432,6 +1432,7 @@ dependencies = [
 name = "buzz-workflow"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "buzz-core",
  "buzz-db",
  "buzz-deletion",

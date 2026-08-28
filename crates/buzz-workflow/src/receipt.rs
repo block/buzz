@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{durable, WorkflowEngine, WorkflowError};
+use crate::{WorkflowEngine, WorkflowError};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -131,9 +131,11 @@ pub async fn process_agent_receipt(
             validate_artifact_receipt(&task, &receipt)?;
             let digest = decode_sha256(&receipt.sha256)?;
             let event_id = event.event.id.to_hex();
-            store
-                .create_artifact(
+            if let Some((completed, artifact)) = store
+                .persist_artifact_and_complete(
                     community,
+                    task.id,
+                    task.version,
                     CreateAgentArtifact {
                         run_id: coordinates.run_id,
                         task_id: Some(coordinates.task_id),
@@ -148,9 +150,6 @@ pub async fn process_agent_receipt(
                         idempotency_key: &event_id,
                     },
                 )
-                .await?;
-            if let Some(completed) = store
-                .complete_task(community, task.id, task.version)
                 .await?
             {
                 store
@@ -167,24 +166,17 @@ pub async fn process_agent_receipt(
                             "task_id": completed.id,
                             "task_key": completed.task_key,
                             "task_version": completed.version,
+                            "artifact_id": artifact.id,
                             "artifact_event_id": event_id,
                         }),
                     )
                     .await?;
-                let progress = durable::advance_run(engine, community, coordinates.run_id).await?;
-                if progress.all_complete {
-                    engine
-                        .db
-                        .update_workflow_run(
-                            community,
-                            coordinates.run_id,
-                            buzz_db::workflow::RunStatus::Completed,
-                            progress.task_count as i32,
-                            &json!([]),
-                            None,
-                        )
-                        .await?;
-                }
+                crate::durable_settlement::advance_settle_and_project(
+                    engine,
+                    community,
+                    coordinates.run_id,
+                )
+                .await?;
             }
         }
         _ => {}
@@ -269,14 +261,14 @@ fn validate_artifact_receipt(
     task: &AgentTask,
     receipt: &ArtifactReceipt,
 ) -> Result<(), WorkflowError> {
-    if receipt.kind.trim().is_empty() || receipt.kind.len() > 128 {
+    if receipt.kind != task.task_key {
         return Err(WorkflowError::InvalidDefinition(
-            "artifact kind must contain 1 to 128 characters".into(),
+            "artifact kind must equal the durable task key".into(),
         ));
     }
-    if receipt.version <= 0 {
+    if receipt.version != 1 {
         return Err(WorkflowError::InvalidDefinition(
-            "artifact version must be positive".into(),
+            "one-output durable tasks require artifact version 1".into(),
         ));
     }
     if receipt.content_type != "application/json" {

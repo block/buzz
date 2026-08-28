@@ -102,4 +102,24 @@ pub trait AgentDispatch: Send + Sync {
         output_schema: Option<&serde_json::Value>,
         checkpoint: Option<&serde_json::Value>,
     ) -> Pin<Box<dyn Future<Output = Result<String, AgentDispatchError>> + Send + '_>>;
+
+    /// Publish one coordinator-signed, deterministic projection of an approved artifact.
+    #[allow(clippy::too_many_arguments)]
+    fn publish_artifact(
+        &self,
+        community_id: CommunityId,
+        channel_id: uuid::Uuid,
+        run_id: uuid::Uuid,
+        publish_task_id: uuid::Uuid,
+        created_at_secs: u64,
+        source_author: Option<&[u8]>,
+        content: &serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<String, AgentDispatchError>> + Send + '_>>;
+
+    /// Project a bounded, database-authoritative replaceable run snapshot.
+    fn publish_run_snapshot(
+        &self,
+        community_id: CommunityId,
+        run_id: uuid::Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<String, AgentDispatchError>> + Send + '_>>;
 }

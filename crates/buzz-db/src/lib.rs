@@ -27,6 +27,11 @@
 /// Explicit deployment-global admin report reads.
 pub mod admin_moderation;
 /// Durable multi-agent workflow run state.
+pub mod agent_approval;
+pub mod agent_artifact;
+pub mod agent_settlement;
+pub mod agent_snapshot;
+pub mod agent_task_recovery;
 pub mod agent_workflow;
 /// Writer-pool facade for durable agent workflow persistence.
 pub mod agent_workflow_store;

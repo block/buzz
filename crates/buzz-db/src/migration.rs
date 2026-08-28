@@ -649,7 +649,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 35);
+        assert_eq!(migrations.len(), 36);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1129,6 +1129,23 @@ mod tests {
                 .sql
                 .as_str()
                 .contains(&format!("CREATE TABLE {table}")));
+        }
+
+        assert_eq!(migrations[35].version, 36);
+        let durable_approvals = migrations[35].sql.as_str();
+        for fragment in [
+            "ADD COLUMN task_id",
+            "ADD CONSTRAINT fk_workflow_approval_task",
+            "CREATE UNIQUE INDEX idx_workflow_approvals_task",
+        ] {
+            assert!(durable_approvals.contains(fragment));
+        }
+        for fragment in [
+            "task_id             UUID",
+            "CONSTRAINT fk_workflow_approval_task",
+            "CREATE UNIQUE INDEX idx_workflow_approvals_task",
+        ] {
+            assert!(desired_schema.contains(fragment));
         }
 
         // pgschema intentionally reconciles DDL, not seed DML or table storage

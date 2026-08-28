@@ -33,6 +33,7 @@
 pub mod action_sink;
 pub mod document;
 pub mod durable;
+pub mod durable_settlement;
 pub mod error;
 pub mod executor;
 pub mod receipt;
@@ -255,10 +256,14 @@ impl WorkflowEngine {
                 let trace_json = serde_json::Value::Array(full_trace);
                 let step_count = result.step_index as i32;
 
-                if result.disposition == ExecutionDisposition::WaitingDurableTasks {
+                if matches!(
+                    result.disposition,
+                    ExecutionDisposition::WaitingDurableTasks
+                        | ExecutionDisposition::DurableSettled
+                ) {
                     tracing::debug!(
                         run_id = %run_id,
-                        "Durable workflow pass suspended pending task receipts"
+                        "Durable workflow lifecycle handled by durable scheduler"
                     );
                     return;
                 }
@@ -516,6 +521,29 @@ impl WorkflowEngine {
         interval_prefilter_should_fire(&self.last_fired, community_id, workflow_id, dur, last, now)
     }
 
+    /// Reconcile bounded active durable runs after restarts and transient failures.
+    async fn reconcile_durable_runs(&self) {
+        let store = self.db.agent_workflow_store();
+        let candidates = match store.list_reconcilable_runs(1_000).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::error!("Durable reconciliation scan failed: {error}");
+                return;
+            }
+        };
+        for candidate in candidates {
+            if let Err(error) = durable_settlement::advance_settle_and_project(
+                self,
+                candidate.community_id,
+                candidate.run_id,
+            )
+            .await
+            {
+                tracing::warn!(run_id = %candidate.run_id, "Durable reconciliation pass failed: {error}");
+            }
+        }
+    }
+
     /// Background loop for scheduled (cron/interval) triggers.
     ///
     /// Ticks every 60 seconds. For each active workflow with a `Schedule`
@@ -539,6 +567,7 @@ impl WorkflowEngine {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
             let now = Utc::now();
+            self.reconcile_durable_runs().await;
 
             let workflows = match self.db.list_all_enabled_workflows().await {
                 Ok(wf) => wf,

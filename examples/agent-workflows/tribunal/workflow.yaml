@@ -5,12 +5,13 @@ trigger:
 steps:
   - id: ingest
     action: ingest_document
-    source: '{{trigger.body.document_uri}}'
+    source: '{{trigger.document_input}}'
     output: document_manifest
   - id: defense_analysis
     action: run_agent
     agent: helena
     identity: 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+    timeout_secs: 2700
     prompt: Analyze the shared document manifest independently as defense counsel.
     depends_on: [ingest]
     output_schema: {
@@ -113,6 +114,7 @@ steps:
     action: run_agent
     agent: rui
     identity: c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5
+    timeout_secs: 2700
     prompt: Analyze the shared document manifest independently as contradictor.
     depends_on: [ingest]
     output_schema: {
@@ -207,6 +209,7 @@ steps:
     action: run_agent
     agent: helena
     identity: 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+    timeout_secs: 2700
     prompt: Respond only to the validated contradictor challenges.
     depends_on: [analysis_barrier]
     output_schema: {
@@ -269,6 +272,7 @@ steps:
     action: run_agent
     agent: rui
     identity: c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5
+    timeout_secs: 2700
     prompt: Respond only to the validated defense claims.
     depends_on: [analysis_barrier]
     output_schema: {
@@ -334,6 +338,7 @@ steps:
     action: run_agent
     agent: anselmo
     identity: f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9
+    timeout_secs: 2700
     prompt: Review the validated analyses and debate, then produce a reasoned decision.
     depends_on: [debate_barrier]
     output_schema: {
@@ -411,6 +416,10 @@ steps:
     }
   - id: verify_citations
     action: verify_artifact
+    agent: verifier
+    identity: e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13
+    timeout_secs: 2700
+    prompt: Independently verify every citation and material claim in the judicial_review artifact against the shared document manifest and official or open legal sources. Reject unsupported or mismatched claims.
     depends_on: [judicial_review]
     schema: {
       "$schema": "https://json-schema.org/draft/2020-12/schema",

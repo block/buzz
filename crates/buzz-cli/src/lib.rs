@@ -994,45 +994,6 @@ pub enum AgentRunsCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
-    /// Publish the latest durable run snapshot
-    Snapshot {
-        /// Channel UUID
-        #[arg(long)]
-        channel: String,
-        /// Workflow UUID
-        #[arg(long)]
-        workflow: String,
-        /// Run UUID
-        #[arg(long)]
-        run: String,
-        /// Participant pubkey; repeat for every independently addressed agent
-        #[arg(long = "participant")]
-        participant: Vec<String>,
-        /// JSON object, or - to read from stdin
-        #[arg(long)]
-        content: String,
-    },
-    /// Publish a task lifecycle receipt
-    Task {
-        /// Channel UUID
-        #[arg(long)]
-        channel: String,
-        /// Workflow UUID
-        #[arg(long)]
-        workflow: String,
-        /// Run UUID
-        #[arg(long)]
-        run: String,
-        /// Task UUID
-        #[arg(long)]
-        task: String,
-        /// Participant pubkey; repeat for every independently addressed agent
-        #[arg(long = "participant")]
-        participant: Vec<String>,
-        /// JSON object, or - to read from stdin
-        #[arg(long)]
-        content: String,
-    },
     /// Publish a resumable task checkpoint receipt
     Checkpoint {
         /// Channel UUID
@@ -1068,24 +1029,6 @@ pub enum AgentRunsCmd {
         /// Producing task UUID
         #[arg(long)]
         task: String,
-        /// Participant pubkey; repeat for every independently addressed agent
-        #[arg(long = "participant")]
-        participant: Vec<String>,
-        /// JSON object, or - to read from stdin
-        #[arg(long)]
-        content: String,
-    },
-    /// Publish a durable run transition receipt
-    Transition {
-        /// Channel UUID
-        #[arg(long)]
-        channel: String,
-        /// Workflow UUID
-        #[arg(long)]
-        workflow: String,
-        /// Run UUID
-        #[arg(long)]
-        run: String,
         /// Participant pubkey; repeat for every independently addressed agent
         #[arg(long = "participant")]
         participant: Vec<String>,
@@ -2298,39 +2241,11 @@ mod tests {
     }
 
     #[test]
-    fn agent_runs_snapshot_preserves_repeated_participants() {
-        let channel = "123e4567-e89b-12d3-a456-426614174000";
-        let workflow = "223e4567-e89b-12d3-a456-426614174000";
-        let run = "323e4567-e89b-12d3-a456-426614174000";
-        let helena = "a".repeat(64);
-        let rui = "b".repeat(64);
-        let anselmo = "c".repeat(64);
-        let parsed = Cli::try_parse_from([
-            "buzz",
-            "agent-runs",
-            "snapshot",
-            "--channel",
-            channel,
-            "--workflow",
-            workflow,
-            "--run",
-            run,
-            "--participant",
-            helena.as_str(),
-            "--participant",
-            rui.as_str(),
-            "--participant",
-            anselmo.as_str(),
-            "--content",
-            r#"{"phase":"analysis"}"#,
-        ]);
-        let cli = parsed.unwrap_or_else(|error| panic!("snapshot should parse: {error}"));
-        let Cmd::AgentRuns(AgentRunsCmd::Snapshot { participant, .. }) = cli.command else {
-            panic!("expected agent-runs snapshot command");
-        };
-        assert_eq!(participant, vec![helena, rui, anselmo]);
+    fn coordinator_only_agent_run_commands_are_not_exposed() {
+        for command in ["snapshot", "task", "transition"] {
+            assert!(Cli::try_parse_from(["buzz", "agent-runs", command]).is_err());
+        }
     }
-
     #[test]
     fn agent_run_task_receipts_require_task_coordinate() {
         let base = [

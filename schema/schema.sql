@@ -415,6 +415,8 @@ CREATE TABLE workflow_approvals (
     token           BYTEA NOT NULL,
     workflow_id     UUID NOT NULL,
     run_id          UUID NOT NULL,
+    task_id         UUID,
+    request_message TEXT,
     step_id         VARCHAR(64) NOT NULL,
     step_index      INT NOT NULL,
     approver_spec   TEXT NOT NULL,
@@ -499,6 +501,15 @@ CREATE TABLE workflow_run_tasks (
     CONSTRAINT chk_workflow_task_version CHECK (version >= 0),
     CONSTRAINT chk_workflow_task_dependencies CHECK (jsonb_typeof(depends_on) = 'array')
 );
+
+ALTER TABLE workflow_approvals
+    ADD CONSTRAINT fk_workflow_approval_task
+    FOREIGN KEY (community_id, run_id, task_id)
+    REFERENCES workflow_run_tasks (community_id, run_id, id)
+    ON DELETE CASCADE;
+CREATE UNIQUE INDEX idx_workflow_approvals_task
+    ON workflow_approvals (community_id, run_id, task_id)
+    WHERE task_id IS NOT NULL;
 
 CREATE TABLE workflow_run_artifacts (
     community_id        UUID NOT NULL REFERENCES communities(id),

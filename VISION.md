@@ -122,7 +122,7 @@ Relay communities can pool opted-in member hardware into shared AI compute. Exis
 
 Channel-scoped YAML-as-code automation with conditional logic — the feature Slack paywalled for 5 years. Message triggers, reaction triggers, scheduled runs, webhooks. Every step traced. Agents manage workflows through MCP tools.
 
-Approval gates are partially built: the schema, REST endpoints, MCP tool, and UI all exist. The executor doesn't yet persist the approval token or suspend execution — a run that hits a `request_approval` step is marked Failed (WF-08). The infrastructure is there; the wiring is next.
+Approval gates are persistent for durable DAG workflows: the scheduler creates a task-bound deterministic approval reference, suspends the run without renewing its deadline on reads or restarts, and resumes exactly once after the existing signed grant/deny flow. Legacy sequential execution rejects approval steps and routes valid definitions to the durable scheduler.
 
 ---
 

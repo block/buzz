@@ -482,7 +482,15 @@ pub fn resolve_step_templates(
             output_schema: output_schema.clone(),
         }),
         Barrier => Ok(Barrier),
-        VerifyArtifact { schema } => Ok(VerifyArtifact {
+        VerifyArtifact {
+            agent,
+            identity,
+            prompt,
+            schema,
+        } => Ok(VerifyArtifact {
+            agent: agent.clone(),
+            identity: identity.clone(),
+            prompt: t(prompt)?,
             schema: schema.clone(),
         }),
         PublishArtifact { artifact } => Ok(PublishArtifact {
@@ -732,26 +740,9 @@ pub async fn dispatch_action(
                     }
                 }
 
-                RequestApproval {
-                    from,
-                    message,
-                    timeout,
-                } => {
-                    let timeout_str = timeout.as_deref().unwrap_or("24h");
-                    info!(
-                        run_id = %run_id, step = step_id,
-                        "RequestApproval from={from} timeout={timeout_str}: {message}"
-                    );
-
-                    let token = generate_approval_token(run_id, step_id);
-
-                    // TODO (WF-08): create approval record in DB, emit kind:46010.
-                    // For now, return Suspended with the token so the caller can persist state.
-
-                    Ok(StepResult::Suspended {
-                        approval_token: token,
-                    })
-                }
+                RequestApproval { .. } => Err(WorkflowError::InvalidDefinition(
+                    "request_approval requires the durable workflow scheduler".into(),
+                )),
 
                 IngestDocument { .. }
                 | RunAgent { .. }
@@ -1052,6 +1043,8 @@ pub enum ExecutionDisposition {
     WaitingApproval,
     /// Durable tasks were materialized and the run is waiting for receipts.
     WaitingDurableTasks,
+    /// The durable scheduler already persisted a terminal lifecycle.
+    DurableSettled,
 }
 
 /// Rich return type from `execute_run` / `execute_from_step`.
@@ -1155,20 +1148,13 @@ pub async fn execute_from_step(
     initial_outputs: Option<HashMap<String, JsonValue>>,
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
     if def.requires_durable_scheduler() {
-        let progress = crate::durable::advance_run(engine, community_id, run_id)
-            .await
-            .map_err(|error| (error, crate::error::PartialProgress::default()))?;
-        if progress.terminal_failure {
-            return Err((
-                WorkflowError::NotImplemented(
-                    "one or more durable task actions have no scheduler adapter".into(),
-                ),
-                crate::error::PartialProgress::default(),
-            ));
-        }
+        let progress =
+            crate::durable_settlement::advance_settle_and_project(engine, community_id, run_id)
+                .await
+                .map_err(|error| (error, crate::error::PartialProgress::default()))?;
         return Ok(ExecutionResult {
-            disposition: if progress.all_complete {
-                ExecutionDisposition::Completed
+            disposition: if progress.all_complete || progress.terminal_failure {
+                ExecutionDisposition::DurableSettled
             } else {
                 ExecutionDisposition::WaitingDurableTasks
             },

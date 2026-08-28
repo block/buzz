@@ -178,6 +178,12 @@ pub enum ActionDef {
     Barrier,
     /// Verify an artifact against an independent evidence contract.
     VerifyArtifact {
+        /// Human-readable verifier roster label.
+        agent: String,
+        /// Explicit 32-byte Nostr public key encoded as lowercase hex.
+        identity: String,
+        /// Prompt instructing the independent verifier.
+        prompt: String,
         /// Self-contained JSON Schema for the verification ledger.
         schema: serde_json::Value,
     },
@@ -213,6 +219,7 @@ impl WorkflowDef {
                         | ActionDef::RunAgent { .. }
                         | ActionDef::Barrier
                         | ActionDef::VerifyArtifact { .. }
+                        | ActionDef::RequestApproval { .. }
                         | ActionDef::PublishArtifact { .. }
                 )
         })
@@ -270,7 +277,10 @@ impl WorkflowDef {
                     validate_agent_identity(&step.id, identity)?;
                     validate_inline_schema(&step.id, output_schema)?;
                 }
-                ActionDef::VerifyArtifact { schema } => {
+                ActionDef::VerifyArtifact {
+                    identity, schema, ..
+                } => {
+                    validate_agent_identity(&step.id, identity)?;
                     validate_inline_schema(&step.id, schema)?;
                 }
                 _ => {}
@@ -1137,6 +1147,21 @@ steps:
         assert!(matches!(trigger, TriggerDef::DiffPosted { filter: None }));
         let back = serde_yaml::to_string(&trigger).unwrap();
         assert!(back.contains("diff_posted"));
+    }
+
+    #[test]
+    fn approval_only_workflow_requires_durable_scheduler() {
+        let yaml = "name: Approval only
+trigger:
+  on: webhook
+steps:
+  - id: approve
+    action: request_approval
+    from: '@workflow-owner'
+    message: Review
+";
+        let (definition, _) = parse_yaml(yaml).expect("approval-only workflow should parse");
+        assert!(definition.requires_durable_scheduler());
     }
 
     #[test]

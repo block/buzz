@@ -25,5 +25,5 @@ agents:
 limits:
   task_timeout_seconds: 2700
   checkpoint_interval_seconds: 300
-  max_attempts: 2
+  max_attempts: 3
   require_human_approval: true
