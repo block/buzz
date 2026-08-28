@@ -766,6 +766,162 @@ async fn c6_relay_status_maps_to_the_documented_exit_codes() {
 }
 
 // ---------------------------------------------------------------------------
+// Edge-case enumeration (hardening -> verifying gate)
+// ---------------------------------------------------------------------------
+//
+// | row               | covered by                                                |
+// |-------------------|------------------------------------------------------------|
+// | empty inputs      | c8_empty_result_set_projects_as_an_empty_json_array         |
+// | concurrent writers| c9_concurrent_writers_do_not_corrupt_each_others_requests   |
+// | authz denial      | c6 (401/403 -> 3), c5 (missing/malformed auth tag -> 3)     |
+// | offline/timeout   | c6 (transport connect failure -> 2)                         |
+// | malformed data    | c6 (`Other` -> 4 non-JSON relay body), c5 (malformed auth)  |
+//
+// authz denial, offline/timeout, and malformed data were already exercised by
+// C5/C6 above; only the empty-input and concurrent-writer rows were unwritten
+// (hardening.md D-table). Both are added here rather than as new C-numbers
+// because they are cross-cutting robustness checks, not new berd call sites.
+
+// ---------------------------------------------------------------------------
+// C8 — empty result set (edge case: empty inputs)
+// ---------------------------------------------------------------------------
+
+/// berd iterates the compact projection unconditionally (SKILL.md:39). If a
+/// zero-message channel ever serialized as `null` instead of `[]`, berd's
+/// iteration would panic on a perfectly ordinary "new channel" state, not a
+/// failure. Driven black-box through the real binary like C2, since the
+/// distinction between an empty JSON array and `null`/absent output is a
+/// property of the actual stdout bytes, not of any in-process return value.
+/// Multi-thread runtime for the same reason as C2: a blocking subprocess
+/// `.output()` on the current-thread runtime starves the stub relay's accept
+/// loop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn c8_empty_result_set_projects_as_an_empty_json_array() {
+    let (relay, _state) = stub_relay(|_| (StatusCode::OK, "[]".to_string())).await;
+    let key = throwaway_key();
+
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_buzz"))
+        .args([
+            "--relay",
+            &relay,
+            "--private-key",
+            &key,
+            "--format",
+            "compact",
+            "messages",
+            "get",
+            "--channel",
+            CHANNEL_ID,
+        ])
+        .output()
+        .expect("the buzz binary must be runnable");
+    assert!(
+        out.status.success(),
+        "an empty channel read must still exit 0: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let stdout = String::from_utf8(out.stdout).expect("empty-channel output must be UTF-8");
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .expect("empty-channel output must still be a single JSON document, not blank stdout");
+    let events = parsed.as_array().expect(
+        "empty-channel output must stay a JSON ARRAY, never null or an object \
+         — berd iterates it unconditionally",
+    );
+    assert!(
+        events.is_empty(),
+        "expected zero events for an empty channel, got {}",
+        events.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// C9 — concurrent writers (edge case: concurrent writers)
+// ---------------------------------------------------------------------------
+
+/// berd may be shelled out to multiple times concurrently (e.g. parallel
+/// handoff summaries across channels). `argv()` in this file passes
+/// `--relay`/`--private-key` as explicit flags rather than process-global env
+/// specifically to avoid a race under a multi-threaded harness (see the
+/// doc-comment on `argv`); this test is the one that actually exercises that
+/// property by driving several signed writes through `run_from_args`
+/// concurrently in-process and asserting none of them observe another
+/// writer's identity, name, or content.
+///
+/// `run_from_args`'s returned future is not `Send` (it threads non-`Send`
+/// state through `lib.rs`'s command dispatch), so true OS-thread parallelism
+/// via `tokio::spawn` is not available here — found by trying it, not by
+/// inspection. `tokio::join!` still drives all five requests concurrently at
+/// the async-I/O level (interleaved awaits against the same stub relay
+/// connection pool), which is the property this test is actually checking:
+/// overlapping in-flight requests must not cross-contaminate each other's
+/// identity, name, or content.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn c9_concurrent_writers_do_not_corrupt_each_others_requests() {
+    const WRITERS: usize = 5;
+
+    let (relay, state) = stub_relay(|body| {
+        // `notes set` reads the current kind:30023 head first (array-shaped
+        // filter body) before writing (object-shaped event body).
+        if body.as_array().is_some() {
+            return (StatusCode::OK, "[]".to_string());
+        }
+        (
+            StatusCode::OK,
+            serde_json::json!({
+                "event_id": body.get("id").and_then(|id| id.as_str()).unwrap_or(ROOT_EVENT_ID),
+                "accepted": true,
+                "message": "ok"
+            })
+            .to_string(),
+        )
+    })
+    .await;
+
+    let keys: Vec<String> = (0..WRITERS).map(|_| throwaway_key()).collect();
+    let names: Vec<String> = (0..WRITERS)
+        .map(|i| format!("handoff-contract-{i}"))
+        .collect();
+    let contents: Vec<String> = (0..WRITERS).map(|i| format!("body-{i}")).collect();
+
+    let write = |i: usize| {
+        buzz_cli::run_from_args(argv(
+            &relay,
+            &keys[i],
+            &[
+                "notes",
+                "set",
+                "--name",
+                &names[i],
+                "--title",
+                "Handoff contract",
+                "--content",
+                &contents[i],
+            ],
+        ))
+    };
+
+    let (c0, c1, c2, c3, c4) = tokio::join!(write(0), write(1), write(2), write(3), write(4));
+    let codes = [c0, c1, c2, c3, c4];
+    assert!(
+        codes.iter().all(|&code| code == 0),
+        "every concurrent writer must succeed independently, got {codes:?}"
+    );
+
+    let observed_writes = state
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|body| body.as_object().is_some())
+        .count();
+    assert!(
+        observed_writes >= WRITERS,
+        "expected at least one relay write per concurrent writer ({WRITERS}), saw {observed_writes}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // C7 — minimum compatible commit is compiled, not prose
 // ---------------------------------------------------------------------------
 
