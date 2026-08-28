@@ -121,9 +121,9 @@ async fn authorize_workflow_read(
 /// `GET /workflows/{workflow_id}/revision` — current signed revision for an
 /// authorized channel reader or the managed agent's immutable human owner.
 ///
-/// This narrow endpoint does not grant channel visibility; it returns only the
-/// exact owner-signed definition event needed to construct a revision-bound
-/// manual trigger.
+/// This narrow endpoint does not grant channel visibility. It returns only the
+/// revision event ID needed to construct a revision-bound manual trigger; the
+/// signed definition remains subject to normal channel-read authorization.
 pub async fn workflow_revision(
     State(state): State<Arc<AppState>>,
     Path(workflow_id): Path<Uuid>,
@@ -148,9 +148,7 @@ pub async fn workflow_revision(
         .await
         .map_err(|error| internal_error(&format!("get workflow revision: {error}")))?
         .ok_or_else(|| api_error(StatusCode::CONFLICT, "workflow revision is unavailable"))?;
-    Ok(Json(serde_json::to_value(event.event).map_err(
-        |error| internal_error(&format!("serialize workflow revision: {error}")),
-    )?))
+    Ok(Json(serde_json::json!({ "id": event.event.id.to_hex() })))
 }
 
 /// `GET /workflows/{workflow_id}/runs` — one authorized, keyset-paginated page.
@@ -282,7 +280,73 @@ fn approval_json(approval: &buzz_db::workflow::ApprovalRecord) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use axum::{
+        body::{to_bytes, Body},
+        http::{header, Request, StatusCode},
+    };
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use sha2::Digest;
+    use tower::ServiceExt;
+
     use super::*;
+
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
+
+    async fn workflow_test_state(host: &str) -> Arc<AppState> {
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_string());
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let mut config = crate::config::Config::from_env().expect("config from env");
+        config.database_url = database_url.clone();
+        config.redis_url = redis_url.clone();
+        config.relay_url = format!("wss://{host}");
+        config.require_auth_token = false;
+        config.require_relay_membership = false;
+
+        let pool = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("connect workflow API test database");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        db.migrate()
+            .await
+            .expect("migrate workflow API test database");
+        db.ensure_configured_community(host)
+            .await
+            .expect("create workflow API test community");
+        let redis_pool = deadpool_redis::Config::from_url(&redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool config");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool);
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            Keys::generate(),
+            media_storage,
+        );
+        Arc::new(state)
+    }
 
     #[test]
     fn request_path_preserves_signed_query_verbatim() {
@@ -314,5 +378,139 @@ mod tests {
         let wire = approval_json(&approval);
         assert!(wire.get("token").is_none());
         assert_eq!(wire["approval_ref"], hex::encode([0xab; 32]));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn revoked_immutable_owner_receives_only_revision_id() {
+        use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
+
+        let host = format!("workflow-revision-{}.example", Uuid::new_v4().simple());
+        let state = workflow_test_state(&host).await;
+        let tenant = state
+            .db
+            .ensure_configured_community(&host)
+            .await
+            .expect("load workflow API test community");
+        let community = tenant.id;
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let owner_bytes = owner.public_key().to_bytes();
+        let agent_bytes = agent.public_key().to_bytes();
+        state
+            .db
+            .ensure_user(community, &owner_bytes)
+            .await
+            .expect("ensure immutable owner");
+        state
+            .db
+            .ensure_user(community, &agent_bytes)
+            .await
+            .expect("ensure managed agent");
+        assert!(state
+            .db
+            .set_agent_owner(community, &agent_bytes, &owner_bytes)
+            .await
+            .expect("set immutable owner"));
+        let channel = state
+            .db
+            .create_channel(
+                community,
+                "revision-secret-boundary",
+                ChannelType::Stream,
+                ChannelVisibility::Private,
+                None,
+                &agent_bytes,
+                None,
+            )
+            .await
+            .expect("create workflow channel");
+        state
+            .db
+            .add_member(
+                community,
+                channel.id,
+                &owner_bytes,
+                MemberRole::Member,
+                Some(&agent_bytes),
+            )
+            .await
+            .expect("add immutable owner to workflow channel");
+
+        let workflow_id = Uuid::new_v4();
+        let secret = format!("secret-{}", Uuid::new_v4().simple());
+        let yaml = format!(
+            "name: guarded\ntrigger:\n  on: webhook\nsteps:\n  - id: call\n    action: call_webhook\n    url: https://example.invalid\n    headers:\n      Authorization: Bearer {secret}\n    body: '{secret}'\n"
+        );
+        let revision = EventBuilder::new(Kind::Custom(30620), &yaml)
+            .tags(vec![
+                Tag::parse(["d", workflow_id.to_string().as_str()]).expect("d tag"),
+                Tag::parse(["h", channel.id.to_string().as_str()]).expect("h tag"),
+            ])
+            .sign_with_keys(&agent)
+            .expect("sign secret-bearing workflow revision");
+        let (_, definition_json) =
+            buzz_workflow::WorkflowEngine::parse_yaml(&yaml).expect("parse workflow YAML");
+        let definition_hash = sha2::Sha256::digest(definition_json.as_bytes());
+        let mut tx = state
+            .db
+            .begin_transaction()
+            .await
+            .expect("begin workflow seed");
+        buzz_db::event::insert_event_in_transaction(
+            &mut tx,
+            community,
+            &revision,
+            Some(channel.id),
+        )
+        .await
+        .expect("persist signed workflow revision");
+        state
+            .db
+            .upsert_workflow(
+                &mut tx,
+                community,
+                workflow_id,
+                Some(channel.id),
+                &agent_bytes,
+                "guarded",
+                &definition_json,
+                definition_hash.as_slice(),
+                revision.id.as_bytes(),
+            )
+            .await
+            .expect("materialize workflow revision");
+        tx.commit().await.expect("commit workflow seed");
+        state
+            .db
+            .remove_member(community, channel.id, &owner_bytes, &agent_bytes)
+            .await
+            .expect("revoke immutable owner's channel access");
+        let tenant_context = TenantContext::resolved(community, host.clone());
+        state.invalidate_membership(&tenant_context, channel.id, &owner_bytes);
+
+        let path = format!("/workflows/{workflow_id}/revision");
+        let response = crate::router::build_router(Arc::clone(&state))
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(&path)
+                    .header(header::HOST, &host)
+                    .header("x-pubkey", owner.public_key().to_hex())
+                    .body(Body::empty())
+                    .expect("workflow revision request"),
+            )
+            .await
+            .expect("workflow revision response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("read workflow revision response");
+        let body: Value = serde_json::from_slice(&bytes).expect("revision response JSON");
+        assert_eq!(body, serde_json::json!({ "id": revision.id.to_hex() }));
+        let serialized = String::from_utf8(bytes.to_vec()).expect("UTF-8 response");
+        assert!(!serialized.contains(&secret));
+        assert!(body.get("content").is_none());
+        assert!(body.get("tags").is_none());
     }
 }
