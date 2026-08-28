@@ -153,6 +153,19 @@ test("decodeMeetingTokenClaims treats a plain participant token as non-host", ()
   });
 });
 
+test("decodeMeetingTokenClaims decodes a payload whose length isn't a multiple of 4", () => {
+  // Hand-build a base64url payload that needs `=` padding restored before atob.
+  const b64 = Buffer.from(JSON.stringify({ owner: true })).toString("base64");
+  const b64url = b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  assert.notEqual(b64url.length % 4, 0, "fixture must be un-padded");
+  const jwt = `h.${b64url}.s`;
+  assert.deepEqual(decodeMeetingTokenClaims(jwt), {
+    owner: true,
+    moderator: true,
+    room: null,
+  });
+});
+
 test("decodeMeetingTokenClaims never throws on garbage", () => {
   for (const bad of ["", "not-a-jwt", "a.b", "a..c", "x.@@@.y"]) {
     assert.deepEqual(decodeMeetingTokenClaims(bad), {

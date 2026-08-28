@@ -17,6 +17,12 @@ type InvoicePanelProps = {
   /** True while a regenerate (fresh `subscribe`) call is in flight. */
   regenerating: boolean;
   onRegenerate: () => void;
+  /** The payment-status poll gave up after repeated failures. */
+  pollStalled?: boolean;
+  /** Manually re-check payment status (used when `pollStalled`). */
+  onRecheck?: () => void;
+  /** True while a manual re-check is in flight. */
+  rechecking?: boolean;
 };
 
 /** 1Hz clock, only while mounted — drives the countdown + local expiry flip. */
@@ -33,6 +39,9 @@ export function InvoicePanel({
   intent,
   regenerating,
   onRegenerate,
+  pollStalled = false,
+  onRecheck,
+  rechecking = false,
 }: InvoicePanelProps) {
   const now = useNow();
   const expired = isInvoiceExpired(intent, now);
@@ -108,9 +117,31 @@ export function InvoicePanel({
         </Button>
       </div>
 
-      <p className="text-xs text-muted-foreground">
-        Waiting for payment — this updates automatically once your wallet pays.
-      </p>
+      {pollStalled ? (
+        <div
+          className="space-y-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2"
+          data-testid="meeting-invoice-poll-stalled"
+        >
+          <p className="text-xs text-amber-900 dark:text-amber-100">
+            We lost track of this payment. If your wallet already paid, it may
+            still have gone through — re-check below, or reopen this dialog.
+          </p>
+          <Button
+            disabled={rechecking}
+            onClick={onRecheck}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            {rechecking ? "Checking…" : "Check payment status"}
+          </Button>
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          Waiting for payment — this updates automatically once your wallet
+          pays.
+        </p>
+      )}
     </div>
   );
 }

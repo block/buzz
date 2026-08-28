@@ -9,6 +9,7 @@ import {
   isInvoiceExpired,
   isTerminalPaymentOutcome,
   secondsUntilExpiry,
+  shouldStopPollingPayment,
   stepFromPaymentStatus,
   stepFromSubscribeError,
   subscriptionBadgeModel,
@@ -45,6 +46,43 @@ test("isTerminalPaymentOutcome: only pending keeps polling", () => {
   assert.equal(isTerminalPaymentOutcome("settled"), true);
   assert.equal(isTerminalPaymentOutcome("expired"), true);
   assert.equal(isTerminalPaymentOutcome("failed"), true);
+});
+
+test("shouldStopPollingPayment: stops on a terminal status or a passed expiry", () => {
+  // terminal status -> stop regardless of expiry
+  assert.equal(
+    shouldStopPollingPayment({ intent_id: "i", status: "settled" }, T0),
+    true,
+  );
+  // pending + no expiry -> keep polling
+  assert.equal(
+    shouldStopPollingPayment({ intent_id: "i", status: "pending" }, T0),
+    false,
+  );
+  // unrecognized status but expiry in the future -> keep polling
+  assert.equal(
+    shouldStopPollingPayment(
+      {
+        intent_id: "i",
+        status: "weird_provider_state",
+        expires_at: new Date(T0 + 60_000).toISOString(),
+      },
+      T0,
+    ),
+    false,
+  );
+  // unrecognized status + expiry in the past -> stop
+  assert.equal(
+    shouldStopPollingPayment(
+      {
+        intent_id: "i",
+        status: "weird_provider_state",
+        expires_at: new Date(T0 - 60_000).toISOString(),
+      },
+      T0,
+    ),
+    true,
+  );
 });
 
 test("buildLightningUri uppercases the invoice and prefixes the scheme", () => {

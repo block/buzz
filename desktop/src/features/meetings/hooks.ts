@@ -13,10 +13,7 @@ import {
   registerRoom,
   subscribe,
 } from "@/features/meetings/relay";
-import {
-  classifyPaymentStatus,
-  isTerminalPaymentOutcome,
-} from "@/features/meetings/ui/subscribeState";
+import { shouldStopPollingPayment } from "@/features/meetings/ui/subscribeState";
 import { useMeetingsCapability } from "@/features/meetings/useMeetingsCapability";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -46,9 +43,13 @@ export const meetingsQueryKeys = {
 /** Poll cadence for a pending payment intent (plan §5.1: ~3s). */
 export const PAYMENT_STATUS_POLL_INTERVAL_MS = 3_000;
 
-/** Stop polling `payment/status` after this many consecutive fetch failures so a
- * dead endpoint doesn't loop forever (`retry: false`). */
+/** Stop polling `payment/status` after this many consecutive *server/network*
+ * failures so a dead endpoint doesn't loop forever (`retry: false`). A 429 does
+ * not count toward this — it's an expected backpressure signal, not a dead
+ * endpoint. */
 export const PAYMENT_STATUS_MAX_POLL_FAILURES = 5;
+/** Fallback backoff for a `payment/status` 429 with no parseable `retry in Ns`. */
+export const PAYMENT_STATUS_RATE_LIMIT_BACKOFF_MS = 10_000;
 /** Plans rarely change within a session. */
 export const MEETING_PLANS_STALE_TIME_MS = 5 * 60 * 1_000;
 
@@ -256,22 +257,33 @@ export function usePaymentStatusQuery(
     },
     queryKey: meetingsQueryKeys.payment(relayUrl, intentId ?? ""),
     refetchInterval: (query) => {
-      // Give up on an endpoint that keeps failing — `retry: false` means a
-      // persistent 5xx would otherwise loop every 3s forever with no backoff.
-      // A handful of retries still rides out a transient blip mid-invoice.
-      if (
-        query.state.status === "error" &&
-        query.state.fetchFailureCount >= PAYMENT_STATUS_MAX_POLL_FAILURES
-      ) {
-        return false;
+      if (query.state.status === "error") {
+        const error = query.state.error;
+        // A 429 is expected backpressure mid-invoice — never give up on it,
+        // just slow down. Honor the relay's `retry in Ns` when it sends one.
+        if (error instanceof MeetingError && error.status === 429) {
+          const secs = error.retryAfterSecs;
+          return secs && secs > 0
+            ? secs * 1_000
+            : PAYMENT_STATUS_RATE_LIMIT_BACKOFF_MS;
+        }
+        // Give up on an endpoint that keeps failing with a real error —
+        // `retry: false` means a persistent 5xx would otherwise loop every 3s
+        // forever. `SubscribeView` surfaces the stalled state to the user.
+        if (query.state.fetchFailureCount >= PAYMENT_STATUS_MAX_POLL_FAILURES) {
+          return false;
+        }
+        return PAYMENT_STATUS_POLL_INTERVAL_MS;
       }
-      const status = query.state.data?.status;
-      if (status === undefined) return PAYMENT_STATUS_POLL_INTERVAL_MS;
-      return isTerminalPaymentOutcome(classifyPaymentStatus(status))
+      const payment = query.state.data;
+      if (!payment) return PAYMENT_STATUS_POLL_INTERVAL_MS;
+      return shouldStopPollingPayment(payment, Date.now())
         ? false
         : PAYMENT_STATUS_POLL_INTERVAL_MS;
     },
-    refetchOnWindowFocus: false,
+    // Error state stops the interval; a window-focus return retries once so a
+    // user who paid while the poll was dead isn't stranded forever.
+    refetchOnWindowFocus: true,
     retry: false,
     staleTime: 0,
   });

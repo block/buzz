@@ -272,6 +272,18 @@ export function classifyMeetingError(
 // --- LiveKit token claim decode (UI gating only) ---
 
 /**
+ * Decode a base64url string, restoring the `=` padding `atob` requires. A raw
+ * JWT payload segment is usually not a multiple of 4 characters, and `atob`
+ * throws on those — without this pad the owner/moderator claims silently read
+ * as `false` and hide host controls from the legitimate owner.
+ */
+function base64UrlDecode(input: string): string {
+  const normalized = input.replace(/-/g, "+").replace(/_/g, "/");
+  const padLength = (4 - (normalized.length % 4)) % 4;
+  return atob(normalized.padEnd(normalized.length + padLength, "="));
+}
+
+/**
  * Decode the `owner` / `moderator` / `room` claims from a LiveKit JWT.
  *
  * **UI gating only.** Never trust this for authorization — the relay and
@@ -286,9 +298,7 @@ export function decodeMeetingTokenClaims(jwt: string): {
   try {
     const [, payload] = jwt.split(".");
     if (!payload) return fallback;
-    const json = JSON.parse(
-      atob(payload.replace(/-/g, "+").replace(/_/g, "/")),
-    ) as {
+    const json = JSON.parse(base64UrlDecode(payload)) as {
       video?: { room?: string; roomAdmin?: boolean };
       metadata?: string;
       owner?: boolean;

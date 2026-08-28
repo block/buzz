@@ -24,7 +24,6 @@ import {
   type CallBannerModel,
   type CallConnectionPhase,
   type CallDisconnectReason,
-  CALL_SESSION_SOFT_WARN_MS,
   connectionBannerModel,
   disconnectBannerModel,
   formatCallElapsed,
@@ -165,6 +164,10 @@ function CallRoom({
 }: CallRoomProps) {
   const [disconnect, setDisconnect] =
     React.useState<CallDisconnectReason | null>(null);
+  // Bumped on Rejoin. Keys `<LiveKitRoom>` so a rejoin tears down and rebuilds
+  // the Room — refetching a still-valid token alone never actually reconnects,
+  // and a fresh mount also resets the elapsed clock / session-cap warning.
+  const [rejoinNonce, setRejoinNonce] = React.useState(0);
   const claims = React.useMemo(() => decodeMeetingTokenClaims(token), [token]);
   const canHost = claims.owner || claims.moderator;
   const moderate = useModerateRoomMutation(token);
@@ -176,6 +179,7 @@ function CallRoom({
   return (
     <CallShell>
       <LiveKitRoom
+        key={rejoinNonce}
         audio
         className="h-full w-full"
         connect
@@ -193,6 +197,7 @@ function CallRoom({
           isModeratePending={moderate.isPending}
           onRejoin={() => {
             setDisconnect(null);
+            setRejoinNonce((n) => n + 1);
             onReconnectToken();
           }}
           room={room}
@@ -240,10 +245,11 @@ function CallStage(props: CallStageProps) {
     return () => window.clearInterval(id);
   }, [phase]);
 
-  const terminalReason: CallDisconnectReason | null =
-    disconnect === "server" && elapsedMs >= CALL_SESSION_SOFT_WARN_MS
-      ? "session-ended"
-      : disconnect;
+  // A server-side disconnect is reported as-is ("The room closed"). We can't
+  // tell a time-cap cut from a host ending the room — the LiveKit reason is the
+  // same — so we no longer guess "reached its time limit" from elapsed time.
+  // The soft session-cap banner still warns about the 4h ceiling while live.
+  const terminalReason: CallDisconnectReason | null = disconnect;
 
   const terminalBanner: CallBannerModel = terminalReason
     ? disconnectBannerModel(terminalReason)

@@ -65,6 +65,26 @@ export function isTerminalPaymentOutcome(outcome: PaymentOutcome): boolean {
 }
 
 /**
+ * True once the payment poll should stop: either the status folded to a
+ * terminal outcome, or the intent's own `expires_at` has passed. The expiry
+ * check keeps an unrecognized-but-stuck status (`classifyPaymentStatus` → an
+ * eternal `"pending"`) from polling forever after the invoice is dead.
+ */
+export function shouldStopPollingPayment(
+  payment: PaymentStatus,
+  now: number,
+): boolean {
+  if (isTerminalPaymentOutcome(classifyPaymentStatus(payment.status))) {
+    return true;
+  }
+  return (
+    typeof payment.expires_at === "string" &&
+    payment.expires_at.length > 0 &&
+    secondsUntilExpiry(payment.expires_at, now) <= 0
+  );
+}
+
+/**
  * Wallet deep-link for a BOLT11 invoice. Uppercased — the QR alphanumeric mode
  * only covers uppercase, so an uppercased invoice encodes ~45% denser and every
  * spec-compliant wallet lowercases on decode. The copy button always uses the

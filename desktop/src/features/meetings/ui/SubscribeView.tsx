@@ -5,6 +5,7 @@ import * as React from "react";
 import { MeetingError } from "@/features/meetings/api";
 import type { SubscribeIntent } from "@/features/meetings/api";
 import {
+  PAYMENT_STATUS_MAX_POLL_FAILURES,
   usePlansQuery,
   useSubscribeMutation,
   usePaymentStatusQuery,
@@ -52,6 +53,17 @@ export function SubscribeView({
     step.kind === "invoice",
   );
 
+  // The poll gave up (persistent non-429 failure). A user who paid in that
+  // window would otherwise sit on "updates automatically" forever — surface it
+  // and offer a manual re-check (a window-focus return also retries).
+  const pollStalled =
+    paymentStatusQuery.isError &&
+    !(
+      paymentStatusQuery.error instanceof MeetingError &&
+      paymentStatusQuery.error.status === 429
+    ) &&
+    paymentStatusQuery.failureCount >= PAYMENT_STATUS_MAX_POLL_FAILURES;
+
   const onSettledRef = React.useRef(onSettled);
   onSettledRef.current = onSettled;
 
@@ -64,7 +76,17 @@ export function SubscribeView({
     if (!next) return;
     setStep(next);
     if (next.kind === "settled") {
-      void queryClient.invalidateQueries({ queryKey: ["meetings"] });
+      // Refresh subscription/room state, but never the active LiveKit token
+      // query — reminting the JWT mid-call bounces a host who is already in a
+      // room (same class as the moderation-invalidation fix).
+      void queryClient.invalidateQueries({
+        predicate: (query) => {
+          const key = query.queryKey;
+          return (
+            Array.isArray(key) && key[0] === "meetings" && key[2] !== "token"
+          );
+        },
+      });
       onSettledRef.current();
     }
   }, [paymentStatusQuery.data, step, selectedPlan, queryClient]);
@@ -105,6 +127,9 @@ export function SubscribeView({
           intent={step.intent}
           onRegenerate={() => startSubscribe(selectedPlan ?? step.intent.plan)}
           regenerating={subscribeMutation.isPending}
+          pollStalled={pollStalled}
+          onRecheck={() => void paymentStatusQuery.refetch()}
+          rechecking={paymentStatusQuery.isFetching}
         />
         <Button
           onClick={() => setStep({ kind: "plans" })}

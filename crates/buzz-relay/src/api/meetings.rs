@@ -102,14 +102,33 @@ struct Proxied {
 
 /// Fields common to moderation responses (most send no body).
 const MOD_FIELDS: &[&str] = &["ok", "status", "room_name", "mute_on_join", "message"];
-/// register-room / room-edit share this response shape.
+/// BOLT11 invoice fields HiveTalk returns on a `409 pending_invoice` — the
+/// client resumes an in-flight subscription from these. `register-room` and
+/// `get-token` can both 409, so their allowlists must carry them through
+/// (`/subscribe` already lists them as its success shape).
+const INVOICE_FIELDS: &[&str] = &[
+    "amount_sats",
+    "bolt11",
+    "expires_at",
+    "intent_id",
+    "payment_hash",
+    "plan",
+];
+/// register-room / room-edit share this response shape (plus [`INVOICE_FIELDS`]
+/// on a 409).
 const ROOM_FIELDS: &[&str] = &[
+    "amount_sats",
+    "bolt11",
     "broadcast_pending",
     "created_via",
+    "expires_at",
     "identifier",
+    "intent_id",
     "lobby_enabled",
     "locked",
     "mute_on_join",
+    "payment_hash",
+    "plan",
     "pubkey",
     "room_description",
     "room_id",
@@ -117,6 +136,17 @@ const ROOM_FIELDS: &[&str] = &[
     "room_picture_url",
     "status",
     "updated_at",
+];
+/// `get-token` success shape (`token`/`url`) plus [`INVOICE_FIELDS`] for a 409.
+const GET_TOKEN_FIELDS: &[&str] = &[
+    "amount_sats",
+    "bolt11",
+    "expires_at",
+    "intent_id",
+    "payment_hash",
+    "plan",
+    "token",
+    "url",
 ];
 
 const ROUTE_CHALLENGE: Proxied = Proxied {
@@ -257,7 +287,7 @@ const ROUTE_GET_TOKEN: Proxied = Proxied {
     auth: HivetalkAuth::InBody,
     metered: true,
     required_query: &[],
-    filter: Filter::Object(&["token", "url"]),
+    filter: Filter::Object(GET_TOKEN_FIELDS),
 };
 
 const fn moderation(local: &'static str, upstream: &'static str) -> Proxied {
@@ -863,6 +893,43 @@ mod tests {
                 "subscribe_url": "https://stage5.exe.xyz/dashboard/subscribe",
             })
         );
+    }
+
+    #[test]
+    fn room_and_get_token_allowlists_carry_pending_invoice_fields() {
+        // A `409 pending_invoice` can come back from register-room and get-token,
+        // not just /subscribe; the client resumes the invoice from these fields.
+        for field in INVOICE_FIELDS {
+            assert!(
+                ROOM_FIELDS.contains(field),
+                "ROOM_FIELDS missing invoice field `{field}`"
+            );
+            assert!(
+                GET_TOKEN_FIELDS.contains(field),
+                "GET_TOKEN_FIELDS missing invoice field `{field}`"
+            );
+        }
+    }
+
+    #[test]
+    fn get_token_409_pending_invoice_passes_the_invoice_through() {
+        let filtered = filter_body(
+            ROUTE_GET_TOKEN.filter,
+            serde_json::json!({
+                "reason": "pending_invoice",
+                "intent_id": "int_1",
+                "bolt11": "lnbc1...",
+                "amount_sats": 21_000,
+                "payment_hash": "hash",
+                "expires_at": "2026-01-01T00:00:00Z",
+                "plan": "bulk10_1y",
+                "internal_trace": "leak-me",
+            }),
+        );
+        assert_eq!(filtered["bolt11"], "lnbc1...");
+        assert_eq!(filtered["intent_id"], "int_1");
+        assert_eq!(filtered["reason"], "pending_invoice");
+        assert!(!filtered.to_string().contains("internal_trace"));
     }
 
     #[test]

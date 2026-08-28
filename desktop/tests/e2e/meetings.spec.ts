@@ -49,6 +49,9 @@ type MeetingsStubState = {
   registerAttempts: number;
   /** payment/status polls seen so far. First poll pending, later ones settled. */
   paymentPolls: number;
+  /** get-token requests seen so far — proves the call view actually reached the
+   * token fetch rather than just rendering its loading shell. */
+  getTokenAttempts: number;
 };
 
 /**
@@ -64,6 +67,7 @@ async function stubMeetings(
     rooms: overrides.rooms ?? [],
     registerAttempts: 0,
     paymentPolls: 0,
+    getTokenAttempts: 0,
   };
 
   const json = (route: Route, body: unknown, status = 200) =>
@@ -161,6 +165,7 @@ async function stubMeetings(
       }
 
       case "/get-token":
+        state.getTokenAttempts += 1;
         return json(route, {
           token: "e2e.header.signature",
           url: "wss://livekit.invalid",
@@ -268,4 +273,15 @@ test("register -> 402 -> subscribe -> settle -> auto-retry lands in the call vie
   });
   await page.waitForURL(/#\/meetings\?.*action=join/);
   expect(state.registerAttempts).toBeGreaterThanOrEqual(2);
+
+  // The room name reached the flow normalized ("e2e standup" -> "e2e-standup"),
+  // not verbatim.
+  expect(page.url()).toContain("room=e2e-standup");
+
+  // Proves the call view actually reached the token fetch — the bare
+  // `meeting-call-view` testid also renders in the loading/error shells, so on
+  // its own it would pass even with a broken token path.
+  await expect
+    .poll(() => state.getTokenAttempts, { timeout: 20_000 })
+    .toBeGreaterThanOrEqual(1);
 });
