@@ -2,7 +2,9 @@
 
 use buzz_core::CommunityId;
 use buzz_db::agent_approval::EnsureAgentApproval;
-use buzz_db::agent_workflow::{AgentTaskStatus, CreateAgentArtifact, CreateAgentTask, EnsureAgentRunState};
+use buzz_db::agent_workflow::{
+    AgentTaskStatus, CreateAgentArtifact, CreateAgentTask, EnsureAgentRunState,
+};
 use buzz_db::workflow::{ApprovalStatus, RunStatus};
 use buzz_db::{CreateCommunityWithOwnerResult, Db, DbConfig};
 use chrono::{Duration, Utc};
@@ -155,7 +157,10 @@ async fn durable_tribunal_transactions_survive_replay_races_and_tenant_boundarie
         store.claim_task(community_a, prerequisite.id, prerequisite.version, &agent),
         store.claim_task(community_a, prerequisite.id, prerequisite.version, &agent)
     );
-    let claims = [first_claim.expect("first claim"), second_claim.expect("second claim")];
+    let claims = [
+        first_claim.expect("first claim"),
+        second_claim.expect("second claim"),
+    ];
     assert_eq!(claims.iter().filter(|claim| claim.is_some()).count(), 1);
     let claimed = claims.into_iter().flatten().next().expect("one claim wins");
     assert!(store
@@ -209,7 +214,12 @@ async fn durable_tribunal_transactions_survive_replay_races_and_tenant_boundarie
         .expect("active task completes");
     assert_eq!(completed.0.status, AgentTaskStatus::Completed);
     assert!(store
-        .persist_artifact_and_complete(community_a, prerequisite.id, completed.0.version, artifact())
+        .persist_artifact_and_complete(
+            community_a,
+            prerequisite.id,
+            completed.0.version,
+            artifact()
+        )
         .await
         .expect("exact artifact replay")
         .is_none());
@@ -217,15 +227,17 @@ async fn durable_tribunal_transactions_survive_replay_races_and_tenant_boundarie
         sha256: &[0x55_u8; 32],
         ..artifact()
     };
-    assert!(store
-        .persist_artifact_and_complete(
-            community_a,
-            prerequisite.id,
-            completed.0.version,
-            divergent,
-        )
-        .await
-        .is_err());
+    assert!(
+        store
+            .persist_artifact_and_complete(
+                community_a,
+                prerequisite.id,
+                completed.0.version,
+                divergent,
+            )
+            .await
+            .is_err()
+    );
 
     let dependent_claim = store
         .claim_task(community_a, dependent.id, dependent.version, &agent)
@@ -261,7 +273,10 @@ async fn durable_tribunal_transactions_survive_replay_races_and_tenant_boundarie
         .expect("recover final timeout")
         .expect("final timeout fails task");
     assert_eq!(exhausted.status, AgentTaskStatus::Failed);
-    assert_eq!(exhausted.error_code.as_deref(), Some("agent_timeout_exhausted"));
+    assert_eq!(
+        exhausted.error_code.as_deref(),
+        Some("agent_timeout_exhausted")
+    );
 
     let approval_task = task(
         &db,

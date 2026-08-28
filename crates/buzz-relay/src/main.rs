@@ -698,6 +698,7 @@ async fn main() -> anyhow::Result<()> {
                         &reaper_state,
                         channel_id,
                         serde_json::json!({ "type": "channel_auto_archived" }),
+                        chrono::Utc::now(),
                     )
                     .await
                     {
@@ -739,6 +740,30 @@ async fn main() -> anyhow::Result<()> {
             &state,
         )));
         info!("NIP-PL push matcher and delivery worker started");
+    }
+
+    // Admin outbox delivery worker — drives `relay_admin_outbox` rows.
+    // Uses DB-level leases (held_by / lease_expires_at) so multiple pods can
+    // run the worker concurrently without double-delivery.
+    {
+        let outbox_state = Arc::clone(&state);
+        tokio::spawn(
+            async move { buzz_relay::handlers::admin_outbox_worker::run(outbox_state).await },
+        );
+        info!("Admin outbox delivery worker started");
+    }
+
+    // Action recovery worker: re-drives stranded relay_admin_actions rows whose
+    // action lease expired before the enforcement state machine completed.
+    // Crash safety: a process that died between claim and finalization leaves
+    // an action in pending/enforcing; this worker resumes from the persisted
+    // step_marker state without re-running the mutation.
+    {
+        let action_state = Arc::clone(&state);
+        tokio::spawn(
+            async move { buzz_relay::handlers::admin_action_worker::run(action_state).await },
+        );
+        info!("Admin action recovery worker started");
     }
 
     // NIP-ER reminder scheduler — polls for due reminders and publishes them
