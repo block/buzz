@@ -1,5 +1,5 @@
 //! Real-storage regressions for workflow wake lifecycle boundaries.
-use super::integration_tests::test_state;
+use super::integration_tests::test_state_with_redis;
 use super::*;
 use axum::{
     extract::{Path, State},
@@ -23,7 +23,10 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
-        let state = test_state().await;
+        let state = test_state_with_redis(
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".into()),
+        )
+        .await;
         let owner = Keys::generate();
         let agent = Keys::generate();
         let host = format!("wake-{}.example", Uuid::new_v4().simple());
@@ -161,7 +164,7 @@ impl Fixture {
 }
 
 #[tokio::test]
-#[ignore = "requires Postgres"]
+#[ignore = "requires Postgres and Redis"]
 async fn captured_revision_survives_replacement_but_not_revocation() {
     let f = Fixture::new().await;
     let a = f.revision(Timestamp::now().as_secs()).await;
@@ -211,7 +214,7 @@ async fn captured_revision_survives_replacement_but_not_revocation() {
 }
 
 #[tokio::test]
-#[ignore = "requires Postgres"]
+#[ignore = "requires Postgres and Redis"]
 async fn removed_open_channel_member_cannot_read_or_count_wakes() {
     let f = Fixture::new().await;
     let a = f.revision(Timestamp::now().as_secs()).await;
@@ -281,7 +284,7 @@ async fn removed_open_channel_member_cannot_read_or_count_wakes() {
 }
 
 #[tokio::test]
-#[ignore = "requires Postgres"]
+#[ignore = "requires Postgres and Redis"]
 async fn notification_failure_rolls_back_message_mentions_and_thread_metadata() {
     let f = Fixture::new().await;
     let message = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "@Worker work")
