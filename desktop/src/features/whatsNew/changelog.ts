@@ -206,6 +206,13 @@ export const WHATS_NEW_CHANGELOG: ChangelogEntry[] = [
       "Caught up to upstream Buzz 0.5.20: faster channel switching, image navigation across message threads, and a range of composer and stability fixes",
     ],
   },
+  {
+    version: "0.5.20-2",
+    date: "2026-08-26",
+    bullets: [
+      "When the media server is temporarily unavailable, files now upload to your Google Drive automatically instead of failing (connect Google Drive under Settings → Voice)",
+    ],
+  },
 ];
 
 /**

@@ -37,6 +37,7 @@ import {
 import { useUnreadChannels } from "@/features/channels/useUnreadChannels";
 import { useMembershipNotifications } from "@/features/channels/useMembershipNotifications";
 import { useFeedItemState } from "@/features/home/useFeedItemState";
+import { subscribeConnectGoogleDrive } from "@/features/messages/lib/openDriveSettingsEvent";
 import { useThreadFollows } from "@/features/messages/lib/useThreadFollows";
 import {
   useHomeFeedNotifications,
@@ -322,6 +323,14 @@ export function AppShell() {
     selectedView,
     sidebarChannels,
   ]);
+
+  // The media-upload fallback toast (relay media store 5xx, no Drive connected)
+  // dispatches this so its "Connect Drive" action can open the right settings.
+  React.useEffect(
+    () => subscribeConnectGoogleDrive(() => void goSettings("voice")),
+    [goSettings],
+  );
+
   const [terminalContextOverride, setTerminalContextOverride] =
     React.useState<TerminalContextOverride | null>(null);
   const { activeChannel, terminalContext } = useTerminalContext({

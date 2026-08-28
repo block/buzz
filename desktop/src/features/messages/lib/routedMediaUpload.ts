@@ -1,11 +1,17 @@
+import { toast } from "sonner";
+
 import { uploadMediaFile as uploadToRelay } from "@/shared/api/tauriMedia";
 import {
   getGoogleDriveStatus,
   uploadFileToDrive,
 } from "@/shared/api/tauriDrive";
 
-import { uploadRouteFor } from "./driveUploadRouting.mjs";
+import {
+  isRelayUnavailableError,
+  uploadRouteFor,
+} from "./driveUploadRouting.mjs";
 import type { ImetaMedia } from "./imetaMediaMarkdown";
+import { requestConnectGoogleDrive } from "./openDriveSettingsEvent";
 import { isVideoFile } from "./videoFileType";
 
 /**
@@ -52,35 +58,17 @@ function driveRoutingEnabled(): boolean {
   return !e2e || e2e.mock?.driveUploads === true;
 }
 
-export async function uploadMediaFile(
+/**
+ * Upload one file to the sender's Google Drive and shape the result as an
+ * `external` {@link ImetaMedia} (a labelled link, never an inline blob). Shared
+ * by the up-front Drive route and the relay-unavailable fallback below.
+ */
+async function uploadViaDrive(
   file: File,
   progressId?: string,
   signal?: AbortSignal,
   onDispatch?: () => void,
 ): Promise<ImetaMedia> {
-  if (!driveRoutingEnabled()) {
-    return uploadToRelay(file, progressId, signal, onDispatch);
-  }
-
-  const route = uploadRouteFor({
-    isVideo: isVideoFile(file),
-    name: file.name,
-    sizeBytes: file.size,
-    type: file.type,
-  });
-  if (route === "relay") {
-    return uploadToRelay(file, progressId, signal, onDispatch);
-  }
-
-  // Refuse rather than silently falling back to the relay. Falling back would
-  // reintroduce exactly the failure this routes around, and for video it would
-  // fail anyway — the transcode needs ffmpeg on this machine.
-  if (!(await getGoogleDriveStatus())) {
-    throw new Error(
-      "Video, audio, programs, and files over 5 MB are shared through your Google Drive. Connect your Google account under Settings → Voice to send this.",
-    );
-  }
-
   if (signal?.aborted) throw new Error("upload cancelled");
   onDispatch?.();
   const uploaded = await uploadFileToDrive(file, progressId);
@@ -98,4 +86,67 @@ export async function uploadMediaFile(
     uploaded: 0,
     url: uploaded.webViewLink,
   };
+}
+
+export async function uploadMediaFile(
+  file: File,
+  progressId?: string,
+  signal?: AbortSignal,
+  onDispatch?: () => void,
+): Promise<ImetaMedia> {
+  if (!driveRoutingEnabled()) {
+    return uploadToRelay(file, progressId, signal, onDispatch);
+  }
+
+  const route = uploadRouteFor({
+    isVideo: isVideoFile(file),
+    name: file.name,
+    sizeBytes: file.size,
+    type: file.type,
+  });
+
+  if (route === "drive") {
+    // Refuse rather than silently falling back to the relay. Falling back would
+    // reintroduce exactly the failure this routes around, and for video it would
+    // fail anyway — the transcode needs ffmpeg on this machine.
+    if (!(await getGoogleDriveStatus())) {
+      throw new Error(
+        "Video, audio, programs, and files over 5 MB are shared through your Google Drive. Connect your Google account under Settings → Voice to send this.",
+      );
+    }
+    return uploadViaDrive(file, progressId, signal, onDispatch);
+  }
+
+  // route === "relay". If the relay's media store is *unavailable* (5xx — e.g.
+  // a 503 during a BuilderLab media-server blip) and the sender has Drive
+  // connected, divert this one file to Drive rather than failing — the same
+  // escape hatch large files already take. Anything else (4xx, cancellation,
+  // or no Drive connected) surfaces as before.
+  try {
+    return await uploadToRelay(file, progressId, signal, onDispatch);
+  } catch (error) {
+    if (!isRelayUnavailableError(error)) throw error;
+
+    if (await getGoogleDriveStatus()) {
+      toast.info(
+        "Buzz's media server was unavailable — uploaded to your Google Drive as a link instead.",
+      );
+      // The relay attempt already ran `onDispatch`; don't double-dispatch.
+      return uploadViaDrive(file, progressId, signal);
+    }
+
+    toast.error("Media server temporarily unavailable.", {
+      description:
+        "Retry in a moment, or connect Google Drive to upload during outages.",
+      action: {
+        label: "Connect Drive",
+        onClick: () => {
+          requestConnectGoogleDrive();
+        },
+      },
+    });
+    throw new Error(
+      "Media server temporarily unavailable. Retry, or connect Google Drive under Settings → Voice to upload during outages.",
+    );
+  }
 }

@@ -36,3 +36,10 @@ export function isRelayBlockedFile(file: {
 export function uploadRouteFor(
   candidate: UploadRouteCandidate,
 ): "drive" | "relay";
+
+/**
+ * Whether a failed relay upload should be retried via Google Drive — true only
+ * for 5xx server-availability failures (e.g. `503 Service Unavailable`), not
+ * 4xx client errors or non-HTTP failures.
+ */
+export function isRelayUnavailableError(error: unknown): boolean;

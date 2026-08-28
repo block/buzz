@@ -163,6 +163,30 @@ export function isRelayBlockedFile(file) {
  * `isVideo` comes from `videoFileType.ts`; pass it rather than letting this
  * module guess.
  */
+/**
+ * Whether a failed relay upload should be retried via Google Drive.
+ *
+ * True only for **server-availability (5xx)** failures — the relay's media
+ * store (Blossom on S3/MinIO) is up but temporarily refusing, e.g. `503
+ * Service Unavailable`. Matches the `relay returned <status>` message shape the
+ * Rust upload command emits (`relay_error_message`).
+ *
+ * Deliberately NOT true for 4xx: those are the request's fault (too large,
+ * unsupported type, bad auth) and rerouting them to Drive would paper over a
+ * real client error. Too-large already routes to Drive up front by size.
+ * Non-HTTP failures (network down, cancelled) also return false — a relay
+ * that is unreachable is a different problem from one that answered 5xx, and
+ * silently diverting every network blip to Drive would hide real outages.
+ */
+export function isRelayUnavailableError(error) {
+  const message =
+    error instanceof Error ? error.message : String(error ?? "");
+  const match = message.match(/relay returned (\d{3})/i);
+  if (!match) return false;
+  const status = Number(match[1]);
+  return status >= 500 && status <= 599;
+}
+
 export function uploadRouteFor({ name, type, sizeBytes, isVideo = false }) {
   if (isVideo) return "drive";
   if (isAudioFile({ name, type })) return "drive";

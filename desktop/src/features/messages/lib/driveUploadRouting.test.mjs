@@ -5,6 +5,7 @@ import {
   DRIVE_UPLOAD_THRESHOLD_BYTES,
   isAudioFile,
   isRelayBlockedFile,
+  isRelayUnavailableError,
   uploadRouteFor,
 } from "./driveUploadRouting.mjs";
 
@@ -222,5 +223,46 @@ test("a missing or unparseable size does not force the Drive path", () => {
       sizeBytes: Number.NaN,
     }),
     "relay",
+  );
+});
+
+// --- the 5xx-unavailable fallback trigger -----------------------------------
+
+test("a relay 5xx availability error triggers the Drive fallback", () => {
+  for (const status of [500, 502, 503, 504, 599]) {
+    assert.equal(
+      isRelayUnavailableError(
+        new Error(`relay returned ${status} Service Unavailable`),
+      ),
+      true,
+      `status ${status}`,
+    );
+  }
+});
+
+test("a 4xx client error does not trigger the fallback", () => {
+  for (const status of [400, 401, 403, 413, 415, 429]) {
+    assert.equal(
+      isRelayUnavailableError(new Error(`relay returned ${status}`)),
+      false,
+      `status ${status}`,
+    );
+  }
+});
+
+test("a non-HTTP failure does not trigger the fallback", () => {
+  assert.equal(isRelayUnavailableError(new Error("upload cancelled")), false);
+  assert.equal(
+    isRelayUnavailableError(new Error("error sending request")),
+    false,
+  );
+  assert.equal(isRelayUnavailableError(undefined), false);
+  assert.equal(isRelayUnavailableError(null), false);
+});
+
+test("a plain string 503 is accepted too", () => {
+  assert.equal(
+    isRelayUnavailableError("relay returned 503 Service Unavailable"),
+    true,
   );
 });
