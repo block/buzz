@@ -30,8 +30,10 @@ pub mod admin_moderation;
 pub mod api_token;
 /// Relay-scoped archived identity persistence (NIP-IA).
 pub mod archived_identities;
-/// Channel and membership persistence.
+/// Channel lifecycle and metadata persistence.
 pub mod channel;
+/// Channel membership and roster persistence.
+pub mod channel_members;
 /// Community lifecycle and host-map persistence.
 pub mod community;
 /// Durable whole-community deletion lifecycle and PostgreSQL adapter.
@@ -59,10 +61,13 @@ pub mod product_feedback;
 pub mod push;
 /// Reaction persistence.
 pub mod reaction;
+pub mod relay_admin_actions;
 /// Use-limited relay invite persistence (v2 opaque tokens).
 pub mod relay_invite;
 /// Relay-level membership persistence (NIP-43).
 pub mod relay_members;
+/// Deployment-global operator/moderator roster persistence.
+pub mod relay_operators;
 /// Replaceable-event persistence and coordinate locking.
 pub mod replaceable;
 /// Replica freshness fence for keyset-cursor read routing.
@@ -1774,363 +1779,6 @@ impl Db {
             }
         }
         Ok(outcome)
-    }
-
-    /// Creates a new channel, bootstraps the creator as owner, and returns the record.
-    #[allow(clippy::too_many_arguments)]
-    #[datastore_span(name = "create_channel", system = "postgresql")]
-    pub async fn create_channel(
-        &self,
-        community_id: CommunityId,
-        name: &str,
-        channel_type: channel::ChannelType,
-        visibility: channel::ChannelVisibility,
-        description: Option<&str>,
-        created_by: &[u8],
-        ttl_seconds: Option<i32>,
-    ) -> Result<channel::ChannelRecord> {
-        channel::create_channel(
-            &self.pool,
-            community_id,
-            name,
-            channel_type,
-            visibility,
-            description,
-            created_by,
-            ttl_seconds,
-        )
-        .await
-    }
-
-    /// Creates a channel with a client-supplied UUID.
-    ///
-    /// Returns `(record, true)` if newly created, `(record, false)` if already exists.
-    #[allow(clippy::too_many_arguments)]
-    #[datastore_span(name = "create_channel_with_id", system = "postgresql")]
-    pub async fn create_channel_with_id(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-        name: &str,
-        channel_type: channel::ChannelType,
-        visibility: channel::ChannelVisibility,
-        description: Option<&str>,
-        created_by: &[u8],
-        ttl_seconds: Option<i32>,
-    ) -> Result<(channel::ChannelRecord, bool)> {
-        channel::create_channel_with_id(
-            &self.pool,
-            community_id,
-            channel_id,
-            name,
-            channel_type,
-            visibility,
-            description,
-            created_by,
-            ttl_seconds,
-        )
-        .await
-    }
-
-    /// Fetches a channel record by ID.
-    #[datastore_span(name = "get_channel", system = "postgresql")]
-    pub async fn get_channel(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-    ) -> Result<channel::ChannelRecord> {
-        channel::get_channel(&self.pool, community_id, channel_id).await
-    }
-
-    /// Returns the canvas content for a channel, if any.
-    #[datastore_span(name = "get_canvas", system = "postgresql")]
-    pub async fn get_canvas(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-    ) -> Result<Option<String>> {
-        channel::get_canvas(&self.pool, community_id, channel_id).await
-    }
-
-    /// Sets or clears the canvas content for a channel.
-    #[datastore_span(name = "set_canvas", system = "postgresql")]
-    pub async fn set_canvas(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-        canvas: Option<&str>,
-    ) -> Result<()> {
-        channel::set_canvas(&self.pool, community_id, channel_id, canvas).await
-    }
-
-    /// Verify the mixed-version channel-roster database fence end to end.
-    #[datastore_span(name = "verify_channel_roster_fence", system = "postgresql")]
-    pub async fn verify_channel_roster_fence(&self) -> Result<()> {
-        channel::verify_channel_roster_fence_catalog(&self.pool).await?;
-        channel::verify_channel_roster_fence_behavior(&self.pool).await
-    }
-
-    /// Capture the active roster while holding the membership-writer lock.
-    #[datastore_span(name = "lock_member_snapshot", system = "postgresql")]
-    pub async fn lock_member_snapshot(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-        relay_pubkey: &[u8],
-    ) -> Result<channel::LockedMemberSnapshot> {
-        channel::lock_member_snapshot(&self.pool, community_id, channel_id, relay_pubkey).await
-    }
-
-    /// Adds a member to a channel.
-    #[datastore_span(name = "add_member", system = "postgresql")]
-    pub async fn add_member(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-        pubkey: &[u8],
-        role: channel::MemberRole,
-        invited_by: Option<&[u8]>,
-    ) -> Result<channel::MemberRecord> {
-        channel::add_member(
-            &self.pool,
-            community_id,
-            channel_id,
-            pubkey,
-            role,
-            invited_by,
-        )
-        .await
-    }
-
-    /// Removes a member from a channel.
-    #[datastore_span(name = "remove_member", system = "postgresql")]
-    pub async fn remove_member(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-        pubkey: &[u8],
-        actor_pubkey: &[u8],
-    ) -> Result<()> {
-        channel::remove_member(&self.pool, community_id, channel_id, pubkey, actor_pubkey).await
-    }
-
-    /// Returns `true` if the pubkey is an active member.
-    #[datastore_span(name = "is_member", system = "postgresql")]
-    pub async fn is_member(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-        pubkey: &[u8],
-    ) -> Result<bool> {
-        channel::is_member(&self.pool, community_id, channel_id, pubkey).await
-    }
-
-    /// Return the active (channel, pubkey) membership pairs among the given
-    /// sets, in one statement.
-    #[datastore_span(name = "membership_pairs", system = "postgresql")]
-    pub async fn membership_pairs(
-        &self,
-        community_id: CommunityId,
-        channel_ids: &[Uuid],
-        pubkeys: &[Vec<u8>],
-    ) -> Result<Vec<(Uuid, Vec<u8>)>> {
-        channel::membership_pairs(&self.pool, community_id, channel_ids, pubkeys).await
-    }
-
-    /// Returns all active members of a channel.
-    #[datastore_span(name = "get_members", system = "postgresql")]
-    pub async fn get_members(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-    ) -> Result<Vec<channel::MemberRecord>> {
-        channel::get_members(&self.pool, community_id, channel_id).await
-    }
-
-    /// Returns active members for multiple channels in a single query.
-    #[datastore_span(name = "get_members_bulk", system = "postgresql")]
-    pub async fn get_members_bulk(
-        &self,
-        community_id: CommunityId,
-        channel_ids: &[Uuid],
-    ) -> Result<Vec<channel::MemberRecord>> {
-        channel::get_members_bulk(&self.pool, community_id, channel_ids).await
-    }
-
-    /// Get all channel IDs accessible to a pubkey.
-    #[datastore_span(name = "get_accessible_channel_ids", system = "postgresql")]
-    pub async fn get_accessible_channel_ids(
-        &self,
-        community_id: CommunityId,
-        pubkey: &[u8],
-    ) -> Result<Vec<Uuid>> {
-        channel::get_accessible_channel_ids(&self.pool, community_id, pubkey).await
-    }
-
-    /// Returns large active-channel rosters whose relay-authored snapshots differ.
-    #[datastore_span(
-        name = "list_large_channel_rosters_needing_reconciliation",
-        system = "postgresql"
-    )]
-    pub async fn list_large_channel_rosters_needing_reconciliation(
-        &self,
-        minimum_members: i64,
-        relay_pubkey: &[u8],
-    ) -> Result<Vec<channel::LargeChannelRoster>> {
-        channel::list_large_channel_rosters_needing_reconciliation(
-            &self.pool,
-            minimum_members,
-            relay_pubkey,
-        )
-        .await
-    }
-
-    /// Lists channels, optionally filtered by visibility.
-    #[datastore_span(name = "list_channels", system = "postgresql")]
-    pub async fn list_channels(
-        &self,
-        community_id: CommunityId,
-        visibility: Option<&str>,
-    ) -> Result<Vec<channel::ChannelRecord>> {
-        channel::list_channels(&self.pool, community_id, visibility).await
-    }
-
-    /// Returns full channel records for all channels a user can access.
-    #[datastore_span(name = "get_accessible_channels", system = "postgresql")]
-    pub async fn get_accessible_channels(
-        &self,
-        community_id: CommunityId,
-        pubkey: &[u8],
-        visibility_filter: Option<&str>,
-        member_only: Option<bool>,
-    ) -> Result<Vec<channel::AccessibleChannel>> {
-        channel::get_accessible_channels(
-            &self.pool,
-            community_id,
-            pubkey,
-            visibility_filter,
-            member_only,
-        )
-        .await
-    }
-
-    /// Returns all bot-role members with their aggregated channel names in one community.
-    #[datastore_span(name = "get_bot_members", system = "postgresql")]
-    pub async fn get_bot_members(
-        &self,
-        community_id: CommunityId,
-    ) -> Result<Vec<channel::BotMemberRecord>> {
-        channel::get_bot_members(&self.pool, community_id).await
-    }
-
-    /// Bulk-fetch user records by pubkey.
-    #[datastore_span(name = "get_users_bulk", system = "postgresql")]
-    pub async fn get_users_bulk(
-        &self,
-        community_id: CommunityId,
-        pubkeys: &[Vec<u8>],
-    ) -> Result<Vec<channel::UserRecord>> {
-        channel::get_users_bulk(&self.pool, community_id, pubkeys).await
-    }
-
-    /// Updates a channel's name and/or description.
-    #[datastore_span(name = "update_channel", system = "postgresql")]
-    pub async fn update_channel(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-        updates: channel::ChannelUpdate,
-    ) -> Result<channel::ChannelRecord> {
-        channel::update_channel(&self.pool, community_id, channel_id, updates).await
-    }
-
-    /// Sets the topic for a channel.
-    #[datastore_span(name = "set_topic", system = "postgresql")]
-    pub async fn set_topic(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-        topic: &str,
-        set_by: &[u8],
-    ) -> Result<()> {
-        channel::set_topic(&self.pool, community_id, channel_id, topic, set_by).await
-    }
-
-    /// Sets the purpose for a channel.
-    #[datastore_span(name = "set_purpose", system = "postgresql")]
-    pub async fn set_purpose(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-        purpose: &str,
-        set_by: &[u8],
-    ) -> Result<()> {
-        channel::set_purpose(&self.pool, community_id, channel_id, purpose, set_by).await
-    }
-
-    /// Archives a channel.
-    #[datastore_span(name = "archive_channel", system = "postgresql")]
-    pub async fn archive_channel(&self, community_id: CommunityId, channel_id: Uuid) -> Result<()> {
-        channel::archive_channel(&self.pool, community_id, channel_id).await
-    }
-
-    /// Unarchives a channel.
-    #[datastore_span(name = "unarchive_channel", system = "postgresql")]
-    pub async fn unarchive_channel(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-    ) -> Result<()> {
-        channel::unarchive_channel(&self.pool, community_id, channel_id).await
-    }
-
-    /// Soft-delete a channel.
-    #[datastore_span(name = "soft_delete_channel", system = "postgresql")]
-    pub async fn soft_delete_channel(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-    ) -> Result<bool> {
-        channel::soft_delete_channel(&self.pool, community_id, channel_id).await
-    }
-
-    /// Returns the count of active members in a channel.
-    #[datastore_span(name = "get_member_count", system = "postgresql")]
-    pub async fn get_member_count(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-    ) -> Result<i64> {
-        channel::get_member_count(&self.pool, community_id, channel_id).await
-    }
-
-    /// Bulk-fetch member counts for a set of channel IDs.
-    #[datastore_span(name = "get_member_counts_bulk", system = "postgresql")]
-    pub async fn get_member_counts_bulk(
-        &self,
-        community_id: CommunityId,
-        channel_ids: &[Uuid],
-    ) -> Result<std::collections::HashMap<Uuid, i64>> {
-        channel::get_member_counts_bulk(&self.pool, community_id, channel_ids).await
-    }
-
-    /// Get the active role of a pubkey in a channel.
-    #[datastore_span(name = "get_member_role", system = "postgresql")]
-    pub async fn get_member_role(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-        pubkey: &[u8],
-    ) -> Result<Option<String>> {
-        channel::get_member_role(&self.pool, community_id, channel_id, pubkey).await
-    }
-
-    /// Archive ephemeral channels whose TTL deadline has passed.
-    #[datastore_span(name = "reap_expired_ephemeral_channels", system = "postgresql")]
-    pub async fn reap_expired_ephemeral_channels(
-        &self,
-    ) -> Result<Vec<channel::ReapedEphemeralChannel>> {
-        channel::reap_expired_ephemeral_channels(&self.pool).await
     }
 
     /// Query due reminders ready for delivery.
@@ -3986,6 +3634,435 @@ impl Db {
         relay_members::backfill_from_allowlist(&self.pool, community).await
     }
 
+    // ── relay_operators (deployment-global principal roster) ──────────────────
+
+    /// Fetch one relay operator/moderator row by pubkey (32-byte binary).
+    pub async fn get_relay_operator(
+        &self,
+        pubkey: &[u8],
+    ) -> Result<Option<relay_operators::RelayOperatorRecord>> {
+        relay_operators::get(&self.pool, pubkey).await
+    }
+
+    /// List all relay operator/moderator rows ordered by creation time.
+    pub async fn list_relay_operators(&self) -> Result<Vec<relay_operators::RelayOperatorRecord>> {
+        relay_operators::list(&self.pool).await
+    }
+
+    /// Insert or update a relay operator/moderator row (upsert by pubkey).
+    ///
+    /// `config_operator_exists` is the caller's request-time snapshot of
+    /// whether a config-backed operator is effective; a demotion that would
+    /// leave no effective operator is rejected with [`DbError::LastOperator`].
+    pub async fn upsert_relay_operator(
+        &self,
+        pubkey: &[u8],
+        role: &str,
+        added_by: &[u8],
+        config_operator_exists: bool,
+    ) -> Result<()> {
+        relay_operators::upsert(&self.pool, pubkey, role, added_by, config_operator_exists).await
+    }
+
+    /// Remove a relay operator/moderator row. Returns `true` if deleted.
+    /// Records the revocation in the append-only audit trail; `actor` is the
+    /// authenticated operator performing the removal. `config_operator_exists`
+    /// is the caller's request-time snapshot of whether a config-backed
+    /// operator is effective; deleting the sole effective operator is rejected
+    /// with [`DbError::LastOperator`].
+    pub async fn remove_relay_operator(
+        &self,
+        pubkey: &[u8],
+        actor: &[u8],
+        config_operator_exists: bool,
+    ) -> Result<bool> {
+        relay_operators::remove(&self.pool, pubkey, actor, config_operator_exists).await
+    }
+
+    // ── relay_admin_actions (HTTP enforcement state machine) ──────────────────
+
+    /// Atomic decision-only report closure: CAS open→terminal + audit row in one transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn resolve_report_decision_atomic(
+        &self,
+        community_id: CommunityId,
+        report_id: uuid::Uuid,
+        terminal_status: &str,
+        audit_action: &str,
+        actor_pubkey: &[u8],
+        actor_authority: &str,
+        target_pubkey: Option<&[u8]>,
+        target_event_id: Option<&[u8]>,
+        channel_id: Option<uuid::Uuid>,
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        relay_admin_actions::resolve_report_decision_atomic(
+            &self.pool,
+            community_id,
+            report_id,
+            terminal_status,
+            audit_action,
+            actor_pubkey,
+            actor_authority,
+            target_pubkey,
+            target_event_id,
+            channel_id,
+            reason,
+        )
+        .await
+    }
+
+    /// Attempt to claim a report for HTTP enforcement (CAS open → processing).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn claim_report_for_enforcement(
+        &self,
+        community_id: CommunityId,
+        report_id: uuid::Uuid,
+        request_id: uuid::Uuid,
+        actor_pubkey: &[u8],
+        actor_role: &str,
+        action: &str,
+        reason: Option<&str>,
+        timeout_until: Option<chrono::DateTime<chrono::Utc>>,
+        audit_action: &str,
+        actor_authority: &str,
+        target_pubkey: Option<&[u8]>,
+        target_event_id: Option<&[u8]>,
+        channel_id: Option<uuid::Uuid>,
+    ) -> Result<relay_admin_actions::ClaimResult> {
+        relay_admin_actions::claim_report(
+            &self.pool,
+            community_id,
+            report_id,
+            request_id,
+            actor_pubkey,
+            actor_role,
+            action,
+            reason,
+            timeout_until,
+            audit_action,
+            actor_authority,
+            target_pubkey,
+            target_event_id,
+            channel_id,
+        )
+        .await
+    }
+
+    /// Advance an action from 'pending' to 'enforcing'.
+    pub async fn begin_enforcing_action(&self, action_id: uuid::Uuid) -> Result<bool> {
+        relay_admin_actions::begin_enforcing(&self.pool, action_id).await
+    }
+
+    /// Commit the core mutation step (advance step_marker to 'mutation_committed').
+    pub async fn commit_action_mutation_step(&self, action_id: uuid::Uuid) -> Result<bool> {
+        relay_admin_actions::commit_mutation_step(&self.pool, action_id).await
+    }
+
+    /// Finalize enforcement: action → succeeded, report → terminal status,
+    /// and enqueue outbox delivery rows atomically.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finalize_action_success(
+        &self,
+        action_id: uuid::Uuid,
+        community_id: CommunityId,
+        report_id: uuid::Uuid,
+        terminal_status: &str,
+        actor_pubkey: &[u8],
+        action_name: &str,
+        target_pubkey: Option<&[u8]>,
+        target_event_id: Option<&[u8]>,
+        channel_id: Option<uuid::Uuid>,
+        reason: Option<&str>,
+        timeout_until: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<bool> {
+        relay_admin_actions::finalize_success(
+            &self.pool,
+            action_id,
+            community_id,
+            report_id,
+            terminal_status,
+            actor_pubkey,
+            action_name,
+            target_pubkey,
+            target_event_id,
+            channel_id,
+            reason,
+            timeout_until,
+        )
+        .await
+    }
+
+    /// Atomically execute a ban mutation and commit the step marker.
+    /// Returns `true` if this driver committed the marker, `false` if already marked or lease lost.
+    pub async fn execute_ban_with_marker(
+        &self,
+        action_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        community_id: CommunityId,
+        target_pubkey: &[u8],
+        actor_pubkey: &[u8],
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        relay_admin_actions::execute_ban_with_marker(
+            &self.pool,
+            action_id,
+            lease_token,
+            community_id,
+            target_pubkey,
+            actor_pubkey,
+            reason,
+        )
+        .await
+    }
+
+    /// Atomically execute a timeout mutation and commit the step marker.
+    /// Returns `true` if this driver committed the marker, `false` if already marked or lease lost.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_timeout_with_marker(
+        &self,
+        action_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        community_id: CommunityId,
+        target_pubkey: &[u8],
+        actor_pubkey: &[u8],
+        until: chrono::DateTime<chrono::Utc>,
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        relay_admin_actions::execute_timeout_with_marker(
+            &self.pool,
+            action_id,
+            lease_token,
+            community_id,
+            target_pubkey,
+            actor_pubkey,
+            until,
+            reason,
+        )
+        .await
+    }
+
+    /// Atomically execute a kick mutation and commit the step marker.
+    /// Returns `Removed` (member was present), `AlreadyGone` (absent before this action),
+    /// or `AlreadyMarked` (marker already committed by another driver or lease lost).
+    pub async fn execute_kick_with_marker(
+        &self,
+        action_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        community_id: CommunityId,
+        channel_id: uuid::Uuid,
+        target_pubkey: &[u8],
+        actor_pubkey: &[u8],
+    ) -> Result<relay_admin_actions::KickWithMarkerResult> {
+        relay_admin_actions::execute_kick_with_marker(
+            &self.pool,
+            action_id,
+            lease_token,
+            community_id,
+            channel_id,
+            target_pubkey,
+            actor_pubkey,
+        )
+        .await
+    }
+
+    /// Atomically execute a soft-delete mutation and commit the step marker.
+    /// Returns `true` if this driver committed the marker, `false` if already marked or lease lost.
+    pub async fn execute_delete_with_marker(
+        &self,
+        action_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        community_id: CommunityId,
+        target_event_id: &[u8],
+        parent_event_id: Option<&[u8]>,
+        root_event_id: Option<&[u8]>,
+    ) -> Result<bool> {
+        relay_admin_actions::execute_delete_with_marker(
+            &self.pool,
+            action_id,
+            lease_token,
+            community_id,
+            target_event_id,
+            parent_event_id,
+            root_event_id,
+        )
+        .await
+    }
+
+    /// Acquire the action mutation lease (prevents concurrent double-mutation).
+    pub async fn acquire_admin_action_lease(
+        &self,
+        action_id: uuid::Uuid,
+        lease_until: chrono::DateTime<chrono::Utc>,
+    ) -> Result<relay_admin_actions::LeaseResult> {
+        relay_admin_actions::acquire_action_lease(&self.pool, action_id, lease_until).await
+    }
+
+    /// Release the action mutation lease. No-op if caller no longer holds the token.
+    pub async fn release_admin_action_lease(
+        &self,
+        action_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+    ) -> Result<()> {
+        relay_admin_actions::release_action_lease(&self.pool, action_id, lease_token).await
+    }
+
+    /// Claim a batch of stranded `relay_admin_actions` for the action recovery worker.
+    pub async fn claim_stranded_admin_action_batch(
+        &self,
+        worker_id: &str,
+        lease_until: chrono::DateTime<chrono::Utc>,
+        batch_size: i64,
+    ) -> Result<Vec<relay_admin_actions::StrandedActionClaim>> {
+        relay_admin_actions::claim_stranded_action_batch(
+            &self.pool,
+            worker_id,
+            lease_until,
+            batch_size,
+        )
+        .await
+    }
+
+    /// Record a pre-mutation enforcement failure (keeps report in 'processing').
+    pub async fn record_action_failure(
+        &self,
+        action_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        error: &str,
+    ) -> Result<bool> {
+        relay_admin_actions::record_failure(&self.pool, action_id, lease_token, error).await
+    }
+
+    /// Cancel a pre-mutation failed action (returns report to 'open'),
+    /// attributing the cancel to `cancelled_by`.
+    pub async fn cancel_admin_action(
+        &self,
+        action_id: uuid::Uuid,
+        community_id: CommunityId,
+        report_id: uuid::Uuid,
+        cancelled_by: &[u8],
+    ) -> Result<bool> {
+        relay_admin_actions::cancel_action(
+            &self.pool,
+            action_id,
+            community_id,
+            report_id,
+            cancelled_by,
+        )
+        .await
+    }
+
+    /// Reopen a terminal report (resolved|dismissed|escalated → open) with a
+    /// durable `reopen` audit row, keyed idempotent on `request_id`.
+    pub async fn reopen_report(
+        &self,
+        community_id: CommunityId,
+        report_id: uuid::Uuid,
+        request_id: uuid::Uuid,
+        actor_pubkey: &[u8],
+        actor_role: &str,
+        reason: Option<&str>,
+    ) -> Result<relay_admin_actions::ReopenResult> {
+        relay_admin_actions::reopen_report(
+            &self.pool,
+            community_id,
+            report_id,
+            request_id,
+            actor_pubkey,
+            actor_role,
+            reason,
+        )
+        .await
+    }
+
+    /// Fetch an action record by ID.
+    pub async fn get_admin_action(
+        &self,
+        action_id: uuid::Uuid,
+    ) -> Result<Option<relay_admin_actions::AdminActionRecord>> {
+        relay_admin_actions::get_action(&self.pool, action_id).await
+    }
+
+    /// Enqueue an outbox artifact/notice delivery command.
+    pub async fn enqueue_admin_outbox(
+        &self,
+        action_id: uuid::Uuid,
+        task_type: &str,
+        payload: serde_json::Value,
+        dedup_key: &str,
+    ) -> Result<()> {
+        relay_admin_actions::enqueue_outbox(&self.pool, action_id, task_type, payload, dedup_key)
+            .await
+    }
+
+    /// Mark an outbox record as delivered, fenced by the claim token.
+    /// Returns `true` if updated, `false` if ownership was already lost.
+    pub async fn mark_admin_outbox_delivered(
+        &self,
+        outbox_id: uuid::Uuid,
+        claim_token: uuid::Uuid,
+    ) -> Result<bool> {
+        relay_admin_actions::mark_outbox_delivered(&self.pool, outbox_id, claim_token).await
+    }
+
+    /// Mark an outbox record as failed, fenced by the claim token.
+    /// Returns `true` if updated, `false` if ownership was already lost.
+    pub async fn fail_admin_outbox_row(
+        &self,
+        outbox_id: uuid::Uuid,
+        claim_token: uuid::Uuid,
+        error: &str,
+    ) -> Result<bool> {
+        relay_admin_actions::fail_outbox_row(&self.pool, outbox_id, claim_token, error).await
+    }
+
+    /// Claim a batch of pending outbox rows for the given worker pod.
+    pub async fn claim_pending_admin_outbox_batch(
+        &self,
+        worker_id: &str,
+        lease_until: chrono::DateTime<chrono::Utc>,
+        batch_size: i64,
+    ) -> Result<Vec<relay_admin_actions::OutboxRecord>> {
+        relay_admin_actions::claim_pending_outbox_batch(
+            &self.pool,
+            worker_id,
+            lease_until,
+            batch_size,
+        )
+        .await
+    }
+
+    /// List pending outbox records for an action.
+    pub async fn list_pending_admin_outbox(
+        &self,
+        action_id: uuid::Uuid,
+    ) -> Result<Vec<relay_admin_actions::OutboxRecord>> {
+        relay_admin_actions::list_pending_outbox(&self.pool, action_id).await
+    }
+
+    /// Deployment-authority kick: remove a member without requiring tenant owner/admin actor.
+    pub async fn deploy_kick_member(
+        &self,
+        community_id: CommunityId,
+        channel_id: uuid::Uuid,
+        target_pubkey: &[u8],
+        actor_pubkey: &[u8],
+    ) -> Result<relay_admin_actions::KickResult> {
+        relay_admin_actions::deploy_kick_member(
+            &self.pool,
+            community_id,
+            channel_id,
+            target_pubkey,
+            actor_pubkey,
+        )
+        .await
+    }
+
+    /// Update product_feedback status (operator-managed lifecycle).
+    pub async fn update_feedback_status(&self, id: uuid::Uuid, status: &str) -> Result<bool> {
+        relay_admin_actions::update_feedback_status(&self.pool, id, status).await
+    }
+
     /// Mints a v2 use-limited relay invite. The plaintext code is returned
     /// exactly once; only its SHA-256 hash is persisted.
     ///
@@ -4623,207 +4700,6 @@ mod tests {
             .await
             .expect("insert community");
         id
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn unmigrated_roster_fence_blocks_startup_until_0032_is_applied() {
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let (pool, scratch_name) =
-            create_scratch_db_through(&admin, "roster_fence_unmigrated", Some(31)).await;
-        let db = Db::from_pool(pool.clone());
-
-        let error = db
-            .verify_channel_roster_fence()
-            .await
-            .expect_err("pre-0032 schema must block roster publishers");
-        assert!(
-            error.to_string().contains("channel roster fence trigger"),
-            "startup gate must report the missing schema fence: {error}"
-        );
-        let rows_before: i64 = sqlx::query_scalar("SELECT count(*) FROM events WHERE kind = 39002")
-            .fetch_one(&pool)
-            .await
-            .expect("count pre-migration rosters");
-        assert_eq!(
-            rows_before, 0,
-            "failed startup gate must not publish a roster"
-        );
-
-        migration::run_migrations(&pool)
-            .await
-            .expect("apply migration 0032");
-        db.verify_channel_roster_fence()
-            .await
-            .expect("0032 must open the startup gate");
-
-        drop_scratch_db(&admin, pool, &scratch_name).await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn channel_roster_fence_behavior_verification_detects_inert_function() {
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let (pool, scratch_name) = create_scratch_db(&admin, "roster_fence_inert").await;
-        let db = Db::from_pool(pool.clone());
-
-        sqlx::raw_sql(
-            "CREATE OR REPLACE FUNCTION guard_channel_roster_snapshot() \
-             RETURNS TRIGGER AS $$ BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql;",
-        )
-        .execute(&pool)
-        .await
-        .expect("replace roster fence with inert body");
-        let error = db
-            .verify_channel_roster_fence()
-            .await
-            .expect_err("inert roster fence must fail closed");
-        assert!(
-            error
-                .to_string()
-                .contains("stale probe roster was accepted"),
-            "behavior probe must identify inert semantics: {error}"
-        );
-
-        drop_scratch_db(&admin, pool, &scratch_name).await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn channel_roster_fence_catalog_verification_fails_closed() {
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let (pool, scratch_name) = create_scratch_db(&admin, "roster_fence_catalog").await;
-        let db = Db::from_pool(pool.clone());
-
-        db.verify_channel_roster_fence()
-            .await
-            .expect("migrated roster fence must verify");
-
-        let child: String = sqlx::query_scalar(
-            "SELECT n.nspname || '.' || c.relname \
-             FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
-             JOIN pg_namespace n ON n.oid = c.relnamespace \
-             WHERE i.inhparent = 'public.events'::regclass ORDER BY i.inhrelid LIMIT 1",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("load event partition");
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "ALTER TABLE {child} DISABLE TRIGGER trg_events_guard_channel_roster_snapshot"
-        )))
-        .execute(&pool)
-        .await
-        .expect("disable partition roster trigger");
-        let error = db
-            .verify_channel_roster_fence()
-            .await
-            .expect_err("disabled partition roster fence must fail closed");
-        assert!(
-            error.to_string().contains(&child),
-            "verification must identify the unfenced partition: {error}"
-        );
-
-        drop_scratch_db(&admin, pool, &scratch_name).await;
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn desired_schema_rejects_stale_legacy_roster_role() {
-        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
-
-        let admin = PgPool::connect(&admin_url().await)
-            .await
-            .expect("connect admin");
-        let scratch_name = format!("schema_roster_role_{}", Uuid::new_v4().simple());
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "CREATE DATABASE {scratch_name}"
-        )))
-        .execute(&admin)
-        .await
-        .expect("create desired-schema scratch db");
-        let base_url = admin_url().await;
-        let slash = base_url.rfind('/').expect("database URL has path segment");
-        let scratch_url = format!("{}/{}", &base_url[..slash], scratch_name);
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&scratch_url)
-            .await
-            .expect("connect desired-schema scratch db");
-        sqlx::raw_sql(include_str!("../../../schema/schema.sql"))
-            .execute(&pool)
-            .await
-            .expect("apply desired-state schema");
-
-        let db = Db::from_pool(pool.clone());
-        let community_uuid = Uuid::new_v4();
-        let community = CommunityId::from_uuid(community_uuid);
-        let channel = Uuid::new_v4();
-        let relay_keys = Keys::generate();
-        let owner_keys = Keys::generate();
-        let owner = owner_keys.public_key().to_bytes();
-        seed_community_channel(&pool, community_uuid, channel, &owner_keys).await;
-        let member = Keys::generate().public_key().to_bytes();
-        sqlx::query(
-            "INSERT INTO channel_members (community_id, channel_id, pubkey, role, invited_by) \
-             VALUES ($1, $2, $3, 'admin', $4)",
-        )
-        .bind(community_uuid)
-        .bind(channel)
-        .bind(member.as_slice())
-        .bind(owner.as_slice())
-        .execute(&pool)
-        .await
-        .expect("seed canonical admin");
-
-        let roster = |role: &str, timestamp| {
-            EventBuilder::new(Kind::Custom(39002), "")
-                .tags(vec![
-                    Tag::parse(["d", channel.to_string().as_str()]).expect("d tag"),
-                    Tag::parse(["p", hex::encode(owner).as_str(), "", "owner"])
-                        .expect("owner p tag"),
-                    Tag::parse(["p", hex::encode(member).as_str(), "", role])
-                        .expect("member p tag"),
-                ])
-                .custom_created_at(Timestamp::from(timestamp))
-                .sign_with_keys(&relay_keys)
-                .expect("sign roster")
-        };
-        let base = Timestamp::now().as_secs();
-        let fresh = roster("admin", base);
-        assert!(
-            db.replace_addressable_event(community, &fresh, Some(channel))
-                .await
-                .expect("publish canonical role")
-                .1
-        );
-        let stale = roster("member", base + 1);
-        let error = db
-            .replace_addressable_event(community, &stale, Some(channel))
-            .await
-            .expect_err("desired-state fence must reject stale role");
-        assert!(matches!(
-            error,
-            DbError::Sqlx(sqlx::Error::Database(ref db_error))
-                if db_error.code().as_deref() == Some("23514")
-        ));
-        let live_id: Vec<u8> = sqlx::query_scalar(
-            "SELECT id FROM events WHERE community_id=$1 AND channel_id=$2 \
-             AND kind=39002 AND deleted_at IS NULL",
-        )
-        .bind(community_uuid)
-        .bind(channel)
-        .fetch_one(&pool)
-        .await
-        .expect("load desired-state live roster");
-        assert_eq!(live_id, fresh.id.as_bytes().to_vec());
-
-        drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 
     #[tokio::test]

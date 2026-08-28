@@ -68,6 +68,66 @@ pub struct AdminReportedMessage {
     pub deleted_at: Option<DateTime<Utc>>,
 }
 
+/// The `relay_admin_actions` enforcement record governing a report.
+///
+/// Populated on the report detail read and enforcement resolve response. Carries
+/// the durable state machine so the console can render enforcement progress or
+/// terminal outcome without inventing a shape the relay never emits.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminActionDto {
+    /// Action row identifier.
+    pub id: Uuid,
+    /// Client-generated idempotency key.
+    pub request_id: Uuid,
+    /// Principal who claimed the report.
+    pub actor_pubkey: String,
+    /// Role of the actor: `"operator"` | `"moderator"`.
+    pub actor_role: String,
+    /// Enforcement action name: `"delete"` | `"kick"` | `"ban"` | `"timeout"`.
+    pub action: String,
+    /// State machine: `"pending"` | `"enforcing"` | `"succeeded"` | `"failed"` | `"cancelled"`.
+    pub status: String,
+    /// Principal who cancelled the action (hex pubkey); null unless `status` is
+    /// `"cancelled"`. Attributes the one mutation that would otherwise carry no
+    /// actor trail while `BUZZ_AUDIT_ENABLED=false`.
+    pub cancelled_by: Option<String>,
+    /// Operator reason, if provided.
+    pub reason: Option<String>,
+    /// Absolute timeout expiry for `timeout` actions; null otherwise. Absolute
+    /// (not remaining-seconds) so repeated reads never disagree; the client
+    /// computes remaining time.
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Error from the last failure, if any.
+    pub error_message: Option<String>,
+    /// Action creation time.
+    pub created_at: DateTime<Utc>,
+    /// Action last-updated time.
+    pub updated_at: DateTime<Utc>,
+}
+
+impl AdminActionDto {
+    /// Build the wire DTO from a persistence record. Used to embed the
+    /// just-cancelled action in the cancel response — the last look at a record
+    /// that a subsequent detail read (report back to `open`) no longer surfaces.
+    pub fn from_record(record: &crate::relay_admin_actions::AdminActionRecord) -> Self {
+        Self {
+            id: record.id,
+            request_id: record.request_id,
+            actor_pubkey: hex::encode(&record.actor_pubkey),
+            actor_role: record.actor_role.clone(),
+            action: record.action.clone(),
+            status: record.state.clone(),
+            cancelled_by: record.cancelled_by.as_deref().map(hex::encode),
+            reason: record.reason.clone(),
+            expires_at: record.timeout_until,
+            error_message: record.error_message.clone(),
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+        }
+    }
+}
+
 /// Deployment-global moderation report detail.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -77,6 +137,9 @@ pub struct AdminReportDetail {
     pub report: AdminReport,
     /// Reported message when the report targets a stored event.
     pub message: Option<AdminReportedMessage>,
+    /// Governing enforcement action, when one exists (live or terminal). Null
+    /// for reports never enforced via the HTTP admin plane.
+    pub active_action: Option<AdminActionDto>,
 }
 
 /// Deployment-global product feedback with source-community provenance.
@@ -85,10 +148,13 @@ pub struct AdminReportDetail {
 pub struct AdminFeedback {
     /// Feedback row identifier.
     pub id: Uuid,
-    /// Source community identifier.
-    pub community_id: Uuid,
-    /// Source community host.
-    pub community_host: String,
+    /// Source community identifier. `None` once the source community has been
+    /// purged: `product_feedback` is deployment-global operator evidence whose
+    /// `community_id` is severed to NULL on tenant purge, not cascade-deleted.
+    pub community_id: Option<Uuid>,
+    /// Source community host. `None` when `community_id` is severed (no row to
+    /// join) — the feedback is retained without its origin tenant.
+    pub community_host: Option<String>,
     /// Signed feedback event identifier.
     pub event_id: String,
     /// Submitter public key.
@@ -99,6 +165,8 @@ pub struct AdminFeedback {
     pub body: String,
     /// Full source tags, including attachment metadata.
     pub tags: serde_json::Value,
+    /// Operator-managed lifecycle status: `"new"` | `"reviewed"` | `"archived"`.
+    pub status: String,
     /// Timestamp signed into the feedback event.
     pub event_created_at: DateTime<Utc>,
     /// Time accepted by this deployment.
@@ -165,7 +233,19 @@ pub async fn get_report(pool: &PgPool, report_id: Uuid) -> Result<Option<AdminRe
                target.pubkey AS message_author_pubkey,
                target.content AS message_content,
                target.created_at AS message_created_at,
-               target.deleted_at AS message_deleted_at
+               target.deleted_at AS message_deleted_at,
+               act.id AS action_id_admin,
+               act.request_id AS action_request_id,
+               act.actor_pubkey AS action_actor_pubkey,
+               act.actor_role AS action_actor_role,
+               act.action AS action_name,
+               act.state AS action_state,
+               act.cancelled_by AS action_cancelled_by,
+               act.reason AS action_reason,
+               act.timeout_until AS action_timeout_until,
+               act.error_message AS action_error_message,
+               act.created_at AS action_created_at,
+               act.updated_at AS action_updated_at
         FROM moderation_reports r
         JOIN communities c ON c.id = r.community_id
         LEFT JOIN LATERAL (
@@ -177,6 +257,18 @@ pub async fn get_report(pool: &PgPool, report_id: Uuid) -> Result<Option<AdminRe
             ORDER BY e.created_at DESC
             LIMIT 1
         ) target ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT a.id, a.request_id, a.actor_pubkey, a.actor_role, a.action,
+                   a.state, a.cancelled_by, a.reason, a.timeout_until, a.error_message,
+                   a.created_at, a.updated_at
+            FROM relay_admin_actions a
+            WHERE a.report_community_id = r.community_id
+              AND a.report_id = r.id
+              AND a.action IN ('delete', 'kick', 'ban', 'timeout')
+              AND (a.id = r.active_action_id OR a.state = 'succeeded')
+            ORDER BY a.created_at DESC, a.id DESC
+            LIMIT 1
+        ) act ON TRUE
         WHERE r.id = $1
         "#,
     )
@@ -195,12 +287,39 @@ pub async fn get_report(pool: &PgPool, report_id: Uuid) -> Result<Option<AdminRe
                 })
             })
             .transpose()?;
+        let active_action = row_to_action_dto(&row)?;
         Ok(AdminReportDetail {
             report: row_to_report(row)?,
             message,
+            active_action,
         })
     })
     .transpose()
+}
+
+/// Build an [`AdminActionDto`] from the LATERAL-joined `act.*` columns, when a
+/// governing action was found. Returns `None` when the join produced no row
+/// (all `act.*` columns null).
+fn row_to_action_dto(row: &sqlx::postgres::PgRow) -> Result<Option<AdminActionDto>> {
+    let Some(id) = row.try_get::<Option<Uuid>, _>("action_id_admin")? else {
+        return Ok(None);
+    };
+    Ok(Some(AdminActionDto {
+        id,
+        request_id: row.try_get("action_request_id")?,
+        actor_pubkey: hex::encode(row.try_get::<Vec<u8>, _>("action_actor_pubkey")?),
+        actor_role: row.try_get("action_actor_role")?,
+        action: row.try_get("action_name")?,
+        status: row.try_get("action_state")?,
+        cancelled_by: row
+            .try_get::<Option<Vec<u8>>, _>("action_cancelled_by")?
+            .map(hex::encode),
+        reason: row.try_get("action_reason")?,
+        expires_at: row.try_get("action_timeout_until")?,
+        error_message: row.try_get("action_error_message")?,
+        created_at: row.try_get("action_created_at")?,
+        updated_at: row.try_get("action_updated_at")?,
+    }))
 }
 
 fn row_to_report(row: sqlx::postgres::PgRow) -> Result<AdminReport> {
@@ -237,10 +356,10 @@ pub async fn list_feedback(pool: &PgPool, limit: i64) -> Result<Vec<AdminFeedbac
     let rows = sqlx::query(
         r#"
         SELECT f.id, f.community_id, c.host AS community_host, f.event_id,
-               f.submitter_pubkey, f.category, f.body, f.tags,
+               f.submitter_pubkey, f.category, f.body, f.tags, f.status,
                f.event_created_at, f.received_at
         FROM product_feedback f
-        JOIN communities c ON c.id = f.community_id
+        LEFT JOIN communities c ON c.id = f.community_id
         ORDER BY f.received_at DESC, f.id DESC
         LIMIT $1
         "#,
@@ -256,10 +375,10 @@ pub async fn get_feedback(pool: &PgPool, id: Uuid) -> Result<Option<AdminFeedbac
     let row = sqlx::query(
         r#"
         SELECT f.id, f.community_id, c.host AS community_host, f.event_id,
-               f.submitter_pubkey, f.category, f.body, f.tags,
+               f.submitter_pubkey, f.category, f.body, f.tags, f.status,
                f.event_created_at, f.received_at
         FROM product_feedback f
-        JOIN communities c ON c.id = f.community_id
+        LEFT JOIN communities c ON c.id = f.community_id
         WHERE f.id = $1
         "#,
     )
@@ -279,6 +398,7 @@ fn row_to_feedback(row: sqlx::postgres::PgRow) -> Result<AdminFeedback> {
         category: row.try_get("category")?,
         body: row.try_get("body")?,
         tags: row.try_get("tags")?,
+        status: row.try_get("status")?,
         event_created_at: row.try_get("event_created_at")?,
         received_at: row.try_get("received_at")?,
     })
@@ -384,6 +504,14 @@ mod tests {
     }
 
     async fn delete_report_fixture(pool: &PgPool, community_id: Uuid) {
+        // relay_admin_actions FK-references (community_id, report_id), so clear
+        // any enforcement/audit rows before the reports they point at. A no-op
+        // for tests that never insert actions.
+        sqlx::query("DELETE FROM relay_admin_actions WHERE report_community_id = $1")
+            .bind(community_id)
+            .execute(pool)
+            .await
+            .expect("delete admin action fixture");
         sqlx::query("DELETE FROM moderation_reports WHERE community_id = $1")
             .bind(community_id)
             .execute(pool)
@@ -484,5 +612,290 @@ mod tests {
         assert!(detail.message.is_none());
 
         delete_report_fixture(&pool, community_id).await;
+    }
+
+    // ── activeAction LATERAL join ─────────────────────────────────────────────
+
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_admin_action(
+        pool: &PgPool,
+        id: Uuid,
+        community_id: Uuid,
+        report_id: Uuid,
+        action: &str,
+        state: &str,
+        created_at: DateTime<Utc>,
+    ) {
+        sqlx::query(
+            r#"
+            INSERT INTO relay_admin_actions (
+                id, report_id, report_community_id, request_id, actor_pubkey,
+                actor_role, action, state, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, 'operator', $6, $7, $8, $8)
+            "#,
+        )
+        .bind(id)
+        .bind(report_id)
+        .bind(community_id)
+        .bind(Uuid::new_v4())
+        .bind(vec![2_u8; 32])
+        .bind(action)
+        .bind(state)
+        .bind(created_at)
+        .execute(pool)
+        .await
+        .expect("insert admin action");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn report_detail_surfaces_succeeded_enforcement_on_a_dismissed_reopened_report() {
+        // Enforcement succeeded, report was later reopened and re-triaged to
+        // `dismissed`. active_action_id is NULL, but the succeeded enforcement
+        // row still matches `a.state='succeeded'` — the activeAction must surface
+        // that DTO: a later dismissal does not un-happen the executed ban.
+        let pool = setup_pool().await;
+        let community_id = insert_community(&pool, "dismissed-after-enforce").await;
+        let report_id = insert_pubkey_report(&pool, community_id).await;
+        let action_id = Uuid::new_v4();
+        insert_admin_action(
+            &pool,
+            action_id,
+            community_id,
+            report_id,
+            "ban",
+            "succeeded",
+            Utc::now(),
+        )
+        .await;
+        set_report_status(&pool, community_id, report_id, "dismissed").await;
+
+        let detail = get_report(&pool, report_id)
+            .await
+            .expect("query report")
+            .expect("report exists");
+        assert_eq!(detail.report.status, "dismissed");
+        let action = detail
+            .active_action
+            .expect("succeeded enforcement DTO survives dismissal");
+        assert_eq!(action.id, action_id);
+        assert_eq!(action.action, "ban");
+        assert_eq!(action.status, "succeeded");
+
+        delete_report_fixture(&pool, community_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn report_detail_active_action_breaks_equal_timestamp_ties_by_id_desc() {
+        // Two succeeded enforcement rows (possible across reopen cycles) sharing
+        // an identical created_at: the `a.id DESC` tiebreaker must pick the
+        // greater id deterministically, never leave the choice to row order.
+        let pool = setup_pool().await;
+        let community_id = insert_community(&pool, "equal-ts-tiebreak").await;
+        let report_id = insert_pubkey_report(&pool, community_id).await;
+        let ts = Utc::now();
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
+        insert_admin_action(&pool, id_a, community_id, report_id, "ban", "succeeded", ts).await;
+        insert_admin_action(
+            &pool,
+            id_b,
+            community_id,
+            report_id,
+            "kick",
+            "succeeded",
+            ts,
+        )
+        .await;
+        set_report_status(&pool, community_id, report_id, "resolved").await;
+
+        let detail = get_report(&pool, report_id)
+            .await
+            .expect("query report")
+            .expect("report exists");
+        let action = detail.active_action.expect("an action surfaces");
+        assert_eq!(
+            action.id,
+            id_a.max(id_b),
+            "equal timestamps must resolve to the greater id via a.id DESC"
+        );
+
+        delete_report_fixture(&pool, community_id).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn report_detail_active_action_excludes_reopen_audit_rows() {
+        // A `reopen` audit row is written state='succeeded'. The enforcement DTO
+        // join filters `action IN (delete,kick,ban,timeout)`, so a report whose
+        // only relay_admin_actions row is a reopen audit must surface no action.
+        let pool = setup_pool().await;
+        let community_id = insert_community(&pool, "reopen-audit-excluded").await;
+        let report_id = insert_pubkey_report(&pool, community_id).await;
+        insert_admin_action(
+            &pool,
+            Uuid::new_v4(),
+            community_id,
+            report_id,
+            "reopen",
+            "succeeded",
+            Utc::now(),
+        )
+        .await;
+
+        let detail = get_report(&pool, report_id)
+            .await
+            .expect("query report")
+            .expect("report exists");
+        assert!(
+            detail.active_action.is_none(),
+            "reopen audit row must not surface as an enforcement action"
+        );
+
+        delete_report_fixture(&pool, community_id).await;
+    }
+
+    async fn set_report_status(pool: &PgPool, community_id: Uuid, report_id: Uuid, status: &str) {
+        sqlx::query(
+            "UPDATE moderation_reports SET status = $3 WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_id)
+        .bind(report_id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("set report status");
+    }
+
+    // ── Feedback severed-provenance survival ──────────────────────────────────
+
+    async fn insert_feedback(pool: &PgPool, community_id: Uuid, status: &str) -> Uuid {
+        let id = Uuid::new_v4();
+        let event_id: Vec<u8> = id
+            .as_bytes()
+            .iter()
+            .chain(id.as_bytes().iter())
+            .copied()
+            .collect();
+        sqlx::query(
+            r#"
+            INSERT INTO product_feedback (
+                id, community_id, event_id, submitter_pubkey, category, body,
+                tags, status, event_created_at, received_at
+            ) VALUES ($1, $2, $3, $4, 'bug', 'reproduces on launch', '[]'::jsonb,
+                      $5, now(), now())
+            "#,
+        )
+        .bind(id)
+        .bind(community_id)
+        .bind(event_id)
+        .bind(vec![9_u8; 32])
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("insert feedback");
+        id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn feedback_survives_community_purge_with_null_provenance_in_list_and_detail() {
+        // purge_postgres severs tenant provenance without deleting the row:
+        // `UPDATE product_feedback SET community_id = NULL`. The LEFT JOIN must
+        // keep the row visible in both list and detail reads with null
+        // community fields and its operator-managed status intact.
+        let pool = setup_pool().await;
+        let community_id = insert_community(&pool, "severed-feedback").await;
+        let feedback_id = insert_feedback(&pool, community_id, "reviewed").await;
+
+        // Sever provenance exactly as the community purge transaction does.
+        sqlx::query("UPDATE product_feedback SET community_id = NULL WHERE community_id = $1")
+            .bind(community_id)
+            .execute(&pool)
+            .await
+            .expect("sever provenance");
+
+        let detail = get_feedback(&pool, feedback_id)
+            .await
+            .expect("query feedback")
+            .expect("severed feedback still readable in detail");
+        assert_eq!(detail.id, feedback_id);
+        assert!(
+            detail.community_id.is_none(),
+            "community_id severed to None"
+        );
+        assert!(
+            detail.community_host.is_none(),
+            "community_host has no row to join"
+        );
+        assert_eq!(detail.status, "reviewed", "operator status is retained");
+
+        let listed = list_feedback(&pool, MAX_PAGE_SIZE)
+            .await
+            .expect("list feedback");
+        let row = listed
+            .iter()
+            .find(|f| f.id == feedback_id)
+            .expect("severed feedback still appears in the list read");
+        assert!(row.community_id.is_none());
+        assert!(row.community_host.is_none());
+        assert_eq!(row.status, "reviewed");
+
+        sqlx::query("DELETE FROM product_feedback WHERE id = $1")
+            .bind(feedback_id)
+            .execute(&pool)
+            .await
+            .expect("delete feedback fixture");
+        sqlx::query("DELETE FROM communities WHERE id = $1")
+            .bind(community_id)
+            .execute(&pool)
+            .await
+            .expect("delete community fixture");
+    }
+
+    // ── Wire contract: nullable action fields are required-nullable ───────────
+
+    #[test]
+    fn action_dto_emits_nullable_fields_as_json_null_not_absent() {
+        // The desktop console types must be required-nullable, not optional:
+        // `reason`, `expiresAt`, `errorMessage` are plain `Option<T>` with no
+        // `skip_serializing_if`, so serde always emits the key (null when None).
+        // This test pins that contract so the seam can't silently drift.
+        let dto = AdminActionDto {
+            id: Uuid::nil(),
+            request_id: Uuid::nil(),
+            actor_pubkey: hex::encode([0_u8; 32]),
+            actor_role: "operator".to_string(),
+            action: "ban".to_string(),
+            status: "succeeded".to_string(),
+            cancelled_by: None,
+            reason: None,
+            expires_at: None,
+            error_message: None,
+            created_at: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+            updated_at: DateTime::<Utc>::from_timestamp(0, 0).unwrap(),
+        };
+        let value = serde_json::to_value(&dto).expect("serialize dto");
+        let obj = value.as_object().expect("dto serializes to an object");
+        for key in ["reason", "expiresAt", "errorMessage", "cancelledBy"] {
+            assert_eq!(
+                obj.get(key),
+                Some(&serde_json::Value::Null),
+                "{key} must be present and null, never absent"
+            );
+        }
+        // Field names are camelCase on the wire.
+        for key in [
+            "requestId",
+            "actorPubkey",
+            "actorRole",
+            "expiresAt",
+            "errorMessage",
+            "createdAt",
+            "updatedAt",
+        ] {
+            assert!(obj.contains_key(key), "missing camelCase key {key}");
+        }
     }
 }

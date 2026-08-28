@@ -63,6 +63,7 @@ test("relay invalidation separates relay project queries from local repo work", 
     ["project", "project-1", "pull-requests"],
     ["projects", "issues", ["project-1"]],
     ["projects", "activity-summaries", ["addr-1"]],
+    ["projects", "home-channel", "channel-1"],
     // Work items fan out over the relay and are fresh for two minutes;
     // reconnect auto-heal must be able to repair a partial result.
     ["projects", "work-items", ["project-1"], ["addr-1"]],

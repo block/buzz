@@ -61,6 +61,7 @@ import { WelcomeSetup } from "@/features/communities/ui/WelcomeSetup";
 import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityApplyErrorScreen";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
 import { setAvatarProfileSyncQueryClient } from "@/features/profile/avatarProfileSync";
+import { seedProjectSnapshot } from "@/features/projects/projectSnapshot";
 import { EncryptedBackupProvider } from "@/features/settings/EncryptedBackupProvider";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
 import { hydrateChannelHeads } from "@/features/messages/lib/channelHeadCache";
@@ -234,6 +235,7 @@ function CommunityQueryProvider({
   const [queryClient] = useState(() => {
     const client = createBuzzQueryClient();
     if (pubkey && relayUrl) {
+      seedProjectSnapshot(client, { pubkey, relayUrl });
       void hydrateChannelHeads(client, { pubkey, relayUrl });
     }
     return client;

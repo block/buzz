@@ -100,6 +100,9 @@ anyhow    = "1"
 uuid    = { version = "1", features = ["v4", "serde"] }
 chrono  = { version = "0.4", features = ["serde"] }
 
+# JWT / JWS verification (NIP-FI federated identity assertions)
+jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
+
 # HTTP client (webhook delivery)
 reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
 

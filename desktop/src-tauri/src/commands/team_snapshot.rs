@@ -133,6 +133,7 @@ fn definition_from_snapshot(
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: Default::default(),
         respond_to,
         respond_to_allowlist: behavior.respond_to_allowlist,
@@ -172,6 +173,11 @@ pub(crate) fn build_import_team(
         persona_ids,
         instructions: snapshot.team.instructions.clone(),
         is_builtin: false,
+        // An imported team starts unshared; sharing is an explicit choice.
+        shared: false,
+        // A snapshot import is not a catalog add — there is no publication
+        // coordinate to point back to.
+        catalog_source: None,
         source_dir: None,
         is_symlink: false,
         symlink_target: None,
@@ -606,6 +612,7 @@ pub async fn confirm_team_snapshot_import(
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
+            team_catalog_source: None,
             definition_respond_to: respond_to_wire.clone(),
             definition_respond_to_allowlist: definition.respond_to_allowlist.clone(),
             definition_parallelism: minted_parallelism,

@@ -298,7 +298,7 @@ jobs:
           ACTIONS_ID_TOKEN_REQUEST_URL: ''
         with:
           openai-api-key: ${{ secrets.CODEX_REVIEW_API_KEY }}
-          codex-version: '0.149.0'
+          codex-version: '0.150.1'
           model: ${{ env.CODEX_MODEL }}
           codex-args: '["-c","model_reasoning_effort=${{ env.CODEX_REASONING_EFFORT }}"]'
           # The trusted authorization job already enforced repository membership.
