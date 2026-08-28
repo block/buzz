@@ -43,7 +43,7 @@ import {
   clearTimeoutState,
   recordTimeoutFromRejection,
 } from "@/features/moderation/lib/timeoutStore";
-import { relayClient, setVisibleChannel } from "@/shared/api/relayClient";
+import { acquireVisibleChannel, relayClient } from "@/shared/api/relayClient";
 import { customEmojiQueryKey } from "@/features/custom-emoji/hooks";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { reactionEmojiUrl } from "@/shared/api/customEmoji";
@@ -60,6 +60,7 @@ import type { Channel, Identity, RelayEvent } from "@/shared/api/types";
 // Same .mjs the renderer uses, so the cache-update projection can't drift
 // from the on-render overlay.
 import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay.mjs";
+import { createChannelLiveSubscriptionRegistry } from "@/features/messages/lib/channelLiveSubscriptionRegistry";
 import {
   emptyChannelWindowStore,
   mapChannelWindowEvents,
@@ -90,6 +91,25 @@ type MessageQueryContext = {
 
 const CHANNEL_TIMELINE_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
 const CHANNEL_AUX_KINDS = new Set<number>(CHANNEL_AUX_EVENT_KINDS);
+const channelSubscriptionRegistries = new WeakMap<
+  QueryClient,
+  ReturnType<typeof createChannelLiveSubscriptionRegistry>
+>();
+
+function channelSubscriptionRegistry(queryClient: QueryClient) {
+  const existing = channelSubscriptionRegistries.get(queryClient);
+  if (existing) return existing;
+  const created = createChannelLiveSubscriptionRegistry({
+    onError: (message, channelId, error) =>
+      console.error(message, channelId, error),
+    subscribe: (channelId, onEvent) =>
+      relayClient.subscribeToChannelLive(channelId, onEvent),
+    subscribeToReconnects: (onReconnect) =>
+      relayClient.subscribeToReconnects(onReconnect),
+  });
+  channelSubscriptionRegistries.set(queryClient, created);
+  return created;
+}
 
 export function resolveCachedReplyRootId(
   parentEventId: string,
@@ -398,10 +418,7 @@ export function useChannelSubscription(channel: Channel | null) {
   // degraded networks.
   useEffect(() => {
     if (!channelId || channelType === "forum") return;
-    setVisibleChannel(channelId);
-    return () => {
-      setVisibleChannel(null);
-    };
+    return acquireVisibleChannel(channelId);
   }, [channelId, channelType]);
 
   useEffect(() => {
@@ -409,68 +426,11 @@ export function useChannelSubscription(channel: Channel | null) {
       return;
     }
 
-    let isDisposed = false;
-    let cleanup: (() => Promise<void>) | undefined;
-    const disposeReconnectListener = relayClient.subscribeToReconnects(() => {
-      void refreshNewestWindow().catch((error) => {
-        if (!isDisposed) {
-          console.error(
-            "Failed to refresh channel window after reconnecting",
-            channelId,
-            error,
-          );
-        }
-      });
+    return channelSubscriptionRegistry(queryClient).acquire(channelId, {
+      onEvent: appendMessage,
+      refresh: refreshNewestWindow,
     });
-
-    // The live subscription starts at "now", so it cannot close the gap
-    // between the last page snapshot and subscription establishment. Always
-    // refresh once subscription setup settles — on success because freshness
-    // alone is not proof that no relay events landed in that interval, and on
-    // failure because a hydrated channel has no other authoritative fetch:
-    // the relay window endpoint may be healthy even when the live socket is
-    // not, and the reconnect listener above re-syncs when it recovers.
-    const refreshAfterSubscribe = (outcome: string) => {
-      if (isDisposed) return;
-      void refreshNewestWindow().catch((error) => {
-        if (!isDisposed) {
-          console.error(
-            `Failed to refresh channel window after ${outcome}`,
-            channelId,
-            error,
-          );
-        }
-      });
-    };
-    relayClient
-      .subscribeToChannelLive(channelId, (event) => {
-        if (!isDisposed) {
-          appendMessage(event);
-        }
-      })
-      .then(
-        (dispose) => {
-          if (isDisposed) {
-            void dispose();
-            return;
-          }
-          cleanup = dispose;
-          refreshAfterSubscribe("subscribing");
-        },
-        (error) => {
-          console.error("Failed to subscribe to channel", channelId, error);
-          refreshAfterSubscribe("subscription failure");
-        },
-      );
-
-    return () => {
-      isDisposed = true;
-      disposeReconnectListener();
-      if (cleanup) {
-        void cleanup();
-      }
-    };
-  }, [channelId, channelType]);
+  }, [channelId, channelType, queryClient]);
 }
 
 export function useSendMessageMutation(

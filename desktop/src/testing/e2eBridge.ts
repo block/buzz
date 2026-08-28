@@ -353,6 +353,8 @@ type E2eConfig = {
     /** Reject `clear_pending_navigation_deep_links` with this message. */
     clearPendingNavigationDeepLinksError?: string;
     openDmDelayMs?: number;
+    /** Reject successive `open_dm` calls, then resume. */
+    openDmErrors?: (string | null)[];
     sendMessageDelayMs?: number;
     /** Delay (ms) for `start_managed_agent` so e2e tests can switch the
      *  community mid-startup and observe the fail-closed scope check. */
@@ -1201,7 +1203,8 @@ declare global {
       kind: number;
     }) => boolean;
     __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
-      channelName: string;
+      channelId?: string;
+      channelName?: string;
       content: string;
       parentEventId?: string | null;
       pubkey?: string;
@@ -6983,6 +6986,8 @@ async function handleOpenDm(
   // active community/identity.
   assertExpectedRelayScope(args.expectedRelayUrl, config);
   assertExpectedSigner(args.expectedSignerPubkey, config);
+  const openError = config?.mock?.openDmErrors?.shift();
+  if (openError) throw new Error(openError);
 
   const normalizedPubkeys = normalizeParticipantPubkeys(args.pubkeys);
   if (normalizedPubkeys.length === 0) {
@@ -10859,6 +10864,7 @@ export function maybeInstallE2eTauriMocks() {
     await emitMockHuddleState();
   };
   window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ = ({
+    channelId,
     channelName,
     content,
     parentEventId,
@@ -10870,11 +10876,13 @@ export function maybeInstallE2eTauriMocks() {
     pending,
     id,
   }) => {
-    const channel = mockChannels.find(
-      (candidate) => candidate.name === channelName,
+    const channel = mockChannels.find((candidate) =>
+      channelId ? candidate.id === channelId : candidate.name === channelName,
     );
     if (!channel) {
-      throw new Error(`Mock channel ${channelName} not found.`);
+      throw new Error(
+        `Mock channel ${channelId ?? channelName ?? "<missing>"} not found.`,
+      );
     }
 
     return emitMockChannelMessage(

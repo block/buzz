@@ -1,16 +1,13 @@
 import { RelayClient } from "@/shared/api/relayClientSession";
+import { createVisibleChannelOwnership } from "@/shared/api/visibleChannelOwnership";
 
 export const relayClient = new RelayClient();
+const visibleChannelOwnership = createVisibleChannelOwnership((channelId) =>
+  relayClient.setVisibleChannelId(channelId),
+);
 
-/**
- * Notify the relay client which channel is currently visible in the UI.
- *
- * On reconnect, subscriptions for the visible channel are sent in the first
- * replay batch so the user sees their active channel recover before others
- * on degraded networks.
- *
- * Call with `null` when the user navigates away from a channel view.
- */
-export function setVisibleChannel(id: string | null): void {
-  relayClient.setVisibleChannelId(id);
+/** Keep reconnect priority on the newest surface without letting an older
+ * surface's cleanup clear a channel that remains visible elsewhere. */
+export function acquireVisibleChannel(id: string): () => void {
+  return visibleChannelOwnership.acquire(id);
 }

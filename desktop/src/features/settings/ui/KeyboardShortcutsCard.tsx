@@ -3,6 +3,7 @@ import {
   getPlatformKeys,
   type KeyboardShortcut,
 } from "@/shared/lib/keyboard-shortcuts";
+import { useFeatureEnabled } from "@/shared/features";
 import {
   SettingsOptionGroup,
   SettingsOptionGroupList,
@@ -33,7 +34,10 @@ function KeyCombo({ shortcut }: { shortcut: KeyboardShortcut }) {
 }
 
 export function KeyboardShortcutsCard() {
-  const categories = getShortcutsByCategory();
+  const bestieEnabled = useFeatureEnabled("bestie");
+  const categories = getShortcutsByCategory(
+    bestieEnabled ? new Set(["bestie"]) : undefined,
+  );
 
   return (
     <section className="min-w-0" data-testid="settings-shortcuts">

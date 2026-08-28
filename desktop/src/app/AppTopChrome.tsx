@@ -15,6 +15,7 @@ type AppTopChromeProps = {
   onGoBack: () => void;
   onGoForward: () => void;
   hasCommunityRail?: boolean;
+  trailingContent?: React.ReactNode;
 };
 
 // Fixed px on purpose (button box + glyph): these controls sit beside the
@@ -58,6 +59,7 @@ export function AppTopChrome({
   onGoBack,
   onGoForward,
   hasCommunityRail = false,
+  trailingContent,
 }: AppTopChromeProps) {
   const topChromeRef = React.useRef<HTMLDivElement>(null);
   const isFullscreen = useIsFullscreen();
@@ -160,6 +162,13 @@ export function AppTopChrome({
         data-tauri-drag-region
         id="app-top-chrome-content"
       />
+      <div
+        className={cn("flex shrink-0 items-center", navRowAlignmentClass)}
+        data-testid="app-top-chrome-trailing"
+        id="app-top-chrome-trailing"
+      >
+        {trailingContent}
+      </div>
     </div>
   );
 }

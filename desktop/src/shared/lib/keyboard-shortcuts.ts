@@ -19,6 +19,7 @@ export type KeyboardShortcut = {
   keys: string;
   keysWindows: string;
   category: ShortcutCategory;
+  requiredFeature?: string;
 };
 
 export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
@@ -94,6 +95,15 @@ export const KEYBOARD_SHORTCUTS: KeyboardShortcut[] = [
     keys: "⇧⌘A",
     keysWindows: "Shift+Ctrl+A",
     category: "Navigation",
+  },
+  {
+    id: "open-bestie",
+    label: "Open Bestie",
+    description: "Open or close the floating Bestie conversation",
+    keys: "⌘1",
+    keysWindows: "Ctrl+1",
+    category: "Navigation",
+    requiredFeature: "bestie",
   },
   {
     id: "toggle-sidebar",
@@ -256,15 +266,19 @@ const CATEGORY_ORDER: ShortcutCategory[] = [
   "Zoom",
 ];
 
-export function getShortcutsByCategory(): Map<
-  ShortcutCategory,
-  KeyboardShortcut[]
-> {
+export function getShortcutsByCategory(
+  enabledFeatures: ReadonlySet<string> = new Set(),
+): Map<ShortcutCategory, KeyboardShortcut[]> {
   const map = new Map<ShortcutCategory, KeyboardShortcut[]>();
   for (const cat of CATEGORY_ORDER) {
     map.set(
       cat,
-      KEYBOARD_SHORTCUTS.filter((s) => s.category === cat),
+      KEYBOARD_SHORTCUTS.filter(
+        (shortcut) =>
+          shortcut.category === cat &&
+          (!shortcut.requiredFeature ||
+            enabledFeatures.has(shortcut.requiredFeature)),
+      ),
     );
   }
   return map;

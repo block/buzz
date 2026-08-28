@@ -284,6 +284,8 @@ type MockBridgeOptions = {
   /** Reject `clear_pending_navigation_deep_links` with this message. */
   clearPendingNavigationDeepLinksError?: string;
   openDmDelayMs?: number;
+  /** Reject successive `open_dm` calls, then resume. */
+  openDmErrors?: (string | null)[];
   sendMessageDelayMs?: number;
   /** Delay (ms) for `start_managed_agent` so e2e tests can switch the
    * community mid-startup and observe the fail-closed scope check. */
