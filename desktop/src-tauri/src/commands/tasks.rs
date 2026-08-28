@@ -222,6 +222,38 @@ pub async fn tasks_set_status(
     Ok(ChannelTask::from_json(&value))
 }
 
+/// `tasks_set_assignee` — assign or clear a task's owner via the relay's PATCH.
+///
+/// REG-16. The relay has accepted this field since 0033 (`api/tasks.rs`
+/// `UpdateTaskRequest::assignee: Option<Option<String>>`, applied to
+/// `TaskPatch::assignee_pubkey`) and it is "doubly optional on the wire":
+/// field ABSENT = leave the assignee alone, field NULL = unassign. Only the
+/// desktop side was missing, so this shim adds ZERO relay surface and no
+/// migration. `None` here means unassign, and we emit an explicit JSON null to
+/// preserve that distinction rather than dropping the key.
+///
+/// Authz is wholly inherited: the relay validates the assignee is in the
+/// community and rejects callers who may not patch the task. A suggestion is
+/// never a grant.
+#[tauri::command]
+pub async fn tasks_set_assignee(
+    state: State<'_, AppState>,
+    task_id: String,
+    assignee: Option<String>,
+) -> Result<ChannelTask, String> {
+    let path = format!("{TASKS_PATH}/{task_id}");
+    // serde_json::Value::Null is emitted for `None` — the unassign case.
+    let payload = serde_json::json!({ "assignee": assignee });
+    let value = tasks_request(
+        state.inner(),
+        reqwest::Method::PATCH,
+        &path,
+        Some(payload.to_string()),
+    )
+    .await?;
+    Ok(ChannelTask::from_json(&value))
+}
+
 /// `tasks_my_workspaces` — the consolidated My-Tasks fan-in across the user's
 /// configured communities. The frontend supplies the relay base URLs of the
 /// active session's communities (bounded, recency-ordered — reflecting D2);
