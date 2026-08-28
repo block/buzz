@@ -142,6 +142,7 @@ fn build_initialize_params() -> serde_json::Value {
 /// [`AcpClient::session_new_with_origin`].
 #[derive(Debug, Clone, Copy)]
 pub struct SessionOrigin<'a> {
+    /// Buzz channel whose turn caused this ACP session to be created.
     pub channel_id: uuid::Uuid,
     /// `"dm"`, `"stream"`, … as the relay reports it; `None` when unresolved.
     pub channel_type: Option<&'a str>,
@@ -700,7 +701,7 @@ impl AcpClient {
         let result = self.send_request("session/load", params).await;
         self.replaying_session = false;
         let result = result?;
-        tracing::info!(target: "acp::session", "session resumed: {session_id}");
+        tracing::info!(target: "acp::session", session_id, "session resumed");
         Ok(result)
     }
 

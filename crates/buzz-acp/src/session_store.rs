@@ -21,7 +21,8 @@
 //!   model it was created under, so resuming across a model change would
 //!   silently ignore the change.
 //! - `permission_mode` — same shape: `agent_supports_mode` reads the
-//!   `session/new` response before `apply_permission_mode` fires.
+//!   `session/new` response before `apply_permission_mode` fires. An
+//!   unsupported request records the agent's default, not the requested mode.
 //!
 //! Everything else the harness sends (system prompt, team instructions, MCP
 //! server list, agent core memory) is delivered per *turn* or re-sent on the
@@ -90,11 +91,12 @@ pub struct StoreScope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionRecord {
+    /// Opaque ACP session identifier returned by `session/new`.
     pub session_id: String,
-    /// `desired_model` at creation; `None` means the agent's own default.
+    /// Model successfully applied at creation; `None` means the agent's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Permission mode wire string at creation (`"default"`, `"bypassPermissions"`, …).
+    /// Permission mode successfully applied at creation (`"default"` when skipped).
     pub permission_mode: String,
 }
 
@@ -115,6 +117,7 @@ struct StoreFile {
     sessions: BTreeMap<Uuid, SessionRecord>,
 }
 
+/// Durable, relay-and-agent-scoped channel-to-session receipt store.
 #[derive(Debug)]
 pub struct SessionStore {
     /// `None` disables persistence: `get` is always empty, `put`/`remove` no-op.
@@ -149,10 +152,10 @@ impl SessionStore {
         let sessions = read_scoped(&path, &scope);
         tracing::info!(
             target: "session_store",
-            "session store {}: {} channel session(s) remembered for relay {}",
-            path.display(),
-            sessions.len(),
-            scope.relay,
+            path = %path.display(),
+            session_count = sessions.len(),
+            relay = %scope.relay,
+            "session store opened"
         );
         Self {
             path: Some(path),
@@ -161,6 +164,7 @@ impl SessionStore {
         }
     }
 
+    /// Whether this store has a persistence path configured.
     pub fn is_enabled(&self) -> bool {
         self.path.is_some()
     }
@@ -206,8 +210,9 @@ impl SessionStore {
         if let Err(e) = write_atomic(path, &self.scope, &sessions) {
             tracing::warn!(
                 target: "session_store",
-                "cannot write session store {}: {e}",
-                path.display()
+                path = %path.display(),
+                error = %e,
+                "cannot write session store"
             );
         }
         *cache = sessions;
@@ -220,9 +225,10 @@ fn read_scoped(path: &Path, scope: &StoreScope) -> BTreeMap<Uuid, SessionRecord>
         Ok(meta) if meta.len() > MAX_STORE_BYTES => {
             tracing::warn!(
                 target: "session_store",
-                "ignoring session store {} — {} bytes exceeds the {MAX_STORE_BYTES} byte cap",
-                path.display(),
-                meta.len()
+                path = %path.display(),
+                size_bytes = meta.len(),
+                max_size_bytes = MAX_STORE_BYTES,
+                "ignoring oversized session store"
             );
             return BTreeMap::new();
         }
@@ -231,8 +237,9 @@ fn read_scoped(path: &Path, scope: &StoreScope) -> BTreeMap<Uuid, SessionRecord>
             Err(e) => {
                 tracing::warn!(
                     target: "session_store",
-                    "cannot read session store {}: {e}",
-                    path.display()
+                    path = %path.display(),
+                    error = %e,
+                    "cannot read session store"
                 );
                 return BTreeMap::new();
             }
@@ -241,8 +248,9 @@ fn read_scoped(path: &Path, scope: &StoreScope) -> BTreeMap<Uuid, SessionRecord>
         Err(e) => {
             tracing::warn!(
                 target: "session_store",
-                "cannot stat session store {}: {e}",
-                path.display()
+                path = %path.display(),
+                error = %e,
+                "cannot stat session store"
             );
             return BTreeMap::new();
         }
@@ -253,8 +261,9 @@ fn read_scoped(path: &Path, scope: &StoreScope) -> BTreeMap<Uuid, SessionRecord>
         Err(e) => {
             tracing::warn!(
                 target: "session_store",
-                "ignoring malformed session store {}: {e}",
-                path.display()
+                path = %path.display(),
+                error = %e,
+                "ignoring malformed session store"
             );
             return BTreeMap::new();
         }
@@ -262,21 +271,22 @@ fn read_scoped(path: &Path, scope: &StoreScope) -> BTreeMap<Uuid, SessionRecord>
     if file.version != STORE_VERSION {
         tracing::warn!(
             target: "session_store",
-            "ignoring session store {} written by version {} (this harness writes {STORE_VERSION})",
-            path.display(),
-            file.version
+            path = %path.display(),
+            stored_version = file.version,
+            current_version = STORE_VERSION,
+            "ignoring session store with incompatible version"
         );
         return BTreeMap::new();
     }
     if file.scope != *scope {
         tracing::warn!(
             target: "session_store",
-            "ignoring session store {} — it belongs to relay {} / agent {}, not {} / {}",
-            path.display(),
-            file.scope.relay,
-            file.scope.agent_pubkey,
-            scope.relay,
-            scope.agent_pubkey,
+            path = %path.display(),
+            stored_relay = %file.scope.relay,
+            stored_agent_pubkey = %file.scope.agent_pubkey,
+            expected_relay = %scope.relay,
+            expected_agent_pubkey = %scope.agent_pubkey,
+            "ignoring session store with mismatched scope"
         );
         return BTreeMap::new();
     }

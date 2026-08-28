@@ -136,17 +136,11 @@ pub struct SessionState {
     ///
     /// An indeterminate failure (a timeout, a broken pipe, an agent that died
     /// mid-load) is not evidence the remembered session is gone, so the receipt
-    /// survives it — but a channel whose load can never finish must not stall
-    /// forever, so after [`MAX_INDETERMINATE_RESUMES`] the receipt is treated as
-    /// definitively gone and the channel starts fresh. In-memory only: a restart
-    /// is a fresh chance to reach the session.
+    /// survives it. The count is diagnostic only; repetition cannot turn an
+    /// indeterminate transport failure into a definitive rejection. In-memory
+    /// only: a restart is a fresh chance to reach the session.
     pub resume_failures: HashMap<Uuid, u32>,
 }
-
-/// Consecutive indeterminate `session/load` failures a channel may accumulate
-/// before its receipt is discarded and a fresh session opened. See
-/// [`SessionState::resume_failures`].
-const MAX_INDETERMINATE_RESUMES: u32 = 3;
 
 impl SessionState {
     /// Invalidate the session (and turn counter) for a specific prompt source.
@@ -1027,9 +1021,11 @@ enum ResumeAttempt {
 /// *answering*: it no longer has that session (a reclaimed sandbox, a machine
 /// change), so the receipt is worthless and is dropped. A timeout or a dead pipe
 /// is not an answer, and dropping the receipt there would destroy a perfectly
-/// good session — and risk a second, competing one — over a transient blip. A
-/// channel that keeps failing indeterminately is bounded by
-/// [`MAX_INDETERMINATE_RESUMES`] so it cannot stall forever.
+/// good session — and risk a second, competing one — over a transient blip. An
+/// indeterminate failure never invalidates the receipt. Repetition does not
+/// turn a timeout or dead pipe into evidence that the remembered session is
+/// gone, and starting fresh in that state could create a second session and
+/// lose thread-scoped state.
 async fn resume_remembered_session(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
@@ -1042,8 +1038,10 @@ async fn resume_remembered_session(
     let forget = |reason: &str| {
         tracing::info!(
             target: "pool::session",
-            "channel {channel_id} remembers session {} but {reason}; starting fresh",
-            remembered.session_id
+            channel_id = %channel_id,
+            session_id = %remembered.session_id,
+            reason,
+            "remembered session is incompatible; starting fresh"
         );
         ctx.session_store.remove(channel_id);
         ResumeAttempt::StartFresh
@@ -1083,8 +1081,9 @@ async fn resume_remembered_session(
         Ok(_) => {
             tracing::info!(
                 target: "pool::session",
-                "resumed session {} for channel {channel_id} after restart",
-                remembered.session_id
+                channel_id = %channel_id,
+                session_id = %remembered.session_id,
+                "resumed session after restart"
             );
             agent.state.resume_failures.remove(&channel_id);
             ResumeAttempt::Resumed(remembered.session_id)
@@ -1097,16 +1096,13 @@ async fn resume_remembered_session(
         Err(error) => {
             let failures = agent.state.resume_failures.entry(channel_id).or_insert(0);
             *failures += 1;
-            if *failures >= MAX_INDETERMINATE_RESUMES {
-                agent.state.resume_failures.remove(&channel_id);
-                return forget(&format!(
-                    "session/load failed {MAX_INDETERMINATE_RESUMES} times without a verdict (last: {error})"
-                ));
-            }
             tracing::warn!(
                 target: "pool::session",
-                "session/load for channel {channel_id} gave no verdict ({error}); keeping session {} and retrying (attempt {failures}/{MAX_INDETERMINATE_RESUMES})",
-                remembered.session_id
+                channel_id = %channel_id,
+                session_id = %remembered.session_id,
+                attempt = *failures,
+                error = %error,
+                "session/load gave no verdict; keeping receipt for retry"
             );
             ResumeAttempt::Indeterminate(error)
         }
@@ -1118,7 +1114,8 @@ async fn resume_remembered_session(
 ///
 /// On error from `session_new_full()`, returns the `AcpError` — caller handles
 /// error reporting. Model-switch failures are logged and gracefully ignored
-/// (the agent proceeds with its default model).
+/// (the agent proceeds with its default model). The returned configuration is
+/// what was actually applied, not merely what was requested.
 struct NewSessionChannelContext<'a> {
     huddle_instructions: Option<&'a str>,
     canvas: Option<&'a str>,
@@ -1132,7 +1129,7 @@ async fn create_session_and_apply_model(
     ctx: &PromptContext,
     agent_core: Option<&str>,
     channel: NewSessionChannelContext<'_>,
-) -> Result<String, AcpError> {
+) -> Result<(String, Option<String>, String), AcpError> {
     // Build base_prompt + system_prompt + agent core + canvas metadata into a
     // single prompt. Standard protocol-v2 agents receive it in `session/new`;
     // Goose receives it through the custom request below. Legacy agents receive
@@ -1218,8 +1215,7 @@ async fn create_session_and_apply_model(
     let switch_succeeded = if let Some(ref desired) = agent.desired_model {
         match resolve_model_switch_method(&resp.raw, desired) {
             Some(method) => {
-                apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?;
-                true
+                apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await?
             }
             None => {
                 tracing::warn!(
@@ -1267,13 +1263,27 @@ async fn create_session_and_apply_model(
     // advertises the requested mode in session/new. Agents that don't support
     // the mode (e.g., goose crashes on unrecognized set_config_option values)
     // are safely skipped — the harness auto-approves via handle_permission_request.
-    if !ctx.permission_mode.is_default()
+    let permission_mode_applied = if !ctx.permission_mode.is_default()
         && agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
     {
-        apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await?;
-    }
+        apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode).await?
+    } else {
+        false
+    };
 
-    Ok(resp.session_id)
+    let effective_model = switch_succeeded
+        .then(|| agent.desired_model.clone())
+        .flatten();
+    let effective_permission_mode = if permission_mode_applied {
+        ctx.permission_mode.as_wire_str()
+    } else {
+        PermissionMode::Default.as_wire_str()
+    };
+    Ok((
+        resp.session_id,
+        effective_model,
+        effective_permission_mode.to_string(),
+    ))
 }
 
 fn mcp_servers_with_git_origin(
@@ -1306,16 +1316,15 @@ fn mcp_servers_with_git_origin(
 
 /// Send the appropriate ACP model-switch request with a timeout.
 ///
-/// On timeout or error, logs a warning and returns — the caller proceeds
-/// with the agent's default model. This is intentionally non-fatal: a stale
-/// response from a timed-out request is safely ignored by `read_until_response`
-/// (non-matching JSON-RPC IDs are skipped).
+/// Returns whether the agent accepted the switch. Application-level rejection
+/// is non-fatal and returns `false`; transport errors remain fatal because the
+/// stream may no longer be usable.
 async fn apply_model_switch(
     acp: &mut AcpClient,
     session_id: &str,
     desired: &str,
     method: &ModelSwitchMethod,
-) -> Result<(), AcpError> {
+) -> Result<bool, AcpError> {
     let method_label = match method {
         ModelSwitchMethod::ConfigOption { config_id, .. } => {
             format!("configOption (configId={config_id})")
@@ -1345,6 +1354,7 @@ async fn apply_model_switch(
                 target: "pool::model",
                 "applied model {desired} via {method_label} on session {session_id}"
             );
+            return Ok(true);
         }
         // Transport-class errors may have corrupted the stdio stream — propagate
         // so the caller can respawn the agent instead of reusing a poisoned one.
@@ -1376,7 +1386,7 @@ async fn apply_model_switch(
             return Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT));
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Set the session permission mode via `session/set_config_option`.
@@ -1407,7 +1417,7 @@ async fn apply_permission_mode(
     acp: &mut AcpClient,
     session_id: &str,
     mode: &PermissionMode,
-) -> Result<(), AcpError> {
+) -> Result<bool, AcpError> {
     let wire = mode.as_wire_str();
     let result = tokio::time::timeout(PERMISSION_MODE_TIMEOUT, async {
         acp.session_set_config_option(session_id, "mode", wire)
@@ -1421,6 +1431,7 @@ async fn apply_permission_mode(
                 target: "pool::permission",
                 "applied permission mode {wire:?} on session {session_id}"
             );
+            return Ok(true);
         }
         // Transport-class errors may have corrupted the stdio stream — propagate
         // so the caller can respawn the agent.
@@ -1451,7 +1462,7 @@ async fn apply_permission_mode(
             return Err(AcpError::Timeout(PERMISSION_MODE_TIMEOUT));
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 /// Prepend a legacy agent's standing context to a user-message body.
@@ -1927,10 +1938,12 @@ pub async fn run_prompt_task(
                     )
                     .await
                     {
-                        Ok(sid) => {
+                        Ok((sid, effective_model, effective_permission_mode)) => {
                             tracing::info!(
                                 target: "pool::session",
-                                "created session {sid} for channel {cid}"
+                                session_id = %sid,
+                                channel_id = %cid,
+                                "created session"
                             );
                             agent.state.sessions.insert(*cid, sid.clone());
                             // Record the configuration the session was created
@@ -1941,8 +1954,8 @@ pub async fn run_prompt_task(
                                 *cid,
                                 SessionRecord {
                                     session_id: sid.clone(),
-                                    model: agent.desired_model.clone(),
-                                    permission_mode: ctx.permission_mode.as_wire_str().to_string(),
+                                    model: effective_model,
+                                    permission_mode: effective_permission_mode,
                                 },
                             );
                             agent
@@ -2005,7 +2018,7 @@ pub async fn run_prompt_task(
                 )
                 .await
                 {
-                    Ok(sid) => {
+                    Ok((sid, _effective_model, _effective_permission_mode)) => {
                         tracing::info!(
                             target: "pool::session",
                             "created heartbeat session {sid} for agent {}",
@@ -7806,8 +7819,18 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     /// `load_reply` is spliced in verbatim as the `session/load` reply body, so
     /// a test can make the load succeed (`"result":{}`), fail definitively
     /// (`"error":{...}`), or — with an empty string — never answer at all.
-    fn restart_script(capture: &std::path::Path, session_id: &str, load_reply: &str) -> String {
+    /// Extended restart fixture for configuration persistence regressions.
+    /// `session_new_result` becomes the `session/new` result, and
+    /// `config_reply` becomes the reply body for every set-config request.
+    fn restart_script_with_config(
+        capture: &std::path::Path,
+        load_reply: &str,
+        session_new_result: &serde_json::Value,
+        config_reply: &str,
+    ) -> String {
         let quoted = capture.to_string_lossy().replace('\'', "'\\''");
+        let session_new_result = session_new_result.to_string().replace('"', "\\\"");
+        let config_reply = config_reply.replace('"', "\\\"");
         let load_arm = if load_reply.is_empty() {
             // No reply, and no further reads: the agent goes away mid-load,
             // which is exactly the indeterminate case.
@@ -7823,9 +7846,11 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     *'"method":"initialize"'*)
       printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"protocolVersion\":1,\"agentCapabilities\":{{\"loadSession\":true}}}}}}" ;;
     *'"method":"session/new"'*)
-      printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"sessionId\":\"{session_id}\"}}}}" ;;
+      printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{session_new_result}}}" ;;
     *'"method":"session/load"'*)
       {load_arm} ;;
+    *'"method":"session/set_config_option"'*)
+      printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,{config_reply}}}" ;;
     *)
       printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"stopReason\":\"end_turn\"}}}}" ;;
   esac
@@ -7841,11 +7866,26 @@ done"#
         session_id: &str,
         load_reply: &str,
     ) -> OwnedAgent {
+        restart_agent_with_config(
+            capture,
+            load_reply,
+            &serde_json::json!({ "sessionId": session_id }),
+            r#""result":{}"#,
+        )
+        .await
+    }
+
+    async fn restart_agent_with_config(
+        capture: &std::path::Path,
+        load_reply: &str,
+        session_new_result: &serde_json::Value,
+        config_reply: &str,
+    ) -> OwnedAgent {
         let mut acp = AcpClient::spawn(
             "bash",
             &[
                 "-c".to_string(),
-                restart_script(capture, session_id, load_reply),
+                restart_script_with_config(capture, load_reply, session_new_result, config_reply),
             ],
             &[],
             false,
@@ -8106,7 +8146,6 @@ done"#
             .collect();
         assert!(methods.iter().any(|m| m == "session/load"));
         assert!(methods.iter().any(|m| m == "session/new"));
-
         let _ = std::fs::remove_file(&store_path);
         let _ = std::fs::remove_file(&capture);
     }
@@ -8131,7 +8170,8 @@ done"#
 
         let capture = restart_store_path("indeterminate-capture").with_extension("ndjson");
         // Empty reply body → the scripted agent exits without answering.
-        let agent = restart_agent(&capture, "ses-competing", "").await;
+        let mut agent = restart_agent(&capture, "ses-competing", "").await;
+        agent.state.resume_failures.insert(channel_id, 2);
         let mut result = restart_turn(agent, &ctx, channel_id, "turn-1").await;
         assert!(
             !matches!(result.outcome, PromptOutcome::Ok(_)),
@@ -8189,9 +8229,95 @@ done"#
             "a session built for another model must not even be loaded: {methods:?}"
         );
         assert!(methods.iter().any(|m| m == "session/new"));
+        assert_eq!(
+            ctx.session_store
+                .get(channel_id)
+                .and_then(|record| record.model),
+            None,
+            "an unsupported desired model must not be recorded as the session's effective model"
+        );
 
         let _ = std::fs::remove_file(&store_path);
         let _ = std::fs::remove_file(&capture);
+    }
+
+    /// Advertising a requested model or permission mode is not proof that the
+    /// agent applied it. An application-level rejection leaves both settings
+    /// at their defaults, and the durable receipt must say so; otherwise a
+    /// restart would load the session as if the requested configuration were
+    /// active.
+    #[tokio::test]
+    async fn rejected_advertised_configuration_persists_defaults_and_is_not_resumed() {
+        let store_path = restart_store_path("rejected-config");
+        let channel_id = Uuid::new_v4();
+        let mut ctx = restart_ctx(&store_path, channel_id);
+        ctx.permission_mode = PermissionMode::BypassPermissions;
+        let ctx = Arc::new(ctx);
+
+        let advertised = serde_json::json!({
+            "sessionId": "ses-default-config",
+            "configOptions": [{
+                "configId": "model",
+                "category": "model",
+                "options": [{ "value": "gpt-5" }]
+            }],
+            "modes": {
+                "availableModes": [{ "id": "bypassPermissions" }]
+            }
+        });
+        let rejected = r#""error":{"code":-32602,"message":"configuration rejected"}"#;
+
+        // Process one: both settings are advertised, but both set-config calls
+        // receive application-level errors and the agent continues on default.
+        let capture_one = restart_store_path("rejected-config-1").with_extension("ndjson");
+        let mut agent =
+            restart_agent_with_config(&capture_one, r#""result":{}"#, &advertised, rejected).await;
+        agent.desired_model = Some("gpt-5".into());
+        let mut first = restart_turn(agent, &ctx, channel_id, "turn-1").await;
+        assert!(matches!(
+            first.outcome,
+            PromptOutcome::Ok(StopReason::EndTurn)
+        ));
+        first.agent.acp.shutdown().await;
+        assert_eq!(
+            ctx.session_store.get(channel_id),
+            Some(SessionRecord {
+                session_id: "ses-default-config".into(),
+                model: None,
+                permission_mode: "default".into(),
+            })
+        );
+
+        // Process two still requests the rejected configuration. It must not
+        // load the receipt as though those settings had applied.
+        let capture_two = restart_store_path("rejected-config-2").with_extension("ndjson");
+        let mut agent = restart_agent_with_config(
+            &capture_two,
+            r#""result":{}"#,
+            &serde_json::json!({
+                "sessionId": "ses-replacement-default",
+                "configOptions": advertised["configOptions"].clone(),
+                "modes": advertised["modes"].clone(),
+            }),
+            rejected,
+        )
+        .await;
+        agent.desired_model = Some("gpt-5".into());
+        let mut second = restart_turn(agent, &ctx, channel_id, "turn-2").await;
+        second.agent.acp.shutdown().await;
+        let methods: Vec<String> = captured_methods(&capture_two)
+            .iter()
+            .filter_map(|request| request["method"].as_str().map(str::to_owned))
+            .collect();
+        assert!(
+            !methods.iter().any(|method| method == "session/load"),
+            "rejected configuration must not later be treated as effective: {methods:?}"
+        );
+        assert!(methods.iter().any(|method| method == "session/new"));
+
+        for path in [&store_path, &capture_one, &capture_two] {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     /// Every intentional fresh-session transition must clear RAM *and* disk
