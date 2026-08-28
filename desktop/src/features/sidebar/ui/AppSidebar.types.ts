@@ -43,6 +43,7 @@ export type AppSidebarProps = {
     | "messages"
     | "agents"
     | "workflows"
+    | "meetings"
     | "pulse"
     | "projects";
   unreadChannelCounts: ReadonlyMap<string, number>;
@@ -83,6 +84,7 @@ export type AppSidebarProps = {
   onRemoveCommunity: (id: string) => Promise<LeaveCommunityResult | undefined>;
   onCreateAgent: () => void;
   onSelectAgents: () => void;
+  onSelectMeetings: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;

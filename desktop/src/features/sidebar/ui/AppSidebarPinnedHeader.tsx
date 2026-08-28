@@ -1,4 +1,4 @@
-import { Activity, Bot, Folders, Inbox, Zap } from "lucide-react";
+import { Activity, Bot, Folders, Inbox, Video, Zap } from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { SidebarProjectsSection } from "@/features/sidebar/ui/SidebarProjectsSection";
@@ -19,6 +19,7 @@ type SidebarSelectedView =
   | "messages"
   | "agents"
   | "workflows"
+  | "meetings"
   | "pulse"
   | "projects";
 
@@ -42,6 +43,7 @@ type AppSidebarPrimaryMenuProps = {
   homeBadgeCount: number;
   onSelectAgents: () => void;
   onSelectHome: () => void;
+  onSelectMeetings: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
@@ -92,6 +94,7 @@ export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
   onSelectHome,
+  onSelectMeetings,
   onSelectProjects,
   onSelectPulse,
   onSelectWorkflows,
@@ -178,6 +181,20 @@ export function AppSidebarPrimaryMenu({
               >
                 <Zap className="h-4 w-4" />
                 <SidebarMenuLabel>Workflows</SidebarMenuLabel>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </FeatureGate>
+          <FeatureGate feature="meetings">
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                data-testid="open-meetings-view"
+                isActive={selectedView === "meetings"}
+                onClick={onSelectMeetings}
+                tooltip="Meetings"
+                type="button"
+              >
+                <Video className="h-4 w-4" />
+                <SidebarMenuLabel>Meetings</SidebarMenuLabel>
               </SidebarMenuButton>
             </SidebarMenuItem>
           </FeatureGate>

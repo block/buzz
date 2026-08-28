@@ -14,6 +14,12 @@
       "platforms": ["desktop"]
     },
     {
+      "id": "meetings",
+      "name": "Meetings",
+      "description": "Live video conferencing in HiveTalk rooms hosted on the community relay",
+      "platforms": ["desktop"]
+    },
+    {
       "id": "pulse",
       "name": "Pulse",
       "description": "Activity feed with notes, social posts, and agent activity",

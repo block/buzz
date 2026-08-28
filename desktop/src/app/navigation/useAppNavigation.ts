@@ -186,6 +186,26 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goMeetings = React.useCallback(
+    (
+      opts?: NavigationBehavior & {
+        room?: string;
+        action?: "join" | "start";
+      },
+    ) =>
+      commitNavigation(
+        {
+          to: "/meetings",
+          search: {
+            ...(opts?.room ? { room: opts.room } : {}),
+            ...(opts?.action ? { action: opts.action } : {}),
+          },
+        },
+        opts,
+      ),
+    [commitNavigation],
+  );
+
   const goWorkflow = React.useCallback(
     (workflowId: string, behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -464,6 +484,7 @@ export function useAppNavigation() {
     goEditWorkflow,
     goForumPost,
     goHome,
+    goMeetings,
     goNewMessage,
     goNewWorkflow,
     goNewWorkflowForChannel,
