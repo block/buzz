@@ -366,16 +366,18 @@ export function pruneObservedUnreadByMarkers(
   eventsByChannel: Map<string, Map<string, ObservedUnreadEvent>>,
   latestByChannel: Map<string, number>,
   getChannelReadAt: (channelId: string) => number | null,
+  getChannelTimelineReadAt: (channelId: string) => number | null,
   getOwnTimestamp: (contextId: string) => number | null,
 ): boolean {
   let changed = false;
   for (const [channelId, eventsById] of eventsByChannel) {
     const channelReadAt = getChannelReadAt(channelId);
+    const channelTimelineReadAt = getChannelTimelineReadAt(channelId);
     const toDelete: string[] = [];
     for (const event of eventsById.values()) {
       const readAt = observedUnreadEventReadAt(
         event,
-        channelReadAt,
+        event.rootId === null ? channelTimelineReadAt : channelReadAt,
         (rootId) => getOwnTimestamp(`thread:${rootId}`),
         (messageId) => getOwnTimestamp(`msg:${messageId}`),
       );

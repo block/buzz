@@ -34,6 +34,7 @@ export const READ_STATE_MAX_SLOTS = 8;
 // two key families apart.
 export const MSG_PREFIX = "msg:";
 export const THREAD_PREFIX = "thread:";
+export const CHANNEL_TIMELINE_PREFIX = "channel-timeline:";
 
 const EVENT_ID_PATTERN = /^[0-9a-f]{64}$/;
 
@@ -47,6 +48,18 @@ export function maxReadAt(...markers: Array<number | null>): number | null {
 
 export function msgContextKey(messageId: string): string {
   return `${MSG_PREFIX}${messageId}`;
+}
+
+/**
+ * Read frontier for a channel's top-level timeline only.
+ *
+ * Passive channel viewing advances this context instead of the bare channel
+ * context. Thread and message contexts inherit the bare channel frontier, so
+ * this separation lets the visible timeline become read without acknowledging
+ * unopened thread activity that happens to be older than a later root message.
+ */
+export function channelTimelineContextKey(channelId: string): string {
+  return `${CHANNEL_TIMELINE_PREFIX}${channelId}`;
 }
 
 // Spec-conformance helpers for well-known interoperable context keys. Runtime

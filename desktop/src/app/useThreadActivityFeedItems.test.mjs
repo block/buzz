@@ -42,6 +42,45 @@ test("thread activity feed projection filters muted roots", () => {
   assert.equal(items[0]?.channelType, "stream");
 });
 
+test("direct mentions remain discoverable inside muted threads", () => {
+  const mention = threadActivityItem({ id: "mention", rootId: "muted-root" });
+  mention.tags.push(["p", "SELF"]);
+  const items = buildThreadActivityFeedItems(
+    [mention],
+    new Set(["muted-root"]),
+    [{ id: CHANNEL_ID, name: "general", channelType: "stream" }],
+    "self",
+  );
+  assert.deepEqual(
+    items.map((item) => item.id),
+    ["mention"],
+  );
+});
+
+test("only canonical broadcasts override muted threads", () => {
+  const canonical = threadActivityItem({
+    id: "canonical",
+    rootId: "muted-root",
+  });
+  canonical.tags.push(["broadcast", "1"]);
+  const noncanonical = threadActivityItem({
+    id: "noncanonical",
+    rootId: "muted-root",
+  });
+  noncanonical.tags.push(["broadcast", "0"]);
+
+  const items = buildThreadActivityFeedItems(
+    [canonical, noncanonical],
+    new Set(["muted-root"]),
+    [{ id: CHANNEL_ID, name: "general", channelType: "stream" }],
+  );
+
+  assert.deepEqual(
+    items.map((item) => item.id),
+    ["canonical"],
+  );
+});
+
 test("channel-presence fence: items from channels absent in community are filtered out", () => {
   // community A has channel-1; community B (relayed) has only channel-2.
   // Simulate A's stored items landing in B's projection call — they should

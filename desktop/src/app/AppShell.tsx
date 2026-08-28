@@ -22,7 +22,10 @@ import { useSettingsShortcuts } from "@/app/useSettingsShortcuts";
 import { useAppShellKeyboardShortcuts } from "@/app/useAppShellKeyboardShortcuts";
 import { useAppShellDesktopNotifications } from "@/app/useAppShellDesktopNotifications";
 import { useAppShellLifecycleEffects } from "@/app/useAppShellLifecycleEffects";
-import { useChannelActivityProjection } from "@/app/useChannelActivityProjection";
+import {
+  useChannelActivityProjection,
+  useMergedUnreadThreadChannelIds,
+} from "@/app/useChannelActivityProjection";
 import { useTauriWindowDrag } from "@/app/useTauriWindowDrag";
 import { useWebviewZoomShortcuts } from "@/app/useWebviewZoomShortcuts";
 import { useHuddlePresentation } from "@/app/useHuddlePresentation";
@@ -193,7 +196,6 @@ export function AppShell() {
     communitiesHook.activeCommunity?.relayUrl,
   );
   useAgentsDataRefresh();
-  // Chunk F: auto-restart drifted idle agents (per-agent opt-out, default ON).
   useAutoRestartPolicy();
   // Owner-global observer ingestion: receives + decrypts agent observer
   // frames and keeps derived active-turn liveness in sync app-wide, so no
@@ -373,6 +375,7 @@ export function AppShell() {
     unreadChannelIds,
     topLevelUnreadChannelIds,
     unreadChannelCounts,
+    unreadThreadEventIdsByChannel,
     highPriorityUnreadChannelIds,
     unreadChannelNotificationCount,
     getEffectiveTimestamp: getChannelReadAt,
@@ -404,7 +407,6 @@ export function AppShell() {
       followedRootIds,
     },
   );
-
   const {
     getThreadReadAt,
     markThreadRead,
@@ -414,7 +416,7 @@ export function AppShell() {
     threadActivityFeedItems,
     locallyUnreadFeedItems,
     unreadThreadFeedItems,
-    unreadThreadChannelIds,
+    unreadThreadChannelIds: previewUnreadThreadChannelIds,
   } = useChannelActivityProjection({
     channels,
     feed: homeFeedQuery.data?.feed,
@@ -425,7 +427,12 @@ export function AppShell() {
     readStateVersion,
     threadActivityItems,
     mutedRootIds,
+    currentPubkey: identityQuery.data?.pubkey,
   });
+  const unreadThreadChannelIds = useMergedUnreadThreadChannelIds(
+    previewUnreadThreadChannelIds,
+    unreadThreadEventIdsByChannel,
+  );
   const markAllChannelsRead = React.useCallback(() => {
     markAllReadSources({
       activeChannelId: activeChannel?.id ?? null,
@@ -737,6 +744,7 @@ export function AppShell() {
             threadActivityFeedItems,
             locallyUnreadFeedItems,
             unreadThreadFeedItems,
+            unreadThreadEventIdsByChannel,
             unreadThreadChannelIds,
             topLevelUnreadChannelIds,
             hasSidebarUnreadProjections: true,

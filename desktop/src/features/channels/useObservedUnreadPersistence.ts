@@ -13,15 +13,22 @@ import {
 } from "@/features/channels/observedUnreadStorage";
 import { activityScopeKey } from "@/features/channels/threadActivityStorage";
 import {
+  channelTimelineContextKey,
+  maxReadAt,
+} from "@/features/channels/readState/readStateFormat";
+import {
   recordObservedUnreadEvent,
   type ObservedUnreadEvent,
 } from "@/features/channels/unreadChannelCounts";
 import {
   ingestObservedUnread,
   openObservedUnreadScope,
-  type ObservedUnreadProjection,
-  type ObservedUnreadResponse,
-  type ObservedUnreadWireEvent,
+} from "@/shared/api/tauriObservedUnread";
+import type {
+  ObservedUnreadMembershipUpdate,
+  ObservedUnreadProjection,
+  ObservedUnreadResponse,
+  ObservedUnreadWireEvent,
 } from "@/shared/api/tauriObservedUnread";
 
 export type ObservedUnreadPersistence = {
@@ -37,6 +44,9 @@ export type ObservedUnreadPersistence = {
   ) => void;
   removeChannel: (channelId: string) => void;
   updateMembership: (kind: string, value: string, present: boolean) => void;
+  persistMembership: (
+    updates: ObservedUnreadMembershipUpdate[],
+  ) => Promise<boolean>;
   syncMarkers: (
     contextIds: Iterable<string>,
     explicitReadAt?: ReadonlyMap<string, number>,
@@ -80,7 +90,8 @@ export function useObservedUnreadPersistence(
   normalizedRelayUrl: string,
   isReadStateReady: boolean,
   readStateVersion: number,
-  getEffectiveTimestamp: (channelId: string) => number | null,
+  getChannelReadAt: (channelId: string) => number | null,
+  getChannelTimelineReadAt: (channelId: string) => number | null,
   getOwnTimestamp: (contextId: string) => number | null,
   observedUnreadEventsByChannelRef: React.MutableRefObject<
     Map<string, Map<string, ObservedUnreadEvent>>
@@ -232,7 +243,30 @@ export function useObservedUnreadPersistence(
           membership: [],
           clearChannels: [],
           clearAll: false,
-        }).then(apply);
+        }).then((response) => {
+          if (response.kind === "snapshotRequired") {
+            throw new Error(
+              "native observed-unread mutation requires snapshot",
+            );
+          }
+          apply(response);
+          // Keep newly observed events visible while the native mutation is in
+          // flight. Without this optimistic mirror, a passive channel-open can
+          // advance the timeline marker during the coalescing/IPC window and
+          // briefly erase the sidebar dot before the authoritative projection
+          // arrives. Once native acknowledges the batch, its projection owns
+          // the rows and the temporary renderer entries can be discarded.
+          for (const { event } of queued) {
+            const channelEvents = observedUnreadEventsByChannelRef.current.get(
+              event.channelId,
+            );
+            channelEvents?.delete(event.id);
+            if (channelEvents?.size === 0) {
+              observedUnreadEventsByChannelRef.current.delete(event.channelId);
+            }
+          }
+          optionsRef.current.onPruned?.();
+        });
       })
       .catch(() => {
         // Native can fail after a scope switch. Preserve the failed scope's
@@ -309,7 +343,17 @@ export function useObservedUnreadPersistence(
       (channelId) =>
         markers.has(channelId)
           ? (markers.get(channelId) ?? null)
-          : getEffectiveTimestamp(channelId),
+          : getChannelReadAt(channelId),
+      (channelId) => {
+        const channelMarker = markers.has(channelId)
+          ? (markers.get(channelId) ?? null)
+          : getChannelReadAt(channelId);
+        const timelineContext = channelTimelineContextKey(channelId);
+        const timelineMarker = markers.has(timelineContext)
+          ? (markers.get(timelineContext) ?? null)
+          : getOwnTimestamp(timelineContext);
+        return maxReadAt(channelMarker, timelineMarker);
+      },
       (contextId) =>
         markers.has(contextId)
           ? (markers.get(contextId) ?? null)
@@ -329,9 +373,14 @@ export function useObservedUnreadPersistence(
   }, []);
 
   const enqueueNative = React.useCallback(
-    (state: NativeState, mutation: NativeMutation, onSettled?: () => void) => {
+    (
+      state: NativeState,
+      mutation: NativeMutation,
+      onSettled?: (persisted: boolean) => void,
+    ) => {
       flushNative();
       chainRef.current = chainRef.current.then(async () => {
+        let persisted = false;
         try {
           const ingest = async () => {
             const current = nativeRef.current;
@@ -340,25 +389,33 @@ export function useObservedUnreadPersistence(
               current.scope.pubkey !== state.scope.pubkey ||
               current.scope.relayUrl !== state.scope.relayUrl
             )
-              return true;
+              return "scopeChanged" as const;
             const response = await ingestObservedUnread({
               scope: current.scope,
               sequence: current.sequence + 1,
               baseRevision: current.revision,
               ...mutation,
             });
-            if (response.kind === "snapshotRequired") return false;
+            if (response.kind === "snapshotRequired") return "retry" as const;
             apply(response);
-            return true;
+            return "persisted" as const;
           };
 
           try {
-            if (await ingest()) return;
+            const result = await ingest();
+            if (result !== "retry") {
+              persisted = result === "persisted";
+              return;
+            }
           } catch {}
 
           try {
             await reopen(state.scope);
-            if (await ingest()) return;
+            const result = await ingest();
+            if (result !== "retry") {
+              persisted = result === "persisted";
+              return;
+            }
           } catch {}
 
           if (
@@ -368,7 +425,7 @@ export function useObservedUnreadPersistence(
             seedFallback(mutation);
           }
         } finally {
-          onSettled?.();
+          onSettled?.(persisted);
         }
       });
     },
@@ -403,7 +460,8 @@ export function useObservedUnreadPersistence(
           clearChannels: [],
           clearAll: false,
         },
-        () => {
+        (persisted) => {
+          if (!persisted) return;
           if (scopeLoadedRef.current !== scopeKey) return;
           const current = pendingMarkersRef.current.get(scopeKey);
           if (!current) return;
@@ -506,9 +564,11 @@ export function useObservedUnreadPersistence(
         contextId,
         readAt:
           explicitReadAt?.get(contextId) ??
-          (contextId.startsWith("thread:") || contextId.startsWith("msg:")
+          (contextId.startsWith("thread:") ||
+          contextId.startsWith("msg:") ||
+          contextId.startsWith("channel-timeline:")
             ? getOwnTimestamp(contextId)
-            : getEffectiveTimestamp(contextId)),
+            : getChannelReadAt(contextId)),
       }));
       if (markers.length === 0) return;
       let pending = pendingMarkersRef.current.get(currentScope);
@@ -519,7 +579,7 @@ export function useObservedUnreadPersistence(
       for (const marker of markers) pending.set(marker.contextId, marker);
       flushPendingMarkers(currentScope);
     },
-    [currentScope, flushPendingMarkers, getEffectiveTimestamp, getOwnTimestamp],
+    [currentScope, flushPendingMarkers, getChannelReadAt, getOwnTimestamp],
   );
 
   // A read-state revision only needs to send the contexts that changed. Native
@@ -533,7 +593,8 @@ export function useObservedUnreadPersistence(
         pruneObservedUnreadByMarkers(
           observedUnreadEventsByChannelRef.current,
           latestByChannelRef.current,
-          getEffectiveTimestamp,
+          getChannelReadAt,
+          getChannelTimelineReadAt,
           getOwnTimestamp,
         )
       ) {
@@ -543,10 +604,17 @@ export function useObservedUnreadPersistence(
     }
   }, [readStateVersion, isReadStateReady]);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the mutable event ref is a stable storage container
   const schedule = React.useCallback(
     (scope: string, channelId?: string, event?: ObservedUnreadEvent) => {
       if (scopeLoadedRef.current !== scope) return;
       if (nativeRef.current && channelId && event) {
+        recordObservedUnreadEvent(
+          observedUnreadEventsByChannelRef.current,
+          channelId,
+          event,
+          1_000,
+        );
         queueRef.current.push({ scope, event: { channelId, ...event } });
         if (timerRef.current !== null) clearTimeout(timerRef.current);
         timerRef.current = setTimeout(() => {
@@ -597,20 +665,34 @@ export function useObservedUnreadPersistence(
     [enqueueNative],
   );
 
-  const updateMembership = React.useCallback(
-    (kind: string, value: string, present: boolean) => {
+  const persistMembership = React.useCallback(
+    (membership: ObservedUnreadMembershipUpdate[]) => {
+      if (membership.length === 0) return Promise.resolve(true);
       const state = nativeRef.current;
-      if (!state) return;
-      enqueueNative(state, {
-        events: [],
-        channelLatest: [],
-        markers: [],
-        membership: [{ kind, value, present }],
-        clearChannels: [],
-        clearAll: false,
+      if (!state) return Promise.resolve(false);
+      return new Promise<boolean>((resolve) => {
+        enqueueNative(
+          state,
+          {
+            events: [],
+            channelLatest: [],
+            markers: [],
+            membership,
+            clearChannels: [],
+            clearAll: false,
+          },
+          resolve,
+        );
       });
     },
     [enqueueNative],
+  );
+
+  const updateMembership = React.useCallback(
+    (kind: string, value: string, present: boolean) => {
+      void persistMembership([{ kind, value, present }]);
+    },
+    [persistMembership],
   );
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: mutable storage refs are stable containers
@@ -662,6 +744,7 @@ export function useObservedUnreadPersistence(
       schedule,
       removeChannel,
       updateMembership,
+      persistMembership,
       syncMarkers,
       advanceLatest,
       latestForChannel,
@@ -674,6 +757,7 @@ export function useObservedUnreadPersistence(
       schedule,
       removeChannel,
       updateMembership,
+      persistMembership,
       syncMarkers,
       advanceLatest,
       latestForChannel,

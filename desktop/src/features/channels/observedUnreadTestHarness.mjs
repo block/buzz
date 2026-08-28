@@ -208,7 +208,7 @@ export function makeObservedEvent({
   return {
     id,
     createdAt,
-    rootId: rootId ?? `root-${id}`,
+    rootId: rootId === undefined ? `root-${id}` : rootId,
     highPriority,
     countsTowardBadge,
     countsTowardAppBadge,
@@ -254,6 +254,7 @@ export async function mountHook(props, refs) {
     isReady,
     readStateVersion,
     getTs,
+    getTimelineTs,
     getOwn,
     onPruned,
     membershipSeed,
@@ -264,6 +265,7 @@ export async function mountHook(props, refs) {
       isReady,
       readStateVersion,
       getTs,
+      getTimelineTs ?? getTs,
       getOwn,
       refs.eventsRef,
       refs.latestRef,
@@ -323,8 +325,8 @@ export async function mountUnreadChannels({
   let capturedMarkAllChannelsRead = null;
   let capturedResult = null;
 
-  function Inner({ pubkey: pk }) {
-    const result = useUnreadChannels(channels, null, {
+  function Inner({ pubkey: pk, channels: currentChannels }) {
+    const result = useUnreadChannels(currentChannels, null, {
       pubkey: pk,
       relayClient,
       relayUrl: relay,
@@ -335,20 +337,25 @@ export async function mountUnreadChannels({
     return null;
   }
 
-  function Harness({ pubkey: pk }) {
+  function Harness({ pubkey: pk, channels: currentChannels }) {
     return React.createElement(
       QueryClientProvider,
       { client: qc },
-      React.createElement(Inner, { pubkey: pk }),
+      React.createElement(Inner, { pubkey: pk, channels: currentChannels }),
     );
   }
 
   const container = document.createElement("div");
   const root = createRoot(container);
 
-  const render = async (pk) => {
+  const render = async (pk, currentChannels = channels) => {
     await act(async () => {
-      root.render(React.createElement(Harness, { pubkey: pk }));
+      root.render(
+        React.createElement(Harness, {
+          pubkey: pk,
+          channels: currentChannels,
+        }),
+      );
     });
   };
 

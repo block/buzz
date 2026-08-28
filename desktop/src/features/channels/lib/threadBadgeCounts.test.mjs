@@ -19,6 +19,7 @@ const msg = (id, parentId, createdAt = 100, pubkey = "author", rootId) => ({
   rootId: rootId ?? parentId ?? id,
   createdAt,
   pubkey,
+  tags: [],
 });
 
 const countAll = () => true;
@@ -103,6 +104,13 @@ test("computeThreadBadgeCounts_notNotified_omitted", () => {
     msg("b", "a", 100, "author", "root"),
   ];
   assert.equal(counts(messages, neverRead, () => false).size, 0);
+});
+
+test("computeThreadBadgeCounts_mutedRoot_keepsOnlyDirectMentions", () => {
+  const mention = msg("mention", "root");
+  mention.tags = [["p", "ME"]];
+  const messages = [msg("root", null), msg("ordinary", "root"), mention];
+  assert.equal(counts(messages, neverRead, () => false, "me").get("root"), 1);
 });
 
 test("computeThreadBadgeCounts_readLineCoversNestedReplies_excludesRead", () => {

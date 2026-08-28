@@ -24,7 +24,7 @@ use tauri::{AppHandle, Manager, State};
 const SCHEMA_VERSION: i64 = 1;
 const PER_CHANNEL_CAP: i64 = 1_000;
 const GLOBAL_CAP: i64 = 5_000;
-const HORIZON_SECONDS: i64 = 7 * 24 * 60 * 60;
+pub(crate) const HORIZON_SECONDS: i64 = 7 * 24 * 60 * 60;
 
 /// Serializes the two observed-unread commands against each other.
 ///
@@ -47,11 +47,8 @@ pub(crate) struct ObservedUnreadScope {
 
 impl ObservedUnreadScope {
     fn key(&self) -> String {
-        format!(
-            "{}:{}",
-            self.pubkey.trim().to_ascii_lowercase(),
-            self.relay_url.trim().trim_end_matches('/')
-        )
+        let relay = self.relay_url.trim().trim_end_matches('/');
+        format!("{}:{}", self.pubkey.trim(), relay).to_ascii_lowercase()
     }
 }
 
@@ -130,6 +127,7 @@ pub(crate) struct ChannelProjection {
     count: u64,
     badge_count: u64,
     app_badge_count: u64,
+    unread_thread_event_ids: Vec<String>,
     top_level_unread: bool,
     high_priority_count: u64,
 }
@@ -339,6 +337,14 @@ fn projections(tx: &Transaction<'_>, scope: &str) -> Result<Vec<ChannelProjectio
         .map_err(|e| format!("query unread markers: {e}"))?
         .collect::<Result<_, _>>()
         .map_err(|e| format!("read unread markers: {e}"))?;
+    let mut muted_stmt = tx
+        .prepare("SELECT value FROM unread_membership WHERE scope=?1 AND kind='muted_root'")
+        .map_err(|e| format!("prepare muted unread roots: {e}"))?;
+    let muted_roots = muted_stmt
+        .query_map([scope], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("query muted unread roots: {e}"))?
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(|e| format!("read muted unread roots: {e}"))?;
     let mut by_channel: HashMap<String, ChannelProjection> = HashMap::new();
     let mut latest_stmt = tx
         .prepare("SELECT channel_id,created_at FROM channel_latest WHERE scope=?1")
@@ -358,6 +364,7 @@ fn projections(tx: &Transaction<'_>, scope: &str) -> Result<Vec<ChannelProjectio
                 count: 0,
                 badge_count: 0,
                 app_badge_count: 0,
+                unread_thread_event_ids: Vec::new(),
                 top_level_unread: false,
                 high_priority_count: 0,
             },
@@ -380,7 +387,20 @@ fn projections(tx: &Transaction<'_>, scope: &str) -> Result<Vec<ChannelProjectio
     for row in rows {
         let (id, channel, created, root, high, badge, app) =
             row.map_err(|e| format!("read observed projection: {e}"))?;
-        let mut read_at = marker(&markers, &channel).max(marker(&markers, &format!("msg:{id}")));
+        if root
+            .as_ref()
+            .is_some_and(|root_id| muted_roots.contains(root_id))
+            && !high
+        {
+            continue;
+        }
+        let channel_read_at = marker(&markers, &channel);
+        let mut read_at = if root.is_none() {
+            channel_read_at.max(marker(&markers, &format!("channel-timeline:{channel}")))
+        } else {
+            channel_read_at
+        }
+        .max(marker(&markers, &format!("msg:{id}")));
         if let Some(root) = &root {
             read_at = read_at.max(marker(&markers, &format!("thread:{root}")));
         }
@@ -395,6 +415,7 @@ fn projections(tx: &Transaction<'_>, scope: &str) -> Result<Vec<ChannelProjectio
                 count: 0,
                 badge_count: 0,
                 app_badge_count: 0,
+                unread_thread_event_ids: Vec::new(),
                 top_level_unread: false,
                 high_priority_count: 0,
             });
@@ -402,6 +423,9 @@ fn projections(tx: &Transaction<'_>, scope: &str) -> Result<Vec<ChannelProjectio
         entry.count += 1;
         entry.badge_count += u64::from(badge);
         entry.app_badge_count += u64::from(app);
+        if root.is_some() {
+            entry.unread_thread_event_ids.push(id);
+        }
         entry.top_level_unread |= root.is_none();
         entry.high_priority_count += u64::from(high);
     }
@@ -716,6 +740,87 @@ mod tests {
         assert_eq!(p[0].badge_count, 1);
         tx.commit().unwrap();
     }
+
+    #[test]
+    fn timeline_marker_reads_top_level_without_clearing_thread_reply() {
+        let (_d, mut conn) = db();
+        let tx = conn.transaction().unwrap();
+        let key = scope().key();
+        ensure_scope(&tx, &key).unwrap();
+        for (id, root_id) in [("top", None), ("reply", Some("root".into()))] {
+            upsert_event(
+                &tx,
+                &key,
+                &IngestEvent {
+                    channel_id: "ch".into(),
+                    id: id.into(),
+                    created_at: 10,
+                    root_id,
+                    high_priority: false,
+                    counts_toward_badge: true,
+                    counts_toward_app_badge: false,
+                },
+            )
+            .unwrap();
+        }
+        tx.execute(
+            "INSERT INTO read_markers(scope,context_id,read_at) VALUES(?1,'channel-timeline:ch',20)",
+            [&key],
+        )
+        .unwrap();
+
+        let projected = projections(&tx, &key).unwrap();
+        assert_eq!(projected[0].count, 1);
+        assert_eq!(projected[0].badge_count, 1);
+        assert_eq!(projected[0].unread_thread_event_ids, ["reply"]);
+        assert!(!projected[0].top_level_unread);
+    }
+
+    #[test]
+    fn projection_filters_muted_roots_but_preserves_high_priority_mentions() {
+        let (_d, mut conn) = db();
+        let tx = conn.transaction().unwrap();
+        let key = scope().key();
+        ensure_scope(&tx, &key).unwrap();
+
+        for index in 0..102 {
+            upsert_event(
+                &tx,
+                &key,
+                &IngestEvent {
+                    channel_id: "ch".into(),
+                    id: format!("reply-{index:03}"),
+                    created_at: 100 + index,
+                    root_id: Some(if index < 2 {
+                        "root-muted".into()
+                    } else {
+                        format!("root-{index:03}")
+                    }),
+                    high_priority: index == 1,
+                    counts_toward_badge: true,
+                    counts_toward_app_badge: false,
+                },
+            )
+            .unwrap();
+        }
+        tx.execute(
+            "INSERT INTO unread_membership(scope,kind,value) VALUES(?1,'muted_root','root-muted')",
+            [&key],
+        )
+        .unwrap();
+
+        let projected = projections(&tx, &key).unwrap();
+        assert_eq!(projected[0].unread_thread_event_ids.len(), 101);
+        assert!(!projected[0]
+            .unread_thread_event_ids
+            .contains(&"reply-000".to_string()));
+        assert!(projected[0]
+            .unread_thread_event_ids
+            .contains(&"reply-001".to_string()));
+        assert!(projected[0]
+            .unread_thread_event_ids
+            .contains(&"reply-101".to_string()));
+    }
     #[test]
     fn latest_anchor_survives_without_a_notify_event_and_seed_is_one_shot() {
         let (_d, mut conn) = db();
@@ -860,6 +965,14 @@ mod tests {
 
     #[test]
     fn serialized_response_matches_typescript_contract() {
+        assert_eq!(
+            ObservedUnreadScope {
+                pubkey: " PK ".into(),
+                relay_url: " WSS://Relay.Example/ ".into()
+            }
+            .key(),
+            "pk:wss://relay.example"
+        );
         let actual = serde_json::to_value(ObservedUnreadResponse::Delta {
             scope: scope(),
             generation: "gen".into(),
@@ -872,13 +985,14 @@ mod tests {
                 count: 2,
                 badge_count: 1,
                 app_badge_count: 1,
+                unread_thread_event_ids: vec!["thread-event".into()],
                 top_level_unread: true,
                 high_priority_count: 0,
             }],
             removed: vec!["old".into()],
         })
         .unwrap();
-        let expected = serde_json::json!({"kind":"delta","scope":{"pubkey":"PK","relayUrl":"wss://relay/"},"generation":"gen","baseRevision":4,"revision":5,"ackedSequence":7,"upserts":[{"channelId":"ch","latest":42,"count":2,"badgeCount":1,"appBadgeCount":1,"topLevelUnread":true,"highPriorityCount":0}],"removed":["old"]});
+        let expected = serde_json::json!({"kind":"delta","scope":{"pubkey":"PK","relayUrl":"wss://relay/"},"generation":"gen","baseRevision":4,"revision":5,"ackedSequence":7,"upserts":[{"channelId":"ch","latest":42,"count":2,"badgeCount":1,"appBadgeCount":1,"unreadThreadEventIds":["thread-event"],"topLevelUnread":true,"highPriorityCount":0}],"removed":["old"]});
         assert_eq!(actual, expected);
     }
 }

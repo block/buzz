@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  channelTimelineContextKey,
   isMsgContextKey,
   isThreadContextKey,
   maxReadAt,
@@ -20,6 +21,13 @@ test("maxReadAt_allNull_returnsNull", () => {
 
 test("msgContextKey_prefixesId_returnsMsgKey", () => {
   assert.equal(msgContextKey(EVENT_ID), `msg:${EVENT_ID}`);
+});
+
+test("channelTimelineContextKey_separatesPassiveTimelineReads", () => {
+  assert.equal(
+    channelTimelineContextKey("channel-1"),
+    "channel-timeline:channel-1",
+  );
 });
 
 test("isMsgContextKey_wellFormedKey_returnsTrue", () => {

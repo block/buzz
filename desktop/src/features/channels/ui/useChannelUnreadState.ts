@@ -24,6 +24,7 @@ import {
 } from "@/features/messages/lib/unreadMarker";
 import type { TimelineMessage } from "@/features/messages/types";
 import { isConversationalUnreadKind } from "@/shared/constants/kinds";
+import { readAtForPreservedUnreadMessage } from "@/features/channels/unreadThreadEventIds";
 
 import { useWelcomeInitialUnreadSuppression } from "./useWelcomeInitialUnreadSuppression";
 
@@ -37,6 +38,7 @@ type UseChannelUnreadStateOptions = {
   openThreadMessages?: MainTimelineEntry[];
   getChannelReadAt: (channelId: string) => number | null;
   getMessageReadAt: (messageId: string) => number | null;
+  preservedUnreadMessageIds: ReadonlySet<string>;
   clearChannelUnreadSource: (
     channelId: string,
     source: ForcedUnreadSource,
@@ -69,6 +71,7 @@ export function useChannelUnreadState({
   openThreadMessages,
   getChannelReadAt,
   getMessageReadAt,
+  preservedUnreadMessageIds,
   clearChannelUnreadSource,
   markChannelUnread,
   markMessageRead,
@@ -166,6 +169,36 @@ export function useChannelUnreadState({
   const messageById = React.useMemo(
     () => new Map(timelineMessages.map((message) => [message.id, message])),
     [timelineMessages],
+  );
+  // Per-message read resolver for the ACTIVE channel's badges and predicates.
+  // Folds the browse frontier — max(bare channel, channel-timeline) exposed as
+  // getChannelReadAt(activeChannelId) — over each message's own msg:<id> marker.
+  //
+  // Passive channel-open advances only the channel-timeline context (so the
+  // sidebar keeps preserving unopened thread activity via the bare marker), but
+  // the per-message parent resolver folds only the bare channel context. Without
+  // re-adding the timeline term here, a reply the user already browsed past — one
+  // older than the frontier but never expanded, so it has no msg:<id> marker —
+  // re-lights the collapsed in-panel branch badge. Folding the browse frontier
+  // reads those browsed-past replies. The observed-unread projection is
+  // authoritative positive evidence for preservation, including IDs recovered
+  // by native hydration or catch-up after the channel has already opened.
+  // Matching message ids keep their bare/message frontier so passive browsing
+  // cannot overtake activity that still requires an explicit clear.
+  const getActiveMessageReadAt = React.useCallback(
+    (messageId: string) =>
+      readAtForPreservedUnreadMessage(
+        messageId,
+        preservedUnreadMessageIds,
+        getMessageReadAt(messageId),
+        activeChannelId ? getChannelReadAt(activeChannelId) : null,
+      ),
+    [
+      activeChannelId,
+      getChannelReadAt,
+      getMessageReadAt,
+      preservedUnreadMessageIds,
+    ],
   );
   const threadPanelIndex = React.useMemo(
     () => buildThreadPanelIndex(timelineMessages),
@@ -322,7 +355,7 @@ export function useChannelUnreadState({
             subtreeReplyIds: getReplyDescendantIdsForMessage(openThreadHeadId),
             visibleReplyIds: threadMessages.map((entry) => entry.message.id),
             expandedReplyIds: expandedThreadReplyIds,
-            getReadAt: getMessageReadAt,
+            getReadAt: getActiveMessageReadAt,
             currentPubkey,
             isForcedUnread: isMsgForcedUnread,
           })
@@ -331,7 +364,7 @@ export function useChannelUnreadState({
       openThreadHeadId,
       threadMessages,
       timelineMessages,
-      getMessageReadAt,
+      getActiveMessageReadAt,
       expandedThreadReplyIds,
       getReplyDescendantIdsForMessage,
       currentPubkey,
@@ -352,7 +385,7 @@ export function useChannelUnreadState({
       computeThreadBadgeCounts(
         timelineMessages,
         repliesByRootId,
-        getMessageReadAt,
+        getActiveMessageReadAt,
         (rootId) => !isThreadMuted(rootId),
         currentPubkey,
         isMsgForcedUnread,
@@ -361,7 +394,7 @@ export function useChannelUnreadState({
       currentPubkey,
       timelineMessages,
       repliesByRootId,
-      getMessageReadAt,
+      getActiveMessageReadAt,
       isThreadMuted,
       isMsgForcedUnread,
       readStateVersion,
@@ -392,7 +425,7 @@ export function useChannelUnreadState({
       if (!message) return false;
       const { firstUnreadReplyId } = computeThreadUnreadMarker(
         [message],
-        getMessageReadAt,
+        getActiveMessageReadAt,
         currentPubkey,
         isMsgForcedUnread,
       );
@@ -400,7 +433,7 @@ export function useChannelUnreadState({
     },
     [
       messageById,
-      getMessageReadAt,
+      getActiveMessageReadAt,
       currentPubkey,
       isMsgForcedUnread,
       readStateVersion,

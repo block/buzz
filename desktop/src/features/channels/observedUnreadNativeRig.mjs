@@ -111,12 +111,19 @@ class Scope {
           count: 0,
           badgeCount: 0,
           appBadgeCount: 0,
+          unreadThreadEventIds: [],
           topLevelUnread: false,
           highPriorityCount: 0,
         },
       ]),
     );
     for (const event of this.events.values()) {
+      if (
+        event.rootId &&
+        this.membership.has(`muted_root\u0000${event.rootId}`) &&
+        !event.highPriority
+      )
+        continue;
       let readAt = Math.max(marker(event.channelId), marker(`msg:${event.id}`));
       if (event.rootId)
         readAt = Math.max(readAt, marker(`thread:${event.rootId}`));
@@ -127,6 +134,7 @@ class Scope {
         count: 0,
         badgeCount: 0,
         appBadgeCount: 0,
+        unreadThreadEventIds: [],
         topLevelUnread: false,
         highPriorityCount: 0,
       };
@@ -134,6 +142,7 @@ class Scope {
       entry.count += 1;
       entry.badgeCount += event.countsTowardBadge ? 1 : 0;
       entry.appBadgeCount += event.countsTowardAppBadge ? 1 : 0;
+      if (event.rootId) entry.unreadThreadEventIds.push(event.id);
       entry.topLevelUnread ||= !event.rootId;
       entry.highPriorityCount += event.highPriority ? 1 : 0;
       byChannel.set(event.channelId, entry);
@@ -157,6 +166,7 @@ export function installNativeRig(options = {}) {
     catchUpChannels = () => [],
     failCommands = new Set(),
     failOnceCommands = new Set(),
+    failCommandWhen = () => false,
   } = options;
 
   const scopes = new Map();
@@ -322,7 +332,11 @@ export function installNativeRig(options = {}) {
 
   const invoke = async (command, args = {}) => {
     calls.push({ command, args });
-    if (failCommands.has(command) || failOnceCommands.delete(command)) {
+    if (
+      failCommands.has(command) ||
+      failOnceCommands.delete(command) ||
+      failCommandWhen(command, args, calls)
+    ) {
       throw new Error(`rig: ${command} configured to fail`);
     }
     const handler = handlers[command];

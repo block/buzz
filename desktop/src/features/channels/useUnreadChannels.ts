@@ -14,7 +14,15 @@ import {
   recordObservedUnreadEvent,
   type ObservedUnreadEvent,
 } from "@/features/channels/unreadChannelCounts";
+import {
+  channelTimelineContextKey,
+  maxReadAt,
+} from "@/features/channels/readState/readStateFormat";
 import { useReadState } from "@/features/channels/readState/useReadState";
+import {
+  resolveChannelReadMarker,
+  resolveObservedUnreadRootId,
+} from "@/features/channels/unreadReadState";
 import {
   forcedUnreadStore,
   type ForcedUnreadMap,
@@ -30,10 +38,10 @@ import {
 } from "@/features/notifications/lib/shouldNotify";
 import type { RelayClient } from "@/shared/api/relayClientSession";
 import type { Channel, RelayEvent } from "@/shared/api/types";
-import { CHANNEL_MESSAGE_EVENT_KINDS } from "@/shared/constants/kinds";
 import { useStableMap, useStableSet } from "@/shared/hooks/useStableReference";
 import { normalizeRelayUrl } from "@/features/profile/lib/selfProfileStorage";
-import { DM_NOTIFIABLE_EVENT_KINDS } from "./isDmNotifiableKind";
+export { channelCatchUpEventKinds, shouldRecordLiveUnread } from "./liveUnread";
+import { shouldRecordLiveUnread } from "./liveUnread";
 import {
   addThreadActivityItems,
   projectActivityForScope,
@@ -58,6 +66,16 @@ import {
 } from "@/features/channels/unreadMembership";
 import { useThreadActivityPersistence } from "@/features/channels/useThreadActivityPersistence";
 import { unreadCatchUp } from "@/shared/api/tauriUnreadCatchUp";
+import {
+  collectMarkAllUnreadChannelIds,
+  collectUnreadThreadEventIds,
+} from "./unreadThreadEventIds";
+import { useCatchUpRetry } from "./useCatchUpRetry";
+import {
+  advanceCatchUpDiscoveryAt,
+  readCatchUpDiscoveryAt,
+} from "./unreadCatchUpDiscoveryStorage";
+import { applyCatchUpDiscoveries } from "./unreadCatchUpMembership";
 
 type UseUnreadChannelsOptions = UseLiveChannelUpdatesOptions & {
   pubkey?: string;
@@ -66,63 +84,9 @@ type UseUnreadChannelsOptions = UseLiveChannelUpdatesOptions & {
   mutedChannelIds?: ReadonlySet<string>;
 };
 
-// Per-channel cap on the catch-up REQ. We only consume the *max matching*
-// event per channel, but the relay can return self-authored / non-trigger
-// events that we discard client-side, so we need enough head-room for the
-// filter to find one external trigger message. 1000 matches the live sub's
-// per-channel limit elsewhere in the app.
+// Match the live subscription's per-channel catch-up headroom.
 const CATCH_UP_LIMIT = 1000;
 const EMPTY_ROOT_IDS: ReadonlySet<string> = new Set();
-
-export function channelCatchUpEventKinds(
-  channelType: Channel["channelType"] | undefined,
-) {
-  return channelType === "dm"
-    ? DM_NOTIFIABLE_EVENT_KINDS
-    : CHANNEL_MESSAGE_EVENT_KINDS;
-}
-
-function parseTimestamp(value: string | null | undefined) {
-  if (!value) {
-    return null;
-  }
-
-  const timestamp = Date.parse(value);
-  return Number.isNaN(timestamp) ? null : timestamp;
-}
-
-function toUnixSeconds(isoOrMs: string | null | undefined): number | null {
-  const ms = parseTimestamp(isoOrMs);
-  return ms === null ? null : Math.floor(ms / 1_000);
-}
-
-// Resolve where the read marker should land when a channel is marked read.
-// Folds the caller's timeline position together with the newest event this
-// client has observed live (`observedLatest`), so an explicit "mark read" still
-// covers messages that arrived faster than channel metadata — this fold is
-// load-bearing for the Esc shortcut, sidebar mark-read, and empty-channel open,
-// all of which pass a null/stale caller value. `clearObserved` reports whether
-// the resulting marker covers the observed timestamp, signalling the caller to
-// drop its observed refs so the unread memo sees `latest === undefined` until a
-// genuinely newer event arrives.
-export function resolveChannelReadMarker(
-  callerReadAt: string | null | undefined,
-  observedLatest: number | undefined,
-): { markAt: number | null; clearObserved: boolean } {
-  const callerUnix = toUnixSeconds(callerReadAt);
-  const markAt = Math.max(callerUnix ?? 0, observedLatest ?? 0) || null;
-  return {
-    markAt,
-    clearObserved:
-      markAt !== null &&
-      observedLatest !== undefined &&
-      observedLatest <= markAt,
-  };
-}
-
-export function resolveObservedUnreadRootId(tags: string[][]): string | null {
-  return isBroadcastReply(tags) ? null : getThreadReference(tags).rootId;
-}
 
 export function useUnreadChannels(
   channels: Channel[],
@@ -138,14 +102,13 @@ export function useUnreadChannels(
   } = options;
   const activeChannelId = activeChannel?.id ?? null;
   const normalizedPubkey = pubkey?.toLowerCase() ?? null;
-  // Scoped relay key for activity storage; empty string when relay not yet known
-  // so rows from an unknown relay never load into the wrong community.
+  // An empty relay never loads activity into an unknown community.
   const normalizedRelayUrl = relayUrlOption
     ? normalizeRelayUrl(relayUrlOption)
     : "";
 
   const {
-    getEffectiveTimestamp,
+    getEffectiveTimestamp: getContextReadAt,
     isReady: isReadStateReady,
     markContextRead,
     drainSyncedAdvances,
@@ -153,10 +116,16 @@ export function useUnreadChannels(
     readStateVersion,
     getOwnTimestamp,
   } = useReadState(pubkey, relayClient);
+  const getChannelTimelineReadAt = React.useCallback(
+    (channelId: string) =>
+      maxReadAt(
+        getContextReadAt(channelId),
+        getOwnTimestamp(channelTimelineContextKey(channelId)),
+      ),
+    [getContextReadAt, getOwnTimestamp],
+  );
 
-  // Per-channel latest observed external trigger timestamp (unix seconds) and
-  // per-event metadata. Derived relay evidence, not source-of-truth; the unread
-  // memo compares these against NIP-RS markers. Hydrated/reset by the persistence hook.
+  // Derived relay evidence, hydrated/reset by the persistence hook.
   const latestByChannelRef = React.useRef(new Map<string, number>());
   const observedUnreadEventsByChannelRef = React.useRef(
     new Map<string, Map<string, ObservedUnreadEvent>>(),
@@ -165,44 +134,31 @@ export function useUnreadChannels(
   const channelsRef = React.useRef(channels);
   channelsRef.current = channels;
 
-  // Channels manually marked unread this session. NIP-RS markers are monotonic,
-  // so this flag creates the badge without lowering synced read state.
-  // Persisted to buzz-forced-unread.v1 for cross-reload and rail-observer visibility.
+  // Manual unread survives reload without lowering monotonic NIP-RS markers.
   const forcedUnreadRef = React.useRef<ForcedUnreadMap>(
     pubkey ? forcedUnreadStore.read(pubkey) : {},
   );
 
-  // Root event IDs of threads where the current user has replied at least once.
-  // Used to determine if thread replies should trigger unread notifications.
+  // Thread roots where the user participated.
   const participatedRootIdsRef = React.useRef(new Set<string>());
 
-  // Root event IDs of top-level messages authored by the current user.
-  // Used to notify the author when someone replies to their posts.
+  // Top-level roots authored by the user.
   const authoredRootIdsRef = React.useRef(new Set<string>());
 
-  // Root event IDs of threads where an external message @-mentioned the user.
-  // ORed into the badge gate so a mention recipient who never participated,
-  // authored, or followed the thread still gets the thread-unread badge.
+  // Thread roots where an external message mentioned the user.
   const mentionedRootIdsRef = React.useRef(new Set<string>());
 
-  // Root event IDs of threads the user has explicitly muted. Takes precedence
-  // over participation, follow, and authorship for notification suppression.
+  // Explicitly muted thread roots.
   const mutedRootIdsRef = React.useRef(new Set<string>());
 
-  // Stable ref for the caller-supplied muted channel IDs. Updated every render
-  // so the catch-up loop always reads the latest set without being a dep.
+  // Latest caller-supplied muted channel IDs.
   const mutedChannelIdsRef = React.useRef<ReadonlySet<string>>(EMPTY_ROOT_IDS);
   mutedChannelIdsRef.current = mutedChannelIdsOption ?? EMPTY_ROOT_IDS;
 
-  // Thread reply events that triggered notifications — surfaced in the Home
-  // activity feed as synthetic FeedItems. The buffer is the source of truth
-  // between coalesced writes; useThreadActivityPersistence owns the loaded
-  // scope, the write timer, flush, and hydration.
+  // Notification-triggering replies buffered for the Home activity feed.
   const threadActivityRef = React.useRef<ThreadActivityItem[]>([]);
 
-  // Tracks which channels we've already issued a catch-up REQ for this
-  // session. Prevents re-fetching on every channels-list refetch, while still
-  // letting newly-joined channels be caught up. Reset on identity change.
+  // Session catch-up claims prevent refetch churn while admitting newly joined channels.
   const caughtUpChannelsRef = React.useRef(new Set<string>());
 
   const [latestVersion, bumpLatestVersion] = React.useReducer(
@@ -210,18 +166,13 @@ export function useUnreadChannels(
     0,
   );
 
-  // Version signal bumped only when the participated/authored/mentioned
-  // root-id sets change, so the gate snapshots (re-derived below) don't
-  // re-allocate on every observed external message the way reusing
-  // latestVersion would.
+  // Changes only when notification membership changes.
   const [membershipVersion, bumpMembershipVersion] = React.useReducer(
     (x: number) => x + 1,
     0,
   );
 
-  // Reset all in-session state when the identity or relay changes. In-memory
-  // caches are cleared; persisted stores are loaded for the new pubkey (so
-  // forced-unread, participation, etc. are correct for the new identity).
+  // Reset in-session state when the identity or relay changes.
   // biome-ignore lint/correctness/useExhaustiveDependencies: pubkey/relayClient are intentional reset signals
   React.useEffect(() => {
     // Load persisted forced-unread map for the new pubkey (do NOT clear the
@@ -254,7 +205,8 @@ export function useUnreadChannels(
     normalizedRelayUrl,
     isReadStateReady,
     readStateVersion,
-    getEffectiveTimestamp,
+    getContextReadAt,
+    getChannelTimelineReadAt,
     getOwnTimestamp,
     observedUnreadEventsByChannelRef,
     latestByChannelRef,
@@ -313,6 +265,11 @@ export function useUnreadChannels(
     threadActivityRef,
   );
   const currentActivityScope = activityPersistence.currentScope;
+  const {
+    retryVersion: catchUpRetryVersion,
+    clearAttempt: clearCatchUpRetryAttempt,
+    schedule: scheduleCatchUpRetry,
+  } = useCatchUpRetry(currentActivityScope, observedPersistence.isScopeLoaded);
 
   // `topLevelOnly`: passive channel-open path (NIP-RS Option 1) — marker lands at newest
   // top-level msg without folding observed replies; leaves refs intact so the dot persists
@@ -347,10 +304,13 @@ export function useUnreadChannels(
         observedLatest,
       );
       if (markAt === null) return;
-      markContextRead(channelId, markAt);
+      const contextId = topLevelOnly
+        ? channelTimelineContextKey(channelId)
+        : channelId;
+      markContextRead(contextId, markAt);
       observedPersistence.syncMarkers(
-        [channelId],
-        new Map([[channelId, markAt]]),
+        [contextId],
+        new Map([[contextId, markAt]]),
       );
       // the parent must not delete from latestByChannelRef or
       // observedUnreadEventsByChannelRef directly on the clear-observed path,
@@ -433,17 +393,23 @@ export function useUnreadChannels(
       const isThreadedReply =
         getThreadReference(event.tags).parentId !== null &&
         !isBroadcastReply(event.tags);
-      const didRecordUnreadEvent = recordUnreadEvent(
+      const didRecordUnreadEvent = shouldRecordLiveUnread(
         channelId,
-        makeObservedUnreadEvent({
-          id: event.id,
-          createdAt: event.created_at,
-          rootId: resolveObservedUnreadRootId(event.tags),
-          highPriority: isHighPriority,
-          channelType: channel?.channelType,
-          isThreadedReply,
-        }),
-      );
+        activeChannelId,
+        isThreadedReply,
+      )
+        ? recordUnreadEvent(
+            channelId,
+            makeObservedUnreadEvent({
+              id: event.id,
+              createdAt: event.created_at,
+              rootId: resolveObservedUnreadRootId(event.tags),
+              highPriority: isHighPriority,
+              channelType: channel?.channelType,
+              isThreadedReply,
+            }),
+          )
+        : false;
       // Fence latestByChannelRef on the scope guard — a stale live callback
       // during A→B drift must not write A's timestamp into B's hydrated ref.
       const scopeOk = observedPersistence.isScopeLoaded();
@@ -476,6 +442,7 @@ export function useUnreadChannels(
     },
     [
       callerOnChannelMessage,
+      activeChannelId,
       normalizedPubkey,
       observedPersistence,
       recordMentionedRoot,
@@ -539,6 +506,11 @@ export function useUnreadChannels(
 
   const handleThreadReplyNotification = React.useCallback(
     (channelId: string, event: RelayEvent) => {
+      // A reply received while its channel is already visible has been browsed
+      // in context; it must not later become the positive evidence that
+      // overrides the passive timeline frontier and relights a badge. Inactive
+      // channel replies are the ones this activity buffer exists to preserve.
+      if (channelId === activeChannelId) return;
       // Guard: don't merge into a buffer whose scope has drifted from the
       // current identity. isScopeLoaded() also rejects an empty scope, so a
       // writer can never fire before the first valid scope is seeded.
@@ -566,7 +538,13 @@ export function useUnreadChannels(
       }
       bumpLatestVersion();
     },
-    [channels, currentActivityScope, activityPersistence, recordMentionedRoot],
+    [
+      activeChannelId,
+      channels,
+      currentActivityScope,
+      activityPersistence,
+      recordMentionedRoot,
+    ],
   );
 
   const muteThread = React.useCallback(
@@ -614,11 +592,7 @@ export function useUnreadChannels(
     [channels],
   );
 
-  // Catch-up: for each channel we haven't already caught up this session,
-  // ask the relay "are there any external trigger messages newer than the
-  // NIP-RS read marker?" If yes, advance latestByChannelRef so the unread
-  // predicate fires. This is the only way historical unreads survive an
-  // app restart now that we don't persist any client-side "latest" state.
+  // Recover historical unreads that arrived after the NIP-RS marker.
   // biome-ignore lint/correctness/useExhaustiveDependencies: options.followedRootIds intentionally omitted — it's a Set reference that changes identity every render; the catch-up is a one-shot per-channel operation controlled by caughtUpChannelsRef, not reactive to follow changes
   React.useEffect(() => {
     if (!isReadStateReady) return;
@@ -631,27 +605,20 @@ export function useUnreadChannels(
     );
     if (toFetch.length === 0) return;
 
-    // Claim optimistically so re-renders mid-flight don't kick off duplicate
-    // REQs. If the effect is cancelled (cleanup) we release the claims so
-    // the next run retries.
+    // Claim optimistically so rerenders cannot duplicate in-flight requests.
     for (const id of toFetch) {
       caughtUpChannelsRef.current.add(id);
     }
 
     let isCancelled = false;
+    const pendingIds = new Set(toFetch);
 
-    // Snapshot membership sizes so the `.then` can detect whether the catch-up
-    // discovered new participated/authored/mentioned roots (pass 1 mutates the
-    // refs in place). A pure-participation or pure-mention discovery produces no
-    // maxExternal advance, so without this the notify gate would never
-    // invalidate to surface the badge.
+    // Detect membership-only discoveries that do not advance maxExternal.
     const participatedSizeBefore = participatedRootIdsRef.current.size;
     const authoredSizeBefore = authoredRootIdsRef.current.size;
     const mentionedSizeBefore = mentionedRootIdsRef.current.size;
 
-    // E's native observed-unread store owns notification membership, so this
-    // request scales with channels being caught up rather than five 1,000-id
-    // sets. The prior 332 KiB-at-cap payload is retired at this boundary.
+    // Native owns membership, so the request scales with channel count.
     void unreadCatchUp({
       channels: toFetch.map((channelId) => {
         const channel = channels.find(
@@ -661,64 +628,55 @@ export function useUnreadChannels(
           id: channelId,
           type: channel?.channelType ?? "stream",
           name: channel?.name ?? "",
-          readAt: getEffectiveTimestamp(channelId),
+          readAt: getContextReadAt(channelId),
+          timelineReadAt: getChannelTimelineReadAt(channelId),
+          discoveryAt: readCatchUpDiscoveryAt(currentActivityScope, channelId),
         };
       }),
       selfPubkey: normalizedPubkey ?? "",
       mutedChannelIds: [...mutedChannelIdsRef.current],
     })
-      .then(({ channels: results }) => {
+      .then(async ({ channels: results }) => {
         if (isCancelled) return;
-        // The command rejects if relay/pubkey scope changes in flight. Keep the
-        // renderer fence too: it also covers effect cleanup before merge.
         if (!observedPersistence.isScopeLoaded()) return;
 
         let didAdvance = false;
         let didDiscover = false;
         const allThreadReplies: ThreadActivityItem[] = [];
+        const failedIds: string[] = [];
         for (const result of results) {
           if (result.status === "error") {
-            // The error arm carries only this identity; releasing its claim is
-            // what lets a failed channel retry on the next effect run.
+            pendingIds.delete(result.channelId);
             caughtUpChannelsRef.current.delete(result.channelId);
+            failedIds.push(result.channelId);
             continue;
           }
-          for (const rootId of result.discovered.participated) {
-            const before = participatedRootIdsRef.current.size;
-            participatedRootIdsRef.current.add(rootId);
-            if (participatedRootIdsRef.current.size !== before) {
-              observedPersistence.updateMembership(
-                "participated",
-                rootId,
-                true,
-              );
-              didDiscover = true;
-            }
-          }
-          for (const rootId of result.discovered.authored) {
-            const before = authoredRootIdsRef.current.size;
-            authoredRootIdsRef.current.add(rootId);
-            if (authoredRootIdsRef.current.size !== before) {
-              observedPersistence.updateMembership("authored", rootId, true);
-              didDiscover = true;
-            }
-          }
-          for (const rootId of result.discovered.mentioned) {
-            const before = mentionedRootIdsRef.current.size;
-            mentionedRootIdsRef.current.add(rootId);
-            if (mentionedRootIdsRef.current.size !== before) {
-              observedPersistence.updateMembership("mentioned", rootId, true);
-              didDiscover = true;
-            }
+          const discovery = applyCatchUpDiscoveries(result.discovered, {
+            participated: participatedRootIdsRef.current,
+            authored: authoredRootIdsRef.current,
+            mentioned: mentionedRootIdsRef.current,
+          });
+          didDiscover ||= discovery.didDiscover;
+          const membershipPersisted =
+            await observedPersistence.persistMembership(discovery.updates);
+          if (isCancelled || !observedPersistence.isScopeLoaded()) return;
+          if (membershipPersisted) {
+            clearCatchUpRetryAttempt(result.channelId);
+            advanceCatchUpDiscoveryAt(
+              currentActivityScope,
+              result.channelId,
+              result.discoveryThrough,
+            );
+          } else {
+            caughtUpChannelsRef.current.delete(result.channelId);
+            failedIds.push(result.channelId);
           }
           allThreadReplies.push(...result.activityRows);
           for (const event of result.observedEvents) {
             recordUnreadEvent(result.channelId, event);
             didAdvance = true;
           }
-          if (
-            result.maxTrigger > (getEffectiveTimestamp(result.channelId) ?? 0)
-          ) {
+          if (result.maxTrigger > (getContextReadAt(result.channelId) ?? 0)) {
             const current =
               observedPersistence.latestForChannel(result.channelId) ?? 0;
             if (result.maxTrigger > current) {
@@ -729,7 +687,16 @@ export function useUnreadChannels(
               didAdvance = true;
             }
           }
+          // Keep the claim pending across every awaited/application step so
+          // effect cleanup can release it if the channel set changes midway.
+          pendingIds.delete(result.channelId);
         }
+        for (const channelId of pendingIds) {
+          caughtUpChannelsRef.current.delete(channelId);
+          failedIds.push(channelId);
+        }
+        pendingIds.clear();
+        scheduleCatchUpRetry(failedIds);
 
         if (normalizedPubkey !== null && didDiscover) {
           participationStore.write(
@@ -762,26 +729,29 @@ export function useUnreadChannels(
       })
       .catch(() => {
         if (isCancelled) return;
-        for (const id of toFetch) caughtUpChannelsRef.current.delete(id);
+        for (const id of pendingIds) caughtUpChannelsRef.current.delete(id);
+        scheduleCatchUpRetry(pendingIds);
+        pendingIds.clear();
       });
 
     return () => {
       isCancelled = true;
-      // Release the claims so the next effect run can retry these channels.
-      // The identity-reset effect replaces the Set entirely, so this is a
-      // no-op in that case (harmless).
-      for (const id of toFetch) {
+      for (const id of pendingIds) {
         caughtUpChannelsRef.current.delete(id);
       }
     };
   }, [
     channelIdsKey,
-    getEffectiveTimestamp,
+    catchUpRetryVersion,
+    clearCatchUpRetryAttempt,
+    getChannelTimelineReadAt,
+    getContextReadAt,
     isReadStateReady,
     normalizedPubkey,
     normalizedRelayUrl,
     recordUnreadEvent,
     relayClient,
+    scheduleCatchUpRetry,
   ]);
 
   // Derive unread and high-priority projections together so they invalidate
@@ -795,38 +765,53 @@ export function useUnreadChannels(
           topLevelUnreadChannelIds: new Set<string>(),
           highPriorityUnreadChannelIds: new Set<string>(),
           unreadChannelCounts: new Map<string, number>(),
+          unreadThreadEventIdsByChannel: new Map<string, Set<string>>(),
           unreadChannelNotificationCount: 0,
         };
       }
-
       const unread = new Set<string>();
       const topLevelUnread = new Set<string>();
       const highPriority = new Set<string>();
       const counts = new Map<string, number>();
+      const unreadThreadEventIdsByChannel = new Map<string, Set<string>>();
       let unreadChannelNotificationCount = 0;
-
       for (const channel of channels) {
         const isForcedUnread = Object.hasOwn(
           forcedUnreadRef.current,
           channel.id,
         );
-        if (channel.id === activeChannelId && !isForcedUnread) continue;
-
         const observedEvents = observedUnreadEventsByChannelRef.current.get(
           channel.id,
         );
-        const channelReadAt = getEffectiveTimestamp(channel.id);
-        const readAtForObservedEvent = (event: ObservedUnreadEvent) =>
-          observedUnreadEventReadAt(
+        const channelReadAt = getContextReadAt(channel.id);
+        const channelTimelineReadAt = getChannelTimelineReadAt(channel.id);
+        const mutedRoots = mutedRootIdsRef.current;
+        const readAtForObservedEvent = (event: ObservedUnreadEvent) => {
+          if (
+            event.rootId !== null &&
+            mutedRoots.has(event.rootId) &&
+            !event.highPriority
+          )
+            return event.createdAt;
+          return observedUnreadEventReadAt(
             event,
-            channelReadAt,
+            event.rootId === null ? channelTimelineReadAt : channelReadAt,
             (rootId) => getOwnTimestamp(`thread:${rootId}`),
             (messageId) => getOwnTimestamp(`msg:${messageId}`),
           );
-
+        };
         const nativeProjection = observedPersistence.isNative()
           ? observedPersistence.projectionsRef.current.get(channel.id)
           : undefined;
+        const unreadThreadEventIds = collectUnreadThreadEventIds(
+          nativeProjection?.unreadThreadEventIds,
+          observedEvents?.values(),
+          readAtForObservedEvent,
+        );
+        if (unreadThreadEventIds.size > 0)
+          unreadThreadEventIdsByChannel.set(channel.id, unreadThreadEventIds);
+        if (channel.id === activeChannelId && !isForcedUnread) continue;
+
         const unreadCount = observedPersistence.isNative()
           ? (nativeProjection?.count ?? 0)
           : latestByChannelRef.current.get(channel.id) === undefined
@@ -894,12 +879,14 @@ export function useUnreadChannels(
         topLevelUnreadChannelIds: topLevelUnread,
         highPriorityUnreadChannelIds: highPriority,
         unreadChannelCounts: counts,
+        unreadThreadEventIdsByChannel,
         unreadChannelNotificationCount,
       };
     }, [
       activeChannelId,
       channels,
-      getEffectiveTimestamp,
+      getChannelTimelineReadAt,
+      getContextReadAt,
       getOwnTimestamp,
       isReadStateReady,
       latestVersion,
@@ -914,6 +901,7 @@ export function useUnreadChannels(
     rawUnread.highPriorityUnreadChannelIds,
   );
   const unreadChannelCounts = useStableMap(rawUnread.unreadChannelCounts);
+  const unreadThreadEventIdsByChannel = rawUnread.unreadThreadEventIdsByChannel;
   const unreadChannelNotificationCount =
     rawUnread.unreadChannelNotificationCount;
 
@@ -922,11 +910,14 @@ export function useUnreadChannels(
 
   const markAllChannelsRead = React.useCallback(() => {
     const marked = new Map<string, number>();
-    for (const channelId of unreadChannelIdsRef.current) {
+    for (const channelId of collectMarkAllUnreadChannelIds(
+      unreadChannelIdsRef.current,
+      observedPersistence.projectionsRef.current,
+    )) {
       delete forcedUnreadRef.current[channelId];
       const unixSeconds =
         observedPersistence.latestForChannel(channelId) ??
-        getEffectiveTimestamp(channelId) ??
+        getChannelTimelineReadAt(channelId) ??
         null;
       if (unixSeconds !== null) {
         markContextRead(channelId, unixSeconds);
@@ -942,7 +933,7 @@ export function useUnreadChannels(
     // (Fenced record writes in handleChannelMessage and catch-up remain in the parent.)
     observedPersistence.clearAll();
     bumpLatestVersion();
-  }, [getEffectiveTimestamp, markContextRead, observedPersistence, pubkey]);
+  }, [getChannelTimelineReadAt, markContextRead, observedPersistence, pubkey]);
 
   // Identity-stable snapshots of the membership sets for the notify gate.
   // Re-derived only when membershipVersion bumps (a set actually changed), so
@@ -968,6 +959,7 @@ export function useUnreadChannels(
     unreadChannelIds,
     topLevelUnreadChannelIds,
     unreadChannelCounts,
+    unreadThreadEventIdsByChannel,
     highPriorityUnreadChannelIds,
     unreadChannelNotificationCount,
     markAllChannelsRead,
@@ -978,7 +970,7 @@ export function useUnreadChannels(
     // off the same NIP-RS read marker without instantiating a second
     // ReadStateManager. readStateVersion is the invalidation signal callers
     // should include in memo deps.
-    getEffectiveTimestamp,
+    getEffectiveTimestamp: getChannelTimelineReadAt,
     getOwnTimestamp,
     readStateVersion,
     setContextParentResolver,
