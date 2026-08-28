@@ -9,6 +9,7 @@
 //!
 //! Lane ownership: relay admin API (Duncan).
 
+use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Row as _, Transaction};
 
@@ -276,6 +277,52 @@ pub async fn list(pool: &PgPool) -> Result<Vec<RelayOperatorRecord>> {
         )
         .collect::<std::result::Result<Vec<_>, sqlx::Error>>()
         .map_err(crate::error::DbError::from)
+}
+
+impl crate::Db {
+    /// Fetch one relay operator/moderator row by pubkey (32-byte binary).
+    #[datastore_span(name = "get_relay_operator", system = "postgresql")]
+    pub async fn get_relay_operator(&self, pubkey: &[u8]) -> Result<Option<RelayOperatorRecord>> {
+        get(&self.pool, pubkey).await
+    }
+
+    /// List all relay operator/moderator rows ordered by creation time.
+    #[datastore_span(name = "list_relay_operators", system = "postgresql")]
+    pub async fn list_relay_operators(&self) -> Result<Vec<RelayOperatorRecord>> {
+        list(&self.pool).await
+    }
+
+    /// Insert or update a relay operator/moderator row (upsert by pubkey).
+    ///
+    /// `config_operator_exists` is the caller's request-time snapshot of
+    /// whether a config-backed operator is effective; a demotion that would
+    /// leave no effective operator is rejected with [`DbError::LastOperator`].
+    #[datastore_span(name = "upsert_relay_operator", system = "postgresql")]
+    pub async fn upsert_relay_operator(
+        &self,
+        pubkey: &[u8],
+        role: &str,
+        added_by: &[u8],
+        config_operator_exists: bool,
+    ) -> Result<()> {
+        upsert(&self.pool, pubkey, role, added_by, config_operator_exists).await
+    }
+
+    /// Remove a relay operator/moderator row. Returns `true` if deleted.
+    /// Records the revocation in the append-only audit trail; `actor` is the
+    /// authenticated operator performing the removal. `config_operator_exists`
+    /// is the caller's request-time snapshot of whether a config-backed
+    /// operator is effective; deleting the sole effective operator is rejected
+    /// with [`DbError::LastOperator`].
+    #[datastore_span(name = "remove_relay_operator", system = "postgresql")]
+    pub async fn remove_relay_operator(
+        &self,
+        pubkey: &[u8],
+        actor: &[u8],
+        config_operator_exists: bool,
+    ) -> Result<bool> {
+        remove(&self.pool, pubkey, actor, config_operator_exists).await
+    }
 }
 
 #[cfg(test)]

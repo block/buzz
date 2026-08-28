@@ -34,10 +34,14 @@ pub mod product_feedback;
 pub mod push;
 /// Reaction persistence.
 pub mod reaction;
+/// HTTP report-resolution enforcement state machine persistence.
+pub mod relay_admin_actions;
 /// Use-limited relay invite persistence (v2 opaque tokens).
 pub mod relay_invite;
 /// Relay-level membership persistence (NIP-43).
 pub mod relay_members;
+/// Deployment-global relay operator/moderator roster persistence.
+pub mod relay_operators;
 /// Event-reminder delivery query, claim, and release persistence.
 pub mod reminder;
 /// Replaceable-event persistence and coordinate locking.
