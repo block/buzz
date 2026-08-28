@@ -541,9 +541,11 @@ pub enum PromptOutcome {
 /// into every task.
 /// Shared channel-metadata resolver for startup-known and dynamically joined channels.
 ///
-/// Successful lazy lookups are cached for every consumer (author gate, prompt
-/// context, canvas, and setup mode). Unknown metadata is never cached as a
-/// non-DM: callers can fail closed and a later event retries resolution.
+/// Successful lazy lookups are cached for fail-closed classification and as a
+/// fallback during relay degradation. Prompt turns refresh metadata through
+/// [`ChannelInfoResolver::resolve`] so edits reach a running harness. Unknown
+/// metadata is never cached as a non-DM: callers can fail closed and a later
+/// event retries resolution.
 #[derive(Debug, Clone)]
 struct CachedProjectInfo {
     fetched_at: std::time::Instant,
@@ -604,12 +606,42 @@ impl ChannelInfoResolver {
         Some(info)
     }
 
+    /// Resolve channel context for a prompt turn.
+    ///
+    /// Prompt-visible metadata is refreshed on every turn rather than served
+    /// indefinitely from startup discovery. Channel descriptions and names can
+    /// be edited while the harness is running; the next prompt must use the
+    /// relay's current kind-39000 event. On a transient refresh failure, retain
+    /// the last known metadata so an otherwise healthy turn can still proceed.
     pub async fn resolve(
         &self,
         channel_id: Uuid,
     ) -> Result<Option<PromptChannelInfo>, ProjectLookupError> {
-        let Some(mut info) = self.resolve_channel_metadata(channel_id).await else {
-            return Ok(None);
+        let cached = self
+            .cache
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(&channel_id).cloned());
+        // A cached value makes this a refresh, not first-time discovery: use
+        // one bounded attempt so relay degradation cannot add the full retry
+        // window to every prompt. Unknown channels still use the retrying lazy
+        // fetch below because callers must fail closed without metadata.
+        let refreshed = if cached.is_some() {
+            fetch_channel_info_once(channel_id, &self.rest_client).await
+        } else {
+            fetch_channel_info(channel_id, &self.rest_client).await
+        };
+        let mut info = match refreshed {
+            Some(fresh) => {
+                if let Ok(mut cache) = self.cache.write() {
+                    cache.insert(channel_id, fresh.clone());
+                }
+                fresh
+            }
+            None => match cached {
+                Some(cached) => cached,
+                None => return Ok(None),
+            },
         };
         info.project = self.lookup_project(channel_id).await?;
         Ok(Some(info))
@@ -1043,11 +1075,10 @@ const UNKNOWN_CHANNEL_NAME: &str = "unknown";
 /// startup cache already refuses `channel_type == "unknown"` for the same
 /// reason.
 ///
-/// Renames do not retitle live sessions, and a **channel** rename is stickier
-/// than an agent rename: `invalidate_channel` drops the session but not the
-/// resolver's cached entry, so a renamed channel keeps its old suffix until the
-/// process restarts. An agent rename lands on the next spawn (the desktop
-/// restart badge covers it — see `spawn_config_hash`).
+/// Renames do not retitle an already-live session. Prompt-turn resolution does
+/// refresh channel metadata, so a later session spawn uses the current channel
+/// name without requiring a harness restart. An agent rename lands on the next
+/// spawn (the desktop restart badge covers it — see `spawn_config_hash`).
 async fn resolve_new_session_channel_context(
     channel_info: Option<&PromptChannelInfo>,
 ) -> (bool, Option<String>, Option<String>) {
@@ -3018,6 +3049,15 @@ pub(crate) async fn fetch_channel_info(
     channel_id: Uuid,
     rest: &RestClient,
 ) -> Option<PromptChannelInfo> {
+    fetch_with_retry(|| fetch_channel_info_once(channel_id, rest)).await
+}
+
+/// Fetch the current kind-39000 metadata with one bounded request.
+///
+/// Used by prompt-turn refreshes when cached metadata is already available as
+/// a graceful fallback. First-time resolution uses [`fetch_channel_info`] so
+/// unknown channels still receive the established retry behavior.
+async fn fetch_channel_info_once(channel_id: Uuid, rest: &RestClient) -> Option<PromptChannelInfo> {
     use nostr::{Alphabet, SingleLetterTag};
 
     let d_tag = SingleLetterTag::lowercase(Alphabet::D);
@@ -3027,57 +3067,48 @@ pub(crate) async fn fetch_channel_info(
         ))
         .custom_tags(d_tag, [channel_id.to_string()]);
 
-    fetch_with_retry(|| async {
-        match timeout(
-            CONTEXT_FETCH_TIMEOUT,
-            rest.query(std::slice::from_ref(&filter)),
-        )
-        .await
-        {
-            Ok(Ok(json)) => {
-                let events = json.as_array()?;
-                let ev = events.first()?;
-                let tags = ev.get("tags")?.as_array()?;
-                let mut name = None;
-                let mut description = None;
-                for tag in tags {
-                    if let Some(arr) = tag.as_array() {
-                        match arr.first().and_then(|v| v.as_str()) {
-                            Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
-                            Some("about") => description = arr.get(1).and_then(|v| v.as_str()),
-                            _ => {}
-                        }
+    match timeout(
+        CONTEXT_FETCH_TIMEOUT,
+        rest.query(std::slice::from_ref(&filter)),
+    )
+    .await
+    {
+        Ok(Ok(json)) => {
+            let events = json.as_array()?;
+            let ev = events.first()?;
+            let tags = ev.get("tags")?.as_array()?;
+            let mut name = None;
+            let mut description = None;
+            for tag in tags {
+                if let Some(arr) = tag.as_array() {
+                    match arr.first().and_then(|v| v.as_str()) {
+                        Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
+                        Some("about") => description = arr.get(1).and_then(|v| v.as_str()),
+                        _ => {}
                     }
                 }
-                let channel_type = crate::relay::channel_type_from_tags(tags);
-                let description = description
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string);
-                Some(PromptChannelInfo {
-                    name: name.unwrap_or(UNKNOWN_CHANNEL_NAME).to_string(),
-                    channel_type,
-                    description,
-                    project: None,
-                })
             }
-            Ok(Err(e)) => {
-                tracing::debug!(
-                    channel_id = %channel_id,
-                    "channel info fetch failed: {e} — will retry"
-                );
-                None
-            }
-            Err(_) => {
-                tracing::debug!(
-                    channel_id = %channel_id,
-                    "channel info fetch timed out — will retry"
-                );
-                None
-            }
+            let channel_type = crate::relay::channel_type_from_tags(tags);
+            let description = description
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            Some(PromptChannelInfo {
+                name: name.unwrap_or(UNKNOWN_CHANNEL_NAME).to_string(),
+                channel_type,
+                description,
+                project: None,
+            })
         }
-    })
-    .await
+        Ok(Err(e)) => {
+            tracing::debug!(channel_id = %channel_id, "channel info fetch failed: {e}");
+            None
+        }
+        Err(_) => {
+            tracing::debug!(channel_id = %channel_id, "channel info fetch timed out");
+            None
+        }
+    }
 }
 
 /// Resolve the listed NIP-MP project whose home channel is `channel_id`.
@@ -8782,8 +8813,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         assert_eq!(resolved.project, Some(stale_project));
         assert_eq!(
             requests.load(Ordering::SeqCst),
-            4,
-            "each refresh is retried once"
+            6,
+            "each resolve makes one metadata refresh and retries project refresh once"
         );
         server.abort();
     }
@@ -8930,6 +8961,7 @@ done"#
             })
             .collect();
         let responses = [
+            channel_metadata_response(id, &[["name", "project-home"], ["t", "stream"]]),
             serde_json::Value::Array(first_page),
             json!([{
                 "id": "f".repeat(64), "created_at": 1, "kind": 30621, "pubkey": owner,
@@ -8949,8 +8981,10 @@ done"#
                 let mut buf = vec![0; 65_536];
                 let read = socket.read(&mut buf).await.unwrap_or(0);
                 let request = String::from_utf8_lossy(&buf[..read]);
-                assert!(request.contains("#buzz-channel"));
                 let index = server_requests.fetch_add(1, Ordering::SeqCst);
+                if index > 0 {
+                    assert!(request.contains("#buzz-channel"));
+                }
                 let body = responses[index].to_string();
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -8982,13 +9016,13 @@ done"#
             .expect("project lookup succeeds")
             .expect("context resolves");
         assert_eq!(info.project.expect("project context").slug, "app");
-        assert_eq!(requests.load(Ordering::SeqCst), 3);
+        assert_eq!(requests.load(Ordering::SeqCst), 4);
         server.abort();
     }
 
     /// A normal channel yields a non-DM (canvas allowed) and its name for the
-    /// title suffix. Channel metadata and project context resolve once each;
-    /// the second consumer reads both from cache.
+    /// title suffix. Prompt-visible channel metadata refreshes for each resolve;
+    /// project context remains cached independently.
     #[tokio::test]
     async fn test_new_session_channel_context_qualifies_a_normal_channel() {
         use std::sync::atomic::Ordering;
@@ -9005,14 +9039,92 @@ done"#
         assert_eq!(channel_type.as_deref(), Some("stream"));
         assert_eq!(requests.load(Ordering::SeqCst), 3);
 
-        let again_info = resolver.resolve(id).await.expect("cached lookup succeeds");
+        let again_info = resolver
+            .resolve(id)
+            .await
+            .expect("refreshed lookup succeeds");
         let (_, again, _) = resolve_new_session_channel_context(again_info.as_ref()).await;
         assert_eq!(again.as_deref(), Some("buzz-dev"));
         assert_eq!(
             requests.load(Ordering::SeqCst),
-            3,
-            "resolved channel metadata and both project event classes are cached"
+            4,
+            "channel metadata refreshes while project event classes remain cached"
         );
+        server.abort();
+    }
+
+    /// Prompt turns refresh kind-39000 metadata so an edit made while the
+    /// harness is running reaches the next agent prompt without a restart.
+    #[tokio::test]
+    async fn test_channel_resolver_refreshes_edited_description() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let id = Uuid::new_v4();
+        let responses = [
+            channel_metadata_response(
+                id,
+                &[
+                    ["name", "team-chat"],
+                    ["t", "stream"],
+                    ["about", "First version"],
+                ],
+            ),
+            json!([]),
+            json!([]),
+            channel_metadata_response(
+                id,
+                &[
+                    ["name", "team-chat"],
+                    ["t", "stream"],
+                    ["about", "First paragraph.\n\nUpdated second paragraph."],
+                ],
+            ),
+        ];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(AtomicUsize::new(0));
+        let server_requests = requests.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0; 8192];
+                let _ = socket.read(&mut buf).await;
+                let index = server_requests.fetch_add(1, Ordering::SeqCst).min(3);
+                let body = responses[index].to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(), body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let resolver = ChannelInfoResolver::new(
+            std::collections::HashMap::new(),
+            crate::relay::RestClient {
+                http: reqwest::Client::new(),
+                base_url,
+                keys: nostr::Keys::generate(),
+                auth_tag_json: None,
+            },
+        );
+
+        let first = resolver
+            .resolve(id)
+            .await
+            .expect("initial project lookup succeeds")
+            .expect("initial metadata resolves");
+        assert_eq!(first.description.as_deref(), Some("First version"));
+
+        let updated = resolver
+            .resolve(id)
+            .await
+            .expect("updated project lookup succeeds")
+            .expect("updated metadata resolves");
+        assert_eq!(
+            updated.description.as_deref(),
+            Some("First paragraph.\n\nUpdated second paragraph.")
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 4);
         server.abort();
     }
 

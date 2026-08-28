@@ -170,8 +170,8 @@ pub(super) fn ensure_remote_provider_supported(provider: Option<&str>) -> Result
 }
 
 /// Build the standard agent JSON payload for provider deploy calls.
-pub(crate) fn build_deploy_payload(
-    app: &AppHandle,
+pub(crate) fn build_deploy_payload<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     state: &AppState,
     record: &ManagedAgentRecord,
 ) -> Result<serde_json::Value, String> {
