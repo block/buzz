@@ -3238,12 +3238,11 @@ async fn tokio_main() -> Result<()> {
                                 {
                                     Ok(authority) => authority,
                                     Err(error) if error.is_transient() => {
-                                        // The authority request exhausted bounded 500ms/1s/2s
-                                        // retry. Transport dedup has recorded this relay-signed
-                                        // wake, but it has not reached dispatch; re-admit it for
-                                        // filtered relay replay rather than losing it or bypassing
-                                        // verification. Each failed cycle is paced by that bounded
-                                        // request retry budget before another replay is scheduled.
+                                        // HTTP-status failures exhaust bounded retries; body
+                                        // interruptions also return transient after pacing.
+                                        // Transport dedup recorded this relay-signed wake, but
+                                        // dispatch has not occurred. Re-admit it for filtered
+                                        // replay rather than losing it or bypassing verification.
                                         if let Err(replay_error) = relay
                                             .replay_event(
                                                 buzz_event.channel_id,

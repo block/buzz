@@ -256,11 +256,24 @@ async fn captured_revision_survives_replacement_but_not_revocation() {
         .await
         .expect("captured authority");
     assert_eq!(authority.0["definition"]["id"], a.id.to_hex());
-    f.state
-        .db
-        .soft_delete_event_and_update_thread(f.community, a.id.as_bytes(), None, None)
-        .await
-        .expect("explicit revoke superseded revision");
+    let deletion = EventBuilder::new(Kind::EventDeletion, "revoke captured revision")
+        .tags([Tag::event(a.id)])
+        .sign_with_keys(&f.owner)
+        .expect("signed deletion");
+    let result = crate::handlers::ingest::ingest_event(
+        &f.state,
+        &buzz_core::TenantContext::resolved(f.community, &f.host),
+        deletion,
+        crate::handlers::ingest::IngestAuth::Nip42 {
+            pubkey: f.owner.public_key(),
+            scopes: vec![],
+            channel_ids: None,
+            conn_id: Uuid::new_v4(),
+        },
+    )
+    .await
+    .expect("explicit revocation through authenticated deletion ingress");
+    assert!(result.accepted);
     assert_eq!(
         f.authority(run, &message).await.expect_err("revoked").0,
         StatusCode::NOT_FOUND
