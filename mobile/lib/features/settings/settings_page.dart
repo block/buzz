@@ -1,7 +1,7 @@
 import 'dart:async';
 
-import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -12,8 +12,8 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/clipboard_utils.dart';
 import '../../shared/community/community_membership_provider.dart';
-import '../../shared/relay/relay.dart';
 import '../../shared/push/push_bridge.dart';
+import '../../shared/relay/relay.dart';
 import '../pairing/pairing_provider.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list.dart';
@@ -24,10 +24,8 @@ import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/ios_glass_navigation_action.dart';
 import '../../shared/widgets/immediate_page_route.dart';
 import '../../shared/widgets/modal_presentation.dart';
-import 'accent_picker_page.dart';
 import 'theme_picker_page.dart';
 
-part 'settings_page/appearance_section.dart';
 part 'settings_page/community_section.dart';
 part 'settings_page/connection_section.dart';
 part 'settings_page/notifications_section.dart';
@@ -145,7 +143,7 @@ class SettingsPage extends HookConsumerWidget {
     }
 
     return FrostedScaffold(
-      backgroundColor: context.colors.surface,
+      useUtilitySurfaceTheme: true,
       appBar: FrostedAppBar(
         automaticallyImplyLeading: false,
         horizontalInset: Grid.gutter,
@@ -218,7 +216,6 @@ class SettingsPage extends HookConsumerWidget {
                 profileHeader,
                 _CommunitySection(invitePageBuilder: invitePageBuilder),
                 const _NotificationsSection(),
-                const _AppearanceSection(),
                 _ConnectionSection(
                   identityRecoveryPageBuilder: identityRecoveryPageBuilder,
                 ),

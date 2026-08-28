@@ -41,6 +41,7 @@ mod relay_admission;
 mod reset;
 mod secret_store;
 mod shutdown;
+mod team_catalog;
 mod templates;
 mod terminal_runtime;
 #[cfg_attr(not(test), allow(dead_code))]
@@ -720,6 +721,7 @@ pub fn run() {
             discover_backend_providers,
             probe_backend_provider,
             persona_catalog::fetch_persona_catalog,
+            team_catalog::fetch_team_catalog,
             unread_catch_up::unread_catch_up,
             observed_unread::observed_unread_open_scope,
             observed_unread::observed_unread_ingest,
