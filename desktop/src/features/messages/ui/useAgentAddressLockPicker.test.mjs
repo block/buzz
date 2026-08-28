@@ -84,6 +84,7 @@ test("always addressing an agent keeps autocomplete open, inserts the chip, adds
       replaceToOffset: 0,
       insertText: "@Agent Ada ",
       preserveSelection: true,
+      reassertMentionCaret: false,
     },
   ]);
   assert.equal(cancelCount, 0);
@@ -425,6 +426,49 @@ test("restoring a multi-word automatic mention into an empty composer focuses af
     },
   ]);
   assert.equal(focusEndCount, 1);
+});
+
+test("restoring before authored text preserves its selection", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  const appliedEdits = [];
+  let focusEndCount = 0;
+  const { result } = renderHook(() =>
+    useAgentAddressLockPicker({
+      applyAutocompleteEdit: (edit) => appliedEdits.push(edit),
+      audience: {
+        pubkeys: ["agent-pubkey"],
+        addPubkey: () => {},
+      },
+      audienceScope: "thread-scope",
+      mentions: {
+        getDraftMentionRefs: () => [],
+        getMentionDisplayName: () => "Morgarita",
+        registerMentionPubkey: () => {},
+      },
+      onPulseAddressLock: () => {},
+      richText: {
+        focusEnd: () => {
+          focusEndCount += 1;
+        },
+        getPlainTextAndCursor: () => ({ text: "draft text", cursor: 10 }),
+      },
+    }),
+  );
+
+  act(() => result.current.restoreAddressedAgentMentions());
+
+  assert.deepEqual(appliedEdits, [
+    {
+      replaceFromOffset: 0,
+      replaceToOffset: 0,
+      insertText: "@Morgarita ",
+      preserveSelection: true,
+    },
+  ]);
+  assert.equal(focusEndCount, 0);
 });
 
 test("restoring an existing automatic mention re-registers its agent chip", async () => {

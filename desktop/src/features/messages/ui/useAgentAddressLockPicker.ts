@@ -1,7 +1,7 @@
 import * as React from "react";
 
 import { getMentionOffsets } from "@/features/messages/lib/hasMention";
-import { stripImplicitAgentMentions } from "@/features/messages/lib/stripImplicitAgentMentions";
+import { stripImplicitAgentMentionPrefix } from "@/features/messages/lib/stripImplicitAgentMentions";
 import type { usePersistentAgentAudience } from "@/features/messages/lib/persistentAgentAudience";
 import type { UseMentionsResult } from "@/features/messages/lib/useMentions";
 import type {
@@ -179,7 +179,11 @@ export function useAgentAddressLockPicker({
       )?.displayName;
       if (displayName) {
         const text = richText.getPlainTextAndCursor().text;
-        const strippedText = stripImplicitAgentMentions(text, [displayName]);
+        const implicitPrefix = `@${displayName}${text === `@${displayName}` ? "" : " "}`;
+        const strippedText = stripImplicitAgentMentionPrefix(
+          text,
+          implicitPrefix,
+        );
         if (strippedText !== text) {
           applyAutocompleteEdit({
             replaceFromOffset: 0,
@@ -241,7 +245,8 @@ export function useAgentAddressLockPicker({
             replaceFromOffset: 0,
             replaceToOffset: 0,
             insertText: `@${suggestion.displayName} `,
-            preserveSelection: true,
+            preserveSelection: text.length > 0,
+            reassertMentionCaret: false,
           });
         }
         trackMentionAddressedAgent(pubkey);

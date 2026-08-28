@@ -435,6 +435,7 @@ function MessageComposerImpl({
         edit.insertText,
         edit.customEmojiShortcode,
         edit.preserveSelection,
+        edit.reassertMentionCaret,
       );
     },
     [richText.replacePlainTextRange],
