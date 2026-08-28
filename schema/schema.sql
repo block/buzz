@@ -229,6 +229,7 @@ CREATE TABLE events (
     received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     channel_id  UUID,
     deleted_at  TIMESTAMPTZ,
+    workflow_revision_superseded BOOLEAN NOT NULL DEFAULT false,
     d_tag       TEXT,
     not_before  BIGINT,
     delivered_at BIGINT,
