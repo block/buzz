@@ -1,6 +1,5 @@
 // biome-ignore-all format: line-count ratchet requires compact forwarding in this legacy component
 import * as React from "react";
-import { useQueryClient } from "@tanstack/react-query";
 import { useAppShell } from "@/app/AppShellContext";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useActiveChannelHeader } from "@/features/channels/useActiveChannelHeader";
@@ -49,11 +48,6 @@ import {
   getThreadReference,
   isThreadReply,
 } from "@/features/messages/lib/threading";
-import { hasPersistedHydratedChannel } from "@/features/messages/lib/channelHeadCache";
-import {
-  resolveTimelineLoadingLatch,
-  selectTimelineLoadingState,
-} from "@/features/messages/lib/timelineLoadingState";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useIndependentThreadPanel } from "@/features/messages/useIndependentThreadPanel";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
@@ -71,6 +65,7 @@ import { useHuddleReadMarker } from "@/features/channels/ui/useHuddleReadMarker"
 import { useHuddleThreadIsolation } from "@/features/channels/ui/useHuddleThreadIsolation";
 import { AgentSessionProvider } from "@/shared/context/AgentSessionContext";
 import { ProfilePanelProvider } from "@/shared/context/ProfilePanelContext";
+import { useChannelTimelineLoading } from "@/features/channels/useChannelTimelineLoading";
 import { useMainInsetRef } from "@/shared/layout/MainInsetContext";
 import { channelContentTopPaddingMeasurement } from "@/shared/layout/chromeLayout";
 import { useMeasuredCssVariable } from "@/shared/layout/useMeasuredCssVariable";
@@ -104,7 +99,6 @@ export function ChannelScreen({
   targetMessageEvents, targetMessageId,
   ...searchTarget
 }: ChannelScreenProps) {
-  const queryClient = useQueryClient();
   const { goHome } = useAppNavigation();
   const { activeCommunity } = useCommunities();
   const {
@@ -615,30 +609,10 @@ export function ChannelScreen({
       setThreadReplyTargetId,
       setThreadScrollTargetId,
     });
-  const settledChannelIdRef = React.useRef<string | null>(null);
-  const hasSettledThisChannel =
-    activeChannelId !== null && settledChannelIdRef.current === activeChannelId;
-  const timelineLoadingNow =
-    activeChannel !== null &&
-    activeChannel.channelType !== "forum" &&
-    selectTimelineLoadingState(
-      {
-        isPending: messagesQuery.isPending,
-        isFetching: messagesQuery.isFetching,
-        isPlaceholderData: messagesQuery.isPlaceholderData,
-        dataLength: messagesQuery.data?.length ?? null,
-      },
-      hasSettledThisChannel ||
-        (activeChannelId !== null &&
-          hasPersistedHydratedChannel(queryClient, activeChannelId)),
-    );
-  const { settledChannelId, isLoading: isTimelineLoading } =
-    resolveTimelineLoadingLatch(
-      settledChannelIdRef.current,
-      activeChannelId,
-      timelineLoadingNow,
-    );
-  settledChannelIdRef.current = settledChannelId;
+  const isTimelineLoading = useChannelTimelineLoading(
+    activeChannel,
+    messagesQuery,
+  );
   const { welcomeKickoffStage, welcomeKickoffSettingUp } =
     useWelcomeKickoffStagePresence(
       activeChannel,

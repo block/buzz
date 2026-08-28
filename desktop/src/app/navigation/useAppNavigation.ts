@@ -6,10 +6,10 @@ import {
   useRouter,
 } from "@tanstack/react-router";
 
+import { commitGuardedNavigation } from "@/app/navigation/commitGuardedNavigation";
 import type { SearchHighlightNavigation } from "@/app/navigation/searchHighlightNavigation";
 import { openSearchHitWithNavigation } from "@/app/navigation/searchHitNavigation";
 import {
-  allowNavigation,
   type GuardedNavigation,
   traverseHistory,
 } from "@/app/navigation/navigationGuard";
@@ -43,30 +43,22 @@ export function useAppNavigation() {
       guardedTarget?: GuardedNavigation,
     ) => {
       const nextLocation = router.buildLocation(next as never);
-      const hasStateUpdate = next.state !== undefined;
-
-      if (
-        location.href === nextLocation.href &&
-        !behavior.force &&
-        !hasStateUpdate
-      ) {
-        return false;
-      }
-
-      if (
-        !allowNavigation(
-          guardedTarget ?? { kind: "route", href: nextLocation.href },
-        )
-      ) {
-        return false;
-      }
-
-      await navigate({
-        ...next,
-        replace: behavior.replace,
-        resetScroll: behavior.resetScroll,
-      } as never);
-      return true;
+      return commitGuardedNavigation({
+        currentHref: location.href,
+        force: behavior.force,
+        guardedTarget: guardedTarget ?? {
+          kind: "route",
+          href: nextLocation.href,
+        },
+        hasStateUpdate: next.state !== undefined,
+        navigate: () =>
+          navigate({
+            ...next,
+            replace: behavior.replace,
+            resetScroll: behavior.resetScroll,
+          } as never),
+        nextHref: nextLocation.href,
+      });
     },
     [location.href, navigate, router],
   );

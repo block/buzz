@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
@@ -47,7 +47,7 @@ export function usePulseNoteActions({
   const [pendingUpvoteNoteIds, setPendingUpvoteNoteIds] = React.useState<
     ReadonlySet<string>
   >(() => new Set());
-  const navigate = useNavigate();
+  const { goChannel } = useAppNavigation();
   const queryClient = useQueryClient();
   const replyMutation = usePublishNoteMutation(currentPubkey);
   const toggleReactionMutation = useToggleReactionMutation();
@@ -154,21 +154,20 @@ export function usePulseNoteActions({
 
   const startDm = React.useCallback(
     async (pubkey: string) => {
+      // goChannel, not raw navigate: this is a first-class channel entry and
+      // must go through the same navigation guard as every other one.
       try {
         const directMessage = await openDmMutation.mutateAsync({
           pubkeys: [pubkey],
         });
-        await navigate({
-          to: "/channels/$channelId",
-          params: { channelId: directMessage.id },
-        });
+        await goChannel(directMessage.id);
       } catch (error) {
         toast.error(
           error instanceof Error ? error.message : "Failed to open DM",
         );
       }
     },
-    [navigate, openDmMutation],
+    [goChannel, openDmMutation],
   );
 
   return {
