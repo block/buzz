@@ -26,6 +26,8 @@
 
 /// Explicit deployment-global admin report reads.
 pub mod admin_moderation;
+/// Durable multi-agent workflow run state.
+pub mod agent_workflow;
 /// API token storage and lookup.
 pub mod api_token;
 /// Relay-scoped archived identity persistence (NIP-IA).

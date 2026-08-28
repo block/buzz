@@ -1,0 +1,47 @@
+version: 1
+name: tribunal-review
+steps:
+  - id: ingest
+    action: ingest_document
+    output: document-manifest
+  - id: defense-analysis
+    action: run_agent
+    agent: helena
+    depends_on: [ingest]
+    output_schema: schemas/defense-analysis.schema.json
+  - id: contradictor-analysis
+    action: run_agent
+    agent: rui
+    depends_on: [ingest]
+    output_schema: schemas/contradictor-analysis.schema.json
+  - id: analysis-barrier
+    action: barrier
+    depends_on: [defense-analysis, contradictor-analysis]
+  - id: defense-debate
+    action: run_agent
+    agent: helena
+    depends_on: [analysis-barrier]
+    output_schema: schemas/debate-response.schema.json
+  - id: contradictor-debate
+    action: run_agent
+    agent: rui
+    depends_on: [analysis-barrier]
+    output_schema: schemas/debate-response.schema.json
+  - id: debate-barrier
+    action: barrier
+    depends_on: [defense-debate, contradictor-debate]
+  - id: judicial-review
+    action: run_agent
+    agent: anselmo
+    depends_on: [debate-barrier]
+    output_schema: schemas/judicial-review.schema.json
+  - id: verify-citations
+    action: verify_artifact
+    depends_on: [judicial-review]
+    schema: schemas/citation-ledger.schema.json
+  - id: human-approval
+    action: request_approval
+    depends_on: [verify-citations]
+  - id: publish
+    action: publish_artifact
+    depends_on: [human-approval]

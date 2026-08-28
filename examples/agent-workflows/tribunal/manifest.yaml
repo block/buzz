@@ -1,0 +1,29 @@
+version: 1
+workflow: tribunal-review
+coordinator: tribunal-coordinator
+agents:
+  helena:
+    role: independent-defense-review
+    identity: replace-with-nostr-pubkey
+    input_budget_tokens: 64000
+    output_budget_tokens: 16000
+  rui:
+    role: independent-contradictor-review
+    identity: replace-with-nostr-pubkey
+    input_budget_tokens: 64000
+    output_budget_tokens: 16000
+  anselmo:
+    role: judicial-review
+    identity: replace-with-nostr-pubkey
+    input_budget_tokens: 48000
+    output_budget_tokens: 12000
+  citation-verifier:
+    role: source-verification
+    identity: replace-with-nostr-pubkey
+    input_budget_tokens: 32000
+    output_budget_tokens: 8000
+limits:
+  task_timeout_seconds: 2700
+  checkpoint_interval_seconds: 300
+  max_attempts: 2
+  require_human_approval: true

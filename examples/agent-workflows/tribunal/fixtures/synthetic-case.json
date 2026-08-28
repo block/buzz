@@ -1,0 +1,16 @@
+{
+  "case_id": "SYNTHETIC-001",
+  "title": "Synthetic evidentiary review",
+  "documents": [
+    {
+      "document_id": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "filename": "synthetic-record.pdf",
+      "pages": 12
+    }
+  ],
+  "parties": [
+    "Synthetic Person A",
+    "Synthetic Person B"
+  ],
+  "notice": "Entirely fictional fixture for workflow validation."
+}

@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "title": "Judicial review",
+  "properties": {
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_assessment": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "rubric_scores": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 5
+      }
+    },
+    "accepted_arguments": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "rejected_arguments": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unresolved_facts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "legal_risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "decision": {
+      "type": "string",
+      "minLength": 1
+    },
+    "citation_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "issues",
+    "evidence_assessment",
+    "rubric_scores",
+    "accepted_arguments",
+    "rejected_arguments",
+    "unresolved_facts",
+    "legal_risks",
+    "decision",
+    "citation_ids"
+  ]
+}

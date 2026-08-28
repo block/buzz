@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "title": "Contradictor analysis",
+  "properties": {
+    "summary": {
+      "type": "string"
+    },
+    "challenged_claims": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "unsupported_claims": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "alternative_interpretations": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "prosecution_strengths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "defense_vulnerabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "priority_challenges": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "claim_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "citation_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "claim_id",
+          "text",
+          "citation_ids"
+        ]
+      }
+    }
+  },
+  "required": [
+    "summary",
+    "challenged_claims",
+    "unsupported_claims",
+    "alternative_interpretations",
+    "prosecution_strengths",
+    "defense_vulnerabilities",
+    "priority_challenges",
+    "claims"
+  ]
+}
