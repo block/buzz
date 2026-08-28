@@ -17,14 +17,14 @@ jobs:
     # This workflow posts an advisory review; its skipped jobs are not a merge
     # gate and must not be configured as required status checks.
     # MEMBER and OWNER are GitHub's associations for members of the `block`
-    # organization. Outside contributors require this exact command from one
+    # organization. The trusted prepare step checks the live PR instead of the
+    # event snapshot. Outside contributors require this exact command from one
     # of those members: @buzz-security-review <full-head-sha>
     if: >-
       github.repository == 'block/buzz' && (
         (
           github.event_name == 'pull_request_target' &&
-          github.event.pull_request.draft == false &&
-          contains(fromJSON('["MEMBER", "OWNER"]'), github.event.pull_request.author_association)
+          github.event.pull_request.draft == false
         ) || (
           github.event_name == 'issue_comment' &&
           github.event.issue.pull_request &&
@@ -38,6 +38,7 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
+      authorized: ${{ steps.pr.outputs.authorized }}
       pr_number: ${{ steps.pr.outputs.pr_number }}
       trigger_actor: ${{ steps.pr.outputs.trigger_actor }}
       base_sha: ${{ steps.pr.outputs.base_sha }}
@@ -111,8 +112,7 @@ jobs:
       cancel-in-progress: true
     permissions:
       contents: read
-      issues: write
-      pull-requests: read
+      pull-requests: write
     steps:
       - name: Checkout trusted workflow support
         if: matrix.pr_number != 0
@@ -192,8 +192,7 @@ jobs:
       cancel-in-progress: true
     permissions:
       contents: read
-      issues: write
-      pull-requests: read
+      pull-requests: write
     steps:
       - name: Checkout trusted workflow support
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -212,6 +211,7 @@ jobs:
   security-review:
     name: Run Codex Security Review
     needs: prepare-review
+    if: needs.prepare-review.outputs.authorized == 'true'
     runs-on: ubuntu-latest
     environment: codex-review
     timeout-minutes: 30
@@ -298,7 +298,7 @@ jobs:
           ACTIONS_ID_TOKEN_REQUEST_URL: ''
         with:
           openai-api-key: ${{ secrets.CODEX_REVIEW_API_KEY }}
-          codex-version: '0.149.0'
+          codex-version: '0.150.1'
           model: ${{ env.CODEX_MODEL }}
           codex-args: '["-c","model_reasoning_effort=${{ env.CODEX_REASONING_EFFORT }}"]'
           # The trusted authorization job already enforced repository membership.
@@ -453,8 +453,7 @@ jobs:
       cancel-in-progress: true
     permissions:
       contents: read
-      issues: write
-      pull-requests: read
+      pull-requests: write
     env:
       CODEX_MODEL: gpt-5.6-sol
       REVIEW_JSON: ${{ needs.security-review.outputs.review_json }}

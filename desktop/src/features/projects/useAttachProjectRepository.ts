@@ -8,6 +8,7 @@ import {
 import { publishOwnedAgentProjectAnnouncements } from "@/features/projects/projectOwnerControl";
 import { addRepositoryToProject } from "@/features/projects/projectModels";
 import { buildProjectPatchTemplate } from "@/features/projects/projectRepositoryCreation";
+import { markProjectDataAuthoritative } from "@/features/projects/projectSnapshot";
 import { publishProjectOwnerAnnouncement } from "@/shared/api/projectGit";
 import { relayClient } from "@/shared/api/relayClient";
 import { KIND_PROJECT_ANNOUNCEMENT } from "@/shared/constants/kinds";
@@ -109,6 +110,7 @@ export function useAttachProjectRepositoryMutation() {
   return useMutation({
     mutationFn: attachProjectRepository,
     onSuccess: ({ previousProjectId, project }) => {
+      markProjectDataAuthoritative(project, "local-write");
       if (previousProjectId !== project.id) {
         queryClient.removeQueries({
           exact: true,

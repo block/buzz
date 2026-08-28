@@ -18,7 +18,6 @@ import {
   restoreImetaMediaDisplayLabels,
   stripImetaMediaLines,
 } from "@/features/messages/lib/imetaMediaMarkdown";
-import { useAttachmentEditing } from "@/features/messages/lib/useAttachmentEditing";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import {
   cancelBackgroundMediaUploads,
@@ -26,6 +25,7 @@ import {
   takeQueuedAttachmentsForDraft,
   useBackgroundMediaUpload,
 } from "@/features/messages/lib/backgroundMediaUploadStore";
+import { isMentionCodeContext } from "@/features/messages/lib/mentionCodeContext";
 import { useMentions } from "@/features/messages/lib/useMentions";
 import {
   getPersistentAgentAudienceScope,
@@ -60,6 +60,7 @@ import { useAddressMentionPulse } from "./useAddressMentionPulse";
 import { useAlwaysAddressShortcut } from "./useAlwaysAddressShortcut";
 import { useComposerMentionPicker } from "./useComposerMentionPicker";
 import { useAutoPinMentionedAgents } from "./useAutoPinMentionedAgents";
+import { useComposerAttachmentSpoilers } from "./useComposerAttachmentSpoilers";
 import { useComposerContentState } from "./useComposerContentState";
 import { useComposerPasteHandler } from "./useComposerPasteHandler";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
@@ -117,11 +118,6 @@ function MessageComposerImpl({
   } = useComposerLinkPreviews(previewContent, editTarget == null);
   const [isEmojiPickerOpen, setIsEmojiPickerOpen] = React.useState(false);
   const [isFormattingOpen, setIsFormattingOpen] = React.useState(false);
-  const [spoileredAttachmentUrls, setSpoileredAttachmentUrls] = React.useState<
-    Set<string>
-  >(() => new Set());
-  const spoileredAttachmentUrlsRef = React.useRef(spoileredAttachmentUrls);
-  spoileredAttachmentUrlsRef.current = spoileredAttachmentUrls;
   const handleFormattingToggle = React.useCallback((pressed: boolean) => {
     if (pressed) setIsEmojiPickerOpen(false);
     setIsFormattingOpen(pressed);
@@ -159,6 +155,19 @@ function MessageComposerImpl({
   );
   const internalMedia = useMediaUpload({ deferUploadsUntilSend: true });
   const media = mediaController ?? internalMedia;
+  const {
+    handleAttachmentEditSave,
+    handleAttachmentRevert,
+    handleRemoveAttachment,
+    handleToggleAttachmentSpoiler,
+    setSpoileredAttachmentUrls,
+    spoileredAttachmentUrls,
+    spoileredAttachmentUrlsRef,
+  } = useComposerAttachmentSpoilers({
+    removeAttachment: media.removeAttachment,
+    revertAttachment: media.revertAttachment,
+    uploadEditedAttachment: media.uploadEditedAttachment,
+  });
   const [isDeferredEditPending, setDeferredEditPending] = React.useState(false);
   const composerDisabled = disabled || isDeferredEditPending;
   const isEditSubmissionLocked =
@@ -662,6 +671,7 @@ function MessageComposerImpl({
     richText.clearContent,
     richText.setContent,
     setComposerContent,
+    setSpoileredAttachmentUrls,
     spoileredAttachmentUrls,
     syncComposerContentFromEditor,
     onCaptureSendContext,
@@ -723,7 +733,9 @@ function MessageComposerImpl({
         }
         return;
       }
-      const { handled, suggestion } = mentions.handleMentionKeyDown(event);
+      const { handled, suggestion } = mentions.handleMentionKeyDown(event, {
+        isCodeContext: () => isMentionCodeContext(richText.editor),
+      });
       if (handled) {
         if (suggestion) {
           selectMentionSuggestion(suggestion);
@@ -756,6 +768,7 @@ function MessageComposerImpl({
       channelLinks.handleChannelKeyDown,
       applyChannelInsert,
       mentions.handleMentionKeyDown,
+      richText.editor,
       selectMentionSuggestion,
       linkEditor.isCardOpen,
       linkEditor.focusCardFirstControl,
@@ -781,35 +794,6 @@ function MessageComposerImpl({
   const handlePaperclipClick = React.useCallback(() => {
     void media.handlePaperclip();
   }, [media.handlePaperclip]);
-  const handleRemoveAttachment = React.useCallback(
-    (url: string) => {
-      setSpoileredAttachmentUrls((current) => {
-        if (!current.has(url)) return current;
-        const next = new Set(current);
-        next.delete(url);
-        return next;
-      });
-      media.removeAttachment(url);
-    },
-    [media.removeAttachment],
-  );
-  const { handleAttachmentEditSave, handleAttachmentRevert } =
-    useAttachmentEditing({
-      revertAttachment: media.revertAttachment,
-      setSpoileredAttachmentUrls,
-      uploadEditedAttachment: media.uploadEditedAttachment,
-    });
-  const handleToggleAttachmentSpoiler = React.useCallback((url: string) => {
-    setSpoileredAttachmentUrls((current) => {
-      const next = new Set(current);
-      if (next.has(url)) {
-        next.delete(url);
-      } else {
-        next.add(url);
-      }
-      return next;
-    });
-  }, []);
   return (
     <>
       <footer

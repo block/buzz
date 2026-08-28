@@ -368,13 +368,17 @@ async fn initialize(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSend
     .await;
 }
 
-/// Resolve the Databricks model catalog for one `session/new` call.
+/// Resolve a Databricks model catalog for one `session/new` call.
 ///
-/// Tries to use a previously-cached successful discovery result. If the cache is empty,
-/// runs `discover` and — on success — populates the cache for future calls. On failure
-/// the error is returned and the cell is intentionally left empty so the next session retries.
+/// The active filter is part of the result's authority: discovery failure may
+/// not fall back to a configured model when it is present, because that would
+/// bypass the same restriction applied to a successful catalog.
 ///
-/// Extracted from `session_new` so that tests can drive this path with an injected
+/// Tries to use a previously cached successful discovery result. If the cache
+/// is empty, runs `discover` and — on success — populates the cache. On failure
+/// the error is returned and the cell remains empty so the next session retries.
+///
+/// Extracted from `session_new` so tests can drive this path with an injected
 /// discovery future without requiring a full `App` / transport stack.
 async fn resolve_models_catalog(
     cache: &tokio::sync::OnceCell<Vec<ModelEntry>>,
@@ -383,7 +387,7 @@ async fn resolve_models_catalog(
     cache.get_or_try_init(|| discover).await.cloned()
 }
 
-/// Return the configured model as a one-entry catalog for this response.
+/// Return the configured model as an unfiltered discovery fallback.
 ///
 /// This value is never written to `models_cache`; failed discovery must be retried by
 /// the next session rather than pinning degraded state for the process lifetime.
@@ -396,6 +400,17 @@ fn configured_model_fallback(model: &str) -> Vec<ModelEntry> {
         .unwrap_or(&model)
         .to_string();
     vec![ModelEntry { id: model, name }]
+}
+
+/// A discovery failure may use the configured model only when no visibility
+/// filter is active. Returning that model under an active filter would silently
+/// bypass the operator's authoritative catalog restriction.
+fn discovery_error_fallback(cfg: &Config) -> Vec<ModelEntry> {
+    if cfg.databricks_model_filter.is_some() {
+        Vec::new()
+    } else {
+        configured_model_fallback(&cfg.model)
+    }
 }
 
 async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSender) {
@@ -482,16 +497,18 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
                     Err(error @ AgentError::LlmAuth(_)) => {
                         tracing::warn!(
                             error = %error,
-                            "Databricks OAuth model catalog unavailable; using configured model"
+                            filter_active = app.cfg.databricks_model_filter.is_some(),
+                            "Databricks OAuth model catalog unavailable; using filter-aware fallback"
                         );
-                        configured_model_fallback(&app.cfg.model)
+                        discovery_error_fallback(&app.cfg)
                     }
                     Err(error) => {
                         tracing::warn!(
                             error = %error,
-                            "Databricks model catalog unavailable; using configured model"
+                            filter_active = app.cfg.databricks_model_filter.is_some(),
+                            "Databricks model catalog unavailable; using filter-aware fallback"
                         );
-                        configured_model_fallback(&app.cfg.model)
+                        discovery_error_fallback(&app.cfg)
                     }
                 };
                 models

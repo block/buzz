@@ -7,6 +7,24 @@ import { relayClient } from "@/shared/api/relayClient";
 import { KIND_PROJECT_ANNOUNCEMENT } from "@/shared/constants/kinds";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
+/** Allows automatic healing only from relay-validated owner project data. */
+export function canHealProjectHomeRepositories({
+  identityPubkey,
+  project,
+  projectDataIsAuthoritative,
+}: {
+  identityPubkey?: string;
+  project: Pick<Project, "owner" | "repositories">;
+  projectDataIsAuthoritative: boolean;
+}): boolean {
+  return Boolean(
+    projectDataIsAuthoritative &&
+      identityPubkey &&
+      normalizePubkey(identityPubkey) === normalizePubkey(project.owner) &&
+      project.repositories.length > 0,
+  );
+}
+
 /**
  * When the signed-in user owns this project, bind absorbed home-channel
  * repositories onto the `kind:30621` so Overview, other clients, and NIP-MP
@@ -15,6 +33,7 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
  */
 export function useHealProjectHomeRepositories(
   project: Project,
+  projectDataIsAuthoritative: boolean,
   identityPubkey?: string,
 ) {
   const attachMutation = useAttachProjectRepositoryMutation();
@@ -22,11 +41,15 @@ export function useHealProjectHomeRepositories(
   const mutateAsync = attachMutation.mutateAsync;
 
   React.useEffect(() => {
-    if (!identityPubkey) return;
-    if (normalizePubkey(identityPubkey) !== normalizePubkey(project.owner)) {
+    if (
+      !canHealProjectHomeRepositories({
+        identityPubkey,
+        project,
+        projectDataIsAuthoritative,
+      })
+    ) {
       return;
     }
-    if (project.repositories.length === 0) return;
 
     let cancelled = false;
     void (async () => {
@@ -58,5 +81,5 @@ export function useHealProjectHomeRepositories(
     return () => {
       cancelled = true;
     };
-  }, [identityPubkey, mutateAsync, project]);
+  }, [identityPubkey, mutateAsync, project, projectDataIsAuthoritative]);
 }

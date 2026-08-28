@@ -1,6 +1,8 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 
 const {
@@ -20,8 +22,14 @@ const NEW_BASE_SHA = "e".repeat(40);
 const MARKER = "<!-- codex-security-review -->";
 const CURRENT_REVIEW_LABEL = "codex-security-review-current";
 
-function pullRequest({ baseSha = OLD_BASE_SHA, headSha = HEAD_SHA } = {}) {
+function pullRequest({
+  authorAssociation = "CONTRIBUTOR",
+  baseSha = OLD_BASE_SHA,
+  headSha = HEAD_SHA,
+  labels = [],
+} = {}) {
   return {
+    author_association: authorAssociation,
     state: "open",
     base: {
       ref: "main",
@@ -33,6 +41,7 @@ function pullRequest({ baseSha = OLD_BASE_SHA, headSha = HEAD_SHA } = {}) {
       repo: { full_name: "outside/buzz" },
     },
     changed_files: 1,
+    labels,
   };
 }
 
@@ -48,6 +57,7 @@ function harness({
   const updated = [];
   const addedLabels = [];
   const removedLabels = [];
+  const removeLabelCalls = [];
   const outputs = new Map();
   const failures = [];
   const notices = [];
@@ -85,6 +95,7 @@ function harness({
           addedLabels.push(input);
         },
         removeLabel: async (input) => {
+          removeLabelCalls.push(input);
           if (!labelExists) {
             throw Object.assign(new Error("not found"), { status: 404 });
           }
@@ -139,6 +150,7 @@ function harness({
     info,
     notices,
     outputs,
+    removeLabelCalls,
     removedLabels,
     storedComments,
     updated,
@@ -198,6 +210,7 @@ test("prepare binds a member command to the named head SHA", async () => {
   await prepare(current);
 
   assert.deepEqual(current.failures, []);
+  assert.equal(current.outputs.get("authorized"), "true");
   assert.equal(current.outputs.get("head_sha"), HEAD_SHA);
   assert.equal(current.outputs.get("base_sha"), BASE_SHA);
   assert.notEqual(current.outputs.get("base_sha"), OLD_BASE_SHA);
@@ -216,6 +229,62 @@ test("prepare binds a member command to the named head SHA", async () => {
     moved.failures[0],
     new RegExp(`@buzz-security-review ${OTHER_HEAD_SHA}`),
   );
+});
+
+test("pull request authorization uses the live author association", async () => {
+  const member = harness({
+    pull: pullRequest({ authorAssociation: "MEMBER" }),
+  });
+  member.context.eventName = "pull_request_target";
+  member.context.payload.pull_request = {
+    number: 6816,
+    head: { sha: HEAD_SHA },
+    author_association: "CONTRIBUTOR",
+  };
+
+  await prepare(member);
+
+  assert.equal(member.outputs.get("authorized"), "true");
+  assert.deepEqual(member.failures, []);
+
+  const external = harness({
+    pull: pullRequest({ authorAssociation: "CONTRIBUTOR" }),
+  });
+  external.context.eventName = "pull_request_target";
+  external.context.payload.pull_request = {
+    number: 6816,
+    head: { sha: HEAD_SHA },
+    author_association: "MEMBER",
+  };
+
+  await prepare(external);
+
+  assert.equal(external.outputs.get("authorized"), undefined);
+  assert.deepEqual(external.failures, []);
+  assert.match(external.info.at(-1), /requires authorization/);
+});
+
+test("PR mutation jobs use pull request write permission", () => {
+  const workflow = readFileSync(
+    path.join(__dirname, "../workflows/codex-security-review.yml"),
+    "utf8",
+  );
+  for (const jobName of [
+    "reconcile-base-reviews",
+    "invalidate-previous-review",
+    "post-review",
+  ]) {
+    const start = workflow.indexOf(`  ${jobName}:\n`);
+    assert.notEqual(start, -1, `missing workflow job ${jobName}`);
+    const remainder = workflow.slice(start + 2);
+    const nextJob = remainder.search(/^  [a-z][a-z0-9-]*:\n/m);
+    const job =
+      nextJob === -1
+        ? workflow.slice(start)
+        : workflow.slice(start, start + 2 + nextJob);
+    assert.match(job, /^      pull-requests: write$/m);
+    assert.doesNotMatch(job, /^      issues: write$/m);
+  }
 });
 
 test("prepare rejects review commands without a full exact SHA", async () => {
@@ -431,7 +500,10 @@ test("base reconciliation does not create comments on unreviewed PRs", async () 
 
 test("pull request updates invalidate member reviews without adding placeholders", async () => {
   const reviewed = harness({
-    pull: pullRequest({ headSha: OTHER_HEAD_SHA }),
+    pull: pullRequest({
+      authorAssociation: "MEMBER",
+      headSha: OTHER_HEAD_SHA,
+    }),
     comments: [
       reviewComment(
         `${MARKER}\n<!-- codex-security-review-range:${BASE_SHA}...${HEAD_SHA} -->\nold review`,
@@ -441,7 +513,7 @@ test("pull request updates invalidate member reviews without adding placeholders
   reviewed.context.eventName = "pull_request_target";
   reviewed.context.payload.pull_request = {
     number: 6816,
-    author_association: "MEMBER",
+    author_association: "CONTRIBUTOR",
   };
   await reviewed.github.rest.issues.addLabels({
     issue_number: 6816,
@@ -456,23 +528,28 @@ test("pull request updates invalidate member reviews without adding placeholders
   );
   assert.equal(reviewed.removedLabels.length, 1);
 
-  const unreviewed = harness();
+  const unreviewed = harness({
+    pull: pullRequest({ authorAssociation: "OWNER" }),
+  });
   unreviewed.context.eventName = "pull_request_target";
   unreviewed.context.payload.pull_request = {
     number: 6816,
-    author_association: "OWNER",
+    author_association: "CONTRIBUTOR",
   };
 
   await invalidatePullRequestUpdate(unreviewed);
 
   assert.equal(unreviewed.created.length, 0);
   assert.equal(unreviewed.updated.length, 0);
+  assert.equal(unreviewed.removeLabelCalls.length, 0);
 
-  const external = harness();
+  const external = harness({
+    pull: pullRequest({ authorAssociation: "CONTRIBUTOR" }),
+  });
   external.context.eventName = "pull_request_target";
   external.context.payload.pull_request = {
     number: 6816,
-    author_association: "CONTRIBUTOR",
+    author_association: "MEMBER",
   };
 
   await invalidatePullRequestUpdate(external);

@@ -125,6 +125,10 @@ type InboxDetailPaneProps = {
     messageId: string,
     threadRootId?: string | null,
   ) => void;
+  /** True while the selected hidden DM is being reopened on the relay. */
+  reopenPending?: boolean;
+  /** True when the last reopen of the selected hidden DM failed. */
+  reopenErrored?: boolean;
   onSendReply: (input: {
     content: string;
     mediaTags?: string[][];
@@ -189,6 +193,8 @@ function InboxMessageDetailPane({
   onRequestEmptyEditDelete,
   onManageChannel,
   onOpenContext,
+  reopenPending = false,
+  reopenErrored = false,
   onSendReply,
   onToggleReaction,
 }: InboxDetailPaneProps) {
@@ -589,6 +595,47 @@ function InboxMessageDetailPane({
               <TooltipProvider>
                 <div className="flex shrink-0 items-center gap-1">
                   <UpdateIndicator />
+                  {reopenPending || reopenErrored ? (
+                    <div
+                      aria-live="polite"
+                      className={cn(
+                        "flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium",
+                        reopenErrored
+                          ? "bg-destructive/10 text-destructive"
+                          : "bg-muted/60 text-muted-foreground",
+                      )}
+                      data-testid="home-inbox-reopen-status"
+                      role="status"
+                    >
+                      {reopenPending ? (
+                        <>
+                          <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin" />
+                          <span>Reopening…</span>
+                        </>
+                      ) : (
+                        <>
+                          <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                          <span>Couldn’t reopen</span>
+                          {contextChannelId ? (
+                            <button
+                              className="ml-0.5 rounded font-semibold underline underline-offset-2 hover:no-underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+                              data-testid="home-inbox-reopen-retry"
+                              onClick={() =>
+                                onOpenContext(
+                                  contextChannelId,
+                                  sourceEventId,
+                                  contextThreadRootId,
+                                )
+                              }
+                              type="button"
+                            >
+                              Retry
+                            </button>
+                          ) : null}
+                        </>
+                      )}
+                    </div>
+                  ) : null}
                   {canOpenChannel && contextChannelId ? (
                     <Tooltip>
                       <TooltipTrigger asChild>
