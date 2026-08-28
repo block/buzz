@@ -514,17 +514,16 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
     profileIsFetching: profileQuery.fetchStatus === "fetching",
     profileStatus: profileQuery.status,
   });
+  const isBlocking =
+    onboardingGate.stage === "blocking" || isCompletingStarterSetup;
   React.useEffect(() => {
-    if (
-      identityQuery.status === "success" ||
-      onboardingGate.stage !== "blocking"
-    ) {
+    if (!isBlocking) {
       setBootTimedOut(false);
       return;
     }
     const timer = window.setTimeout(() => setBootTimedOut(true), 15_000);
     return () => window.clearTimeout(timer);
-  }, [identityQuery.status, onboardingGate.stage]);
+  }, [isBlocking]);
   const gateComplete = onboardingGate.complete;
   const starterChannelsFocusIntentRef = React.useRef(
     new Map<string, boolean>(),
@@ -683,10 +682,10 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
           ? ("keyring-locked" as const)
           : relaunchRequired
             ? ("relaunch-required" as const)
-            : isCompletingStarterSetup
-              ? ("blocking" as const)
-              : bootTimedOut
-                ? ("timeout" as const)
+            : bootTimedOut
+              ? ("timeout" as const)
+              : isCompletingStarterSetup
+                ? ("blocking" as const)
                 : onboardingGate.stage,
   };
 }
