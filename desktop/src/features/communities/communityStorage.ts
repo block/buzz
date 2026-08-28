@@ -9,6 +9,8 @@ const LEGACY_WORKSPACES_KEY = "buzz-workspaces";
 const LEGACY_ACTIVE_WORKSPACE_KEY = "buzz-active-workspace-id";
 const COMMUNITY_DISCOVERY_AFTER_LEAVE_KEY =
   "buzz-community-discovery-after-leave";
+const COMMUNITY_STORAGE_SCHEMA_KEY = "buzz-community-storage-schema";
+const COMMUNITY_STORAGE_SCHEMA_VERSION = "2";
 
 /**
  * Expand a leading `~` to the user's home directory. The backend rejects
@@ -91,13 +93,90 @@ export function loadCommunities(): Community[] {
       }
       return entry;
     }) as Community[];
-    if (didStrip) {
-      setLocalStorageItemWithRecovery(COMMUNITIES_KEY, JSON.stringify(cleaned));
+    const repaired = repairCommunities(cleaned);
+    if (didStrip || repaired.changed) {
+      setLocalStorageItemWithRecovery(
+        COMMUNITIES_KEY,
+        JSON.stringify(repaired.communities),
+      );
     }
-    return cleaned;
+    markCommunityStorageSchema();
+    return repaired.communities;
   } catch {
     return [];
   }
+}
+
+type CommunityRepairResult = { communities: Community[]; changed: boolean };
+
+/**
+ * Repair persisted community state before React mounts relay-scoped state.
+ * Older builds could leave malformed/duplicate entries and an active id that
+ * no longer existed, which made the UI bootstrap the wrong relay indefinitely.
+ */
+function repairCommunities(input: Community[]): CommunityRepairResult {
+  const seenIds = new Set<string>();
+  let changed = false;
+  const communities = input.filter((community) => {
+    if (!community || typeof community.relayUrl !== "string") {
+      changed = true;
+      return false;
+    }
+    const relayUrl = normalizeRelayUrl(community.relayUrl.trim());
+    try {
+      const parsed = new URL(relayUrl);
+      if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+        changed = true;
+        return false;
+      }
+    } catch {
+      changed = true;
+      return false;
+    }
+    if (typeof community.id !== "string" || !community.id.trim()) {
+      changed = true;
+      return false;
+    }
+    if (seenIds.has(community.id)) {
+      changed = true;
+      return false;
+    }
+    seenIds.add(community.id);
+    if (relayUrl !== community.relayUrl) {
+      community.relayUrl = relayUrl;
+      changed = true;
+    }
+    return true;
+  });
+
+  const activeId = getStorageItem(ACTIVE_COMMUNITY_KEY);
+  if (communities.length === 0) {
+    if (activeId !== null) {
+      removeStorageItem(ACTIVE_COMMUNITY_KEY);
+      changed = true;
+    }
+  } else if (
+    !activeId ||
+    !communities.some((community) => community.id === activeId)
+  ) {
+    saveActiveCommunityId(communities[0].id);
+    changed = true;
+  }
+
+  return { communities, changed };
+}
+
+function markCommunityStorageSchema(): void {
+  if (
+    getStorageItem(COMMUNITY_STORAGE_SCHEMA_KEY) ===
+    COMMUNITY_STORAGE_SCHEMA_VERSION
+  ) {
+    return;
+  }
+  setLocalStorageItemWithRecovery(
+    COMMUNITY_STORAGE_SCHEMA_KEY,
+    COMMUNITY_STORAGE_SCHEMA_VERSION,
+  );
 }
 
 export function saveCommunities(communities: Community[]): boolean {

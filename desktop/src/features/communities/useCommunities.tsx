@@ -293,6 +293,19 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
       );
 
       if (result.kind === "updated") {
+        const current = communitiesRef.current.find(
+          (community) => community.id === id,
+        );
+        if (
+          current &&
+          updates.relayUrl !== undefined &&
+          updates.relayUrl !== current.relayUrl
+        ) {
+          removeSelfProfileCachesForRelay(current.relayUrl);
+          removeUserLabelCacheForRelay(current.relayUrl);
+          removeChannelSnapshotForRelay(current.relayUrl);
+          removeMessageSnapshotsForRelay(current.relayUrl);
+        }
         setCommunitiesState((prev) => {
           const next = prev.map((w) =>
             w.id === id ? { ...w, ...updates } : w,
