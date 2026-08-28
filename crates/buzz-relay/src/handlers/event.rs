@@ -197,6 +197,25 @@ pub async fn filter_fanout_by_access(
         matches
     };
 
+    if owner_only_kind == buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE {
+        let mut allowed = Vec::with_capacity(matches.len());
+        for (conn_id, sub_id) in matches {
+            let Some(pubkey) = state.conn_manager.pubkey_for_conn(conn_id) else {
+                continue;
+            };
+            if super::req::event_visible_to_reader(
+                state,
+                community_id,
+                &stored_event.event,
+                &pubkey,
+            )
+            .await
+            {
+                allowed.push((conn_id, sub_id));
+            }
+        }
+        return allowed;
+    }
     let Some(channel_id) = stored_event.channel_id else {
         return matches;
     };
@@ -2165,7 +2184,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn workflow_wake_delivers_only_to_exact_authenticated_recipient() {
+        async fn workflow_wake_fails_closed_when_membership_cannot_be_established() {
             let state = test_state().await;
             let community_id = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
             let channel_id = Uuid::new_v4();
@@ -2207,7 +2226,7 @@ mod tests {
 
             let out = filter_fanout_by_access(&state, community_id, &stored, matches, None).await;
 
-            assert_eq!(out, vec![(recipient, "recipient".to_string())]);
+            assert!(out.is_empty());
         }
 
         #[tokio::test]

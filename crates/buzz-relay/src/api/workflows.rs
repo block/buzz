@@ -305,7 +305,7 @@ pub async fn workflow_wake_authority(
         .map_err(|_| api_error(StatusCode::BAD_REQUEST, "invalid message id"))?;
     let definition = state
         .db
-        .get_event_by_id(tenant.community(), definition_id)
+        .get_workflow_revision(tenant.community(), definition_id)
         .await
         .map_err(|error| internal_error(&format!("workflow definition lookup: {error}")))?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
@@ -335,6 +335,17 @@ pub async fn workflow_wake_authority(
         "workflow wake not accessible",
     )
     .await?;
+    if !state
+        .db
+        .is_member(tenant.community(), message_channel, &recipient.to_bytes())
+        .await
+        .map_err(|error| internal_error(&format!("workflow wake membership: {error}")))?
+    {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "workflow wake not accessible",
+        ));
+    }
     if workflow.owner_pubkey != definition.event.pubkey.to_bytes()
         || workflow.channel_id != Some(message_channel)
         || !exact_tag(&definition.event, "h", &message_channel.to_string())

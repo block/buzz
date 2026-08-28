@@ -428,7 +428,7 @@ impl RestClient {
                 Ok(resp) if is_retriable_status(resp.status()) => {
                     let status = resp.status();
                     tracing::warn!("{method} {path} returned retriable HTTP {status}");
-                    last_err = Some(RelayError::Http(format!(
+                    last_err = Some(RelayError::TransientHttp(format!(
                         "{method} {path} returned HTTP {status}"
                     )));
                 }
@@ -441,14 +441,15 @@ impl RestClient {
                 }
                 Err(e) if e.is_timeout() || e.is_connect() => {
                     tracing::warn!("{method} {path} network error: {e}");
-                    last_err = Some(RelayError::Http(e.to_string()));
+                    last_err = Some(RelayError::TransientHttp(e.to_string()));
                 }
                 Err(e) => return Err(RelayError::Http(e.to_string())),
             }
         }
 
-        Err(last_err
-            .unwrap_or_else(|| RelayError::Http(format!("{method} {path} failed after retries"))))
+        Err(last_err.unwrap_or_else(|| {
+            RelayError::TransientHttp(format!("{method} {path} failed after retries"))
+        }))
     }
 
     /// POST with NIP-98 auth and retry. Re-signs on each attempt.
@@ -667,8 +668,22 @@ pub enum RelayError {
     #[error("HTTP error: {0}")]
     Http(String),
 
+    /// A request exhausted its bounded retry budget after only transient
+    /// failures. Callers may safely schedule delayed recovery; all other HTTP
+    /// errors, including 403/404 and malformed bodies, are terminal.
+    #[error("transient HTTP error: {0}")]
+    TransientHttp(String),
+
     #[error("Unexpected message: {0}")]
     UnexpectedMessage(String),
+}
+
+impl RelayError {
+    /// Whether retry exhaustion, rather than an authority denial or malformed
+    /// response, caused this failure.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::TransientHttp(_))
+    }
 }
 
 impl From<nostr::event::builder::Error> for RelayError {
@@ -731,6 +746,15 @@ enum RelayCommand {
     PublishEvent { event: Box<Event> },
     /// Floor `since` for membership notification replay; events before startup are never re-delivered.
     SetStartupWatermark { ts: u64 },
+    /// Re-admit an event which reached the harness but could not be safely
+    /// processed. Removing its transport dedup entry and replaying its channel
+    /// lets a transient harness-side dependency failure recover without
+    /// dispatching an unverified event.
+    ReplayEvent {
+        channel_id: Uuid,
+        event_id: String,
+        created_at: u64,
+    },
 }
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -1022,6 +1046,27 @@ impl HarnessRelay {
     pub async fn next_event(&mut self) -> Option<BuzzEvent> {
         // The background task sends `None` to signal connection loss.
         self.event_rx.recv().await.flatten()
+    }
+
+    /// Arrange replay of an event that failed harness-side admission.
+    ///
+    /// This is intentionally narrower than general event retry: it preserves
+    /// the subscription's exact filter and reuses transport dedup/replay rather
+    /// than manufacturing a local event or bypassing verification.
+    pub async fn replay_event(
+        &self,
+        channel_id: Uuid,
+        event_id: String,
+        created_at: u64,
+    ) -> Result<(), RelayError> {
+        self.cmd_tx
+            .send(RelayCommand::ReplayEvent {
+                channel_id,
+                event_id,
+                created_at,
+            })
+            .await
+            .map_err(|_| RelayError::ConnectionClosed)
     }
 
     /// Publish a signed event to the relay via the background WebSocket task.
@@ -1343,6 +1388,19 @@ impl BgState {
         }
     }
 
+    /// Undo transport admission for an event whose harness-side verification
+    /// dependency failed. The event was never dispatched, so it must become
+    /// eligible for the existing replay path. The timestamp is retained as a
+    /// replay floor even though `last_seen` already advanced when it arrived.
+    fn replay_event(&mut self, channel_id: Uuid, event_id: String, created_at: u64) {
+        self.seen_ids.remove(&event_id);
+        self.channel_dropped_since
+            .entry(channel_id)
+            .and_modify(|since| *since = (*since).min(created_at))
+            .or_insert(created_at);
+        self.proactive_resubscribe_needed = true;
+    }
+
     /// Clear all per-channel state for a channel that is being unsubscribed.
     /// Prevents stale replay on re-subscribe and avoids unbounded state growth
     /// for channels that are removed and never re-added.
@@ -1527,6 +1585,11 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
                 state.membership_last_seen = Some(ts);
             }
         }
+        RelayCommand::ReplayEvent {
+            channel_id,
+            event_id,
+            created_at,
+        } => state.replay_event(channel_id, event_id, created_at),
         // Observer telemetry frames are durable: park them (bounded, visible
         // overflow) so they are delivered by the post-reconnect drain. Other
         // ephemeral publishes (typing indicators) are meaningless while
@@ -1763,6 +1826,14 @@ async fn execute_connected_command(
                 state.membership_last_seen = Some(ts);
             }
             debug!("startup watermark set to {ts}");
+            true
+        }
+        RelayCommand::ReplayEvent {
+            channel_id,
+            event_id,
+            created_at,
+        } => {
+            state.replay_event(channel_id, event_id, created_at);
             true
         }
         // Control-flow commands — callers handle these before dispatching.
@@ -3966,6 +4037,7 @@ pub(crate) fn parse_relay_message(text: &str) -> Result<RelayMessage, RelayError
 fn is_terminal_connect_error(err: &RelayError) -> bool {
     match err {
         RelayError::Http(_) | RelayError::Json(_) | RelayError::UnexpectedMessage(_) => true,
+        RelayError::TransientHttp(_) => false,
         RelayError::WebSocket(e) => is_terminal_ws_error(e.as_ref()),
         RelayError::AuthFailed(message) => is_terminal_auth_failure(message),
         RelayError::NoAuthChallenge | RelayError::ConnectionClosed | RelayError::Timeout => false,
@@ -4897,6 +4969,76 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn workflow_wake_authority_retries_transient_failure_then_recovers() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let keys = Keys::generate();
+        let relay = Keys::generate();
+        let run_id = Uuid::new_v4();
+        let channel_id = Uuid::new_v4();
+        let workflow_id = Uuid::new_v4();
+        let definition = EventBuilder::text_note("definition")
+            .sign_with_keys(&keys)
+            .expect("definition");
+        let message = EventBuilder::text_note("message")
+            .sign_with_keys(&relay)
+            .expect("message");
+        let authority = serde_json::json!({
+            "run_id": run_id,
+            "channel_id": channel_id,
+            "workflow_id": workflow_id,
+            "definition_event_id": definition.id.to_hex(),
+            "workflow_owner": keys.public_key().to_hex(),
+            "definition": definition,
+            "message": message,
+        });
+        let body = authority.to_string();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind authority server");
+        let address = listener.local_addr().expect("authority server address");
+        let server = tokio::spawn(async move {
+            for (status, response_body) in [(503, String::new()), (200, body)] {
+                let (mut stream, _) = listener.accept().await.expect("accept authority request");
+                let mut request = [0u8; 4096];
+                let _ = stream
+                    .read(&mut request)
+                    .await
+                    .expect("read authority request");
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status} test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                            response_body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .expect("write authority response");
+            }
+        });
+        let client = RestClient {
+            http: reqwest::Client::new(),
+            base_url: format!("http://{address}"),
+            keys,
+            auth_tag_json: None,
+        };
+
+        let fetch = tokio::spawn(async move {
+            client
+                .workflow_wake_authority(run_id, &message.id)
+                .await
+                .expect("transient authority failure should recover")
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        let received = fetch.await.expect("join authority fetch");
+        server.await.expect("join authority server");
+        assert_eq!(received.run_id, run_id);
+        assert_eq!(received.message.id, message.id);
+    }
+
     #[test]
     fn subscription_id_starts_with_ch_prefix() {
         let uuid = Uuid::new_v4();
@@ -5333,6 +5475,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn workflow_wake_authority_failure_reopens_transport_dedup_for_replay() {
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let keys = nostr::Keys::generate();
+        let wake = make_test_event(&keys, 1_000);
+        let event_id = wake.id.to_hex();
+
+        // Normal transport delivery claims the ID and advances its watermark.
+        assert!(state.record_event(channel_id, &wake));
+        assert!(!state.record_event(channel_id, &wake));
+
+        // A failure before authenticated authority verification must not lose
+        // the wake: make its exact ID eligible and replay from its timestamp.
+        state.replay_event(channel_id, event_id.clone(), wake.created_at.as_secs());
+        assert!(!state.seen_ids.contains(&event_id));
+        assert_eq!(
+            state.channel_since(&channel_id),
+            Some(wake.created_at.as_secs())
+        );
+        assert!(state.proactive_resubscribe_needed);
+        assert!(state.record_event(channel_id, &wake));
+
+        // Once replayed, ordinary dedup resumes; this does not admit duplicates.
+        assert!(!state.record_event(channel_id, &wake));
+    }
+
     /// Test 8: channel_dropped_since records the OLDEST dropped timestamp.
     ///
     /// Simulates the backpressure path directly on BgState:
@@ -5671,6 +5840,11 @@ mod tests {
         let cases: Vec<(&str, RelayError, bool)> = vec![
             // ── outer RelayError variants ──
             ("Http: bad URL", RelayError::Http("bad url".into()), true),
+            (
+                "TransientHttp: exhausted retry budget",
+                RelayError::TransientHttp("timeout".into()),
+                false,
+            ),
             (
                 "Json: malformed relay frame",
                 RelayError::Json(serde_json::from_str::<()>("not json").unwrap_err()),

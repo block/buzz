@@ -105,14 +105,24 @@ pub fn verify(
     if step.action != "send_message" {
         return None;
     }
-    if step
+    if let Some(target) = step
         .channel
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .is_some_and(|value| value != channel)
     {
-        return None;
+        // The endpoint's relay-signed message is the authority for a resolved
+        // template target. A definition stores templates, while its execution
+        // resolves them from per-run state unavailable to ACP; comparing raw
+        // text would reject valid targets. Literal targets remain an independent
+        // constraint and are compared as UUIDs so noncanonical spelling works.
+        if !target.contains("{{") {
+            let target = Uuid::parse_str(target).ok()?;
+            let message_channel = Uuid::parse_str(channel).ok()?;
+            if target != message_channel {
+                return None;
+            }
+        }
     }
     Some((message, definition.pubkey.to_hex()))
 }
@@ -390,6 +400,77 @@ mod tests {
             Some(Uuid::new_v4()),
         );
         assert!(wrong_target.verify(wrong_target.authority()).is_none());
+    }
+
+    #[test]
+    fn accepts_template_target_using_relay_signed_resolved_message_channel() {
+        let fixture = Fixture::new(
+            "name: wake\ntrigger:\n  on: message_posted\nsteps:\n  - id: notify\n    action: send_message\n    text: do work\n    channel: '{{trigger.channel_id}}'\n",
+            None,
+        );
+        assert!(fixture.verify(fixture.authority()).is_some());
+    }
+
+    #[test]
+    fn accepts_noncanonical_literal_uuid_target() {
+        let fixture = Fixture::new(
+            "name: wake\ntrigger:\n  on: message_posted\nsteps:\n  - id: notify\n    action: send_message\n    text: do work\n    channel: $CHANNEL\n",
+            None,
+        );
+        let noncanonical = fixture.channel.simple().to_string();
+        let definition = EventBuilder::new(
+            Kind::Custom(KIND_WORKFLOW_DEF as u16),
+            format!("name: wake\ntrigger:\n  on: message_posted\nsteps:\n  - id: notify\n    action: send_message\n    text: do work\n    channel: {noncanonical}\n"),
+        )
+        .tags([
+            Tag::parse(["d", &fixture.workflow.to_string()]).expect("d tag"),
+            Tag::parse(["h", &fixture.channel.to_string()]).expect("h tag"),
+        ])
+        .sign_with_keys(&fixture.owner)
+        .expect("definition");
+        let message = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "do work")
+            .tags([
+                Tag::parse(["h", &fixture.channel.to_string()]).expect("h tag"),
+                Tag::parse(["p", &fixture.agent.public_key().to_hex()]).expect("p tag"),
+                Tag::parse(["workflow-run", &fixture.run.to_string()]).expect("run tag"),
+                Tag::parse(["workflow-definition", &definition.id.to_hex()])
+                    .expect("definition tag"),
+                Tag::parse(["workflow-step", "notify"]).expect("step tag"),
+            ])
+            .sign_with_keys(&fixture.relay)
+            .expect("message");
+        let wake = WorkflowMentionWake::new(
+            fixture.agent.public_key(),
+            fixture.channel,
+            fixture.run,
+            definition.id,
+            message.id,
+        )
+        .sign(&fixture.relay)
+        .expect("wake");
+        let authority = WorkflowWakeAuthority {
+            definition_event_id: definition.id.to_hex(),
+            definition,
+            message,
+            ..fixture.authority()
+        };
+        assert!(super::verify(
+            &wake,
+            authority,
+            fixture.relay.public_key(),
+            fixture.agent.public_key(),
+            fixture.channel,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn malformed_literal_target_remains_rejected() {
+        let fixture = Fixture::new(
+            "name: wake\ntrigger:\n  on: message_posted\nsteps:\n  - id: notify\n    action: send_message\n    text: do work\n    channel: not-a-channel\n",
+            None,
+        );
+        assert!(fixture.verify(fixture.authority()).is_none());
     }
 
     #[test]

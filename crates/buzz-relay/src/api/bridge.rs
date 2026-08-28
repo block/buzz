@@ -1284,7 +1284,14 @@ async fn query_events_authed(
                 // Defense-in-depth: never deliver a result-gated event (e.g. kind:44200
                 // or kind:30622) to a non-owner via the feed path, even though feed SQL
                 // kind allowlists already exclude these kinds.
-                if !buzz_core::filter::reader_authorized_for_event(&se.event, &authed_pubkey_hex) {
+                if !crate::handlers::req::event_visible_to_reader(
+                    &state,
+                    tenant.community(),
+                    &se.event,
+                    &pubkey_bytes,
+                )
+                .await
+                {
                     continue;
                 }
                 if let Ok(v) = serde_json::to_value(&se.event) {
@@ -1352,7 +1359,14 @@ async fn query_events_authed(
             // Defense-in-depth: never deliver a result-gated event (e.g. kind:44200
             // or kind:30622) to a non-owner via the thread path, even though
             // requires_h_channel_scope already excludes these kinds from thread metadata.
-            if !buzz_core::filter::reader_authorized_for_event(&se.event, &authed_pubkey_hex) {
+            if !crate::handlers::req::event_visible_to_reader(
+                &state,
+                tenant.community(),
+                &se.event,
+                &pubkey_bytes,
+            )
+            .await
+            {
                 continue;
             }
             thread_row_ids.push(se.event.id.to_hex());
@@ -1377,10 +1391,13 @@ async fn query_events_authed(
                 for se in aux_events {
                     if !seen_aux.insert(se.event.id)
                         || !event_in_accessible_channel(&se, &accessible_channels)
-                        || !buzz_core::filter::reader_authorized_for_event(
+                        || !crate::handlers::req::event_visible_to_reader(
+                            &state,
+                            tenant.community(),
                             &se.event,
-                            &authed_pubkey_hex,
+                            &pubkey_bytes,
                         )
+                        .await
                     {
                         continue;
                     }
@@ -1497,7 +1514,14 @@ async fn query_events_authed(
                     // Also enforces author-only kinds (30300/30350) and the persona
                     // shared-gate (kind:30175 without ["shared","true"]). Single call
                     // covers all three gated event classes.
-                    if !crate::handlers::req::event_visible_to_reader(&se.event, &pubkey_bytes) {
+                    if !crate::handlers::req::event_visible_to_reader(
+                        &state,
+                        tenant.community(),
+                        &se.event,
+                        &pubkey_bytes,
+                    )
+                    .await
+                    {
                         continue;
                     }
                     if let Ok(v) = serde_json::to_value(&se.event) {
@@ -1783,9 +1807,13 @@ async fn count_events_authed(
                                 continue;
                             }
                             if !crate::handlers::req::event_visible_to_reader(
+                                &state,
+                                tenant.community(),
                                 &se.event,
                                 &pubkey_bytes,
-                            ) {
+                            )
+                            .await
+                            {
                                 continue;
                             }
                             total += 1;
@@ -1853,9 +1881,13 @@ async fn count_events_authed(
                                 continue;
                             }
                             if !crate::handlers::req::event_visible_to_reader(
+                                &state,
+                                tenant.community(),
                                 &se.event,
                                 &pubkey_bytes,
-                            ) {
+                            )
+                            .await
+                            {
                                 continue;
                             }
                             total += 1;
@@ -2036,7 +2068,14 @@ async fn handle_bridge_search(
             // branch cannot currently return unshared persona content — but the
             // check here ensures that a future FTS allowlist change cannot silently
             // reopen the bypass.
-            if !crate::handlers::req::event_visible_to_reader(&stored.event, pubkey_bytes) {
+            if !crate::handlers::req::event_visible_to_reader(
+                state,
+                tenant.community(),
+                &stored.event,
+                pubkey_bytes,
+            )
+            .await
+            {
                 continue;
             }
             // Dedup across filters.

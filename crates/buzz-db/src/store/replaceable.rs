@@ -270,6 +270,9 @@ async fn replace_parameterized_event_in_transaction_impl(
         let statement = if hard_delete_superseded {
             "DELETE FROM events \
              WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+        } else if kind_i32 == buzz_core::kind::KIND_WORKFLOW_DEF as i32 {
+            "UPDATE events SET deleted_at = NOW(), workflow_revision_superseded = true \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
         } else {
             "UPDATE events SET deleted_at = NOW() \
              WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"

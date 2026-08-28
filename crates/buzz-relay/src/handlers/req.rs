@@ -460,7 +460,14 @@ pub async fn handle_req(
             // Also enforces author-only kinds (30300/30350) and the persona
             // shared-gate (kind:30175 without ["shared","true"]). Single call
             // covers all three gated event classes.
-            if !event_visible_to_reader(&stored.event, &pubkey_bytes) {
+            if !event_visible_to_reader(
+                &state,
+                conn.tenant.community(),
+                &stored.event,
+                &pubkey_bytes,
+            )
+            .await
+            {
                 continue;
             }
 
@@ -793,7 +800,14 @@ async fn handle_search_req(
                     }
                     // Result-level gate: covers author-only, persona shared-gate,
                     // and result-gated kinds in one call.
-                    if !event_visible_to_reader(&stored.event, reader_pubkey_bytes) {
+                    if !event_visible_to_reader(
+                        state,
+                        tenant.community(),
+                        &stored.event,
+                        reader_pubkey_bytes,
+                    )
+                    .await
+                    {
                         continue;
                     }
                     // Dedup AFTER acceptance — an event that fails filter A's constraints
@@ -1475,6 +1489,14 @@ pub(crate) fn result_gated_count_safe_for_pushdown(
     filter: &Filter,
     authed_pubkey_hex: &str,
 ) -> bool {
+    // Recipient pinning alone cannot prove current channel membership for wakes.
+    if filter.kinds.as_ref().is_none_or(|kinds| {
+        kinds
+            .iter()
+            .any(|kind| u32::from(kind.as_u16()) == buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE)
+    }) {
+        return false;
+    }
     let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
     filter
         .generic_tags
@@ -1511,7 +1533,27 @@ pub(crate) fn is_author_only_event(event: &nostr::Event, requester_pubkey_bytes:
 /// Call this from every read surface — both WS (REQ/COUNT/fan-out) and HTTP
 /// (NIP-98 `/query`, `/count`, FTS search) — instead of inlining the three
 /// individual predicates at each site.
-pub(crate) fn event_visible_to_reader(event: &nostr::Event, requester_pubkey_bytes: &[u8]) -> bool {
+pub(crate) async fn event_visible_to_reader(
+    state: &AppState,
+    community: buzz_core::tenant::CommunityId,
+    event: &nostr::Event,
+    requester_pubkey_bytes: &[u8],
+) -> bool {
+    if u32::from(event.kind.as_u16()) == buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE {
+        let Ok(wake) = buzz_core::workflow_wake::WorkflowMentionWake::parse(event) else {
+            return false;
+        };
+        // Open-channel readability is not wake authority. Read the writer,
+        // not a cached membership snapshot, at every delivery/count boundary.
+        if !state
+            .db
+            .is_member(community, wake.channel_id(), requester_pubkey_bytes)
+            .await
+            .unwrap_or(false)
+        {
+            return false;
+        }
+    }
     if is_author_only_event(event, requester_pubkey_bytes) {
         return false;
     }

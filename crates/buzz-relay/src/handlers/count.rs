@@ -227,7 +227,14 @@ pub async fn handle_count(
                             {
                                 continue;
                             }
-                            if !event_visible_to_reader(&se.event, &pubkey_bytes) {
+                            if !event_visible_to_reader(
+                                &state,
+                                conn.tenant.community(),
+                                &se.event,
+                                &pubkey_bytes,
+                            )
+                            .await
+                            {
                                 continue;
                             }
                             total += 1;
@@ -300,7 +307,14 @@ pub async fn handle_count(
                             {
                                 continue;
                             }
-                            if !event_visible_to_reader(&se.event, &pubkey_bytes) {
+                            if !event_visible_to_reader(
+                                &state,
+                                conn.tenant.community(),
+                                &se.event,
+                                &pubkey_bytes,
+                            )
+                            .await
+                            {
                                 continue;
                             }
                             total += 1;
