@@ -339,6 +339,10 @@ mod path_cache_race_tests {
             Some(Some("/fresh/bin".to_string())),
             "a pre-refresh probe must not overwrite the post-refresh fresh PATH"
         );
+
+        // Restore the shared cache so sibling tests re-probe a real PATH rather
+        // than reading this fixture value.
+        refresh_login_shell_path();
     }
 
     /// Within one generation a slow failure/timeout must not clobber a peer's
@@ -360,5 +364,9 @@ mod path_cache_race_tests {
             Some(Some("/usr/local/bin".to_string())),
             "a same-generation timeout must not overwrite a committed success"
         );
+
+        // Restore the shared cache so sibling tests re-probe a real PATH rather
+        // than reading this fixture value.
+        refresh_login_shell_path();
     }
 }
