@@ -129,7 +129,7 @@ async fn start_pairing_session(
 
     let ws_url = relay_ws_url_with_override(&state);
     let http_url = relay_api_base_url_with_override(&state);
-    let pairing_relay_url = resolve_pairing_relay_url(&ws_url, probe_pairing_relay(&ws_url).await)?;
+    let pairing_relay_url = resolve_pairing_relay_url(&ws_url, probe_pairing_relay(&ws_url).await?);
     let (session, qr_payload) = PairingSession::new_source(pairing_relay_url.clone());
     let mut qr_uri = encode_qr(&qr_payload);
     if mode == PairingMode::RecoverIdentity {
@@ -667,20 +667,19 @@ fn parse_relay_event(text: &str, sub_id: &str) -> Option<nostr::Event> {
 #[derive(Debug, PartialEq, Eq)]
 enum PairingRelay {
     Configured(String),
-    LegacyPath,
     MainRelay,
 }
 
-/// Prefer the relay-advertised dedicated pairing URL. The legacy `/pair`
-/// convention remains as a compatibility fallback for NIP-43 relays that do
-/// not advertise the extension yet.
-async fn probe_pairing_relay(relay_url: &str) -> PairingRelay {
+/// Prefer the relay-advertised dedicated pairing URL. NIP-43 advertises relay
+/// membership support and does not imply that a `/pair` WebSocket endpoint is
+/// available on the main relay.
+async fn probe_pairing_relay(relay_url: &str) -> Result<PairingRelay, String> {
     let http_url = if let Some(rest) = relay_url.strip_prefix("wss://") {
         format!("https://{rest}")
     } else if let Some(rest) = relay_url.strip_prefix("ws://") {
         format!("http://{rest}")
     } else {
-        return PairingRelay::MainRelay;
+        return Ok(PairingRelay::MainRelay);
     };
 
     let client = reqwest::Client::builder()
@@ -695,44 +694,48 @@ async fn probe_pairing_relay(relay_url: &str) -> PairingRelay {
         .await
     {
         Ok(response) => response,
-        Err(_) => return PairingRelay::MainRelay,
+        Err(_) => return Ok(PairingRelay::MainRelay),
     };
 
     let json: serde_json::Value = match resp.json().await {
         Ok(value) => value,
-        Err(_) => return PairingRelay::MainRelay,
+        Err(_) => return Ok(PairingRelay::MainRelay),
     };
 
     pairing_relay_from_nip11(&json)
 }
 
-fn resolve_pairing_relay_url(
-    main_relay_url: &str,
-    pairing_relay: PairingRelay,
-) -> Result<String, String> {
+fn resolve_pairing_relay_url(main_relay_url: &str, pairing_relay: PairingRelay) -> String {
     match pairing_relay {
-        PairingRelay::Configured(url) => Ok(url),
-        PairingRelay::LegacyPath => {
-            let mut url =
-                url::Url::parse(main_relay_url).map_err(|e| format!("invalid relay URL: {e}"))?;
-            let path = url.path().trim_end_matches('/').to_string();
-            url.set_path(&format!("{path}/pair"));
-            Ok(url.to_string())
-        }
-        PairingRelay::MainRelay => Ok(main_relay_url.to_string()),
+        PairingRelay::Configured(url) => url,
+        PairingRelay::MainRelay => main_relay_url.to_string(),
     }
 }
 
-fn pairing_relay_from_nip11(json: &serde_json::Value) -> PairingRelay {
-    if let Some(value) = json
-        .get("pairing_relay_url")
-        .and_then(|value| value.as_str())
-    {
-        if let Ok(url) = url::Url::parse(value) {
-            if matches!(url.scheme(), "ws" | "wss") && url.host_str().is_some() {
-                return PairingRelay::Configured(value.to_string());
-            }
+fn pairing_relay_from_nip11(json: &serde_json::Value) -> Result<PairingRelay, String> {
+    if let Some(configured_value) = json.get("pairing_relay_url") {
+        let value = configured_value.as_str().ok_or_else(|| {
+            "Relay pairing configuration is invalid: NIP-11 pairing_relay_url must be a valid \
+             ws:// or wss:// URL with a host. Configure the stateless buzz-pair-relay through \
+             BUZZ_PAIRING_RELAY_URL."
+                .to_string()
+        })?;
+        let url = url::Url::parse(value).map_err(|error| {
+            format!(
+                "Relay pairing configuration is invalid: NIP-11 pairing_relay_url must be a \
+                 valid ws:// or wss:// URL with a host ({error}). Configure the stateless \
+                 buzz-pair-relay through BUZZ_PAIRING_RELAY_URL."
+            )
+        })?;
+        if !matches!(url.scheme(), "ws" | "wss") || url.host_str().is_none() {
+            return Err(
+                "Relay pairing configuration is invalid: NIP-11 pairing_relay_url must be a \
+                 valid ws:// or wss:// URL with a host. Configure the stateless \
+                 buzz-pair-relay through BUZZ_PAIRING_RELAY_URL."
+                    .to_string(),
+            );
         }
+        return Ok(PairingRelay::Configured(value.to_string()));
     }
 
     if json
@@ -740,9 +743,14 @@ fn pairing_relay_from_nip11(json: &serde_json::Value) -> PairingRelay {
         .and_then(|value| value.as_array())
         .is_some_and(|nips| nips.iter().any(|nip| nip.as_u64() == Some(43)))
     {
-        PairingRelay::LegacyPath
+        Err(
+            "Pairing is not configured for this membership-gated relay. Configure the \
+             stateless buzz-pair-relay through BUZZ_PAIRING_RELAY_URL so NIP-11 advertises \
+             pairing_relay_url."
+                .to_string(),
+        )
     } else {
-        PairingRelay::MainRelay
+        Ok(PairingRelay::MainRelay)
     }
 }
 

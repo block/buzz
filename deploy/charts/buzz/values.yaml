@@ -211,8 +211,7 @@ extraVolumes: []
 
 # ── Device pairing relay ─────────────────────────────────────────────────────
 # Optional, stateless NIP-AB relay. When enabled, the main relay advertises
-# pairingRelay.url in NIP-11 and Buzz clients use it instead of the legacy
-# same-host /pair convention.
+# pairingRelay.url in NIP-11 and Buzz clients use that explicit endpoint.
 pairingRelay:
   enabled: false
   url: ""

@@ -20,8 +20,6 @@ services:
       BUZZ_GIT_REPO_PATH: /data/git
       BUZZ_AUTO_MIGRATE: ${BUZZ_AUTO_MIGRATE:-false}
       BUZZ_GIT_CONFORMANCE_PROBE: ${BUZZ_GIT_CONFORMANCE_PROBE:-true}
-    ports:
-      - "${BUZZ_HTTP_PORT:-3000}:3000"
     volumes:
       - buzz-git-data:/data/git
     depends_on:
@@ -44,6 +42,43 @@ services:
       timeout: 3s
       retries: 12
       start_period: 30s
+    restart: unless-stopped
+    networks:
+      - buzz-net
+
+  pairing-relay:
+    image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
+    entrypoint: ["/usr/local/bin/buzz-pair-relay"]
+    environment:
+      BUZZ_PAIR_RELAY_BIND_ADDR: 0.0.0.0:5000
+    # The pairing relay is intentionally stateless: no identity, database, or volume.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/5000'"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - buzz-net
+
+  gateway:
+    image: nginx:1.29-alpine
+    depends_on:
+      relay:
+        condition: service_healthy
+      pairing-relay:
+        condition: service_healthy
+    ports:
+      - "${BUZZ_HTTP_BIND_IP:-0.0.0.0}:${BUZZ_HTTP_PORT:-3000}:3000"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:3000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
     restart: unless-stopped
     networks:
       - buzz-net
