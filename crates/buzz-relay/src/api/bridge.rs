@@ -1285,7 +1285,7 @@ async fn query_events_authed(
                 // or kind:30622) to a non-owner via the feed path, even though feed SQL
                 // kind allowlists already exclude these kinds.
                 if !crate::handlers::req::event_visible_to_reader(
-                    &state,
+                    state,
                     tenant.community(),
                     &se.event,
                     &pubkey_bytes,
@@ -1360,7 +1360,7 @@ async fn query_events_authed(
             // or kind:30622) to a non-owner via the thread path, even though
             // requires_h_channel_scope already excludes these kinds from thread metadata.
             if !crate::handlers::req::event_visible_to_reader(
-                &state,
+                state,
                 tenant.community(),
                 &se.event,
                 &pubkey_bytes,
@@ -1392,7 +1392,7 @@ async fn query_events_authed(
                     if !seen_aux.insert(se.event.id)
                         || !event_in_accessible_channel(&se, &accessible_channels)
                         || !crate::handlers::req::event_visible_to_reader(
-                            &state,
+                            state,
                             tenant.community(),
                             &se.event,
                             &pubkey_bytes,
@@ -1515,7 +1515,7 @@ async fn query_events_authed(
                     // shared-gate (kind:30175 without ["shared","true"]). Single call
                     // covers all three gated event classes.
                     if !crate::handlers::req::event_visible_to_reader(
-                        &state,
+                        state,
                         tenant.community(),
                         &se.event,
                         &pubkey_bytes,
@@ -1807,7 +1807,7 @@ async fn count_events_authed(
                                 continue;
                             }
                             if !crate::handlers::req::event_visible_to_reader(
-                                &state,
+                                state,
                                 tenant.community(),
                                 &se.event,
                                 &pubkey_bytes,
@@ -1881,7 +1881,7 @@ async fn count_events_authed(
                                 continue;
                             }
                             if !crate::handlers::req::event_visible_to_reader(
-                                &state,
+                                state,
                                 tenant.community(),
                                 &se.event,
                                 &pubkey_bytes,

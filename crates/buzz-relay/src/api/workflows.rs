@@ -268,7 +268,7 @@ fn approval_json(approval: &buzz_db::workflow::ApprovalRecord) -> Value {
 
 // A missing/revoked authority is terminal; unavailable storage is not. Keep
 // this distinction at the endpoint so ACP's bounded transport retries can work.
-fn wake_lookup_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
+pub(crate) fn wake_lookup_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
     use buzz_db::DbError;
     let status = match &error {
         DbError::NotFound(_) => StatusCode::NOT_FOUND,
@@ -280,7 +280,14 @@ fn wake_lookup_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
                 code.starts_with("08")
                     || matches!(
                         code.as_ref(),
-                        "40001" | "40P01" | "53300" | "57P01" | "57P02" | "57P03"
+                        "40001"
+                            | "40P01"
+                            | "53300"
+                            | "55P03"
+                            | "57014"
+                            | "57P01"
+                            | "57P02"
+                            | "57P03"
                     )
             }) =>
         {

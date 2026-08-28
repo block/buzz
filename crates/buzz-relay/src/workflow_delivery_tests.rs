@@ -488,3 +488,35 @@ async fn notification_failure_rolls_back_message_mentions_and_thread_metadata() 
             .is_some());
     }
 }
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn storage_timeout_is_retryable_but_missing_authority_is_terminal() {
+    use crate::api::workflows::wake_lookup_error;
+    let f = Fixture::new().await;
+    let mut tx = f.state.db.begin_transaction().await.expect("transaction");
+    sqlx::query("SET LOCAL statement_timeout = '10ms'")
+        .execute(&mut *tx)
+        .await
+        .expect("set timeout");
+    let error = sqlx::query("SELECT pg_sleep(1)")
+        .execute(&mut *tx)
+        .await
+        .expect_err("statement timeout");
+    assert_eq!(
+        error.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("57014")
+    );
+    assert_eq!(
+        wake_lookup_error(error.into()).0,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    tx.rollback().await.expect("rollback");
+    let error = f
+        .state
+        .db
+        .get_workflow_run(f.community, Uuid::new_v4())
+        .await
+        .expect_err("missing run");
+    assert_eq!(wake_lookup_error(error).0, StatusCode::NOT_FOUND);
+}
