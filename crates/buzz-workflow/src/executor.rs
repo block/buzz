@@ -466,6 +466,36 @@ pub fn resolve_step_templates(
         Delay { duration } => Ok(Delay {
             duration: duration.clone(),
         }),
+        IngestDocument { source, output } => Ok(IngestDocument {
+            source: t(source)?,
+            output: output.clone(),
+        }),
+        RunAgent {
+            agent,
+            identity,
+            prompt,
+            output_schema,
+        } => Ok(RunAgent {
+            agent: agent.clone(),
+            identity: identity.clone(),
+            prompt: t(prompt)?,
+            output_schema: output_schema.clone(),
+        }),
+        Barrier => Ok(Barrier),
+        VerifyArtifact {
+            agent,
+            identity,
+            prompt,
+            schema,
+        } => Ok(VerifyArtifact {
+            agent: agent.clone(),
+            identity: identity.clone(),
+            prompt: t(prompt)?,
+            schema: schema.clone(),
+        }),
+        PublishArtifact { artifact } => Ok(PublishArtifact {
+            artifact: artifact.clone(),
+        }),
     }
 }
 
@@ -710,26 +740,17 @@ pub async fn dispatch_action(
                     }
                 }
 
-                RequestApproval {
-                    from,
-                    message,
-                    timeout,
-                } => {
-                    let timeout_str = timeout.as_deref().unwrap_or("24h");
-                    info!(
-                        run_id = %run_id, step = step_id,
-                        "RequestApproval from={from} timeout={timeout_str}: {message}"
-                    );
+                RequestApproval { .. } => Err(WorkflowError::InvalidDefinition(
+                    "request_approval requires the durable workflow scheduler".into(),
+                )),
 
-                    let token = generate_approval_token(run_id, step_id);
-
-                    // TODO (WF-08): create approval record in DB, emit kind:46010.
-                    // For now, return Suspended with the token so the caller can persist state.
-
-                    Ok(StepResult::Suspended {
-                        approval_token: token,
-                    })
-                }
+                IngestDocument { .. }
+                | RunAgent { .. }
+                | Barrier
+                | VerifyArtifact { .. }
+                | PublishArtifact { .. } => Err(WorkflowError::NotImplemented(
+                    "durable workflow scheduler".into(),
+                )),
 
                 Delay { duration } => {
                     let secs = parse_duration_secs(duration)?;
@@ -768,16 +789,6 @@ pub async fn dispatch_action(
             Err(error)
         }
     }
-}
-
-/// Generate a cryptographically random approval token.
-///
-/// Uses `Uuid::new_v4()` which draws from the OS CSPRNG (via the `getrandom`
-/// crate). The `run_id` and `step_id` parameters are accepted for logging
-/// context but are not mixed into the token — the UUID's own randomness is
-/// sufficient and avoids the predictability of time-based entropy.
-fn generate_approval_token(_run_id: Uuid, _step_id: &str) -> String {
-    Uuid::new_v4().to_string()
 }
 
 /// Parse a duration string like "5m", "1h", "30s" into seconds.
@@ -1013,6 +1024,19 @@ async fn add_reaction_impl(message_id: &str, emoji: &str) -> Result<JsonValue, W
     }))
 }
 
+/// Lifecycle disposition produced by a workflow execution pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionDisposition {
+    /// Every workflow step completed.
+    Completed,
+    /// Legacy sequential execution suspended at a human approval gate.
+    WaitingApproval,
+    /// Durable tasks were materialized and the run is waiting for receipts.
+    WaitingDurableTasks,
+    /// The durable scheduler already persisted a terminal lifecycle.
+    DurableSettled,
+}
+
 /// Rich return type from `execute_run` / `execute_from_step`.
 ///
 /// Carries enough information for the caller to:
@@ -1021,6 +1045,8 @@ async fn add_reaction_impl(message_id: &str, emoji: &str) -> Result<JsonValue, W
 /// - Resume execution from the correct step after approval.
 #[derive(Debug)]
 pub struct ExecutionResult {
+    /// Lifecycle disposition for the caller's single lifecycle update.
+    pub disposition: ExecutionDisposition,
     /// Set when execution suspended at a `RequestApproval` step.
     /// `None` means the run completed normally.
     pub approval_token: Option<String>,
@@ -1055,6 +1081,12 @@ pub async fn execute_run(
     def: &WorkflowDef,
     trigger_ctx: &TriggerContext,
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
+    if def.requires_durable_scheduler() {
+        return crate::durable::execute_durable_run(engine, community_id, run_id, def, trigger_ctx)
+            .await
+            .map_err(|error| (error, crate::error::PartialProgress::default()));
+    }
+
     // Fail fast if all concurrency permits are in use — no queuing.
     let _permit = engine.run_semaphore.try_acquire().map_err(|_| {
         (
@@ -1105,6 +1137,24 @@ pub async fn execute_from_step(
     start_index: usize,
     initial_outputs: Option<HashMap<String, JsonValue>>,
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
+    if def.requires_durable_scheduler() {
+        let progress =
+            crate::durable_settlement::advance_settle_and_project(engine, community_id, run_id)
+                .await
+                .map_err(|error| (error, crate::error::PartialProgress::default()))?;
+        return Ok(ExecutionResult {
+            disposition: if progress.all_complete || progress.terminal_failure {
+                ExecutionDisposition::DurableSettled
+            } else {
+                ExecutionDisposition::WaitingDurableTasks
+            },
+            approval_token: None,
+            step_index: progress.task_count,
+            step_outputs: HashMap::new(),
+            trace: Vec::new(),
+        });
+    }
+
     // Fail fast if all concurrency permits are in use — no queuing.
     let _permit = engine.run_semaphore.try_acquire().map_err(|_| {
         (
@@ -1272,6 +1322,7 @@ async fn execute_steps(
                 // Return the token and current state so the caller can persist the
                 // approval record and update the run's execution trace.
                 return Ok(ExecutionResult {
+                    disposition: ExecutionDisposition::WaitingApproval,
                     approval_token: Some(approval_token),
                     step_index: i,
                     step_outputs,
@@ -1290,6 +1341,7 @@ async fn execute_steps(
 
     info!(run_id = %run_id, "Workflow run completed");
     Ok(ExecutionResult {
+        disposition: ExecutionDisposition::Completed,
         approval_token: None,
         step_index: def.steps.len(),
         step_outputs,
@@ -1460,6 +1512,7 @@ mod tests {
             name: None,
             if_expr: None,
             timeout_secs: None,
+            depends_on: Vec::new(),
             action: ActionDef::SendMessage {
                 text: "hi {{trigger.author}}".to_owned(),
                 channel: None,

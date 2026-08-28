@@ -31,13 +31,21 @@
 //! ```
 
 pub mod action_sink;
+pub mod document;
+pub mod durable;
+pub mod durable_settlement;
 pub mod error;
 pub mod executor;
+pub mod receipt;
 pub mod schema;
 
-pub use action_sink::{ActionSink, ActionSinkError};
+pub use action_sink::{ActionSink, ActionSinkError, AgentDispatch, AgentDispatchError};
+pub use document::{
+    build_document_manifest, retrieve_document_chunks, verify_document_manifest, DocumentChunk,
+    DocumentError, DocumentInput, DocumentManifest, ExtractedPage, IngestLimits, RetrievalQuery,
+};
 pub use error::{PartialProgress, WorkflowError};
-pub use executor::ExecutionResult;
+pub use executor::{ExecutionDisposition, ExecutionResult};
 pub use schema::{ActionDef, Step, TriggerDef, WorkflowDef};
 
 use std::collections::HashMap;
@@ -87,6 +95,8 @@ pub struct WorkflowEngine {
     /// Action sink for executing side-effects (SendMessage, etc.).
     /// Late-initialized via [`set_action_sink`] after `AppState` construction.
     pub(crate) action_sink: OnceLock<Arc<dyn ActionSink>>,
+    /// Fire-and-forget bridge for independently signed agent tasks.
+    pub(crate) agent_dispatch: OnceLock<Arc<dyn AgentDispatch>>,
     /// Short-TTL cache for the per-event enabled-workflow lookup, keyed
     /// `(community_id, channel_id)`. Most channels have no workflows, so this
     /// removes one SELECT from nearly every ingested event.
@@ -115,6 +125,7 @@ impl WorkflowEngine {
             run_semaphore,
             last_fired: DashMap::new(),
             action_sink: OnceLock::new(),
+            agent_dispatch: OnceLock::new(),
             workflow_cache: moka::sync::Cache::builder()
                 .max_capacity(10_000)
                 .time_to_live(std::time::Duration::from_secs(10))
@@ -180,6 +191,25 @@ impl WorkflowEngine {
         }
     }
 
+    /// Set the durable agent dispatcher once after relay construction.
+    ///
+    /// # Panics
+    /// Panics if called more than once.
+    pub fn set_agent_dispatch(&self, dispatch: Arc<dyn AgentDispatch>) {
+        if self.agent_dispatch.set(dispatch).is_err() {
+            panic!("agent_dispatch already initialized");
+        }
+    }
+
+    /// Get the configured durable agent dispatcher.
+    pub(crate) fn agent_dispatch(&self) -> Result<&dyn AgentDispatch, WorkflowError> {
+        self.agent_dispatch.get().map(|value| value.as_ref()).ok_or_else(|| {
+            WorkflowError::InvalidDefinition(
+                "agent_dispatch not initialized — call set_agent_dispatch() before dispatching agent tasks".into(),
+            )
+        })
+    }
+
     /// Get the action sink reference.
     ///
     /// Returns `Err(WorkflowError)` if the sink has not been initialized via
@@ -226,7 +256,19 @@ impl WorkflowEngine {
                 let trace_json = serde_json::Value::Array(full_trace);
                 let step_count = result.step_index as i32;
 
-                if result.approval_token.is_some() {
+                if matches!(
+                    result.disposition,
+                    ExecutionDisposition::WaitingDurableTasks
+                        | ExecutionDisposition::DurableSettled
+                ) {
+                    tracing::debug!(
+                        run_id = %run_id,
+                        "Durable workflow lifecycle handled by durable scheduler"
+                    );
+                    return;
+                }
+
+                if result.disposition == ExecutionDisposition::WaitingApproval {
                     // Approval gates are not yet implemented (WF-08).
                     // Fail explicitly rather than creating unreachable WaitingApproval rows.
                     tracing::warn!(
@@ -307,7 +349,7 @@ impl WorkflowEngine {
     /// Called from the event handler post-store hook for every stored event.
     ///
     /// Checks whether any workflow in the event's channel has a matching trigger.
-    /// Workflow execution events (kinds 46001–46012) are excluded to prevent loops.
+    /// Workflow execution events (kinds 46001–46016) are excluded to prevent loops.
     ///
     /// `community_id` is the server-resolved community the event was stored
     /// under — `StoredEvent` does not carry it, and the same channel UUID can
@@ -333,7 +375,16 @@ impl WorkflowEngine {
 
         let kind_u32 = event_kind_u32(&event.event);
 
-        // Exclude workflow execution events to prevent infinite loops.
+        if matches!(
+            kind_u32,
+            buzz_core::kind::KIND_AGENT_WORKFLOW_CHECKPOINT
+                | buzz_core::kind::KIND_AGENT_WORKFLOW_ARTIFACT
+        ) {
+            receipt::process_agent_receipt(self, community_id, event).await?;
+            return Ok(());
+        }
+
+        // Exclude every other workflow execution event to prevent trigger loops.
         if is_workflow_execution_kind(kind_u32) {
             return Ok(());
         }
@@ -470,6 +521,29 @@ impl WorkflowEngine {
         interval_prefilter_should_fire(&self.last_fired, community_id, workflow_id, dur, last, now)
     }
 
+    /// Reconcile bounded active durable runs after restarts and transient failures.
+    async fn reconcile_durable_runs(&self) {
+        let store = self.db.agent_workflow_store();
+        let candidates = match store.list_reconcilable_runs(1_000).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::error!("Durable reconciliation scan failed: {error}");
+                return;
+            }
+        };
+        for candidate in candidates {
+            if let Err(error) = durable_settlement::advance_settle_and_project(
+                self,
+                candidate.community_id,
+                candidate.run_id,
+            )
+            .await
+            {
+                tracing::warn!(run_id = %candidate.run_id, "Durable reconciliation pass failed: {error}");
+            }
+        }
+    }
+
     /// Background loop for scheduled (cron/interval) triggers.
     ///
     /// Ticks every 60 seconds. For each active workflow with a `Schedule`
@@ -493,6 +567,7 @@ impl WorkflowEngine {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
             let now = Utc::now();
+            self.reconcile_durable_runs().await;
 
             let workflows = match self.db.list_all_enabled_workflows().await {
                 Ok(wf) => wf,

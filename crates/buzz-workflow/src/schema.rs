@@ -84,6 +84,10 @@ pub struct Step {
     /// Maximum seconds this step may run before timing out.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Step ids that must complete successfully before this step is eligible.
+    /// Dependencies must reference earlier steps in the ordered definition.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
     /// The action to perform when this step executes.
     #[serde(flatten)]
     pub action: ActionDef,
@@ -152,6 +156,42 @@ pub enum ActionDef {
         /// Duration string (e.g. `"5m"`, `"1h"`).
         duration: String,
     },
+    /// Ingest one immutable document into the shared run index.
+    IngestDocument {
+        /// Workflow input key or immutable URI to ingest.
+        source: String,
+        /// Artifact kind produced by ingestion.
+        output: String,
+    },
+    /// Dispatch a durable task to an independently identified ACP agent.
+    RunAgent {
+        /// Human-readable stable roster label.
+        agent: String,
+        /// Explicit 32-byte Nostr public key encoded as lowercase hex.
+        identity: String,
+        /// Prompt template or run input key.
+        prompt: String,
+        /// Self-contained JSON Schema used to validate the output artifact.
+        output_schema: serde_json::Value,
+    },
+    /// Fan-in gate that opens only after every dependency completes.
+    Barrier,
+    /// Verify an artifact against an independent evidence contract.
+    VerifyArtifact {
+        /// Human-readable verifier roster label.
+        agent: String,
+        /// Explicit 32-byte Nostr public key encoded as lowercase hex.
+        identity: String,
+        /// Prompt instructing the independent verifier.
+        prompt: String,
+        /// Self-contained JSON Schema for the verification ledger.
+        schema: serde_json::Value,
+    },
+    /// Publish one previously validated artifact.
+    PublishArtifact {
+        /// Artifact kind or task output key to publish.
+        artifact: String,
+    },
 }
 
 impl WorkflowDef {
@@ -166,6 +206,23 @@ impl WorkflowDef {
         self.steps
             .iter()
             .any(|s| matches!(s.action, ActionDef::CallWebhook { .. }))
+    }
+
+    /// Whether this definition requires the durable DAG scheduler instead of
+    /// the legacy sequential executor.
+    pub fn requires_durable_scheduler(&self) -> bool {
+        self.steps.iter().any(|step| {
+            !step.depends_on.is_empty()
+                || matches!(
+                    step.action,
+                    ActionDef::IngestDocument { .. }
+                        | ActionDef::RunAgent { .. }
+                        | ActionDef::Barrier
+                        | ActionDef::VerifyArtifact { .. }
+                        | ActionDef::RequestApproval { .. }
+                        | ActionDef::PublishArtifact { .. }
+                )
+        })
     }
 
     /// Validate the workflow definition. Returns `Err` with a descriptive message
@@ -210,6 +267,56 @@ impl WorkflowDef {
                     "duplicate step id: {}",
                     step.id
                 )));
+            }
+            match &step.action {
+                ActionDef::RunAgent {
+                    identity,
+                    output_schema,
+                    ..
+                } => {
+                    validate_agent_identity(&step.id, identity)?;
+                    validate_inline_schema(&step.id, output_schema)?;
+                }
+                ActionDef::VerifyArtifact {
+                    identity, schema, ..
+                } => {
+                    validate_agent_identity(&step.id, identity)?;
+                    validate_inline_schema(&step.id, schema)?;
+                }
+                _ => {}
+            }
+        }
+
+        // Dependencies form a DAG by construction: every edge must point to a
+        // unique earlier step. This also rejects self-dependencies, unknown ids,
+        // forward references, and cycles without a separate graph traversal.
+        let positions: HashMap<&str, usize> = self
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(index, step)| (step.id.as_str(), index))
+            .collect();
+        for (index, step) in self.steps.iter().enumerate() {
+            let mut dependencies = HashSet::new();
+            for dependency in &step.depends_on {
+                if !dependencies.insert(dependency.as_str()) {
+                    return Err(WorkflowError::InvalidDefinition(format!(
+                        "step '{}': duplicate dependency '{}'",
+                        step.id, dependency
+                    )));
+                }
+                let dependency_index = positions.get(dependency.as_str()).ok_or_else(|| {
+                    WorkflowError::InvalidDefinition(format!(
+                        "step '{}': unknown dependency '{}'",
+                        step.id, dependency
+                    ))
+                })?;
+                if *dependency_index >= index {
+                    return Err(WorkflowError::InvalidDefinition(format!(
+                        "step '{}': dependency '{}' must reference an earlier step",
+                        step.id, dependency
+                    )));
+                }
             }
         }
 
@@ -276,6 +383,41 @@ impl WorkflowDef {
 
         Ok(())
     }
+}
+
+fn validate_agent_identity(step_id: &str, identity: &str) -> Result<(), WorkflowError> {
+    let bytes = hex::decode(identity).map_err(|error| {
+        WorkflowError::InvalidDefinition(format!(
+            "step '{step_id}': agent identity is not hex: {error}"
+        ))
+    })?;
+    if bytes.len() != 32 || identity != identity.to_ascii_lowercase() {
+        return Err(WorkflowError::InvalidDefinition(format!(
+            "step '{step_id}': agent identity must be 32 lowercase hex bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_inline_schema(step_id: &str, schema: &serde_json::Value) -> Result<(), WorkflowError> {
+    if !schema.is_object() {
+        return Err(WorkflowError::InvalidDefinition(format!(
+            "step '{step_id}': inline JSON Schema must be an object"
+        )));
+    }
+    let encoded = serde_json::to_vec(schema)
+        .map_err(|error| WorkflowError::InvalidDefinition(error.to_string()))?;
+    if encoded.len() > 64 * 1024 {
+        return Err(WorkflowError::InvalidDefinition(format!(
+            "step '{step_id}': inline JSON Schema exceeds 64 KiB"
+        )));
+    }
+    jsonschema::validator_for(schema).map_err(|error| {
+        WorkflowError::InvalidDefinition(format!(
+            "step '{step_id}': invalid inline JSON Schema: {error}"
+        ))
+    })?;
+    Ok(())
 }
 
 /// Validate a cron expression using the `cron` crate.
@@ -475,6 +617,24 @@ mod tests {
             }
             other => panic!("expected InvalidDefinition, got: {other}"),
         }
+    }
+
+    #[test]
+    fn validate_rejects_invalid_inline_agent_schema() {
+        let yaml = "name: Bad Schema
+trigger:
+  on: webhook
+steps:
+  - id: agent
+    action: run_agent
+    agent: helena
+    identity: 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+    prompt: analyze
+    output_schema:
+      type: definitely-not-a-json-schema-type
+";
+        let error = parse_yaml(yaml).expect_err("invalid schema must fail");
+        assert!(matches!(error, WorkflowError::InvalidDefinition(_)));
     }
 
     #[test]
@@ -987,6 +1147,58 @@ mod tests {
         assert!(matches!(trigger, TriggerDef::DiffPosted { filter: None }));
         let back = serde_yaml::to_string(&trigger).unwrap();
         assert!(back.contains("diff_posted"));
+    }
+
+    #[test]
+    fn approval_only_workflow_requires_durable_scheduler() {
+        let yaml = "name: Approval only
+trigger:
+  on: webhook
+steps:
+  - id: approve
+    action: request_approval
+    from: '@workflow-owner'
+    message: Review
+";
+        let (definition, _) = parse_yaml(yaml).expect("approval-only workflow should parse");
+        assert!(definition.requires_durable_scheduler());
+    }
+
+    #[test]
+    fn tribunal_example_is_a_valid_durable_dag() {
+        let yaml = include_str!("../../../examples/agent-workflows/tribunal/workflow.yaml");
+        let (definition, _) = parse_yaml(yaml).expect("tribunal workflow should parse");
+        assert_eq!(definition.steps.len(), 11);
+        assert!(definition.requires_durable_scheduler());
+        assert!(matches!(definition.steps[3].action, ActionDef::Barrier));
+        assert_eq!(
+            definition.steps[3].depends_on,
+            vec!["defense_analysis", "contradictor_analysis"]
+        );
+    }
+
+    #[test]
+    fn durable_dag_rejects_unknown_dependency() {
+        let yaml = "name: Bad DAG\ntrigger:\n  on: webhook\nsteps:\n  - id: ingest\n    action: delay\n    duration: 1m\n  - id: analyze\n    action: barrier\n    depends_on: [missing]\n";
+        let error = parse_yaml(yaml).expect_err("unknown dependency must fail");
+        match error {
+            WorkflowError::InvalidDefinition(message) => {
+                assert!(message.contains("unknown dependency 'missing'"));
+            }
+            other => panic!("expected InvalidDefinition, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn durable_dag_rejects_forward_dependency() {
+        let yaml = "name: Bad DAG\ntrigger:\n  on: webhook\nsteps:\n  - id: barrier\n    action: barrier\n    depends_on: [later]\n  - id: later\n    action: delay\n    duration: 1m\n";
+        let error = parse_yaml(yaml).expect_err("forward dependency must fail");
+        match error {
+            WorkflowError::InvalidDefinition(message) => {
+                assert!(message.contains("must reference an earlier step"));
+            }
+            other => panic!("expected InvalidDefinition, got: {other}"),
+        }
     }
 
     #[test]

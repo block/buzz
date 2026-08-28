@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "title": "Debate response",
+  "properties": {
+    "agent": {
+      "type": "string"
+    },
+    "responses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "challenge_id": {
+            "type": "string"
+          },
+          "position": {
+            "enum": [
+              "accept",
+              "reject",
+              "qualify"
+            ]
+          },
+          "reason": {
+            "type": "string"
+          },
+          "citation_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "challenge_id",
+          "position",
+          "reason",
+          "citation_ids"
+        ]
+      }
+    },
+    "remaining_disagreements": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "agent",
+    "responses",
+    "remaining_disagreements"
+  ]
+}

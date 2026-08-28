@@ -689,7 +689,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 39);
+        assert_eq!(migrations.len(), 41);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1151,6 +1151,42 @@ mod tests {
         assert!(heartbeat_vacuum.contains("ALTER TABLE replica_heartbeat"));
         assert!(heartbeat_vacuum.contains("vacuum_truncate = false"));
         assert!(desired_schema.contains("vacuum_truncate = false"));
+
+        // Durable agent workflow state is additive: brownfield deployments get
+        // migration 0040 while desired-state bootstrap carries the same tables.
+        assert_eq!(migrations[39].version, 40);
+        let agent_workflow = migrations[39].sql.as_str();
+        for table in [
+            "workflow_run_state",
+            "workflow_run_tasks",
+            "workflow_run_artifacts",
+            "workflow_run_checkpoints",
+            "workflow_run_transitions",
+        ] {
+            assert!(agent_workflow.contains(&format!("CREATE TABLE {table}")));
+            assert!(desired_schema.contains(&format!("CREATE TABLE {table}")));
+            assert!(!migrations[0]
+                .sql
+                .as_str()
+                .contains(&format!("CREATE TABLE {table}")));
+        }
+
+        assert_eq!(migrations[40].version, 41);
+        let durable_approvals = migrations[40].sql.as_str();
+        for fragment in [
+            "ADD COLUMN task_id",
+            "ADD CONSTRAINT fk_workflow_approval_task",
+            "CREATE UNIQUE INDEX idx_workflow_approvals_task",
+        ] {
+            assert!(durable_approvals.contains(fragment));
+        }
+        for fragment in [
+            "task_id             UUID",
+            "CONSTRAINT fk_workflow_approval_task",
+            "CREATE UNIQUE INDEX idx_workflow_approvals_task",
+        ] {
+            assert!(desired_schema.contains(fragment));
+        }
 
         // pgschema intentionally reconciles DDL, not seed DML or table storage
         // parameters. Its post-apply reconciliation must restore and verify
@@ -1689,7 +1725,14 @@ mod tests {
         let schema_sql = std::fs::read_to_string(workspace_root.join("schema/schema.sql"))
             .expect("read schema/schema.sql");
 
+        let migration_0040: &str = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 40)
+            .expect("embedded migration 0040")
+            .sql
+            .as_ref();
         let migration = surface(migration_0029);
+        let agent_workflow = surface(migration_0040);
         let schema = surface(&schema_sql);
 
         assert_eq!(
@@ -1748,6 +1791,7 @@ mod tests {
             );
         }
         let mut expected_fences = migration.fence_attachments.clone();
+        expected_fences.extend(agent_workflow.fence_attachments);
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
         assert_eq!(

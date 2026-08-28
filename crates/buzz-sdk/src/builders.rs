@@ -5,14 +5,16 @@
 
 use buzz_core::{
     kind::{
-        KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
-        KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-        KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
-        KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
-        KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
-        KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
-        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_AGENT_OBSERVER_FRAME, KIND_AGENT_WORKFLOW_ARTIFACT, KIND_AGENT_WORKFLOW_CHECKPOINT,
+        KIND_AGENT_WORKFLOW_RUN, KIND_AGENT_WORKFLOW_TASK, KIND_AGENT_WORKFLOW_TRANSITION,
+        KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_OPEN,
+        KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
+        KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT,
+        KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST,
+        KIND_IA_UNARCHIVE_REQUEST, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
+        KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT,
+        KIND_PRESENCE_UPDATE, KIND_PROJECT, KIND_USER_STATUS, KIND_WORKFLOW_DEF,
+        KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -1589,6 +1591,156 @@ pub fn build_git_pr_update(
     }
 
     Ok(EventBuilder::new(Kind::Custom(KIND_GIT_PR_UPDATE as u16), content).tags(tags))
+}
+
+/// Build the durable, parameterized-replaceable snapshot of an agent workflow run.
+///
+/// The run UUID is the NIP-33 coordinate. Every participant is emitted as a
+/// distinct p-tag after validation and stable deduplication.
+pub fn build_agent_workflow_run(
+    channel_id: Uuid,
+    workflow_id: Uuid,
+    run_id: Uuid,
+    participants: &[&str],
+    content: &str,
+) -> Result<EventBuilder, SdkError> {
+    check_json_object(content)?;
+    let mut tags = vec![
+        tag(&["d", &run_id.to_string()])?,
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["workflow", &workflow_id.to_string()])?,
+        tag(&["run", &run_id.to_string()])?,
+    ];
+    workflow_participant_tags(participants, &mut tags)?;
+    Ok(EventBuilder::new(Kind::Custom(KIND_AGENT_WORKFLOW_RUN as u16), content).tags(tags))
+}
+
+/// Build an agent-authored task lifecycle receipt.
+pub fn build_agent_workflow_task(
+    channel_id: Uuid,
+    workflow_id: Uuid,
+    run_id: Uuid,
+    task_id: Uuid,
+    participants: &[&str],
+    content: &str,
+) -> Result<EventBuilder, SdkError> {
+    build_agent_workflow_receipt(
+        KIND_AGENT_WORKFLOW_TASK,
+        channel_id,
+        workflow_id,
+        run_id,
+        Some(task_id),
+        participants,
+        content,
+    )
+}
+
+/// Build an agent-authored resumable checkpoint receipt.
+pub fn build_agent_workflow_checkpoint(
+    channel_id: Uuid,
+    workflow_id: Uuid,
+    run_id: Uuid,
+    task_id: Uuid,
+    participants: &[&str],
+    content: &str,
+) -> Result<EventBuilder, SdkError> {
+    build_agent_workflow_receipt(
+        KIND_AGENT_WORKFLOW_CHECKPOINT,
+        channel_id,
+        workflow_id,
+        run_id,
+        Some(task_id),
+        participants,
+        content,
+    )
+}
+
+/// Build an agent-authored immutable artifact receipt.
+pub fn build_agent_workflow_artifact(
+    channel_id: Uuid,
+    workflow_id: Uuid,
+    run_id: Uuid,
+    task_id: Uuid,
+    participants: &[&str],
+    content: &str,
+) -> Result<EventBuilder, SdkError> {
+    build_agent_workflow_receipt(
+        KIND_AGENT_WORKFLOW_ARTIFACT,
+        channel_id,
+        workflow_id,
+        run_id,
+        Some(task_id),
+        participants,
+        content,
+    )
+}
+
+/// Build a coordinator-authored durable state transition receipt.
+pub fn build_agent_workflow_transition(
+    channel_id: Uuid,
+    workflow_id: Uuid,
+    run_id: Uuid,
+    participants: &[&str],
+    content: &str,
+) -> Result<EventBuilder, SdkError> {
+    build_agent_workflow_receipt(
+        KIND_AGENT_WORKFLOW_TRANSITION,
+        channel_id,
+        workflow_id,
+        run_id,
+        None,
+        participants,
+        content,
+    )
+}
+
+fn build_agent_workflow_receipt(
+    kind: u32,
+    channel_id: Uuid,
+    workflow_id: Uuid,
+    run_id: Uuid,
+    task_id: Option<Uuid>,
+    participants: &[&str],
+    content: &str,
+) -> Result<EventBuilder, SdkError> {
+    check_json_object(content)?;
+    let mut tags = vec![
+        tag(&["d", &run_id.to_string()])?,
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["workflow", &workflow_id.to_string()])?,
+        tag(&["run", &run_id.to_string()])?,
+    ];
+    if let Some(task_id) = task_id {
+        tags.push(tag(&["task", &task_id.to_string()])?);
+    }
+    workflow_participant_tags(participants, &mut tags)?;
+    Ok(EventBuilder::new(Kind::Custom(kind as u16), content).tags(tags))
+}
+
+fn check_json_object(content: &str) -> Result<(), SdkError> {
+    check_content(content, 64 * 1024)?;
+    let value: serde_json::Value = serde_json::from_str(content)
+        .map_err(|error| SdkError::InvalidInput(format!("content must be valid JSON: {error}")))?;
+    if !value.is_object() {
+        return Err(SdkError::InvalidInput(
+            "content must be a JSON object".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn workflow_participant_tags(participants: &[&str], tags: &mut Vec<Tag>) -> Result<(), SdkError> {
+    if participants.len() > crate::mentions::MENTION_CAP {
+        return Err(SdkError::TooManyMentions);
+    }
+    let mut seen = std::collections::HashSet::new();
+    for participant in participants {
+        let normalized = check_pubkey_hex(participant, "participant")?;
+        if seen.insert(normalized.clone()) {
+            tags.push(tag(&["p", &normalized])?);
+        }
+    }
+    Ok(())
 }
 
 /// Build a workflow definition event (kind 30620).
@@ -4013,6 +4165,109 @@ mod tests {
         let ev = sign(build_workflow_trigger(wid).unwrap());
         assert_eq!(ev.kind.as_u16(), 46020);
         assert!(has_tag(&ev, "d", &wid.to_string()));
+    }
+
+    #[test]
+    fn agent_workflow_run_preserves_distinct_participant_tags() {
+        let helena = "a".repeat(64);
+        let rui = "b".repeat(64);
+        let anselmo = "c".repeat(64);
+        let channel = uuid();
+        let workflow = uuid();
+        let run = uuid();
+        let ev = sign(
+            build_agent_workflow_run(
+                channel,
+                workflow,
+                run,
+                &[&helena, &rui, &anselmo, &helena.to_ascii_uppercase()],
+                r#"{"phase":"analysis"}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), KIND_AGENT_WORKFLOW_RUN as u16);
+        assert!(has_tag(&ev, "d", &run.to_string()));
+        assert!(has_tag(&ev, "h", &channel.to_string()));
+        assert!(has_tag(&ev, "workflow", &workflow.to_string()));
+        assert!(has_tag(&ev, "run", &run.to_string()));
+        assert_eq!(tag_values(&ev, "p"), vec![helena, rui, anselmo]);
+    }
+
+    #[test]
+    fn agent_workflow_receipts_have_required_coordinates() {
+        let channel = uuid();
+        let workflow = uuid();
+        let run = uuid();
+        let task = uuid();
+        let participant = "d".repeat(64);
+        let cases = [
+            (
+                KIND_AGENT_WORKFLOW_TASK,
+                build_agent_workflow_task(
+                    channel,
+                    workflow,
+                    run,
+                    task,
+                    &[&participant],
+                    r#"{"status":"running"}"#,
+                ),
+                true,
+            ),
+            (
+                KIND_AGENT_WORKFLOW_CHECKPOINT,
+                build_agent_workflow_checkpoint(
+                    channel,
+                    workflow,
+                    run,
+                    task,
+                    &[&participant],
+                    r#"{"sequence":1}"#,
+                ),
+                true,
+            ),
+            (
+                KIND_AGENT_WORKFLOW_ARTIFACT,
+                build_agent_workflow_artifact(
+                    channel,
+                    workflow,
+                    run,
+                    task,
+                    &[&participant],
+                    r#"{"kind":"analysis"}"#,
+                ),
+                true,
+            ),
+            (
+                KIND_AGENT_WORKFLOW_TRANSITION,
+                build_agent_workflow_transition(
+                    channel,
+                    workflow,
+                    run,
+                    &[&participant],
+                    r#"{"to_phase":"debate"}"#,
+                ),
+                false,
+            ),
+        ];
+        for (kind, builder, has_task) in cases {
+            let ev = sign(builder.unwrap());
+            assert_eq!(ev.kind.as_u16(), kind as u16);
+            assert!(has_tag(&ev, "d", &run.to_string()));
+            assert!(has_tag(&ev, "h", &channel.to_string()));
+            assert!(has_tag(&ev, "workflow", &workflow.to_string()));
+            assert!(has_tag(&ev, "run", &run.to_string()));
+            assert_eq!(has_tag(&ev, "task", &task.to_string()), has_task);
+            assert!(has_tag(&ev, "p", &participant));
+        }
+    }
+
+    #[test]
+    fn agent_workflow_builder_rejects_invalid_json_and_pubkey() {
+        let err = build_agent_workflow_transition(uuid(), uuid(), uuid(), &[], "[]").unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+        let err = build_agent_workflow_transition(uuid(), uuid(), uuid(), &["not-a-pubkey"], "{}")
+            .unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
     }
 
     #[test]

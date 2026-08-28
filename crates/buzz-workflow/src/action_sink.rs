@@ -71,3 +71,55 @@ pub trait ActionSink: Send + Sync {
         reply_to: Option<&str>,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }
+
+/// Errors while resolving or dispatching a durable agent task.
+#[derive(Debug, thiserror::Error)]
+pub enum AgentDispatchError {
+    /// The resolved Nostr identity is malformed.
+    #[error("invalid agent identity: {0}")]
+    InvalidIdentity(String),
+    /// Publishing the signed task invitation failed.
+    #[error("task dispatch failed: {0}")]
+    Publish(String),
+}
+
+/// Fire-and-forget bridge from durable tasks to independent agent identities.
+///
+/// Implementations publish a task invitation addressed to the explicit Nostr
+/// pubkey persisted in the workflow definition. They must return after publication;
+/// task output arrives later as a separately signed artifact receipt.
+pub trait AgentDispatch: Send + Sync {
+    /// Publish one already-claimed durable task invitation.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_task(
+        &self,
+        community_id: CommunityId,
+        channel_id: uuid::Uuid,
+        run_id: uuid::Uuid,
+        task_id: uuid::Uuid,
+        agent_pubkey: &[u8],
+        prompt: &str,
+        output_schema: Option<&serde_json::Value>,
+        checkpoint: Option<&serde_json::Value>,
+    ) -> Pin<Box<dyn Future<Output = Result<String, AgentDispatchError>> + Send + '_>>;
+
+    /// Publish one coordinator-signed, deterministic projection of an approved artifact.
+    #[allow(clippy::too_many_arguments)]
+    fn publish_artifact(
+        &self,
+        community_id: CommunityId,
+        channel_id: uuid::Uuid,
+        run_id: uuid::Uuid,
+        publish_task_id: uuid::Uuid,
+        created_at_secs: u64,
+        source_author: Option<&[u8]>,
+        content: &serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<String, AgentDispatchError>> + Send + '_>>;
+
+    /// Project a bounded, database-authoritative replaceable run snapshot.
+    fn publish_run_snapshot(
+        &self,
+        community_id: CommunityId,
+        run_id: uuid::Uuid,
+    ) -> Pin<Box<dyn Future<Output = Result<String, AgentDispatchError>> + Send + '_>>;
+}

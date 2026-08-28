@@ -713,8 +713,20 @@ mod tests {
             KIND_JOB_RESULT,
         ];
 
-        use buzz_core::kind::{KIND_WORKFLOW_APPROVAL_DENIED, KIND_WORKFLOW_TRIGGERED};
-        for kind in KIND_WORKFLOW_TRIGGERED..=KIND_WORKFLOW_APPROVAL_DENIED {
+        use buzz_core::kind::{
+            is_workflow_execution_kind, KIND_AGENT_WORKFLOW_ARTIFACT,
+            KIND_AGENT_WORKFLOW_CHECKPOINT, KIND_AGENT_WORKFLOW_RUN, KIND_AGENT_WORKFLOW_TASK,
+            KIND_AGENT_WORKFLOW_TRANSITION, KIND_WORKFLOW_APPROVAL_DENIED, KIND_WORKFLOW_TRIGGERED,
+        };
+        let execution_kinds = (KIND_WORKFLOW_TRIGGERED..=KIND_WORKFLOW_APPROVAL_DENIED).chain([
+            KIND_AGENT_WORKFLOW_RUN,
+            KIND_AGENT_WORKFLOW_TASK,
+            KIND_AGENT_WORKFLOW_CHECKPOINT,
+            KIND_AGENT_WORKFLOW_ARTIFACT,
+            KIND_AGENT_WORKFLOW_TRANSITION,
+        ]);
+        for kind in execution_kinds {
+            assert!(is_workflow_execution_kind(kind));
             assert!(
                 !activity_kinds.contains(&kind),
                 "workflow execution kind {kind} must NOT be in activity"

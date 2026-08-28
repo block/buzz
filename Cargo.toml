@@ -79,6 +79,7 @@ postcard    = { version = "1", default-features = false, features = ["use-std"] 
 iroh = { version = "1.0.0-rc.0", default-features = false, features = ["tls-ring"] }
 serde_json  = { version = "1", features = ["raw_value"] }
 serde_yaml  = "0.9"
+jsonschema  = { version = "=0.52.0", default-features = false }
 evalexpr    = "11"
 cron        = "0.16"
 # Observability

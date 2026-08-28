@@ -26,6 +26,15 @@
 
 /// Explicit deployment-global admin report reads.
 pub mod admin_moderation;
+/// Durable multi-agent workflow run state.
+pub mod agent_approval;
+pub mod agent_artifact;
+pub mod agent_settlement;
+pub mod agent_snapshot;
+pub mod agent_task_recovery;
+pub mod agent_workflow;
+/// Writer-pool facade for durable agent workflow persistence.
+pub mod agent_workflow_store;
 /// API token storage and lookup.
 pub mod api_token;
 /// Relay-scoped archived identity persistence (NIP-IA).
@@ -1172,6 +1181,11 @@ impl Db {
     #[datastore_span(name = "usage_community_hosts", system = "postgresql")]
     pub async fn usage_community_hosts(&self) -> Result<Vec<usage::CommunityHost>> {
         usage::community_hosts(&self.pool).await
+    }
+
+    /// Return the tenant-scoped durable agent-workflow persistence facade.
+    pub fn agent_workflow_store(&self) -> agent_workflow_store::AgentWorkflowStore {
+        agent_workflow_store::AgentWorkflowStore::new(self.pool.clone())
     }
 
     /// Return the shared durable whole-community deletion adapter.

@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "title": "Defense analysis",
+  "properties": {
+    "summary": {
+      "type": "string"
+    },
+    "charges": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "procedural_issues": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "evidence_analysis": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "defense_theses": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "subsidiary_theses": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "requests": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "claim_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "citation_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "claim_id",
+          "text",
+          "citation_ids"
+        ]
+      }
+    },
+    "draft_final_arguments": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "summary",
+    "charges",
+    "procedural_issues",
+    "evidence_analysis",
+    "defense_theses",
+    "subsidiary_theses",
+    "risks",
+    "requests",
+    "claims",
+    "draft_final_arguments"
+  ]
+}

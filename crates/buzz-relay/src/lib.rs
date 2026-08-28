@@ -49,6 +49,8 @@ pub mod tenant;
 pub mod tunnel;
 /// Webhook secret generation and constant-time comparison.
 pub mod webhook_secret;
+/// Durable agent task dispatcher backed by relay-visible Nostr events.
+pub mod workflow_agent_dispatch;
 /// Workflow action sink — relay-side implementation of [`buzz_workflow::ActionSink`].
 pub mod workflow_sink;
 

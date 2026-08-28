@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Citation ledger",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "citation_id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "claim_id": {
+        "type": "string",
+        "minLength": 1
+      },
+      "claim_type": {
+        "enum": [
+          "fact",
+          "law",
+          "precedent"
+        ]
+      },
+      "document_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "physical_page": {
+        "type": [
+          "integer",
+          "null"
+        ],
+        "minimum": 1
+      },
+      "court_page": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "quote": {
+        "type": "string"
+      },
+      "official_url": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "status": {
+        "enum": [
+          "verified",
+          "unverified",
+          "divergent",
+          "rejected"
+        ]
+      },
+      "verified_by": {
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "citation_id",
+      "claim_id",
+      "claim_type",
+      "document_id",
+      "physical_page",
+      "court_page",
+      "quote",
+      "official_url",
+      "status",
+      "verified_by"
+    ]
+  }
+}
