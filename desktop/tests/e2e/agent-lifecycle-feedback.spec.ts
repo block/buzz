@@ -106,16 +106,29 @@ test.describe("agent lifecycle feedback screenshots", () => {
 
     await openAgentsView(page);
 
-    // The custom persona card appears in the library.
+    // Both instances were renamed, so the persona splits into one card per
+    // name rather than hiding an instance behind a single persona card.
+    await expect(
+      page.getByText("Cascade Instance A", { exact: true }),
+    ).toBeVisible({ timeout: 10_000 });
+    await expect(
+      page.getByText("Cascade Instance B", { exact: true }),
+    ).toBeVisible();
+
+    // The persona's own name stays visible as each split card's second line,
+    // so a split persona is still findable in the library.
     await expect(
       page.getByText("Cascade Test Agent", { exact: true }),
-    ).toBeVisible({ timeout: 10_000 });
+    ).toHaveCount(2);
 
-    // Open the actions menu for the custom persona. The trigger button carries
-    // an aria-label derived from the persona displayName.
-    await page
-      .getByRole("button", { name: "Open actions for Cascade Test Agent" })
-      .click();
+    // Persona actions live on exactly one card — deterministically the first,
+    // since no instance kept the persona's name. The trigger button carries an
+    // aria-label derived from the persona displayName.
+    const personaActions = page.getByRole("button", {
+      name: "Open actions for Cascade Test Agent",
+    });
+    await expect(personaActions).toHaveCount(1);
+    await personaActions.click();
 
     // For a custom (non-builtin) persona, Delete opens PersonaDeleteDialog.
     await page.getByRole("menuitem", { name: "Delete" }).click();

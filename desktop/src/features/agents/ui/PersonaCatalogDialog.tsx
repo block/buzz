@@ -48,6 +48,16 @@ type PersonaCatalogDialogProps = {
 type PendingNavigation =
   | { type: "close" }
   | { type: "selection"; selection: string };
+
+/**
+ * Prefix for this dialog's radio-group selection token, alongside the bare
+ * `"create"` and `"import"` values. Deliberately NOT `persona:` — that
+ * namespace belongs to `agentIdentity`, and a token that merely addresses a row
+ * in this list must not look like an agent identity to a reader or to
+ * `check-agent-identity`. Produced and consumed only in this file; never
+ * persisted or sent over the wire.
+ */
+const CATALOG_PERSONA_PREFIX = "catalog-persona:";
 export function PersonaCatalogDialog({
   createContent,
   error,
@@ -70,8 +80,8 @@ export function PersonaCatalogDialog({
   const [pendingNavigation, setPendingNavigation] =
     React.useState<PendingNavigation | null>(null);
   const [selection, setSelection] = React.useState("create");
-  const selectedPersonaId = selection.startsWith("persona:")
-    ? selection.slice("persona:".length)
+  const selectedPersonaId = selection.startsWith(CATALOG_PERSONA_PREFIX)
+    ? selection.slice(CATALOG_PERSONA_PREFIX.length)
     : null;
   const selectedPersona = React.useMemo(() => {
     if (!selectedPersonaId) {
@@ -380,7 +390,9 @@ function PersonaCatalogChooser({
                     data-testid={`persona-catalog-list-item-${persona.id}`}
                     key={persona.id}
                     onClick={() => {
-                      onSelectionChange(`persona:${persona.id}`);
+                      onSelectionChange(
+                        `${CATALOG_PERSONA_PREFIX}${persona.id}`,
+                      );
                     }}
                     type="button"
                   >
@@ -438,7 +450,7 @@ function PersonaCatalogChooser({
             </div>
           </>
         ) : null}
-        {selection.startsWith("persona:") && isLoading ? (
+        {selection.startsWith(CATALOG_PERSONA_PREFIX) && isLoading ? (
           <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
             <PersonaCatalogDetailSkeleton />
           </div>

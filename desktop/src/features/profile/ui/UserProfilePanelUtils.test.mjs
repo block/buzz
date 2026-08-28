@@ -241,6 +241,8 @@ test("profile target identity stays stable while a requested pubkey is canonical
   );
   assert.equal(
     profilePanelTargetKey(undefined, "requested-persona"),
-    "persona:requested-persona",
+    // `profile:`, never `persona:` — that namespace belongs to agentIdentity,
+    // and this key exists precisely when there is no agent to identify.
+    "profile:requested-persona",
   );
 });

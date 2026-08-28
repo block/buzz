@@ -1,3 +1,4 @@
+import { agentIdentityKey } from "@/features/agents/lib/agentIdentity";
 import type { Channel, RelayAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
@@ -274,16 +275,13 @@ type AgentAutocompleteCandidate = {
   personaId?: string | null;
 };
 
-function agentIdentityKey<T extends AgentAutocompleteCandidate>(candidate: T) {
-  if (candidate.isAgent !== true || !candidate.pubkey) {
-    return null;
-  }
-
-  // Pubkeys—not persona metadata or a display name—are agent identities.
-  // A persona may be installed more than once, and an owner may intentionally
-  // create multiple same-named agents. Collapsing either case makes one agent
-  // impossible to choose from autocomplete.
-  return `pubkey:${normalizePubkey(candidate.pubkey)}`;
+function agentAutocompleteIdentityKey<T extends AgentAutocompleteCandidate>(
+  candidate: T,
+) {
+  // Only agents coalesce; two humans may legitimately share every other field.
+  // The identity itself comes from `agentIdentityKey` so this surface and the
+  // Agents library cannot drift into two different answers for "same agent?".
+  return candidate.isAgent === true ? agentIdentityKey(candidate) : null;
 }
 
 function agentCandidateRank<T extends AgentAutocompleteCandidate>(
@@ -358,7 +356,7 @@ export function coalesceAgentAutocompleteCandidates<
   const indexesByKey = new Map<string, number>();
 
   for (const candidate of candidates) {
-    const key = agentIdentityKey(candidate);
+    const key = agentAutocompleteIdentityKey(candidate);
     if (!key) {
       output.push(candidate);
       continue;

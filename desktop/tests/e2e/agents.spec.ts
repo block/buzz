@@ -2708,3 +2708,71 @@ test("duplicate instances move from the agents gallery into the agent profile", 
     page.getByTestId(`user-profile-agent-delete-${additionalPubkey}`),
   ).toHaveCount(0);
 });
+
+test("renamed instances of one persona each get their own gallery card", async ({
+  page,
+}) => {
+  // The regression this pins lived in JSX: the gallery rendered exactly one
+  // card per persona, so an instance the owner renamed had no card at all and
+  // was unreachable from Settings. Model-layer tests cannot catch a revert of
+  // the render layer; this can.
+  const personaId = "builtin:fizz";
+  const claudePubkey = TEST_IDENTITIES.alice.pubkey;
+  const fizzPubkey = TEST_IDENTITIES.charlie.pubkey;
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: personaId,
+        displayName: "Fizz",
+        systemPrompt: "You are Fizz.",
+      },
+    ],
+    managedAgents: [
+      { pubkey: claudePubkey, name: "Claude", personaId, status: "running" },
+      { pubkey: "1".repeat(64), name: "Claude", personaId, status: "stopped" },
+      { pubkey: fizzPubkey, name: "Fizz", personaId, status: "stopped" },
+      { pubkey: "2".repeat(64), name: "Fizz", personaId, status: "stopped" },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  // Four instances, two names, two cards — not one card hiding "Fizz", and not
+  // four cards exploding same-named duplicates apart.
+  const claudeCard = page.getByTestId(`persona-agent-row-${personaId}::claude`);
+  const fizzCard = page.getByTestId(`persona-agent-row-${personaId}::fizz`);
+  await expect(claudeCard).toBeVisible();
+  await expect(fizzCard).toBeVisible();
+  await expect(
+    page.locator(`[data-testid^="persona-agent-row-${personaId}"]`),
+  ).toHaveCount(2);
+  await expect(claudeCard).toContainText("Claude");
+
+  // The persona's own name survives the split as each card's second line, so a
+  // split persona stays findable in the library.
+  await expect(claudeCard.getByText("Fizz", { exact: true })).toBeVisible();
+
+  // Persona actions live on exactly one card — the one still carrying the
+  // persona's name — rather than migrating to whichever instance is running.
+  await expect(
+    page.getByRole("button", { name: "Open actions for Fizz" }),
+  ).toHaveCount(1);
+  await expect(
+    fizzCard.getByRole("button", { name: "Open actions for Fizz" }),
+  ).toBeVisible();
+
+  // The renamed card opens its own instance, not the persona's active winner:
+  // the stopped "Fizz" offers Start, where running "Claude" would offer Stop.
+  await fizzCard.click();
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+  await expect(
+    page.getByTestId("user-profile-agent-primary-action"),
+  ).toHaveAttribute("aria-label", "Start agent");
+
+  // ...and the "Claude" card opens the running instance.
+  await page.getByTestId("auxiliary-panel-close").click();
+  await claudeCard.click();
+  await expect(
+    page.getByTestId("user-profile-agent-primary-action"),
+  ).toHaveAttribute("aria-label", "Stop");
+});

@@ -88,11 +88,20 @@ export function profilePanelTabFromSearch(value: unknown): ProfilePanelTab {
   return parseProfilePanelTab(value) ?? "info";
 }
 
+/**
+ * Which profile the panel is showing — a render/reset key, not an identity.
+ *
+ * The persona fallback is namespaced `profile:` rather than `persona:` on
+ * purpose. `persona:` belongs to `agentIdentity`, and this value addresses a
+ * *panel*: it exists precisely when there is no agent yet (an uninstantiated
+ * persona has no pubkey), so it must never be mistaken for, or compared
+ * against, an agent identity key.
+ */
 export function profilePanelTargetKey(
   pubkey: string | undefined,
   personaId: string | undefined,
 ): string {
-  return pubkey ?? `persona:${personaId ?? "unknown"}`;
+  return pubkey ?? `profile:${personaId ?? "unknown"}`;
 }
 
 export type UserProfilePanelProps = {
