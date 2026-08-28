@@ -38,7 +38,9 @@ test("first-time project empty state opens project creation", async ({
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
 
-  await expect(page.getByText("No projects yet")).toBeVisible();
+  await expect(
+    page.getByRole("main").getByText("No projects yet"),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Create project" }).click();
   await expect(page.getByTestId("create-project-dialog")).toBeVisible();
 });
