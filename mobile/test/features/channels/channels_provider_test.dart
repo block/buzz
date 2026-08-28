@@ -7,12 +7,14 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
+part 'channels_provider_live_cases.dart';
+
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
 ///
 /// The provider loads membership-backed channels first:
 ///   1. paginated kind:39002 memberships tagged `#p:<my-pubkey>`
 ///   2. kind:39000 metadata for those channel ids
-/// then layers per-channel live subscriptions on the `#h` tag. Browse channels
+/// then layers chunked live subscriptions on the `#h` tag. Browse channels
 /// separately triggers paginated kind:39000 open-channel discovery.
 ///
 /// Tests stub out the relay session by overriding [relaySessionProvider] with
@@ -545,13 +547,15 @@ void main() {
           .retryDirectory();
       await session.nextSubscribeStarted;
 
-      // Record every list emitted from the switch onward. The live-subscription
-      // queue is serialized, so community B's own subscribe waits behind the
-      // parked one. That makes the observable defect an emission of community
-      // A's channel into the current scope, not just a wrong final state.
+      await staleRefresh;
+      await _settle();
+
+      // The old scope's finite snapshot is allowed to publish before its live
+      // subscription becomes ready. From the actual switch onward, however,
+      // neither that snapshot nor its detached live work may republish.
       final emitted = <List<String>>[];
       container.listen(channelsProvider, (previous, next) {
-        final value = next.value;
+        final value = next.asData?.value;
         if (value != null) {
           emitted.add(value.map((channel) => channel.id).toList());
         }
@@ -562,9 +566,9 @@ void main() {
       container
           .read(relayConfigProvider.notifier)
           .update(baseUrl: 'https://community-b.example');
+      await container.read(channelsProvider.future);
 
       session.resumePausedSubscribe();
-      await staleRefresh;
       await _settle();
 
       expect(
@@ -1535,6 +1539,7 @@ void main() {
     expect(channels.map((channel) => channel.id), [_channelA, _channelB]);
     expect(channels.first.isMember, isTrue);
     expect(channels.last.isMember, isFalse);
+    await _waitUntil(() => session.subscribeFilters.length == 1);
     expect(session.subscribeFilters, hasLength(1));
   });
 
@@ -1574,38 +1579,7 @@ void main() {
     },
   );
 
-  test(
-    'subscribes per-channel with #h tags (only joined, non-archived)',
-    () async {
-      final session = _FakeRelaySession(
-        memberships: [
-          _membership(_channelA, myPk),
-          _membership(_channelB, myPk),
-          _membership(_channelD, myPk),
-        ],
-        metadata: [
-          _meta(id: _channelA, name: 'general'),
-          _meta(id: _channelB, name: 'random'),
-          // channelD metadata missing -> won't appear in channel list
-        ],
-      );
-      final container = _buildContainer(session: session);
-      addTearDown(container.dispose);
-
-      await container.read(channelsProvider.future);
-
-      // One subscription per joined, non-archived channel.
-      expect(session.subscribeFilters, hasLength(2));
-      expect(
-        session.subscribeFilters.map((f) => f.tags['#h']?.single).toSet(),
-        {_channelA, _channelB},
-      );
-      for (final filter in session.subscribeFilters) {
-        expect(filter.kinds, EventKind.channelEventKinds);
-        expect(filter.limit, 0);
-      }
-    },
-  );
+  _liveSubscriptionTests();
 
   test('retains channel-list member snapshots for immediate reuse', () async {
     final joinedAt = DateTime.fromMillisecondsSinceEpoch(1000, isUtc: true);
@@ -1625,174 +1599,6 @@ void main() {
     expect(members.map((member) => member.pubkey), [myPk, 'alice']);
     expect(members.every((member) => member.joinedAt == joinedAt), isTrue);
   });
-
-  test(
-    'refreshing an unchanged channel set issues zero new live REQs',
-    () async {
-      final session = _FakeRelaySession(
-        memberships: [
-          _membership(_channelA, myPk),
-          _membership(_channelB, myPk),
-        ],
-        metadata: [
-          _meta(id: _channelA, name: 'general'),
-          _meta(id: _channelB, name: 'random'),
-        ],
-      );
-      final container = _buildContainer(session: session);
-      addTearDown(container.dispose);
-
-      await container.read(channelsProvider.future);
-      final initialSubscribeCount = session.totalSubscribeCount;
-
-      await container.read(channelsProvider.notifier).refresh();
-
-      expect(session.totalSubscribeCount, initialSubscribeCount);
-      expect(session.unsubscribeCount, 0);
-      expect(session.subscribeFilters, hasLength(2));
-    },
-  );
-
-  test(
-    'live subscription diff only removes and adds changed channels',
-    () async {
-      final session = _FakeRelaySession(
-        memberships: [
-          _membership(_channelA, myPk),
-          _membership(_channelB, myPk),
-        ],
-        metadata: [
-          _meta(id: _channelA, name: 'general'),
-          _meta(id: _channelB, name: 'random'),
-        ],
-      );
-      final container = _buildContainer(session: session);
-      addTearDown(container.dispose);
-
-      await container.read(channelsProvider.future);
-      session.memberships = [
-        _membership(_channelB, myPk),
-        _membership(_channelD, myPk),
-      ];
-      session.metadata = [
-        _meta(id: _channelB, name: 'random'),
-        _meta(id: _channelD, name: 'support'),
-      ];
-
-      await container.read(channelsProvider.notifier).refresh();
-
-      expect(session.totalSubscribeCount, 3);
-      expect(session.unsubscribeCount, 1);
-      expect(
-        session.subscribeFilters
-            .map((filter) => filter.tags['#h']!.single)
-            .toSet(),
-        {_channelB, _channelD},
-      );
-    },
-  );
-
-  test(
-    'empty channel refresh removes every retained live subscription',
-    () async {
-      final session = _FakeRelaySession(
-        memberships: [
-          _membership(_channelA, myPk),
-          _membership(_channelB, myPk),
-        ],
-        metadata: [
-          _meta(id: _channelA, name: 'general'),
-          _meta(id: _channelB, name: 'random'),
-        ],
-      );
-      final container = _buildContainer(session: session);
-      addTearDown(container.dispose);
-
-      await container.read(channelsProvider.future);
-      session.memberships = [];
-      session.metadata = [];
-
-      await container.read(channelsProvider.notifier).refresh();
-
-      expect(session.activeChannels, isEmpty);
-      expect(session.activeSubscriptionCount, 0);
-      expect(session.unsubscribeCount, 2);
-    },
-  );
-
-  test(
-    'overlapping refreshes retain one live subscription per desired channel',
-    () async {
-      final session = _FakeRelaySession(
-        memberships: [
-          _membership(_channelA, myPk),
-          _membership(_channelB, myPk),
-        ],
-        metadata: [
-          _meta(id: _channelA, name: 'general'),
-          _meta(id: _channelB, name: 'random'),
-        ],
-      );
-      final container = _buildContainer(session: session);
-      addTearDown(container.dispose);
-
-      await container.read(channelsProvider.future);
-      session.pauseNextSubscribe();
-      session.memberships = [
-        _membership(_channelA, myPk),
-        _membership(_channelB, myPk),
-        _membership(_channelD, myPk),
-      ];
-      session.metadata = [
-        _meta(id: _channelA, name: 'general'),
-        _meta(id: _channelB, name: 'random'),
-        _meta(id: _channelD, name: 'support'),
-      ];
-
-      final firstRefresh = container.read(channelsProvider.notifier).refresh();
-      await session.nextSubscribeStarted;
-      final secondRefresh = container.read(channelsProvider.notifier).refresh();
-      session.resumePausedSubscribe();
-      await Future.wait([firstRefresh, secondRefresh]);
-
-      expect(session.activeChannels, {_channelA, _channelB, _channelD});
-      expect(session.activeSubscriptionCount, 3);
-    },
-  );
-
-  test(
-    'community switch replaces retained live subscriptions on the new relay',
-    () async {
-      final session = _FakeRelaySession(
-        memberships: [_membership(_channelA, myPk)],
-        metadata: [_meta(id: _channelA, name: 'general')],
-      );
-      final container = _buildContainer(session: session);
-      addTearDown(container.dispose);
-
-      await container.read(channelsProvider.future);
-      expect(session.activeChannels, {_channelA});
-
-      session.setStatus(SessionStatus.disconnected);
-      session.memberships = [_membership(_channelB, myPk)];
-      session.metadata = [_meta(id: _channelB, name: 'random')];
-      container
-          .read(relayConfigProvider.notifier)
-          .update(baseUrl: 'https://new-community.example');
-      await Future<void>.delayed(Duration.zero);
-      session.setStatus(SessionStatus.connected);
-      await container.read(channelsProvider.future);
-      await _waitUntil(
-        () =>
-            session.activeChannels.length == 1 &&
-            session.activeChannels.contains(_channelB),
-      );
-
-      expect(session.activeChannels, {_channelB});
-      expect(session.activeSubscriptionCount, 1);
-      expect(session.unsubscribeCount, 1);
-    },
-  );
 
   test('live channel events update channel lastMessageAt', () async {
     final session = _FakeRelaySession(
@@ -2196,6 +2002,7 @@ void main() {
 
       final initial = await container.read(channelsProvider.future);
       expect(initial.single.name, 'general');
+      await _waitUntil(() => session.subscribeFilters.length == 1);
       expect(session.subscribeFilters, hasLength(1));
 
       session.setStatus(SessionStatus.reconnecting);
@@ -2296,6 +2103,7 @@ void main() {
     );
 
     // And one live subscription on the resulting channel.
+    await _waitUntil(() => session.subscribeFilters.length == 1);
     expect(session.subscribeFilters, hasLength(1));
   });
 }
@@ -2304,6 +2112,9 @@ const _channelA = '11111111-1111-4111-8111-111111111111';
 const _channelB = '22222222-2222-4222-8222-222222222222';
 const _channelD = '44444444-4444-4444-8444-444444444444';
 const _otherPk = 'someone-else';
+
+String _generatedChannelId(int index) =>
+    '${index.toString().padLeft(8, '0')}-0000-4000-8000-000000000000';
 
 /// Build a kind:39002 membership event tagged with the channel id and member.
 NostrEvent _membership(
@@ -2470,9 +2281,11 @@ class _FakeRelaySession extends RelaySessionNotifier {
   Completer<void>? _claimedUnreadCatchUp;
   int unsubscribeCount = 0;
   int totalSubscribeCount = 0;
+  int subscribeFailures = 0;
 
   Set<String> get activeChannels => {
-    for (final (filter, _) in _subscriptions.values) ?filter.tags['#h']?.single,
+    for (final (filter, _) in _subscriptions.values)
+      ...filter.tags['#h'] ?? const <String>[],
   };
 
   int get activeSubscriptionCount => _subscriptions.length;
@@ -2849,6 +2662,11 @@ class _FakeRelaySession extends RelaySessionNotifier {
       await paused.future;
       _pausedSubscribe = null;
       _subscribeStarted = null;
+    }
+    if (subscribeFailures > 0) {
+      subscribeFailures--;
+      subscribeFilters.remove(filter);
+      throw StateError('live subscription failed');
     }
     final subscriptionKey = ++_nextSubscriptionKey;
     _subscriptions[subscriptionKey] = (filter, onEvent);

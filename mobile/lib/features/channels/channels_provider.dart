@@ -34,13 +34,13 @@ const _authoredRootIdsPrefix = 'buzz-thread-authored.v1';
 ///
 /// The paginated kind:39000 directory is fetched separately when Browse
 /// channels opens, so discovery never delays the main Conversations screen.
-/// Live updates are layered on top via per-channel subscriptions on the
-/// `#h` tag for any of the visible channel event kinds — incoming events
-/// bump `lastMessageAt` for that channel.
+/// Live updates are layered on top via chunked subscriptions on the `#h` tag
+/// for any visible channel event kind. Chunks stay within the relay's explicit
+/// channel cap and incoming events bump `lastMessageAt` for their channel.
 class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   static const _backstopInterval = Duration(seconds: 60);
 
-  final Map<String, void Function()> _unsubscribersByChannel = {};
+  final Map<String, void Function()> _unsubscribersByLiveChunk = {};
   Future<void> _liveSubscriptionQueue = Future.value();
   Set<String> _desiredLiveChannelIds = const {};
   int _subscriptionVersion = 0;
@@ -62,6 +62,10 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   /// Fences directory responses to the relay and identity that requested them.
   late final _ChannelRefreshCoordinator _refreshCoordinator =
       _ChannelRefreshCoordinator.forRef(ref);
+
+  // Expose the notifier's protected Ref only to same-library extensions used to
+  // keep lifecycle code below the file-size ratchet.
+  Ref get _lifecycleRef => ref;
 
   /// The member snapshot already returned while loading the channel list.
   ///
@@ -378,11 +382,11 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       }
     }
 
+    // Layer live delivery onto the already-built snapshot without making EOSE
+    // part of the provider's readiness path. Every refresh queues a generation;
+    // a later refresh or scope switch retires older queued/in-flight work.
     if (subscribeLive) {
-      // Subscriptions are shared relay state, so a retired refresh must not
-      // install them even though its channel list is already built.
-      fence.ensureCurrent();
-      await _fenced(fence, _subscribeLive(channels, fence));
+      unawaited(_subscribeLive(channels, fence));
     }
     // Guard the provider-state write in `retryDirectory` and `build`: the
     // caller assigns whatever this returns, so the last check belongs here.
@@ -537,140 +541,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     );
   }
 
-  /// Subscribe per-channel to live events (requires `#h` tag for relay
-  /// channel-scoped fan-out). Also starts a 60s WS backstop poll to reconcile
-  /// membership changes without repeatedly downloading the global directory.
-  Future<void> _subscribeLive(
-    List<Channel> channels,
-    _ChannelRefreshFence fence,
-  ) {
-    final channelIds = {
-      for (final channel in channels)
-        if (channel.isMember && !channel.isArchived) channel.id,
-    };
-    final relayBaseUrl = ref.read(relayConfigProvider).baseUrl;
-    _desiredLiveChannelIds = channelIds;
-    final subscriptionVersion = ++_subscriptionVersion;
-
-    final sync = _liveSubscriptionQueue.then(
-      (_) => _syncLiveSubscriptions(
-        relayBaseUrl,
-        subscriptionVersion,
-        channels,
-        fence,
-      ),
-    );
-    _liveSubscriptionQueue = sync.catchError((Object error, StackTrace stack) {
-      if (error is! _StaleChannelRefresh) {
-        debugPrint(
-          '[ChannelsNotifier] live subscription sync failed: $error\n$stack',
-        );
-      }
-    });
-    return sync;
-  }
-
-  Future<void> _syncLiveSubscriptions(
-    String relayBaseUrl,
-    int subscriptionVersion,
-    List<Channel> channels,
-    _ChannelRefreshFence fence,
-  ) async {
-    fence.ensureCurrent();
-    if (ref.read(relaySessionProvider).status != SessionStatus.connected) {
-      return;
-    }
-
-    if (subscriptionVersion != _subscriptionVersion) {
-      return;
-    }
-
-    if (_subscriptionRelayBaseUrl != relayBaseUrl) {
-      for (final unsubscribe in _unsubscribersByChannel.values) {
-        unsubscribe();
-      }
-      _unsubscribersByChannel.clear();
-      _subscriptionRelayBaseUrl = relayBaseUrl;
-    }
-    if (ref.read(relayConfigProvider).baseUrl != relayBaseUrl) {
-      return;
-    }
-    final session = ref.read(relaySessionProvider.notifier);
-    final channelIds = _desiredLiveChannelIds;
-
-    for (final entry in _unsubscribersByChannel.entries.toList()) {
-      if (channelIds.contains(entry.key)) continue;
-      _unsubscribersByChannel.remove(entry.key);
-      entry.value();
-    }
-
-    for (final channelId in channelIds) {
-      if (ref.read(relaySessionProvider).status != SessionStatus.connected) {
-        return;
-      }
-      if (_unsubscribersByChannel.containsKey(channelId)) continue;
-      try {
-        final unsubscribe = await session.subscribe(
-          NostrFilter(
-            kinds: EventKind.channelEventKinds,
-            tags: {
-              '#h': [channelId],
-            },
-            limit: 0,
-          ),
-          _handleLiveEvent,
-        );
-        if (!fence.isCurrent) {
-          unsubscribe();
-          throw const _StaleChannelRefresh();
-        }
-        if (subscriptionVersion != _subscriptionVersion ||
-            ref.read(relaySessionProvider).status != SessionStatus.connected ||
-            !_desiredLiveChannelIds.contains(channelId) ||
-            ref.read(relayConfigProvider).baseUrl != relayBaseUrl ||
-            _subscriptionRelayBaseUrl != relayBaseUrl) {
-          unsubscribe();
-          return;
-        }
-        final replaced = _unsubscribersByChannel[channelId];
-        if (replaced != null) {
-          unsubscribe();
-          continue;
-        }
-        _unsubscribersByChannel[channelId] = unsubscribe;
-      } on _StaleChannelRefresh {
-        rethrow;
-      } catch (error) {
-        debugPrint(
-          '[ChannelsNotifier] live subscription failed for $channelId: $error',
-        );
-      }
-    }
-
-    if (ref.read(relaySessionProvider).status != SessionStatus.connected) {
-      return;
-    }
-
-    if (subscriptionVersion != _subscriptionVersion) {
-      final desiredChannelIds = _desiredLiveChannelIds;
-      for (final entry in _unsubscribersByChannel.entries.toList()) {
-        if (desiredChannelIds.contains(entry.key)) continue;
-        _unsubscribersByChannel.remove(entry.key);
-        entry.value();
-      }
-      return;
-    }
-
-    fence.ensureCurrent();
-    unawaited(_catchUpUnreadEvents(channels, fence, subscriptionVersion));
-
-    _backstopTimer?.cancel();
-    _backstopTimer = Timer.periodic(
-      _backstopInterval,
-      (_) => _backstopRefresh(),
-    );
-  }
-
   /// Backfills unread badges for the channels this refresh just installed.
   ///
   /// Runs detached from the refresh that starts it, so the lifecycle token
@@ -689,6 +559,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     _ChannelRefreshFence fence,
     int subscriptionGeneration,
   ) async {
+    if (!ref.mounted) return;
     final myPk = ref.read(myPubkeyProvider);
     if (myPk == null) return;
 
@@ -733,7 +604,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       // The relay round-trip above is the window Jed's probes park in: a newer
       // refresh, a community switch or an identity switch here means every
       // write below belongs to a channel list the user has left.
-      if (_isCatchUpRetired(fence, subscriptionGeneration)) return;
+      if (!ref.mounted || _isCatchUpRetired(fence, subscriptionGeneration)) {
+        return;
+      }
 
       for (final event in events) {
         if (event.pubkey.toLowerCase() == myPk.toLowerCase()) {
@@ -773,6 +646,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
         state = state.whenData((channels) => List<Channel>.of(channels));
       }
     } catch (error) {
+      if (!ref.mounted) return;
       debugPrint('[ChannelsNotifier] unread catch-up failed: $error');
     }
   }

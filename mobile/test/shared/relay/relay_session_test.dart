@@ -1036,6 +1036,42 @@ void main() {
     unsubscribe();
   });
 
+  test('rate-limited live CLOSED honors an immediate retry hint', () async {
+    final retryTimers = <_ManualTimer>[];
+    final gateTimers = <_ManualTimer>[];
+    final gate = RelayRateLimitGate(
+      timerFactory: (duration, callback) {
+        final timer = _ManualTimer(duration, callback);
+        gateTimers.add(timer);
+        return timer;
+      },
+    );
+    final session = RelaySessionNotifier(
+      rateLimitGate: gate,
+      retryTimerFactory: (duration, callback) {
+        final timer = _ManualTimer(duration, callback);
+        retryTimers.add(timer);
+        return timer;
+      },
+    );
+    final socket = _RecordingRelaySocket();
+    session.debugAttachSocketForTest(socket);
+    final subscribe = session.subscribe(_channelFilter, (_) {});
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    final unsubscribe = await subscribe;
+
+    session.debugHandleMessage([
+      'CLOSED',
+      'l-1',
+      'rate-limited: quota exceeded; retry in 0s',
+    ]);
+
+    expect(retryTimers.single.duration, const Duration(seconds: 1));
+    expect(gateTimers, isEmpty);
+    expect(gate.isActive, isFalse);
+    unsubscribe();
+  });
+
   test(
     'rate-limited CLOSED retry does not survive a superseded connection',
     () async {
