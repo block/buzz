@@ -35,6 +35,7 @@ test("relay policy revalidation admits an authorized external agent", async () =
 });
 
 test("fresh managed evidence survives unrelated relay authorization errors", async () => {
+  let relayFetches = 0;
   const result = await revalidateAgentMentionPubkeys({
     ...options(),
     pubkeys: [HUMAN, LOCAL_AGENT],
@@ -44,11 +45,33 @@ test("fresh managed evidence survives unrelated relay authorization errors", asy
       error: null,
     }),
     fetchRelayAgents: async () => {
+      relayFetches += 1;
       throw new Error("relay directory unavailable");
     },
   });
 
   assert.deepEqual(result, [HUMAN, LOCAL_AGENT]);
+  assert.equal(relayFetches, 0);
+});
+
+test("relay lookup is limited to agents not confirmed as managed", async () => {
+  const requestedRelayPubkeys = [];
+  const result = await revalidateAgentMentionPubkeys({
+    ...options(),
+    pubkeys: [HUMAN, LOCAL_AGENT, AGENT],
+    agentPubkeys: new Set([LOCAL_AGENT, AGENT]),
+    refetchManagedAgents: async () => ({
+      data: [{ pubkey: LOCAL_AGENT }],
+      error: null,
+    }),
+    fetchRelayAgents: async (pubkeys) => {
+      requestedRelayPubkeys.push(...pubkeys);
+      return options().fetchRelayAgents();
+    },
+  });
+
+  assert.deepEqual(requestedRelayPubkeys, [AGENT]);
+  assert.deepEqual(result, [HUMAN, LOCAL_AGENT, AGENT]);
 });
 
 test("relay-only agents still fail closed when relay discovery fails", async () => {

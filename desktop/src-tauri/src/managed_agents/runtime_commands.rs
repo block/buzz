@@ -9,7 +9,7 @@ use super::{
     spawn_agent_child, terminate_process, terminate_untracked_pair_runtime,
     write_agent_runtime_receipt, AgentReadiness, BackendKind, ManagedAgentPairRuntime,
     ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
-    ManagedAgentRuntimeStatus,
+    ManagedAgentRuntimeStatus, SpawnPolicy,
 };
 use crate::app_state::AppState;
 
@@ -288,7 +288,12 @@ fn start_pair(
         .lock()
         .ok()
         .map(|keys| keys.public_key().to_hex());
-    let mut process = spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref())?;
+    let policy = if lazy {
+        SpawnPolicy::Lazy
+    } else {
+        SpawnPolicy::Durable
+    };
+    let mut process = spawn_agent_child(&app, record, &key.relay_url, policy, owner.as_deref())?;
     let now = crate::util::now_iso();
     let receipt = ManagedAgentRuntimeReceipt {
         key: key.clone(),

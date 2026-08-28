@@ -62,6 +62,10 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // Desktop-owned pool lifetime policy: user env must not disable or reset
     // the idle worker-reclamation window while the desktop launcher sets it.
     "BUZZ_ACP_IDLE_POOL_SLEEP",
+    // Desktop-owned speculative lifetime policy: the composer's mention
+    // prewake attaches a never-used bound so an abandoned draft cannot leak a
+    // live harness. User env must not be able to remove it.
+    "BUZZ_ACP_EXIT_IF_UNUSED",
     "BUZZ_ACP_NO_PRESENCE",
     // Readiness handoff: desktop is the ONLY readiness source. A saved or
     // ambient env var must not be able to forge setup mode (NotReady) on a

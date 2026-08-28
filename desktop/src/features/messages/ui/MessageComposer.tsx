@@ -226,6 +226,7 @@ function MessageComposerImpl({
   const syncAddressedAgentsFromTextRef = React.useRef<(text: string) => void>(
     () => {},
   );
+  const prepareMentionWakeRef = React.useRef<(text: string) => void>(() => {});
   disabledRef.current = disabled;
   isSendingRef.current = isSending;
   isUploadingRef.current = media.isUploading;
@@ -283,6 +284,7 @@ function MessageComposerImpl({
     onUpdate: ({ cursor, linkPreviewContent, text }) => {
       trackAuthoredContent(text);
       contentRef.current = text;
+      prepareMentionWakeRef.current(text);
       setComposerContentFromText(text);
       setPreviewContent(linkPreviewContent);
       if (!isSubmitLockedRef.current && !editTargetRef.current) {
@@ -350,6 +352,7 @@ function MessageComposerImpl({
     drafts,
     emojiAutocomplete,
     mentions,
+    mentionWakeEnabled: editTarget == null && !isSubmitLocked,
     onAddressedAgentsComposerCleared: (pubkeys) =>
       restoreAddressedAgentMentionsRef.current(pubkeys),
     onAddressedAgentsSendFailed: addressPulse.shakeMany,
@@ -380,6 +383,7 @@ function MessageComposerImpl({
     restoreQueuedAttachments: media.restoreQueuedAttachments,
     setSpoileredAttachmentUrls,
   });
+  prepareMentionWakeRef.current = mentionSendFlow.prepareMentionWake;
   React.useEffect(() => {
     onDeferredEditPendingChange?.(isDeferredEditPending);
     return () => onDeferredEditPendingChange?.(false);
@@ -407,7 +411,6 @@ function MessageComposerImpl({
       setSpoileredAttachmentUrls(
         findSpoileredImetaMediaUrls(editTarget.body, editableImeta),
       );
-      // also lands the caret at end of the loaded content.
       const rafId = requestAnimationFrame(() => richText.focusEnd());
       return () => cancelAnimationFrame(rafId);
     } else if (preEditSnapshotRef.current !== null) {
@@ -435,8 +438,6 @@ function MessageComposerImpl({
     richText.focusPreserve();
   }, [composerDisabled, replyTarget, richText.focusPreserve]);
   useComposerAutofocus(richText.focus, effectiveDraftKey, composerDisabled);
-  // Hooks return a plain-text edit descriptor; `replacePlainTextRange`
-  // applies it as a single ProseMirror transaction (no markdown round-trip).
   const applyAutocompleteEdit = React.useCallback(
     (edit: AutocompleteEdit) => {
       richText.replacePlainTextRange(
@@ -782,7 +783,6 @@ function MessageComposerImpl({
     setPendingImeta: media.setPendingImeta,
     uploadFile: media.uploadFile,
   });
-  // ── Send button state ───────────────────────────────────────────────
   const sendDisabled =
     composerDisabled ||
     media.isUploading ||

@@ -1,7 +1,7 @@
 use super::{
     find_managed_agent_mut, kill_stale_tracked_processes, load_managed_agents, load_personas,
     save_managed_agents, spawn_agent_child, sync_managed_agent_processes, BackendKind,
-    ManagedAgentProcess,
+    ManagedAgentProcess, SpawnPolicy,
 };
 use crate::app_state::AppState;
 use crate::util;
@@ -336,7 +336,7 @@ pub async fn restore_managed_agents_on_launch(
                                                 app,
                                                 record,
                                                 &key.relay_url,
-                                                true,
+                                                SpawnPolicy::Lazy,
                                                 owner_hex_ref,
                                             )
                                         }) {

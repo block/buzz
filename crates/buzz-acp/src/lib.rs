@@ -1650,6 +1650,64 @@ fn inactivity_expired(
     !bound.is_zero() && !turn_in_flight && now.duration_since(last_activity) >= bound
 }
 
+/// Activity bookkeeping the dispatch path owns and the lifetime reapers read.
+///
+/// The two fields are kept together because they are written at the same seam:
+/// `dispatch_pending` stamps the clock and latches the flag whenever it hands a
+/// batch to an agent. Putting `ever_dispatched` at the call sites instead would
+/// let a future dispatch path forget it and silently leave a used harness
+/// eligible for the never-used exit.
+struct DispatchActivity {
+    /// When work was last dispatched. Drives the rolling inactivity TTL and the
+    /// idle pool re-sleep window.
+    last: tokio::time::Instant,
+    /// Whether any event has ever been dispatched since boot. A latch, never
+    /// cleared: it is the permanent disarm for [`exit_if_unused_due`].
+    ever_dispatched: bool,
+}
+
+impl DispatchActivity {
+    fn new() -> Self {
+        Self {
+            last: tokio::time::Instant::now(),
+            ever_dispatched: false,
+        }
+    }
+}
+
+/// Whether a harness that has never been used may exit its one-shot boot bound.
+///
+/// This is the reaper for speculatively started harnesses: a desktop that woke
+/// an agent ahead of a draft that was then abandoned would otherwise leak the
+/// process (and its online presence) until app quit. The bound is measured from
+/// boot rather than from the last turn, and `ever_dispatched` disarms it
+/// permanently, so a harness that IS used — by its own owner or by anyone else
+/// who messages it in the window — keeps the same unbounded lifetime it would
+/// have had from a deliberate start.
+///
+/// The busy gates mirror [`idle_pool_sleep_due`], for the same race reason:
+/// accepted-but-undispatched work (queued, retry-throttled, or awaiting a pool
+/// wake) means the harness is about to be used, so exiting would strand it.
+#[allow(clippy::too_many_arguments)]
+fn exit_if_unused_due(
+    ever_dispatched: bool,
+    started_at: tokio::time::Instant,
+    now: tokio::time::Instant,
+    bound: Duration,
+    turn_in_flight: bool,
+    prompt_tasks_in_flight: bool,
+    work_queued: bool,
+    wake_or_respawn_in_flight: bool,
+) -> bool {
+    !bound.is_zero()
+        && !ever_dispatched
+        && !turn_in_flight
+        && !prompt_tasks_in_flight
+        && !work_queued
+        && !wake_or_respawn_in_flight
+        && now.duration_since(started_at) >= bound
+}
+
 /// Whether a woken lazy pool may be torn back down to the empty-slot state.
 ///
 /// True only when the pool is ready, the idle bound has elapsed with no
@@ -1718,6 +1776,114 @@ mod inactivity_tests {
             Duration::from_secs(60),
             false
         ));
+    }
+}
+
+#[cfg(test)]
+mod exit_if_unused_tests {
+    use super::*;
+
+    // Never dispatched, bound elapsed, nothing busy or queued. Every case below
+    // flips exactly one input off this baseline.
+    fn unused_after_bound() -> (tokio::time::Instant, tokio::time::Instant, Duration) {
+        let booted = tokio::time::Instant::now();
+        (
+            booted,
+            booted + Duration::from_secs(901),
+            Duration::from_secs(900),
+        )
+    }
+
+    #[test]
+    fn exits_when_never_dispatched_and_bound_elapsed() {
+        let (booted, now, bound) = unused_after_bound();
+        assert!(exit_if_unused_due(
+            false, booted, now, bound, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn zero_bound_disables_the_exit() {
+        let (booted, now, _) = unused_after_bound();
+        assert!(!exit_if_unused_due(
+            false,
+            booted,
+            now,
+            Duration::ZERO,
+            false,
+            false,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn before_the_bound_the_harness_stays_up() {
+        let booted = tokio::time::Instant::now();
+        assert!(!exit_if_unused_due(
+            false,
+            booted,
+            booted + Duration::from_secs(899),
+            Duration::from_secs(900),
+            false,
+            false,
+            false,
+            false
+        ));
+    }
+
+    // The promotion contract: one dispatch makes this a normal durable harness
+    // forever. Unlike the rolling inactivity TTL, no amount of later quiet
+    // re-arms it — a prewoken-then-used agent must outlive its bound exactly as
+    // a send-started one does.
+    #[test]
+    fn first_dispatch_disarms_the_bound_permanently() {
+        let booted = tokio::time::Instant::now();
+        for elapsed in [901, 3_600, 86_400] {
+            assert!(
+                !exit_if_unused_due(
+                    true,
+                    booted,
+                    booted + Duration::from_secs(elapsed),
+                    Duration::from_secs(900),
+                    false,
+                    false,
+                    false,
+                    false
+                ),
+                "a used harness must never exit on the unused bound ({elapsed}s in)"
+            );
+        }
+    }
+
+    // A harness can be busy without ever having *dispatched*: the pool wake and
+    // the queue both run ahead of the dispatch seam. Exiting through any of
+    // these would kill in-flight or accepted work.
+    #[test]
+    fn busy_or_queued_work_defers_the_exit() {
+        let (booted, now, bound) = unused_after_bound();
+        for (label, turn, prompt_tasks, queued, wake) in [
+            ("turn in flight", true, false, false, false),
+            ("prompt task in flight", false, true, false, false),
+            ("undispatched queued work", false, false, true, false),
+            ("wake or respawn in flight", false, false, false, true),
+        ] {
+            assert!(
+                !exit_if_unused_due(false, booted, now, bound, turn, prompt_tasks, queued, wake),
+                "{label} must defer the never-used exit"
+            );
+        }
+    }
+
+    // The dispatch seam is shared with the inactivity clock so a new dispatch
+    // path cannot stamp one and forget the other.
+    #[test]
+    fn dispatch_activity_starts_unused_and_latches() {
+        let mut activity = DispatchActivity::new();
+        assert!(!activity.ever_dispatched);
+        activity.last = tokio::time::Instant::now();
+        activity.ever_dispatched = true;
+        assert!(activity.ever_dispatched);
     }
 }
 
@@ -2269,7 +2435,7 @@ async fn tokio_main() -> Result<()> {
     // self-terminate. The watch interval is capped so small configured bounds
     // remain reasonably precise without waking long-lived agents frequently.
     let inactivity_bound = Duration::from_secs(config.exit_after_inactivity_secs);
-    let mut last_activity = tokio::time::Instant::now();
+    let mut activity = DispatchActivity::new();
     let mut inactivity_reaper = if inactivity_bound.is_zero() {
         None
     } else {
@@ -2295,6 +2461,24 @@ async fn tokio_main() -> Result<()> {
         None
     } else {
         let interval = idle_pool_sleep_bound.min(Duration::from_secs(30));
+        Some(tokio::time::interval_at(
+            tokio::time::Instant::now() + interval,
+            interval,
+        ))
+    };
+
+    // Never-used exit: bound a harness that some launcher started
+    // speculatively (the desktop composer wakes a mentioned agent while its
+    // draft is still being typed) so an abandoned draft cannot leak a live
+    // process and an online presence indefinitely. Measured from boot and
+    // disarmed permanently by the first dispatch, unlike the rolling
+    // `inactivity_bound` above — see `exit_if_unused_due`.
+    let exit_if_unused_bound = Duration::from_secs(config.exit_if_unused_secs);
+    let booted_at = tokio::time::Instant::now();
+    let mut exit_if_unused_reaper = if exit_if_unused_bound.is_zero() {
+        None
+    } else {
+        let interval = exit_if_unused_bound.min(Duration::from_secs(30));
         Some(tokio::time::interval_at(
             tokio::time::Instant::now() + interval,
             interval,
@@ -2475,7 +2659,7 @@ async fn tokio_main() -> Result<()> {
             // arrive when the channel is silent.
             if queue.has_flushable_work() {
                 for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut activity)
                 {
                     typing_channels.insert(channel_id, thread_tags);
                 }
@@ -2527,7 +2711,7 @@ async fn tokio_main() -> Result<()> {
         // next relay event arrives — which can be minutes on quiet channels.
         if respawn_collected {
             for (channel_id, thread_tags) in
-                dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                dispatch_pending(&mut pool, &mut queue, &ctx, &mut activity)
             {
                 typing_channels.insert(channel_id, thread_tags);
             }
@@ -2983,7 +3167,7 @@ async fn tokio_main() -> Result<()> {
                             }
                             if pool_ready {
                                 for (channel_id, thread_tags) in
-                                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut activity)
                                 {
                                     typing_channels.insert(channel_id, thread_tags);
                                 }
@@ -3008,7 +3192,7 @@ async fn tokio_main() -> Result<()> {
                 } => {
                     let _ = result_rx;
                     if inactivity_expired(
-                        last_activity,
+                        activity.last,
                         tokio::time::Instant::now(),
                         inactivity_bound,
                         queue.has_in_flight() || heartbeat_in_flight,
@@ -3016,6 +3200,37 @@ async fn tokio_main() -> Result<()> {
                         tracing::info!(
                             inactivity_seconds = config.exit_after_inactivity_secs,
                             "inactivity bound reached — exiting gracefully"
+                        );
+                        let _ = shutdown_tx.send(());
+                    }
+                    None
+                }
+                _ = async {
+                    match exit_if_unused_reaper.as_mut() {
+                        Some(timer) => timer.tick().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    let _ = result_rx; // end split borrow before touching pool
+                    // Same busy gates as the idle re-sleep arm below, for the
+                    // same reason: a queued-but-undispatched batch means work
+                    // was accepted and is about to run, so exiting here would
+                    // strand it — and would do so *before* the dispatch that
+                    // disarms this bound could ever happen.
+                    if exit_if_unused_due(
+                        activity.ever_dispatched,
+                        booted_at,
+                        tokio::time::Instant::now(),
+                        exit_if_unused_bound,
+                        queue.has_in_flight() || heartbeat_in_flight,
+                        !pool.join_set.is_empty(),
+                        queue.has_undispatched_work(),
+                        !wake_tasks.is_empty()
+                            || any_respawn_in_flight(&crash_history),
+                    ) {
+                        tracing::info!(
+                            exit_if_unused_seconds = config.exit_if_unused_secs,
+                            "never-used bound reached — exiting gracefully"
                         );
                         let _ = shutdown_tx.send(());
                     }
@@ -3037,7 +3252,7 @@ async fn tokio_main() -> Result<()> {
                     // next iteration dispatches or re-wakes it.
                     if idle_pool_sleep_due(
                         pool_ready,
-                        last_activity,
+                        activity.last,
                         tokio::time::Instant::now(),
                         idle_pool_sleep_bound,
                         queue.has_in_flight() || heartbeat_in_flight,
@@ -3059,7 +3274,11 @@ async fn tokio_main() -> Result<()> {
                         );
                         pool_ready = false;
                         pool_lifecycle = PoolLifecycle::listening();
-                        last_activity = tokio::time::Instant::now();
+                        // Only the clock resets. A pool that ran long enough to
+                        // go idle has dispatched, and `ever_dispatched` is a
+                        // permanent latch — re-sleeping must not make a used
+                        // harness eligible for the never-used exit again.
+                        activity.last = tokio::time::Instant::now();
                         emit_runtime_lifecycle(
                             observer.as_ref(),
                             &runtime_start_nonce,
@@ -3083,7 +3302,7 @@ async fn tokio_main() -> Result<()> {
                     } else if queue.has_flushable_work() {
                         tracing::debug!("heartbeat_skipped_events");
                         for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut activity)
                         {
                             typing_channels.insert(channel_id, thread_tags);
                         }
@@ -3182,7 +3401,7 @@ async fn tokio_main() -> Result<()> {
                     break;
                 }
                 for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut activity)
                 {
                     typing_channels.insert(channel_id, thread_tags);
                 }
@@ -3207,7 +3426,7 @@ async fn tokio_main() -> Result<()> {
                     break;
                 }
                 for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut activity)
                 {
                     typing_channels.insert(channel_id, thread_tags);
                 }
@@ -3362,7 +3581,7 @@ async fn tokio_main() -> Result<()> {
                 // queue drains. We still try here in case the in-flight
                 // task has already returned.
                 for (channel_id, thread_tags) in
-                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut activity)
                 {
                     typing_channels.insert(channel_id, thread_tags);
                 }
@@ -3390,7 +3609,7 @@ async fn tokio_main() -> Result<()> {
                             None,
                         );
                         for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut last_activity)
+                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut activity)
                         {
                             typing_channels.insert(channel_id, thread_tags);
                         }
@@ -3730,7 +3949,7 @@ fn dispatch_pending(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
-    last_activity: &mut tokio::time::Instant,
+    activity: &mut DispatchActivity,
 ) -> Vec<(Uuid, ThreadTags)> {
     let mut dispatched_channels = Vec::new();
     loop {
@@ -3811,7 +4030,11 @@ fn dispatch_pending(
             },
         );
         dispatched_channels.push((channel_id, typing_scope));
-        *last_activity = tokio::time::Instant::now();
+        activity.last = tokio::time::Instant::now();
+        // The harness has now done real work. This is the disarm seam for the
+        // one-shot never-used bound: whatever speculation started this process,
+        // it is an ordinary durable harness from here on.
+        activity.ever_dispatched = true;
     }
     tracing::debug!(
         dispatched = dispatched_channels.len(),
@@ -6831,6 +7054,7 @@ mod build_mcp_servers_tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            exit_if_unused_secs: 0,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -7055,6 +7279,7 @@ mod error_outcome_emission_tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            exit_if_unused_secs: 0,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,

@@ -1,6 +1,8 @@
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
+  managedAgentsQueryKey,
   type CreateChannelManagedAgentInput,
   useAttachManagedAgentToChannelMutation,
   useAvailableAcpRuntimes,
@@ -8,7 +10,6 @@ import {
   useManagedAgentsQuery,
   usePersonasQuery,
   useProvisionChannelManagedAgentMutation,
-  useStartManagedAgentMutation,
 } from "@/features/agents/hooks";
 import { applyReusableAgentAccessPolicy } from "@/features/agents/channelAgents";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
@@ -43,6 +44,8 @@ import {
 } from "./useMentionSendFlow.helpers";
 import { buildAgentAddressMentionTags } from "@/features/messages/lib/agentAddressMention.mjs";
 import type { UseMentionSendFlowOptions } from "./useMentionSendFlow.types";
+import { useMentionWakePreflight } from "./useMentionWakePreflight";
+import { useScopedManagedAgentStart } from "./useSingleFlightManagedAgentStart";
 
 export function useMentionSendFlow({
   channelId,
@@ -52,6 +55,7 @@ export function useMentionSendFlow({
   customEmoji,
   drafts,
   emojiAutocomplete,
+  mentionWakeEnabled,
   mentions,
   onPrepareSendChannel,
   onAddressedAgentsComposerCleared,
@@ -98,19 +102,39 @@ export function useMentionSendFlow({
   const availableRuntimesQuery = useAvailableAcpRuntimes();
   const managedAgentsQuery = useManagedAgentsQuery();
   const personasQuery = usePersonasQuery();
-  const startAgentMutation = useStartManagedAgentMutation();
+  const queryClient = useQueryClient();
+  const {
+    expectedRelayUrl,
+    expectedSignerPubkey,
+    startManagedAgentForScope,
+    startManagedAgentOnce,
+  } = useScopedManagedAgentStart();
   const getManagedAgentsByPubkey = React.useCallback(async () => {
     const agents =
-      managedAgentsQuery.data ??
+      queryClient.getQueryData<ManagedAgent[]>(managedAgentsQueryKey) ??
       (await managedAgentsQuery.refetch()).data ??
       [];
     return new Map(
       agents.map((agent) => [normalizePubkey(agent.pubkey), agent]),
     );
-  }, [managedAgentsQuery.data, managedAgentsQuery.refetch]);
+  }, [managedAgentsQuery.refetch, queryClient]);
   const getPersonas = React.useCallback(async () => {
     return personasQuery.data ?? (await personasQuery.refetch()).data ?? [];
   }, [personasQuery.data, personasQuery.refetch]);
+  const { prepareMentionWake } = useMentionWakePreflight({
+    channelId,
+    contentRef,
+    enabled:
+      mentionWakeEnabled &&
+      (channelType === "stream" || channelType === "forum"),
+    expectedRelayUrl,
+    expectedSignerPubkey,
+    getDraftMentionRefs: mentions.getDraftMentionRefs,
+    getManagedAgentsByPubkey,
+    isManagedAgentPubkey: mentions.isManagedAgentPubkey,
+    memberPubkeys: mentions.memberPubkeys,
+    startManagedAgent: startManagedAgentOnce,
+  });
   const getAvailableRuntimes = React.useCallback(async (): Promise<
     AcpRuntime[]
   > => {
@@ -177,7 +201,7 @@ export function useMentionSendFlow({
               (!isProviderBackedAgent(readyAgent) &&
                 !isManagedAgentRunning(readyAgent))
             ) {
-              await startAgentMutation.mutateAsync(readyAgent.pubkey);
+              await startManagedAgentForScope(readyAgent.pubkey);
             }
           } else {
             await attachAgentMutation.mutateAsync({
@@ -200,7 +224,7 @@ export function useMentionSendFlow({
       getManagedAgentsByPubkey,
       getPersonas,
       mentions.memberPubkeys,
-      startAgentMutation,
+      startManagedAgentForScope,
     ],
   );
   const createMentionedPersonaAgents = React.useCallback(
@@ -951,8 +975,7 @@ export function useMentionSendFlow({
       isMentionSendPending ||
       isCompleteSendPending ||
       attachAgentMutation.isPending ||
-      createPersonaAgentMutation.isPending ||
-      startAgentMutation.isPending,
+      createPersonaAgentMutation.isPending,
     nonMemberPromptProps: {
       canInvite: canInviteNonMembers,
       error: nonMemberPromptError,
@@ -961,14 +984,14 @@ export function useMentionSendFlow({
         isCompleteSendPending ||
         addMembersMutation.isPending ||
         attachAgentMutation.isPending ||
-        createPersonaAgentMutation.isPending ||
-        startAgentMutation.isPending,
+        createPersonaAgentMutation.isPending,
       names: pendingNonMemberNames,
       onDismiss: dismissNonMemberPrompt,
       onDoNothing: handleSendWithoutInviting,
       onInvite: handleInviteNonMembers,
       open: pendingNonMemberSend !== null,
     },
+    prepareMentionWake,
     sendMessageWithMentionFlow,
   };
 }

@@ -38,11 +38,7 @@ export async function revalidateAgentMentionPubkeys({
     return [...pubkeys];
   }
 
-  const [managedResult, relayAgents] = await Promise.all([
-    refetchManagedAgents(),
-    fetchRelayAgents([...requestedAgentPubkeys]).catch(() => null),
-  ]);
-  const relayDirectoryReady = relayAgents !== null;
+  const managedResult = await refetchManagedAgents();
   if (managedResult.error !== null || managedResult.data === undefined) {
     return filterAdmittedMentionPubkeys(pubkeys, agentPubkeys, new Set());
   }
@@ -50,11 +46,19 @@ export async function revalidateAgentMentionPubkeys({
   const managedPubkeys = new Set(
     managedResult.data.map((agent) => normalizePubkey(agent.pubkey)),
   );
+  const relayAgentPubkeys = [...requestedAgentPubkeys].filter(
+    (pubkey) => !managedPubkeys.has(pubkey),
+  );
+  const relayAgents =
+    relayAgentPubkeys.length === 0
+      ? []
+      : await fetchRelayAgents(relayAgentPubkeys).catch(() => null);
+  const relayDirectoryReady = relayAgents !== null;
   const mentionablePubkeys = getMentionableAgentPubkeys({
     currentPubkey,
     eligibilityScope,
     managedAgentPubkeys: managedPubkeys,
-    relayAgents: relayDirectoryReady ? relayAgents : [],
+    relayAgents: relayAgents ?? [],
     sharedChannelIds,
   });
   const admittedPubkeys = new Set(

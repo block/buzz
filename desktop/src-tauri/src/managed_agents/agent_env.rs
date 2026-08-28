@@ -15,15 +15,69 @@ use base64::Engine as _;
 /// normal back-and-forth but a truly quiet harness stops paying for workers.
 const IDLE_POOL_SLEEP_SECS: &str = "900";
 
-/// Value for `BUZZ_ACP_IDLE_POOL_SLEEP`. Idle re-sleep is only meaningful for
-/// lazy harnesses (the harness ignores it otherwise); gate to `lazy` here so
-/// the env reads inert (`"0"` = disabled) for eager harnesses. This is a
-/// desktop-owned lifetime policy (reserved key), not user-tunable.
-pub(super) fn idle_pool_sleep_env(lazy: bool) -> &'static str {
-    if lazy {
-        IDLE_POOL_SLEEP_SECS
-    } else {
-        "0"
+/// Seconds a speculatively started harness may stay up without ever being used
+/// before it exits gracefully (via `BUZZ_ACP_EXIT_IF_UNUSED`). Same 15 minutes
+/// as [`IDLE_POOL_SLEEP_SECS`], for the symmetric reason: it is the window in
+/// which the draft that woke the agent could still plausibly be sent.
+///
+/// Expiring costs nothing but a cold start — the composer re-arms the prewake
+/// when a parked draft is resumed, and the send path has always started a
+/// mentioned agent that is not running.
+const EXIT_IF_UNUSED_SECS: &str = "900";
+
+/// How a spawned harness's worker pool and lifetime are bounded.
+///
+/// One enum rather than a pair of booleans because the combinations are not
+/// independent: a lazy pair defers its pool and lives until it is stopped, and
+/// a speculative pair boots eagerly precisely so a send that may never come is
+/// fast. "Lazy speculative" would defeat the prewake it exists for, so it is
+/// not representable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnPolicy {
+    /// Eager pool, no lifetime bound. Every user-initiated start.
+    Durable,
+    /// Pool deferred until the first accepted event; no lifetime bound. Launch
+    /// restore and runtime reconciliation spawn these.
+    Lazy,
+    /// Eager pool with a one-shot never-used bound. Started ahead of a draft
+    /// that may never be sent (the composer's mention prewake), so the harness
+    /// self-expires unless something is dispatched to it. The first dispatched
+    /// event promotes it to a durable harness inside the harness itself — no
+    /// desktop-side promotion call, and no way for an outside kill to race a
+    /// turn it cannot see.
+    Speculative,
+}
+
+impl SpawnPolicy {
+    /// Value for `BUZZ_ACP_LAZY_POOL`.
+    pub(super) fn lazy_pool_env(self) -> &'static str {
+        match self {
+            Self::Lazy => "true",
+            Self::Durable | Self::Speculative => "false",
+        }
+    }
+
+    /// Value for `BUZZ_ACP_IDLE_POOL_SLEEP`. Idle re-sleep is only meaningful
+    /// for lazy harnesses (the harness ignores it otherwise); gate on the
+    /// policy here so the env reads inert (`"0"` = disabled) for eager
+    /// harnesses. This is a desktop-owned lifetime policy (reserved key), not
+    /// user-tunable.
+    pub(super) fn idle_pool_sleep_env(self) -> &'static str {
+        match self {
+            Self::Lazy => IDLE_POOL_SLEEP_SECS,
+            Self::Durable | Self::Speculative => "0",
+        }
+    }
+
+    /// Value for `BUZZ_ACP_EXIT_IF_UNUSED`. Written on every spawn — inert
+    /// (`"0"`) for deliberate starts — so the bound is always stated explicitly
+    /// rather than inherited from an ambient environment. Also a reserved key:
+    /// user env must not disable the bound the desktop attached.
+    pub(super) fn exit_if_unused_env(self) -> &'static str {
+        match self {
+            Self::Speculative => EXIT_IF_UNUSED_SECS,
+            Self::Durable | Self::Lazy => "0",
+        }
     }
 }
 
@@ -141,8 +195,40 @@ pub(crate) fn parse_agent_env_lines(raw: &str) -> Vec<(&str, &str)> {
 mod tests {
     use super::{
         baked_build_env, build_buzz_agent_provider_defaults, build_env_map,
-        discovery_env_with_baked_floor, parse_agent_env_lines,
+        discovery_env_with_baked_floor, parse_agent_env_lines, SpawnPolicy,
     };
+
+    // ── spawn policy → lifetime env ───────────────────────────────────────
+    //
+    // These three keys are what the desktop uses to state a harness's pool and
+    // lifetime policy; every spawn writes all three, so a value is never
+    // inherited from the launching process's environment.
+
+    #[test]
+    fn durable_policy_states_every_lifetime_bound_as_inert() {
+        // The deliberate start: eager pool, no re-sleep, no unused bound.
+        assert_eq!(SpawnPolicy::Durable.lazy_pool_env(), "false");
+        assert_eq!(SpawnPolicy::Durable.idle_pool_sleep_env(), "0");
+        assert_eq!(SpawnPolicy::Durable.exit_if_unused_env(), "0");
+    }
+
+    #[test]
+    fn lazy_policy_defers_the_pool_and_reclaims_idle_workers() {
+        assert_eq!(SpawnPolicy::Lazy.lazy_pool_env(), "true");
+        assert_eq!(SpawnPolicy::Lazy.idle_pool_sleep_env(), "900");
+        // A lazy pair is a reconcile/launch pair the user asked to keep
+        // running — it must not self-expire just because nobody messaged it.
+        assert_eq!(SpawnPolicy::Lazy.exit_if_unused_env(), "0");
+    }
+
+    #[test]
+    fn speculative_policy_boots_eagerly_and_bounds_the_unused_case() {
+        // Eager: the whole point of the prewake is to pay boot cost early.
+        assert_eq!(SpawnPolicy::Speculative.lazy_pool_env(), "false");
+        assert_eq!(SpawnPolicy::Speculative.idle_pool_sleep_env(), "0");
+        // Bounded: an abandoned draft must not leak a live harness.
+        assert_eq!(SpawnPolicy::Speculative.exit_if_unused_env(), "900");
+    }
 
     #[test]
     fn buzz_agent_provider_defaults_empty_in_oss_build() {

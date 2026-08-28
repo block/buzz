@@ -503,6 +503,17 @@ pub struct CliArgs {
     /// Requires `--lazy-pool`; ignored otherwise. 0 disables idle re-sleep.
     #[arg(long, env = "BUZZ_ACP_IDLE_POOL_SLEEP", default_value_t = 0)]
     pub idle_pool_sleep: u64,
+
+    /// Exit gracefully if no event has ever been dispatched within this many
+    /// seconds of boot. The first dispatch disarms the bound permanently.
+    ///
+    /// This is a one-shot boot bound, deliberately not the rolling idle TTL of
+    /// `--exit-after-inactivity`: it exists for a harness some launcher started
+    /// speculatively, so that being *used even once* restores exactly the
+    /// lifetime the harness would have had if it were started deliberately.
+    /// 0 disables.
+    #[arg(long, env = "BUZZ_ACP_EXIT_IF_UNUSED", default_value_t = 0)]
+    pub exit_if_unused: u64,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -590,6 +601,9 @@ pub struct Config {
     /// woken lazy pool is torn back down to the empty-slot state. 0 = disabled.
     /// Only meaningful when `lazy_pool` is true.
     pub idle_pool_sleep_secs: u64,
+    /// Seconds from boot before a harness that has *never* dispatched an event
+    /// exits gracefully. The first dispatch disarms it permanently. 0 = disabled.
+    pub exit_if_unused_secs: u64,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -1140,6 +1154,7 @@ impl Config {
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
             idle_pool_sleep_secs: args.idle_pool_sleep,
+            exit_if_unused_secs: args.exit_if_unused,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1513,6 +1528,7 @@ mod tests {
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
             idle_pool_sleep_secs: 0,
+            exit_if_unused_secs: 0,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -2247,6 +2263,17 @@ channels = "ALL"
             "300",
         ]);
         assert_eq!(configured.idle_pool_sleep, 300);
+    }
+
+    #[test]
+    fn exit_if_unused_defaults_disabled_and_accepts_cli_value() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert_eq!(default.exit_if_unused, 0);
+
+        let configured =
+            CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--exit-if-unused", "900"]);
+        assert_eq!(configured.exit_if_unused, 900);
     }
 
     #[test]

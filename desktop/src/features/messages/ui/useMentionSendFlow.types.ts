@@ -17,6 +17,7 @@ export type UseMentionSendFlowOptions = {
   customEmoji: CustomEmoji[];
   drafts: Pick<UseDraftsResult, "loadDraft" | "markDraftSent" | "persistDraft">;
   emojiAutocomplete: Pick<UseEmojiAutocompleteResult, "clearEmojis">;
+  mentionWakeEnabled: boolean;
   mentions: UseMentionsResult;
   onPrepareSendChannel?: (pubkeys?: string[]) => Promise<string | null>;
   onAddressedAgentsComposerCleared?: (pubkeys: readonly string[]) => string;

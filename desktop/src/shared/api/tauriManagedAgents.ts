@@ -18,12 +18,18 @@ export async function startManagedAgent(
     /** Signer identity captured with the relay scope; the backend fails
      * closed when the active workspace identity no longer matches. */
     expectedSignerPubkey?: string;
+    /** Start made ahead of a send that may never happen (the composer's
+     * mention prewake). The backend bounds the spawned local harness so it
+     * self-expires unless something is dispatched to it; provider-backed
+     * agents ignore the flag and are never started this way. */
+    speculative?: boolean;
   },
 ): Promise<ManagedAgent> {
   const response = await invokeTauri<RawManagedAgent>("start_managed_agent", {
     pubkey,
     expectedRelayUrl: options?.expectedRelayUrl ?? null,
     expectedSignerPubkey: options?.expectedSignerPubkey ?? null,
+    speculative: options?.speculative ?? false,
   });
   return fromRawManagedAgent(response);
 }

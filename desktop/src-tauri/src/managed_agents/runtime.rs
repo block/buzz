@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tauri::AppHandle;
 
-use super::agent_env::{build_buzz_agent_provider_defaults, idle_pool_sleep_env};
+use super::agent_env::{build_buzz_agent_provider_defaults, SpawnPolicy};
 
 use crate::{
     managed_agents::{
@@ -70,6 +70,9 @@ use lifecycle::kill_stale_tracked_processes_with;
 pub use lifecycle::{kill_stale_tracked_processes, sync_managed_agent_processes};
 mod spawn_key; // production spawn-key derivation + its regressions
 pub(crate) use spawn_key::bound_runtime_key;
+
+mod start;
+pub use start::start_managed_agent_process;
 
 /// Classify an agent's persona against the live catalog for the Agents-menu
 /// drift indicator. Returns `(out_of_date, orphaned)`.
@@ -403,11 +406,15 @@ pub(crate) fn configure_runtime_cli(
 ///
 /// `owner_hex`: the workspace owner's pubkey, used as a fallback for legacy
 /// records that have no NIP-OA `auth_tag`. See `build_respond_to_env`.
+///
+/// `policy`: how the child's worker pool and lifetime are bounded. See
+/// [`SpawnPolicy`] — the desktop states all three lifetime env vars on every
+/// spawn, so nothing is inherited from the launching environment.
 pub fn spawn_agent_child(
     app: &AppHandle,
     record: &ManagedAgentRecord,
     relay_url: &str,
-    lazy: bool,
+    policy: SpawnPolicy,
     owner_hex: Option<&str>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
     if let Some(error) = spawn_key_refusal(record) {
@@ -532,8 +539,9 @@ pub fn spawn_agent_child(
     command.env("RUST_LOG", child_rust_log_filter());
     command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
-    command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
-    command.env("BUZZ_ACP_IDLE_POOL_SLEEP", idle_pool_sleep_env(lazy));
+    command.env("BUZZ_ACP_LAZY_POOL", policy.lazy_pool_env());
+    command.env("BUZZ_ACP_IDLE_POOL_SLEEP", policy.idle_pool_sleep_env());
+    command.env("BUZZ_ACP_EXIT_IF_UNUSED", policy.exit_if_unused_env());
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
     match &resolved_mcp_command {
@@ -934,62 +942,6 @@ fn child_rust_log_filter() -> String {
         Ok(existing) if !existing.trim().is_empty() => format!("{existing},buzz_acp=info"),
         _ => "buzz_acp=info".to_string(),
     }
-}
-
-/// Spawn (or adopt) the runtime pair for `record` on the caller's bound
-/// workspace relay. `workspace_relay` can only be produced by
-/// `bind_expected_relay_scope`, so this spawn consumes — by construction — the
-/// exact workspace-relay read the caller's scope assertion passed on; it never
-/// re-reads the mutable override (see `relay::scope`). The key comes from
-/// [`bound_runtime_key`] — the seam the spawn-key regressions exercise.
-pub fn start_managed_agent_process(
-    app: &AppHandle,
-    record: &mut ManagedAgentRecord,
-    runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
-    owner_hex: Option<&str>,
-    workspace_relay: &crate::relay::ScopedWorkspaceRelay,
-) -> Result<(), String> {
-    let key = bound_runtime_key(record, workspace_relay)?;
-    if let Some(runtime) = runtimes.get_mut(&key) {
-        if runtime
-            .child
-            .try_wait()
-            .map_err(|error| format!("failed to inspect running process: {error}"))?
-            .is_none()
-        {
-            return Ok(());
-        }
-
-        runtimes.remove(&key);
-        super::remove_agent_runtime_receipt(app, &key);
-    }
-
-    // Scalar PIDs are migration-only and never establish pair liveness.
-    record.runtime_pid = None;
-
-    let mut process = spawn_agent_child(app, record, &key.relay_url, false, owner_hex)?;
-    let now = now_iso();
-    let receipt = super::ManagedAgentRuntimeReceipt {
-        key: key.clone(),
-        pid: process.child.id(),
-        desktop_instance_id: current_instance_id(app),
-        started_at: now.clone(),
-    };
-    if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
-        let _ = terminate_process(process.child.id());
-        let _ = process.child.wait();
-        return Err(error);
-    }
-
-    record.updated_at = now.clone();
-    record.last_started_at = Some(now);
-    record.last_stopped_at = None;
-    record.last_exit_code = None;
-    record.last_error = None;
-    record.last_error_code = None;
-
-    runtimes.insert(key, ManagedAgentPairRuntime::starting(process));
-    Ok(())
 }
 
 #[cfg(test)]
