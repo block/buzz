@@ -8,7 +8,7 @@ A legacy workflow run owns the top-level lifecycle. The workflow_run_state table
 
 Tasks have stable task_key and idempotency_key values. A task is claimable only when its dependencies are complete, its delay has elapsed, attempts remain, and the caller wins the version CAS. A timeout after progress resumes from the latest checkpoint; it does not replay the whole input. Deterministic failures and exhausted attempts become blocked or failed instead of retry loops.
 
-Artifacts are immutable, hashed, versioned outputs. Large outputs use an immutable URI; small structured outputs may be inline. A completion receipt is valid only after its required artifact passes schema validation.
+Artifacts are immutable, hashed, versioned outputs. Large outputs use an immutable URI; schema-validated agent outputs include canonical inline JSON. Output schemas are self-contained JSON Schema objects stored with the workflow and task, so validation survives relay restart without filesystem or network resolution. A completion receipt is valid only after its signer matches the persisted task assignee, its run/workflow/channel tags match durable state, its SHA-256 matches canonical content, and the artifact passes schema validation.
 
 ## Coordination
 
@@ -24,11 +24,11 @@ Fan-out creates independent tasks. A barrier opens only when every required task
 8. persistent human approval;
 9. final publication.
 
-The coordinator owns protocol state but never decides the legal merits. Workers retain separate Nostr identities and publish signed receipts.
+The coordinator owns protocol state but never decides the legal merits. Every `run_agent` step stores an explicit 32-byte Nostr public key in the durable definition; mutable display names are labels only and never authorize dispatch or receipts. Workers retain separate identities and publish signed receipts.
 
 ## Idempotency and recovery
 
-The operation key combines run id, task key, and agent pubkey. Re-delivery returns the existing task or artifact. Checkpoint sequence and transition sequence are monotonic within their parent. Relay or worker restart reconstructs status from the database and event log. Status queries read durable state and never steer an LLM turn or renew its deadline.
+The operation key combines run id and task key, while the explicit assignee pubkey is part of the persisted blueprint checked on replay. Re-materialization fails closed if input, schema, dependency set, phase, attempts, or assignee differs from the existing task. Re-delivery returns the existing task or artifact. Checkpoint sequence is monotonic per task; transition sequence is allocated under a transaction-scoped tenant/run lock. Relay or worker restart reconstructs status from the database and event log. Status queries read durable state and never steer an LLM turn or renew its deadline.
 
 ## Evidence contract
 
@@ -61,7 +61,7 @@ The durable database remains authoritative. Signed Nostr events are the realtime
 - kind 46015: immutable artifact receipt;
 - kind 46016: phase or lifecycle transition receipt.
 
-Every event carries d (the run UUID), h, workflow, and run tags. Task-scoped receipts also carry task. Each independently addressed worker has its own p tag; textual at-mentions are not a routing primitive. Receipts are signed by the actual worker or coordinator identity and are excluded from workflow triggers and the general activity feed.
+Every event carries d (the run UUID), h, workflow, and run tags. Task-scoped receipts also carry task. Each independently addressed worker has its explicit workflow pubkey in a p tag; textual at-mentions and mutable display names are not routing or authorization primitives. The relay signs coordinator invitations, while the designated worker signs its checkpoint and artifact receipts. Receipts are processed before the anti-trigger guard, then excluded from workflow triggers and the general activity feed.
 
 The agent-facing CLI exposes buzz agent-runs status and history as read-only queries. They never issue an LLM turn or extend a deadline. Snapshot, task, checkpoint, artifact, and transition subcommands publish signed events through the generic Nostr bridge; they do not add a feature-specific HTTP endpoint. Pass --participant once for each worker identity and use --content - for JSON from stdin.
 
@@ -69,4 +69,4 @@ The agent-facing CLI exposes buzz agent-runs status and history as read-only que
 
 Format-specific adapters provide the original source bytes and extracted UTF-8 pages. The workflow core does not pretend to parse PDF or OCR itself. It builds one deterministic immutable manifest containing the source SHA-256, physical page, optional logical label (for example, a printed folio), UTF-8 byte range, stable chunk id, chunk SHA-256, and canonical manifest SHA-256.
 
-Every worker in a run consumes the same manifest hash. Verification rejects source, coordinate, chunk, or manifest tampering. Retrieval is deterministic and bounded to at most 32 chunks and 256 KiB per call; callers may filter by chunk id, physical page, logical label, and case-insensitive terms. The scheduler persists the manifest as a versioned workflow artifact before agent fan-out.
+Every worker in a run consumes the same manifest hash. Verification rejects source, coordinate, chunk, or manifest tampering. Retrieval is deterministic and bounded to at most 32 chunks and 256 KiB per call; callers may filter by chunk id, physical page, logical label, and case-insensitive terms. The scheduler must persist the manifest as a versioned workflow artifact before agent fan-out. Until the format-specific ingestion adapter is configured, `ingest_document` becomes an explicit blocked task and the run fails instead of hanging or claiming false success. The same fail-closed rule currently applies to verification, human approval, and publication adapters.

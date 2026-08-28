@@ -16,6 +16,7 @@ sha2        = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 serde_yaml  = { workspace = true }
+jsonschema  = { workspace = true }
 dashmap     = { workspace = true }
 moka        = { workspace = true }
 evalexpr    = "11"

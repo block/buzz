@@ -472,10 +472,12 @@ pub fn resolve_step_templates(
         }),
         RunAgent {
             agent,
+            identity,
             prompt,
             output_schema,
         } => Ok(RunAgent {
             agent: agent.clone(),
+            identity: identity.clone(),
             prompt: t(prompt)?,
             output_schema: output_schema.clone(),
         }),
@@ -1041,6 +1043,17 @@ async fn add_reaction_impl(message_id: &str, emoji: &str) -> Result<JsonValue, W
     }))
 }
 
+/// Lifecycle disposition produced by a workflow execution pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionDisposition {
+    /// Every workflow step completed.
+    Completed,
+    /// Legacy sequential execution suspended at a human approval gate.
+    WaitingApproval,
+    /// Durable tasks were materialized and the run is waiting for receipts.
+    WaitingDurableTasks,
+}
+
 /// Rich return type from `execute_run` / `execute_from_step`.
 ///
 /// Carries enough information for the caller to:
@@ -1049,6 +1062,8 @@ async fn add_reaction_impl(message_id: &str, emoji: &str) -> Result<JsonValue, W
 /// - Resume execution from the correct step after approval.
 #[derive(Debug)]
 pub struct ExecutionResult {
+    /// Lifecycle disposition for the caller's single lifecycle update.
+    pub disposition: ExecutionDisposition,
     /// Set when execution suspended at a `RequestApproval` step.
     /// `None` means the run completed normally.
     pub approval_token: Option<String>,
@@ -1084,10 +1099,9 @@ pub async fn execute_run(
     trigger_ctx: &TriggerContext,
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
     if def.requires_durable_scheduler() {
-        return Err((
-            WorkflowError::NotImplemented("durable workflow scheduler".into()),
-            crate::error::PartialProgress::default(),
-        ));
+        return crate::durable::execute_durable_run(engine, community_id, run_id, def, trigger_ctx)
+            .await
+            .map_err(|error| (error, crate::error::PartialProgress::default()));
     }
 
     // Fail fast if all concurrency permits are in use — no queuing.
@@ -1141,10 +1155,28 @@ pub async fn execute_from_step(
     initial_outputs: Option<HashMap<String, JsonValue>>,
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
     if def.requires_durable_scheduler() {
-        return Err((
-            WorkflowError::NotImplemented("durable workflow scheduler".into()),
-            crate::error::PartialProgress::default(),
-        ));
+        let progress = crate::durable::advance_run(engine, community_id, run_id)
+            .await
+            .map_err(|error| (error, crate::error::PartialProgress::default()))?;
+        if progress.terminal_failure {
+            return Err((
+                WorkflowError::NotImplemented(
+                    "one or more durable task actions have no scheduler adapter".into(),
+                ),
+                crate::error::PartialProgress::default(),
+            ));
+        }
+        return Ok(ExecutionResult {
+            disposition: if progress.all_complete {
+                ExecutionDisposition::Completed
+            } else {
+                ExecutionDisposition::WaitingDurableTasks
+            },
+            approval_token: None,
+            step_index: progress.task_count,
+            step_outputs: HashMap::new(),
+            trace: Vec::new(),
+        });
     }
 
     // Fail fast if all concurrency permits are in use — no queuing.
@@ -1314,6 +1346,7 @@ async fn execute_steps(
                 // Return the token and current state so the caller can persist the
                 // approval record and update the run's execution trace.
                 return Ok(ExecutionResult {
+                    disposition: ExecutionDisposition::WaitingApproval,
                     approval_token: Some(approval_token),
                     step_index: i,
                     step_outputs,
@@ -1332,6 +1365,7 @@ async fn execute_steps(
 
     info!(run_id = %run_id, "Workflow run completed");
     Ok(ExecutionResult {
+        disposition: ExecutionDisposition::Completed,
         approval_token: None,
         step_index: def.steps.len(),
         step_outputs,

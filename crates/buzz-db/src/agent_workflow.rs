@@ -383,6 +383,26 @@ pub async fn list_tasks(
     .collect()
 }
 
+/// Fetch one task by id within its tenant.
+pub async fn get_task(
+    pool: &PgPool,
+    community: CommunityId,
+    task_id: Uuid,
+) -> Result<Option<AgentTask>> {
+    sqlx::query(
+        "SELECT id,run_id,task_key,phase,agent_pubkey,status,attempt,max_attempts,input,\
+         output_schema,idempotency_key,parent_task_id,depends_on,not_before,started_at,\
+         completed_at,error_code,error_message,version,created_at,updated_at \
+         FROM workflow_run_tasks WHERE community_id=$1 AND id=$2",
+    )
+    .bind(community.as_uuid())
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await?
+    .map(map_task)
+    .transpose()
+}
+
 /// Claim a task using optimistic locking.
 pub async fn claim_task(
     pool: &PgPool,
@@ -392,11 +412,21 @@ pub async fn claim_task(
     agent: &[u8],
 ) -> Result<Option<AgentTask>> {
     sqlx::query(
-        "UPDATE workflow_run_tasks SET status='running',agent_pubkey=$4,attempt=attempt+1,\
+        "UPDATE workflow_run_tasks AS task \
+         SET status='running',agent_pubkey=$4,attempt=attempt+1,\
          started_at=COALESCE(started_at,NOW()),version=version+1,updated_at=NOW() \
-         WHERE community_id=$1 AND id=$2 AND version=$3 \
-           AND status IN ('pending','assigned','retry_scheduled') \
-           AND (not_before IS NULL OR not_before<=NOW()) AND attempt<max_attempts \
+         WHERE task.community_id=$1 AND task.id=$2 AND task.version=$3 \
+           AND task.status IN ('pending','assigned','retry_scheduled') \
+           AND (task.not_before IS NULL OR task.not_before<=NOW()) \
+           AND task.attempt<task.max_attempts \
+           AND NOT EXISTS (\
+             SELECT 1 FROM jsonb_array_elements_text(task.depends_on) dependency(task_key) \
+             LEFT JOIN workflow_run_tasks prerequisite \
+               ON prerequisite.community_id=task.community_id \
+              AND prerequisite.run_id=task.run_id \
+              AND prerequisite.task_key=dependency.task_key \
+             WHERE prerequisite.id IS NULL OR prerequisite.status<>'completed'\
+           ) \
          RETURNING id,run_id,task_key,phase,agent_pubkey,status,attempt,max_attempts,input,\
           output_schema,idempotency_key,parent_task_id,depends_on,not_before,started_at,\
           completed_at,error_code,error_message,version,created_at,updated_at",
@@ -411,6 +441,80 @@ pub async fn claim_task(
     .transpose()
 }
 
+/// Block an unsupported coordinator task only after every dependency completes.
+pub async fn block_ready_task(
+    pool: &PgPool,
+    community: CommunityId,
+    task_id: Uuid,
+    expected: i64,
+    code: &str,
+    message: &str,
+) -> Result<Option<AgentTask>> {
+    sqlx::query(
+        "UPDATE workflow_run_tasks AS task \
+         SET status='blocked',error_code=$4,error_message=$5,completed_at=NOW(),\
+             version=version+1,updated_at=NOW() \
+         WHERE task.community_id=$1 AND task.id=$2 AND task.version=$3 \
+           AND task.status='pending' \
+           AND NOT EXISTS (\
+             SELECT 1 FROM jsonb_array_elements_text(task.depends_on) dependency(task_key) \
+             LEFT JOIN workflow_run_tasks prerequisite \
+               ON prerequisite.community_id=task.community_id \
+              AND prerequisite.run_id=task.run_id \
+              AND prerequisite.task_key=dependency.task_key \
+             WHERE prerequisite.id IS NULL OR prerequisite.status<>'completed'\
+           ) \
+         RETURNING id,run_id,task_key,phase,agent_pubkey,status,attempt,max_attempts,input,\
+          output_schema,idempotency_key,parent_task_id,depends_on,not_before,started_at,\
+          completed_at,error_code,error_message,version,created_at,updated_at",
+    )
+    .bind(community.as_uuid())
+    .bind(task_id)
+    .bind(expected)
+    .bind(code)
+    .bind(message)
+    .fetch_optional(pool)
+    .await?
+    .map(map_task)
+    .transpose()
+}
+
+/// Complete a coordinator task only when every declared dependency is complete.
+///
+/// Dependency eligibility and the status transition are evaluated atomically in
+/// one SQL statement, so concurrent workers cannot open a barrier early.
+pub async fn complete_ready_task(
+    pool: &PgPool,
+    community: CommunityId,
+    task_id: Uuid,
+    expected: i64,
+) -> Result<Option<AgentTask>> {
+    sqlx::query(
+        "UPDATE workflow_run_tasks AS task \
+         SET status='completed',completed_at=NOW(),version=version+1,updated_at=NOW() \
+         WHERE task.community_id=$1 AND task.id=$2 AND task.version=$3 \
+           AND task.status='pending' \
+           AND NOT EXISTS (\
+             SELECT 1 FROM jsonb_array_elements_text(task.depends_on) dependency(task_key) \
+             LEFT JOIN workflow_run_tasks prerequisite \
+               ON prerequisite.community_id=task.community_id \
+              AND prerequisite.run_id=task.run_id \
+              AND prerequisite.task_key=dependency.task_key \
+             WHERE prerequisite.id IS NULL OR prerequisite.status<>'completed'\
+           ) \
+         RETURNING id,run_id,task_key,phase,agent_pubkey,status,attempt,max_attempts,input,\
+          output_schema,idempotency_key,parent_task_id,depends_on,not_before,started_at,\
+          completed_at,error_code,error_message,version,created_at,updated_at",
+    )
+    .bind(community.as_uuid())
+    .bind(task_id)
+    .bind(expected)
+    .fetch_optional(pool)
+    .await?
+    .map(map_task)
+    .transpose()
+}
+
 /// Complete a task using optimistic locking.
 pub async fn complete_task(
     pool: &PgPool,
@@ -419,6 +523,37 @@ pub async fn complete_task(
     expected: i64,
 ) -> Result<Option<AgentTask>> {
     update_terminal_task(pool, community, task_id, expected, "completed", None, None).await
+}
+
+/// Schedule a retry using optimistic locking without consuming another attempt.
+pub async fn schedule_retry(
+    pool: &PgPool,
+    community: CommunityId,
+    task_id: Uuid,
+    expected: i64,
+    not_before: DateTime<Utc>,
+    code: &str,
+    message: &str,
+) -> Result<Option<AgentTask>> {
+    sqlx::query(
+        "UPDATE workflow_run_tasks SET status='retry_scheduled',not_before=$4,\
+         error_code=$5,error_message=$6,completed_at=NULL,version=version+1,updated_at=NOW() \
+         WHERE community_id=$1 AND id=$2 AND version=$3 \
+           AND status IN ('running','waiting') AND attempt<max_attempts \
+         RETURNING id,run_id,task_key,phase,agent_pubkey,status,attempt,max_attempts,input,\
+          output_schema,idempotency_key,parent_task_id,depends_on,not_before,started_at,\
+          completed_at,error_code,error_message,version,created_at,updated_at",
+    )
+    .bind(community.as_uuid())
+    .bind(task_id)
+    .bind(expected)
+    .bind(not_before)
+    .bind(code)
+    .bind(message)
+    .fetch_optional(pool)
+    .await?
+    .map(map_task)
+    .transpose()
 }
 
 /// Fail or block a task using optimistic locking.
@@ -540,6 +675,52 @@ pub async fn append_transition(
     map_transition(sqlx::query("INSERT INTO workflow_run_transitions (community_id,run_id,sequence,from_phase,to_phase,from_status,to_status,reason,actor_pubkey,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (community_id,run_id,sequence) DO UPDATE SET sequence=EXCLUDED.sequence RETURNING id,run_id,sequence,from_phase,to_phase,from_status,to_status,reason,actor_pubkey,metadata,created_at")
         .bind(community.as_uuid()).bind(run_id).bind(sequence).bind(from_phase).bind(to_phase)
         .bind(from_status).bind(to_status).bind(reason).bind(actor).bind(metadata).fetch_one(pool).await?)
+}
+
+/// Append the next monotonic run transition under a transaction-scoped lock.
+///
+/// Concurrent pods serialize by tenant and run before deriving the next
+/// sequence, so every committed transition receives a unique increasing value.
+#[allow(clippy::too_many_arguments)]
+pub async fn append_next_transition(
+    pool: &PgPool,
+    community: CommunityId,
+    run_id: Uuid,
+    from_phase: Option<&str>,
+    to_phase: &str,
+    from_status: Option<&str>,
+    to_status: &str,
+    reason: Option<&str>,
+    actor: Option<&[u8]>,
+    metadata: &Value,
+) -> Result<AgentRunTransition> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2::text, 0))")
+        .bind(community.as_uuid())
+        .bind(run_id)
+        .execute(&mut *transaction)
+        .await?;
+    let row = sqlx::query(
+        "INSERT INTO workflow_run_transitions \
+         (community_id,run_id,sequence,from_phase,to_phase,from_status,to_status,reason,actor_pubkey,metadata) \
+         SELECT $1,$2,COALESCE(MAX(sequence),-1)+1,$3,$4,$5,$6,$7,$8,$9 \
+         FROM workflow_run_transitions WHERE community_id=$1 AND run_id=$2 \
+         RETURNING id,run_id,sequence,from_phase,to_phase,from_status,to_status,reason,actor_pubkey,metadata,created_at",
+    )
+    .bind(community.as_uuid())
+    .bind(run_id)
+    .bind(from_phase)
+    .bind(to_phase)
+    .bind(from_status)
+    .bind(to_status)
+    .bind(reason)
+    .bind(actor)
+    .bind(metadata)
+    .fetch_one(&mut *transaction)
+    .await?;
+    let transition = map_transition(row)?;
+    transaction.commit().await?;
+    Ok(transition)
 }
 
 /// List transitions for a run.

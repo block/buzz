@@ -10,43 +10,488 @@ steps:
   - id: defense_analysis
     action: run_agent
     agent: helena
+    identity: 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
     prompt: Analyze the shared document manifest independently as defense counsel.
     depends_on: [ingest]
-    output_schema: schemas/defense-analysis.schema.json
+    output_schema: {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "additionalProperties": false,
+      "title": "Defense analysis",
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "charges": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "procedural_issues": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence_analysis": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "defense_theses": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "subsidiary_theses": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "risks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "requests": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "claims": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "claim_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1
+              },
+              "citation_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "claim_id",
+              "text",
+              "citation_ids"
+            ]
+          }
+        },
+        "draft_final_arguments": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary",
+        "charges",
+        "procedural_issues",
+        "evidence_analysis",
+        "defense_theses",
+        "subsidiary_theses",
+        "risks",
+        "requests",
+        "claims",
+        "draft_final_arguments"
+      ]
+    }
   - id: contradictor_analysis
     action: run_agent
     agent: rui
+    identity: c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5
     prompt: Analyze the shared document manifest independently as contradictor.
     depends_on: [ingest]
-    output_schema: schemas/contradictor-analysis.schema.json
+    output_schema: {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "additionalProperties": false,
+      "title": "Contradictor analysis",
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "challenged_claims": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unsupported_claims": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "alternative_interpretations": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "prosecution_strengths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "defense_vulnerabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "priority_challenges": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "claims": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "claim_id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1
+              },
+              "citation_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "claim_id",
+              "text",
+              "citation_ids"
+            ]
+          }
+        }
+      },
+      "required": [
+        "summary",
+        "challenged_claims",
+        "unsupported_claims",
+        "alternative_interpretations",
+        "prosecution_strengths",
+        "defense_vulnerabilities",
+        "priority_challenges",
+        "claims"
+      ]
+    }
   - id: analysis_barrier
     action: barrier
     depends_on: [defense_analysis, contradictor_analysis]
   - id: defense_debate
     action: run_agent
     agent: helena
+    identity: 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
     prompt: Respond only to the validated contradictor challenges.
     depends_on: [analysis_barrier]
-    output_schema: schemas/debate-response.schema.json
+    output_schema: {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "additionalProperties": false,
+      "title": "Debate response",
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "responses": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "challenge_id": {
+                "type": "string"
+              },
+              "position": {
+                "enum": [
+                  "accept",
+                  "reject",
+                  "qualify"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "citation_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "challenge_id",
+              "position",
+              "reason",
+              "citation_ids"
+            ]
+          }
+        },
+        "remaining_disagreements": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "agent",
+        "responses",
+        "remaining_disagreements"
+      ]
+    }
   - id: contradictor_debate
     action: run_agent
     agent: rui
+    identity: c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5
     prompt: Respond only to the validated defense claims.
     depends_on: [analysis_barrier]
-    output_schema: schemas/debate-response.schema.json
+    output_schema: {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "additionalProperties": false,
+      "title": "Debate response",
+      "properties": {
+        "agent": {
+          "type": "string"
+        },
+        "responses": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "challenge_id": {
+                "type": "string"
+              },
+              "position": {
+                "enum": [
+                  "accept",
+                  "reject",
+                  "qualify"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "citation_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "challenge_id",
+              "position",
+              "reason",
+              "citation_ids"
+            ]
+          }
+        },
+        "remaining_disagreements": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "agent",
+        "responses",
+        "remaining_disagreements"
+      ]
+    }
   - id: debate_barrier
     action: barrier
     depends_on: [defense_debate, contradictor_debate]
   - id: judicial_review
     action: run_agent
     agent: anselmo
+    identity: f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9
     prompt: Review the validated analyses and debate, then produce a reasoned decision.
     depends_on: [debate_barrier]
-    output_schema: schemas/judicial-review.schema.json
+    output_schema: {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "additionalProperties": false,
+      "title": "Judicial review",
+      "properties": {
+        "issues": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "evidence_assessment": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rubric_scores": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 5
+          }
+        },
+        "accepted_arguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "rejected_arguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unresolved_facts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "legal_risks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "decision": {
+          "type": "string",
+          "minLength": 1
+        },
+        "citation_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "issues",
+        "evidence_assessment",
+        "rubric_scores",
+        "accepted_arguments",
+        "rejected_arguments",
+        "unresolved_facts",
+        "legal_risks",
+        "decision",
+        "citation_ids"
+      ]
+    }
   - id: verify_citations
     action: verify_artifact
     depends_on: [judicial_review]
-    schema: schemas/citation-ledger.schema.json
+    schema: {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "title": "Citation ledger",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "citation_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "claim_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "claim_type": {
+            "enum": [
+              "fact",
+              "law",
+              "precedent"
+            ]
+          },
+          "document_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "physical_page": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "court_page": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "quote": {
+            "type": "string"
+          },
+          "official_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "enum": [
+              "verified",
+              "unverified",
+              "divergent",
+              "rejected"
+            ]
+          },
+          "verified_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "citation_id",
+          "claim_id",
+          "claim_type",
+          "document_id",
+          "physical_page",
+          "court_page",
+          "quote",
+          "official_url",
+          "status",
+          "verified_by"
+        ]
+      }
+    }
   - id: human_approval
     action: request_approval
     from: '@workflow-owner'

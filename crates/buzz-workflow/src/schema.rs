@@ -165,19 +165,21 @@ pub enum ActionDef {
     },
     /// Dispatch a durable task to an independently identified ACP agent.
     RunAgent {
-        /// Agent roster key.
+        /// Human-readable stable roster label.
         agent: String,
+        /// Explicit 32-byte Nostr public key encoded as lowercase hex.
+        identity: String,
         /// Prompt template or run input key.
         prompt: String,
-        /// JSON Schema path used to validate the output artifact.
-        output_schema: String,
+        /// Self-contained JSON Schema used to validate the output artifact.
+        output_schema: serde_json::Value,
     },
     /// Fan-in gate that opens only after every dependency completes.
     Barrier,
     /// Verify an artifact against an independent evidence contract.
     VerifyArtifact {
-        /// JSON Schema path for the verification ledger.
-        schema: String,
+        /// Self-contained JSON Schema for the verification ledger.
+        schema: serde_json::Value,
     },
     /// Publish one previously validated artifact.
     PublishArtifact {
@@ -258,6 +260,20 @@ impl WorkflowDef {
                     "duplicate step id: {}",
                     step.id
                 )));
+            }
+            match &step.action {
+                ActionDef::RunAgent {
+                    identity,
+                    output_schema,
+                    ..
+                } => {
+                    validate_agent_identity(&step.id, identity)?;
+                    validate_inline_schema(&step.id, output_schema)?;
+                }
+                ActionDef::VerifyArtifact { schema } => {
+                    validate_inline_schema(&step.id, schema)?;
+                }
+                _ => {}
             }
         }
 
@@ -357,6 +373,41 @@ impl WorkflowDef {
 
         Ok(())
     }
+}
+
+fn validate_agent_identity(step_id: &str, identity: &str) -> Result<(), WorkflowError> {
+    let bytes = hex::decode(identity).map_err(|error| {
+        WorkflowError::InvalidDefinition(format!(
+            "step '{step_id}': agent identity is not hex: {error}"
+        ))
+    })?;
+    if bytes.len() != 32 || identity != identity.to_ascii_lowercase() {
+        return Err(WorkflowError::InvalidDefinition(format!(
+            "step '{step_id}': agent identity must be 32 lowercase hex bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_inline_schema(step_id: &str, schema: &serde_json::Value) -> Result<(), WorkflowError> {
+    if !schema.is_object() {
+        return Err(WorkflowError::InvalidDefinition(format!(
+            "step '{step_id}': inline JSON Schema must be an object"
+        )));
+    }
+    let encoded = serde_json::to_vec(schema)
+        .map_err(|error| WorkflowError::InvalidDefinition(error.to_string()))?;
+    if encoded.len() > 64 * 1024 {
+        return Err(WorkflowError::InvalidDefinition(format!(
+            "step '{step_id}': inline JSON Schema exceeds 64 KiB"
+        )));
+    }
+    jsonschema::validator_for(schema).map_err(|error| {
+        WorkflowError::InvalidDefinition(format!(
+            "step '{step_id}': invalid inline JSON Schema: {error}"
+        ))
+    })?;
+    Ok(())
 }
 
 /// Validate a cron expression using the `cron` crate.
@@ -556,6 +607,24 @@ mod tests {
             }
             other => panic!("expected InvalidDefinition, got: {other}"),
         }
+    }
+
+    #[test]
+    fn validate_rejects_invalid_inline_agent_schema() {
+        let yaml = "name: Bad Schema
+trigger:
+  on: webhook
+steps:
+  - id: agent
+    action: run_agent
+    agent: helena
+    identity: 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+    prompt: analyze
+    output_schema:
+      type: definitely-not-a-json-schema-type
+";
+        let error = parse_yaml(yaml).expect_err("invalid schema must fail");
+        assert!(matches!(error, WorkflowError::InvalidDefinition(_)));
     }
 
     #[test]

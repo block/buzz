@@ -640,8 +640,11 @@ async fn main() -> anyhow::Result<()> {
     // sub_registry, conn_manager) and before the cron loop starts.
     let action_sink = Arc::new(buzz_relay::workflow_sink::RelayActionSink::new(&state));
     workflow_engine.set_action_sink(action_sink);
+    let agent_dispatch =
+        Arc::new(buzz_relay::workflow_agent_dispatch::RelayAgentDispatch::new(&state));
+    workflow_engine.set_agent_dispatch(agent_dispatch);
 
-    // Start the cron loop AFTER the action sink is wired.
+    // Start the cron loop AFTER both workflow side-effect bridges are wired.
     let wf_cron = Arc::clone(&workflow_engine);
     tokio::spawn(async move { wf_cron.run().await });
 
