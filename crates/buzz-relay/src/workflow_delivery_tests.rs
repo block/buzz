@@ -23,11 +23,7 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
-        let mut state = test_state().await;
-        Arc::get_mut(&mut state)
-            .expect("unique state")
-            .config
-            .require_auth_token = false;
+        let state = test_state().await;
         let owner = Keys::generate();
         let agent = Keys::generate();
         let host = format!("wake-{}.example", Uuid::new_v4().simple());
