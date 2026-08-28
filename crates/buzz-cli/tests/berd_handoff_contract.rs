@@ -51,6 +51,7 @@ const MIN_COMPATIBLE_BUZZ_COMMIT: &str = "84c095f8b";
 const CHANNEL_ID: &str = "6f1c9e2a-77d4-4a1e-9a8b-2c5d3e4f6a70";
 const ROOT_EVENT_ID: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const REPLY_EVENT_ID: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+const TARGET_PUBKEY_HEX: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 // ---------------------------------------------------------------------------
 // Stub relay
@@ -261,11 +262,11 @@ async fn c1_format_flag_is_global_and_precedes_the_subcommand() {
 /// PR #5764 proposes adding `pubkey` and `channel` to this exact arm. An
 /// equality assertion would go red on a benign upstream improvement — that is
 /// the failure mode this rule exists to prevent.
-/// Runs on a MULTI-THREAD runtime and shells out via `spawn_blocking`: this test
-/// is the only one that drives a real subprocess, and a blocking `.output()` on
-/// the default current-thread runtime starves the stub relay's accept loop (the
-/// subprocess then times out against a server that never polls). Found by
-/// running the test, not by reading it.
+/// Runs on a MULTI-THREAD runtime because this test is the only one that drives
+/// a real subprocess, and a blocking `.output()` on the default current-thread
+/// runtime starves the stub relay's accept loop (the subprocess then times out
+/// against a server that never polls). Found by running the test, not by
+/// reading it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c2_compact_projection_carries_the_keys_berd_parses() {
     let (relay, _state) = stub_relay(answer_query).await;
@@ -552,11 +553,12 @@ async fn c5_relay_key_and_auth_tag_are_accepted_inputs() {
 }
 
 // ---------------------------------------------------------------------------
-// C6 — exit-code contract (8 arms, not 7)
+// C6 — exit-code contract
 // ---------------------------------------------------------------------------
 
-/// berd branches on our process exit codes. `src/error.rs:90-108` defines EIGHT
-/// arms, and the eighth is status-dependent:
+/// berd branches on our process exit codes. `src/error.rs:90-108` maps every
+/// private `CliError` variant through the public `i32` returned by
+/// `run_from_args`; the relay-status arm is also status-dependent:
 /// `Relay { status } => if 401 || 403 { 3 } else { 2 }`.
 ///
 /// A 403 mapping to 2 instead of 3 would make berd retry a permission failure
@@ -566,6 +568,27 @@ async fn c5_relay_key_and_auth_tag_are_accepted_inputs() {
 #[tokio::test]
 async fn c6_relay_status_maps_to_the_documented_exit_codes() {
     let key = throwaway_key();
+
+    // Key => 3 (auth bucket). This is distinct from missing-key Auth in C5.
+    let (relay, state) = stub_relay(answer_query).await;
+    let code = buzz_cli::run_from_args(vec![
+        "buzz".to_string(),
+        "--relay".to_string(),
+        relay,
+        "--private-key".to_string(),
+        "not-a-real-nostr-secret".to_string(),
+        "messages".to_string(),
+        "get".to_string(),
+        "--channel".to_string(),
+        CHANNEL_ID.to_string(),
+    ])
+    .await;
+    assert_eq!(code, 3, "an invalid private key must exit 3");
+    assert_eq!(
+        state.hits.load(Ordering::SeqCst),
+        0,
+        "the CLI must fail invalid keys before contacting the relay"
+    );
 
     // 403 => 3 (auth), NOT 2. The status-dependent arm.
     let (relay, _s) = stub_relay(|_| {
@@ -618,6 +641,17 @@ async fn c6_relay_status_maps_to_the_documented_exit_codes() {
     .await;
     assert_eq!(code, 2, "a relay 5xx must map to the network exit code");
 
+    // Network => 2. Port 1 on loopback is expected to refuse immediately; even
+    // with the normal three-attempt retry policy this remains a sub-second
+    // local failure on developer and CI hosts.
+    let code = buzz_cli::run_from_args(argv(
+        "http://127.0.0.1:1",
+        &key,
+        &["messages", "get", "--channel", CHANNEL_ID],
+    ))
+    .await;
+    assert_eq!(code, 2, "a transport connect failure must exit 2");
+
     // Usage => 1 (unknown subcommand, no relay needed).
     let code = buzz_cli::run_from_args(vec![
         "buzz".to_string(),
@@ -650,6 +684,85 @@ async fn c6_relay_status_maps_to_the_documented_exit_codes() {
     ))
     .await;
     assert_eq!(code, 1, "a missing thread target must exit 1 (not-found)");
+
+    // Conflict => 5. Drive it through a real addressable-write command instead
+    // of importing private error helpers: `notes set` first queries the current
+    // kind:30023 head, then treats an accepted write with `duplicate:` as a
+    // dominated head conflict.
+    let (relay, _s) = stub_relay(|body| {
+        if body.as_array().is_some() {
+            return (StatusCode::OK, "[]".to_string());
+        }
+        (
+            StatusCode::OK,
+            serde_json::json!({
+                "event_id": body.get("id").and_then(|id| id.as_str()).unwrap_or(ROOT_EVENT_ID),
+                "accepted": true,
+                "message": "duplicate: dominated by a newer head"
+            })
+            .to_string(),
+        )
+    })
+    .await;
+    let code = buzz_cli::run_from_args(argv(
+        &relay,
+        &key,
+        &[
+            "notes",
+            "set",
+            "--name",
+            "handoff-contract",
+            "--title",
+            "Handoff contract",
+            "--content",
+            "body",
+        ],
+    ))
+    .await;
+    assert_eq!(code, 5, "a dominated addressable write must exit 5");
+
+    // DeliveryUnknown => 2. Moderation writes (kinds 9040-9044) are
+    // non-idempotent command events; a proxy 502 may have happened after relay
+    // execution, so `submit_moderation_event` must surface DeliveryUnknown
+    // rather than a retryable relay error.
+    let (relay, _s) = stub_relay(|_| {
+        (
+            StatusCode::BAD_GATEWAY,
+            serde_json::json!({"error":"proxy failed after possible execution"}).to_string(),
+        )
+    })
+    .await;
+    let code = buzz_cli::run_from_args(argv(
+        &relay,
+        &key,
+        &["moderation", "ban", "--pubkey", TARGET_PUBKEY_HEX],
+    ))
+    .await;
+    assert_eq!(
+        code, 2,
+        "an ambiguous non-idempotent moderation write must exit 2"
+    );
+
+    // Other => 4. `notes set` parses the read-before-write kind:30023 query
+    // strictly; a non-JSON relay body is an unexpected local/relay contract
+    // failure, not a usage, auth, conflict, or network error.
+    let (relay, _s) = stub_relay(|_| (StatusCode::OK, "not json".to_string())).await;
+    let code = buzz_cli::run_from_args(argv(
+        &relay,
+        &key,
+        &[
+            "notes",
+            "set",
+            "--name",
+            "handoff-contract",
+            "--title",
+            "Handoff contract",
+            "--content",
+            "body",
+        ],
+    ))
+    .await;
+    assert_eq!(code, 4, "unexpected malformed relay data must exit 4");
 }
 
 // ---------------------------------------------------------------------------
