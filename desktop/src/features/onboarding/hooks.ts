@@ -178,7 +178,7 @@ async function refreshChannelsCache(
 }
 
 const ONBOARDING_COMPLETION_STORAGE_KEY = "buzz-onboarding-complete.v1";
-type OnboardingGateStage = "blocking" | "onboarding" | "ready";
+type OnboardingGateStage = "blocking" | "onboarding" | "ready" | "timeout";
 
 type UseFirstRunOnboardingGateOptions = {
   currentPubkey: string | null;
@@ -475,6 +475,7 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
   );
   const [isCompletingStarterSetup, setIsCompletingStarterSetup] =
     React.useState(false);
+  const [bootTimedOut, setBootTimedOut] = React.useState(false);
   const identityLost = identity?.lost === true;
   // Keyring unreachable at boot — the real key is still in the OS keyring but
   // the session cannot access it. No in-app recovery is possible; the user
@@ -513,6 +514,17 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
     profileIsFetching: profileQuery.fetchStatus === "fetching",
     profileStatus: profileQuery.status,
   });
+  React.useEffect(() => {
+    if (
+      identityQuery.status === "success" ||
+      onboardingGate.stage !== "blocking"
+    ) {
+      setBootTimedOut(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setBootTimedOut(true), 15_000);
+    return () => window.clearTimeout(timer);
+  }, [identityQuery.status, onboardingGate.stage]);
   const gateComplete = onboardingGate.complete;
   const starterChannelsFocusIntentRef = React.useRef(
     new Map<string, boolean>(),
@@ -673,6 +685,8 @@ export function useAppOnboardingState(isSharedIdentity: boolean) {
             ? ("relaunch-required" as const)
             : isCompletingStarterSetup
               ? ("blocking" as const)
-              : onboardingGate.stage,
+              : bootTimedOut
+                ? ("timeout" as const)
+                : onboardingGate.stage,
   };
 }

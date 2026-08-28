@@ -211,6 +211,26 @@ function CommunitySwitchGate() {
   );
 }
 
+function AppBootTimeoutScreen() {
+  return (
+    <div className="flex min-h-dvh items-center justify-center bg-background p-6">
+      <div className="grid max-w-md gap-4 text-center">
+        <h1 className="text-lg font-semibold">Buzz 启动超时</h1>
+        <p className="text-sm text-muted-foreground">
+          本机身份或 Community 状态未能完成初始化。
+        </p>
+        <button
+          className="mx-auto rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground"
+          onClick={() => window.location.reload()}
+          type="button"
+        >
+          重新加载
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function CommunityQueryProvider({ children }: { children: ReactNode }) {
   const [queryClient] = useState(createBuzzQueryClient);
 
@@ -272,6 +292,10 @@ function AppReady({
 
   if (onboarding.stage === "blocking") {
     return isCommunitySwitch ? <CommunitySwitchGate /> : <AppLoadingGate />;
+  }
+
+  if (onboarding.stage === "timeout") {
+    return <AppBootTimeoutScreen />;
   }
 
   return (
