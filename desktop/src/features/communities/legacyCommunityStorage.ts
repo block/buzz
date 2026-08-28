@@ -4,6 +4,14 @@ import { migrateLegacyCommunityStorage } from "./communityStorage";
 
 const BUZZ_COMMUNITIES_KEY = "buzz-communities";
 const BUZZ_ACTIVE_COMMUNITY_KEY = "buzz-active-community-id";
+const BUZZ_STORAGE_REPAIR_KEY = "buzz-storage-repair-v1";
+const COMMUNITY_CACHE_PREFIXES = [
+  "buzz-channels.v1:",
+  "buzz-home-feed-",
+  "buzz-observed-",
+  "buzz-active-agent-turns:",
+  "buzz-relay-",
+];
 const BUZZ_ONBOARDING_COMPLETION_STORAGE_KEY_PREFIX =
   "buzz-onboarding-complete.v1:";
 const LOCAL_DEV_RELAY_URLS = new Set([
@@ -117,6 +125,7 @@ export async function migrateLegacyCommunityStorageBeforeRender(): Promise<void>
   }
 
   migrateLegacyCommunityStorage(window.localStorage);
+  repairStaleCommunityCaches(window.localStorage);
   // block/buzz#5078 — read through the throw-safe accessor so a denied-storage
   // origin degrades to "no community state" instead of crashing pre-render.
   const currentCommunitiesRaw = getStorageItem(BUZZ_COMMUNITIES_KEY);
@@ -137,5 +146,32 @@ export async function migrateLegacyCommunityStorageBeforeRender(): Promise<void>
     );
   } catch (error) {
     console.warn("Failed to read legacy Sprout community storage.", error);
+  }
+}
+
+/**
+ * One-time cleanup for state written by pre-repair builds. These snapshots are
+ * disposable and can contain a relay URL from a previous LAN/public setup;
+ * keeping them can make the first channel query appear permanently loading.
+ * Community definitions, identity data, Agent data, and message history use
+ * different keys and are intentionally retained.
+ */
+function repairStaleCommunityCaches(storage: Storage): void {
+  try {
+    if (storage.getItem(BUZZ_STORAGE_REPAIR_KEY) === "1") return;
+    const keysToRemove: string[] = [];
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (
+        key &&
+        COMMUNITY_CACHE_PREFIXES.some((prefix) => key.startsWith(prefix))
+      ) {
+        keysToRemove.push(key);
+      }
+    }
+    for (const key of keysToRemove) storage.removeItem(key);
+    storage.setItem(BUZZ_STORAGE_REPAIR_KEY, "1");
+  } catch (error) {
+    console.warn("[communityStorage] stale cache repair skipped:", error);
   }
 }

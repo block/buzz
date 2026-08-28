@@ -118,18 +118,7 @@ function repairCommunities(input: Community[]): CommunityRepairResult {
   const seenIds = new Set<string>();
   let changed = false;
   const communities = input.filter((community) => {
-    if (!community || typeof community.relayUrl !== "string") {
-      changed = true;
-      return false;
-    }
-    const relayUrl = normalizeRelayUrl(community.relayUrl.trim());
-    try {
-      const parsed = new URL(relayUrl);
-      if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
-        changed = true;
-        return false;
-      }
-    } catch {
+    if (!community || typeof community !== "object") {
       changed = true;
       return false;
     }
@@ -142,6 +131,22 @@ function repairCommunities(input: Community[]): CommunityRepairResult {
       return false;
     }
     seenIds.add(community.id);
+
+    if (typeof community.relayUrl !== "string" || !community.relayUrl.trim()) {
+      return true;
+    }
+
+    const relayUrl = normalizeRelayUrl(community.relayUrl.trim());
+    try {
+      const parsed = new URL(relayUrl);
+      if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+        changed = true;
+        return false;
+      }
+    } catch {
+      changed = true;
+      return false;
+    }
     if (relayUrl !== community.relayUrl) {
       community.relayUrl = relayUrl;
       changed = true;
