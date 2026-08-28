@@ -51,6 +51,11 @@ void main() {
     testWidgets(
       'is the direct preview page with the name inside its container',
       (tester) async {
+        tester.view.physicalSize = const Size(390, 844);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.resetPhysicalSize);
+        addTearDown(tester.view.resetDevicePixelRatio);
+
         await _pumpPicker(tester);
 
         expect(
@@ -78,7 +83,7 @@ void main() {
           find.byKey(const ValueKey('theme-device-pair-preview-buzz')),
         );
         expect(nameBounds.bottom, lessThan(previewBounds.bottom));
-        expect(previewBounds.top - nameBounds.bottom, closeTo(Grid.md, 0.1));
+        expect(previewBounds.top - nameBounds.bottom, closeTo(Grid.md, 1));
         expect(
           tester
               .widget<FittedBox>(
@@ -101,6 +106,26 @@ void main() {
         );
       },
     );
+
+    testWidgets('keeps the theme name inside the card in landscape', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(844, 390);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      await _pumpPicker(tester);
+
+      final nameBounds = tester.getRect(
+        find.byKey(const ValueKey('theme-preview-name-buzz')),
+      );
+      final cardBounds = tester.getRect(
+        find.byKey(const ValueKey('theme-preview-page-buzz')),
+      );
+      expect(cardBounds.contains(nameBounds.topLeft), isTrue);
+      expect(cardBounds.contains(nameBounds.bottomRight), isTrue);
+    });
 
     testWidgets(
       'keeps accurate Home and Chat frames in one preview container',

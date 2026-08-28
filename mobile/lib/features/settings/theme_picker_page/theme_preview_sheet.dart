@@ -273,6 +273,7 @@ class _ThemePreviewPage extends StatelessWidget {
   Widget build(BuildContext context) => Padding(
     padding: const EdgeInsets.fromLTRB(Grid.gutter, Grid.xxs, Grid.gutter, 0),
     child: DecoratedBox(
+      key: ValueKey('theme-preview-page-${theme.name}'),
       decoration: BoxDecoration(
         color: context.colors.surfaceContainerLow,
         borderRadius: BorderRadius.circular(Radii.container),
@@ -288,6 +289,15 @@ class _ThemePreviewPage extends StatelessWidget {
           final scale = widthScale < heightScale ? widthScale : heightScale;
           final previewTop =
               (constraints.maxHeight - previewHeight * scale) / 2;
+          final desiredTitleBottom =
+              constraints.maxHeight - previewTop + Grid.md;
+          final landscapeTitleBottom =
+              constraints.maxHeight - Grid.xs - Grid.lg;
+          final titleBottom =
+              heightScale < widthScale &&
+                  desiredTitleBottom > landscapeTitleBottom
+              ? landscapeTitleBottom
+              : desiredTitleBottom;
 
           return Stack(
             children: [
@@ -310,7 +320,7 @@ class _ThemePreviewPage extends StatelessWidget {
               Positioned(
                 left: Grid.xs,
                 right: Grid.xs,
-                bottom: constraints.maxHeight - previewTop + Grid.md,
+                bottom: titleBottom,
                 child: Transform.translate(
                   key: ValueKey('theme-preview-name-motion-${theme.name}'),
                   offset: Offset(titleHorizontalOffset, 0),
