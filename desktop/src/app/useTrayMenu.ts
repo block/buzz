@@ -112,7 +112,7 @@ export function useTrayMenu({
       activities,
       recentActivities,
     }).catch((error) => {
-      console.error("Failed to update the macOS tray menu", error);
+      console.error("Failed to update the tray menu", error);
     });
   }, [activities, recentActivities]);
 

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   isHighPriorityEventForUser,
+  shouldAlertForAllMessages,
   shouldNotifyForEvent,
 } from "./shouldNotify.ts";
 
@@ -325,4 +326,24 @@ test("isHighPriorityEventForUser returns false when currentPubkey is empty", () 
 test("isHighPriorityEventForUser returns false for event with no tags at all", () => {
   const event = makeEvent([]);
   assert.equal(isHighPriorityEventForUser(event, PUBKEY), false);
+});
+
+test("all-messages alerts skip DMs, mentions, and thread replies", () => {
+  assert.equal(
+    shouldAlertForAllMessages(makeEvent([]), PUBKEY, "stream"),
+    true,
+  );
+  assert.equal(shouldAlertForAllMessages(makeEvent([]), PUBKEY, "dm"), false);
+  assert.equal(
+    shouldAlertForAllMessages(makeEvent([pTag(PUBKEY)]), PUBKEY, "stream"),
+    false,
+  );
+  assert.equal(
+    shouldAlertForAllMessages(
+      makeEvent([rootTag(ROOT_ID), replyTag(PARENT_ID)]),
+      PUBKEY,
+      "stream",
+    ),
+    false,
+  );
 });

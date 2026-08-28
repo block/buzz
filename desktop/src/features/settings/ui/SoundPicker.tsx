@@ -65,20 +65,33 @@ export function SoundPicker({
   const items = sortedSounds(recommended);
   const [isPlaying, setIsPlaying] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const playGenerationRef = useRef(0);
 
   function togglePreview() {
     if (isPlaying) {
+      playGenerationRef.current += 1;
       audioRef.current?.pause();
       setIsPlaying(false);
       return;
     }
-    const audio = playNotificationSound(value);
-    if (!audio) return;
-    audioRef.current = audio;
-    setIsPlaying(true);
-    const stop = () => setIsPlaying(false);
-    audio.addEventListener("ended", stop, { once: true });
-    audio.addEventListener("pause", stop, { once: true });
+    const generation = playGenerationRef.current + 1;
+    playGenerationRef.current = generation;
+    void playNotificationSound(value, { preview: true }).then((audio) => {
+      if (generation !== playGenerationRef.current) {
+        audio?.pause();
+        return;
+      }
+      if (!audio) return;
+      audioRef.current = audio;
+      setIsPlaying(true);
+      const stop = () => {
+        if (generation === playGenerationRef.current) {
+          setIsPlaying(false);
+        }
+      };
+      audio.addEventListener("ended", stop, { once: true });
+      audio.addEventListener("pause", stop, { once: true });
+    });
   }
 
   return (

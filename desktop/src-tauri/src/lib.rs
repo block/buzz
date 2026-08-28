@@ -13,6 +13,7 @@ mod huddle;
 mod identity_storage;
 mod initial_window;
 mod key_backup;
+mod launch_at_login;
 mod link_preview_tags;
 mod linux_media;
 #[cfg(target_os = "macos")]
@@ -45,7 +46,6 @@ mod templates;
 mod terminal_runtime;
 #[cfg_attr(not(test), allow(dead_code))]
 mod terminal_transport;
-#[cfg(target_os = "macos")]
 mod tray_menu;
 mod unread_catch_up;
 mod util;
@@ -91,8 +91,7 @@ use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
 use tauri::Listener;
 use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 use tauri_plugin_window_state::StateFlags;
-#[cfg(target_os = "macos")]
-use tray_menu::show_main_window;
+use tray_menu::{hide_main_window_to_tray, show_main_window};
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // mesh-llm async chains overflow tokio's default 2 MiB stacks; run on 8 MiB like upstream.
@@ -120,10 +119,9 @@ pub fn run() {
     }
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            // Focus the existing window when a duplicate instance launches.
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.set_focus();
-            }
+            // A second launch (taskbar/dock/desktop icon) must unhide the
+            // tray-resident window, not merely focus a hidden webview.
+            show_main_window(app);
             // Forward any deep link URLs from the duplicate launch.
             for arg in &argv {
                 if arg.starts_with("buzz://") {
@@ -151,6 +149,12 @@ pub fn run() {
                     // permission-request handler for getUserMedia; no-op
                     // on macOS/Windows.
                     linux_media::enable_media_capture(&webview);
+
+                    // Login-item launches stay in the tray; the user (or a
+                    // later second instance) reveals the window on demand.
+                    if launch_at_login::launched_hidden() {
+                        return;
+                    }
 
                     // macOS applies the restored geometry asynchronously. Wait
                     // for several identical outer bounds and for React to
@@ -198,6 +202,7 @@ pub fn run() {
         .plugin(native_websocket::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init());
+    let builder = launch_at_login::install(builder);
 
     // The push-to-talk global-shortcut plugin lives in `ptt_shortcut`, next to
     // the registration lifecycle it drives. Installing it is a no-op in test
@@ -234,11 +239,10 @@ pub fn run() {
         .manage(channel_head_cache::ChannelHeadCacheStore::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            tray_menu::init(&app_handle)?;
             #[cfg(target_os = "macos")]
-            {
-                tray_menu::init(&app_handle)?;
-                macos_notifications::init(&app_handle)?;
-            }
+            macos_notifications::init(&app_handle)?;
+            launch_at_login::enable_on_setup(&app_handle);
 
             // ── Phase 2: boot-time sentinel wipe ──────────────────────────────
             // Must run before migrations and identity resolution so the wipe
@@ -850,13 +854,9 @@ pub fn run() {
             archive::sync::stop_archive_sync,
             is_auto_update_supported,
             set_window_vibrancy,
-            #[cfg(target_os = "macos")]
             tray_menu::clear_tray_agent_activity,
-            #[cfg(target_os = "macos")]
             tray_menu::requeue_tray_actions,
-            #[cfg(target_os = "macos")]
             tray_menu::take_tray_actions,
-            #[cfg(target_os = "macos")]
             tray_menu::update_tray_agent_activity,
         ])
         .build(tauri::generate_context!())
@@ -871,19 +871,12 @@ pub fn run() {
     app.run(move |app_handle, event| match event {
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => show_main_window(app_handle),
-        #[cfg(target_os = "macos")]
         RunEvent::WindowEvent {
             label,
             event: WindowEvent::CloseRequested { api, .. },
             ..
         } if label == "main" => {
-            // Keep the webview alive so Buzz can be reopened from its tray menu.
-            api.prevent_close();
-            if let Some(window) = app_handle.get_webview_window("main") {
-                if let Err(error) = window.hide() {
-                    eprintln!("buzz-desktop: failed to hide main window: {error}");
-                }
-            }
+            hide_main_window_to_tray(app_handle, &api);
         }
         RunEvent::WindowEvent {
             label,

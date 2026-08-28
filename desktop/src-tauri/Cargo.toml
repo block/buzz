@@ -66,6 +66,9 @@ plist = "1"
 windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_Foundation"] }
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "vendored"], optional = true }
 user-idle = { version = "0.6", default-features = false }
+# WinRT toasts. Same crate as Linux so All messages (and the other slots)
+# share one native command; WebView2 permission is not required.
+notify-rust = "4"
 
 [dependencies]
 atomic-write-file = "0.3"
@@ -79,6 +82,8 @@ tauri-plugin-window-state = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# Linux/Windows login item so the tray process comes back after reboot.
+tauri-plugin-autostart = "2"
 infer = "0.19"
 hex = "0.4"
 ed25519-dalek = "=3.0.0-rc.0"

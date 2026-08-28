@@ -80,11 +80,16 @@ internal object AndroidImageProcessor {
 class MainActivity : FlutterFragmentActivity() {
     private var mediaUploadChannel: MethodChannel? = null
     private var huddleMediaPlugin: HuddleMediaPlugin? = null
+    private var messageAlertPlugin: MessageAlertPlugin? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
         huddleMediaPlugin = HuddleMediaPlugin(
+            this,
+            flutterEngine.dartExecutor.binaryMessenger,
+        )
+        messageAlertPlugin = MessageAlertPlugin(
             this,
             flutterEngine.dartExecutor.binaryMessenger,
         )
@@ -123,11 +128,14 @@ class MainActivity : FlutterFragmentActivity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         huddleMediaPlugin?.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        messageAlertPlugin?.onRequestPermissionsResult(requestCode, grantResults)
     }
 
     override fun onDestroy() {
         huddleMediaPlugin?.dispose()
         huddleMediaPlugin = null
+        messageAlertPlugin?.dispose()
+        messageAlertPlugin = null
         super.onDestroy()
     }
 

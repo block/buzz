@@ -49,6 +49,18 @@ test("DM body falls back when the message is blank", () => {
   );
 });
 
+test("channel messages lead with the sender in the channel", () => {
+  assert.equal(
+    formatMessageNotification({
+      source: "channel",
+      senderName: "Taylor",
+      channelName: "general",
+      content: "enene",
+    }).title,
+    "Taylor in #general",
+  );
+});
+
 test("thread reply leads with the sender when resolved", () => {
   assert.equal(
     formatMessageNotification({

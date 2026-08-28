@@ -6,7 +6,10 @@ import {
   shouldBounceForChannelNotification,
 } from "@/app/AppShell.helpers";
 import { useCommunityJoinAlerts } from "@/features/community-members/useCommunityJoinAlerts";
-import { hasMentionForEvent } from "@/features/notifications/lib/shouldNotify";
+import {
+  hasMentionForEvent,
+  shouldAlertForAllMessages,
+} from "@/features/notifications/lib/shouldNotify";
 import type { NotificationSettings } from "@/features/notifications/hooks";
 import {
   listenForDesktopNotificationActions,
@@ -59,16 +62,59 @@ export function useAppShellDesktopNotifications({
   const resolveSenderName = useNotificationSenderName();
 
   const handleChannelNotification = React.useEffectEvent(
-    (_channelId: string, event: RelayEvent) => {
+    (
+      channelId: string,
+      event: RelayEvent,
+      delivery?: { suppressDesktopToast?: boolean },
+    ) => {
       if (!enabled) return;
-      if (!shouldBounceForChannelNotification(event.tags)) return;
       if (!notificationSettings.desktopEnabled) return;
-      void requestDockBounce();
+      if (shouldBounceForChannelNotification(event.tags)) {
+        void requestDockBounce();
+      }
+
+      if (!notificationSettings.slotAlertsEnabled.all_messages) return;
+      const channel = channels.find((candidate) => candidate.id === channelId);
+      const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
+      if (
+        !shouldAlertForAllMessages(
+          event,
+          normalizedPubkey,
+          channel?.channelType,
+        )
+      ) {
+        return;
+      }
+      if (!shouldPlayNotificationSound(channelId, silentChannelIds)) return;
+
+      const channelName = channel?.name?.trim() || null;
+      const { title, body } = formatMessageNotification({
+        source: "channel",
+        senderName: resolveSenderName(event.pubkey),
+        channelName,
+        content: event.content,
+      });
+      void playNotificationSound(
+        resolveSlotSound(notificationSettings, "all_messages"),
+      );
+      if (delivery?.suppressDesktopToast) return;
+      void sendDesktopNotification({
+        title,
+        body,
+        target: buildEventNotificationTarget(event, {
+          id: channelId,
+          name: channelName,
+        }),
+      });
     },
   );
 
   const handleDmNotification = React.useEffectEvent(
-    (event: RelayEvent, channel: Channel) => {
+    (
+      event: RelayEvent,
+      channel: Channel,
+      delivery?: { suppressDesktopToast?: boolean },
+    ) => {
       if (!enabled) return;
       if (
         !notificationSettings.desktopEnabled ||
@@ -85,6 +131,16 @@ export function useAppShellDesktopNotifications({
         content: event.content,
       });
 
+      // Sound is independent of OS toast delivery — WebKitGTK / permission
+      // failures must not mute the chosen alert (block/buzz#2562).
+      if (shouldPlayNotificationSound(channel.id, silentChannelIds)) {
+        void playNotificationSound(
+          resolveSlotSound(notificationSettings, "dm"),
+        );
+      }
+      if (delivery?.suppressDesktopToast) {
+        return;
+      }
       void sendDesktopNotification({
         title,
         body,
@@ -94,16 +150,17 @@ export function useAppShellDesktopNotifications({
         }),
       }).then((didSend) => {
         if (!didSend) return;
-        if (shouldPlayNotificationSound(channel.id, silentChannelIds)) {
-          playNotificationSound(resolveSlotSound(notificationSettings, "dm"));
-        }
         void requestDockBounce();
       });
     },
   );
 
   const handleThreadReplyDesktopNotification = React.useEffectEvent(
-    (channelId: string, event: RelayEvent) => {
+    (
+      channelId: string,
+      event: RelayEvent,
+      delivery?: { suppressDesktopToast?: boolean },
+    ) => {
       if (!enabled) return;
       if (
         !notificationSettings.desktopEnabled ||
@@ -128,6 +185,14 @@ export function useAppShellDesktopNotifications({
         content: event.content,
       });
 
+      if (shouldPlayNotificationSound(channelId, silentChannelIds)) {
+        void playNotificationSound(
+          resolveSlotSound(notificationSettings, "thread_reply"),
+        );
+      }
+      if (delivery?.suppressDesktopToast) {
+        return;
+      }
       void sendDesktopNotification({
         title,
         body,
@@ -137,11 +202,6 @@ export function useAppShellDesktopNotifications({
         }),
       }).then((didSend) => {
         if (!didSend) return;
-        if (shouldPlayNotificationSound(channelId, silentChannelIds)) {
-          playNotificationSound(
-            resolveSlotSound(notificationSettings, "thread_reply"),
-          );
-        }
         void requestDockBounce();
       });
     },

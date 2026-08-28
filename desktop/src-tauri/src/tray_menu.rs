@@ -2,9 +2,12 @@
 //!
 //! The webview owns the live agent-turn state. It sends the small display
 //! projection here so the native menu can remain useful while Buzz is hidden.
+//! Closing the main window hides to this tray instead of quitting, so Linux
+//! and Windows stay running for live notifications.
 
-// Mouse back/forward (X1/X2 buttons and swipe) is also macOS-only native I/O;
+// Mouse back/forward (X1/X2 buttons and swipe) is macOS-only native I/O;
 // group it here so both platform-layer init paths share one call site in lib.rs.
+#[cfg(target_os = "macos")]
 #[path = "mouse_nav.rs"]
 pub(crate) mod mouse_nav;
 
@@ -234,6 +237,20 @@ pub(crate) fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     }
     if let Err(error) = window.set_focus() {
         eprintln!("buzz-desktop: failed to focus main window from tray: {error}");
+    }
+}
+
+/// Intercept the main window close button: hide instead of tearing down the
+/// webview so live alerts and the tray icon keep working.
+pub(crate) fn hide_main_window_to_tray<R: Runtime>(
+    app: &AppHandle<R>,
+    api: &tauri::CloseRequestApi,
+) {
+    api.prevent_close();
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(error) = window.hide() {
+            eprintln!("buzz-desktop: failed to hide main window: {error}");
+        }
     }
 }
 
@@ -486,15 +503,36 @@ pub fn init<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             pending_actions: Vec::new(),
         }),
     });
-    let tray = TrayIconBuilder::with_id(TRAY_ID)
+    let tray_builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .icon(tray_bee_icon())
-        .icon_as_template(true)
-        .on_menu_event(|app, event| handle_menu_event(app, event.id.as_ref()))
-        .build(app)?;
+        .tooltip("Buzz")
+        .on_menu_event(|app, event| handle_menu_event(app, event.id.as_ref()));
+    #[cfg(target_os = "macos")]
+    let tray_builder = tray_builder.icon_as_template(true);
+    #[cfg(not(target_os = "macos"))]
+    let tray_builder = tray_builder
+        .show_menu_on_left_click(false)
+        .on_tray_icon_event(|tray, event| {
+            use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
+            match event {
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                }
+                | TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    ..
+                } => show_main_window(tray.app_handle()),
+                _ => {}
+            }
+        });
+    let tray = tray_builder.build(app)?;
     if let Err(error) = apply_activity_presentation(&tray, activities, recent_activities) {
         eprintln!("buzz-desktop: failed to apply tray menu presentation: {error}");
     }
+    #[cfg(target_os = "macos")]
     mouse_nav::init(app);
     Ok(())
 }

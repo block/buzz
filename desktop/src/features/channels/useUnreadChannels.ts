@@ -424,7 +424,11 @@ export function useUnreadChannels(
     [observedPersistence],
   );
   const handleChannelMessage = React.useCallback(
-    (channelId: string, event: RelayEvent) => {
+    (
+      channelId: string,
+      event: RelayEvent,
+      delivery?: { suppressDesktopToast?: boolean },
+    ) => {
       const channel = channelsRef.current.find((ch) => ch.id === channelId);
       const isHighPriority =
         channel?.channelType === "dm" ||
@@ -444,8 +448,7 @@ export function useUnreadChannels(
           isThreadedReply,
         }),
       );
-      // Fence latestByChannelRef on the scope guard — a stale live callback
-      // during A→B drift must not write A's timestamp into B's hydrated ref.
+      // Fence latestByChannelRef so a stale live callback cannot write across scopes.
       const scopeOk = observedPersistence.isScopeLoaded();
       const current = observedPersistence.latestForChannel(channelId) ?? 0;
       if (
@@ -459,20 +462,17 @@ export function useUnreadChannels(
         bumpLatestVersion();
       }
 
-      // A mention on a reply makes its thread badge-eligible even when the
-      // user never participated/authored/followed (the gate's missing term).
+      // A mention on a reply makes its thread badge-eligible without prior interest.
       if (recordMentionedRoot(event)) {
         bumpMembershipVersion();
       }
 
-      // A high-priority event can be older than the channel's latest observed
-      // normal unread, so it may not advance latestByChannelRef. Still bump so
-      // highPriorityUnreadChannelIds re-reads the per-event priority flag.
+      // Older high-priority events still need a bump so the badge re-reads priority.
       if (isHighPriority) {
         bumpLatestVersion();
       }
 
-      callerOnChannelMessage?.(channelId, event);
+      callerOnChannelMessage?.(channelId, event, delivery);
     },
     [
       callerOnChannelMessage,

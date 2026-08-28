@@ -18,6 +18,7 @@ import 'thread_follows/thread_follows_provider.dart';
 import 'unread_badge/is_high_priority_event.dart';
 import 'unread_badge/observed_unread_event.dart';
 import 'unread_badge/should_notify_for_event.dart';
+import '../../shared/notifications/message_alerts.dart';
 
 part 'channel_directory.dart';
 part 'channels_provider_lifecycle.dart';
@@ -28,7 +29,6 @@ const _participatedRootIdsPrefix = 'buzz-thread-participation.v1';
 const _authoredRootIdsPrefix = 'buzz-thread-authored.v1';
 
 /// Loads the user's channel list from the relay over WebSocket.
-///
 /// Membership loading resolves kind:39002 events tagged `#p:<my-pubkey>`,
 /// then fetches kind:39000 metadata for those channel ids.
 ///
@@ -807,7 +807,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
             mutedChannelIds: mutedChannelIds,
             channelId: channel.id,
           )) {
-        _recordUnreadEvent(channel, event, myPk);
+        _recordUnreadEvent(channel, event, myPk, fromLive: true);
         final eventTime = DateTime.fromMillisecondsSinceEpoch(
           event.createdAt * 1000,
           isUtc: true,

@@ -105,12 +105,14 @@ export function useReminderNotifications(
           )
         : `${due.length} reminders are due`;
 
+    // Sound is independent of OS toast delivery — WebKitGTK / permission
+    // failures must not mute the chosen alert (block/buzz#2562).
+    void playNotificationSound(resolveSlotSound(current, "needs_action"));
     void sendDesktopNotification({
       title: formatNotificationTitle({ prefix: "Reminder due", channelLabel }),
       body,
     }).then((didSend) => {
       if (!didSend) return;
-      playNotificationSound(resolveSlotSound(current, "needs_action"));
       void requestDockBounce();
     });
   });

@@ -29,6 +29,7 @@ import 'features/settings/settings_page.dart';
 import 'shared/auth/auth.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
+import 'shared/notifications/message_alerts.dart';
 import 'shared/relay/relay.dart';
 import 'shared/read_state/read_state_provider.dart';
 import 'shared/theme/theme.dart';
@@ -346,6 +347,12 @@ class App extends HookConsumerWidget {
       applyBadge(ref.read(unreadBadgeProvider));
       return null;
     }, const []);
+    useEffect(() {
+      if (authState.value?.status != AuthStatus.authenticated) return null;
+      if (!ref.read(notificationPreferencesProvider).allMessages) return null;
+      unawaited(MessageAlerts.requestPermission());
+      return null;
+    }, [authState.value?.status]);
     ref.listen<UnreadBadgeState>(unreadBadgeProvider, (_, next) {
       applyBadge(next);
     });

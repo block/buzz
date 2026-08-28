@@ -2,6 +2,7 @@ import type { RelayEvent } from "@/shared/api/types";
 import {
   getThreadReference,
   isBroadcastReply,
+  isThreadReply,
 } from "@/features/messages/lib/threading";
 
 export function hasMentionForEvent(
@@ -91,4 +92,21 @@ export function isHighPriorityEventForUser(
     return true;
   }
   return false;
+}
+
+/**
+ * Whether a live channel event should use the All messages alert slot.
+ *
+ * DMs, @mentions, and thread replies have their own rows — firing this slot
+ * for them would double-ding.
+ */
+export function shouldAlertForAllMessages(
+  event: RelayEvent,
+  currentPubkey: string,
+  channelType?: string | null,
+): boolean {
+  if (channelType === "dm") return false;
+  if (isThreadReply(event.tags)) return false;
+  if (hasMentionForEvent(event, currentPubkey)) return false;
+  return true;
 }
