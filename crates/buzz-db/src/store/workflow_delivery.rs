@@ -1,12 +1,14 @@
 //! Atomic workflow output persistence and captured-revision reads.
 use crate::{event, insert_mentions_in_transaction, Db, Result};
 use buzz_core::{tenant::CommunityId, StoredEvent};
+use buzz_datastore_tracing::datastore_span;
 use uuid::Uuid;
 
 impl Db {
     /// Atomically persist a visible event, its thread metadata/mentions, and all
     /// required notifications. No caller may publish any row until this commits.
     /// Cancellation or any insert failure rolls the entire bundle back.
+    #[datastore_span(name = "insert_event_with_notifications", system = "postgresql")]
     pub async fn insert_event_with_notifications(
         &self,
         community_id: CommunityId,
@@ -47,6 +49,7 @@ impl Db {
     }
 
     /// Read a captured workflow definition without reviving explicitly deleted revisions.
+    #[datastore_span(name = "get_workflow_revision", system = "postgresql")]
     pub async fn get_workflow_revision(
         &self,
         community_id: CommunityId,
