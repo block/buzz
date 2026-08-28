@@ -8,6 +8,13 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 export const STARTUP_CHANGELOG: StartupChangelogEntry[] = [
   {
+    date: "2026-08-28",
+    items: [
+      "修复旧 Community 与 WebView 状态可能导致 Buzz 启动后一直加载的问题。",
+      "修复公网 Community 的 HTTP 请求错误回退到 LAN Host、导致频道不可用的问题。",
+    ],
+  },
+  {
     date: "2026-08-27",
     items: [
       "诊断版本：撤回 182519d9 的连接相关改动，同时恢复 LAN HTTP fallback，用于验证断连问题来源。",

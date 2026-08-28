@@ -73,14 +73,6 @@ pub fn relay_media_base_urls(state: &AppState) -> Vec<String> {
     urls
 }
 
-/// Returns HTTP bases for the active workspace, ordered by preferred public
-/// address followed by the optional LAN address. Callers use this list for
-/// connectivity fallback while keeping the public URL authoritative when it
-/// is reachable.
-pub fn relay_http_base_urls(state: &AppState) -> Vec<String> {
-    relay_media_base_urls(state)
-}
-
 /// Selects the relay a managed agent should use for a relay operation.
 ///
 /// Always the active workspace relay. The legacy per-record `relay_url` pin is
@@ -361,18 +353,12 @@ pub async fn query_relay(
     state: &AppState,
     filters: &[serde_json::Value],
 ) -> Result<Vec<nostr::Event>, String> {
-    let bases = relay_http_base_urls(state);
-    let mut last_error = None;
-    for (index, base) in bases.iter().enumerate() {
-        match query_relay_at(state, base, filters).await {
-            Ok(events) => return Ok(events),
-            Err(error) if index + 1 < bases.len() && error.starts_with("relay unreachable:") => {
-                last_error = Some(error);
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Err(last_error.unwrap_or_else(|| "relay unreachable: could not connect to relay".to_string()))
+    // HTTP bridge requests are tenant-bound by both the request Host and the
+    // NIP-98 `u` tag. The optional LAN URL is only a transport alias: sending
+    // `/query` directly to that authority would select a different community.
+    // Keep HTTP on the canonical relay; native WebSocket transport preserves
+    // the canonical Host when it dials the LAN endpoint.
+    query_relay_at(state, &relay_api_base_url_with_override(state), filters).await
 }
 
 /// Like [`query_relay`] but targets an explicit HTTP API base URL instead of
