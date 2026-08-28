@@ -2,9 +2,8 @@ part of '../theme_picker_page.dart';
 
 /// A compact preview container holding complete Home and Chat device frames.
 ///
-/// The outer card follows Signal's compact preview footprint. The inner
-/// Each 393 x 852 frame uses `contain`, keeping both complete devices in view
-/// with breathing room instead of filling the card.
+/// Each 393 x 852 frame uses `contain` within the compact outer card, keeping
+/// both complete devices in view with breathing room instead of filling it.
 class _ThemeHomePreview extends StatelessWidget {
   const _ThemeHomePreview({
     required this.colorScheme,
