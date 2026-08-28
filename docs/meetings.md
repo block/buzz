@@ -97,3 +97,77 @@ the client's LiveKit SDK to the LiveKit SFU using the `token` + `url` from
 | `POST /meetings/room/notify-lock` | `POST /api/room/notify-lock` | LiveKit JWT |
 | `POST /meetings/room/mute-on-join` | `POST /api/room/mute-on-join` | LiveKit JWT |
 | `POST /meetings/room/audience-mode` | `POST /api/room/audience-mode` | LiveKit JWT |
+
+## Desktop client
+
+The desktop side (Phases 2–6) is gated behind the **`meetings` preview feature**.
+It only appears when **both** are true:
+
+1. The connected community relay advertises the `buzz-meetings` extension in its
+   NIP-11 `supported_extensions` (i.e. the operator set `BUZZ_HIVETALK_API_ROOT`).
+2. The user has enabled **Meetings** under Settings → Preview features.
+
+If the relay does not advertise the capability, the Meetings screen shows an
+"unavailable on this community" state and the channel **Start meeting** button is
+hidden even with the preview flag on.
+
+### Entry points
+
+- **Sidebar → Meetings** — opens the Meetings screen: the room list for the
+  current community plus a **Start a meeting** form.
+- **Channel header → Start meeting** (video icon, next to Buzz Term) — non-DM
+  channels only. Deep-links to `/#/meetings?room=<derived>&action=start` with the
+  room name pre-derived from the channel (normalized name + short id suffix,
+  clamped to 64 chars) and the start form focused. Joiners find the live room in
+  the list rather than being auto-joined, so room registration stays host-driven.
+
+### Hosting a meeting
+
+1. Open the start form, confirm the room name, **Start meeting**.
+2. The client signs a kind-27235 `create-room` event and calls
+   `POST /meetings/register-room` through the relay proxy.
+3. If you have no active HiveTalk subscription the call returns `402` and the
+   **Subscribe** dialog opens:
+   - plans are fetched from `GET /meetings/plans`;
+   - picking a plan signs a `subscribe` event, posts `POST /meetings/subscribe`,
+     and shows the BOLT11 invoice (copy button + QR + live expiry countdown);
+   - the client polls `GET /meetings/payment/status?id=<intent_id>` every ~3 s
+     (read-only, not metered) until `settled`, then closes the dialog and
+     **auto-retries** `register-room`.
+4. On success the client mints a LiveKit token via `POST /meetings/get-token`
+   and mounts the call view (`action=join`).
+
+### In the call
+
+- Camera / mic toggles, device pickers, leave.
+- Host controls (shown when the caller holds the owner LiveKit JWT): lock room,
+  mute-on-join, mute / kick a participant, promote / demote stage & moderator,
+  audience mode. Moderation calls invalidate the **room lists only** — never the
+  `["meetings"]` root — so a lock/kick/mute does not re-mint the host's own token
+  and drop their call.
+
+### Failure states the UI handles
+
+| Upstream | UI |
+|----------|-----|
+| `402 subscription_required` / `subscription_expired` | Subscribe dialog |
+| `403 room_not_registered` | "ephemeral rooms are dashboard-only" explainer |
+| `401` | signature-freshness / nonce error, retryable |
+| `409 pending_invoice` | re-show the existing invoice |
+| `5xx` on the payment poll | give up after 5 consecutive failures |
+| `503` | retry with backoff |
+
+### Operator notes
+
+- Nothing to configure on the desktop beyond the relay env var; the client
+  feature-detects.
+- The relay proxy adds no HiveTalk credential and stores no meeting state — see
+  "No credential" above.
+- The `meeting_actions_per_min` bucket (default 10/min per pubkey) covers
+  subscribe / register-room / room-edit / room-delete / get-token / moderation.
+  The invoice poll is deliberately excluded; raising the limit is rarely needed.
+
+### Changelog
+
+Release changelog entries are generated from the merged PR at release time; no
+manual `CHANGELOG.md` edit is required for this feature.
