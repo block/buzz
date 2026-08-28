@@ -1469,6 +1469,8 @@ fn format_context_hints(
             if let Some(event_id) = reply_anchor {
                 append_reply_instruction(&mut s, event_id);
             }
+        } else if let Some(event_id) = reply_anchor {
+            append_new_thread_reply_instruction(&mut s, event_id);
         }
         crate::prompt_framing::semantic_section("context", &s)
     } else if let Some(ref root) = thread_tags.root_event_id {
@@ -1824,10 +1826,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     // there. DMs are always 1:1 with a human, so they always anchor.
     let sender_pubkey = last_event.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
+        Some(last_event.event.id.to_hex())
     } else {
         resolve_reply_anchor(
             &sender_pubkey,
@@ -4816,9 +4815,10 @@ mod tests {
     }
 
     #[test]
-    fn test_reply_instruction_absent_for_dm_non_reply() {
+    fn test_reply_instruction_present_for_top_level_dm() {
         let ch = Uuid::new_v4();
         let event = make_event("hey there");
+        let event_id = event.id.to_hex();
         let batch = FlushBatch {
             channel_id: ch,
             events: vec![BatchEvent {
@@ -4845,8 +4845,12 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            !prompt.contains("--reply-to"),
-            "DM non-reply should NOT include reply instruction"
+            prompt.contains(&format!("--reply-to {event_id}")),
+            "top-level DM should anchor the reply to the triggering event"
+        );
+        assert!(
+            prompt.contains("new top-level message"),
+            "top-level DM should use the new-thread instruction"
         );
     }
 
