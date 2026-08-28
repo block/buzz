@@ -732,6 +732,10 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
             return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
         }
     };
+    delivery_outcome_response(outcome, grant.generation)
+}
+
+fn delivery_outcome_response(outcome: DeliveryOutcome, generation: i64) -> Response {
     match outcome {
         DeliveryOutcome::Accepted => {
             (StatusCode::OK, Json(DeliveryResponse::Accepted)).into_response()
@@ -739,7 +743,7 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
         DeliveryOutcome::InvalidEndpoint { unregistered_at } => (
             StatusCode::GONE,
             Json(DeliveryResponse::InvalidEndpoint {
-                generation: grant.generation,
+                generation,
                 invalid_at: unregistered_at,
             }),
         )
@@ -928,6 +932,24 @@ mod request_limit_tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn ambiguous_apns_profile_failures_remain_retryable_at_the_relay_boundary() {
+        for reason in ["BadDeviceToken", "DeviceTokenNotForTopic"] {
+            let outcome = crate::apns::classify(400, Some(reason), None);
+            assert_eq!(outcome, DeliveryOutcome::ConfigurationFault);
+            assert_eq!(
+                delivery_outcome_response(outcome, 7).status(),
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+        }
+
+        let outcome = crate::apns::classify(410, Some("Unregistered"), Some(42));
+        assert_eq!(
+            delivery_outcome_response(outcome, 7).status(),
+            StatusCode::GONE
+        );
     }
 }
 

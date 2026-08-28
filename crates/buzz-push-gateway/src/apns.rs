@@ -37,10 +37,12 @@ pub fn classify(code: u16, reason: Option<&str>, timestamp: Option<i64>) -> Deli
         (410, Some("Unregistered")) => DeliveryOutcome::InvalidEndpoint {
             unregistered_at: timestamp,
         },
+        // Both reasons are ambiguous with deployment profile mistakes: APNs
+        // uses BadDeviceToken for environment mismatches and
+        // DeviceTokenNotForTopic for topic mismatches. Only Unregistered
+        // crosses the permanent endpoint-invalidation boundary.
         (400, Some("BadDeviceToken" | "DeviceTokenNotForTopic")) => {
-            DeliveryOutcome::InvalidEndpoint {
-                unregistered_at: None,
-            }
+            DeliveryOutcome::ConfigurationFault
         }
         (403, _) | (429, Some("TooManyProviderTokenUpdates")) => {
             DeliveryOutcome::ConfigurationFault
@@ -365,6 +367,12 @@ mod tests {
         for reason in ["InvalidProviderToken", "ExpiredProviderToken"] {
             assert_eq!(
                 classify(403, Some(reason), None),
+                DeliveryOutcome::ConfigurationFault
+            );
+        }
+        for reason in ["BadDeviceToken", "DeviceTokenNotForTopic"] {
+            assert_eq!(
+                classify(400, Some(reason), None),
                 DeliveryOutcome::ConfigurationFault
             );
         }
