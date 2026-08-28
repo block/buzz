@@ -2131,6 +2131,52 @@ async fn handle_leave_request(
 
 /// Handle NIP-09 deletion via `a` tag (addressable/parameterized-replaceable events).
 /// Parses "kind:pubkey:d-tag" and deletes the corresponding DB record.
+/// Tombstone the kind:30620 workflow-definition event row for the coordinate
+/// `(30620, pubkey, d_tag)` so REQ-based readers (`workflows list`/`get`, Buzz
+/// Desktop) stop returning a deleted workflow — the same soft-delete the
+/// generic NIP-33 branch performs for every other addressable kind. The
+/// execution-side `workflows` row is removed separately; without this the two
+/// stores disagree and deleted workflows keep appearing (issue #6986).
+async fn soft_delete_workflow_def_event(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    pubkey_hex: &str,
+    d_tag: &str,
+    deletion: &Event,
+) -> anyhow::Result<()> {
+    let pubkey_bytes = hex::decode(pubkey_hex)
+        .map_err(|e| anyhow::anyhow!("invalid pubkey hex in a-tag {pubkey_hex}: {e}"))?;
+    // Safe cast: 30620 is well within i32.
+    let kind_i32 = buzz_core::kind::KIND_WORKFLOW_DEF as i32;
+    let deleted = state
+        .db
+        .soft_delete_by_coordinate(
+            tenant.community(),
+            kind_i32,
+            &pubkey_bytes,
+            d_tag,
+            deletion.created_at.as_secs() as i64,
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "failed to soft-delete by coordinate {kind_i32}:{pubkey_hex}:{d_tag}: {e}"
+            )
+        })?;
+    if deleted {
+        tracing::info!(
+            d_tag = d_tag,
+            "NIP-09 a-tag deletion: soft-deleted workflow definition event"
+        );
+    } else {
+        tracing::debug!(
+            d_tag = d_tag,
+            "NIP-09 a-tag deletion: no live workflow definition event matched coordinate"
+        );
+    }
+    Ok(())
+}
+
 async fn handle_a_tag_deletion(
     tenant: &TenantContext,
     event: &Event,
@@ -2160,7 +2206,10 @@ async fn handle_a_tag_deletion(
             tracing::debug!(d_tag, "NIP-09 deletion ignored for push lease");
         }
         buzz_core::kind::KIND_WORKFLOW_DEF => {
+            // Bespoke deletion of the execution-side `workflows` row first.
             // Try UUID first (workflow_id); fall back to name-based lookup.
+            // A repeat delete finds no row — that's an idempotent no-op, not
+            // an error (issue #6986).
             if let Ok(wf_id) = uuid::Uuid::parse_str(d_tag) {
                 let channel_id = state
                     .db
@@ -2171,10 +2220,15 @@ async fn handle_a_tag_deletion(
                     state
                         .workflow_engine
                         .invalidate_channel_workflows(tenant.community(), channel_id);
+                    tracing::info!(workflow_id = %wf_id, "Workflow deleted via NIP-09 a-tag (UUID)");
+                } else {
+                    tracing::debug!(workflow_id = %wf_id, "NIP-09 a-tag deletion: no workflows row matched (already deleted or not owned)");
                 }
-                tracing::info!(workflow_id = %wf_id, "Workflow deleted via NIP-09 a-tag (UUID)");
+                soft_delete_workflow_def_event(tenant, state, pubkey_hex, d_tag, event).await?;
             } else {
-                // Name-based lookup
+                // Name-based lookup. The kind:30620 definition event's d-tag
+                // is the workflow UUID, so tombstone the coordinate resolved
+                // from the name — the raw name coordinate matches no event row.
                 match state
                     .db
                     .find_workflow_by_owner_and_name(tenant.community(), &actor_bytes, d_tag)
@@ -2194,6 +2248,14 @@ async fn handle_a_tag_deletion(
                                 .invalidate_channel_workflows(tenant.community(), channel_id);
                         }
                         tracing::info!(workflow_id = %wf.id, name = d_tag, "Workflow deleted via NIP-09 a-tag (name)");
+                        soft_delete_workflow_def_event(
+                            tenant,
+                            state,
+                            pubkey_hex,
+                            &wf.id.to_string(),
+                            event,
+                        )
+                        .await?;
                     }
                     Ok(None) => {
                         tracing::warn!(
@@ -2208,10 +2270,10 @@ async fn handle_a_tag_deletion(
         }
         // Generic NIP-33 (parameterized-replaceable) soft-delete by coordinate.
         //
-        // Listed after the workflow branch so workflow's bespoke deletion
-        // (which doesn't soft-delete the `events` row by design — that's a
-        // separate concern) takes precedence. For every other addressable
-        // kind, including kind:30023 (NIP-23 long-form), we soft-delete the
+        // Listed after the workflow branch, whose bespoke deletion also
+        // removes the execution-side `workflows` row before tombstoning the
+        // events row. For every other addressable kind, including kind:30023
+        // (NIP-23 long-form), we soft-delete the
         // live row matching `(kind, pubkey, d_tag)` so REQs stop returning it.
         // See https://github.com/block/sprout/issues/714.
         k if is_parameterized_replaceable(k) => {

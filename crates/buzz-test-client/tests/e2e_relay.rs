@@ -2767,6 +2767,153 @@ async fn test_workflow_reply_in_thread_pushes_live_thread_summary() {
     ws.disconnect().await.expect("disconnect");
 }
 
+/// NIP-09 a-tag deletion of a workflow definition: a kind:5 targeting the
+/// addressable coordinate `30620:<pubkey>:<workflow-uuid>` must tombstone the
+/// kind:30620 event row so subsequent REQs (the path `buzz workflows
+/// list`/`get` and Buzz Desktop read) no longer return it — matching what the
+/// execution-side workflows table already does. A repeated deletion of the
+/// same coordinate must stay accepted (idempotent no-op), and the definition
+/// must remain absent.
+///
+/// Regression test for issue #6986 — before the fix, the workflow branch of
+/// `handle_a_tag_deletion` removed only the execution-side workflows row and
+/// skipped the events-row soft-delete the generic NIP-33 branch performs, so
+/// deleted workflows kept appearing in list/get and the desktop UI.
+#[tokio::test]
+#[ignore]
+async fn test_workflow_a_tag_deletion_tombstones_definition() {
+    let url = relay_url();
+    let http = relay_http_url();
+    let keys = Keys::generate();
+    let pubkey_hex = keys.public_key().to_hex();
+    let channel = create_test_channel(&keys).await;
+
+    // Publish a workflow definition (kind:30620, d = workflow UUID).
+    let workflow_id = Uuid::new_v4().to_string();
+    let yaml = "name: doomed-workflow\n\
+         description: issue 6986 probe\n\
+         trigger:\n\
+         \x20 on: message_posted\n\
+         steps:\n\
+         \x20 - id: step1\n\
+         \x20   name: Reply\n\
+         \x20   action: send_message\n\
+         \x20   text: \"never fires\"\n"
+        .to_string();
+    let def = EventBuilder::new(Kind::Custom(30620), yaml)
+        .tags([
+            Tag::parse(["d", &workflow_id]).unwrap(),
+            Tag::parse(["h", channel.as_str()]).unwrap(),
+            Tag::parse(["name", "doomed-workflow"]).unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .expect("sign workflow def");
+    let http_client = reqwest::Client::new();
+    let resp = http_client
+        .post(format!("{http}/events"))
+        .header("X-Pubkey", &pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&def).unwrap())
+        .send()
+        .await
+        .expect("submit workflow def");
+    let body: serde_json::Value = resp.json().await.expect("parse def response");
+    assert!(
+        body["accepted"].as_bool().unwrap_or(false),
+        "workflow def not accepted: {body}"
+    );
+
+    // Sanity check: the definition is queryable before deletion, the same
+    // filter shape `buzz workflows get` uses (kind + d-tag).
+    let mut ws = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+    let sid_pre = sub_id("wf-del-pre");
+    let filter_pre = Filter::new().kind(Kind::Custom(30620)).custom_tag(
+        SingleLetterTag::lowercase(Alphabet::D),
+        workflow_id.as_str(),
+    );
+    ws.subscribe(&sid_pre, vec![filter_pre])
+        .await
+        .expect("subscribe pre");
+    let pre = ws
+        .collect_until_eose(&sid_pre, Duration::from_secs(5))
+        .await
+        .expect("collect pre");
+    assert!(
+        pre.iter().any(|e| e.id == def.id),
+        "workflow def should be queryable before deletion"
+    );
+
+    // kind:5 deletion targeting the addressable coordinate.
+    let a_coord = format!("30620:{}:{}", pubkey_hex, workflow_id);
+    let del = EventBuilder::new(Kind::EventDeletion, "")
+        .tags(vec![Tag::parse(["a", &a_coord]).unwrap()])
+        .sign_with_keys(&keys)
+        .unwrap();
+    let ok_del = ws.send_event(del).await.expect("send deletion");
+    assert!(
+        ok_del.accepted,
+        "a-tag deletion should be accepted: {}",
+        ok_del.message
+    );
+
+    // The definition must no longer be returned by REQ.
+    let sid_post = sub_id("wf-del-post");
+    let filter_post = Filter::new().kind(Kind::Custom(30620)).custom_tag(
+        SingleLetterTag::lowercase(Alphabet::D),
+        workflow_id.as_str(),
+    );
+    ws.subscribe(&sid_post, vec![filter_post])
+        .await
+        .expect("subscribe post");
+    let post = ws
+        .collect_until_eose(&sid_post, Duration::from_secs(5))
+        .await
+        .expect("collect post");
+    assert!(
+        post.is_empty(),
+        "a-tag deletion should remove the workflow def from REQ results (got {} events)",
+        post.len()
+    );
+
+    // Repeat the deletion — must stay accepted (idempotent no-op), and the
+    // definition must remain absent. A distinct `created_at` gives the event
+    // a distinct id; otherwise the relay dedups it and the idempotent
+    // side-effect path is never exercised.
+    let del_again = EventBuilder::new(Kind::EventDeletion, "")
+        .tags(vec![Tag::parse(["a", &a_coord]).unwrap()])
+        .custom_created_at(nostr::Timestamp::now() + 1)
+        .sign_with_keys(&keys)
+        .unwrap();
+    let ok_again = ws
+        .send_event(del_again)
+        .await
+        .expect("send repeat deletion");
+    assert!(
+        ok_again.accepted,
+        "repeated a-tag deletion should stay accepted: {}",
+        ok_again.message
+    );
+
+    let sid_final = sub_id("wf-del-final");
+    let filter_final = Filter::new().kind(Kind::Custom(30620)).custom_tag(
+        SingleLetterTag::lowercase(Alphabet::D),
+        workflow_id.as_str(),
+    );
+    ws.subscribe(&sid_final, vec![filter_final])
+        .await
+        .expect("subscribe final");
+    let final_events = ws
+        .collect_until_eose(&sid_final, Duration::from_secs(5))
+        .await
+        .expect("collect final");
+    assert!(
+        final_events.is_empty(),
+        "workflow def must remain absent after repeated deletion"
+    );
+
+    ws.disconnect().await.expect("disconnect");
+}
+
 /// Read a member's authoritative role from the relay-signed kind:39002 member
 /// list. The relay's own view of membership, not the client's — a kind:9000 can
 /// be `accepted` (stored) while its membership side effect fails, so asserting
