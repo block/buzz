@@ -313,8 +313,10 @@ mod path_cache_race_tests {
     /// A probe that started before a refresh must not recache its stale result.
     /// Models the P1 interleaving: probe A captures generation G; a forced
     /// refresh bumps to G+1 and (via probe B) commits a fresh PATH; then A
-    /// finishes late with a false-negative `None`. A's publish must be dropped
-    /// because its generation is stale, leaving B's fresh value intact.
+    /// finishes late and tries to publish. A publishes a non-empty *success*
+    /// (`/stale/bin`), which the same-generation `None`-over-`Some` rule would
+    /// accept — so only the generation guard can reject it. This keeps the test
+    /// non-vacuous: delete the generation comparison and stale overwrites fresh.
     #[test]
     fn stale_probe_cannot_commit_after_refresh() {
         let _guard = crate::managed_agents::lock_path_mutex();
@@ -330,9 +332,10 @@ mod path_cache_race_tests {
         assert_ne!(gen_a, gen_b, "refresh must bump the generation");
         publish_probe_result(gen_b, Some("/fresh/bin".to_string()));
 
-        // Probe A finishes late with a false-negative and tries to publish
-        // under its stale generation.
-        publish_probe_result(gen_a, None);
+        // Probe A finishes late and tries to publish a *stale success* under
+        // its old generation. Only the generation guard can reject this — the
+        // same-generation success-retention rule would let a `Some` through.
+        publish_probe_result(gen_a, Some("/stale/bin".to_string()));
 
         assert_eq!(
             cached_probe(),
