@@ -165,7 +165,6 @@ export function useRichTextEditor({
   onLinkShortcut,
 }: RichTextEditorOptions) {
   const addressedAgentMentionNamesRef = React.useRef<readonly string[]>([]);
-  const [isFocused, setIsFocused] = React.useState(false);
   const onUpdateRef = React.useRef(onUpdate);
   onUpdateRef.current = onUpdate;
   const onSubmitRef = React.useRef(onSubmit);
@@ -597,8 +596,6 @@ export function useRichTextEditor({
           buildPreviewUpdate(ed.state.doc, ed.state.selection.anchor),
         );
       },
-      onFocus: () => setIsFocused(true),
-      onBlur: () => setIsFocused(false),
     },
     [],
   );
@@ -935,7 +932,6 @@ export function useRichTextEditor({
 
   return {
     editor,
-    isFocused,
     getMarkdown,
     isEmpty,
     clearContent,

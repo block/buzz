@@ -38,12 +38,14 @@ type MentionAutocompleteProps = {
   suggestions: MentionSuggestion[];
   selectedIndex: number;
   /**
-   * Whether the owning composer's editor holds focus. The focus gate lives
-   * here rather than in each composer so a background composer replaying a
-   * stale update (e.g. a shared mid-send disabled toggle) can't resurrect
-   * its suggestion overlay.
+   * Whether the owning composer owns document focus — its editor or this
+   * overlay's own controls (see useComposerFocusOwnership). The focus gate
+   * lives here rather than in each composer so a background composer
+   * replaying a stale update (e.g. a shared mid-send disabled toggle) can't
+   * resurrect its suggestion overlay, while keyboard focus moving into the
+   * Options controls keeps the overlay mounted.
    */
-  isEditorFocused: boolean;
+  composerOwnsFocus: boolean;
   onFetchMore?: () => void;
   onSelect: (suggestion: MentionSuggestion) => void;
   lockedAgentPubkeys?: ReadonlySet<string>;
@@ -63,10 +65,27 @@ export function showMentionAgentProvenanceMarker(
   return hasNameCollision && suggestion.agentProvenance === "managed-elsewhere";
 }
 
+/**
+ * Move keyboard focus to the mention overlay's Options trigger inside
+ * `container` (the composer form). Returns false when the trigger isn't
+ * rendered — overlay closed, or a composer without audience controls — so
+ * the caller can leave the key event to its default behavior.
+ */
+export function focusMentionOptionsTrigger(
+  container: HTMLElement | null,
+): boolean {
+  const trigger = container?.querySelector<HTMLElement>(
+    "[data-mention-options-trigger]",
+  );
+  if (!trigger) return false;
+  trigger.focus();
+  return true;
+}
+
 export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   suggestions,
   selectedIndex,
-  isEditorFocused,
+  composerOwnsFocus,
   onFetchMore,
   onSelect,
   lockedAgentPubkeys,
@@ -153,7 +172,27 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
     }
   }, [onFetchMore]);
 
-  if (!isEditorFocused || suggestions.length === 0) {
+  // Escape from inside the overlay is the keyboard counterpart of pressing
+  // outside it: hand focus back to the editor the overlay belongs to, then
+  // dismiss. Focusing first keeps the composer's focus ownership unbroken, so
+  // the overlay never unmounts with focus stranded on the document. Escape in
+  // the editor itself never reaches here — that path is the composer's own
+  // key handler.
+  const handleOverlayKeyDown = React.useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      rootRef.current
+        ?.closest("form")
+        ?.querySelector<HTMLElement>('[data-testid="message-input"]')
+        ?.focus();
+      onDismiss?.();
+    },
+    [onDismiss],
+  );
+
+  if (!composerOwnsFocus || suggestions.length === 0) {
     return null;
   }
 
@@ -167,12 +206,14 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   }
 
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: the overlay's own controls are the interactive elements; this listener only gives them the standard Escape-to-dismiss exit.
     <div
       className={cn(
         "absolute left-0 right-0 z-50 px-3 sm:px-4",
         position === "below" ? "top-full mt-1" : "bottom-full mb-1",
       )}
       data-testid="mention-autocomplete-layer"
+      onKeyDown={handleOverlayKeyDown}
       ref={rootRef}
     >
       <div className="w-full max-w-2xl">
@@ -246,6 +287,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 aria-controls={optionsId}
                 aria-expanded={optionsOpen}
                 className="flex h-8 w-full items-center justify-between gap-1 px-2.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-popover-foreground"
+                data-mention-options-trigger
                 data-testid="mention-options-trigger"
                 onClick={() => setOptionsOpen((open) => !open)}
                 onMouseDown={(event) => event.preventDefault()}

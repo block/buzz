@@ -25,6 +25,7 @@ import {
   takeQueuedAttachmentsForDraft,
   useBackgroundMediaUpload,
 } from "@/features/messages/lib/backgroundMediaUploadStore";
+import { useComposerFocusOwnership } from "@/features/messages/lib/useComposerFocusOwnership";
 import { isMentionCodeContext } from "@/features/messages/lib/mentionCodeContext";
 import { useMentions } from "@/features/messages/lib/useMentions";
 import {
@@ -48,6 +49,7 @@ import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
 import { cn } from "@/shared/lib/cn";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
 import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
+import { focusMentionOptionsTrigger } from "./MentionAutocomplete";
 import { MessageComposerAutocompletes } from "./MessageComposerAutocompletes";
 import { ComposerDockToolbar } from "./ComposerDockToolbar";
 import { ComposerUploadProgressPill } from "./ComposerUploadProgressPill";
@@ -246,6 +248,8 @@ function MessageComposerImpl({
     emojiAutocomplete.isEmojiAutocompleteOpen;
   const submitMessageRef = React.useRef<() => void>(() => {});
   const composerScrollRef = React.useRef<HTMLDivElement>(null);
+  const formRef = React.useRef<HTMLFormElement>(null);
+  const composerOwnsFocus = useComposerFocusOwnership(formRef);
   const onEditLinkRef = React.useRef<
     ((info: LinkSelectionInfo) => void) | null
   >(null);
@@ -720,6 +724,19 @@ function MessageComposerImpl({
         }
         return;
       }
+      // Shift+Tab is the keyboard route from the editor into the mention
+      // overlay's Options controls — forward Tab is consumed below to select
+      // the highlighted suggestion. Falls through (e.g. a composer with no
+      // audience controls) to the browser's native backward focus move.
+      if (
+        event.key === "Tab" &&
+        event.shiftKey &&
+        mentions.isMentionOpen &&
+        focusMentionOptionsTrigger(formRef.current)
+      ) {
+        event.preventDefault();
+        return;
+      }
       const { handled, suggestion } = mentions.handleMentionKeyDown(event, {
         isCodeContext: () => isMentionCodeContext(richText.editor),
       });
@@ -754,6 +771,7 @@ function MessageComposerImpl({
       applyEmojiInsert,
       channelLinks.handleChannelKeyDown,
       applyChannelInsert,
+      mentions.isMentionOpen,
       mentions.handleMentionKeyDown,
       richText.editor,
       selectMentionSuggestion,
@@ -836,6 +854,7 @@ function MessageComposerImpl({
             onSubmit={(event) => {
               handleSubmit(event);
             }}
+            ref={formRef}
           >
             {ownsDropZone && media.isDragOver && <DropZoneOverlay />}
             <MessageComposerAutocompletes
@@ -843,8 +862,8 @@ function MessageComposerImpl({
                 audienceScope && editTarget == null,
               )}
               channelLinks={channelLinks}
+              composerOwnsFocus={composerOwnsFocus}
               emojiAutocomplete={emojiAutocomplete}
-              isEditorFocused={richText.isFocused}
               keepMentionedAgentsPinned={keepMentionedAgentsPinned}
               lockedAgentPubkeys={lockedAgentPubkeys}
               mentions={mentions}

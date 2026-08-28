@@ -22,8 +22,8 @@ type MessageComposerAutocompletesProps = {
    */
   audienceControlsEnabled: boolean;
   channelLinks: UseChannelLinksResult;
+  composerOwnsFocus: boolean;
   emojiAutocomplete: UseEmojiAutocompleteResult;
-  isEditorFocused: boolean;
   keepMentionedAgentsPinned: boolean;
   lockedAgentPubkeys: ReadonlySet<string>;
   mentions: UseMentionsResult;
@@ -41,14 +41,16 @@ type MessageComposerAutocompletesProps = {
 
 /**
  * The message composer's three suggestion overlays. Each one gates its own
- * rendering on `isEditorFocused`, so a background composer replaying a stale
- * update cannot resurrect a suggestion menu over the focused composer.
+ * rendering on `composerOwnsFocus`, so a background composer replaying a
+ * stale update cannot resurrect a suggestion menu over the focused composer,
+ * while keyboard focus moving into an overlay's own controls keeps that
+ * overlay mounted.
  */
 export function MessageComposerAutocompletes({
   audienceControlsEnabled,
   channelLinks,
+  composerOwnsFocus,
   emojiAutocomplete,
-  isEditorFocused,
   keepMentionedAgentsPinned,
   lockedAgentPubkeys,
   mentions,
@@ -62,7 +64,7 @@ export function MessageComposerAutocompletes({
   return (
     <>
       <EmojiAutocomplete
-        isEditorFocused={isEditorFocused}
+        composerOwnsFocus={composerOwnsFocus}
         onSelect={onEmojiSelect}
         selectedIndex={emojiAutocomplete.emojiSelectedIndex}
         suggestions={
@@ -72,7 +74,7 @@ export function MessageComposerAutocompletes({
         }
       />
       <ChannelAutocomplete
-        isEditorFocused={isEditorFocused}
+        composerOwnsFocus={composerOwnsFocus}
         onSelect={onChannelSelect}
         selectedIndex={channelLinks.channelSelectedIndex}
         suggestions={
@@ -80,7 +82,7 @@ export function MessageComposerAutocompletes({
         }
       />
       <MentionAutocomplete
-        isEditorFocused={isEditorFocused}
+        composerOwnsFocus={composerOwnsFocus}
         keepMentionedAgentsPinned={keepMentionedAgentsPinned}
         lockedAgentPubkeys={lockedAgentPubkeys}
         openOptionsRequest={openOptionsRequest}

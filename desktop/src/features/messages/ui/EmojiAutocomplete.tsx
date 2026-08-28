@@ -16,10 +16,10 @@ type EmojiAutocompleteProps = {
   suggestions: EmojiSuggestion[];
   selectedIndex: number;
   /**
-   * Whether the owning composer's editor holds focus. Unfocused composers
+   * Whether the owning composer owns document focus. Composers that don't
    * must not render suggestions — see MentionAutocomplete for the rationale.
    */
-  isEditorFocused: boolean;
+  composerOwnsFocus: boolean;
   onSelect: (suggestion: EmojiSuggestion) => void;
   position?: "above" | "below";
 };
@@ -27,7 +27,7 @@ type EmojiAutocompleteProps = {
 export const EmojiAutocomplete = React.memo(function EmojiAutocomplete({
   suggestions,
   selectedIndex,
-  isEditorFocused,
+  composerOwnsFocus,
   onSelect,
   position = "above",
 }: EmojiAutocompleteProps) {
@@ -46,7 +46,7 @@ export const EmojiAutocomplete = React.memo(function EmojiAutocomplete({
     [],
   );
 
-  if (!isEditorFocused || suggestions.length === 0) {
+  if (!composerOwnsFocus || suggestions.length === 0) {
     return null;
   }
 

@@ -8,7 +8,7 @@ import {
 type ForumComposerAutocompletesProps = {
   channelSelectedIndex: number;
   channelSuggestions: ChannelSuggestion[];
-  isEditorFocused: boolean;
+  composerOwnsFocus: boolean;
   mentionSelectedIndex: number;
   mentionSuggestions: MentionSuggestion[];
   onChannelSelect: (suggestion: ChannelSuggestion) => void;
@@ -21,7 +21,7 @@ type ForumComposerAutocompletesProps = {
 export function ForumComposerAutocompletes({
   channelSelectedIndex,
   channelSuggestions,
-  isEditorFocused,
+  composerOwnsFocus,
   mentionSelectedIndex,
   mentionSuggestions,
   onChannelSelect,
@@ -33,14 +33,14 @@ export function ForumComposerAutocompletes({
   return (
     <>
       <ChannelAutocomplete
-        isEditorFocused={isEditorFocused}
+        composerOwnsFocus={composerOwnsFocus}
         onSelect={onChannelSelect}
         position={position}
         selectedIndex={channelSelectedIndex}
         suggestions={channelSuggestions}
       />
       <MentionAutocomplete
-        isEditorFocused={isEditorFocused}
+        composerOwnsFocus={composerOwnsFocus}
         onDismiss={onMentionDismiss}
         onFetchMore={onMentionFetchMore}
         onSelect={onMentionSelect}

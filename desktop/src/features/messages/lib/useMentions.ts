@@ -749,9 +749,13 @@ export function useMentions(
         );
         return { handled: true };
       }
+      // Shift+Tab is deliberately not a select: it is the keyboard route out
+      // of the editor — into this overlay's Options controls where the
+      // composer offers them, otherwise the browser's own backward focus
+      // move — so those controls stay reachable.
       if (
         exactMentionSpace ||
-        event.key === "Tab" ||
+        (event.key === "Tab" && !event.shiftKey) ||
         (event.key === "Enter" &&
           !event.ctrlKey &&
           !event.metaKey &&
