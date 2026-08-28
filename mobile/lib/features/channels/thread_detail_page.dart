@@ -60,11 +60,6 @@ const _landingHighlightDuration = Duration(seconds: 3);
 const _landingHighlightDelay = Duration(milliseconds: 50);
 const _landingHighlightTransitionDuration = Duration(milliseconds: 300);
 const _landingHighlightOpacity = 0.12;
-const _threadTailScrollTolerance = 0.5;
-
-// Keep the direct-position correction finite in case the viewport cannot
-// expose its tail (for example, continuously changing media dimensions).
-const _latestTailCorrectionLimit = 8;
 
 /// Full-screen thread detail page.
 ///
@@ -79,6 +74,10 @@ class ThreadDetailPage extends HookConsumerWidget {
   final bool isArchived;
   final String? initialMessageId;
 
+  /// Overrides the tail jump only in deterministic lazy-layout tests.
+  @visibleForTesting
+  final bool Function()? jumpThreadTailForTesting;
+
   const ThreadDetailPage({
     super.key,
     required this.threadHead,
@@ -88,6 +87,7 @@ class ThreadDetailPage extends HookConsumerWidget {
     required this.isMember,
     required this.isArchived,
     this.initialMessageId,
+    this.jumpThreadTailForTesting,
   });
 
   @override
@@ -252,7 +252,11 @@ class ThreadDetailPage extends HookConsumerWidget {
     final initialTailSettle = useMemoized(InitialThreadTailSettle.new);
     final isAtThreadTail = useState(true);
     final isNavigatingToThreadTail = useState(false);
-    final hidesLatestForComposerTailFollow = useState(false);
+    // Ordinary thread entry owns a tail-follow intent before lazy item
+    // positions settle. Keep Latest suppressed through those initial layout
+    // frames; a deep-link entry must expose it for its older target instead.
+    final hidesLatestForInitialTailSettle = useState(initialMessageId == null);
+    final hidesLatestForComposerTailCorrection = useState(false);
     final tailCorrectionInProgress = useRef(false);
     final tailCorrectionGeneration = useRef(0);
     final activeThreadScrollPosition = useRef<ScrollPosition?>(null);
@@ -341,44 +345,16 @@ class ThreadDetailPage extends HookConsumerWidget {
       );
     }
 
-    Widget trackActiveScrollPosition(Widget child) {
-      return Builder(
-        builder: (itemContext) {
-          activeThreadScrollPosition.value = Scrollable.of(
-            itemContext,
-          ).position;
-          return child;
-        },
-      );
-    }
+    Widget trackActiveScrollPosition(Widget child) =>
+        _trackActiveThreadScrollPosition(child, activeThreadScrollPosition);
 
-    bool jumpActiveScrollPositionToTail() {
-      final position = activeThreadScrollPosition.value;
-      if (position == null || !position.hasContentDimensions) return false;
-      // Move the one active viewport to its exact end. Unlike indexed
-      // jumpTo/scrollTo, this does not reset or cross-fade through a second
-      // list, so iOS never exposes the intermediate top-of-thread frame.
-      position.jumpTo(position.maxScrollExtent);
-      return true;
-    }
+    bool jumpActiveScrollPositionToTail() => _jumpActiveThreadScrollToTail(
+      activeThreadScrollPosition,
+      jumpThreadTailForTesting,
+    );
 
-    Future<bool> animateActiveScrollPositionToTail() async {
-      final position = activeThreadScrollPosition.value;
-      if (position == null || !position.hasContentDimensions) return false;
-      if (MediaQuery.disableAnimationsOf(context)) {
-        position.jumpTo(position.maxScrollExtent);
-        return true;
-      }
-      // Match the channel's visible Latest glide while moving only the active
-      // thread viewport. The indexed-list animation path can create a temporary
-      // second list for distant targets, which caused the old top-frame bounce.
-      await position.animateTo(
-        position.maxScrollExtent,
-        duration: jumpToLatestScrollDuration,
-        curve: jumpToLatestScrollCurve,
-      );
-      return true;
-    }
+    Future<bool> animateActiveScrollPositionToTail() =>
+        _animateActiveThreadScrollToTail(context, activeThreadScrollPosition);
 
     void finishThreadTailCorrection({
       required bool revealViewport,
@@ -393,6 +369,7 @@ class ThreadDetailPage extends HookConsumerWidget {
           tailIntent.isDragging ||
           userOptedOutOfTailFollow.value) {
         tailCorrectionInProgress.value = false;
+        hidesLatestForComposerTailCorrection.value = false;
         isNavigatingToThreadTail.value = false;
         isAtThreadTail.value = threadTailIsVisible();
         return;
@@ -413,6 +390,7 @@ class ThreadDetailPage extends HookConsumerWidget {
         return;
       }
       tailCorrectionInProgress.value = false;
+      hidesLatestForComposerTailCorrection.value = false;
       isNavigatingToThreadTail.value = false;
       if (revealViewport) initialViewportReady.value = true;
       isAtThreadTail.value = reachedTail;
@@ -434,7 +412,7 @@ class ThreadDetailPage extends HookConsumerWidget {
 
     void followThreadTailFromComposer() {
       if (userDragDetachedTailFollow.value) return;
-      hidesLatestForComposerTailFollow.value = true;
+      hidesLatestForComposerTailCorrection.value = true;
       initialTailSettle.abandon();
       initialViewportReady.value = true;
       tailIntent.endDrag();
@@ -443,8 +421,19 @@ class ThreadDetailPage extends HookConsumerWidget {
       followsThreadTail.value = true;
       final reachedTail = threadTailIsVisible();
       isAtThreadTail.value = reachedTail;
-      if (!reachedTail) correctThreadTailInstantly();
+      if (reachedTail) {
+        hidesLatestForComposerTailCorrection.value = false;
+      } else {
+        correctThreadTailInstantly();
+      }
     }
+
+    useEffect(() {
+      if (!composerHasFocus) {
+        hidesLatestForComposerTailCorrection.value = false;
+      }
+      return null;
+    }, [composerHasFocus]);
 
     useEffect(
       () {
@@ -866,7 +855,8 @@ class ThreadDetailPage extends HookConsumerWidget {
                 child: _ThreadMessageList(
                   viewport: listViewport,
                   onUserScrollStart: () {
-                    hidesLatestForComposerTailFollow.value = false;
+                    hidesLatestForInitialTailSettle.value = false;
+                    hidesLatestForComposerTailCorrection.value = false;
                     initialTailSettle.abandon();
                     initialViewportReady.value = true;
                     tailCorrectionInProgress.value = false;
@@ -985,7 +975,8 @@ class ThreadDetailPage extends HookConsumerWidget {
                     threadViewportVisible &&
                     hasFetchedReplies &&
                     !isNavigatingToThreadTail.value &&
-                    !hidesLatestForComposerTailFollow.value &&
+                    !hidesLatestForInitialTailSettle.value &&
+                    !hidesLatestForComposerTailCorrection.value &&
                     !(composerHasFocus && !userDragDetachedTailFollow.value) &&
                     !isAtThreadTail.value,
                 onPressed: scrollToThreadLatest,

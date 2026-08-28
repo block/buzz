@@ -12943,6 +12943,81 @@ void main() {
       );
     }
 
+    testWidgets(
+      'thread shows Latest after composer tail correction exhausts and focus leaves',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            threadReplies: {'thread-root': replies},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+            home: ThreadDetailPage(
+              threadHead: formatTimeline([rootEvent]).single,
+              allMessages: formatTimeline([rootEvent, replies[5]]),
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+              initialMessageId: 'reply-5',
+              jumpThreadTailForTesting: () => true,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        const latestButton = ValueKey('thread-jump-to-latest');
+        expect(find.byKey(latestButton), findsOneWidget);
+
+        await tester.tap(find.text('Reply in thread…').hitTestable());
+        await tester.pump();
+        for (var frame = 0; frame < 10; frame++) {
+          await tester.pump();
+        }
+
+        final focusNode = tester
+            .widget<TextField>(find.byType(TextField))
+            .focusNode!;
+        expect(focusNode.hasFocus, isTrue);
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-29')),
+          findsNothing,
+          reason: 'The lazy tail must remain unlaid after bounded correction.',
+        );
+
+        focusNode.unfocus();
+        await tester.pumpAndSettle();
+
+        expect(focusNode.hasFocus, isFalse);
+        expect(find.byKey(latestButton), findsOneWidget);
+      },
+    );
+
     testWidgets('thread hides initial tail placement until it is settled', (
       tester,
     ) async {
@@ -13306,6 +13381,21 @@ void main() {
           findsNothing,
         );
 
+        final landingScrollable = tester.state<ScrollableState>(
+          find.descendant(of: list, matching: find.byType(Scrollable)).first,
+        );
+        landingScrollable.position.jumpTo(
+          landingScrollable.position.maxScrollExtent - 24,
+        );
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsNothing,
+          reason:
+              'A stale landing measurement must not expose Latest before the '
+              'user explicitly browses history.',
+        );
+
         await tester.drag(list, const Offset(0, 500));
         await tester.pumpAndSettle();
 
@@ -13469,6 +13559,8 @@ void main() {
           find.descendant(of: list, matching: find.byType(Scrollable)).first,
         );
         positionedList.itemScrollController!.jumpTo(index: 5);
+        await tester.pumpAndSettle();
+        await tester.drag(list, const Offset(0, 20));
         await tester.pumpAndSettle();
         expect(
           find.byKey(const ValueKey('thread-message-group-reply-159')),
