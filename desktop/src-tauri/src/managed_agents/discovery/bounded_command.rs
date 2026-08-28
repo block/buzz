@@ -73,24 +73,23 @@ const _: () = {
     assert!(BOUNDED_CREATION_FLAGS & CREATE_NO_WINDOW == CREATE_NO_WINDOW);
 };
 
-/// A spawned child plus ownership of its entire descendant tree, so the tree
-/// can be torn down on *every* exit path — timeout, error, or successful exit.
-///
-/// The two platforms establish ownership differently, but both own the tree for
-/// the guard's whole lifetime and — critically — before the child can run any
-/// code that forks a descendant:
+/// A spawned child plus ownership of its descendant tree, torn down on *every*
+/// exit path — timeout, error, or successful exit. The two platforms establish
+/// ownership differently, and the guarantee is deliberately asymmetric — the
+/// adjudicated design, not an oversight:
 ///
 /// - **Unix:** the child leads its own process group (`process_group(0)`), so
-///   `killpg` reaches every descendant that has not left the group.
+///   `killpg` reaches every descendant that has not left the group. A
+///   `setsid`/`setpgid` escapee holding a pipe is *not* owned and may survive
+///   one probe, yet never hangs the helper (see [`output_with_timeout`]).
 /// - **Windows:** the child is spawned `CREATE_SUSPENDED`, assigned to a
-///   kill-on-close Job Object while frozen, then resumed. No descendant can
-///   exist until the job owns the root, so a probe that backgrounds a child and
-///   exits in the same tick cannot escape. Closing that job reaps the whole
-///   tree *even after the root has exited* — the distinction that makes
-///   `taskkill /T <pid>` (a live-root lookup) unfit for the success path, where
-///   the root is already gone by the time we tear down. This mirrors the Job
-///   Object discipline the harness already uses to reap its 24 agent workers
-///   (`process_lifecycle.rs`).
+///   kill-on-close Job Object while frozen, then resumed. The job owns the root
+///   before any descendant can exist and is created without breakaway, so no
+///   writer can escape it — a hard whole-tree guarantee. Closing that job reaps
+///   the whole tree *even after the root has exited* — the distinction that
+///   makes `taskkill /T <pid>` (a live-root lookup) unfit for the success path.
+///   This mirrors the Job Object discipline the harness uses to reap its 24
+///   agent workers (`process_lifecycle.rs`).
 struct BoundedChild {
     child: std::process::Child,
     /// The kill-on-close job that owns the whole tree. Taken and dropped by
@@ -353,13 +352,14 @@ fn spawn_drain<R: Read + Send + 'static>(
 ///   join forever on a group-escaping writer.
 /// - **No wait hang.** The child is polled with [`Child::try_wait`] against the
 ///   deadline rather than blocked on with `wait()`.
-/// - **Hard tree termination on every exit path.** [`BoundedChild`] owns the
-///   child's whole descendant tree and tears it down whether the child times
-///   out, errors, breaches the cap, *or exits successfully*. Success is not an
-///   exemption: a login-shell rc file or an auth CLI can legitimately background
-///   a descendant (`worker &`) that would otherwise outlive discovery and keep
-///   consuming resources. The timeout path additionally sends a graceful
-///   `SIGTERM` and a bounded grace period before the final kill.
+/// - **Tree termination on every exit path.** [`BoundedChild`] tears the tree
+///   down whether the child times out, errors, breaches the cap, *or exits
+///   successfully* — a login-shell rc file or auth CLI can legitimately
+///   background a descendant (`worker &`) that would outlive discovery.
+///   Ownership is a hard whole-tree guarantee on Windows but only the child's
+///   process group on Unix (the group-escapee case bounded by the drain rule
+///   above) — the adjudicated asymmetry. The timeout path additionally sends a
+///   graceful `SIGTERM` and a grace period before the kill.
 pub(crate) fn output_with_timeout(mut command: Command, timeout: Duration) -> Option<Output> {
     command
         .stdin(Stdio::null())
