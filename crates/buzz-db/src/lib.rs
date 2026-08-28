@@ -3530,6 +3530,27 @@ impl Db {
         workflow::delete_workflow_for_owner(&self.pool, community_id, id, owner_pubkey).await
     }
 
+    /// Atomically delete an owned workflow and tombstone its kind-30620
+    /// definition, respecting the deletion event's NIP-09 timestamp.
+    pub async fn delete_workflow_and_definition_for_owner(
+        &self,
+        community_id: CommunityId,
+        id: Uuid,
+        owner_pubkey: &[u8],
+        d_tag: &str,
+        deletion_created_at_secs: i64,
+    ) -> Result<workflow::WorkflowDeleteOutcome> {
+        workflow::delete_workflow_and_definition_for_owner(
+            &self.pool,
+            community_id,
+            id,
+            owner_pubkey,
+            d_tag,
+            deletion_created_at_secs,
+        )
+        .await
+    }
+
     /// Find a workflow by owner pubkey and name within a community. Used for
     /// NIP-09 a-tag deletion where the d-tag is the workflow name (not UUID).
     #[datastore_span(name = "find_workflow_by_owner_and_name", system = "postgresql")]
