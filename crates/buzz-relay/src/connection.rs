@@ -10,6 +10,7 @@ use axum::extract::ws::{Message as WsMessage, WebSocket};
 use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::sync::{mpsc, watch, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::Instrument as _;
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
@@ -27,6 +28,11 @@ use crate::state::{
 
 /// Maximum time a new socket may hold a connection slot without completing NIP-42 auth.
 const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Consecutive missed heartbeat pongs (15s cadence) before a socket is torn down
+/// — ~2 minutes of silence. Single source of truth for the heartbeat loop and
+/// the terminal close classifier.
+const HEARTBEAT_MAX_MISSED_PONGS: u8 = 8;
 
 /// Shared mutable subscription map for a single WebSocket connection.
 pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, Vec<Filter>>>>;
@@ -84,9 +90,27 @@ pub struct ConnectionState {
     pub backpressure_count: Arc<AtomicU8>,
     /// Configurable slow-client grace limit (from `Config::slow_client_grace_limit`).
     pub grace_limit: u8,
+    /// Tracks the detached REQ/EVENT/COUNT handler tasks spawned for this
+    /// connection. Teardown closes and awaits this BEFORE sweeping the
+    /// subscription registry, so a REQ handler that is still parked on auth/DB
+    /// work when the socket closes cannot register its subscription AFTER
+    /// `sub_registry.remove_connection` already ran — which would orphan the
+    /// subscription (its conn_id is never swept again) and leak
+    /// `buzz_subscriptions_active` for the life of the pod.
+    pub(crate) handler_tasks: TaskTracker,
 }
 
 impl ConnectionState {
+    /// Best-effort hex pubkey for structured logging. Returns an empty string
+    /// when the connection has not completed NIP-42 auth. Internal app: the real
+    /// identity is logged in full, never scrubbed.
+    pub async fn authed_pubkey_hex(&self) -> String {
+        match &*self.auth_state.read().await {
+            AuthState::Authenticated(ctx) => ctx.pubkey.to_hex(),
+            _ => String::new(),
+        }
+    }
+
     /// Sends a data message to this connection's outbound channel.
     ///
     /// On a full buffer, increments the backpressure counter. The first
@@ -156,6 +180,10 @@ async fn handle_active_connection(
 ) {
     let cancel = control.cancellation_token();
     let disconnect_reason = control.disconnect_reason();
+    // Second subscription, read only at teardown to classify the close reason for
+    // the terminal log + `buzz_ws_disconnects_total`. Additive: never drives the
+    // teardown itself.
+    let close_reason_rx = control.disconnect_reason();
     let permit = match state.conn_semaphore.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
@@ -192,6 +220,7 @@ async fn handle_active_connection(
         cancel: cancel.clone(),
         backpressure_count: Arc::clone(&backpressure_count),
         grace_limit: state.config.slow_client_grace_limit,
+        handler_tasks: TaskTracker::new(),
     });
 
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection established");
@@ -243,6 +272,8 @@ async fn handle_active_connection(
     let missed_pongs = Arc::new(AtomicU8::new(0));
     let heartbeat_cancel = cancel.clone();
     let heartbeat_task = tokio::spawn(heartbeat_loop(
+        conn_id,
+        Arc::clone(&conn),
         ctrl_tx,
         Arc::clone(&missed_pongs),
         heartbeat_cancel,
@@ -285,6 +316,17 @@ async fn handle_active_connection(
     let _ = heartbeat_task.await;
     let _ = auth_timeout_task.await;
 
+    // Barrier before the registry sweep: wait for every in-flight REQ/EVENT/COUNT
+    // handler spawned for this connection to finish. `handle_req` registers its
+    // subscription in `sub_registry` only after async auth/DB work, so a handler
+    // still parked when the socket closed could otherwise insert AFTER the sweep
+    // below — orphaning the subscription (its conn_id is never swept again) and
+    // leaking `buzz_subscriptions_active`. Handlers bail fast once the send
+    // channel closes (see `ConnectionState::send`), so this wait is bounded by
+    // any single in-flight DB query, never the full historical delivery.
+    conn.handler_tasks.close();
+    conn.handler_tasks.wait().await;
+
     for removed in state.sub_registry.remove_connection(conn.conn_id) {
         if removed.scope.is_global() {
             state
@@ -300,7 +342,9 @@ async fn handle_active_connection(
         }
     }
     state.conn_manager.deregister(conn.conn_id);
+    let mut pubkey_hex = String::new();
     if let AuthState::Authenticated(ref auth_ctx) = *conn.auth_state.read().await {
+        pubkey_hex = auth_ctx.pubkey.to_hex();
         let remaining = state.conn_manager.connection_ids_for_pubkey_in_community(
             conn.tenant.community(),
             auth_ctx.pubkey.to_bytes().as_slice(),
@@ -312,8 +356,28 @@ async fn handle_active_connection(
                 .await;
         }
     }
+    // Best-effort disconnect classification for the terminal line + metric.
+    // Purely observational — every teardown signal here was already decided
+    // upstream; this only labels it.
+    let missed = missed_pongs.load(Ordering::Relaxed);
+    let close_reason = if close_reason_rx.borrow().is_some() {
+        "community_deleted"
+    } else if missed >= HEARTBEAT_MAX_MISSED_PONGS {
+        "pong_timeout"
+    } else if pubkey_hex.is_empty() {
+        "unauthenticated"
+    } else {
+        "client_close"
+    };
     metrics::gauge!("buzz_ws_connections_active").decrement(1.0);
-    info!(conn_id = %conn_id, addr = %addr, "WebSocket connection closed");
+    metrics::counter!("buzz_ws_disconnects_total", "reason" => close_reason).increment(1);
+    info!(
+        conn_id = %conn_id,
+        addr = %addr,
+        pubkey = %pubkey_hex,
+        close_reason,
+        "WebSocket connection closed"
+    );
 
     drop(permit);
 }
@@ -428,32 +492,56 @@ async fn send_loop_inner<S>(
     }
 }
 
-/// 3 missed pongs → disconnect.
+/// Server-side WS keepalive.
 ///
-/// Sends Ping through the control channel so it isn't blocked by a full
-/// data buffer. Uses `try_send` to keep the select loop responsive to
-/// cancellation — a full control channel means the writer is stalled.
+/// Pings every 15s so an idle socket always carries traffic well inside any
+/// edge proxy's read timeout (idle upstream connections get reaped otherwise —
+/// the desktop "Reconnecting" loop). The Ping goes through the control channel
+/// so it isn't blocked by a full data buffer; `try_send` keeps the select loop
+/// responsive to cancellation.
+///
+/// Disconnect only after ~2 minutes of silence (8 missed pongs). This is
+/// deliberately tolerant: some edges drop inbound WS control frames, so a *live*
+/// client whose Pong is occasionally eaten must NOT be closed — the frequent
+/// Ping keeps the socket warm regardless, and only a genuinely dead connection
+/// (no Pong for ~2m) is torn down. (Was 30s ping / 3 missed = 90s, which killed
+/// live clients behind pong-dropping edges.)
 async fn heartbeat_loop(
+    conn_id: Uuid,
+    conn: Arc<ConnectionState>,
     ctrl_tx: mpsc::Sender<WsMessage>,
     missed_pongs: Arc<AtomicU8>,
     cancel: CancellationToken,
 ) {
-    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    // 8 ticks × 15s ≈ 2 min of no Pong before we give up on the connection.
+    let mut interval = tokio::time::interval(Duration::from_secs(15));
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                // fetch_add returns the *previous* value before incrementing:
-                //   prev=0 → now 1 (first miss)
-                //   prev=1 → now 2 (second miss)
-                //   prev=2 → now 3 (third miss → disconnect)
+                // fetch_add returns the *previous* value before incrementing;
+                // a received Pong resets this to 0 (recv_loop).
                 let missed = missed_pongs.fetch_add(1, Ordering::Relaxed);
-                if missed >= 2 {
-                    warn!("3 missed pongs — closing connection");
+                if missed >= HEARTBEAT_MAX_MISSED_PONGS - 1 {
+                    // Resolve the pubkey into a local first: holding the macro's
+                    // format temporary across an await makes this spawned future
+                    // non-Send.
+                    let pubkey = conn.authed_pubkey_hex().await;
+                    warn!(
+                        conn_id = %conn_id,
+                        pubkey = %pubkey,
+                        missed = missed + 1,
+                        close_reason = "pong_timeout",
+                        "~2 min without a pong — closing connection"
+                    );
                     cancel.cancel();
                     break;
                 }
                 if ctrl_tx.try_send(WsMessage::Ping(axum::body::Bytes::new())).is_err() {
-                    warn!("control channel full — cannot send Ping, closing");
+                    warn!(
+                        conn_id = %conn_id,
+                        close_reason = "control_channel_full",
+                        "control channel full — cannot send Ping, closing"
+                    );
                     cancel.cancel();
                     break;
                 }
@@ -571,6 +659,20 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
             let permit = match state.handler_semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
+                    let pubkey = conn.authed_pubkey_hex().await;
+                    warn!(
+                        conn_id = %conn.conn_id,
+                        pubkey = %pubkey,
+                        limit_type = "event",
+                        reason = "handler_semaphore_full",
+                        "handler semaphore full — rejecting request"
+                    );
+                    metrics::counter!(
+                        "buzz_admission_rejections_total",
+                        "transport" => "websocket",
+                        "reason" => "concurrency"
+                    )
+                    .increment(1);
                     conn.send(RelayMessage::notice(
                         "rate-limited: too many concurrent requests",
                     ));
@@ -585,7 +687,10 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                 event_id = tracing::field::Empty,
                 kind = tracing::field::Empty,
             );
-            tokio::spawn(
+            // Track on the connection so teardown awaits it before the registry
+            // sweep (see `ConnectionState::handler_tasks`).
+            let handler_tasks = conn.handler_tasks.clone();
+            handler_tasks.spawn(
                 async move {
                     handlers::event::handle_event(event, conn, state).await;
                     drop(permit);
@@ -599,6 +704,20 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
             let permit = match state.handler_semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
+                    let pubkey = conn.authed_pubkey_hex().await;
+                    warn!(
+                        conn_id = %conn.conn_id,
+                        pubkey = %pubkey,
+                        limit_type = "req",
+                        reason = "handler_semaphore_full",
+                        "handler semaphore full — rejecting request"
+                    );
+                    metrics::counter!(
+                        "buzz_admission_rejections_total",
+                        "transport" => "websocket",
+                        "reason" => "concurrency"
+                    )
+                    .increment(1);
                     conn.send(request_rejection_message(
                         Some(&sub_id),
                         "rate-limited: too many concurrent requests",
@@ -607,7 +726,12 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                 }
             };
             let span = tracing::info_span!("ws.req", conn_id = %conn.conn_id, sub_id = %sub_id);
-            tokio::spawn(
+            // Track on the connection so teardown awaits this REQ handler before
+            // the registry sweep — otherwise a handler still parked on auth/DB
+            // work could register its subscription after the sweep and leak it
+            // (see `ConnectionState::handler_tasks`).
+            let handler_tasks = conn.handler_tasks.clone();
+            handler_tasks.spawn(
                 async move {
                     handlers::req::handle_req(sub_id, filters, conn, state).await;
                     drop(permit);
@@ -621,6 +745,20 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
             let permit = match state.handler_semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
+                    let pubkey = conn.authed_pubkey_hex().await;
+                    warn!(
+                        conn_id = %conn.conn_id,
+                        pubkey = %pubkey,
+                        limit_type = "count",
+                        reason = "handler_semaphore_full",
+                        "handler semaphore full — rejecting request"
+                    );
+                    metrics::counter!(
+                        "buzz_admission_rejections_total",
+                        "transport" => "websocket",
+                        "reason" => "concurrency"
+                    )
+                    .increment(1);
                     conn.send(RelayMessage::notice(
                         "rate-limited: too many concurrent requests",
                     ));
@@ -628,7 +766,10 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                 }
             };
             let span = tracing::info_span!("ws.count", conn_id = %conn.conn_id, sub_id = %sub_id);
-            tokio::spawn(
+            // Track on the connection so teardown awaits it before the registry
+            // sweep (see `ConnectionState::handler_tasks`).
+            let handler_tasks = conn.handler_tasks.clone();
+            handler_tasks.spawn(
                 async move {
                     handlers::count::handle_count(sub_id, filters, conn, state).await;
                     drop(permit);
