@@ -84,6 +84,10 @@ pub struct Step {
     /// Maximum seconds this step may run before timing out.
     #[serde(default)]
     pub timeout_secs: Option<u64>,
+    /// Step ids that must complete successfully before this step is eligible.
+    /// Dependencies must reference earlier steps in the ordered definition.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
     /// The action to perform when this step executes.
     #[serde(flatten)]
     pub action: ActionDef,
@@ -152,6 +156,34 @@ pub enum ActionDef {
         /// Duration string (e.g. `"5m"`, `"1h"`).
         duration: String,
     },
+    /// Ingest one immutable document into the shared run index.
+    IngestDocument {
+        /// Workflow input key or immutable URI to ingest.
+        source: String,
+        /// Artifact kind produced by ingestion.
+        output: String,
+    },
+    /// Dispatch a durable task to an independently identified ACP agent.
+    RunAgent {
+        /// Agent roster key.
+        agent: String,
+        /// Prompt template or run input key.
+        prompt: String,
+        /// JSON Schema path used to validate the output artifact.
+        output_schema: String,
+    },
+    /// Fan-in gate that opens only after every dependency completes.
+    Barrier,
+    /// Verify an artifact against an independent evidence contract.
+    VerifyArtifact {
+        /// JSON Schema path for the verification ledger.
+        schema: String,
+    },
+    /// Publish one previously validated artifact.
+    PublishArtifact {
+        /// Artifact kind or task output key to publish.
+        artifact: String,
+    },
 }
 
 impl WorkflowDef {
@@ -166,6 +198,22 @@ impl WorkflowDef {
         self.steps
             .iter()
             .any(|s| matches!(s.action, ActionDef::CallWebhook { .. }))
+    }
+
+    /// Whether this definition requires the durable DAG scheduler instead of
+    /// the legacy sequential executor.
+    pub fn requires_durable_scheduler(&self) -> bool {
+        self.steps.iter().any(|step| {
+            !step.depends_on.is_empty()
+                || matches!(
+                    step.action,
+                    ActionDef::IngestDocument { .. }
+                        | ActionDef::RunAgent { .. }
+                        | ActionDef::Barrier
+                        | ActionDef::VerifyArtifact { .. }
+                        | ActionDef::PublishArtifact { .. }
+                )
+        })
     }
 
     /// Validate the workflow definition. Returns `Err` with a descriptive message
@@ -210,6 +258,39 @@ impl WorkflowDef {
                     "duplicate step id: {}",
                     step.id
                 )));
+            }
+        }
+
+        // Dependencies form a DAG by construction: every edge must point to a
+        // unique earlier step. This also rejects self-dependencies, unknown ids,
+        // forward references, and cycles without a separate graph traversal.
+        let positions: HashMap<&str, usize> = self
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(index, step)| (step.id.as_str(), index))
+            .collect();
+        for (index, step) in self.steps.iter().enumerate() {
+            let mut dependencies = HashSet::new();
+            for dependency in &step.depends_on {
+                if !dependencies.insert(dependency.as_str()) {
+                    return Err(WorkflowError::InvalidDefinition(format!(
+                        "step '{}': duplicate dependency '{}'",
+                        step.id, dependency
+                    )));
+                }
+                let dependency_index = positions.get(dependency.as_str()).ok_or_else(|| {
+                    WorkflowError::InvalidDefinition(format!(
+                        "step '{}': unknown dependency '{}'",
+                        step.id, dependency
+                    ))
+                })?;
+                if *dependency_index >= index {
+                    return Err(WorkflowError::InvalidDefinition(format!(
+                        "step '{}': dependency '{}' must reference an earlier step",
+                        step.id, dependency
+                    )));
+                }
             }
         }
 
@@ -987,6 +1068,43 @@ mod tests {
         assert!(matches!(trigger, TriggerDef::DiffPosted { filter: None }));
         let back = serde_yaml::to_string(&trigger).unwrap();
         assert!(back.contains("diff_posted"));
+    }
+
+    #[test]
+    fn tribunal_example_is_a_valid_durable_dag() {
+        let yaml = include_str!("../../../examples/agent-workflows/tribunal/workflow.yaml");
+        let (definition, _) = parse_yaml(yaml).expect("tribunal workflow should parse");
+        assert_eq!(definition.steps.len(), 11);
+        assert!(definition.requires_durable_scheduler());
+        assert!(matches!(definition.steps[3].action, ActionDef::Barrier));
+        assert_eq!(
+            definition.steps[3].depends_on,
+            vec!["defense_analysis", "contradictor_analysis"]
+        );
+    }
+
+    #[test]
+    fn durable_dag_rejects_unknown_dependency() {
+        let yaml = "name: Bad DAG\ntrigger:\n  on: webhook\nsteps:\n  - id: ingest\n    action: delay\n    duration: 1m\n  - id: analyze\n    action: barrier\n    depends_on: [missing]\n";
+        let error = parse_yaml(yaml).expect_err("unknown dependency must fail");
+        match error {
+            WorkflowError::InvalidDefinition(message) => {
+                assert!(message.contains("unknown dependency 'missing'"));
+            }
+            other => panic!("expected InvalidDefinition, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn durable_dag_rejects_forward_dependency() {
+        let yaml = "name: Bad DAG\ntrigger:\n  on: webhook\nsteps:\n  - id: barrier\n    action: barrier\n    depends_on: [later]\n  - id: later\n    action: delay\n    duration: 1m\n";
+        let error = parse_yaml(yaml).expect_err("forward dependency must fail");
+        match error {
+            WorkflowError::InvalidDefinition(message) => {
+                assert!(message.contains("must reference an earlier step"));
+            }
+            other => panic!("expected InvalidDefinition, got: {other}"),
+        }
     }
 
     #[test]

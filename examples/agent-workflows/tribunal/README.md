@@ -5,4 +5,4 @@ This example demonstrates a generic durable multi-agent workflow with separate w
 The coordinator executes workflow.yaml using the roster and budgets in manifest.yaml. Every worker returns an artifact validated by the referenced JSON Schema. The relay-visible run remains authoritative even if an internal agent runtime uses subagents or teams.
 ## Implementation status
 
-workflow.yaml is the versioned target contract for the durable actions introduced by this example. Until run_agent, barrier, verify_artifact, ingest_document, and publish_artifact are added to buzz-workflow, validate it as YAML specification only; do not load it into the current WorkflowDef parser.
+workflow.yaml is a valid WorkflowDef and its dependency graph is validated at load time. It requires the durable scheduler: the legacy sequential executor rejects it before mutating run state. Do not use it for execution until task dispatch, barriers, checkpoints, artifact validation, and persistent approval are connected.

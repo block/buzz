@@ -466,6 +466,26 @@ pub fn resolve_step_templates(
         Delay { duration } => Ok(Delay {
             duration: duration.clone(),
         }),
+        IngestDocument { source, output } => Ok(IngestDocument {
+            source: t(source)?,
+            output: output.clone(),
+        }),
+        RunAgent {
+            agent,
+            prompt,
+            output_schema,
+        } => Ok(RunAgent {
+            agent: agent.clone(),
+            prompt: t(prompt)?,
+            output_schema: output_schema.clone(),
+        }),
+        Barrier => Ok(Barrier),
+        VerifyArtifact { schema } => Ok(VerifyArtifact {
+            schema: schema.clone(),
+        }),
+        PublishArtifact { artifact } => Ok(PublishArtifact {
+            artifact: artifact.clone(),
+        }),
     }
 }
 
@@ -730,6 +750,14 @@ pub async fn dispatch_action(
                         approval_token: token,
                     })
                 }
+
+                IngestDocument { .. }
+                | RunAgent { .. }
+                | Barrier
+                | VerifyArtifact { .. }
+                | PublishArtifact { .. } => Err(WorkflowError::NotImplemented(
+                    "durable workflow scheduler".into(),
+                )),
 
                 Delay { duration } => {
                     let secs = parse_duration_secs(duration)?;
@@ -1055,6 +1083,13 @@ pub async fn execute_run(
     def: &WorkflowDef,
     trigger_ctx: &TriggerContext,
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
+    if def.requires_durable_scheduler() {
+        return Err((
+            WorkflowError::NotImplemented("durable workflow scheduler".into()),
+            crate::error::PartialProgress::default(),
+        ));
+    }
+
     // Fail fast if all concurrency permits are in use — no queuing.
     let _permit = engine.run_semaphore.try_acquire().map_err(|_| {
         (
@@ -1105,6 +1140,13 @@ pub async fn execute_from_step(
     start_index: usize,
     initial_outputs: Option<HashMap<String, JsonValue>>,
 ) -> Result<ExecutionResult, (WorkflowError, crate::error::PartialProgress)> {
+    if def.requires_durable_scheduler() {
+        return Err((
+            WorkflowError::NotImplemented("durable workflow scheduler".into()),
+            crate::error::PartialProgress::default(),
+        ));
+    }
+
     // Fail fast if all concurrency permits are in use — no queuing.
     let _permit = engine.run_semaphore.try_acquire().map_err(|_| {
         (
@@ -1460,6 +1502,7 @@ mod tests {
             name: None,
             if_expr: None,
             timeout_secs: None,
+            depends_on: Vec::new(),
             action: ActionDef::SendMessage {
                 text: "hi {{trigger.author}}".to_owned(),
                 channel: None,

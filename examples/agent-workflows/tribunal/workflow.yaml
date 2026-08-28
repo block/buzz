@@ -1,47 +1,59 @@
-version: 1
 name: tribunal-review
+description: Durable independent defense, contradiction, debate, review, verification, and approval.
+trigger:
+  on: webhook
 steps:
   - id: ingest
     action: ingest_document
-    output: document-manifest
-  - id: defense-analysis
+    source: '{{trigger.body.document_uri}}'
+    output: document_manifest
+  - id: defense_analysis
     action: run_agent
     agent: helena
+    prompt: Analyze the shared document manifest independently as defense counsel.
     depends_on: [ingest]
     output_schema: schemas/defense-analysis.schema.json
-  - id: contradictor-analysis
+  - id: contradictor_analysis
     action: run_agent
     agent: rui
+    prompt: Analyze the shared document manifest independently as contradictor.
     depends_on: [ingest]
     output_schema: schemas/contradictor-analysis.schema.json
-  - id: analysis-barrier
+  - id: analysis_barrier
     action: barrier
-    depends_on: [defense-analysis, contradictor-analysis]
-  - id: defense-debate
+    depends_on: [defense_analysis, contradictor_analysis]
+  - id: defense_debate
     action: run_agent
     agent: helena
-    depends_on: [analysis-barrier]
+    prompt: Respond only to the validated contradictor challenges.
+    depends_on: [analysis_barrier]
     output_schema: schemas/debate-response.schema.json
-  - id: contradictor-debate
+  - id: contradictor_debate
     action: run_agent
     agent: rui
-    depends_on: [analysis-barrier]
+    prompt: Respond only to the validated defense claims.
+    depends_on: [analysis_barrier]
     output_schema: schemas/debate-response.schema.json
-  - id: debate-barrier
+  - id: debate_barrier
     action: barrier
-    depends_on: [defense-debate, contradictor-debate]
-  - id: judicial-review
+    depends_on: [defense_debate, contradictor_debate]
+  - id: judicial_review
     action: run_agent
     agent: anselmo
-    depends_on: [debate-barrier]
+    prompt: Review the validated analyses and debate, then produce a reasoned decision.
+    depends_on: [debate_barrier]
     output_schema: schemas/judicial-review.schema.json
-  - id: verify-citations
+  - id: verify_citations
     action: verify_artifact
-    depends_on: [judicial-review]
+    depends_on: [judicial_review]
     schema: schemas/citation-ledger.schema.json
-  - id: human-approval
+  - id: human_approval
     action: request_approval
-    depends_on: [verify-citations]
+    from: '@workflow-owner'
+    message: Review the verified judicial artifact before publication.
+    timeout: 24h
+    depends_on: [verify_citations]
   - id: publish
     action: publish_artifact
-    depends_on: [human-approval]
+    artifact: judicial_review
+    depends_on: [human_approval]
