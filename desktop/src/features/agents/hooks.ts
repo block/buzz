@@ -454,7 +454,7 @@ export function useUpdateManagedAgentMutation() {
       // the new display name / about / NIP-05 immediately. Also poke any
       // ["users-batch", ...] entries that include this pubkey so sidebar member
       // rows, channel header chips, and message author labels refresh too.
-      const lowerPubkey = variables.pubkey.toLowerCase();
+      const lowerPubkey = normalizePubkey(variables.pubkey);
 
       // The users-batch delta fetch resolves from per-pubkey
       // ["users-batch-entry", pubkey] entries with their own 60s freshness —
@@ -513,7 +513,7 @@ export function useUpdatePersonaMutation() {
       if (agents) {
         const linkedPubkeys = agents
           .filter((a) => a.personaId === variables.id)
-          .map((a) => a.pubkey.toLowerCase());
+          .map((a) => normalizePubkey(a.pubkey));
         evictUsersBatchEntries(queryClient, linkedPubkeys);
       }
 

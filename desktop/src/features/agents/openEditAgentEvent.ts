@@ -1,3 +1,4 @@
+import { normalizePubkey } from "@/shared/lib/pubkey";
 /**
  * Global event for requesting that the Edit Agent dialog open for a specific
  * agent pubkey, with an optional field-focus target.
@@ -55,7 +56,7 @@ export function consumePendingOpenEditAgent(
 ): EditAgentFocusTarget | true | false {
   if (
     pendingEditAgentPubkey !== null &&
-    pendingEditAgentPubkey.toLowerCase() === pubkey.toLowerCase()
+    normalizePubkey(pendingEditAgentPubkey) === normalizePubkey(pubkey)
   ) {
     pendingEditAgentPubkey = null;
     const focus = pendingEditAgentFocus;
@@ -71,7 +72,7 @@ export function subscribeOpenEditAgent(
 ): () => void {
   function handleEvent(event: Event) {
     const detail = (event as CustomEvent<OpenEditAgentDetail>).detail;
-    if (detail.pubkey.toLowerCase() === pubkey.toLowerCase()) {
+    if (normalizePubkey(detail.pubkey) === normalizePubkey(pubkey)) {
       pendingEditAgentPubkey = null;
       pendingEditAgentFocus = undefined;
       handler(detail.focus);

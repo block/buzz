@@ -4,6 +4,7 @@ import type {
   RespondToMode,
 } from "@/shared/api/types";
 import { invokeTauri } from "@/shared/api/tauri";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export type CatalogPersonaShareLevel = "not-shared" | "none";
 
@@ -105,7 +106,9 @@ export function catalogPersonasFromPublications(
   localPersonas: readonly AgentPersona[],
   currentPubkey: string | null | undefined,
 ): CatalogPersona[] {
-  const normalizedCurrentPubkey = currentPubkey?.toLowerCase() ?? null;
+  const normalizedCurrentPubkey = currentPubkey
+    ? normalizePubkey(currentPubkey)
+    : null;
   const personas: CatalogPersona[] = [];
 
   for (const publication of publications) {

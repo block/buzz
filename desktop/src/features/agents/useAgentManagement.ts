@@ -32,6 +32,7 @@ import type {
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 
 function updateInputFromRequest(
   request: Extract<AgentManagementRequest, { action: "update" }>,
@@ -161,12 +162,15 @@ export function useAgentManagement() {
     const targetChannel = (channelsQuery.data ?? []).find(
       (channel) => channel.id === channelId,
     );
-    const requestingPubkey = sourceAgentPubkey.current?.toLowerCase();
+    const sourcePubkey = sourceAgentPubkey.current;
+    const requestingPubkey = sourcePubkey
+      ? normalizePubkey(sourcePubkey)
+      : undefined;
     if (
       !targetChannel?.isMember ||
       !requestingPubkey ||
       !targetChannel.memberPubkeys.some(
-        (pubkey) => pubkey.toLowerCase() === requestingPubkey,
+        (pubkey) => normalizePubkey(pubkey) === requestingPubkey,
       )
     ) {
       throw new Error(
