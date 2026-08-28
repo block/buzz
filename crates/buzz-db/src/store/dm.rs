@@ -10,7 +10,9 @@ use uuid::Uuid;
 
 use crate::channel::ChannelRecord;
 use crate::error::{DbError, Result};
+use crate::Db;
 use buzz_core::CommunityId;
+use buzz_datastore_tracing::datastore_span;
 
 // -- Public structs -----------------------------------------------------------
 
@@ -512,6 +514,89 @@ fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
         ttl_seconds: row.try_get("ttl_seconds").unwrap_or(None),
         ttl_deadline: row.try_get("ttl_deadline").unwrap_or(None),
     })
+}
+
+// -- Db API -------------------------------------------------------------------
+
+impl Db {
+    /// Find an existing DM by its participant hash.
+    #[datastore_span(name = "find_dm_by_participants", system = "postgresql")]
+    pub async fn find_dm_by_participants(
+        &self,
+        community_id: CommunityId,
+        participant_hash: &[u8],
+    ) -> Result<Option<ChannelRecord>> {
+        crate::dm::find_dm_by_participants(&self.pool, community_id, participant_hash).await
+    }
+
+    /// Create or return an existing DM channel.
+    #[datastore_span(name = "create_dm", system = "postgresql")]
+    pub async fn create_dm(
+        &self,
+        community_id: CommunityId,
+        participants: &[&[u8]],
+        created_by: &[u8],
+    ) -> Result<ChannelRecord> {
+        crate::dm::create_dm(&self.pool, community_id, participants, created_by).await
+    }
+
+    /// List all DMs for a user.
+    #[datastore_span(name = "list_dms_for_user", system = "postgresql")]
+    pub async fn list_dms_for_user(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+        limit: u32,
+        cursor: Option<Uuid>,
+    ) -> Result<Vec<DmRecord>> {
+        crate::dm::list_dms_for_user(&self.pool, community_id, pubkey, limit, cursor).await
+    }
+
+    /// Open or retrieve a DM for the given participants.
+    #[datastore_span(name = "open_dm", system = "postgresql")]
+    pub async fn open_dm(
+        &self,
+        community_id: CommunityId,
+        pubkeys: &[&[u8]],
+        created_by: &[u8],
+    ) -> Result<(ChannelRecord, bool)> {
+        crate::dm::open_dm(&self.pool, community_id, pubkeys, created_by).await
+    }
+
+    /// Hide a DM channel for a specific user.
+    ///
+    /// The DM is not deleted — it can be restored by opening a new DM with
+    /// the same participants.
+    #[datastore_span(name = "hide_dm", system = "postgresql")]
+    pub async fn hide_dm(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> Result<()> {
+        crate::dm::hide_dm(&self.pool, community_id, channel_id, pubkey).await
+    }
+
+    /// Unhide a DM channel for a specific user.
+    #[datastore_span(name = "unhide_dm", system = "postgresql")]
+    pub async fn unhide_dm(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        pubkey: &[u8],
+    ) -> Result<()> {
+        crate::dm::unhide_dm(&self.pool, community_id, channel_id, pubkey).await
+    }
+
+    /// List the channel IDs of all DMs the given user currently has hidden.
+    #[datastore_span(name = "list_hidden_dms", system = "postgresql")]
+    pub async fn list_hidden_dms(
+        &self,
+        community_id: CommunityId,
+        pubkey: &[u8],
+    ) -> Result<Vec<Uuid>> {
+        crate::dm::list_hidden_dms(&self.pool, community_id, pubkey).await
+    }
 }
 
 // -- Tests --------------------------------------------------------------------

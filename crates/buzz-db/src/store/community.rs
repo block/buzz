@@ -602,7 +602,7 @@ mod tests {
     #[test]
     fn community_implementation_tests_and_spans_have_single_owners() {
         let community_source = include_str!("community.rs");
-        let lib_source = include_str!("lib.rs");
+        let lib_source = include_str!("../lib.rs");
         let operations = [
             "lookup_community_by_host",
             "is_community_active",

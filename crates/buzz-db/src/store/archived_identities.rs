@@ -6,10 +6,12 @@
 //! All pubkey and event ID values are lowercase hex strings.
 
 use buzz_core::CommunityId;
+use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row as _};
 
 use crate::error::Result;
+use crate::Db;
 
 /// A single archived identity record.
 #[derive(Debug, Clone)]
@@ -124,11 +126,60 @@ fn row_to_archived_identity(
     })
 }
 
+impl Db {
+    /// Returns `true` if `pubkey` (64-char hex) is archived in `community_id`.
+    #[datastore_span(name = "is_archived", system = "postgresql")]
+    pub async fn is_archived(&self, community_id: CommunityId, pubkey: &str) -> Result<bool> {
+        is_archived(&self.pool, community_id, pubkey).await
+    }
+
+    /// Archives an identity in `community_id`. Returns `true` if inserted,
+    /// `false` if already archived.
+    #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "archive", system = "postgresql")]
+    pub async fn archive(
+        &self,
+        community_id: CommunityId,
+        pubkey: &str,
+        consent_path: &str,
+        actor: &str,
+        reason: Option<&str>,
+        replaced_by: Option<&str>,
+        request_event_id: &str,
+    ) -> Result<bool> {
+        archive(
+            &self.pool,
+            community_id,
+            pubkey,
+            consent_path,
+            actor,
+            reason,
+            replaced_by,
+            request_event_id,
+        )
+        .await
+    }
+
+    /// Unarchives an identity from `community_id`. Returns `true` if deleted,
+    /// `false` if absent.
+    #[datastore_span(name = "unarchive", system = "postgresql")]
+    pub async fn unarchive(&self, community_id: CommunityId, pubkey: &str) -> Result<bool> {
+        unarchive(&self.pool, community_id, pubkey).await
+    }
+
+    /// Returns all identities archived in `community_id`, ordered by archive
+    /// time ascending.
+    #[datastore_span(name = "list_archived", system = "postgresql")]
+    pub async fn list_archived(&self, community_id: CommunityId) -> Result<Vec<ArchivedIdentity>> {
+        list_archived(&self.pool, community_id).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     async fn setup_pool() -> PgPool {
         PgPool::connect(TEST_DB_URL)

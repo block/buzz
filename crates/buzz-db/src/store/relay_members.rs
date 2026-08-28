@@ -6,11 +6,14 @@
 //! community B (NIP-43 admission confinement). `pubkey` values are 64-char
 //! lowercase hex strings.
 
+use buzz_core::StoredEvent;
+use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row as _};
+use uuid::Uuid;
 
-use crate::error::Result;
-use crate::CommunityId;
+use crate::error::{DbError, Result};
+use crate::{observability, replaceable, CommunityId, Db, RouteDecision, RoutePredicate};
 
 /// A single relay member record.
 #[derive(Debug, Clone)]
@@ -607,6 +610,361 @@ pub async fn backfill_from_allowlist(pool: &PgPool, community: CommunityId) -> R
     .await?;
 
     Ok(result.rows_affected())
+}
+
+impl Db {
+    /// Returns `true` if `pubkey` (64-char hex) is a member of `community`.
+    ///
+    /// Replica-routed on the bounded arm — the one PERMISSION read routed by
+    /// explicit product decision (bounded-stale membership beats the 10s
+    /// cache it replaced). Admits and revokes may lag by at most the budget
+    /// `B`; everything else fails closed to the writer, exactly like
+    /// [`Db::query_events_routed_bounded`]. Not precedent for routing other
+    /// permission reads.
+    #[datastore_span(name = "is_relay_member", system = "postgresql")]
+    pub async fn is_relay_member(&self, community: CommunityId, pubkey: &str) -> Result<bool> {
+        let path = "relay_membership";
+        match self.route_read(path, RoutePredicate::Bounded).await {
+            RouteDecision::Replica(mut tx, _entry, reason) => {
+                match is_relay_member_on(&mut tx, community, pubkey).await {
+                    Ok(is_member) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(is_member)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        is_relay_member(&self.pool, community, pubkey).await
+                    }
+                }
+            }
+            RouteDecision::Writer => is_relay_member(&self.pool, community, pubkey).await,
+        }
+    }
+
+    /// Returns the relay member record for `pubkey` in `community`, or `None` if not found.
+    #[datastore_span(name = "get_relay_member", system = "postgresql")]
+    pub async fn get_relay_member(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+    ) -> Result<Option<RelayMember>> {
+        get_relay_member(&self.pool, community, pubkey).await
+    }
+
+    /// Returns all relay members of `community` ordered by `created_at` ascending.
+    #[datastore_span(name = "list_relay_members", system = "postgresql")]
+    pub async fn list_relay_members(&self, community: CommunityId) -> Result<Vec<RelayMember>> {
+        list_relay_members(&self.pool, community).await
+    }
+
+    /// Adds a new relay member to `community`.
+    ///
+    /// Returns `true` if the row was actually inserted, `false` if the pubkey
+    /// already existed in `community` (idempotent — `ON CONFLICT DO NOTHING`).
+    #[datastore_span(name = "add_relay_member", system = "postgresql")]
+    pub async fn add_relay_member(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+        role: &str,
+        added_by: Option<&str>,
+    ) -> Result<bool> {
+        add_relay_member(&self.pool, community, pubkey, role, added_by).await
+    }
+
+    /// Claims relay membership via an invite and atomically persists the
+    /// accepted policy version when a policy is configured.
+    #[datastore_span(name = "claim_relay_membership", system = "postgresql")]
+    pub async fn claim_relay_membership(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+        role: &str,
+        policy_version: Option<&str>,
+    ) -> Result<bool> {
+        claim_relay_membership(&self.pool, community, pubkey, role, policy_version).await
+    }
+
+    /// Returns whether a member has persisted acceptance evidence for a policy version.
+    #[datastore_span(name = "has_join_policy_acceptance", system = "postgresql")]
+    pub async fn has_join_policy_acceptance(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+        policy_version: &str,
+    ) -> Result<bool> {
+        has_join_policy_acceptance(&self.pool, community, pubkey, policy_version).await
+    }
+
+    /// Removes a relay member from `community` atomically, refusing to delete the owner.
+    #[datastore_span(name = "remove_relay_member", system = "postgresql")]
+    pub async fn remove_relay_member(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+    ) -> Result<RemoveResult> {
+        remove_relay_member(&self.pool, community, pubkey).await
+    }
+
+    /// Removes a relay member from `community` only if their current role matches `expected_role`.
+    ///
+    /// Atomic conditional delete — eliminates the TOCTOU race between a
+    /// prior role read and the delete. See [`remove_relay_member_if_role`].
+    #[datastore_span(name = "remove_relay_member_if_role", system = "postgresql")]
+    pub async fn remove_relay_member_if_role(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+        expected_role: &str,
+    ) -> Result<RemoveResult> {
+        remove_relay_member_if_role(&self.pool, community, pubkey, expected_role).await
+    }
+
+    /// Updates the role of an existing relay member in `community`. Returns `true` if updated.
+    #[datastore_span(name = "update_relay_member_role", system = "postgresql")]
+    pub async fn update_relay_member_role(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+        new_role: &str,
+    ) -> Result<bool> {
+        update_relay_member_role(&self.pool, community, pubkey, new_role).await
+    }
+
+    /// Ensures the owner pubkey exists with role `"owner"` in `community`. Called at startup.
+    #[datastore_span(name = "bootstrap_owner", system = "postgresql")]
+    pub async fn bootstrap_owner(&self, community: CommunityId, owner_pubkey: &str) -> Result<()> {
+        bootstrap_owner(&self.pool, community, owner_pubkey).await
+    }
+
+    /// Returns `true` if any member of `community` holds the `admin` or
+    /// `owner` role.
+    #[datastore_span(name = "has_admin_or_owner", system = "postgresql")]
+    pub async fn has_admin_or_owner(&self, community: CommunityId) -> Result<bool> {
+        has_admin_or_owner(&self.pool, community).await
+    }
+
+    /// Atomically transfers ownership of `community` to `new_owner_pubkey`,
+    /// demoting the previous owner(s) to `member`. Verifies
+    /// `expected_owner_pubkey` matches the current owner inside the same
+    /// transaction to prevent stale-owner races.
+    #[datastore_span(name = "transfer_ownership", system = "postgresql")]
+    pub async fn transfer_ownership(
+        &self,
+        community: CommunityId,
+        new_owner_pubkey: &str,
+        expected_owner_pubkey: &str,
+    ) -> Result<TransferResult> {
+        transfer_ownership(
+            &self.pool,
+            community,
+            new_owner_pubkey,
+            expected_owner_pubkey,
+        )
+        .await
+    }
+
+    /// Migrates existing `pubkey_allowlist` entries into `relay_members` for `community`.
+    ///
+    /// Idempotent — uses `ON CONFLICT DO NOTHING`. Returns the number of rows
+    /// inserted, or 0 if the `pubkey_allowlist` table doesn't exist.
+    #[datastore_span(name = "backfill_from_allowlist", system = "postgresql")]
+    pub async fn backfill_from_allowlist(&self, community: CommunityId) -> Result<u64> {
+        backfill_from_allowlist(&self.pool, community).await
+    }
+
+    /// Returns whether the relay-authored NIP-43 snapshot is absent or differs
+    /// from the canonical membership rows for `community_id`.
+    ///
+    /// Snapshot and canonical rows are compared directly rather than by
+    /// timestamp: relay membership events use whole-second Nostr timestamps,
+    /// and multiple mutations within one second must still be repaired.
+    #[datastore_span(
+        name = "nip43_membership_snapshot_needs_reconciliation",
+        system = "postgresql"
+    )]
+    pub async fn nip43_membership_snapshot_needs_reconciliation(
+        &self,
+        community_id: CommunityId,
+        relay_pubkey: &nostr::PublicKey,
+    ) -> Result<bool> {
+        let snapshot = self
+            .query_events(&crate::event::EventQuery {
+                kinds: Some(vec![buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32]),
+                pubkey: Some(relay_pubkey.to_bytes().to_vec()),
+                global_only: true,
+                limit: Some(1),
+                ..crate::event::EventQuery::for_community(community_id)
+            })
+            .await?
+            .into_iter()
+            .next();
+        let members = self.list_relay_members(community_id).await?;
+
+        let Some(snapshot) = snapshot else {
+            return Ok(true);
+        };
+        let mut snapshot_members = snapshot
+            .event
+            .tags
+            .iter()
+            .filter_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.first().map(String::as_str) == Some("member") && parts.len() >= 3)
+                    .then(|| (parts[1].to_ascii_lowercase(), parts[2].clone()))
+            })
+            .collect::<Vec<_>>();
+        let mut canonical_members = members
+            .into_iter()
+            .map(|member| (member.pubkey.to_ascii_lowercase(), member.role))
+            .collect::<Vec<_>>();
+        snapshot_members.sort_unstable();
+        canonical_members.sort_unstable();
+
+        Ok(snapshot_members != canonical_members)
+    }
+
+    /// Atomically publish a NIP-43 membership snapshot under a single
+    /// transaction-scoped advisory lock.
+    ///
+    /// This method acquires the per-community snapshot lock, reads the
+    /// current membership, builds the event, and replaces the prior snapshot
+    /// — all inside one transaction on one database connection. This
+    /// prevents the stale-snapshot race where a concurrent publication reads
+    /// older state and overwrites a newer snapshot by arrival order.
+    #[datastore_span(name = "publish_nip43_membership_locked", system = "postgresql")]
+    pub async fn publish_nip43_membership_locked(
+        &self,
+        community_id: CommunityId,
+        relay_keypair: &nostr::Keys,
+    ) -> Result<(StoredEvent, bool, usize)> {
+        use nostr::{EventBuilder, Kind, Tag};
+
+        let kind_i32 = buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32;
+        let pubkey_bytes = relay_keypair.public_key().to_bytes();
+
+        let lock_key = replaceable::event_replacement_lock_key(
+            community_id,
+            kind_i32,
+            pubkey_bytes.as_slice(),
+            None,
+        );
+
+        let (mut tx, transaction_timer) = observability::begin_transaction(
+            &self.pool,
+            observability::TransactionOperation::PublishNip43MembershipLocked,
+        )
+        .await?;
+        let (event, received_at, was_inserted, member_count) = transaction_timer
+            .observe(async {
+
+        // Acquire the per-community snapshot lock BEFORE reading members.
+        // This serializes the entire read-build-write cycle: a concurrent
+        // publication will block here until our transaction commits, then
+        // read the updated membership state.
+        observability::observe_advisory_lock(
+            observability::LockType::Membership,
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(lock_key)
+                .execute(&mut *tx),
+        )
+        .await?;
+
+        // Read current members inside the locked transaction.
+        let rows = sqlx::query(
+            "SELECT pubkey, role FROM relay_members \
+             WHERE community_id = $1 ORDER BY created_at ASC",
+        )
+        .bind(community_id.as_uuid())
+        .fetch_all(&mut *tx)
+        .await?;
+
+        let member_count = rows.len();
+
+        // Build the NIP-43 event from the locked member rows.
+        let mut tags: Vec<Tag> = Vec::with_capacity(member_count + 1);
+        // NIP-70 protected-event marker.
+        tags.push(Tag::parse(["-"]).map_err(|e| {
+            crate::error::DbError::InvalidData(format!("failed to build '-' tag: {e}"))
+        })?);
+        for row in &rows {
+            let pubkey: String = row.try_get("pubkey")?;
+            let role: String = row.try_get("role")?;
+            tags.push(Tag::parse(["member", &pubkey, &role]).map_err(|e| {
+                crate::error::DbError::InvalidData(format!("failed to build member tag: {e}"))
+            })?);
+        }
+
+        let event = EventBuilder::new(Kind::Custom(kind_i32 as u16), "")
+            .tags(tags)
+            .sign_with_keys(relay_keypair)
+            .map_err(|e| {
+                crate::error::DbError::InvalidData(format!("failed to sign kind:13534: {e}"))
+            })?;
+
+        let created_at_secs = event.created_at.as_secs() as i64;
+        let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
+            .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
+        let sig_bytes = event.sig.serialize();
+        let tags_json = serde_json::to_value(&event.tags)?;
+        let received_at = chrono::Utc::now();
+        let d_tag = crate::event::extract_d_tag(&event);
+
+        // Soft-delete prior snapshots — unconditional, the relay is authoritative.
+        sqlx::query(
+            "UPDATE events SET deleted_at = NOW() \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+             AND channel_id IS NULL \
+             AND deleted_at IS NULL",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind_i32)
+        .bind(pubkey_bytes.as_slice())
+        .execute(&mut *tx)
+        .await?;
+
+        let insert_result = sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .bind(pubkey_bytes.as_slice())
+        .bind(created_at)
+        .bind(kind_i32)
+        .bind(&tags_json)
+        .bind(&event.content)
+        .bind(sig_bytes.as_slice())
+        .bind(received_at)
+        .bind::<Option<Uuid>>(None)
+        .bind(d_tag.as_deref())
+        .execute(&mut *tx)
+        .await?;
+
+        let was_inserted = insert_result.rows_affected() > 0;
+        if was_inserted {
+            tx.commit().await?;
+        } else {
+            tx.rollback().await?;
+        }
+        Ok::<_, DbError>((event, received_at, was_inserted, member_count))
+            })
+            .await?;
+
+        if was_inserted {
+            if let Err(e) = crate::insert_mentions(&self.pool, community_id, &event, None).await {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            }
+        }
+
+        Ok((
+            StoredEvent::with_received_at(event, received_at, None, was_inserted),
+            was_inserted,
+            member_count,
+        ))
+    }
 }
 
 #[cfg(test)]

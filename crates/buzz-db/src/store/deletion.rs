@@ -17,6 +17,7 @@ use sqlx::{AssertSqlSafe, PgConnection, PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 use crate::error::{DbError, Result};
+use crate::Db;
 
 /// Default PostgreSQL lease duration for one claimed deletion request.
 pub const DEFAULT_LEASE_DURATION: Duration = Duration::from_secs(60);
@@ -625,6 +626,23 @@ pub struct ServingLeaseStats {
 #[derive(Clone)]
 pub struct DeletionStore {
     pool: PgPool,
+}
+
+impl Db {
+    /// Validate the minimum deletion fence catalog required by serving paths.
+    pub async fn validate_deletion_serving_catalog(&self) -> Result<()> {
+        self.deletion_store().validate_serving_catalog().await
+    }
+
+    /// Validate the exact live community-deletion tenant catalog for destruction.
+    pub async fn validate_deletion_catalog(&self) -> Result<()> {
+        self.deletion_store().validate_catalog().await
+    }
+
+    /// Return the shared durable whole-community deletion adapter.
+    pub fn deletion_store(&self) -> DeletionStore {
+        DeletionStore::new(self.pool.clone())
+    }
 }
 
 impl DeletionStore {

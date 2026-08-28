@@ -19,13 +19,13 @@
 //!    observes `token >= M` on its own connection has, by WAL/storage replay
 //!    order, also replayed every commit that preceded M's commit; every
 //!    transaction then partitions into exactly three buckets:
-//!      (a) finished before the activity scan — its commit precedes `M`'s
-//!          commit, so the replica session has replayed it;
-//!      (b) open at the activity scan — represented by `xact_start`, so it is
-//!          bounded by the `oldest_xact_start` term;
-//!      (c) started after the activity scan — its deferred floor guard runs
-//!          after `S`, so it cannot commit a row with
-//!          `created_at < S - floor`.
+//!    (a) finished before the activity scan — its commit precedes `M`'s
+//!    commit, so the replica session has replayed it;
+//!    (b) open at the activity scan — represented by `xact_start`, so it is
+//!    bounded by the `oldest_xact_start` term;
+//!    (c) started after the activity scan — its deferred floor guard runs
+//!    after `S`, so it cannot commit a row with
+//!    `created_at < S - floor`.
 //!    There is no fourth bucket. Each committed token `M` therefore proves a
 //!    **fence wall** of `min(oldest_xact_start, S) - floor - clock_margin`:
 //!    every channel-window row with `created_at <= fence_wall(M)` is present

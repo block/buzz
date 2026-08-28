@@ -3,12 +3,13 @@
 //! Feedback retains its source [`CommunityId`] as provenance, but is not a
 //! community moderation concern and is never inserted into the events table.
 
+use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::{PgPool, Row as _};
 use uuid::Uuid;
 
-use crate::{error::Result, CommunityId};
+use crate::{error::Result, CommunityId, Db};
 
 /// Validated fields from an accepted product-feedback event.
 #[derive(Debug, Clone)]
@@ -115,6 +116,24 @@ pub async fn list(pool: &PgPool, limit: i64) -> Result<Vec<ProductFeedbackRecord
             })
         })
         .collect()
+}
+
+impl Db {
+    /// Sidecar an accepted product-feedback event, idempotent by event id.
+    #[datastore_span(name = "insert_product_feedback", system = "postgresql")]
+    pub async fn insert_product_feedback(
+        &self,
+        community: CommunityId,
+        feedback: NewProductFeedback<'_>,
+    ) -> Result<Uuid> {
+        insert(&self.pool, community, feedback).await
+    }
+
+    /// List product feedback across the deployment, newest first.
+    #[datastore_span(name = "list_product_feedback", system = "postgresql")]
+    pub async fn list_product_feedback(&self, limit: i64) -> Result<Vec<ProductFeedbackRecord>> {
+        list(&self.pool, limit).await
+    }
 }
 
 #[cfg(test)]

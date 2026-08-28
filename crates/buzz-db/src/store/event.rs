@@ -14,8 +14,16 @@ use buzz_core::kind::{
     KIND_HUDDLE_STARTED, SHARED_GATED_KINDS,
 };
 use buzz_core::{CommunityId, StoredEvent};
+use buzz_datastore_tracing::datastore_span;
 
 use crate::error::{DbError, Result};
+use crate::Db;
+
+// Compatibility exports preserve the pre-extraction public event-store paths.
+pub use crate::reminder::{
+    claim_due_reminder, claim_due_reminder_with_stamp, query_due_reminders, release_due_reminder,
+    DueReminder,
+};
 
 /// Largest page [`query_events`] will return when [`EventQuery::max_limit`] is
 /// unset — the effective ceiling on any client-requested `limit`.
@@ -140,21 +148,7 @@ impl EventQuery {
     }
 }
 
-/// Result of atomically inserting a kind:7 reaction event and its reaction row.
-#[derive(Debug)]
-pub enum ReactionEventInsertOutcome {
-    /// Target event was absent in this community, or was soft-deleted. No writes committed.
-    TargetMissing,
-    /// The active `(target, actor, emoji)` reaction already exists. No event was stored.
-    Duplicate,
-    /// Reaction row and event transaction committed.
-    Inserted {
-        /// Stored reaction event.
-        stored_event: Box<StoredEvent>,
-        /// Whether the event row itself was newly inserted.
-        was_inserted: bool,
-    },
-}
+pub use crate::reaction::{insert_reaction_event_with_thread_metadata, ReactionEventInsertOutcome};
 
 /// Maximum length for a `d_tag` value (bytes). NIP-33 d-tags are short identifiers;
 /// anything beyond this is either a bug or abuse.
@@ -1354,238 +1348,395 @@ pub async fn insert_event_with_thread_metadata(
     Ok(result)
 }
 
-/// Atomically insert a kind:7 reaction event and its reaction row.
-///
-/// Ordering is load-bearing: resolve target, upsert/reactivate the reaction row,
-/// check `rows_affected`, then insert the kind:7 event. Active duplicates return
-/// before event insertion so duplicate reactions never store a duplicate kind:7.
-#[allow(clippy::too_many_arguments)]
-pub async fn insert_reaction_event_with_thread_metadata(
-    pool: &PgPool,
-    community_id: CommunityId,
-    reaction_event: &Event,
-    channel_id: Option<Uuid>,
-    thread_meta: Option<ThreadMetadataParams<'_>>,
-    target_event_id: &[u8],
-    actor_pubkey: &[u8],
-    emoji: &str,
-) -> Result<ReactionEventInsertOutcome> {
-    let mut tx = pool.begin().await?;
-
-    let target_row = sqlx::query(
-        "SELECT created_at FROM events \
-         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL \
-         ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(community_id.as_uuid())
-    .bind(target_event_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    let Some(target_row) = target_row else {
-        tx.rollback().await?;
-        return Ok(ReactionEventInsertOutcome::TargetMissing);
-    };
-    let target_created_at: DateTime<Utc> = target_row.get("created_at");
-
-    // Preserve add_reaction's exact new / re-activate / active-duplicate semantics.
-    let reaction_inserted = crate::reaction::add_reaction_tx(
-        &mut tx,
-        community_id,
-        target_event_id,
-        target_created_at,
-        actor_pubkey,
-        emoji,
-        Some(reaction_event.id.as_bytes()),
-    )
-    .await?;
-
-    if !reaction_inserted {
-        tx.rollback().await?;
-        return Ok(ReactionEventInsertOutcome::Duplicate);
+impl Db {
+    /// Inserts an event. Returns `(StoredEvent, was_inserted)` — `false` on duplicate.
+    #[datastore_span(name = "insert_event", system = "postgresql")]
+    pub async fn insert_event(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+    ) -> Result<(StoredEvent, bool)> {
+        let result =
+            crate::event::insert_event(&self.pool, community_id, event, channel_id).await?;
+        if result.1 {
+            if let Err(e) =
+                crate::insert_mentions(&self.pool, community_id, event, channel_id).await
+            {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            }
+        }
+        Ok(result)
     }
 
-    let (stored_event, was_inserted) = insert_event_with_thread_metadata_tx(
-        &mut tx,
-        community_id,
-        reaction_event,
-        channel_id,
-        thread_meta,
-    )
-    .await?;
+    /// Queries events matching the given filter parameters.
+    ///
+    /// Always reads from the WRITER pool. If the result influences a write
+    /// or a permission decision, this is the method to call. Display-path
+    /// callers that tolerate bounded staleness should use
+    /// [`Db::query_events_routed`] instead — converting a caller is an
+    /// explicit, per-callsite decision, never a change to this method.
+    #[datastore_span(name = "query_events", system = "postgresql")]
+    pub async fn query_events(&self, q: &EventQuery) -> Result<Vec<StoredEvent>> {
+        crate::event::query_events(&self.pool, q).await
+    }
 
-    tx.commit().await?;
+    /// [`Db::query_events`] with replica routing — the opt-in fast path for
+    /// display reads.
+    ///
+    /// Rule of thumb: **if the result influences a write or a permission,
+    /// it reads from the writer** — do not convert such a caller to this
+    /// method. Every new caller must be added to the caller-classification
+    /// table in `PLANS/REPLICA_FULL_READ_ROUTING_DESIGN.md`.
+    ///
+    /// Routing derives the strongest sound predicate from the query shape
+    /// ([`crate::RoutePredicate::for_query`]): a channel-pinned query with an
+    /// `until` upper bound may be served covered (provably complete below
+    /// the fence wall); anything else is bounded-staleness only. The whole
+    /// seam is gated on `BUZZ_REPLICA_READ_MAX_AGE_MS` (default off): when
+    /// unset, even covered-eligible queries stay on the writer, so merging
+    /// this seam is a true no-op until the budget is configured. Every
+    /// failure fails closed to the writer.
+    #[datastore_span(name = "query_events_routed", system = "postgresql")]
+    pub async fn query_events_routed(
+        &self,
+        path: &'static str,
+        q: &EventQuery,
+    ) -> Result<Vec<StoredEvent>> {
+        let predicate = crate::RoutePredicate::for_query(q, self.replica_read_max_age.is_some());
+        match self.route_read(path, predicate).await {
+            crate::RouteDecision::Replica(mut tx, _entry, reason) => {
+                match crate::event::query_events_on(&mut tx, q).await {
+                    Ok(events) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(events)
+                    }
+                    Err(e) => {
+                        // Mid-query replica failure: fail closed to the
+                        // writer rather than surfacing a routed error.
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        crate::event::query_events(&self.pool, q).await
+                    }
+                }
+            }
+            crate::RouteDecision::Writer => crate::event::query_events(&self.pool, q).await,
+        }
+    }
 
-    Ok(ReactionEventInsertOutcome::Inserted {
-        stored_event: Box::new(stored_event),
-        was_inserted,
-    })
-}
+    /// [`Db::query_events_routed`] restricted to the BOUNDED arm — for
+    /// reads whose result feeds a COUNT rather than a displayed page.
+    ///
+    /// The covered arm bounds insert-completeness only; stale deletions can
+    /// briefly inflate the result set (see [`crate::RoutePredicate::Covered`]). A
+    /// display page absorbs that per-row; a number derived from the rows
+    /// does not. Same classification-table requirement as
+    /// [`Db::query_events_routed`].
+    #[datastore_span(name = "query_events_routed_bounded", system = "postgresql")]
+    pub async fn query_events_routed_bounded(
+        &self,
+        path: &'static str,
+        q: &EventQuery,
+    ) -> Result<Vec<StoredEvent>> {
+        match self.route_read(path, crate::RoutePredicate::Bounded).await {
+            crate::RouteDecision::Replica(mut tx, _entry, reason) => {
+                match crate::event::query_events_on(&mut tx, q).await {
+                    Ok(events) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(events)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        crate::event::query_events(&self.pool, q).await
+                    }
+                }
+            }
+            crate::RouteDecision::Writer => crate::event::query_events(&self.pool, q).await,
+        }
+    }
 
-/// A due reminder row returned by [`query_due_reminders`].
-#[derive(Debug)]
-pub struct DueReminder {
-    /// Server-resolved community this reminder row belongs to.
-    pub community_id: CommunityId,
-    /// Normalized host mapped to that community.
-    pub host: String,
-    /// The event's raw ID bytes.
-    pub id: Vec<u8>,
-    /// The event's pubkey bytes.
-    pub pubkey: Vec<u8>,
-    /// The event's `created_at` timestamp.
-    pub created_at: DateTime<Utc>,
-    /// The event's kind (always 30300).
-    pub kind: i32,
-    /// The event's JSONB tags.
-    pub tags: serde_json::Value,
-    /// The event's encrypted content.
-    pub content: String,
-    /// The event's signature bytes.
-    pub sig: Vec<u8>,
-    /// The channel ID (always None for reminders — global events).
-    pub channel_id: Option<Uuid>,
-}
+    /// Count events matching the given query (NIP-45 COUNT support).
+    ///
+    /// Always reads from the WRITER pool — see [`Db::query_events`] for the
+    /// writer-vs-routed rule.
+    #[datastore_span(name = "count_events", system = "postgresql")]
+    pub async fn count_events(&self, q: &EventQuery) -> Result<i64> {
+        crate::event::count_events(&self.pool, q).await
+    }
 
-/// Query due reminders: latest-per-address `kind:30300` rows where
-/// `not_before <= now`, `deleted_at IS NULL`, `delivered_at IS NULL`.
-///
-/// Returns the latest head per `(pubkey, d_tag)` using canonical NIP-16
-/// ordering (`created_at DESC, id ASC`).
-pub async fn query_due_reminders(
-    pool: &PgPool,
-    now_secs: i64,
-    batch_limit: i64,
-) -> Result<Vec<DueReminder>> {
-    let kind_i32 = KIND_EVENT_REMINDER as i32;
-    let rows = sqlx::query(
-        r#"
-        SELECT DISTINCT ON (e.community_id, e.pubkey, e.d_tag)
-            e.community_id, c.host, e.id, e.pubkey, e.created_at, e.kind, e.tags, e.content, e.sig, e.channel_id
-        FROM events AS e
-        JOIN communities AS c ON c.id = e.community_id
-        WHERE e.kind = $1
-          AND e.not_before IS NOT NULL
-          AND e.not_before <= $2
-          AND e.deleted_at IS NULL
-          AND e.delivered_at IS NULL
-          AND c.archived_at IS NULL
-        ORDER BY e.community_id, e.pubkey, e.d_tag, e.created_at DESC, e.id ASC
-        LIMIT $3
-        "#,
-    )
-    .bind(kind_i32)
-    .bind(now_secs)
-    .bind(batch_limit)
-    .fetch_all(pool)
-    .await?;
+    /// [`Db::count_events`] with replica routing — same contract, rules,
+    /// and classification-table requirement as [`Db::query_events_routed`].
+    ///
+    /// Counts route on the BOUNDED arm only, never covered: the covered
+    /// arm bounds insert-completeness but not deletion visibility (soft
+    /// deletes are UPDATEs outside the floor guard), and a count has no
+    /// downstream per-row re-filter to absorb extra rows — a silently
+    /// inflated number for up to `FENCE_STALENESS` is a different product
+    /// statement than a page briefly showing a deleted row. `Bounded` ties
+    /// the error to the accepted budget `B`.
+    #[datastore_span(name = "count_events_routed", system = "postgresql")]
+    pub async fn count_events_routed(&self, path: &'static str, q: &EventQuery) -> Result<i64> {
+        match self.route_read(path, crate::RoutePredicate::Bounded).await {
+            crate::RouteDecision::Replica(mut tx, _entry, reason) => {
+                match crate::event::count_events_on(&mut tx, q).await {
+                    Ok(count) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(count)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica count failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        crate::event::count_events(&self.pool, q).await
+                    }
+                }
+            }
+            crate::RouteDecision::Writer => crate::event::count_events(&self.pool, q).await,
+        }
+    }
 
-    let results = rows
-        .into_iter()
-        .map(|row| DueReminder {
-            community_id: CommunityId::from_uuid(row.get("community_id")),
-            host: row.get("host"),
-            id: row.get("id"),
-            pubkey: row.get("pubkey"),
-            created_at: row.get("created_at"),
-            kind: row.get("kind"),
-            tags: row.get("tags"),
-            content: row.get("content"),
-            sig: row.get("sig"),
-            channel_id: row.get("channel_id"),
-        })
-        .collect();
+    /// Return whether a creator-signed huddle-start event links a parent
+    /// channel to an ephemeral huddle channel.
+    #[datastore_span(name = "huddle_started_link_exists", system = "postgresql")]
+    pub async fn huddle_started_link_exists(
+        &self,
+        community_id: CommunityId,
+        parent_channel_id: Uuid,
+        ephemeral_channel_id: Uuid,
+        creator_pubkey: &[u8],
+    ) -> Result<bool> {
+        crate::event::huddle_started_link_exists(
+            &self.pool,
+            community_id,
+            parent_channel_id,
+            ephemeral_channel_id,
+            creator_pubkey,
+        )
+        .await
+    }
 
-    Ok(results)
-}
+    /// Fetch the latest replaceable event for a (kind, pubkey) pair.
+    ///
+    /// Uses canonical NIP-16 ordering: `created_at DESC, id ASC`.
+    /// This matches the write path in [`replace_addressable_event`] and handles
+    /// historical duplicate survivors correctly.
+    #[datastore_span(name = "get_latest_global_replaceable", system = "postgresql")]
+    pub async fn get_latest_global_replaceable(
+        &self,
+        community_id: CommunityId,
+        kind: i32,
+        pubkey_bytes: &[u8],
+    ) -> Result<Option<StoredEvent>> {
+        crate::event::get_latest_global_replaceable(&self.pool, community_id, kind, pubkey_bytes)
+            .await
+    }
 
-/// Atomically claim a due reminder for delivery. Returns `Some(id)` if this
-/// caller won the claim (set `delivered_at`), or `None` if another pod already
-/// claimed it. Mirrors the reaper's `archived_at IS NULL` guard for cross-pod
-/// idempotency.
-pub async fn claim_due_reminder(
-    pool: &PgPool,
-    community_id: CommunityId,
-    event_id: &[u8],
-    event_created_at: DateTime<Utc>,
-) -> Result<bool> {
-    claim_due_reminder_with_stamp(
-        pool,
-        community_id,
-        event_id,
-        event_created_at,
-        Utc::now().timestamp(),
-    )
-    .await
-}
+    /// Fetches a single non-deleted event by its raw ID bytes.
+    ///
+    /// Returns `None` if the event does not exist or has been soft-deleted.
+    #[datastore_span(name = "get_event_by_id", system = "postgresql")]
+    pub async fn get_event_by_id(
+        &self,
+        community_id: CommunityId,
+        id_bytes: &[u8],
+    ) -> Result<Option<StoredEvent>> {
+        crate::event::get_event_by_id(&self.pool, community_id, id_bytes).await
+    }
 
-/// Atomically claim a due reminder using a caller-supplied delivery stamp.
-///
-/// The same stamp should be passed to [`release_due_reminder`] if the publish
-/// side effect fails, so rollback can compare-and-clear only this pod's claim.
-///
-/// Scoped by `community_id`: `events` is keyed `(community_id, created_at, id)`,
-/// and the same Nostr event id (hence the same `id`/`created_at` pair) is
-/// allowed across communities. Without the community predicate a claim for
-/// `A/X` would also mark `B/X` delivered. The caller already holds the owning
-/// community on the `DueReminder` row.
-pub async fn claim_due_reminder_with_stamp(
-    pool: &PgPool,
-    community_id: CommunityId,
-    event_id: &[u8],
-    event_created_at: DateTime<Utc>,
-    delivery_stamp: i64,
-) -> Result<bool> {
-    let result = sqlx::query(
-        r#"
-        UPDATE events
-        SET delivered_at = $1
-        WHERE community_id = $2 AND created_at = $3 AND id = $4 AND delivered_at IS NULL
-        "#,
-    )
-    .bind(delivery_stamp)
-    .bind(community_id.as_uuid())
-    .bind(event_created_at)
-    .bind(event_id)
-    .execute(pool)
-    .await?;
+    /// Fetches a single event by its raw ID bytes, **including soft-deleted rows**.
+    #[datastore_span(name = "get_event_by_id_including_deleted", system = "postgresql")]
+    pub async fn get_event_by_id_including_deleted(
+        &self,
+        community_id: CommunityId,
+        id_bytes: &[u8],
+    ) -> Result<Option<StoredEvent>> {
+        crate::event::get_event_by_id_including_deleted(&self.pool, community_id, id_bytes).await
+    }
 
-    Ok(result.rows_affected() > 0)
-}
+    /// Soft-deletes an event. Returns `Ok(true)` if deleted, `Ok(false)` if already deleted.
+    #[datastore_span(name = "soft_delete_event", system = "postgresql")]
+    pub async fn soft_delete_event(
+        &self,
+        community_id: CommunityId,
+        event_id: &[u8],
+    ) -> Result<bool> {
+        crate::event::soft_delete_event(&self.pool, community_id, event_id).await
+    }
 
-/// Release a previously claimed reminder when publish fails.
-///
-/// The `delivery_stamp` must be the exact value written by the claiming pod;
-/// that compare-and-clear prevents one pod from rolling back another pod's
-/// later claim after a retry/race.
-///
-/// Scoped by `community_id` for the same reason as the claim: a release for
-/// `A/X` must not clear `B/X` even when their `id`/`created_at`/stamp coincide.
-pub async fn release_due_reminder(
-    pool: &PgPool,
-    community_id: CommunityId,
-    event_id: &[u8],
-    event_created_at: DateTime<Utc>,
-    delivery_stamp: i64,
-) -> Result<bool> {
-    let result = sqlx::query(
-        r#"
-        UPDATE events
-        SET delivered_at = NULL
-        WHERE community_id = $1
-          AND created_at = $2
-          AND id = $3
-          AND delivered_at = $4
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(event_created_at)
-    .bind(event_id)
-    .bind(delivery_stamp)
-    .execute(pool)
-    .await?;
+    /// Soft-delete the live row for an addressable coordinate `(kind, pubkey, d_tag)`
+    /// when it is not newer than the deletion request.
+    /// Used by NIP-09 a-tag deletion for parameterized-replaceable kinds;
+    /// `deletion_created_at_secs` is the deletion event's `created_at`.
+    #[datastore_span(name = "soft_delete_by_coordinate", system = "postgresql")]
+    pub async fn soft_delete_by_coordinate(
+        &self,
+        community_id: CommunityId,
+        kind: i32,
+        pubkey: &[u8],
+        d_tag: &str,
+        deletion_created_at_secs: i64,
+    ) -> Result<bool> {
+        crate::event::soft_delete_by_coordinate(
+            &self.pool,
+            community_id,
+            kind,
+            pubkey,
+            d_tag,
+            deletion_created_at_secs,
+        )
+        .await
+    }
 
-    Ok(result.rows_affected() == 1)
+    /// Atomically soft-delete an event and decrement thread reply counters.
+    #[datastore_span(name = "soft_delete_event_and_update_thread", system = "postgresql")]
+    pub async fn soft_delete_event_and_update_thread(
+        &self,
+        community_id: CommunityId,
+        event_id: &[u8],
+        parent_event_id: Option<&[u8]>,
+        root_event_id: Option<&[u8]>,
+    ) -> Result<bool> {
+        crate::event::soft_delete_event_and_update_thread(
+            &self.pool,
+            community_id,
+            event_id,
+            parent_event_id,
+            root_event_id,
+        )
+        .await
+    }
+
+    /// Returns the most recent `created_at` for a channel.
+    #[datastore_span(name = "get_last_message_at", system = "postgresql")]
+    pub async fn get_last_message_at(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<Option<DateTime<Utc>>> {
+        crate::event::get_last_message_at(&self.pool, community_id, channel_id).await
+    }
+
+    /// Bulk-fetch the most recent `created_at` for a set of channel IDs.
+    #[datastore_span(name = "get_last_message_at_bulk", system = "postgresql")]
+    pub async fn get_last_message_at_bulk(
+        &self,
+        community_id: CommunityId,
+        channel_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, DateTime<Utc>>> {
+        crate::event::get_last_message_at_bulk(&self.pool, community_id, channel_ids).await
+    }
+
+    /// Batch-fetch non-deleted events by their raw IDs.
+    #[datastore_span(name = "get_events_by_ids", system = "postgresql")]
+    pub async fn get_events_by_ids(
+        &self,
+        community_id: CommunityId,
+        ids: &[&[u8]],
+    ) -> Result<Vec<StoredEvent>> {
+        crate::event::get_events_by_ids(&self.pool, community_id, ids).await
+    }
+
+    /// [`Db::get_events_by_ids`] with replica routing — same contract and
+    /// classification-table requirement as [`Db::query_events_routed`].
+    ///
+    /// By-id fetches route on the BOUNDED arm only: an id list carries no
+    /// channel pin, so no fence floor can prove insert-completeness — the
+    /// covered arm is structurally unavailable. Used for FTS hit hydration,
+    /// where a missing row degrades to a skipped search hit downstream.
+    #[datastore_span(name = "get_events_by_ids_routed", system = "postgresql")]
+    pub async fn get_events_by_ids_routed(
+        &self,
+        path: &'static str,
+        community_id: CommunityId,
+        ids: &[&[u8]],
+    ) -> Result<Vec<StoredEvent>> {
+        match self.route_read(path, crate::RoutePredicate::Bounded).await {
+            crate::RouteDecision::Replica(mut tx, _entry, reason) => {
+                match crate::event::get_events_by_ids_on(&mut tx, community_id, ids).await {
+                    Ok(events) => {
+                        Self::record_route(path, "replica", reason);
+                        Ok(events)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "replica read failed; re-running on writer: {e}");
+                        Self::record_route(path, "writer", "replica_error");
+                        crate::event::get_events_by_ids(&self.pool, community_id, ids).await
+                    }
+                }
+            }
+            crate::RouteDecision::Writer => {
+                crate::event::get_events_by_ids(&self.pool, community_id, ids).await
+            }
+        }
+    }
+
+    /// Atomically insert an event AND its thread metadata in a single transaction.
+    #[datastore_span(name = "insert_event_with_thread_metadata", system = "postgresql")]
+    pub async fn insert_event_with_thread_metadata(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+        thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
+    ) -> Result<(StoredEvent, bool)> {
+        let result = crate::event::insert_event_with_thread_metadata(
+            &self.pool,
+            community_id,
+            event,
+            channel_id,
+            thread_meta,
+        )
+        .await?;
+        if result.1 {
+            if let Err(e) =
+                crate::insert_mentions(&self.pool, community_id, event, channel_id).await
+            {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            }
+        }
+        Ok(result)
+    }
+
+    /// Backfill `d_tag` for existing NIP-33 events (kind 30000–39999) that have `d_tag IS NULL`.
+    ///
+    /// Idempotent — safe to call on every startup. No-ops when all rows are already populated.
+    /// Runs a single UPDATE touching only NIP-33 rows with NULL d_tag.
+    #[datastore_span(name = "backfill_d_tags", system = "postgresql")]
+    pub async fn backfill_d_tags(&self) -> Result<u64> {
+        let result = sqlx::query(
+            "UPDATE events \
+             SET d_tag = COALESCE( \
+                 (SELECT elem->>1 FROM jsonb_array_elements(tags) AS elem \
+                  WHERE elem->>0 = 'd' LIMIT 1), \
+                 '' \
+             ) \
+             WHERE kind BETWEEN 30000 AND 39999 AND d_tag IS NULL \
+               AND community_write_allowed(community_id)",
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Soft-delete NIP-29 discovery events for a channel created by a specific relay pubkey.
+    #[datastore_span(name = "soft_delete_discovery_events", system = "postgresql")]
+    pub async fn soft_delete_discovery_events(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        relay_pubkey: &[u8],
+    ) -> Result<u64> {
+        let result = sqlx::query(
+            "UPDATE events SET deleted_at = NOW() \
+             WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 AND deleted_at IS NULL AND kind IN (39000, 39001, 39002)",
+        )
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .bind(relay_pubkey)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
 }
 
 #[cfg(test)]
@@ -2073,298 +2224,6 @@ mod tests {
             .expect("sign text event")
     }
 
-    fn make_reaction_event(keys: &Keys, target_id_hex: &str, emoji: &str) -> nostr::Event {
-        let nonce = Uuid::new_v4().to_string();
-        EventBuilder::new(Kind::Custom(7), emoji)
-            .tags(vec![
-                Tag::parse(["e", target_id_hex]).expect("reaction e tag"),
-                Tag::parse(["nonce", nonce.as_str()]).expect("nonce tag"),
-            ])
-            .sign_with_keys(keys)
-            .expect("sign reaction event")
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn reaction_single_tx_stores_wrapped_max_shortcode() {
-        let pool = setup_pool().await;
-        let community = CommunityId::from_uuid(make_test_community(&pool).await);
-        let target = make_text_event("long custom emoji target");
-        insert_event(&pool, community, &target, None)
-            .await
-            .expect("insert target");
-
-        let actor = Keys::generate();
-        let emoji = format!(":{}:", "a".repeat(64));
-        let reaction = make_reaction_event(&actor, &target.id.to_hex(), &emoji);
-        let outcome = insert_reaction_event_with_thread_metadata(
-            &pool,
-            community,
-            &reaction,
-            None,
-            None,
-            target.id.as_bytes(),
-            &actor.public_key().to_bytes(),
-            &emoji,
-        )
-        .await
-        .expect("store wrapped 64-character shortcode");
-
-        assert!(matches!(
-            outcome,
-            ReactionEventInsertOutcome::Inserted {
-                was_inserted: true,
-                ..
-            }
-        ));
-        assert_eq!(emoji.chars().count(), 66);
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn reaction_single_tx_duplicate_short_circuit_stores_no_event() {
-        let pool = setup_pool().await;
-        let community = CommunityId::from_uuid(make_test_community(&pool).await);
-        let target = make_text_event("reaction target");
-        insert_event(&pool, community, &target, None)
-            .await
-            .expect("insert target");
-
-        let actor = Keys::generate();
-        let actor_pubkey = actor.public_key().to_bytes();
-        let target_hex = target.id.to_hex();
-        let first = make_reaction_event(&actor, &target_hex, "👍");
-        let second = make_reaction_event(&actor, &target_hex, "👍");
-
-        let first_outcome = insert_reaction_event_with_thread_metadata(
-            &pool,
-            community,
-            &first,
-            None,
-            None,
-            target.id.as_bytes(),
-            &actor_pubkey,
-            "👍",
-        )
-        .await
-        .expect("first reaction insert");
-        assert!(matches!(
-            first_outcome,
-            ReactionEventInsertOutcome::Inserted {
-                was_inserted: true,
-                ..
-            }
-        ));
-
-        let duplicate = insert_reaction_event_with_thread_metadata(
-            &pool,
-            community,
-            &second,
-            None,
-            None,
-            target.id.as_bytes(),
-            &actor_pubkey,
-            "👍",
-        )
-        .await
-        .expect("duplicate reaction insert");
-        assert!(matches!(duplicate, ReactionEventInsertOutcome::Duplicate));
-
-        let duplicate_event = get_event_by_id(&pool, community, second.id.as_bytes())
-            .await
-            .expect("lookup duplicate reaction event");
-        assert!(
-            duplicate_event.is_none(),
-            "active duplicate reaction must short-circuit before storing kind:7 event"
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn reaction_single_tx_cross_community_target_rejected() {
-        let pool = setup_pool().await;
-        let community_a = CommunityId::from_uuid(make_test_community(&pool).await);
-        let community_b = CommunityId::from_uuid(make_test_community(&pool).await);
-        let target = make_text_event("community A target only");
-        insert_event(&pool, community_a, &target, None)
-            .await
-            .expect("insert target in A");
-
-        let actor = Keys::generate();
-        let actor_pubkey = actor.public_key().to_bytes();
-        let reaction = make_reaction_event(&actor, &target.id.to_hex(), "👍");
-
-        let outcome = insert_reaction_event_with_thread_metadata(
-            &pool,
-            community_b,
-            &reaction,
-            None,
-            None,
-            target.id.as_bytes(),
-            &actor_pubkey,
-            "👍",
-        )
-        .await
-        .expect("cross-community reaction attempt");
-        assert!(matches!(outcome, ReactionEventInsertOutcome::TargetMissing));
-
-        assert!(
-            get_event_by_id(&pool, community_b, reaction.id.as_bytes())
-                .await
-                .expect("lookup B reaction event")
-                .is_none(),
-            "reaction event must not store when target exists only in another community"
-        );
-        assert!(
-            crate::reaction::get_active_reaction_record(
-                &pool,
-                community_b,
-                target.id.as_bytes(),
-                DateTime::from_timestamp(target.created_at.as_secs() as i64, 0).unwrap(),
-                &actor_pubkey,
-                "👍",
-            )
-            .await
-            .expect("lookup B reaction row")
-            .is_none(),
-            "reaction row must not be inserted for cross-community target miss"
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn reaction_single_tx_event_insert_failure_rolls_back_reaction() {
-        let pool = setup_pool().await;
-        let community = CommunityId::from_uuid(make_test_community(&pool).await);
-        let target = make_text_event("rollback target");
-        insert_event(&pool, community, &target, None)
-            .await
-            .expect("insert target");
-
-        let actor = Keys::generate();
-        let actor_pubkey = actor.public_key().to_bytes();
-        let target_hex = target.id.to_hex();
-        let bad_reaction = EventBuilder::new(Kind::Custom(20000), "👍")
-            .tags(vec![
-                Tag::parse(["e", target_hex.as_str()]).expect("reaction e tag")
-            ])
-            .sign_with_keys(&actor)
-            .expect("sign ephemeral reaction-shaped event");
-        let target_created_at = DateTime::from_timestamp(target.created_at.as_secs() as i64, 0)
-            .expect("target timestamp");
-
-        let err = insert_reaction_event_with_thread_metadata(
-            &pool,
-            community,
-            &bad_reaction,
-            None,
-            None,
-            target.id.as_bytes(),
-            &actor_pubkey,
-            "👍",
-        )
-        .await
-        .expect_err("ephemeral event insert must fail after reaction upsert attempt");
-        assert!(matches!(err, DbError::EphemeralEventRejected(20000)));
-
-        assert!(
-            crate::reaction::get_active_reaction_record(
-                &pool,
-                community,
-                target.id.as_bytes(),
-                target_created_at,
-                &actor_pubkey,
-                "👍",
-            )
-            .await
-            .expect("lookup reaction row after rollback")
-            .is_none(),
-            "transaction rollback must remove the reaction row when event insert fails"
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn reaction_single_tx_reactivates_soft_deleted_reaction() {
-        let pool = setup_pool().await;
-        let community = CommunityId::from_uuid(make_test_community(&pool).await);
-        let target = make_text_event("reactivation target");
-        insert_event(&pool, community, &target, None)
-            .await
-            .expect("insert target");
-
-        let actor = Keys::generate();
-        let actor_pubkey = actor.public_key().to_bytes();
-        let target_hex = target.id.to_hex();
-        let target_created_at = DateTime::from_timestamp(target.created_at.as_secs() as i64, 0)
-            .expect("target timestamp");
-        let first = make_reaction_event(&actor, &target_hex, "👍");
-        let second = make_reaction_event(&actor, &target_hex, "👍");
-
-        assert!(matches!(
-            insert_reaction_event_with_thread_metadata(
-                &pool,
-                community,
-                &first,
-                None,
-                None,
-                target.id.as_bytes(),
-                &actor_pubkey,
-                "👍",
-            )
-            .await
-            .expect("first reaction insert"),
-            ReactionEventInsertOutcome::Inserted { .. }
-        ));
-        assert!(crate::reaction::remove_reaction(
-            &pool,
-            community,
-            target.id.as_bytes(),
-            target_created_at,
-            &actor_pubkey,
-            "👍",
-        )
-        .await
-        .expect("soft delete reaction"));
-
-        let outcome = insert_reaction_event_with_thread_metadata(
-            &pool,
-            community,
-            &second,
-            None,
-            None,
-            target.id.as_bytes(),
-            &actor_pubkey,
-            "👍",
-        )
-        .await
-        .expect("reactivate reaction");
-        assert!(matches!(
-            outcome,
-            ReactionEventInsertOutcome::Inserted {
-                was_inserted: true,
-                ..
-            }
-        ));
-
-        let active = crate::reaction::get_active_reaction_record(
-            &pool,
-            community,
-            target.id.as_bytes(),
-            target_created_at,
-            &actor_pubkey,
-            "👍",
-        )
-        .await
-        .expect("active record after reactivation")
-        .expect("reaction active after reactivation");
-        assert_eq!(
-            active.reaction_event_id.as_deref(),
-            Some(second.id.as_bytes().as_slice()),
-            "reactivation through the tx path must preserve add_reaction's source-id update semantics"
-        );
-    }
-
     #[test]
     fn extract_d_tag_from_nip33_event() {
         let event = make_event_with_kind_and_tags(
@@ -2495,240 +2354,70 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn query_due_reminders_returns_row_community_and_host_per_tenant() {
-        let pool = setup_pool().await;
-        let community_a_uuid = make_test_community(&pool).await;
-        let community_b_uuid = make_test_community(&pool).await;
-        let community_a = CommunityId::from_uuid(community_a_uuid);
-        let community_b = CommunityId::from_uuid(community_b_uuid);
-        let host_a: String = sqlx::query_scalar("SELECT host FROM communities WHERE id = $1")
-            .bind(community_a_uuid)
-            .fetch_one(&pool)
-            .await
-            .expect("load host A");
-        let host_b: String = sqlx::query_scalar("SELECT host FROM communities WHERE id = $1")
-            .bind(community_b_uuid)
-            .fetch_one(&pool)
-            .await
-            .expect("load host B");
+    async fn coordinate_delete_spares_head_newer_than_the_deletion() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
-        let not_before = Utc::now().timestamp() - 1;
-        let keys_a = Keys::generate();
-        let keys_b = Keys::generate();
-        let event_a = EventBuilder::new(Kind::Custom(KIND_EVENT_REMINDER as u16), "a")
-            .tags([
-                Tag::parse(["d", "due-reminder-scope-a"]).unwrap(),
-                Tag::parse(["not_before", &not_before.to_string()]).unwrap(),
-            ])
-            .sign_with_keys(&keys_a)
-            .expect("sign A");
-        let event_b = EventBuilder::new(Kind::Custom(KIND_EVENT_REMINDER as u16), "b")
-            .tags([
-                Tag::parse(["d", "due-reminder-scope-b"]).unwrap(),
-                Tag::parse(["not_before", &not_before.to_string()]).unwrap(),
-            ])
-            .sign_with_keys(&keys_b)
-            .expect("sign B");
-
-        insert_event(&pool, community_a, &event_a, None)
-            .await
-            .expect("insert A");
-        insert_event(&pool, community_b, &event_b, None)
-            .await
-            .expect("insert B");
-
-        let due = query_due_reminders(&pool, Utc::now().timestamp(), 100)
-            .await
-            .expect("query due reminders");
-
-        assert!(due.iter().any(|row| {
-            row.id == event_a.id.as_bytes() && row.community_id == community_a && row.host == host_a
-        }));
-        assert!(due.iter().any(|row| {
-            row.id == event_b.id.as_bytes() && row.community_id == community_b && row.host == host_b
-        }));
-    }
-
-    /// Two pods race to claim the same due reminder: exactly one wins. The
-    /// scheduler publishes only on a winning claim (`Ok(true)`) and `continue`s
-    /// on the loser (`Ok(false)`), so a single winning claim *is* the proof of
-    /// exactly one publish side effect across N pods.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn claim_due_reminder_is_won_by_exactly_one_of_two_racing_pods() {
-        let pool = setup_pool().await;
-        let community = CommunityId::from_uuid(make_test_community(&pool).await);
-        let not_before = Utc::now().timestamp() - 1;
+        let db = Db::from_pool(setup_pool().await);
+        let community = CommunityId::from_uuid(make_test_community(&db.pool).await);
         let keys = Keys::generate();
-        let event = EventBuilder::new(Kind::Custom(KIND_EVENT_REMINDER as u16), "due")
-            .tags([
-                Tag::parse(["d", "due-reminder-claim-race"]).unwrap(),
-                Tag::parse(["not_before", &not_before.to_string()]).unwrap(),
-            ])
-            .sign_with_keys(&keys)
-            .expect("sign reminder");
-        insert_event(&pool, community, &event, None)
+        let kind = buzz_core::kind::KIND_PROJECT as i32;
+        let d_tag = "stale-tombstone-project";
+        let pubkey = keys.public_key().to_bytes().to_vec();
+        let base = Timestamp::now().as_secs();
+
+        let version = |content: &str, offset: u64| {
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_PROJECT as u16), content)
+                .tags(vec![Tag::parse(["d", d_tag]).expect("d tag")])
+                .custom_created_at(Timestamp::from(base + offset))
+                .sign_with_keys(&keys)
+                .expect("sign project version")
+        };
+
+        for (content, offset) in [("v1", 0), ("v2", 100)] {
+            assert!(
+                db.replace_parameterized_event(community, &version(content, offset), d_tag, None)
+                    .await
+                    .expect("store project version")
+                    .1
+            );
+        }
+
+        // Tombstone timestamped between V1 and V2: it authorizes deleting V1,
+        // never the newer head that replaced it.
+        let stale_deleted = db
+            .soft_delete_by_coordinate(community, kind, &pubkey, d_tag, (base + 50) as i64)
             .await
-            .expect("insert reminder");
+            .expect("stale coordinate delete");
+        assert!(
+            !stale_deleted,
+            "a tombstone older than the live head must delete nothing"
+        );
 
-        let id = event.id.as_bytes().to_vec();
-        let created_at = event.created_at.as_secs() as i64;
-        let created_at = chrono::DateTime::from_timestamp(created_at, 0).expect("created_at");
+        let live_content: Option<String> = sqlx::query_scalar(
+            "SELECT content FROM events \
+             WHERE community_id=$1 AND kind=$2 AND pubkey=$3 AND d_tag=$4 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(kind)
+        .bind(&pubkey)
+        .bind(d_tag)
+        .fetch_optional(&db.pool)
+        .await
+        .expect("read live head");
+        assert_eq!(
+            live_content.as_deref(),
+            Some("v2"),
+            "the newer head must survive a stale tombstone"
+        );
 
-        // Two pods, two distinct per-attempt stamps, same reminder.
-        let stamp_p1: i64 = 0x1111_1111_1111_1111;
-        let stamp_p2: i64 = 0x2222_2222_2222_2222;
-        let won_p1 = claim_due_reminder_with_stamp(&pool, community, &id, created_at, stamp_p1)
+        // A tombstone at or after the head's own timestamp still deletes it.
+        let current_deleted = db
+            .soft_delete_by_coordinate(community, kind, &pubkey, d_tag, (base + 100) as i64)
             .await
-            .expect("p1 claim");
-        let won_p2 = claim_due_reminder_with_stamp(&pool, community, &id, created_at, stamp_p2)
-            .await
-            .expect("p2 claim");
-
+            .expect("current coordinate delete");
         assert!(
-            won_p1 ^ won_p2,
-            "exactly one pod must win the claim (p1={won_p1}, p2={won_p2}) — \
-             the loser never reaches the publish side effect"
-        );
-    }
-
-    /// A failed publish releases the claim so the reminder is redeliverable,
-    /// and the compare-and-clear stamp guard prevents one pod from rolling back
-    /// another pod's claim.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn release_due_reminder_rolls_back_only_the_matching_stamp() {
-        let pool = setup_pool().await;
-        let community = CommunityId::from_uuid(make_test_community(&pool).await);
-        let not_before = Utc::now().timestamp() - 1;
-        let keys = Keys::generate();
-        let event = EventBuilder::new(Kind::Custom(KIND_EVENT_REMINDER as u16), "due")
-            .tags([
-                Tag::parse(["d", "due-reminder-release"]).unwrap(),
-                Tag::parse(["not_before", &not_before.to_string()]).unwrap(),
-            ])
-            .sign_with_keys(&keys)
-            .expect("sign reminder");
-        insert_event(&pool, community, &event, None)
-            .await
-            .expect("insert reminder");
-
-        let id = event.id.as_bytes().to_vec();
-        let created_at = event.created_at.as_secs() as i64;
-        let created_at = chrono::DateTime::from_timestamp(created_at, 0).expect("created_at");
-        let stamp: i64 = 0x3333_3333_3333_3333;
-
-        assert!(
-            claim_due_reminder_with_stamp(&pool, community, &id, created_at, stamp)
-                .await
-                .expect("claim"),
-            "first claim wins"
-        );
-
-        // A release with the *wrong* stamp must be a no-op (does not clear
-        // another pod's claim).
-        assert!(
-            !release_due_reminder(&pool, community, &id, created_at, stamp ^ 0xFFFF)
-                .await
-                .expect("wrong-stamp release"),
-            "release with a non-matching stamp must not clear the claim"
-        );
-        assert!(
-            !claim_due_reminder_with_stamp(&pool, community, &id, created_at, stamp)
-                .await
-                .expect("re-claim after no-op release"),
-            "reminder must still be claimed after a no-op release"
-        );
-
-        // The matching-stamp release rolls the claim back; the reminder is
-        // redeliverable and a subsequent claim wins again.
-        assert!(
-            release_due_reminder(&pool, community, &id, created_at, stamp)
-                .await
-                .expect("matching-stamp release"),
-            "release with the claiming stamp must clear the claim"
-        );
-        assert!(
-            claim_due_reminder_with_stamp(&pool, community, &id, created_at, stamp)
-                .await
-                .expect("re-claim after release"),
-            "released reminder must be reclaimable for retry"
-        );
-    }
-
-    /// Cross-community confinement: the same Nostr reminder event (identical
-    /// `id` and `created_at`) inserted into communities A and B must claim and
-    /// release independently. A claim/release for `A/X` must never touch `B/X`.
-    ///
-    /// This is the primitive the scheduler's exactly-once-publish proof rests
-    /// on: `events` is keyed `(community_id, created_at, id)`, so without the
-    /// community predicate a claim for A would mark B delivered (suppressing
-    /// B's reminder) and a matching-stamp release for A would clear B.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn reminder_claim_and_release_are_confined_to_their_community() {
-        let pool = setup_pool().await;
-        let community_a = CommunityId::from_uuid(make_test_community(&pool).await);
-        let community_b = CommunityId::from_uuid(make_test_community(&pool).await);
-
-        // One signed event, inserted into both communities — same id/created_at.
-        let not_before = Utc::now().timestamp() - 1;
-        let keys = Keys::generate();
-        let event = EventBuilder::new(Kind::Custom(KIND_EVENT_REMINDER as u16), "due")
-            .tags([
-                Tag::parse(["d", "due-reminder-cross-community"]).unwrap(),
-                Tag::parse(["not_before", &not_before.to_string()]).unwrap(),
-            ])
-            .sign_with_keys(&keys)
-            .expect("sign reminder");
-        insert_event(&pool, community_a, &event, None)
-            .await
-            .expect("insert A/X");
-        insert_event(&pool, community_b, &event, None)
-            .await
-            .expect("insert B/X");
-
-        let id = event.id.as_bytes().to_vec();
-        let created_at = event.created_at.as_secs() as i64;
-        let created_at = chrono::DateTime::from_timestamp(created_at, 0).expect("created_at");
-        let stamp: i64 = 0x4444_4444_4444_4444;
-
-        // Claim A/X. B/X must remain claimable — A's claim did not mark B.
-        assert!(
-            claim_due_reminder_with_stamp(&pool, community_a, &id, created_at, stamp)
-                .await
-                .expect("claim A"),
-            "A/X claim wins"
-        );
-        assert!(
-            claim_due_reminder_with_stamp(&pool, community_b, &id, created_at, stamp)
-                .await
-                .expect("claim B"),
-            "B/X must still be claimable after A/X is claimed — \
-             a claim for A must not mark B delivered"
-        );
-
-        // Both are now claimed under the same stamp. A matching-stamp release
-        // for A/X must clear only A/X; B/X must stay claimed.
-        assert!(
-            release_due_reminder(&pool, community_a, &id, created_at, stamp)
-                .await
-                .expect("release A"),
-            "A/X release with the claiming stamp clears A/X"
-        );
-        assert!(
-            !claim_due_reminder_with_stamp(&pool, community_b, &id, created_at, stamp)
-                .await
-                .expect("re-claim B after A release"),
-            "B/X must remain claimed after A/X is released — \
-             a release for A must not clear B"
-        );
-        // And A/X is genuinely redeliverable (the release was real, not a no-op).
-        assert!(
-            claim_due_reminder_with_stamp(&pool, community_a, &id, created_at, stamp)
-                .await
-                .expect("re-claim A after release"),
-            "A/X must be reclaimable after its own release"
+            current_deleted,
+            "a tombstone at the head's timestamp must delete it (NIP-09 is at-or-before)"
         );
     }
 

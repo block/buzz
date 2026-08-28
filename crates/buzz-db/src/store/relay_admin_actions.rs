@@ -10,6 +10,7 @@
 //!
 //! Lane ownership: relay admin API (Duncan).
 
+use buzz_datastore_tracing::datastore_span;
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row as _};
 use uuid::Uuid;
@@ -1654,6 +1655,393 @@ fn row_to_outbox_claimed(row: sqlx::postgres::PgRow) -> Result<OutboxRecord> {
     })
 }
 
+impl crate::Db {
+    /// Atomic decision-only report closure: CAS open→terminal + audit row in one transaction.
+    #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "resolve_report_decision_atomic", system = "postgresql")]
+    pub async fn resolve_report_decision_atomic(
+        &self,
+        community_id: CommunityId,
+        report_id: uuid::Uuid,
+        terminal_status: &str,
+        audit_action: &str,
+        actor_pubkey: &[u8],
+        actor_authority: &str,
+        target_pubkey: Option<&[u8]>,
+        target_event_id: Option<&[u8]>,
+        channel_id: Option<uuid::Uuid>,
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        resolve_report_decision_atomic(
+            &self.pool,
+            community_id,
+            report_id,
+            terminal_status,
+            audit_action,
+            actor_pubkey,
+            actor_authority,
+            target_pubkey,
+            target_event_id,
+            channel_id,
+            reason,
+        )
+        .await
+    }
+
+    /// Attempt to claim a report for HTTP enforcement (CAS open → processing).
+    #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "claim_report_for_enforcement", system = "postgresql")]
+    pub async fn claim_report_for_enforcement(
+        &self,
+        community_id: CommunityId,
+        report_id: uuid::Uuid,
+        request_id: uuid::Uuid,
+        actor_pubkey: &[u8],
+        actor_role: &str,
+        action: &str,
+        reason: Option<&str>,
+        timeout_until: Option<chrono::DateTime<chrono::Utc>>,
+        audit_action: &str,
+        actor_authority: &str,
+        target_pubkey: Option<&[u8]>,
+        target_event_id: Option<&[u8]>,
+        channel_id: Option<uuid::Uuid>,
+    ) -> Result<ClaimResult> {
+        claim_report(
+            &self.pool,
+            community_id,
+            report_id,
+            request_id,
+            actor_pubkey,
+            actor_role,
+            action,
+            reason,
+            timeout_until,
+            audit_action,
+            actor_authority,
+            target_pubkey,
+            target_event_id,
+            channel_id,
+        )
+        .await
+    }
+
+    /// Advance an action from 'pending' to 'enforcing'.
+    #[datastore_span(name = "begin_enforcing_action", system = "postgresql")]
+    pub async fn begin_enforcing_action(&self, action_id: uuid::Uuid) -> Result<bool> {
+        begin_enforcing(&self.pool, action_id).await
+    }
+
+    /// Commit the core mutation step (advance step_marker to 'mutation_committed').
+    #[datastore_span(name = "commit_action_mutation_step", system = "postgresql")]
+    pub async fn commit_action_mutation_step(&self, action_id: uuid::Uuid) -> Result<bool> {
+        commit_mutation_step(&self.pool, action_id).await
+    }
+
+    /// Finalize enforcement: action → succeeded, report → terminal status,
+    /// and enqueue outbox delivery rows atomically.
+    #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "finalize_action_success", system = "postgresql")]
+    pub async fn finalize_action_success(
+        &self,
+        action_id: uuid::Uuid,
+        community_id: CommunityId,
+        report_id: uuid::Uuid,
+        terminal_status: &str,
+        actor_pubkey: &[u8],
+        action_name: &str,
+        target_pubkey: Option<&[u8]>,
+        target_event_id: Option<&[u8]>,
+        channel_id: Option<uuid::Uuid>,
+        reason: Option<&str>,
+        timeout_until: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<bool> {
+        finalize_success(
+            &self.pool,
+            action_id,
+            community_id,
+            report_id,
+            terminal_status,
+            actor_pubkey,
+            action_name,
+            target_pubkey,
+            target_event_id,
+            channel_id,
+            reason,
+            timeout_until,
+        )
+        .await
+    }
+
+    /// Atomically execute a ban mutation and commit the step marker.
+    /// Returns `true` if this driver committed the marker, `false` if already marked or lease lost.
+    #[datastore_span(name = "execute_ban_with_marker", system = "postgresql")]
+    pub async fn execute_ban_with_marker(
+        &self,
+        action_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        community_id: CommunityId,
+        target_pubkey: &[u8],
+        actor_pubkey: &[u8],
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        execute_ban_with_marker(
+            &self.pool,
+            action_id,
+            lease_token,
+            community_id,
+            target_pubkey,
+            actor_pubkey,
+            reason,
+        )
+        .await
+    }
+
+    /// Atomically execute a timeout mutation and commit the step marker.
+    /// Returns `true` if this driver committed the marker, `false` if already marked or lease lost.
+    #[allow(clippy::too_many_arguments)]
+    #[datastore_span(name = "execute_timeout_with_marker", system = "postgresql")]
+    pub async fn execute_timeout_with_marker(
+        &self,
+        action_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        community_id: CommunityId,
+        target_pubkey: &[u8],
+        actor_pubkey: &[u8],
+        until: chrono::DateTime<chrono::Utc>,
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        execute_timeout_with_marker(
+            &self.pool,
+            action_id,
+            lease_token,
+            community_id,
+            target_pubkey,
+            actor_pubkey,
+            until,
+            reason,
+        )
+        .await
+    }
+
+    /// Atomically execute a kick mutation and commit the step marker.
+    /// Returns `Removed` (member was present), `AlreadyGone` (absent before this action),
+    /// or `AlreadyMarked` (marker already committed by another driver or lease lost).
+    #[datastore_span(name = "execute_kick_with_marker", system = "postgresql")]
+    pub async fn execute_kick_with_marker(
+        &self,
+        action_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        community_id: CommunityId,
+        channel_id: uuid::Uuid,
+        target_pubkey: &[u8],
+        actor_pubkey: &[u8],
+    ) -> Result<KickWithMarkerResult> {
+        execute_kick_with_marker(
+            &self.pool,
+            action_id,
+            lease_token,
+            community_id,
+            channel_id,
+            target_pubkey,
+            actor_pubkey,
+        )
+        .await
+    }
+
+    /// Atomically execute a soft-delete mutation and commit the step marker.
+    /// Returns `true` if this driver committed the marker, `false` if already marked or lease lost.
+    #[datastore_span(name = "execute_delete_with_marker", system = "postgresql")]
+    pub async fn execute_delete_with_marker(
+        &self,
+        action_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        community_id: CommunityId,
+        target_event_id: &[u8],
+        parent_event_id: Option<&[u8]>,
+        root_event_id: Option<&[u8]>,
+    ) -> Result<bool> {
+        execute_delete_with_marker(
+            &self.pool,
+            action_id,
+            lease_token,
+            community_id,
+            target_event_id,
+            parent_event_id,
+            root_event_id,
+        )
+        .await
+    }
+
+    /// Acquire the action mutation lease (prevents concurrent double-mutation).
+    #[datastore_span(name = "acquire_admin_action_lease", system = "postgresql")]
+    pub async fn acquire_admin_action_lease(
+        &self,
+        action_id: uuid::Uuid,
+        lease_until: chrono::DateTime<chrono::Utc>,
+    ) -> Result<LeaseResult> {
+        acquire_action_lease(&self.pool, action_id, lease_until).await
+    }
+
+    /// Release the action mutation lease. No-op if caller no longer holds the token.
+    #[datastore_span(name = "release_admin_action_lease", system = "postgresql")]
+    pub async fn release_admin_action_lease(
+        &self,
+        action_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+    ) -> Result<()> {
+        release_action_lease(&self.pool, action_id, lease_token).await
+    }
+
+    /// Claim a batch of stranded `relay_admin_actions` for the action recovery worker.
+    #[datastore_span(name = "claim_stranded_admin_action_batch", system = "postgresql")]
+    pub async fn claim_stranded_admin_action_batch(
+        &self,
+        worker_id: &str,
+        lease_until: chrono::DateTime<chrono::Utc>,
+        batch_size: i64,
+    ) -> Result<Vec<StrandedActionClaim>> {
+        claim_stranded_action_batch(&self.pool, worker_id, lease_until, batch_size).await
+    }
+
+    /// Record a pre-mutation enforcement failure (keeps report in 'processing').
+    #[datastore_span(name = "record_action_failure", system = "postgresql")]
+    pub async fn record_action_failure(
+        &self,
+        action_id: uuid::Uuid,
+        lease_token: uuid::Uuid,
+        error: &str,
+    ) -> Result<bool> {
+        record_failure(&self.pool, action_id, lease_token, error).await
+    }
+
+    /// Cancel a pre-mutation failed action (returns report to 'open'),
+    /// attributing the cancel to `cancelled_by`.
+    #[datastore_span(name = "cancel_admin_action", system = "postgresql")]
+    pub async fn cancel_admin_action(
+        &self,
+        action_id: uuid::Uuid,
+        community_id: CommunityId,
+        report_id: uuid::Uuid,
+        cancelled_by: &[u8],
+    ) -> Result<bool> {
+        cancel_action(&self.pool, action_id, community_id, report_id, cancelled_by).await
+    }
+
+    /// Reopen a terminal report (resolved|dismissed|escalated → open) with a
+    /// durable `reopen` audit row, keyed idempotent on `request_id`.
+    #[datastore_span(name = "reopen_report", system = "postgresql")]
+    pub async fn reopen_report(
+        &self,
+        community_id: CommunityId,
+        report_id: uuid::Uuid,
+        request_id: uuid::Uuid,
+        actor_pubkey: &[u8],
+        actor_role: &str,
+        reason: Option<&str>,
+    ) -> Result<ReopenResult> {
+        reopen_report(
+            &self.pool,
+            community_id,
+            report_id,
+            request_id,
+            actor_pubkey,
+            actor_role,
+            reason,
+        )
+        .await
+    }
+
+    /// Fetch an action record by ID.
+    #[datastore_span(name = "get_admin_action", system = "postgresql")]
+    pub async fn get_admin_action(
+        &self,
+        action_id: uuid::Uuid,
+    ) -> Result<Option<AdminActionRecord>> {
+        get_action(&self.pool, action_id).await
+    }
+
+    /// Enqueue an outbox artifact/notice delivery command.
+    #[datastore_span(name = "enqueue_admin_outbox", system = "postgresql")]
+    pub async fn enqueue_admin_outbox(
+        &self,
+        action_id: uuid::Uuid,
+        task_type: &str,
+        payload: serde_json::Value,
+        dedup_key: &str,
+    ) -> Result<()> {
+        enqueue_outbox(&self.pool, action_id, task_type, payload, dedup_key).await
+    }
+
+    /// Mark an outbox record as delivered, fenced by the claim token.
+    /// Returns `true` if updated, `false` if ownership was already lost.
+    #[datastore_span(name = "mark_admin_outbox_delivered", system = "postgresql")]
+    pub async fn mark_admin_outbox_delivered(
+        &self,
+        outbox_id: uuid::Uuid,
+        claim_token: uuid::Uuid,
+    ) -> Result<bool> {
+        mark_outbox_delivered(&self.pool, outbox_id, claim_token).await
+    }
+
+    /// Mark an outbox record as failed, fenced by the claim token.
+    /// Returns `true` if updated, `false` if ownership was already lost.
+    #[datastore_span(name = "fail_admin_outbox_row", system = "postgresql")]
+    pub async fn fail_admin_outbox_row(
+        &self,
+        outbox_id: uuid::Uuid,
+        claim_token: uuid::Uuid,
+        error: &str,
+    ) -> Result<bool> {
+        fail_outbox_row(&self.pool, outbox_id, claim_token, error).await
+    }
+
+    /// Claim a batch of pending outbox rows for the given worker pod.
+    #[datastore_span(name = "claim_pending_admin_outbox_batch", system = "postgresql")]
+    pub async fn claim_pending_admin_outbox_batch(
+        &self,
+        worker_id: &str,
+        lease_until: chrono::DateTime<chrono::Utc>,
+        batch_size: i64,
+    ) -> Result<Vec<OutboxRecord>> {
+        claim_pending_outbox_batch(&self.pool, worker_id, lease_until, batch_size).await
+    }
+
+    /// List pending outbox records for an action.
+    #[datastore_span(name = "list_pending_admin_outbox", system = "postgresql")]
+    pub async fn list_pending_admin_outbox(
+        &self,
+        action_id: uuid::Uuid,
+    ) -> Result<Vec<OutboxRecord>> {
+        list_pending_outbox(&self.pool, action_id).await
+    }
+
+    /// Deployment-authority kick: remove a member without requiring tenant owner/admin actor.
+    #[datastore_span(name = "deploy_kick_member", system = "postgresql")]
+    pub async fn deploy_kick_member(
+        &self,
+        community_id: CommunityId,
+        channel_id: uuid::Uuid,
+        target_pubkey: &[u8],
+        actor_pubkey: &[u8],
+    ) -> Result<KickResult> {
+        deploy_kick_member(
+            &self.pool,
+            community_id,
+            channel_id,
+            target_pubkey,
+            actor_pubkey,
+        )
+        .await
+    }
+
+    /// Update product_feedback status (operator-managed lifecycle).
+    #[datastore_span(name = "update_feedback_status", system = "postgresql")]
+    pub async fn update_feedback_status(&self, id: uuid::Uuid, status: &str) -> Result<bool> {
+        update_feedback_status(&self.pool, id, status).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1661,7 +2049,7 @@ mod tests {
     use sqlx::PgPool;
     use uuid::Uuid;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     async fn setup_pool() -> PgPool {
         let url =
