@@ -254,6 +254,13 @@ export function useMentions(
     const candidatesByPubkey = new Map<string, MentionCandidate>();
     const addCandidate = (candidate: MentionCandidate & { pubkey: string }) => {
       const pubkey = normalizePubkey(candidate.pubkey);
+      if (!pubkey) {
+        // Persona-definition rows in managed-agents.json can carry an empty
+        // pubkey (their running instance carries the real one). They are not
+        // mentionable identities — skip so they never render as phantom
+        // candidates or shadow the real instance (#3947).
+        return;
+      }
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
@@ -357,10 +364,15 @@ export function useMentions(
       });
     }
     for (const agent of managedAgentsQuery.data ?? []) {
+      const linkedPersonaName = agent.personaId
+        ? (activePersonaById.get(agent.personaId)?.displayName ?? null)
+        : null;
       addCandidate({
         kind: "identity",
         pubkey: agent.pubkey,
-        displayName: agent.name,
+        // Prefer the linked persona's display name for presentation; the
+        // instance's own `name` may be null on running instances (#3947).
+        displayName: agent.name || linkedPersonaName || null,
         isMember: false,
         isAgent: true,
         isActiveAgent:
@@ -368,7 +380,9 @@ export function useMentions(
         isManagedAgent: true,
         personaId: agent.personaId ?? undefined,
         personaName:
-          personaNameByPubkey.get(normalizePubkey(agent.pubkey)) ?? null,
+          personaNameByPubkey.get(normalizePubkey(agent.pubkey)) ??
+          linkedPersonaName ??
+          null,
         ownerPubkey: currentPubkey,
       });
     }
