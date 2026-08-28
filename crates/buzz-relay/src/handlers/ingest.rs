@@ -13,8 +13,10 @@ use buzz_auth::Scope;
 use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
     is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
-    KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
-    KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
+    KIND_AGENT_WORKFLOW_ARTIFACT, KIND_AGENT_WORKFLOW_CHECKPOINT, KIND_AGENT_WORKFLOW_RUN,
+    KIND_AGENT_WORKFLOW_TASK, KIND_AGENT_WORKFLOW_TRANSITION, KIND_APPROVAL_DENY,
+    KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET, KIND_CANVAS,
+    KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
     KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
     KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
     KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
@@ -540,7 +542,13 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_GIT_STATUS_DRAFT => Ok(Scope::MessagesWrite),
         // Command kinds — DM management, workflows, approvals
         KIND_DM_OPEN | KIND_DM_ADD_MEMBER | KIND_DM_HIDE => Ok(Scope::MessagesWrite),
-        KIND_WORKFLOW_DEF | KIND_WORKFLOW_TRIGGER => Ok(Scope::MessagesWrite),
+        KIND_WORKFLOW_DEF
+        | KIND_WORKFLOW_TRIGGER
+        | KIND_AGENT_WORKFLOW_RUN
+        | KIND_AGENT_WORKFLOW_TASK
+        | KIND_AGENT_WORKFLOW_CHECKPOINT
+        | KIND_AGENT_WORKFLOW_ARTIFACT
+        | KIND_AGENT_WORKFLOW_TRANSITION => Ok(Scope::MessagesWrite),
         KIND_APPROVAL_GRANT | KIND_APPROVAL_DENY => Ok(Scope::MessagesWrite),
         _ => Err("restricted: unknown event kind"),
     }
@@ -716,6 +724,11 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_FORUM_POST
             | KIND_FORUM_VOTE
             | KIND_FORUM_COMMENT
+            | KIND_AGENT_WORKFLOW_RUN
+            | KIND_AGENT_WORKFLOW_TASK
+            | KIND_AGENT_WORKFLOW_CHECKPOINT
+            | KIND_AGENT_WORKFLOW_ARTIFACT
+            | KIND_AGENT_WORKFLOW_TRANSITION
             // NIP-29 admin kinds (except CREATE_GROUP which creates the channel)
             | KIND_NIP29_PUT_USER
             | KIND_NIP29_REMOVE_USER
@@ -3667,6 +3680,26 @@ mod tests {
             assert!(
                 requires_h_channel_scope(kind),
                 "kind {kind} should require h"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_workflow_events_require_channel_scope() {
+        for kind in [
+            KIND_AGENT_WORKFLOW_RUN,
+            KIND_AGENT_WORKFLOW_TASK,
+            KIND_AGENT_WORKFLOW_CHECKPOINT,
+            KIND_AGENT_WORKFLOW_ARTIFACT,
+            KIND_AGENT_WORKFLOW_TRANSITION,
+        ] {
+            assert!(
+                requires_h_channel_scope(kind),
+                "kind {kind} should require h"
+            );
+            assert_eq!(
+                required_scope_for_kind(kind, &make_dummy_event()).ok(),
+                Some(Scope::MessagesWrite),
             );
         }
     }

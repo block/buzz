@@ -440,6 +440,12 @@ pub const KIND_WINDOW_BOUNDS: u32 = 39006;
 
 /// Workflow definition (parameterized replaceable, d=workflow_uuid).
 pub const KIND_WORKFLOW_DEF: u32 = 30620;
+/// Durable agent workflow run snapshot (parameterized replaceable, d=run_uuid).
+///
+/// The coordinator publishes this channel-scoped projection after committing the
+/// authoritative state transition to Postgres. Content is structured JSON; tags
+/// identify the channel, workflow, run, and participating agent pubkeys.
+pub const KIND_AGENT_WORKFLOW_RUN: u32 = 30623;
 
 /// NIP-DV: per-viewer DM visibility snapshot (relay-signed, parameterized
 /// replaceable, d=viewer_pubkey). Carries one `h` tag per DM the viewer has
@@ -580,6 +586,14 @@ pub const KIND_WORKFLOW_APPROVAL_REQUESTED: u32 = 46010;
 pub const KIND_WORKFLOW_APPROVAL_GRANTED: u32 = 46011;
 /// A pending workflow approval was denied.
 pub const KIND_WORKFLOW_APPROVAL_DENIED: u32 = 46012;
+/// Agent-authored task lifecycle receipt for a durable workflow run.
+pub const KIND_AGENT_WORKFLOW_TASK: u32 = 46013;
+/// Agent-authored resumable checkpoint receipt for a durable workflow run.
+pub const KIND_AGENT_WORKFLOW_CHECKPOINT: u32 = 46014;
+/// Agent-authored immutable artifact receipt for a durable workflow run.
+pub const KIND_AGENT_WORKFLOW_ARTIFACT: u32 = 46015;
+/// Coordinator-authored state transition receipt for a durable workflow run.
+pub const KIND_AGENT_WORKFLOW_TRANSITION: u32 = 46016;
 
 // User groups (47000–47999)
 
@@ -726,6 +740,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_AGENT_TURN_METRIC,
     KIND_WORKFLOW_DEF,
+    KIND_AGENT_WORKFLOW_RUN,
     KIND_LONG_FORM,
     KIND_USER_STATUS,
     KIND_READ_STATE,
@@ -745,6 +760,10 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_WORKFLOW_APPROVAL_REQUESTED,
     KIND_WORKFLOW_APPROVAL_GRANTED,
     KIND_WORKFLOW_APPROVAL_DENIED,
+    KIND_AGENT_WORKFLOW_TASK,
+    KIND_AGENT_WORKFLOW_CHECKPOINT,
+    KIND_AGENT_WORKFLOW_ARTIFACT,
+    KIND_AGENT_WORKFLOW_TRANSITION,
     KIND_AUDIT_ENTRY,
     KIND_HUDDLE_STARTED,
     KIND_HUDDLE_PARTICIPANT_JOINED,
@@ -784,10 +803,11 @@ pub const fn is_parameterized_replaceable(kind: u32) -> bool {
     kind >= PARAM_REPLACEABLE_KIND_MIN && kind <= PARAM_REPLACEABLE_KIND_MAX
 }
 
-/// Returns `true` if `kind` is a workflow execution event (46001–46012).
+/// Returns `true` if `kind` is a workflow execution projection or receipt.
 /// These must not trigger workflows (prevents infinite loops).
 pub const fn is_workflow_execution_kind(kind: u32) -> bool {
-    kind >= KIND_WORKFLOW_TRIGGERED && kind <= KIND_WORKFLOW_APPROVAL_DENIED
+    kind == KIND_AGENT_WORKFLOW_RUN
+        || (kind >= KIND_WORKFLOW_TRIGGERED && kind <= KIND_AGENT_WORKFLOW_TRANSITION)
 }
 
 /// Returns `true` if `kind` is a NIP-43 relay membership admin command (9030–9032)
@@ -859,6 +879,7 @@ const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 3017
 const _: () = assert!(is_parameterized_replaceable(KIND_TEAM_CATALOG)); // 30178 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PRIVATE_MANAGED_AGENT)); // 30179 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_AGENT_WORKFLOW_RUN)); // 30623 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PROJECT)); // 30621 ∈ 30000–39999
@@ -905,6 +926,20 @@ mod tests {
         for &k in ALL_KINDS {
             assert!(seen.insert(k), "duplicate kind value: {k}");
         }
+    }
+
+    #[test]
+    fn agent_workflow_events_are_execution_events() {
+        for kind in [
+            KIND_AGENT_WORKFLOW_RUN,
+            KIND_AGENT_WORKFLOW_TASK,
+            KIND_AGENT_WORKFLOW_CHECKPOINT,
+            KIND_AGENT_WORKFLOW_ARTIFACT,
+            KIND_AGENT_WORKFLOW_TRANSITION,
+        ] {
+            assert!(is_workflow_execution_kind(kind));
+        }
+        assert!(!is_workflow_execution_kind(KIND_WORKFLOW_TRIGGER));
     }
 
     #[test]

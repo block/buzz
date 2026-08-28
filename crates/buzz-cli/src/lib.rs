@@ -201,6 +201,9 @@ enum Cmd {
     /// Create, trigger, and manage workflows
     #[command(subcommand)]
     Workflows(WorkflowsCmd),
+    /// Inspect and publish durable multi-agent workflow run events
+    #[command(name = "agent-runs", subcommand)]
+    AgentRuns(AgentRunsCmd),
     /// Read the activity feed
     #[command(subcommand)]
     Feed(FeedCmd),
@@ -971,6 +974,124 @@ pub enum WorkflowsCmd {
         /// Optional note to include with the approval/denial
         #[arg(long)]
         note: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AgentRunsCmd {
+    /// Read the latest durable run snapshot without steering an agent
+    Status {
+        /// Run UUID
+        #[arg(long)]
+        run: String,
+    },
+    /// Read append-only task, checkpoint, artifact, and transition receipts
+    History {
+        /// Run UUID
+        #[arg(long)]
+        run: String,
+        /// Maximum number of receipts
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+    /// Publish the latest durable run snapshot
+    Snapshot {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Workflow UUID
+        #[arg(long)]
+        workflow: String,
+        /// Run UUID
+        #[arg(long)]
+        run: String,
+        /// Participant pubkey; repeat for every independently addressed agent
+        #[arg(long = "participant")]
+        participant: Vec<String>,
+        /// JSON object, or - to read from stdin
+        #[arg(long)]
+        content: String,
+    },
+    /// Publish a task lifecycle receipt
+    Task {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Workflow UUID
+        #[arg(long)]
+        workflow: String,
+        /// Run UUID
+        #[arg(long)]
+        run: String,
+        /// Task UUID
+        #[arg(long)]
+        task: String,
+        /// Participant pubkey; repeat for every independently addressed agent
+        #[arg(long = "participant")]
+        participant: Vec<String>,
+        /// JSON object, or - to read from stdin
+        #[arg(long)]
+        content: String,
+    },
+    /// Publish a resumable task checkpoint receipt
+    Checkpoint {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Workflow UUID
+        #[arg(long)]
+        workflow: String,
+        /// Run UUID
+        #[arg(long)]
+        run: String,
+        /// Task UUID
+        #[arg(long)]
+        task: String,
+        /// Participant pubkey; repeat for every independently addressed agent
+        #[arg(long = "participant")]
+        participant: Vec<String>,
+        /// JSON object, or - to read from stdin
+        #[arg(long)]
+        content: String,
+    },
+    /// Publish an immutable artifact receipt
+    Artifact {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Workflow UUID
+        #[arg(long)]
+        workflow: String,
+        /// Run UUID
+        #[arg(long)]
+        run: String,
+        /// Producing task UUID
+        #[arg(long)]
+        task: String,
+        /// Participant pubkey; repeat for every independently addressed agent
+        #[arg(long = "participant")]
+        participant: Vec<String>,
+        /// JSON object, or - to read from stdin
+        #[arg(long)]
+        content: String,
+    },
+    /// Publish a durable run transition receipt
+    Transition {
+        /// Channel UUID
+        #[arg(long)]
+        channel: String,
+        /// Workflow UUID
+        #[arg(long)]
+        workflow: String,
+        /// Run UUID
+        #[arg(long)]
+        run: String,
+        /// Participant pubkey; repeat for every independently addressed agent
+        #[arg(long = "participant")]
+        participant: Vec<String>,
+        /// JSON object, or - to read from stdin
+        #[arg(long)]
+        content: String,
     },
 }
 
@@ -2083,6 +2204,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Dms(sub) => commands::dms::dispatch(sub, &client).await,
         Cmd::Users(sub) => commands::users::dispatch(sub, &client, &cli.format).await,
         Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
+        Cmd::AgentRuns(sub) => commands::agent_runs::dispatch(sub, &client).await,
         Cmd::Feed(sub) => commands::feed::dispatch(sub, &client, &cli.format).await,
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
         Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
@@ -2147,6 +2269,84 @@ mod tests {
         ] {
             assert_eq!(normalize_auth_tag_input(garbage), garbage.trim());
         }
+    }
+
+    #[test]
+    fn agent_runs_read_commands_do_not_accept_steering_content() {
+        let run = "123e4567-e89b-12d3-a456-426614174000";
+        assert!(Cli::try_parse_from(["buzz", "agent-runs", "status", "--run", run]).is_ok());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "agent-runs",
+            "history",
+            "--run",
+            run,
+            "--limit",
+            "250",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "agent-runs",
+            "status",
+            "--run",
+            run,
+            "--content",
+            "steer the model",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn agent_runs_snapshot_preserves_repeated_participants() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let workflow = "223e4567-e89b-12d3-a456-426614174000";
+        let run = "323e4567-e89b-12d3-a456-426614174000";
+        let helena = "a".repeat(64);
+        let rui = "b".repeat(64);
+        let anselmo = "c".repeat(64);
+        let parsed = Cli::try_parse_from([
+            "buzz",
+            "agent-runs",
+            "snapshot",
+            "--channel",
+            channel,
+            "--workflow",
+            workflow,
+            "--run",
+            run,
+            "--participant",
+            helena.as_str(),
+            "--participant",
+            rui.as_str(),
+            "--participant",
+            anselmo.as_str(),
+            "--content",
+            r#"{"phase":"analysis"}"#,
+        ]);
+        let cli = parsed.unwrap_or_else(|error| panic!("snapshot should parse: {error}"));
+        let Cmd::AgentRuns(AgentRunsCmd::Snapshot { participant, .. }) = cli.command else {
+            panic!("expected agent-runs snapshot command");
+        };
+        assert_eq!(participant, vec![helena, rui, anselmo]);
+    }
+
+    #[test]
+    fn agent_run_task_receipts_require_task_coordinate() {
+        let base = [
+            "buzz",
+            "agent-runs",
+            "task",
+            "--channel",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "--workflow",
+            "223e4567-e89b-12d3-a456-426614174000",
+            "--run",
+            "323e4567-e89b-12d3-a456-426614174000",
+            "--content",
+            r#"{"status":"running"}"#,
+        ];
+        assert!(Cli::try_parse_from(base).is_err());
     }
 
     /// Smoke test: CLI definition is valid and parseable.
@@ -2223,6 +2423,7 @@ mod tests {
     #[test]
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
+            "agent-runs",
             "agents",
             "canvas",
             "channels",
@@ -2286,6 +2487,18 @@ mod tests {
         }
 
         let cmd = Cli::command();
+        assert_eq!(
+            names(&cmd, "agent-runs"),
+            vec![
+                "artifact",
+                "checkpoint",
+                "history",
+                "snapshot",
+                "status",
+                "task",
+                "transition"
+            ]
+        );
         assert_eq!(
             names(&cmd, "agents"),
             vec![

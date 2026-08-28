@@ -50,3 +50,17 @@ Operators must be able to see phase, task status, last checkpoint, attempt count
 - Invalid output, missing decision, or failed citation verification blocks the run.
 - Human approval survives restart and resumes exactly once.
 - The complete execution is reproducible from durable records and signed events.
+
+## Nostr projection and CLI
+
+The durable database remains authoritative. Signed Nostr events are the realtime, channel-scoped projection:
+
+- kind 30623: latest parameterized-replaceable run snapshot, with d equal to the run UUID;
+- kind 46013: task lifecycle receipt;
+- kind 46014: resumable checkpoint receipt;
+- kind 46015: immutable artifact receipt;
+- kind 46016: phase or lifecycle transition receipt.
+
+Every event carries d (the run UUID), h, workflow, and run tags. Task-scoped receipts also carry task. Each independently addressed worker has its own p tag; textual at-mentions are not a routing primitive. Receipts are signed by the actual worker or coordinator identity and are excluded from workflow triggers and the general activity feed.
+
+The agent-facing CLI exposes buzz agent-runs status and history as read-only queries. They never issue an LLM turn or extend a deadline. Snapshot, task, checkpoint, artifact, and transition subcommands publish signed events through the generic Nostr bridge; they do not add a feature-specific HTTP endpoint. Pass --participant once for each worker identity and use --content - for JSON from stdin.
