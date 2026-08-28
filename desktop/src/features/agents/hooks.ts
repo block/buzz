@@ -41,6 +41,7 @@ import {
   saveCustomHarness,
   updateManagedAgent,
 } from "@/shared/api/tauri";
+import { getAgentUsageDashboard } from "@/shared/api/tauriAgentUsage";
 import type { HarnessDefinitionInput } from "@/shared/api/tauri";
 import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery";
 import {
@@ -130,6 +131,7 @@ export const managedAgentsQueryKey = ["managed-agents"] as const;
 export const personasQueryKey = ["personas"] as const;
 export const acpAuthMethodsQueryKey = ["acp-auth-methods"] as const;
 export const managedAgentPrereqsQueryKey = ["managed-agent-prereqs"] as const;
+export const agentUsageDashboardQueryKey = ["agent-usage-dashboard"] as const;
 export const backendProvidersQueryKey = ["backend-providers"] as const;
 export const gitBashPrerequisiteQueryKey = ["git-bash-prerequisite"] as const;
 
@@ -875,6 +877,16 @@ export function useManagedAgentLogQuery(
     retry: false,
     refetchInterval,
     ...managedAgentLogFocusRefetchPolicy,
+  });
+}
+
+export function useAgentUsageDashboardQuery() {
+  return useQuery({
+    queryKey: agentUsageDashboardQueryKey,
+    queryFn: getAgentUsageDashboard,
+    retry: false,
+    staleTime: 10_000,
+    refetchInterval: 30_000,
   });
 }
 
