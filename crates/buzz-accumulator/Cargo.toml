@@ -1,0 +1,15 @@
+[package]
+name = "buzz-accumulator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fold engine: incrementally maintained, provenance-carrying artifacts over the event stream"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+chrono = { workspace = true }
