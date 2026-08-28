@@ -12,6 +12,8 @@ mod prompt_project;
 mod queue;
 mod relay;
 mod setup_mode;
+#[cfg(test)]
+mod testshell;
 mod usage;
 
 pub use usage::TurnUsage;
