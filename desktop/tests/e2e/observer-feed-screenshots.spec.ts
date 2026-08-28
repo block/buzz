@@ -814,4 +814,65 @@ test.describe("observer feed screenshots", () => {
       path: `${SHOTS}/11-first-turn-ordering.png`,
     });
   });
+
+  test("12 — circuit_open and circuit_recovered lifecycle alerts", async ({
+    page,
+  }) => {
+    await installMockBridge(page, { managedAgents: MANAGED_AGENTS });
+    const feedPanel = await openObserverFeedPanel(page, OBSERVER_AGENT_PUBKEY);
+
+    // Circuit breaker opened after a panic inside this channel (the real
+    // panicked-in-channel call site passes the triggering channel's id, see
+    // emit_circuit_open_alert's caller in buzz-acp/src/lib.rs), then
+    // recovered. Both events are seeded with this channel's id to prove the
+    // renderer works when a channel context is present. The real
+    // circuit_recovered alert now carries that same real channel_id too —
+    // it's threaded through from the SlotCircuit that opened it (see
+    // emit_circuit_recovered_alert's caller in buzz-acp/src/lib.rs) rather
+    // than always being channel_id=None. Both the transcript bubble here and
+    // the persistent ManagedAgentRow badge
+    // (data-testid="managed-agent-circuit-open") reflect it.
+    await seedObserverEvents(page, OBSERVER_AGENT_PUBKEY, [
+      {
+        seq: 1,
+        timestamp: NOW,
+        kind: "circuit_open",
+        agentIndex: 0,
+        channelId: CHANNEL_ID,
+        sessionId: null,
+        turnId: null,
+        payload: {
+          trigger: "panicked",
+          cooldown_secs: 300,
+          error:
+            "Agent slot 0 panicked repeatedly and its circuit breaker is now open " +
+            "— it will not respond until the 300s cooldown elapses and a health probe succeeds.",
+        },
+      },
+      {
+        seq: 2,
+        timestamp: NOW,
+        kind: "circuit_recovered",
+        agentIndex: 0,
+        channelId: CHANNEL_ID,
+        sessionId: null,
+        turnId: null,
+        payload: {
+          error:
+            "Agent slot 0 recovered — its circuit breaker probe succeeded and it is responding again.",
+        },
+      },
+    ]);
+
+    await expect(
+      feedPanel.getByText("Agent suspended (repeated crashes)"),
+    ).toBeVisible({ timeout: 5_000 });
+    await expect(feedPanel.getByText("Agent recovered")).toBeVisible({
+      timeout: 5_000,
+    });
+    await settleAnimations(feedPanel);
+    await feedPanel.screenshot({
+      path: `${SHOTS}/12-circuit-breaker-alerts.png`,
+    });
+  });
 });

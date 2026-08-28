@@ -768,6 +768,52 @@ test("buildTranscript separates repeated lifecycle text", () => {
   assert.equal(item.text, "recovered: first\nrecovered: second");
 });
 
+test("buildTranscript renders circuit_open and circuit_recovered alerts", () => {
+  const events = [
+    {
+      seq: 1,
+      timestamp: "2026-06-30T09:00:00.000Z",
+      kind: "circuit_open",
+      agentIndex: 2,
+      channelId: null,
+      sessionId: null,
+      turnId: null,
+      payload: {
+        trigger: "crashed",
+        cooldown_secs: 300,
+        error:
+          "Agent slot 2 crashed repeatedly and its circuit breaker is now open " +
+          "— it will not respond until the 300s cooldown elapses and a health probe succeeds.",
+      },
+    },
+    {
+      seq: 2,
+      timestamp: "2026-06-30T09:05:00.000Z",
+      kind: "circuit_recovered",
+      agentIndex: 2,
+      channelId: null,
+      sessionId: null,
+      turnId: null,
+      payload: {
+        error:
+          "Agent slot 2 recovered — its circuit breaker probe succeeded and it is responding again.",
+      },
+    },
+  ];
+
+  const transcript = buildTranscript(events);
+  assert.equal(transcript.length, 2);
+
+  const [openItem, recoveredItem] = transcript;
+  assert.equal(openItem.type, "lifecycle");
+  assert.equal(openItem.title, "Agent suspended (repeated crashes)");
+  assert.match(openItem.text, /circuit breaker is now open/);
+
+  assert.equal(recoveredItem.type, "lifecycle");
+  assert.equal(recoveredItem.title, "Agent recovered");
+  assert.match(recoveredItem.text, /responding again/);
+});
+
 // --- permission outcome (Fix #3) ---
 
 function makePermissionRequest(seq, requestId, turnId = "turn-1") {

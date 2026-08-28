@@ -43,6 +43,7 @@ import { useThreadViewModeSwitch } from "@/features/channels/ui/useThreadViewMod
 import { useFocusDrawerPresence } from "@/features/channels/ui/useFocusDrawerPresence";
 import { useChannelWorkingAgentPubkeys } from "@/features/agents/agentWorkingSignal";
 import { useCardMintJobs } from "@/features/agents/cardMintStore";
+import { useOpenCircuitAgents } from "@/features/agents/agentCircuitHooks";
 import { BotActivityComposerAction } from "@/features/channels/ui/BotActivityBar";
 import { ChannelComposerActivityAccessory } from "@/features/channels/ui/ChannelComposerActivityAccessory";
 import {
@@ -330,7 +331,14 @@ export const ChannelPane = React.memo(function ChannelPane({
   const composerWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
     activeChannel?.id ?? null,
   );
-  const hasComposerBotActivity = composerWorkingBotPubkeys.length > 0;
+  // A suspended (circuit-open) agent is never "working", so it wouldn't
+  // otherwise open this reserved rail — without this, a user typing to an
+  // agent that just crashed sees no in-channel sign of it at all, only the
+  // Agents settings screen (see BotActivityComposerAction, which renders the
+  // matching suspended state once this gate lets it mount).
+  const composerSuspendedAgents = useOpenCircuitAgents(activityAgents);
+  const hasComposerBotActivity =
+    composerWorkingBotPubkeys.length > 0 || composerSuspendedAgents.length > 0;
   const hasCardMintActivity = useCardMintJobs().length > 0;
   const hasComposerBottomActivity =
     hasComposerBotActivity || hasTypingActivity || hasCardMintActivity;

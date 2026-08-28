@@ -9,13 +9,18 @@ import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModel
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { pickProfileAgent } from "@/features/agents/lib/pickProfileAgent";
+import { circuitCooldownRemainingMs } from "@/features/agents/observerRelayStore";
+import { useAgentCircuitStatus } from "@/features/agents/agentCircuitHooks";
+import { formatDurationMs } from "@/features/agents/ui/agentSessionUtils";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserProfileQuery } from "@/features/profile/hooks";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
+import { useNow } from "@/shared/lib/useNow";
 import { Badge } from "@/shared/ui/badge";
 import { IdentityCardSkeleton } from "@/shared/ui/identity-card-skeleton";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { AgentIdentityCard } from "./AgentIdentityCard";
 import { AgentRuntimeAvatarControl } from "./AgentRuntimeAvatarControl";
 import { CreateIdentityCard } from "./CreateIdentityCard";
@@ -219,6 +224,50 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   );
 }
 
+/**
+ * Purely informational (no click action — the card itself already opens the
+ * agent's profile), so unlike ManagedAgentRow's CircuitOpenBadge this has no
+ * role="button"/onKeyDown. tabIndex={0} still makes the tooltip keyboard-
+ * reachable, mirroring RestartDiffBadge's non-interactive tooltip pattern.
+ */
+function CircuitOpenStatusBadge({
+  circuitStatus,
+  dataTestId,
+}: {
+  circuitStatus: ReturnType<typeof useAgentCircuitStatus>;
+  dataTestId: string | undefined;
+}) {
+  // See CircuitOpenBadge in ManagedAgentRow.tsx for why this ticks every
+  // second — same shared-timer useNow, cheap even with many suspended agents.
+  const now = useNow(1000);
+  const remainingMs = circuitCooldownRemainingMs(circuitStatus, now);
+  const label =
+    remainingMs === null
+      ? "Suspended — repeated crashes"
+      : remainingMs > 0
+        ? `Suspended — retrying in ${formatDurationMs(remainingMs)}`
+        : "Suspended — health check pending";
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge
+          className="gap-1"
+          data-testid={dataTestId}
+          tabIndex={0}
+          variant={remainingMs === 0 ? "warning" : "destructive"}
+        >
+          <AlertTriangle className="h-3 w-3" />
+          {label}
+        </Badge>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-72 text-xs" side="bottom">
+        {circuitStatus.message ?? "Agent suspended (repeated crashes)."}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 function AgentPersonaCard({
   actions,
   agent,
@@ -261,6 +310,7 @@ function AgentPersonaCard({
   });
   const isActive = agent ? isManagedAgentActive(agent) : false;
   const profileQuery = useUserProfileQuery(agent?.pubkey);
+  const circuitStatus = useAgentCircuitStatus(agent?.pubkey);
   const avatarUrl = agent
     ? resolveAgentCardAvatarUrl(profileQuery.data?.avatarUrl, persona.avatarUrl)
     : persona.avatarUrl;
@@ -326,7 +376,14 @@ function AgentPersonaCard({
         onOpenPersonaProfile(persona);
       }}
       statusBadge={
-        agent?.personaOrphaned ? (
+        circuitStatus.isOpen ? (
+          <CircuitOpenStatusBadge
+            circuitStatus={circuitStatus}
+            dataTestId={
+              agent ? `managed-agent-circuit-open-${agent.pubkey}` : undefined
+            }
+          />
+        ) : agent?.personaOrphaned ? (
           <Badge className="gap-1" variant="warning">
             <AlertTriangle className="h-3 w-3" />
             Configuration missing
@@ -359,6 +416,7 @@ function StandaloneAgentCard({
 }) {
   const title = agent.name;
   const profileQuery = useUserProfileQuery(agent.pubkey);
+  const circuitStatus = useAgentCircuitStatus(agent.pubkey);
   const friendlyError = friendlyAgentLastError(
     agent.lastError,
     agent.lastErrorCode,
@@ -407,7 +465,12 @@ function StandaloneAgentCard({
         );
       }}
       statusBadge={
-        agent.personaOrphaned ? (
+        circuitStatus.isOpen ? (
+          <CircuitOpenStatusBadge
+            circuitStatus={circuitStatus}
+            dataTestId={`managed-agent-circuit-open-${agent.pubkey}`}
+          />
+        ) : agent.personaOrphaned ? (
           <Badge className="gap-1" variant="warning">
             <AlertTriangle className="h-3 w-3" />
             Configuration missing

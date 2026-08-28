@@ -1,6 +1,7 @@
 import * as React from "react";
-import { Loader2 } from "lucide-react";
+import { AlertTriangle, Loader2 } from "lucide-react";
 
+import { useOpenCircuitAgents } from "@/features/agents/agentCircuitHooks";
 import { useAgentTranscript } from "@/features/agents/ui/useObserverEvents";
 import {
   getActivityHeadline,
@@ -55,6 +56,12 @@ export function BotActivityComposerAction({
 
     return agents.filter((agent) => workingSet.has(agent.pubkey.toLowerCase()));
   }, [agents, workingBotPubkeys]);
+  // A suspended (crashed, circuit-open) agent is never "working" — this is
+  // the in-channel counterpart to the persistent circuit badge on the Agents
+  // screen, so a user typing to an agent that just crashed sees it here too
+  // instead of only after navigating to Settings.
+  const suspendedAgents = useOpenCircuitAgents(agents);
+  const hasSuspended = suspendedAgents.length > 0;
   const singleWorkingAgent =
     workingAgents.length === 1 ? (workingAgents[0] ?? null) : null;
   const transcript = useAgentTranscript(
@@ -140,20 +147,29 @@ export function BotActivityComposerAction({
     return () => window.clearInterval(interval);
   }, [activityHeadlines.length]);
 
-  if (workingAgents.length === 0) {
+  if (workingAgents.length === 0 && !hasSuspended) {
     return null;
   }
 
   const agentAvatarUrl = (agent: BotActivityAgent) =>
     profiles?.[agent.pubkey.toLowerCase()]?.avatarUrl ?? null;
   const selectedPubkey = openAgentSessionPubkey?.toLowerCase() ?? null;
-  const triggerLabel =
-    workingAgents.length === 1
+  // Suspended takes priority in the trigger — an agent that's dead is more
+  // urgent to notice than one that's merely busy.
+  const headlineAgents = hasSuspended ? suspendedAgents : workingAgents;
+  const triggerLabel = hasSuspended
+    ? suspendedAgents.length === 1
+      ? `${suspendedAgents[0]?.name ?? "Agent"} suspended — repeated crashes`
+      : `${suspendedAgents.length} agents suspended`
+    : workingAgents.length === 1
       ? `${workingAgents[0]?.name ?? "Agent"} is working`
       : `${workingAgents.length} agents working`;
   const isInline = variant === "inline";
-  const visibleStatusLabel =
-    workingAgents.length === 1
+  const visibleStatusLabel = hasSuspended
+    ? suspendedAgents.length === 1
+      ? `${suspendedAgents[0]?.name ?? "Agent"}: Suspended`
+      : `${suspendedAgents[0]?.name ?? "Agent"} +${suspendedAgents.length - 1} suspended`
+    : workingAgents.length === 1
       ? `${workingAgents[0]?.name ?? "Agent"}: ${
           activityHeadlines[headlineIndex % activityHeadlines.length] ??
           "Working"
@@ -167,6 +183,9 @@ export function BotActivityComposerAction({
           aria-label={`${triggerLabel}. View activity.`}
           className={cn(
             "inline-flex items-center justify-center rounded-full border border-border/60 bg-background font-medium text-muted-foreground transition-colors hover:border-primary/30 hover:bg-primary/5 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring data-[state=open]:border-primary/40 data-[state=open]:bg-primary/10 data-[state=open]:text-primary",
+            hasSuspended &&
+              !isInline &&
+              "border-destructive/40 text-destructive hover:border-destructive/60 hover:bg-destructive/5 hover:text-destructive data-[state=open]:border-destructive/60 data-[state=open]:bg-destructive/10 data-[state=open]:text-destructive",
             isInline
               ? "min-w-0 gap-1.5 overflow-visible border-transparent bg-transparent px-0 text-xs font-normal leading-normal shadow-none hover:border-transparent hover:bg-transparent data-[state=open]:border-transparent data-[state=open]:bg-transparent"
               : "h-9 min-w-9 gap-1.5 px-2 text-xs",
@@ -183,7 +202,7 @@ export function BotActivityComposerAction({
           type="button"
         >
           <span className="flex h-4.5 items-center overflow-visible -space-x-1">
-            {workingAgents.slice(0, 2).map((agent) => (
+            {headlineAgents.slice(0, 2).map((agent) => (
               <UserAvatar
                 avatarUrl={agentAvatarUrl(agent)}
                 className={cn(
@@ -197,9 +216,9 @@ export function BotActivityComposerAction({
               />
             ))}
           </span>
-          {workingAgents.length > 2 ? (
+          {headlineAgents.length > 2 ? (
             <span className="text-2xs leading-none">
-              +{workingAgents.length - 2}
+              +{headlineAgents.length - 2}
             </span>
           ) : null}
           <span
@@ -210,14 +229,23 @@ export function BotActivityComposerAction({
             )}
           >
             {isInline ? (
-              <Shimmer className="-my-px truncate py-px">
+              <Shimmer
+                className={cn(
+                  "-my-px truncate py-px",
+                  hasSuspended && "text-destructive",
+                )}
+              >
                 {visibleStatusLabel}
               </Shimmer>
+            ) : hasSuspended ? (
+              "suspended"
             ) : (
               "working"
             )}
           </span>
-          {isInline ? null : (
+          {isInline ? null : hasSuspended ? (
+            <AlertTriangle className="h-4 w-4 shrink-0 opacity-70" />
+          ) : (
             <Loader2 className="h-4 w-4 shrink-0 animate-spin opacity-70" />
           )}
         </button>
@@ -231,46 +259,116 @@ export function BotActivityComposerAction({
         side="top"
         sideOffset={8}
       >
-        <div className="px-2 py-1 text-xs font-medium text-muted-foreground">
-          Agents working
-        </div>
-        <div className="mt-1 flex flex-col gap-1">
-          {workingAgents.map((agent) => {
-            const isSelected = selectedPubkey === agent.pubkey.toLowerCase();
-
-            return (
-              <button
-                className={cn(
-                  "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors",
-                  isSelected
-                    ? "bg-primary/10 text-primary"
-                    : "text-foreground hover:bg-accent hover:text-accent-foreground",
-                )}
-                data-testid={`bot-activity-composer-item-${agent.pubkey}`}
-                key={agent.pubkey}
-                onClick={() => {
-                  clearHoverTimer();
-                  setOpen(false);
-                  onOpenAgentSession(agent.pubkey, channelId);
-                }}
-                type="button"
-              >
-                <UserAvatar
-                  avatarUrl={agentAvatarUrl(agent)}
-                  className="shrink-0"
-                  displayName={agent.name}
-                  size="sm"
-                />
-                <span className="min-w-0 flex-1 truncate">{agent.name}</span>
-                <span className="shrink-0 whitespace-nowrap text-xs font-medium opacity-80">
-                  View activity
-                </span>
-                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground/70" />
-              </button>
-            );
-          })}
-        </div>
+        {hasSuspended ? (
+          <AgentPopoverSection
+            agentAvatarUrl={agentAvatarUrl}
+            agents={suspendedAgents}
+            heading="Agents suspended"
+            headingClassName="text-destructive"
+            itemStatusLabel="Suspended"
+            onCloseWithSelection={(pubkey) => {
+              clearHoverTimer();
+              setOpen(false);
+              onOpenAgentSession(pubkey, channelId);
+            }}
+            selectedPubkey={selectedPubkey}
+            trailingIcon={
+              <AlertTriangle className="h-4 w-4 shrink-0 text-destructive/70" />
+            }
+            variant="destructive"
+          />
+        ) : null}
+        {workingAgents.length > 0 ? (
+          <AgentPopoverSection
+            agentAvatarUrl={agentAvatarUrl}
+            agents={workingAgents}
+            heading="Agents working"
+            headingClassName={cn(
+              "text-muted-foreground",
+              hasSuspended && "mt-2",
+            )}
+            itemStatusLabel="View activity"
+            onCloseWithSelection={(pubkey) => {
+              clearHoverTimer();
+              setOpen(false);
+              onOpenAgentSession(pubkey, channelId);
+            }}
+            selectedPubkey={selectedPubkey}
+            trailingIcon={
+              <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground/70" />
+            }
+            variant="default"
+          />
+        ) : null}
       </PopoverContent>
     </Popover>
+  );
+}
+
+/** One labeled group of agent rows in the popover — shared shape for the
+ * working and suspended sections, which differ only in styling/copy/icon. */
+function AgentPopoverSection({
+  agentAvatarUrl,
+  agents,
+  heading,
+  headingClassName,
+  itemStatusLabel,
+  onCloseWithSelection,
+  selectedPubkey,
+  trailingIcon,
+  variant,
+}: {
+  agentAvatarUrl: (agent: BotActivityAgent) => string | null;
+  agents: BotActivityAgent[];
+  heading: string;
+  headingClassName?: string;
+  itemStatusLabel: string;
+  onCloseWithSelection: (pubkey: string) => void;
+  selectedPubkey: string | null;
+  trailingIcon: React.ReactNode;
+  variant: "default" | "destructive";
+}) {
+  return (
+    <>
+      <div className={cn("px-2 py-1 text-xs font-medium", headingClassName)}>
+        {heading}
+      </div>
+      <div className="mt-1 flex flex-col gap-1">
+        {agents.map((agent) => {
+          const isSelected = selectedPubkey === agent.pubkey.toLowerCase();
+
+          return (
+            <button
+              className={cn(
+                "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors",
+                variant === "destructive"
+                  ? isSelected
+                    ? "bg-destructive/10 text-destructive"
+                    : "text-foreground hover:bg-destructive/5 hover:text-destructive"
+                  : isSelected
+                    ? "bg-primary/10 text-primary"
+                    : "text-foreground hover:bg-accent hover:text-accent-foreground",
+              )}
+              data-testid={`bot-activity-composer-item-${agent.pubkey}`}
+              key={agent.pubkey}
+              onClick={() => onCloseWithSelection(agent.pubkey)}
+              type="button"
+            >
+              <UserAvatar
+                avatarUrl={agentAvatarUrl(agent)}
+                className="shrink-0"
+                displayName={agent.name}
+                size="sm"
+              />
+              <span className="min-w-0 flex-1 truncate">{agent.name}</span>
+              <span className="shrink-0 whitespace-nowrap text-xs font-medium opacity-80">
+                {itemStatusLabel}
+              </span>
+              {trailingIcon}
+            </button>
+          );
+        })}
+      </div>
+    </>
   );
 }
