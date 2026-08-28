@@ -17,8 +17,11 @@ BUZZ_HIVETALK_API_ROOT=https://premrelay.exe.xyz
   work, and the NIP-11 document does not advertise Meetings. The feature is
   invisible to clients.
 - **Set:** the proxy routes are live and NIP-11 advertises the `buzz-meetings`
-  extension with a `meetings` descriptor (`{ provider, proxy }`), which the
-  client uses to feature-detect.
+  extension with a `meetings` descriptor (`{ provider, proxy, api_base }`), which
+  the client uses to feature-detect. `api_base` echoes `BUZZ_HIVETALK_API_ROOT`
+  so the client can build the `u` tag of its *own* HiveTalk-signed request —
+  HiveTalk verifies that signature against the upstream URL, not the relay URL.
+  It is a public URL, never a credential.
 
 `BUZZ_HIVETALK_API_ROOT` is **not a secret** — see "No credential" below. It can
 live in a plain ConfigMap / `.env`, unlike `BUZZ_KLIPY_API_KEY`.

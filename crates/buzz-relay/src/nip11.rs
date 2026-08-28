@@ -84,6 +84,11 @@ pub struct MeetingsDescriptor {
     pub provider: String,
     /// Relay-relative path prefix for the Meetings control-plane proxy.
     pub proxy: String,
+    /// Public HiveTalk API base the proxy forwards to. Not a credential — it is
+    /// a public URL in HiveTalk's own docs. The client needs it to build the
+    /// `u` tag of its *own* HiveTalk-signed request (the signature HiveTalk
+    /// verifies covers the upstream URL, not the relay URL).
+    pub api_base: String,
 }
 
 /// Protocol and resource limits advertised in the NIP-11 document.
@@ -172,6 +177,15 @@ impl RelayInfo {
     /// `build` advertises the provider-agnostic `buzz-gif` extension and the
     /// relay-relative metadata search endpoint. It must never contain a
     /// provider credential.
+    ///
+    /// `meetings_provider` / `meetings_api_base` are config-derived scalars for
+    /// the HiveTalk Meetings descriptor (`api_base` is a public URL, never a
+    /// credential — see [`MeetingsDescriptor::api_base`]).
+    ///
+    // Every parameter is a pre-derived static/scalar input by design — see
+    // `_RELAY_INFO_BUILD_STATIC_INPUT_FENCE`. Collapsing them into a struct
+    // would hide that contract from the fence, so the arg count is intentional.
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         relay_self: Option<&str>,
         icon: Option<&str>,
@@ -180,6 +194,7 @@ impl RelayInfo {
         pairing_relay_url: Option<&str>,
         gif_provider: Option<&str>,
         meetings_provider: Option<&str>,
+        meetings_api_base: Option<&str>,
     ) -> Self {
         debug_assert!(
             !advertise_nip43 || relay_self.is_some(),
@@ -206,6 +221,9 @@ impl RelayInfo {
             MeetingsDescriptor {
                 provider: provider.to_string(),
                 proxy: crate::api::meetings::MEETINGS_PREFIX.to_string(),
+                api_base: meetings_api_base
+                    .unwrap_or(crate::api::meetings::DEFAULT_HIVETALK_API_ROOT)
+                    .to_string(),
             }
         });
 
@@ -305,6 +323,11 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         state.config.pairing_relay_url.as_deref(),
         state.config.klipy.as_ref().map(|_| "klipy"),
         state.config.hivetalk.as_ref().map(|_| "hivetalk"),
+        state
+            .config
+            .hivetalk
+            .as_ref()
+            .map(|cfg| cfg.api_root.as_str()),
     );
     let tenant_host = if state.config.push_gateway_delivery_url.is_some() {
         crate::tenant::bind_community(&state.db, raw_host)
@@ -398,6 +421,7 @@ const _RELAY_INFO_BUILD_STATIC_INPUT_FENCE: fn(
     Option<&str>,
     Option<&str>,
     Option<&str>,
+    Option<&str>,
 ) -> RelayInfo = RelayInfo::build;
 
 #[cfg(test)]
@@ -452,7 +476,16 @@ mod tests {
 
     #[test]
     fn build_advertises_buzz_repository_url() {
-        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
+        let info = RelayInfo::build(
+            None,
+            None,
+            false,
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+            None,
+        );
         assert_eq!(info.software, "https://github.com/block/buzz");
     }
 
@@ -466,6 +499,7 @@ mod tests {
             Some("wss://pairing.buzz.xyz"),
             None,
             None,
+            None,
         );
         let json = serde_json::to_value(&info).expect("serialize");
         assert_eq!(
@@ -474,7 +508,16 @@ mod tests {
             Some("wss://pairing.buzz.xyz")
         );
 
-        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
+        let info = RelayInfo::build(
+            None,
+            None,
+            false,
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+            None,
+        );
         let json = serde_json::to_value(&info).expect("serialize");
         assert!(json.get("pairing_relay_url").is_none());
     }
@@ -489,6 +532,7 @@ mod tests {
             None,
             Some("klipy"),
             None,
+            None,
         );
 
         let json = serde_json::to_value(&info).expect("serialize");
@@ -501,8 +545,16 @@ mod tests {
             .contains(&serde_json::json!("buzz-gif")));
         assert!(!json.to_string().contains("api_key"));
 
-        let unconfigured =
-            RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
+        let unconfigured = RelayInfo::build(
+            None,
+            None,
+            false,
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(unconfigured.gif.is_none());
         assert!(!unconfigured
             .supported_extensions
@@ -520,17 +572,27 @@ mod tests {
             None,
             None,
             Some("hivetalk"),
+            Some("https://premrelay.exe.xyz"),
         );
         let json = serde_json::to_value(&info).expect("serialize");
         assert_eq!(json["meetings"]["provider"], "hivetalk");
         assert_eq!(json["meetings"]["proxy"], "/meetings");
+        assert_eq!(json["meetings"]["api_base"], "https://premrelay.exe.xyz");
         assert!(json["supported_extensions"]
             .as_array()
             .expect("extensions")
             .contains(&serde_json::json!("buzz-meetings")));
 
-        let unconfigured =
-            RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
+        let unconfigured = RelayInfo::build(
+            None,
+            None,
+            false,
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(unconfigured.meetings.is_none());
         assert!(!unconfigured
             .supported_extensions
@@ -551,6 +613,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(
             info.icon.as_deref(),
@@ -563,8 +626,16 @@ mod tests {
         );
 
         for icon in [None, Some("")] {
-            let info =
-                RelayInfo::build(None, icon, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
+            let info = RelayInfo::build(
+                None,
+                icon,
+                false,
+                DEFAULT_MAX_FRAME_BYTES,
+                None,
+                None,
+                None,
+                None,
+            );
             assert!(info.icon.is_none());
             let json = serde_json::to_value(&info).expect("serialize");
             assert!(
@@ -584,7 +655,7 @@ mod tests {
 
     #[test]
     fn max_message_length_uses_configured_frame_limit() {
-        let info = RelayInfo::build(None, None, false, 262_144, None, None, None);
+        let info = RelayInfo::build(None, None, false, 262_144, None, None, None, None);
         let limitation = info.limitation.expect("limitation");
         assert_eq!(limitation.max_message_length, Some(262_144));
     }
@@ -615,7 +686,16 @@ mod tests {
     /// Open relay, ephemeral key — both `self` and NIP-43 are absent.
     #[test]
     fn build_open_relay_ephemeral_key_omits_self_and_nip43() {
-        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None, None, None);
+        let info = RelayInfo::build(
+            None,
+            None,
+            false,
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+            None,
+        );
         assert!(info.relay_self.is_none());
         assert!(!info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
     }
@@ -636,6 +716,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(info.relay_self.as_deref(), Some(pk));
         assert!(!info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
@@ -653,6 +734,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert_eq!(info.relay_self.as_deref(), Some(pk));
         assert!(info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
@@ -664,6 +746,15 @@ mod tests {
     #[test]
     #[should_panic(expected = "advertise_nip43=true requires relay_self=Some")]
     fn build_nip43_without_self_panics_in_debug() {
-        let _ = RelayInfo::build(None, None, true, DEFAULT_MAX_FRAME_BYTES, None, None, None);
+        let _ = RelayInfo::build(
+            None,
+            None,
+            true,
+            DEFAULT_MAX_FRAME_BYTES,
+            None,
+            None,
+            None,
+            None,
+        );
     }
 }
