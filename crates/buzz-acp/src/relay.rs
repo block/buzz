@@ -522,11 +522,21 @@ impl RestClient {
         message_id: &nostr::EventId,
     ) -> Result<crate::workflow_wake::WorkflowWakeAuthority, RelayError> {
         let path = format!("/workflow-wakes/{run_id}/{}", message_id.to_hex());
-        self.bridge_get(&path)
-            .await?
-            .json()
-            .await
-            .map_err(|error| RelayError::Http(error.to_string()))
+        // A successful status is not a complete authority response. Read the
+        // body separately so an interrupted transfer remains recoverable while
+        // a complete but malformed authority document stays terminal.
+        let response = self.bridge_get(&path).await?;
+        let body = match response.bytes().await {
+            Ok(body) => body,
+            Err(error) => {
+                // Replay retries this read through the normal verification path.
+                // Pace body failures too: headers may have arrived immediately,
+                // bypassing request_with_retry's backoff entirely.
+                tokio::time::sleep(jittered_duration(REST_RETRY_BASE_DELAYS[0])).await;
+                return Err(RelayError::TransientHttp(error.to_string()));
+            }
+        };
+        serde_json::from_slice(&body).map_err(|error| RelayError::Http(error.to_string()))
     }
 
     /// Query events via the HTTP bridge: `POST /query` with NIP-98 auth.

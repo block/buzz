@@ -6,6 +6,27 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test]
 async fn exhausted_authority_failure_replays_exact_wake_and_verifies_before_dispatch() {
+    assert_authority_recovery(AuthorityFailure::Status).await;
+}
+
+#[tokio::test]
+async fn truncated_authority_body_replays_before_dispatch() {
+    assert_authority_recovery(AuthorityFailure::TruncatedBody).await;
+}
+
+#[tokio::test]
+async fn stalled_authority_body_replays_before_dispatch() {
+    assert_authority_recovery(AuthorityFailure::StalledBody).await;
+}
+
+#[derive(Clone, Copy)]
+enum AuthorityFailure {
+    Status,
+    TruncatedBody,
+    StalledBody,
+}
+
+async fn assert_authority_recovery(failure: AuthorityFailure) {
     let agent = Keys::generate();
     let owner = Keys::generate();
     let relay_key = Keys::generate();
@@ -37,24 +58,44 @@ async fn exhausted_authority_failure_replays_exact_wake_and_verifies_before_disp
     .to_string();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    // Four failures exhaust the entire bounded request budget; the fifth
-    // request is possible only after the transport has replayed the wake.
+    // Status failures exhaust the HTTP retry budget. Body failures arrive
+    // after successful headers and must independently reopen transport replay.
+    let failures = if matches!(failure, AuthorityFailure::Status) {
+        4
+    } else {
+        1
+    };
     let http_server = tokio::spawn(async move {
-        for index in 0..5 {
+        for index in 0..=failures {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0u8; 4096];
             let len = stream.read(&mut request).await.unwrap();
             let request = String::from_utf8_lossy(&request[..len]);
             assert!(request.starts_with(&format!("GET /workflow-wakes/{run}/")));
-            let (status, response) = if index < 4 {
-                (503, "")
+            if index < failures {
+                match failure {
+                    AuthorityFailure::Status => {
+                        stream.write_all(b"HTTP/1.1 503 test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                    }
+                    AuthorityFailure::TruncatedBody | AuthorityFailure::StalledBody => {
+                        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n{").await.unwrap();
+                        if matches!(failure, AuthorityFailure::StalledBody) {
+                            tokio::spawn(async move {
+                                tokio::time::sleep(Duration::from_secs(5)).await;
+                                drop(stream);
+                            });
+                        }
+                    }
+                }
             } else {
-                (200, body.as_str())
-            };
-            stream.write_all(format!("HTTP/1.1 {status} test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
         }
     });
-    let http = reqwest::Client::new();
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(1))
+        .build()
+        .unwrap();
     let rest = RestClient {
         http: http.clone(),
         base_url: format!("http://{address}"),
@@ -112,7 +153,7 @@ async fn exhausted_authority_failure_replays_exact_wake_and_verifies_before_disp
     let error = rest
         .workflow_wake_authority(authenticated.run_id(), &authenticated.message_event_id())
         .await
-        .expect_err("all four requests fail");
+        .expect_err("authority transfer fails");
     assert!(error.is_transient());
     assert!(
         harness.event_rx.try_recv().is_err(),
@@ -179,4 +220,44 @@ async fn next_data_frame(server: &mut WebSocketStream<tokio::net::TcpStream>) ->
     })
     .await
     .expect("data frame before timeout")
+}
+
+#[tokio::test]
+async fn complete_malformed_authority_body_is_terminal() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        for body in ["{", "{}"] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            stream.read(&mut request).await.unwrap();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        }
+    });
+    let rest = RestClient {
+        http: reqwest::Client::new(),
+        base_url: format!("http://{address}"),
+        keys: Keys::generate(),
+        auth_tag_json: None,
+    };
+    for _ in 0..2 {
+        let error = rest
+            .workflow_wake_authority(Uuid::new_v4(), &nostr::EventId::all_zeros())
+            .await
+            .unwrap_err();
+        assert!(
+            !error.is_transient(),
+            "complete malformed authority must not replay"
+        );
+    }
+    server.await.unwrap();
 }
