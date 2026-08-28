@@ -57,6 +57,22 @@ async function mutateProjectCache(
   });
 }
 
+async function waitForProjectEnumeration(
+  page: import("@playwright/test").Page,
+): Promise<void> {
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const queryClient = window.__BUZZ_E2E_QUERY_CLIENT__;
+        const state = queryClient?.getQueryState(["projects"]);
+        return Boolean(
+          state && state.fetchStatus === "idle" && state.dataUpdatedAt > 0,
+        );
+      }),
+    )
+    .toBe(true);
+}
+
 test("snapshot project home cannot publish repository healing", async ({
   page,
 }) => {
@@ -131,4 +147,25 @@ test("stale non-matching snapshot uses the scoped project-home lookup", async ({
     );
   }, PROJECT_HOME_CHANNEL_ID);
   expect(usedScopedLookup).toBe(true);
+});
+
+test("equal live project data enables healing after snapshot reconciliation", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Date.now = () => 1_787_872_972_113;
+  });
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await waitForProjectSnapshot(page);
+
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await waitForProjectEnumeration(page);
+  await page.getByTestId("channel-buzz").click();
+
+  await expect(page.getByTestId("project-channel-home")).toHaveAttribute(
+    "data-repository-healing-enabled",
+    "true",
+  );
 });

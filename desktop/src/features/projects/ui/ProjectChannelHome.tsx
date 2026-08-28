@@ -258,6 +258,7 @@ export function ProjectChannelHome({
         )}
         data-project-context-detached={summaryVisible ? "true" : undefined}
         data-project-detail-screen
+        data-repository-healing-enabled={allowRepositoryHealing}
         data-testid="project-channel-home"
       >
         <div

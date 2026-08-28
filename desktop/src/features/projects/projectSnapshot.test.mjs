@@ -9,6 +9,7 @@ import {
   markProjectCollectionAuthoritative,
   markProjectDataAuthoritative,
   persistProjectSnapshot,
+  PROJECT_QUERY_STRUCTURAL_SHARING,
   projectSnapshotKey,
   readProjectSnapshot,
   removeProjectSnapshotForRelay,
@@ -125,4 +126,30 @@ test("successful relay data is authoritative", () => {
     }),
     false,
   );
+});
+
+test("equal relay data replaces snapshot objects and preserves provenance", async () => {
+  const writer = new QueryClient();
+  seedProjectSnapshot(writer, { pubkey: OWNER, relayUrl: RELAY });
+  persistProjectSnapshot(writer, [PROJECT]);
+
+  const reader = new QueryClient();
+  seedProjectSnapshot(reader, { pubkey: OWNER, relayUrl: RELAY });
+  const snapshotProject = reader.getQueryData(["projects"])[0];
+  const liveProject = markProjectDataAuthoritative({ ...PROJECT }, "relay");
+
+  await reader.fetchQuery({
+    queryKey: ["projects"],
+    queryFn: async () => {
+      markProjectCollectionAuthoritative(reader);
+      return [liveProject];
+    },
+    structuralSharing: PROJECT_QUERY_STRUCTURAL_SHARING,
+  });
+
+  const cachedProject = reader.getQueryData(["projects"])[0];
+  assert.notEqual(cachedProject, snapshotProject);
+  assert.equal(cachedProject, liveProject);
+  assert.equal(isProjectRelayValidated(cachedProject), true);
+  assert.equal(isProjectCollectionAuthoritative(reader), true);
 });

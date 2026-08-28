@@ -70,6 +70,7 @@ import { fetchProjectHomeForChannel, fetchProjects } from "./projectFetch";
 import {
   markProjectCollectionAuthoritative,
   persistProjectSnapshot,
+  PROJECT_QUERY_STRUCTURAL_SHARING,
 } from "./projectSnapshot";
 import { projectMatchesRouteId } from "./projectRoutes";
 
@@ -622,6 +623,7 @@ export function useProjectsQuery(enabled = true) {
     },
     staleTime: PROJECTS_STALE_TIME_MS,
     gcTime: PROJECTS_GC_TIME_MS,
+    structuralSharing: PROJECT_QUERY_STRUCTURAL_SHARING,
     enabled,
   });
 }
@@ -654,6 +656,7 @@ export function useProjectQuery(projectId: string) {
       null,
     staleTime: PROJECTS_STALE_TIME_MS,
     gcTime: PROJECTS_GC_TIME_MS,
+    structuralSharing: PROJECT_QUERY_STRUCTURAL_SHARING,
   });
 }
 
