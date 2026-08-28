@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  baselineOwnerOrder,
-  suggestTaskOwners,
-} from "./ownerSuggestion.ts";
+import { baselineOwnerOrder, suggestTaskOwners } from "./ownerSuggestion.ts";
 
 const ALICE = "a".repeat(64);
 const BOB = "b".repeat(64);
@@ -130,11 +127,9 @@ test("substring must not false-match a shorter name", () => {
 });
 
 test("raw pubkey in the title counts as a mention", () => {
-  const out = suggestTaskOwners(
-    task({ title: `assign to ${DOZER}` }),
-    ROSTER,
-    { limit: 5 },
-  );
+  const out = suggestTaskOwners(task({ title: `assign to ${DOZER}` }), ROSTER, {
+    limit: 5,
+  });
   assert.equal(out[0].pubkey, DOZER);
 });
 
@@ -143,7 +138,10 @@ test("recency is ordered: earlier in the list ranks higher", () => {
     recentParticipantPubkeys: [CAROL, BOB],
     limit: 5,
   });
-  assert.ok(out.findIndex((s) => s.pubkey === CAROL) < out.findIndex((s) => s.pubkey === BOB));
+  assert.ok(
+    out.findIndex((s) => s.pubkey === CAROL) <
+      out.findIndex((s) => s.pubkey === BOB),
+  );
   const carol = out.find((s) => s.pubkey === CAROL);
   assert.deepEqual(
     carol.reasons.find((r) => r.code === "recent-participant").params,
@@ -192,5 +190,8 @@ test("ranking is deterministic across repeated calls", () => {
     ROSTER,
     { recentParticipantPubkeys: [BOB], limit: 5 },
   ];
-  assert.deepEqual(labels(suggestTaskOwners(...args)), labels(suggestTaskOwners(...args)));
+  assert.deepEqual(
+    labels(suggestTaskOwners(...args)),
+    labels(suggestTaskOwners(...args)),
+  );
 });
