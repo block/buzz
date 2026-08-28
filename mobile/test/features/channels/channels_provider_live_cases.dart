@@ -223,7 +223,7 @@ void _liveSubscriptionTests() {
   );
 
   test(
-    'terminal closure reinstalls desired coverage without retiring fallback',
+    'terminal closure preserves fallback until reconnect retries coverage',
     () async {
       final channelIds = [
         for (var i = 1; i <= 129; i++) _generatedChannelId(i),
@@ -249,6 +249,13 @@ void _liveSubscriptionTests() {
         channelIds.last,
         'restricted: terminal closure',
       );
+      await _settle();
+      // The rejected chunk itself is gone, but the previously retained
+      // fallback must still cover its original first 128 channels.
+      expect(session.activeChannels, channelIds.take(128).toSet());
+      expect(session.activeChannels, isNot(contains(addedId)));
+      session.setStatus(SessionStatus.disconnected);
+      session.setStatus(SessionStatus.connected);
       await _waitUntil(() => session.activeChannels.contains(addedId));
 
       expect(session.activeChannels, containsAll({...channelIds, addedId}));

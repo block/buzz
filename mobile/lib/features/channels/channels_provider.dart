@@ -45,8 +45,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   Set<String> _desiredLiveChannelIds = const {};
   int _subscriptionVersion = 0;
   int _nextLiveChunkGeneration = 0;
-  bool _liveReconcileRunning = false;
-  bool _liveReconcileRequested = false;
+  final Set<String> _terminallyClosedLiveChunks = {};
   String? _subscriptionRelayBaseUrl;
   Timer? _backstopTimer;
   final Map<String, int> _latestObservedByChannel = {};
@@ -117,6 +116,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
           !connected.isCompleted) {
         connected.complete();
       } else if (previous?.status != SessionStatus.connected) {
+        // A new authenticated connection can change relay admission policy.
+        // Ordinary refreshes must not retry an unchanged terminal rejection.
+        _terminallyClosedLiveChunks.clear();
         unawaited(_backstopRefresh());
       }
     });

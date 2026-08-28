@@ -23,6 +23,13 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     };
     final relayBaseUrl = _lifecycleRef.read(relayConfigProvider).baseUrl;
     _desiredLiveChannelIds = channelIds;
+    // A changed filter may be admitted, but an unchanged terminal rejection
+    // cannot recover just because a timer or manual refresh fetched it again.
+    // Drop obsolete keys so this quarantine stays bounded by desired chunks.
+    final desiredKeys = chunkChannelIdsForLiveSubscriptions(
+      channelIds,
+    ).map(_liveChunkKey).toSet();
+    _terminallyClosedLiveChunks.retainAll(desiredKeys);
     final subscriptionVersion = ++_subscriptionVersion;
 
     final sync = _liveSubscriptionQueue.then(
@@ -78,7 +85,10 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     final session = _lifecycleRef.read(relaySessionProvider.notifier);
     for (final chunk in desiredChunks) {
       final chunkKey = _liveChunkKey(chunk);
-      if (_liveSubscriptionsByChunk.containsKey(chunkKey)) continue;
+      if (_liveSubscriptionsByChunk.containsKey(chunkKey) ||
+          _terminallyClosedLiveChunks.contains(chunkKey)) {
+        continue;
+      }
       if (_lifecycleRef.read(relaySessionProvider).status !=
           SessionStatus.connected) {
         return;
@@ -160,36 +170,21 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
   }
 
   void _handleLiveChunkClosed(String chunkKey, int generation, String message) {
+    if (!_lifecycleRef.mounted) return;
     final subscription = _liveSubscriptionsByChunk[chunkKey];
     if (subscription == null || subscription.generation != generation) return;
     _liveSubscriptionsByChunk.remove(chunkKey);
+    // RelaySession calls onClosed only for terminal admission failures. Its
+    // transient/rate-limit retries have their own backoff. Do not turn a
+    // terminal rejection into a fresh membership/history/REQ loop here.
+    if (chunkChannelIdsForLiveSubscriptions(
+      _desiredLiveChannelIds,
+    ).any((chunk) => _liveChunkKey(chunk) == chunkKey)) {
+      _terminallyClosedLiveChunks.add(chunkKey);
+    }
     debugPrint(
       '[ChannelsNotifier] live subscription closed by relay: $message',
     );
-    _requestLiveReconcile();
-  }
-
-  void _requestLiveReconcile() {
-    if (!_lifecycleRef.mounted ||
-        _lifecycleRef.read(relaySessionProvider).status !=
-            SessionStatus.connected) {
-      return;
-    }
-    if (_liveReconcileRunning) {
-      _liveReconcileRequested = true;
-      return;
-    }
-    _liveReconcileRunning = true;
-    unawaited(() async {
-      try {
-        do {
-          _liveReconcileRequested = false;
-          await _backstopRefresh();
-        } while (_liveReconcileRequested && _lifecycleRef.mounted);
-      } finally {
-        _liveReconcileRunning = false;
-      }
-    }());
   }
 
   void _removeUndesiredLiveChunks() {
@@ -243,7 +238,7 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
   void _clearLiveSubscriptions() {
     _subscriptionVersion++;
     _desiredLiveChannelIds = const {};
-    _liveReconcileRequested = false;
+    _terminallyClosedLiveChunks.clear();
     _clearRetainedLiveChunks();
     _subscriptionRelayBaseUrl = null;
     _backstopTimer?.cancel();
