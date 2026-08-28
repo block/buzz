@@ -353,6 +353,33 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     }
 }
 
+/// Fail-closed channel preflight for `messages get`.
+///
+/// The relay silently filters events the caller cannot read, so a bare
+/// message query returns `[]` for a nonexistent channel, a private channel
+/// the caller is not a member of, AND a genuinely empty channel — three
+/// very different situations that used to be indistinguishable. The relay's
+/// access control applies the same visibility rule to kind:39000 channel
+/// metadata (private channels are hidden from non-members), so probing the
+/// metadata first separates "channel readable" from everything else:
+/// no metadata → the channel does not exist or is not visible to us → hard
+/// error instead of a misleading empty array.
+async fn ensure_channel_readable(client: &BuzzClient, channel_id: &str) -> Result<(), CliError> {
+    let filter = serde_json::json!({
+        "kinds": [39000],
+        "#d": [channel_id],
+        "limit": 1
+    });
+    let resp = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+    if events.is_empty() {
+        return Err(CliError::NotFound(format!(
+            "channel {channel_id} not found or not accessible — check the UUID and your channel membership"
+        )));
+    }
+    Ok(())
+}
+
 pub async fn cmd_get_messages(
     client: &BuzzClient,
     channel_id: &str,
@@ -363,6 +390,7 @@ pub async fn cmd_get_messages(
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
+    ensure_channel_readable(client, channel_id).await?;
     let limit = limit.unwrap_or(50).min(200);
 
     let mut filter = serde_json::json!({
@@ -1056,11 +1084,11 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
-        format_events, match_profiles_by_name, merge_message_mentions, missing_members,
-        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
-        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
-        CliError, Uuid,
+        channel_id_from_event, cmd_get_messages, cmd_get_thread, event_mention_pubkeys,
+        find_root_from_tags, format_events, match_profiles_by_name, merge_message_mentions,
+        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
+        thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1569,5 +1597,138 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+
+    // ---- messages get channel preflight (fail closed) ----
+
+    const CHANNEL: &str = "123e4567-e89b-12d3-a456-426614174000";
+
+    /// Spin up a mock relay `/query` endpoint. `metadata_visible` controls
+    /// whether the kind:39000 channel-metadata probe returns the channel's
+    /// metadata event; the message query (any other kinds) always returns
+    /// an empty array — the "real empty channel" wire behavior.
+    async fn spawn_messages_get_relay(metadata_visible: bool) -> String {
+        use axum::{extract::State, routing::post, Router};
+        use serde_json::Value;
+        use tokio::net::TcpListener;
+
+        let app = Router::new()
+            .route(
+                "/query",
+                post(
+                    move |State(()): State<()>, body: axum::body::Bytes| async move {
+                        let filters: Vec<Value> = serde_json::from_slice(&body).unwrap_or_default();
+                        let wants_metadata = filters
+                            .first()
+                            .and_then(|f| f.get("kinds"))
+                            .and_then(|k| k.as_array())
+                            .is_some_and(|k| k.iter().any(|v| v.as_u64() == Some(39000)));
+                        let events = if wants_metadata && metadata_visible {
+                            vec![json!({
+                                "kind": 39000,
+                                "pubkey": PUBKEY,
+                                "tags": [["d", CHANNEL], ["name", "empty-channel"]],
+                                "content": "",
+                            })]
+                        } else {
+                            vec![]
+                        };
+                        axum::response::Response::builder()
+                            .header("content-type", "application/json")
+                            .body(axum::body::Body::from(
+                                serde_json::to_string(&events).unwrap(),
+                            ))
+                            .unwrap()
+                    },
+                ),
+            )
+            .with_state(());
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    fn test_client(relay_url: String) -> BuzzClient {
+        let keys =
+            nostr::Keys::parse("0000000000000000000000000000000000000000000000000000000000000001")
+                .expect("valid test key");
+        BuzzClient::new(relay_url, keys, None, None).expect("client construction should not fail")
+    }
+
+    #[tokio::test]
+    async fn messages_get_fails_closed_for_nonexistent_channel() {
+        // The relay returns no metadata for a channel that does not exist —
+        // the same empty array it returns for the message query itself.
+        let client = test_client(spawn_messages_get_relay(false).await);
+
+        let error = cmd_get_messages(
+            &client,
+            CHANNEL,
+            None,
+            None,
+            None,
+            None,
+            &crate::OutputFormat::Json,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, CliError::NotFound(_)),
+            "expected NotFound, got: {error:?}"
+        );
+        assert!(error.to_string().contains(CHANNEL));
+        // NotFound maps to a nonzero exit code (1 = user/not-found).
+        assert_eq!(crate::error::exit_code(&error), 1);
+    }
+
+    #[tokio::test]
+    async fn messages_get_fails_closed_for_unauthorized_channel() {
+        // A private channel the caller is not a member of: the relay's access
+        // control hides its kind:39000 metadata exactly like a nonexistent
+        // channel, so the CLI must fail closed here too rather than print [].
+        let client = test_client(spawn_messages_get_relay(false).await);
+
+        let error = cmd_get_messages(
+            &client,
+            CHANNEL,
+            None,
+            None,
+            None,
+            None,
+            &crate::OutputFormat::Json,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, CliError::NotFound(_)),
+            "expected NotFound, got: {error:?}"
+        );
+        // The message names both possibilities because the relay deliberately
+        // makes them indistinguishable.
+        assert!(error.to_string().contains("not found or not accessible"));
+        assert_eq!(crate::error::exit_code(&error), 1);
+    }
+
+    #[tokio::test]
+    async fn messages_get_succeeds_for_real_empty_channel() {
+        // Metadata exists but the message query returns no events: this is a
+        // genuinely empty channel and must remain a success.
+        let client = test_client(spawn_messages_get_relay(true).await);
+
+        cmd_get_messages(
+            &client,
+            CHANNEL,
+            None,
+            None,
+            None,
+            None,
+            &crate::OutputFormat::Json,
+        )
+        .await
+        .expect("a real empty channel must still succeed with []");
     }
 }
