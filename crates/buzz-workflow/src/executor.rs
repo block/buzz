@@ -791,16 +791,6 @@ pub async fn dispatch_action(
     }
 }
 
-/// Generate a cryptographically random approval token.
-///
-/// Uses `Uuid::new_v4()` which draws from the OS CSPRNG (via the `getrandom`
-/// crate). The `run_id` and `step_id` parameters are accepted for logging
-/// context but are not mixed into the token — the UUID's own randomness is
-/// sufficient and avoids the predictability of time-based entropy.
-fn generate_approval_token(_run_id: Uuid, _step_id: &str) -> String {
-    Uuid::new_v4().to_string()
-}
-
 /// Parse a duration string like "5m", "1h", "30s" into seconds.
 ///
 /// Exposed as `pub(crate)` so `schema.rs` can use it for interval validation.

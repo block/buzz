@@ -25,7 +25,7 @@ pub struct EnsureAgentApproval<'a> {
     pub step_index: i32,
     /// Exact authorized approver pubkey as lowercase hex.
     pub approver_spec: &'a str,
-    /// Fixed expiration derived from task creation.
+    /// Fixed expiration established when the approval is first armed.
     pub expires_at: DateTime<Utc>,
 }
 

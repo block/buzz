@@ -233,7 +233,7 @@ pub async fn advance_run(
         iterations += 1;
         if iterations > 4_096 {
             tracing::warn!(run_id = %run_id, "durable advancement iteration limit reached");
-            break;
+            return Ok(progress);
         }
         let tasks = store.list_tasks(community, run_id, Some(1_000)).await?;
         progress.task_count = tasks.len();

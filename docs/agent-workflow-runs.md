@@ -79,11 +79,17 @@ Citation verification is an independently assigned `verify_artifact` task. Human
 
 ## Local validation evidence
 
-The implementation was validated without starting replacement services:
+The implementation was validated without starting persistent replacement services:
 
 - focused durable workflow tests and compile checks for `buzz-db`, `buzz-workflow`, `buzz-relay`, and `buzz-cli`;
 - relay-only coordinator-kind and CLI surface tests;
 - a synthetic pilot that parses the real 11-step tribunal YAML and verifies both barriers, four distinct Nostr identities, independent citation verification, persistent approval, and publication ordering;
 - a golden in-memory pilot that deterministically builds and verifies a 3,218-page manifest, including physical/logical coordinate `fls. 3218`.
 
-A live transactional E2E with relay restart, Postgres, and Redis was not run in this checkout because neither service nor a test database URL was available. This is an explicit remaining environment gate, not a passing result. The database integration suite must still exercise exclusive claims, tenant isolation, stale CAS, timeout recovery, approval restart/resume, duplicate artifact receipts, and exactly-once publication against migrated Postgres before deployment.
+The PostgreSQL acceptance test lives at `crates/buzz-workflow/tests/durable_postgres.rs`. It applies every embedded migration and exercises exclusive claims, dependency refusal, tenant isolation, stale CAS, timeout recovery, checkpoint replay, immutable artifact replay/divergence, fixed approval expiry, fair reconciliation, and exactly-once terminal settlement. Run it only against a disposable database:
+
+```bash
+BUZZ_TEST_DATABASE_URL=postgres://... cargo test -p buzz-workflow --test durable_postgres -- --ignored --exact
+```
+
+The test is ignored by default and fails before connecting when `BUZZ_TEST_DATABASE_URL` is absent. It passed against a freshly initialized PostgreSQL 17.11 cluster after all embedded migrations, including a new `Db` connection that simulated scheduler/relay restart for approval resume (`1 passed; 0 failed`). A full relay-process restart smoke with Redis remains an environment gate; compilation alone is never reported as a runtime pass.
