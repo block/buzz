@@ -230,7 +230,7 @@ async fn complete_malformed_authority_body_is_terminal() {
         for body in ["{", "{}"] {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0u8; 4096];
-            stream.read(&mut request).await.unwrap();
+            assert!(stream.read(&mut request).await.unwrap() > 0);
             stream
                 .write_all(
                     format!(

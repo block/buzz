@@ -266,7 +266,7 @@ async fn captured_revision_survives_replacement_but_not_revocation() {
         deletion,
         crate::handlers::ingest::IngestAuth::Nip42 {
             pubkey: f.owner.public_key(),
-            scopes: vec![],
+            scopes: vec![buzz_auth::Scope::MessagesWrite],
             channel_ids: None,
             conn_id: Uuid::new_v4(),
         },
