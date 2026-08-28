@@ -351,6 +351,19 @@ void main() {
     expect(find.text('Animated'), findsOneWidget);
     expect(find.text('Photo'), findsNothing);
     final modeControl = find.byKey(const ValueKey('avatar-mode-control'));
+    final modeIndicator = find.byKey(const ValueKey('avatar-mode-indicator'));
+    final controlRect = tester.getRect(modeControl);
+    final indicatorRect = tester.getRect(modeIndicator);
+    expect(indicatorRect.left - controlRect.left, Grid.quarter);
+    expect(indicatorRect.top - controlRect.top, Grid.quarter);
+    expect(controlRect.bottom - indicatorRect.bottom, Grid.quarter);
+    expect(
+      controlRect.width - Grid.quarter * 2,
+      closeTo(indicatorRect.width * 3, 0.01),
+    );
+    final indicatorDecoration =
+        tester.widget<DecoratedBox>(modeIndicator).decoration as BoxDecoration;
+    expect(indicatorDecoration.boxShadow, isNull);
     final preview = find.descendant(
       of: find.byKey(const ValueKey('avatar-editor-content')),
       matching: find.byType(AvatarImage),
