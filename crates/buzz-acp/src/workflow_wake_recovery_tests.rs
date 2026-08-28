@@ -97,7 +97,7 @@ async fn exhausted_authority_failure_replays_exact_wake_and_verifies_before_disp
         )
         .await
         .unwrap();
-    let initial = next_test_frame(&mut server).await;
+    let initial = next_data_frame(&mut server).await;
     let frame = json!(["EVENT", channel_sub_id(channel), wake]).to_string();
     server
         .send(Message::Text(frame.clone().into()))
@@ -126,7 +126,7 @@ async fn exhausted_authority_failure_replays_exact_wake_and_verifies_before_disp
         )
         .await
         .unwrap();
-    let replay = next_test_frame(&mut server).await;
+    let replay = next_data_frame(&mut server).await;
     assert_eq!(replay[0], "REQ");
     assert_eq!(replay[1], initial[1]);
     assert_eq!(replay[2]["kinds"], json!([KIND_WORKFLOW_MENTION_WAKE]));
@@ -165,4 +165,18 @@ async fn exhausted_authority_failure_replays_exact_wake_and_verifies_before_disp
     );
     http_server.await.unwrap();
     harness.shutdown().await;
+}
+
+async fn next_data_frame(server: &mut WebSocketStream<tokio::net::TcpStream>) -> Value {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            match server.next().await.expect("websocket open").expect("frame") {
+                Message::Text(text) => return serde_json::from_str(&text).expect("JSON frame"),
+                Message::Ping(payload) => server.send(Message::Pong(payload)).await.expect("pong"),
+                other => panic!("unexpected frame {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("data frame before timeout")
 }
