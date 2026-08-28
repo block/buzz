@@ -25,13 +25,14 @@
 #     bundled libgst* core below to use the host's). Crucially, once that variable
 #     is set it *replaces* GStreamer's compiled-in default search path rather than
 #     adding to it, so the app finds ZERO plugins on every distro:
-#     "GStreamer element appsink not found" kills the WebKitWebProcess and the
-#     window never paints. An earlier revision of this script hid the failure on
+#     "GStreamer element autoaudiosink not found" then WebKitWebProcess SIGABRT
+#     (blank window). An earlier revision of this script hid the failure on
 #     Debian only by symlinking usr/lib/gstreamer-1.0 to the Debian multiarch dir
 #     (/usr/lib/x86_64-linux-gnu/gstreamer-1.0); that symlink dangles on Arch and
-#     Fedora, and the "safe fallback to default discovery" it assumed does not
-#     exist -- a set GST_PLUGIN_SYSTEM_PATH_1_0 disables the default. A broken run
-#     also poisons ~/.cache/gstreamer-1.0/registry.x86_64.bin.
+#     Fedora. Unsetting the override is necessary but not sufficient: GStreamer's
+#     compiled-in default can miss host plugin dirs (Arch/Fedora live at
+#     /usr/lib/gstreamer-1.0, Debian at the multiarch path), and a failed scan
+#     poisons ~/.cache/gstreamer-1.0/registry.x86_64.bin.
 #
 #  3. WebKit helper mismatch (latent): the bundled WebKit helpers
 #     (WebKitNetworkProcess/WebKitWebProcess) have RUNPATH=$ORIGIN only, and
@@ -45,9 +46,11 @@
 # Fix: (a) remove the offending libs so the app uses the system copies (newer and
 # ABI-compatible on any distro shipping glib >= 2.72 / Ubuntu 22.04+), and
 # (b) install a launcher shim in front of the app binary that strips the
-# bundle-pointing GST_PLUGIN_* overrides AppRun.wrapped injects, letting the host
-# GStreamer resolve plugins via its own default path (correct on Debian, Arch, and
-# Fedora alike). The shim has to run *after* AppRun.wrapped: the wrapper rewrites
+# bundle-pointing GST_PLUGIN_* overrides AppRun.wrapped injects and, if the
+# user has not already set a host path, points GST_PLUGIN_SYSTEM_PATH_1_0 at
+# existing host plugin dirs. The shim also isolates GST_REGISTRY under the app
+# cache so a failed scan cannot poison the user-wide GStreamer registry. The
+# shim has to run *after* AppRun.wrapped: the wrapper rewrites
 # the variable last -- after every apprun-hook -- so any value set before it is
 # discarded (verified empirically; a runtime GST_PLUGIN_SYSTEM_PATH_1_0 passed
 # into the AppImage does not survive). No tauri.conf.json knob can do this --
@@ -117,7 +120,10 @@ echo "==> Installing GStreamer launcher shim on the app binary"
 # plugins into. Because a set path *replaces* GStreamer's default instead of
 # extending it, the app finds zero plugins on any distro and WebKit aborts. The
 # wrapper rewrites the variable after every apprun-hook, so the only place to undo
-# it is a shim between AppRun.wrapped and the real binary. First confirm the
+# it is a shim between AppRun.wrapped and the real binary. The shim unsets
+# bundle-pointing GST_PLUGIN_* values, then sets GST_PLUGIN_SYSTEM_PATH_1_0 to
+# existing host plugin dirs (unsetting alone is not enough on Arch/Fedora) and
+# isolates GST_REGISTRY under the app cache. First confirm the
 # wrapper still injects the override; if a tauri/linuxdeploy bump drops it, the
 # shim becomes a harmless no-op, but we want a human to re-verify rather than
 # silently ship — so fail loudly (mirrors the libwayland guard above).
@@ -146,10 +152,12 @@ cat > "$APP_BIN" <<'SHIM'
 # linuxdeploy's AppRun.wrapped force-sets GST_PLUGIN_SYSTEM_PATH_1_0 to an empty
 # in-bundle dir ($APPDIR/usr/lib/gstreamer-1.0). A set path *replaces* the host's
 # default GStreamer search path, so the app finds zero plugins and WebKit aborts
-# (blank window). Drop the bundle-pointing GST_PLUGIN_* overrides so the system
-# GStreamer — which we use, having removed the bundled core libs — resolves
-# plugins via its own default path on any distro. Values that don't point into
-# this AppImage are the user's own and are preserved.
+# (blank window). Drop bundle-pointing GST_PLUGIN_* overrides (user-set values
+# that do not point into this AppImage are preserved), then if no host
+# GST_PLUGIN_SYSTEM_PATH_1_0 remains, point it at existing host plugin dirs.
+# Unsetting alone is not enough: compiled-in defaults miss Arch/Fedora paths.
+# Isolate GST_REGISTRY under the app cache so a failed scan cannot poison
+# ~/.cache/gstreamer-1.0/registry.x86_64.bin.
 here="$(dirname "$(readlink -f "$0")")"
 appdir="$(readlink -f "$here/../..")"
 for var in GST_PLUGIN_SYSTEM_PATH_1_0 GST_PLUGIN_SYSTEM_PATH \
@@ -160,6 +168,19 @@ for var in GST_PLUGIN_SYSTEM_PATH_1_0 GST_PLUGIN_SYSTEM_PATH \
     unset "$var"
   fi
 done
+if [[ -z "${GST_PLUGIN_SYSTEM_PATH_1_0:-}" ]]; then
+  host_gst_path=
+  for dir in /usr/lib/gstreamer-1.0 /usr/lib64/gstreamer-1.0 \
+             /usr/lib/x86_64-linux-gnu/gstreamer-1.0; do
+    [[ -d "$dir" ]] || continue
+    host_gst_path="${host_gst_path:+$host_gst_path:}$dir"
+  done
+  if [[ -n "$host_gst_path" ]]; then
+    export GST_PLUGIN_SYSTEM_PATH_1_0="$host_gst_path"
+  fi
+fi
+export GST_REGISTRY="${XDG_CACHE_HOME:-$HOME/.cache}/xyz.block.buzz.app/gstreamer-1.0/registry.bin"
+mkdir -p "$(dirname "$GST_REGISTRY")"
 exec -a "buzz-desktop" "$here/buzz-desktop.bin" "$@"
 SHIM
 chmod +x "$APP_BIN"
