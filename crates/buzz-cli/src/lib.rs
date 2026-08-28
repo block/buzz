@@ -234,6 +234,9 @@ enum Cmd {
     /// Agent engram management — persistent memory per NIP-AE
     #[command(subcommand)]
     Mem(MemCmd),
+    /// Accumulator folds — standing digests over saved relay selections
+    #[command(subcommand)]
+    Folds(FoldsCmd),
     /// Persona pack operations (local, no relay connection needed)
     #[command(subcommand)]
     Pack(PackCmd),
@@ -1796,6 +1799,88 @@ pub enum MediaCmd {
     },
 }
 
+/// Subcommands for `buzz folds` — the accumulator control plane.
+#[derive(Subcommand)]
+pub enum FoldsCmd {
+    /// Create or update a fold spec (last-write-wins by name)
+    Set {
+        /// Fold name: lowercase letters, digits, and inner dashes (≤64 chars)
+        name: String,
+        /// Channel UUID to read from (repeatable)
+        #[arg(long = "channel")]
+        channel: Vec<String>,
+        /// Author pubkey (hex) to read from (repeatable)
+        #[arg(long = "author")]
+        author: Vec<String>,
+        /// Event kind to include (repeatable; default 9 = channel messages)
+        #[arg(long = "kind")]
+        kind: Vec<u32>,
+        /// Artifact schema: channel-digest@v1 or freeform@v1
+        #[arg(long, default_value = "channel-digest@v1")]
+        schema: String,
+        /// Model handed to the fold runner (e.g. haiku, sonnet, opus)
+        #[arg(long, default_value = "haiku")]
+        model: String,
+        /// Fold instructions; pass `-` to read from stdin. Only
+        /// channel-digest@v1 has a built-in default prompt.
+        #[arg(long)]
+        instructions: Option<String>,
+    },
+    /// List folds with latest-run state
+    List,
+    /// Show a fold's full spec and latest artifact metadata
+    Get { name: String },
+    /// Tombstone a fold spec (existing artifact versions remain)
+    Delete { name: String },
+    /// Preflight a run without spending: pending signals, est. tokens, cost
+    Estimate {
+        name: String,
+        /// Only consider signals created at or after this unix timestamp
+        #[arg(long)]
+        since: Option<i64>,
+        /// Only consider signals created strictly before this unix timestamp
+        #[arg(long)]
+        until: Option<i64>,
+        /// Max signals fetched per compiled selection filter
+        #[arg(long, default_value_t = 500)]
+        limit: u32,
+    },
+    /// Run the fold: plan, invoke the model, validate, persist a new version
+    Run {
+        name: String,
+        /// Only consider signals created at or after this unix timestamp
+        #[arg(long)]
+        since: Option<i64>,
+        /// Only consider signals created strictly before this unix timestamp
+        #[arg(long)]
+        until: Option<i64>,
+        /// Max signals fetched per compiled selection filter
+        #[arg(long, default_value_t = 500)]
+        limit: u32,
+    },
+    /// Print an artifact (latest version by default)
+    Artifact {
+        name: String,
+        /// Print a specific version instead of the latest
+        #[arg(long)]
+        version: Option<u32>,
+        /// List version metadata for the whole chain instead
+        #[arg(long, default_value_t = false)]
+        history: bool,
+        /// Print only the artifact's markdown output
+        #[arg(long, default_value_t = false)]
+        raw: bool,
+    },
+    /// Republish the latest artifact as a message in the fold's channel
+    Share {
+        name: String,
+        /// Target channel UUID — must be exactly the one channel the fold
+        /// reads from, so every cited signal is already visible there
+        #[arg(long)]
+        channel: String,
+    },
+}
+
 /// Subcommands for `buzz mem`.
 #[derive(Subcommand)]
 pub enum MemCmd {
@@ -2094,6 +2179,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Media(sub) => commands::upload::dispatch_media(sub, &client).await,
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
+        Cmd::Folds(sub) => commands::folds::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
@@ -2229,6 +2315,7 @@ mod tests {
             "dms",
             "emoji",
             "feed",
+            "folds",
             "issues",
             "media",
             "mem",
@@ -2331,6 +2418,10 @@ mod tests {
             ]
         );
         assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
+        assert_eq!(
+            names(&cmd, "folds"),
+            vec!["artifact", "delete", "estimate", "get", "list", "run", "set", "share"]
+        );
         assert_eq!(names(&cmd, "reactions"), vec!["add", "get", "remove"]);
         assert_eq!(
             names(&cmd, "emoji"),
