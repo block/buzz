@@ -143,42 +143,84 @@ fn fetch_login_shell_path_inner() -> Option<String> {
 /// Within one generation two callers may both probe; a failure/timeout result
 /// (`None`) never clobbers an already-committed success, so a slow timeout can't
 /// undo a peer's fresh PATH.
+///
+/// The caller never returns its own local probe result: after publishing it
+/// returns the value now in the cache. This closes two divergences where a
+/// caller's own result contradicted the authoritative cache:
+///   - same-generation timeout-vs-success — a peer committed a success while
+///     our probe timed out (`None`); we return the peer's success, not `None`;
+///   - a pre-refresh probe whose writeback was generation-rejected — its local
+///     value is stale, so we re-probe under the new generation instead.
 pub fn login_shell_path() -> Option<String> {
-    // Fast path: return the cached result and capture the generation the probe
-    // will run under, all under a single lock.
-    let generation = {
-        let guard = path_cache().lock().unwrap_or_else(|e| e.into_inner());
-        if let LoginShellPath::Probed(ref result) = guard.state {
-            return result.clone();
+    loop {
+        // Fast path: return the cached result and capture the generation the
+        // probe will run under, all under a single lock.
+        let generation = {
+            let guard = path_cache().lock().unwrap_or_else(|e| e.into_inner());
+            if let LoginShellPath::Probed(ref result) = guard.state {
+                return result.clone();
+            }
+            guard.generation
+        };
+
+        // Slow path: spawn shell outside any lock.
+        let result = probe_login_shell_path();
+
+        // Publish under our generation, then return whatever value is now
+        // authoritative. `None` means a refresh invalidated our generation
+        // mid-probe and no fresh value is cached yet, so our `result` is stale
+        // by definition — discard it and re-probe under the new generation.
+        //
+        // Termination: another lap requires another [`refresh_login_shell_path`]
+        // to land during a probe. Refreshes come only from discrete human
+        // actions (install/retry/Doctor re-run) and one-shot boot warm, so the
+        // loop cannot spin unbounded.
+        if let Some(committed) = publish_probe_result(generation, result) {
+            return committed;
         }
-        guard.generation
-    };
-
-    // Slow path: spawn shell outside any lock.
-    let result = fetch_login_shell_path_inner();
-
-    // Publish only if our generation is still current, and never let a failure
-    // overwrite a peer's committed success within the same generation.
-    publish_probe_result(generation, result.clone());
-
-    result
+    }
 }
 
-/// Commit a probe's `result` under the generation it started with.
+/// Real login-shell probe. A `cfg(test)` seam lets the race tests inject
+/// deterministic probe results (and side effects) without spawning shells.
+#[cfg(not(test))]
+fn probe_login_shell_path() -> Option<String> {
+    fetch_login_shell_path_inner()
+}
+
+#[cfg(test)]
+fn probe_login_shell_path() -> Option<String> {
+    match path_cache_race_tests::take_injected_probe() {
+        Some(injected) => injected(),
+        None => fetch_login_shell_path_inner(),
+    }
+}
+
+/// Commit a probe's `result` under the generation it started with, then report
+/// the value the caller should return.
 ///
 /// A probe whose generation is stale (a [`refresh_login_shell_path`] ran while
-/// it was probing) is dropped. Within a live generation a failure/timeout
+/// it was probing) does not commit. Within a live generation a failure/timeout
 /// (`None`) never overwrites an already-committed success. This is the sole
 /// writer of a probed value, so the two race outcomes are decided here.
-fn publish_probe_result(generation: u64, result: Option<String>) {
+///
+/// Returns `Some(v)` — the now-cached probed value the caller must return
+/// (its own commit, or a peer's success that superseded it) — or `None` when
+/// the cache is `Uninit` because a refresh landed mid-probe, signalling the
+/// caller to re-probe under the new generation. Commit and re-read happen under
+/// one lock so no refresh can slip between them.
+fn publish_probe_result(generation: u64, result: Option<String>) -> Option<Option<String>> {
     let mut guard = path_cache().lock().unwrap_or_else(|e| e.into_inner());
-    if guard.generation != generation {
-        return;
+    if guard.generation == generation {
+        let keep_committed_success =
+            result.is_none() && matches!(guard.state, LoginShellPath::Probed(Some(_)));
+        if !keep_committed_success {
+            guard.state = LoginShellPath::Probed(result);
+        }
     }
-    let keep_committed_success =
-        result.is_none() && matches!(guard.state, LoginShellPath::Probed(Some(_)));
-    if !keep_committed_success {
-        guard.state = LoginShellPath::Probed(result);
+    match guard.state {
+        LoginShellPath::Probed(ref v) => Some(v.clone()),
+        LoginShellPath::Uninit => None,
     }
 }
 
@@ -295,6 +337,35 @@ pub(crate) fn parse_semver_tag(s: &str) -> Option<(u64, u64, u64)> {
 #[cfg(test)]
 mod path_cache_race_tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::{Mutex, OnceLock};
+
+    /// A deterministic stand-in for one login-shell spawn. Returning it lets a
+    /// test drive `login_shell_path`'s slow path without a real shell, and run
+    /// side effects (a peer commit, a mid-probe refresh) at the exact moment a
+    /// probe would be executing.
+    pub(super) type InjectedProbe = Box<dyn FnOnce() -> Option<String> + Send>;
+
+    fn probe_queue() -> &'static Mutex<VecDeque<InjectedProbe>> {
+        static Q: OnceLock<Mutex<VecDeque<InjectedProbe>>> = OnceLock::new();
+        Q.get_or_init(|| Mutex::new(VecDeque::new()))
+    }
+
+    /// Consumed by the `cfg(test)` `probe_login_shell_path` seam: each slow-path
+    /// probe pops the next injected result, falling back to the real shell when
+    /// the queue is empty (so unrelated cache tests still exercise real probing).
+    pub(super) fn take_injected_probe() -> Option<InjectedProbe> {
+        probe_queue()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pop_front()
+    }
+
+    fn inject_probes(probes: Vec<InjectedProbe>) {
+        let mut q = probe_queue().lock().unwrap_or_else(|e| e.into_inner());
+        q.clear();
+        q.extend(probes);
+    }
 
     fn cached_probe() -> Option<Option<String>> {
         match path_cache().lock().unwrap_or_else(|e| e.into_inner()).state {
@@ -370,6 +441,70 @@ mod path_cache_race_tests {
 
         // Restore the shared cache so sibling tests re-probe a real PATH rather
         // than reading this fixture value.
+        refresh_login_shell_path();
+    }
+
+    /// P1 #2, divergence (a): same-generation timeout-vs-success. A caller
+    /// whose own probe times out (`None`) must still return the success a peer
+    /// committed under the same generation — never its own `None`, which would
+    /// let a forced discovery on this thread settle a PATH-missing UI while the
+    /// authoritative cache holds the peer's success.
+    ///
+    /// Injected probe: commit the peer's `/peer/bin` success, then return `None`
+    /// (this caller's timeout). Non-vacuous for the "return authoritative value"
+    /// rule: return the local result instead and this yields `None`.
+    #[test]
+    fn caller_returns_peer_success_not_own_timeout() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+        refresh_login_shell_path();
+        let gen = generation();
+
+        inject_probes(vec![Box::new(move || {
+            // A peer probe finishes first and commits a success under gen.
+            publish_probe_result(gen, Some("/peer/bin".to_string()));
+            // Our probe then times out.
+            None
+        })]);
+
+        assert_eq!(
+            login_shell_path(),
+            Some("/peer/bin".to_string()),
+            "a timed-out caller must return the peer's committed success, not its own None"
+        );
+
+        refresh_login_shell_path();
+    }
+
+    /// P1 #2, divergence (b): a pre-refresh probe whose writeback is
+    /// generation-rejected must not return its stale local value; the caller
+    /// re-probes under the new generation and returns the fresh result.
+    ///
+    /// First injected probe refreshes mid-flight (bumping the generation) and
+    /// returns a stale `/stale/bin`; publication is rejected, so the caller
+    /// loops and the second probe returns the fresh `/fresh/bin`. Non-vacuous
+    /// for the re-probe rule: return the stale local value on a rejected commit
+    /// instead and this yields `/stale/bin`.
+    #[test]
+    fn caller_reprobes_after_midprobe_refresh() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+        refresh_login_shell_path();
+
+        inject_probes(vec![
+            Box::new(|| {
+                // A forced refresh lands while this probe runs, invalidating the
+                // generation it started under; its result is stale by definition.
+                refresh_login_shell_path();
+                Some("/stale/bin".to_string())
+            }),
+            Box::new(|| Some("/fresh/bin".to_string())),
+        ]);
+
+        assert_eq!(
+            login_shell_path(),
+            Some("/fresh/bin".to_string()),
+            "a generation-rejected probe must re-probe, never return its stale local value"
+        );
+
         refresh_login_shell_path();
     }
 }
