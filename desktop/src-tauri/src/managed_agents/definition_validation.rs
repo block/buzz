@@ -60,57 +60,6 @@ pub(crate) fn validate_managed_agent_definition_text(
     validate_agent_definition_text(name, executable_prompt)
 }
 
-/// Maximum length of a device label, in `char`s.
-pub(crate) const MAX_DEVICE_LABEL_CHARS: usize = 32;
-
-/// Validate a device label against the same visible-text policy as agent
-/// definition text.
-///
-/// A device label names the computer an agent lives on and is published in a
-/// world-readable kind:30177 event, then rendered beside an agent's name in
-/// other people's clients. That makes it the same class of input as a display
-/// name: `char::is_control` alone would pass zero-width characters (U+200B) and
-/// bidi overrides (U+202E), which are Unicode category `Cf` and can visually
-/// reorder the text around them.
-pub(crate) fn validate_device_label(label: &str) -> Result<(), String> {
-    let trimmed = label.trim();
-    if trimmed.is_empty() {
-        return Err("Device name must not be empty".to_string());
-    }
-    let count = trimmed.chars().count();
-    if count > MAX_DEVICE_LABEL_CHARS {
-        return Err(format!(
-            "Device name is too long ({count} characters, max {MAX_DEVICE_LABEL_CHARS})"
-        ));
-    }
-    validate_visible_text(trimmed, "Device name", false)
-}
-
-/// Maximum length of one owner-attested directory string (capability or
-/// model), in `char`s.
-pub(crate) const MAX_DIRECTORY_STRING_CHARS: usize = 64;
-
-/// Validate an owner-attested directory string (capability label, model id)
-/// against the same visible-text policy as a device label.
-///
-/// These strings are published in world-readable kind:30177 events and
-/// rendered verbatim beside an agent's name in other people's clients. Same
-/// threat and same policy class as [`validate_device_label`]: zero-width
-/// characters and bidi overrides must not pass.
-pub(crate) fn validate_capability(value: &str) -> Result<(), String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err("Capability string must not be empty".to_string());
-    }
-    let count = trimmed.chars().count();
-    if count > MAX_DIRECTORY_STRING_CHARS {
-        return Err(format!(
-            "Capability string is too long ({count} characters, max {MAX_DIRECTORY_STRING_CHARS})"
-        ));
-    }
-    validate_visible_text(trimmed, "Capability string", false)
-}
-
 fn validate_visible_text(
     value: &str,
     label: &str,
@@ -202,6 +151,57 @@ fn is_default_ignorable(character: char) -> bool {
             | 0x1D173..=0x1D17A
             | 0xE0000..=0xE0FFF
     )
+}
+
+/// Maximum length of a device label, in `char`s.
+pub(crate) const MAX_DEVICE_LABEL_CHARS: usize = 32;
+
+/// Validate a device label against the same visible-text policy as agent
+/// definition text.
+///
+/// A device label names the computer an agent lives on and is published in a
+/// world-readable kind:30177 event, then rendered beside an agent's name in
+/// other people's clients. That makes it the same class of input as a display
+/// name: `char::is_control` alone would pass zero-width characters (U+200B) and
+/// bidi overrides (U+202E), which are Unicode category `Cf` and can visually
+/// reorder the text around them.
+pub(crate) fn validate_device_label(label: &str) -> Result<(), String> {
+    let trimmed = label.trim();
+    if trimmed.is_empty() {
+        return Err("Device name must not be empty".to_string());
+    }
+    let count = trimmed.chars().count();
+    if count > MAX_DEVICE_LABEL_CHARS {
+        return Err(format!(
+            "Device name is too long ({count} characters, max {MAX_DEVICE_LABEL_CHARS})"
+        ));
+    }
+    validate_visible_text(trimmed, "Device name", false)
+}
+
+/// Maximum length of one owner-attested directory string (capability or
+/// model), in `char`s.
+pub(crate) const MAX_DIRECTORY_STRING_CHARS: usize = 64;
+
+/// Validate an owner-attested directory string (capability label, model id)
+/// against the same visible-text policy as a device label.
+///
+/// These strings are published in world-readable kind:30177 events and
+/// rendered verbatim beside an agent's name in other people's clients. Same
+/// threat and same policy class as [`validate_device_label`]: zero-width
+/// characters and bidi overrides must not pass.
+pub(crate) fn validate_capability(value: &str) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("Capability string must not be empty".to_string());
+    }
+    let count = trimmed.chars().count();
+    if count > MAX_DIRECTORY_STRING_CHARS {
+        return Err(format!(
+            "Capability string is too long ({count} characters, max {MAX_DIRECTORY_STRING_CHARS})"
+        ));
+    }
+    validate_visible_text(trimmed, "Capability string", false)
 }
 
 #[cfg(test)]
