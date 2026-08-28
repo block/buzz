@@ -1488,7 +1488,6 @@ impl Db {
             name,
             definition_json,
             definition_hash,
-            definition_event_id,
         )
         .await
     }
@@ -1640,7 +1639,6 @@ impl Db {
             name,
             definition_json,
             definition_hash,
-            definition_event_id,
         )
         .await
     }
