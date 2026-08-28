@@ -61,6 +61,7 @@ export function useAgentAddressLockPicker({
   onAddressAgentMention,
   onAutoPinAgentMention,
   onImplicitPrefixInserted,
+  onImplicitPrefixRemoved,
   onPulseAddressLock,
   profiles,
   richText,
@@ -74,8 +75,12 @@ export function useAgentAddressLockPicker({
     suggestion: MentionSuggestion,
     options: { reinstateExcluded: boolean },
   ) => void;
-  /** Records the exact automatic prefix at the moment it is inserted. */
-  onImplicitPrefixInserted?: (prefix: string) => void;
+  /** Records generated mention provenance at the insertion boundary. */
+  onImplicitPrefixInserted?: (
+    mentions: readonly { pubkey: string; prefix: string }[],
+  ) => void;
+  /** Removes generated mention provenance by its stable identity. */
+  onImplicitPrefixRemoved?: (pubkey: string) => void;
   onPulseAddressLock: (pubkey: string) => void;
   profiles?: UserProfileLookup;
   richText: UseRichTextEditorResult;
@@ -188,6 +193,7 @@ export function useAgentAddressLockPicker({
           implicitPrefix,
         );
         if (strippedText !== text) {
+          onImplicitPrefixRemoved?.(normalized);
           applyAutocompleteEdit({
             replaceFromOffset: 0,
             replaceToOffset: text.length - strippedText.length,
@@ -202,6 +208,7 @@ export function useAgentAddressLockPicker({
       audience.removePubkey,
       audienceScope,
       lockedAgents,
+      onImplicitPrefixRemoved,
       richText.getPlainTextAndCursor,
     ],
   );
@@ -245,7 +252,7 @@ export function useAgentAddressLockPicker({
         const { text } = richText.getPlainTextAndCursor();
         if (getMentionOffsets(text, suggestion.displayName).length === 0) {
           const insertedText = `@${suggestion.displayName} `;
-          onImplicitPrefixInserted?.(insertedText);
+          onImplicitPrefixInserted?.([{ pubkey, prefix: insertedText }]);
           applyAutocompleteEdit({
             replaceFromOffset: 0,
             replaceToOffset: 0,
@@ -430,7 +437,12 @@ export function useAgentAddressLockPicker({
       const insertedText = `${missingAgents
         .map((agent) => `@${agent.displayName}`)
         .join(" ")} `;
-      onImplicitPrefixInserted?.(insertedText);
+      onImplicitPrefixInserted?.(
+        missingAgents.map((agent) => ({
+          pubkey: agent.pubkey,
+          prefix: `@${agent.displayName} `,
+        })),
+      );
       applyAutocompleteEdit({
         replaceFromOffset: 0,
         replaceToOffset: 0,

@@ -46,7 +46,6 @@ import { useLinkEditor } from "@/features/messages/lib/useLinkEditor";
 import { useComposerSpoilerParticles } from "@/features/messages/lib/useComposerSpoilerParticles";
 import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
 import { cn } from "@/shared/lib/cn";
-import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { ChannelAutocomplete } from "./ChannelAutocomplete";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
 import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
@@ -65,6 +64,7 @@ import { useComposerAttachmentSpoilers } from "./useComposerAttachmentSpoilers";
 import { useComposerContentState } from "./useComposerContentState";
 import { useComposerPasteHandler } from "./useComposerPasteHandler";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
+import { useImplicitAgentMentionProvenance } from "./useImplicitAgentMentionProvenance";
 import { submitMessageEdit } from "./submitMessageEdit";
 import { prepareBackgroundLinkPreviews } from "@/features/messages/lib/linkPreviewPreparationStore";
 import { useComposerLinkPreviews } from "./useComposerLinkPreviews";
@@ -125,9 +125,6 @@ function MessageComposerImpl({
     setIsFormattingOpen(pressed);
   }, []);
   const drafts = useDrafts();
-  const implicitAgentMentionPrefixByDraftRef = React.useRef(
-    new Map<string, string>(),
-  );
   const identityQuery = useIdentityQuery();
   const effectiveDraftKey = draftKey ?? channelId;
   const ownerPubkey = identityQuery.data?.pubkey ?? null;
@@ -141,6 +138,8 @@ function MessageComposerImpl({
       : null;
   const effectiveDraftKeyRef = React.useRef(effectiveDraftKey);
   effectiveDraftKeyRef.current = effectiveDraftKey;
+  const implicitAgentMentionProvenance =
+    useImplicitAgentMentionProvenance(effectiveDraftKey);
   const preEditSnapshotRef = React.useRef<{
     content: string;
     pendingImeta: ImetaMedia[];
@@ -210,12 +209,7 @@ function MessageComposerImpl({
     setSpoileredAttachmentUrls,
     spoileredAttachmentUrlsRef,
     syncComposerContentFromEditor,
-    getImplicitAgentMentionPrefix: () =>
-      effectiveDraftKey
-        ? (implicitAgentMentionPrefixByDraftRef.current.get(
-            effectiveDraftKey,
-          ) ?? "")
-        : "",
+    getImplicitAgentMentionPrefix: implicitAgentMentionProvenance.getPrefix,
   });
   // biome-ignore lint/correctness/useExhaustiveDependencies: effectiveDraftKey is the sole trigger
   React.useEffect(() => {
@@ -464,14 +458,8 @@ function MessageComposerImpl({
         pubkeys: suggestion.pubkey ? [suggestion.pubkey] : [],
       });
     },
-    onImplicitPrefixInserted: (prefix) => {
-      if (!effectiveDraftKey) return;
-      implicitAgentMentionPrefixByDraftRef.current.set(
-        effectiveDraftKey,
-        prefix,
-      );
-      trimMapToSize(implicitAgentMentionPrefixByDraftRef.current, 200);
-    },
+    onImplicitPrefixInserted: implicitAgentMentionProvenance.add,
+    onImplicitPrefixRemoved: implicitAgentMentionProvenance.remove,
     onPulseAddressLock: addressPulse.pulseOne,
     profiles,
     richText,

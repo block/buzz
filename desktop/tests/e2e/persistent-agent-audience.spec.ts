@@ -1138,6 +1138,75 @@ test("an authored duplicate leading mention survives draft restoration", async (
     .toBe("@Morgarita authored duplicate");
 });
 
+test("removing an automatic mention preserves an identical authored mention in drafts", async ({
+  page,
+}) => {
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+
+  await automaticallyMention(composer, "Morgarita");
+  await composer.getByTestId(`composer-address-lock-remove-${AGENT_A}`).click();
+  await input.pressSequentially("@Morgarita manual after removal");
+  await page.goto(`/#/channels/${RANDOM_CHANNEL_ID}`, {
+    waitUntil: "domcontentloaded",
+  });
+
+  await expect
+    .poll(() =>
+      page.evaluate((channelId) => {
+        for (const storageKey of Object.keys(window.localStorage)) {
+          if (!storageKey.startsWith("buzz-drafts.v2:")) continue;
+          const draft = (
+            JSON.parse(
+              window.localStorage.getItem(storageKey) ?? "{}",
+            ) as Record<string, { content?: string }>
+          )[channelId];
+          if (draft) return draft.content ?? "";
+        }
+        return "";
+      }, CHANNEL_ID),
+    )
+    .toBe("@Morgarita manual after removal");
+});
+
+test("multiple automatic mentions stay out of persisted drafts", async ({
+  page,
+}) => {
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  await automaticallyMention(composer, "Morgarita");
+  await automaticallyMention(composer, "Vogue");
+  await input.pressSequentially("draft text");
+
+  await openThread(page);
+  await openGeneral(page);
+  await expect(input).toHaveText("@Vogue @Morgarita draft text");
+  await expect(input.locator(".agent-mention-highlight")).toHaveCount(2);
+  await page.goto(`/#/channels/${RANDOM_CHANNEL_ID}`, {
+    waitUntil: "domcontentloaded",
+  });
+  await expect
+    .poll(() =>
+      page.evaluate((channelId) => {
+        for (const storageKey of Object.keys(window.localStorage)) {
+          if (!storageKey.startsWith("buzz-drafts.v2:")) continue;
+          const draft = (
+            JSON.parse(
+              window.localStorage.getItem(storageKey) ?? "{}",
+            ) as Record<string, { content?: string }>
+          )[channelId];
+          if (draft) return draft.content ?? "";
+        }
+        return "";
+      }, CHANNEL_ID),
+    )
+    .toBe("draft text");
+});
+
 test("re-enabling an automatic mention preserves an authored duplicate after draft restoration", async ({
   page,
 }) => {
