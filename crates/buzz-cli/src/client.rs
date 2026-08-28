@@ -569,6 +569,67 @@ impl BuzzClient {
         &self.relay_url
     }
 
+    /// Wait for the first event matching a Nostr subscription filter.
+    ///
+    /// The full connect, NIP-42 authentication, subscription, and receive
+    /// sequence is bounded by `timeout_duration`. A normal timeout returns
+    /// `Ok(None)`; transport and relay subscription failures remain errors so
+    /// callers can reconcile through the HTTP query path.
+    pub async fn wait_for_event(
+        &self,
+        filter: &serde_json::Value,
+        timeout_duration: Duration,
+    ) -> Result<Option<nostr::Event>, CliError> {
+        if timeout_duration.is_zero() {
+            return Ok(None);
+        }
+
+        let ws_url = to_ws_url(&self.relay_url);
+        let subscription_id = format!("buzz-cli-wait-{}", uuid::Uuid::new_v4());
+        let wait = async {
+            let mut connection = buzz_ws_client::NostrWsConnection::connect_authenticated(
+                &ws_url,
+                &self.keys,
+                self.auth_tag.as_ref(),
+            )
+            .await
+            .map_err(|error| CliError::Other(error.to_string()))?;
+
+            connection
+                .send_raw(&serde_json::json!(["REQ", subscription_id, filter]))
+                .await
+                .map_err(|error| CliError::Other(error.to_string()))?;
+
+            loop {
+                match connection.next_event(timeout_duration).await {
+                    Ok(buzz_ws_client::RelayMessage::Event {
+                        subscription_id: received_subscription_id,
+                        event,
+                    }) if received_subscription_id == subscription_id => {
+                        let _ = connection.disconnect().await;
+                        return Ok(Some(*event));
+                    }
+                    Ok(buzz_ws_client::RelayMessage::Closed {
+                        subscription_id: closed_subscription_id,
+                        message,
+                    }) if closed_subscription_id == subscription_id => {
+                        return Err(CliError::Other(format!(
+                            "relay closed subscription {closed_subscription_id}: {message}"
+                        )));
+                    }
+                    Ok(_) => {}
+                    Err(buzz_ws_client::WsClientError::Timeout) => return Ok(None),
+                    Err(error) => return Err(CliError::Other(error.to_string())),
+                }
+            }
+        };
+
+        match tokio::time::timeout(timeout_duration, wait).await {
+            Ok(result) => result,
+            Err(_) => Ok(None),
+        }
+    }
+
     /// Return the owner pubkey carried by the NIP-OA auth tag, if any.
     ///
     /// The auth tag is `["auth", owner_pubkey, conditions, sig]`; the
@@ -2332,6 +2393,103 @@ mod tests {
         normalize_events, BuzzClient,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn wait_for_event_authenticates_subscribes_and_returns_live_match() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let channel_id = "123e4567-e89b-12d3-a456-426614174000";
+        let root_event_id = "a".repeat(64);
+        let event = EventBuilder::new(Kind::Custom(9), "live reply")
+            .tags([
+                Tag::parse(["h", channel_id]).unwrap(),
+                Tag::parse(["e", root_event_id.as_str(), "", "root"]).unwrap(),
+            ])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let expected_event_id = event.id;
+        let expected_filter = serde_json::json!({
+            "kinds": [9],
+            "#h": [channel_id],
+            "#e": [root_event_id],
+        });
+        let server_filter = expected_filter.clone();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut websocket = accept_async(stream).await.unwrap();
+            websocket
+                .send(Message::Text(
+                    serde_json::json!(["AUTH", "test-challenge"])
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+
+            let auth_text = websocket
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap();
+            let auth: serde_json::Value = serde_json::from_str(&auth_text).unwrap();
+            let auth_event_id = auth[1]["id"].as_str().unwrap();
+            websocket
+                .send(Message::Text(
+                    serde_json::json!(["OK", auth_event_id, true, ""])
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+
+            let request_text = websocket
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap();
+            let request: serde_json::Value = serde_json::from_str(&request_text).unwrap();
+            assert_eq!(request[0], "REQ");
+            assert_eq!(request[2], server_filter);
+            let subscription_id = request[1].as_str().unwrap();
+            websocket
+                .send(Message::Text(
+                    serde_json::json!(["EOSE", subscription_id])
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            websocket
+                .send(Message::Text(
+                    serde_json::json!(["EVENT", subscription_id, event])
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        });
+
+        let client =
+            BuzzClient::new(format!("http://{address}"), Keys::generate(), None, None).unwrap();
+        let received = client
+            .wait_for_event(&expected_filter, Duration::from_secs(2))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(received.id, expected_event_id);
+        assert_eq!(received.content, "live reply");
+        server.await.unwrap();
+    }
 
     #[test]
     fn normalize_events_preserves_the_complete_signed_event_shape() {

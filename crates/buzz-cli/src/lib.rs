@@ -501,6 +501,27 @@ pub enum MessagesCmd {
         #[arg(long)]
         depth_limit: Option<u32>,
     },
+    /// Wait for the next reply from one author in a message thread
+    #[command(
+        after_help = "Example:\n  buzz messages wait --channel <UUID> --event <ROOT_EVENT_ID> --author <PUBKEY> --since <UNIX_TIME> --timeout 300"
+    )]
+    Wait {
+        /// Channel UUID containing the thread
+        #[arg(long)]
+        channel: String,
+        /// Thread root event ID (64-char hex)
+        #[arg(long)]
+        event: String,
+        /// Reply author pubkey (hex or npub)
+        #[arg(long)]
+        author: String,
+        /// Unix timestamp — ignore replies created before this time
+        #[arg(long)]
+        since: i64,
+        /// Maximum seconds to wait before returning null
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=86400))]
+        timeout: u64,
+    },
     /// Full-text search across messages
     #[command(
         after_help = "Examples:\n  buzz messages search --query checkout\n  buzz messages search --author npub1... --since 1783497600\n  buzz messages search --author Aaron --query checkout --limit 20"
@@ -2197,6 +2218,60 @@ mod tests {
     }
 
     #[test]
+    fn messages_wait_requires_a_bounded_complete_target() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let event = "a".repeat(64);
+        let author = "b".repeat(64);
+        let valid = [
+            "buzz",
+            "messages",
+            "wait",
+            "--channel",
+            channel,
+            "--event",
+            event.as_str(),
+            "--author",
+            author.as_str(),
+            "--since",
+            "1777777777",
+            "--timeout",
+            "300",
+        ];
+
+        assert!(Cli::try_parse_from(valid).is_ok());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "wait",
+            "--channel",
+            channel,
+            "--event",
+            event.as_str(),
+            "--author",
+            author.as_str(),
+            "--since",
+            "1777777777",
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "wait",
+            "--channel",
+            channel,
+            "--event",
+            event.as_str(),
+            "--author",
+            author.as_str(),
+            "--since",
+            "1777777777",
+            "--timeout",
+            "0",
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn set_status_clear_rejects_text_and_emoji() {
         for extra in [["--text", "busy"], ["--emoji", "🎶"]] {
             let args = ["buzz", "users", "set-status", "--clear"]
@@ -2306,7 +2381,8 @@ mod tests {
                 "send",
                 "send-diff",
                 "thread",
-                "vote"
+                "vote",
+                "wait"
             ]
         );
         assert_eq!(
@@ -2440,7 +2516,7 @@ mod tests {
             ("feed", 1),
             ("issues", 6),
             ("media", 1),
-            ("messages", 8),
+            ("messages", 9),
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),

@@ -93,3 +93,6 @@ tempfile = "3"
 axum = { workspace = true }
 # `test-util` enables paused-time control for deterministic timeout tests
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+# Local authenticated WebSocket relay fixtures for subscription tests
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
