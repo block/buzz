@@ -485,3 +485,86 @@ extension _ObservedUnreadRecording on ChannelsNotifier {
     }
   }
 }
+
+/// Scope-owned live events received before the initial list is published.
+class _BootstrapLiveEventBuffer {
+  _BootstrapLiveEventBuffer(this.fence);
+
+  final _ChannelRefreshFence fence;
+  final Map<String, NostrEvent> events = {};
+}
+
+extension _ChannelBootstrapMerging on ChannelsNotifier {
+  void _cacheMemberSnapshots(
+    Iterable<NostrEvent> events, {
+    bool replaceAll = false,
+  }) {
+    final latestByChannelId = <String, NostrEvent>{};
+    for (final event in events) {
+      final channelId = event.getTagValue('d');
+      if (channelId == null) continue;
+      final current = latestByChannelId[channelId];
+      if (current == null || event.createdAt > current.createdAt) {
+        latestByChannelId[channelId] = event;
+      }
+    }
+
+    final snapshots = replaceAll
+        ? <String, List<ChannelMember>>{}
+        : Map<String, List<ChannelMember>>.of(_memberSnapshotsByChannelId);
+    snapshots.addAll({
+      for (final entry in latestByChannelId.entries)
+        entry.key: List.unmodifiable([
+          for (final member in membersFromEvent(entry.value))
+            ChannelMember(
+              pubkey: member.pubkey,
+              role: member.role,
+              joinedAt: DateTime.fromMillisecondsSinceEpoch(
+                entry.value.createdAt * 1000,
+                isUtc: true,
+              ),
+            ),
+        ]),
+    });
+    _memberSnapshotsByChannelId = Map.unmodifiable(snapshots);
+  }
+
+  List<NostrFilter> _lastMessageFilters(List<Channel> channels) => [
+    for (final channel in channels)
+      NostrFilter(
+        kinds: EventKind.channelMessageEventKinds,
+        tags: {
+          '#h': [channel.id],
+        },
+        limit: channel.isDm ? 1 : 20,
+      ),
+  ];
+
+  void _mergeLastMessageEvents(
+    Map<String, int> lastMessageMap,
+    Iterable<NostrEvent> events, {
+    required Map<String, Channel> channelById,
+    required String myPk,
+    required Set<String> mutedChannelIds,
+  }) {
+    for (final event in events) {
+      final channelId = event.channelId;
+      if (channelId == null) continue;
+      final channel = channelById[channelId];
+      if (channel == null) continue;
+      if (!channel.isDm &&
+          !shouldNotifyForEvent(
+            event,
+            myPk,
+            mutedChannelIds: mutedChannelIds,
+            channelId: channelId,
+          )) {
+        continue;
+      }
+      final current = lastMessageMap[channelId];
+      if (current == null || event.createdAt > current) {
+        lastMessageMap[channelId] = event.createdAt;
+      }
+    }
+  }
+}

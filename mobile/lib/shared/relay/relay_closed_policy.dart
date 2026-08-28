@@ -3,6 +3,9 @@ enum RelayClosedClass {
   /// A transient failure that may recover when the same REQ is retried.
   retryable,
 
+  /// Relay capacity exhaustion that may recover after another REQ closes.
+  capacity,
+
   /// Relay back-pressure that must also arm the shared request gate.
   rateLimited,
 
@@ -16,6 +19,9 @@ RelayClosedClass classifyRelayClosed(String message) {
   if (normalized.startsWith('rate-limited:')) {
     return RelayClosedClass.rateLimited;
   }
+  if (normalized.startsWith('error: too many subscriptions')) {
+    return RelayClosedClass.capacity;
+  }
   if (normalized.startsWith('restricted:') ||
       normalized.startsWith('auth-required:') ||
       normalized.startsWith('blocked:') ||
@@ -23,8 +29,7 @@ RelayClosedClass classifyRelayClosed(String message) {
       normalized.startsWith('pow:') ||
       normalized.startsWith('duplicate:') ||
       normalized.startsWith('unsupported:') ||
-      normalized.startsWith('error: mixed search') ||
-      normalized.startsWith('error: too many subscriptions')) {
+      normalized.startsWith('error: mixed search')) {
     return RelayClosedClass.terminal;
   }
   return RelayClosedClass.retryable;

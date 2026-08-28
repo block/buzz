@@ -15,7 +15,7 @@ void main() {
       'duplicate: subscription already exists': RelayClosedClass.terminal,
       'unsupported: filter extension': RelayClosedClass.terminal,
       'error: mixed search and channel filter': RelayClosedClass.terminal,
-      'error: too many subscriptions': RelayClosedClass.terminal,
+      'error: too many subscriptions': RelayClosedClass.capacity,
       'error: relay temporarily unavailable': RelayClosedClass.retryable,
       'subscription closed by relay': RelayClosedClass.retryable,
     };

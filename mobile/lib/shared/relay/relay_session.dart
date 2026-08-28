@@ -154,6 +154,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     List<NostrFilter> filters, {
     Duration timeout = const Duration(seconds: 8),
   }) async {
+    if (_rateLimitGate.isActive) await _rateLimitGate.wait();
     final config = ref.read(relayConfigProvider);
     final url = Uri.parse(config.baseUrl).resolve('/query').toString();
     final bodyBytes = utf8.encode(
@@ -747,6 +748,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
             ? fallbackMs
             : _rateLimitGate.remainingMs(),
       );
+    } else if (closedClass == RelayClosedClass.capacity) {
+      delayMs = max(backoffMs, RelayRateLimitGate.defaultRetrySeconds * 1000);
     }
 
     liveSub.closedRetryAttempt = attempt + 1;

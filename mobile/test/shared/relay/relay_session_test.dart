@@ -331,7 +331,7 @@ void main() {
     expect(gate.isActive, isFalse);
   });
 
-  test('queryRelay does not wait for an active rate-limit gate', () async {
+  test('queryRelay waits for an active rate-limit gate', () async {
     final gate = RelayRateLimitGate(
       now: () => DateTime(2026),
       timerFactory: _ManualTimer.new,
@@ -356,10 +356,10 @@ void main() {
     final query = harness.session.queryRelay(const []);
     await Future<void>.delayed(Duration.zero);
 
-    expect(requestCount, 1);
+    expect(requestCount, 0);
+    gate.reset();
     expect(await query, isEmpty);
-    // Still armed: the read must neither wait on the gate nor clear it.
-    expect(gate.isActive, isTrue);
+    expect(requestCount, 1);
   });
 
   test(
@@ -699,6 +699,26 @@ void main() {
     unsubscribe();
   });
 
+  test(
+    'live subscribe without EOSE releases readiness after its bound',
+    () async {
+      final socket = _RecordingRelaySocket();
+      final session = RelaySessionNotifier();
+      session.debugAttachSocketForTest(socket);
+      final stopwatch = Stopwatch()..start();
+
+      final unsubscribe = await session.subscribe(_channelFilter, (_) {});
+
+      expect(
+        stopwatch.elapsed,
+        greaterThanOrEqualTo(const Duration(milliseconds: 450)),
+      );
+      expect(stopwatch.elapsed, lessThan(const Duration(seconds: 2)));
+      expect(_reqs(socket), hasLength(1));
+      unsubscribe();
+    },
+  );
+
   test('terminal CLOSED fails a live subscribe before ready', () async {
     final session = RelaySessionNotifier();
     const filter = NostrFilter(kinds: [EventKind.agentObserverFrame], limit: 0);
@@ -997,6 +1017,44 @@ void main() {
     session.debugDispose();
     expect(disposeTimer.isActive, isFalse);
   });
+
+  test(
+    'capacity CLOSED retries after ten seconds without arming gate',
+    () async {
+      final retryTimers = <_ManualTimer>[];
+      final gateTimers = <_ManualTimer>[];
+      final gate = RelayRateLimitGate(
+        timerFactory: (duration, callback) {
+          final timer = _ManualTimer(duration, callback);
+          gateTimers.add(timer);
+          return timer;
+        },
+      );
+      final session = RelaySessionNotifier(
+        rateLimitGate: gate,
+        retryTimerFactory: (duration, callback) {
+          final timer = _ManualTimer(duration, callback);
+          retryTimers.add(timer);
+          return timer;
+        },
+      );
+      final socket = _RecordingRelaySocket();
+      session.debugAttachSocketForTest(socket);
+      final subscribe = session.subscribe(_channelFilter, (_) {});
+      session.debugHandleMessage(['EOSE', 'l-1']);
+      final unsubscribe = await subscribe;
+
+      session.debugHandleMessage([
+        'CLOSED',
+        'l-1',
+        'error: too many subscriptions',
+      ]);
+
+      expect(retryTimers.single.duration, const Duration(seconds: 10));
+      expect(gateTimers, isEmpty);
+      unsubscribe();
+    },
+  );
 
   test('rate-limited live CLOSED honours the gate floor', () async {
     final retryTimers = <_ManualTimer>[];

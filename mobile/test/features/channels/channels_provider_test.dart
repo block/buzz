@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/features/channels/channel_sync.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 /// Tests for [ChannelsNotifier] in the pure-Nostr world.
@@ -1593,6 +1594,7 @@ void main() {
       addTearDown(container.dispose);
 
       await container.read(channelsProvider.future);
+      await _waitUntil(() => session.activeSubscriptionCount == 2);
 
       // One subscription per joined, non-archived channel.
       expect(session.subscribeFilters, hasLength(2));
@@ -1643,6 +1645,11 @@ void main() {
       addTearDown(container.dispose);
 
       await container.read(channelsProvider.future);
+      await _waitUntil(() => session.activeSubscriptionCount == 2);
+      // Active fake subscriptions become visible just before the notifier
+      // records their unsubscribe handles. Let that synchronous handoff settle
+      // before testing an unchanged refresh.
+      await Future<void>.delayed(const Duration(milliseconds: 10));
       final initialSubscribeCount = session.totalSubscribeCount;
 
       await container.read(channelsProvider.notifier).refresh();
@@ -1650,6 +1657,35 @@ void main() {
       expect(session.totalSubscribeCount, initialSubscribeCount);
       expect(session.unsubscribeCount, 0);
       expect(session.subscribeFilters, hasLength(2));
+
+      session.emit(
+        const NostrEvent(
+          id: 'retained-live-event',
+          pubkey: 'alice',
+          createdAt: 20,
+          kind: EventKind.streamMessageV2,
+          tags: [
+            ['h', _channelA],
+          ],
+          content: 'after unchanged refresh',
+          sig: 'sig',
+        ),
+      );
+
+      final channelA = container
+          .read(channelsProvider)
+          .requireValue
+          .firstWhere((channel) => channel.id == _channelA);
+      expect(
+        channelA.lastMessageAt,
+        DateTime.fromMillisecondsSinceEpoch(20 * 1000, isUtc: true),
+      );
+      expect(
+        container
+            .read(channelsProvider.notifier)
+            .observedUnreadEventsByChannel[_channelA],
+        contains('retained-live-event'),
+      );
     },
   );
 
@@ -1670,6 +1706,7 @@ void main() {
       addTearDown(container.dispose);
 
       await container.read(channelsProvider.future);
+      await _waitUntil(() => session.activeSubscriptionCount == 2);
       session.memberships = [
         _membership(_channelB, myPk),
         _membership(_channelD, myPk),
@@ -1709,6 +1746,7 @@ void main() {
       addTearDown(container.dispose);
 
       await container.read(channelsProvider.future);
+      await _waitUntil(() => session.activeSubscriptionCount == 2);
       session.memberships = [];
       session.metadata = [];
 
@@ -1899,6 +1937,196 @@ void main() {
       );
     },
   );
+
+  test('loaded refresh preserves a newer live timestamp', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [_meta(id: _channelA, name: 'general')],
+      recentMessages: [
+        NostrEvent(
+          id: 'snapshot',
+          pubkey: 'alice',
+          createdAt: 10,
+          kind: EventKind.streamMessageV2,
+          tags: const [
+            ['h', _channelA],
+          ],
+          content: 'snapshot',
+          sig: 'sig',
+        ),
+      ],
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    await container.read(channelsProvider.future);
+    await _waitUntil(() => session.activeSubscriptionCount == 1);
+    session.pauseNextLatestMessageQuery();
+    final refresh = container.read(channelsProvider.notifier).refresh();
+    await session.nextLatestMessageQueryStarted;
+    session.emit(
+      NostrEvent(
+        id: 'live',
+        pubkey: 'alice',
+        createdAt: 50,
+        kind: EventKind.streamMessageV2,
+        tags: const [
+          ['h', _channelA],
+        ],
+        content: 'live',
+        sig: 'sig',
+      ),
+    );
+    session.resumePausedLatestMessageQuery();
+    await refresh;
+
+    expect(
+      container.read(channelsProvider).value!.single.lastMessageAt,
+      DateTime.fromMillisecondsSinceEpoch(50 * 1000, isUtc: true),
+    );
+  });
+
+  test(
+    'chunks latest-message and unread queries at exactly 100 channels',
+    () async {
+      final ids = [for (var i = 0; i < 100; i++) 'channel-$i'];
+      final session = _FakeRelaySession(
+        memberships: [for (final id in ids) _membership(id, myPk)],
+        metadata: [for (final id in ids) _meta(id: id, name: id)],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      await _waitUntil(() => session.queryBatches.length == 2);
+
+      expect(session.queryBatches.map((batch) => batch.length), [100, 100]);
+      expect(
+        session.queryBatches.first.every((filter) => filter.since == null),
+        isTrue,
+      );
+      expect(
+        session.queryBatches.last.every((filter) => filter.since != null),
+        isTrue,
+      );
+    },
+  );
+
+  test(
+    'never-EOSE workers release and allow later subscriptions and catch-up',
+    () async {
+      final ids = [for (var i = 0; i < 5; i++) 'channel-$i'];
+      final session = _FakeRelaySession(
+        memberships: [for (final id in ids) _membership(id, myPk)],
+        metadata: [for (final id in ids) _meta(id: id, name: id)],
+        neverEoseSubscribeCount: 4,
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      final stopwatch = Stopwatch()..start();
+      await container.read(channelsProvider.future);
+      await _waitUntil(() => session.queryBatches.length == 2);
+      stopwatch.stop();
+
+      expect(
+        stopwatch.elapsed,
+        greaterThanOrEqualTo(const Duration(milliseconds: 450)),
+      );
+      expect(stopwatch.elapsed, lessThan(const Duration(seconds: 2)));
+      expect(session.peakNeverEoseSubscriptions, 4);
+      expect(session.totalSubscribeCount, 5);
+      expect(session.activeChannels, ids.toSet());
+      expect(session.queryBatches.last, hasLength(5));
+      expect(
+        session.queryBatches.last.every((filter) => filter.since != null),
+        isTrue,
+      );
+    },
+  );
+
+  test(
+    'chunks latest-message and unread queries at 100 for 129 channels',
+    () async {
+      final ids = [for (var i = 0; i < 129; i++) 'channel-$i'];
+      final session = _FakeRelaySession(
+        memberships: [for (final id in ids) _membership(id, myPk)],
+        metadata: [for (final id in ids) _meta(id: id, name: id)],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      await container.read(channelsProvider.future);
+      await _waitUntil(() => session.queryBatches.length == 4);
+
+      expect(session.queryBatches.map((batch) => batch.length), [
+        100,
+        29,
+        100,
+        29,
+      ]);
+      expect(
+        session.historyFilters.where(
+          (filter) => filter.kinds.toSet().containsAll(
+            EventKind.channelMessageEventKinds,
+          ),
+        ),
+        isEmpty,
+      );
+    },
+  );
+
+  test('initial list retains a live event overlapping its snapshot', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [_meta(id: _channelA, name: 'general')],
+      recentMessages: [
+        NostrEvent(
+          id: 'snapshot',
+          pubkey: 'alice',
+          createdAt: 10,
+          kind: EventKind.streamMessageV2,
+          tags: const [
+            ['h', _channelA],
+          ],
+          content: 'snapshot',
+          sig: 'sig',
+        ),
+      ],
+    )..pauseNextLatestMessageQuery();
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    final channelsFuture = container.read(channelsProvider.future);
+    await session.nextLatestMessageQueryStarted;
+    await _waitUntil(() => session.activeSubscriptionCount == 1);
+    final live = NostrEvent(
+      id: 'live',
+      pubkey: 'alice',
+      createdAt: 20,
+      kind: EventKind.streamMessageV2,
+      tags: const [
+        ['h', _channelA],
+      ],
+      content: 'live',
+      sig: 'sig',
+    );
+    session.emit(live);
+    session.emit(live);
+    session.resumePausedLatestMessageQuery();
+
+    final channels = await channelsFuture;
+    expect(
+      channels.single.lastMessageAt,
+      DateTime.fromMillisecondsSinceEpoch(20 * 1000, isUtc: true),
+    );
+    expect(
+      container
+          .read(channelsProvider.notifier)
+          .observedUnreadEventsByChannel[_channelA],
+      contains('live'),
+    );
+  });
 
   test('ephemeral (TTL) channels appear in the list', () async {
     // Regression: previously the provider unconditionally dropped any channel
@@ -2208,6 +2436,54 @@ void main() {
   );
 
   test(
+    'same channel id does not inherit a timestamp across communities',
+    () async {
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'community-a')],
+        recentMessages: [
+          _message(id: 'a-message', channelId: _channelA, createdAt: 50),
+        ],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      expect(
+        (await container.read(
+          channelsProvider.future,
+        )).single.lastMessageAt?.millisecondsSinceEpoch,
+        50 * 1000,
+      );
+
+      session.setStatus(SessionStatus.disconnected);
+      session.metadata = [_meta(id: _channelA, name: 'community-b')];
+      session.recentMessages = [
+        _message(id: 'b-message', channelId: _channelA, createdAt: 10),
+      ];
+      container
+          .read(relayConfigProvider.notifier)
+          .update(baseUrl: 'https://new-community.example');
+      await Future<void>.delayed(Duration.zero);
+      session.setStatus(SessionStatus.connected);
+      await _waitUntil(
+        () =>
+            container.read(channelsProvider).value?.single.name ==
+            'community-b',
+      );
+
+      expect(
+        container
+            .read(channelsProvider)
+            .value!
+            .single
+            .lastMessageAt
+            ?.millisecondsSinceEpoch,
+        10 * 1000,
+      );
+    },
+  );
+
+  test(
     'refreshes cached channels after a disconnected community switch',
     () async {
       final session = _FakeRelaySession(
@@ -2341,6 +2617,22 @@ NostrEvent _hiddenDms(List<String> channelIds, {required String pubkey}) =>
       sig: 'sig',
     );
 
+NostrEvent _message({
+  required String id,
+  required String channelId,
+  required int createdAt,
+}) => NostrEvent(
+  id: id,
+  pubkey: 'alice',
+  createdAt: createdAt,
+  kind: EventKind.streamMessageV2,
+  tags: [
+    ['h', channelId],
+  ],
+  content: 'message',
+  sig: 'sig',
+);
+
 /// Build a kind:39000 channel metadata event.
 NostrEvent _meta({
   required String id,
@@ -2367,7 +2659,10 @@ NostrEvent _meta({
   sig: 'sig',
 );
 
-ProviderContainer _buildContainer({required _FakeRelaySession session}) {
+ProviderContainer _buildContainer({
+  required _FakeRelaySession session,
+  TaskDelay liveSubscriptionDelay = _noDelay,
+}) {
   return ProviderContainer(
     retry: (_, _) => null,
     overrides: [
@@ -2376,6 +2671,9 @@ ProviderContainer _buildContainer({required _FakeRelaySession session}) {
       // Route the pubkey through a mutable notifier so tests can switch the
       // signing identity mid-flight the way an account change does at runtime.
       myPubkeyProvider.overrideWith((ref) => ref.watch(_testPubkeyProvider)),
+      channelsLiveSubscriptionDelayProvider.overrideWithValue(
+        liveSubscriptionDelay,
+      ),
     ],
   );
 }
@@ -2402,7 +2700,7 @@ Future<void> _settle() async {
 Future<void> _waitUntil(bool Function() predicate) async {
   for (var i = 0; i < 100; i++) {
     if (predicate()) return;
-    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(const Duration(milliseconds: 5));
   }
   fail('Timed out waiting for asynchronous provider work');
 }
@@ -2424,6 +2722,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
     this.huddleStarts = const [],
     this.recentMessages = const [],
     this.membershipFailures = 0,
+    this.neverEoseSubscribeCount = 0,
   });
 
   List<NostrEvent> memberships;
@@ -2439,6 +2738,12 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final List<NostrEvent> huddleStarts;
   List<NostrEvent> recentMessages;
   int membershipFailures;
+  final int neverEoseSubscribeCount;
+  int activeNeverEoseSubscriptions = 0;
+  int peakNeverEoseSubscriptions = 0;
+  int statusSubscribeAttempts = 0;
+  Completer<void>? _pausedLatestMessageQuery;
+  Completer<void>? _latestMessageQueryStarted;
   int directoryFailures = 0;
   bool failClaimedMemberCountQuery = false;
   bool failClaimedUnreadCatchUpQuery = false;
@@ -2483,6 +2788,21 @@ class _FakeRelaySession extends RelaySessionNotifier {
       throw StateError('No paused subscription is pending');
     }
     await started.future;
+  }
+
+  Future<void> get nextLatestMessageQueryStarted async {
+    final started = _latestMessageQueryStarted;
+    if (started == null) throw StateError('No latest-message query pending');
+    await started.future;
+  }
+
+  void pauseNextLatestMessageQuery() {
+    _pausedLatestMessageQuery = Completer<void>();
+    _latestMessageQueryStarted = Completer<void>();
+  }
+
+  void resumePausedLatestMessageQuery() {
+    _pausedLatestMessageQuery!.complete();
   }
 
   void pauseNextSubscribe() {
@@ -2793,6 +3113,16 @@ class _FakeRelaySession extends RelaySessionNotifier {
       return filter.until == null ? directorySnapshot : const [];
     }
     queryBatches.add(filters);
+    final isLatestMessage =
+        filters.isNotEmpty && filters.every((filter) => filter.since == null);
+    if (isLatestMessage && _pausedLatestMessageQuery != null) {
+      final messages = List<NostrEvent>.of(recentMessages);
+      _latestMessageQueryStarted!.complete();
+      await _pausedLatestMessageQuery!.future;
+      _pausedLatestMessageQuery = null;
+      _latestMessageQueryStarted = null;
+      return _matchingMessages(filters, messages);
+    }
     // The unread catch-up is the only batch that carries `since` on every
     // filter; the latest-message batch leaves it null. Snapshot the messages at
     // request time so a parked response reflects the scope that asked for it.
@@ -2814,7 +3144,14 @@ class _FakeRelaySession extends RelaySessionNotifier {
         }
       }
     }
-    return messageSnapshot.where((event) {
+    return _matchingMessages(filters, messageSnapshot);
+  }
+
+  List<NostrEvent> _matchingMessages(
+    List<NostrFilter> filters,
+    List<NostrEvent> messages,
+  ) {
+    return messages.where((event) {
       return filters.any((filter) {
         if (!filter.kinds.contains(event.kind)) return false;
         for (final entry in filter.tags.entries) {
@@ -2833,6 +3170,26 @@ class _FakeRelaySession extends RelaySessionNotifier {
         return true;
       });
     }).toList();
+  }
+
+  @override
+  Future<void Function()> subscribeWithStatus(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+    required void Function(RelaySubscriptionStatus status) onStatusChanged,
+  }) async {
+    final shouldAwaitReadiness =
+        statusSubscribeAttempts++ < neverEoseSubscribeCount;
+    if (shouldAwaitReadiness) {
+      activeNeverEoseSubscriptions++;
+      if (activeNeverEoseSubscriptions > peakNeverEoseSubscriptions) {
+        peakNeverEoseSubscriptions = activeNeverEoseSubscriptions;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 500));
+      activeNeverEoseSubscriptions--;
+    }
+    return subscribe(filter, onEvent, onClosed: onClosed);
   }
 
   @override
@@ -2876,3 +3233,5 @@ class _FakeAppLifecycleNotifier extends AppLifecycleNotifier {
   @override
   AppLifecycleState build() => AppLifecycleState.resumed;
 }
+
+Future<void> _noDelay(Duration _) async {}
