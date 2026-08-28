@@ -96,6 +96,51 @@ impl Fixture {
             workflow: Uuid::new_v4(),
         }
     }
+    fn connection(
+        &self,
+    ) -> (
+        Arc<crate::connection::ConnectionState>,
+        tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+    ) {
+        use crate::connection::{AuthState, ConnectionState};
+        use std::{collections::HashMap, sync::atomic::AtomicU8};
+        use tokio::sync::{mpsc, Mutex, RwLock};
+        let (send_tx, rx) = mpsc::channel(16);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(4);
+        let conn = Arc::new(ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: buzz_core::TenantContext::resolved(self.community, &self.host),
+            remote_addr: "127.0.0.1:1234".parse().expect("address"),
+            auth_state: RwLock::new(AuthState::Authenticated(buzz_auth::AuthContext {
+                pubkey: self.agent.public_key(),
+                scopes: vec![],
+                channel_ids: None,
+                auth_method: buzz_auth::AuthMethod::Nip42,
+                agent_owner_pubkey: None,
+            })),
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            send_tx,
+            ctrl_tx,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        });
+        self.state.conn_manager.register(
+            conn.conn_id,
+            conn.send_tx.clone(),
+            conn.ctrl_tx.clone(),
+            None,
+            conn.cancel.clone(),
+            self.community,
+            conn.backpressure_count.clone(),
+            conn.subscriptions.clone(),
+            conn.grace_limit,
+        );
+        self.state
+            .conn_manager
+            .set_authenticated_pubkey(conn.conn_id, self.agent.public_key().to_bytes().to_vec());
+        (conn, rx)
+    }
     fn headers(&self) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert("host", self.host.parse().expect("host"));
@@ -161,6 +206,15 @@ impl Fixture {
         )
         .await
     }
+}
+
+fn next_frame(
+    rx: &mut tokio::sync::mpsc::Receiver<axum::extract::ws::Message>,
+) -> serde_json::Value {
+    let axum::extract::ws::Message::Text(text) = rx.try_recv().expect("frame") else {
+        panic!("expected text frame");
+    };
+    serde_json::from_str(&text).expect("frame JSON")
 }
 
 #[tokio::test]
@@ -239,7 +293,7 @@ async fn removed_open_channel_member_cannot_read_or_count_wakes() {
         )
         .await
         .expect("message");
-    f.authority(run, &message).await.expect("member authority");
+    let _ = f.authority(run, &message).await.expect("member authority");
     let filter = serde_json::json!({"kinds":[buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE], "#p":[f.agent.public_key().to_hex()], "#h":[f.channel.to_string()]});
     let body =
         axum::body::Bytes::from(serde_json::to_vec(&serde_json::json!([filter])).expect("body"));
@@ -248,6 +302,32 @@ async fn removed_open_channel_member_cannot_read_or_count_wakes() {
             .await
             .expect("query");
     assert_eq!(before.0.as_array().expect("events").len(), 1);
+    // Exercise the actual WS handlers and live send path, retaining the same
+    // connection/subscription across removal to expose stale access state.
+    let (conn, mut frames) = f.connection();
+    let filters: Vec<nostr::Filter> = serde_json::from_slice(&body).expect("filters");
+    crate::handlers::req::handle_req(
+        "wakes".into(),
+        filters.clone(),
+        conn.clone(),
+        f.state.clone(),
+    )
+    .await;
+    assert_eq!(next_frame(&mut frames)[0], "EVENT");
+    assert_eq!(next_frame(&mut frames)[0], "EOSE");
+    crate::handlers::count::handle_count(
+        "count".into(),
+        filters.clone(),
+        conn.clone(),
+        f.state.clone(),
+    )
+    .await;
+    assert_eq!(next_frame(&mut frames)[2]["count"], 1);
+    let wake: Event = serde_json::from_value(before.0[0].clone()).expect("wake");
+    let stored = buzz_core::StoredEvent::new(wake, Some(f.channel));
+    crate::handlers::event::fan_out_event_to_local_subscribers(&f.state, f.community, &stored)
+        .await;
+    assert_eq!(next_frame(&mut frames)[0], "EVENT");
     f.state
         .db
         .remove_member(
@@ -280,6 +360,23 @@ async fn removed_open_channel_member_cannot_read_or_count_wakes() {
         .await
         .expect("count after removal");
     assert_eq!(count.0["count"], 0);
+    crate::handlers::event::fan_out_event_to_local_subscribers(&f.state, f.community, &stored)
+        .await;
+    assert!(
+        frames.try_recv().is_err(),
+        "stale subscription must not deliver"
+    );
+    crate::handlers::req::handle_req(
+        "wakes".into(),
+        filters.clone(),
+        conn.clone(),
+        f.state.clone(),
+    )
+    .await;
+    assert_eq!(next_frame(&mut frames)[0], "EOSE", "no historical EVENT");
+    crate::handlers::count::handle_count("count".into(), filters, conn, f.state.clone()).await;
+    assert_eq!(next_frame(&mut frames)[2]["count"], 0);
+    assert!(frames.try_recv().is_err());
 }
 
 #[tokio::test]
