@@ -531,11 +531,14 @@ fn resolve_submit_host(host: Option<&str>, relay_url: Option<&str>) -> Result<St
 
 async fn connect_store() -> Result<DeletionStore> {
     let database_url = required_env("DATABASE_URL")?;
-    let db = Db::new(&DbConfig {
-        database_url,
-        max_connections: env_parse("BUZZ_DB_POOL_SIZE", 20),
-        ..DbConfig::default()
-    })
+    let db = Db::new(
+        &DbConfig {
+            database_url,
+            max_connections: env_parse("BUZZ_DB_POOL_SIZE", 20),
+            ..DbConfig::default()
+        }
+        .with_session_timeouts_from_env(),
+    )
     .await?;
     Ok(store(&db))
 }

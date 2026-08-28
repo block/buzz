@@ -1,7 +1,7 @@
 use super::*;
 use crate::{relay_members, thread};
 use buzz_core::CommunityId;
-use sqlx::PgPool;
+use sqlx::{Connection, PgPool};
 use uuid::Uuid;
 
 const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
@@ -2180,10 +2180,10 @@ async fn created_at_floor_guard_aborts_old_channel_rows_at_commit() {
 fn writer_pool_safety_hook_is_single_and_composed() {
     let source = include_str!("mod.rs");
     let connect_pool = source
-        .split("async fn connect_pool")
+        .split("async fn connect_writer_pool")
         .nth(1)
         .and_then(|tail| tail.split("const READER_ACQUIRE_TIMEOUT").next())
-        .expect("connect_pool source block");
+        .expect("connect_writer_pool source block");
     assert_eq!(
         connect_pool.matches(".after_connect(").count(),
         1,
@@ -2191,6 +2191,9 @@ fn writer_pool_safety_hook_is_single_and_composed() {
     );
     assert!(connect_pool.contains("buzz.created_at_floor"));
     assert!(connect_pool.contains("SHOW transaction_isolation"));
+    assert!(connect_pool.contains("'lock_timeout'"));
+    assert!(connect_pool.contains("'idle_in_transaction_session_timeout'"));
+    assert!(connect_pool.contains("'statement_timeout'"));
     assert!(!connect_pool.contains("arm_floor_guard"));
     assert!(!connect_pool.contains("_arm_floor_guard"));
     assert!(!connect_pool.contains("allow(unused_variables)"));
@@ -2202,7 +2205,7 @@ fn writer_pool_safety_hook_is_single_and_composed() {
         .expect("reader pool documentation");
     assert!(reader_doc.contains("replica sessions are"));
     assert!(reader_doc.contains("read-only"));
-    assert!(!reader_doc.contains("Db::connect_pool"));
+    assert!(!reader_doc.contains("Db::connect_writer_pool"));
 }
 
 #[tokio::test]
@@ -2244,6 +2247,146 @@ async fn writer_pool_rejects_non_read_committed_database_default() {
     .execute(&admin)
     .await
     .expect("drop isolation test database");
+}
+
+/// Session-timeout environment overrides retain PostgreSQL's `0 = disabled`
+/// semantics and ignore invalid values.
+#[test]
+fn session_timeout_env_overlay_zero_passthrough_and_invalid_fallback() {
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = ENV_LOCK.lock().unwrap();
+    let keys = [
+        "BUZZ_DB_LOCK_TIMEOUT_MS",
+        "BUZZ_DB_IDLE_TXN_TIMEOUT_MS",
+        "BUZZ_DB_STATEMENT_TIMEOUT_MS",
+    ];
+    let previous: Vec<_> = keys.iter().map(std::env::var_os).collect();
+    let read = |config: DbConfig| {
+        (
+            config.lock_timeout_ms,
+            config.idle_txn_timeout_ms,
+            config.statement_timeout_ms,
+        )
+    };
+
+    for key in keys {
+        std::env::remove_var(key);
+    }
+    let unset = read(DbConfig::default().with_session_timeouts_from_env());
+
+    std::env::set_var("BUZZ_DB_LOCK_TIMEOUT_MS", "2000");
+    std::env::set_var("BUZZ_DB_IDLE_TXN_TIMEOUT_MS", "30000");
+    std::env::set_var("BUZZ_DB_STATEMENT_TIMEOUT_MS", "10000");
+    let overridden = read(DbConfig::default().with_session_timeouts_from_env());
+
+    for key in keys {
+        std::env::set_var(key, "0");
+    }
+    let zero = read(DbConfig::default().with_session_timeouts_from_env());
+
+    for key in keys {
+        std::env::set_var(key, "not-a-number");
+    }
+    let junk = read(DbConfig::default().with_session_timeouts_from_env());
+
+    for (key, value) in keys.iter().zip(previous) {
+        match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    let defaults = (DEFAULT_LOCK_TIMEOUT_MS, DEFAULT_IDLE_TXN_TIMEOUT_MS, 0);
+    assert_eq!(unset, defaults, "unset env must keep the defaults");
+    assert_eq!(overridden, (2000, 30000, 10000));
+    assert_eq!(zero, (0, 0, 0), "explicit 0 must disable each timeout");
+    assert_eq!(junk, defaults, "junk env must keep the defaults");
+}
+
+/// The production writer constructor installs all three timeout GUCs, bounds
+/// ordinary lock waits, and exempts the intentional migration lock wait.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn session_timeouts_install_through_db_new_and_bound_lock_waits() {
+    let admin = PgPool::connect(&admin_url().await)
+        .await
+        .expect("connect admin");
+    let (seed_pool, name) = create_scratch_db(&admin, "session_timeouts").await;
+    seed_pool.close().await;
+
+    let base = admin_url().await;
+    let idx = base.rfind('/').expect("db url has a path segment");
+    let scratch_url = format!("{}/{}", &base[..idx], name);
+    let db = Db::new(&DbConfig {
+        database_url: scratch_url.clone(),
+        max_connections: 2,
+        lock_timeout_ms: 500,
+        idle_txn_timeout_ms: 60_000,
+        statement_timeout_ms: 0,
+        ..DbConfig::default()
+    })
+    .await
+    .expect("connect Db with session timeouts");
+
+    let (lock, idle, statement): (String, String, String) = sqlx::query_as(
+        "SELECT current_setting('lock_timeout'), \
+                current_setting('idle_in_transaction_session_timeout'), \
+                current_setting('statement_timeout')",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("read effective GUCs");
+    assert_eq!(lock, "500ms");
+    assert_eq!(idle, "1min");
+    assert_eq!(statement, "0");
+
+    let mut holder = db.pool.acquire().await.expect("holder connection");
+    sqlx::raw_sql("BEGIN; LOCK TABLE events IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *holder)
+        .await
+        .expect("hold relation lock");
+    let waited = std::time::Instant::now();
+    let mut waiter_txn = db.pool.begin().await.expect("waiter transaction");
+    let error = sqlx::query("LOCK TABLE events IN ACCESS SHARE MODE")
+        .execute(&mut *waiter_txn)
+        .await
+        .expect_err("waiter must time out, not park");
+    drop(waiter_txn);
+    let code = match &error {
+        sqlx::Error::Database(db_error) => db_error.code().map(|code| code.to_string()),
+        other => panic!("expected database error, got {other:?}"),
+    };
+    assert_eq!(code.as_deref(), Some("55P03"));
+    assert!(waited.elapsed() < std::time::Duration::from_secs(5));
+
+    let mut advisory_holder = PgPool::connect(&scratch_url)
+        .await
+        .expect("advisory holder pool")
+        .acquire()
+        .await
+        .expect("advisory holder conn")
+        .detach();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(crate::deletion::SCHEMA_DESTRUCTION_LOCK_KEY)
+        .execute(&mut advisory_holder)
+        .await
+        .expect("hold schema advisory lock");
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+        let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(crate::deletion::SCHEMA_DESTRUCTION_LOCK_KEY)
+            .execute(&mut advisory_holder)
+            .await;
+        let _ = advisory_holder.close().await;
+    });
+    db.migrate()
+        .await
+        .expect("migrate must wait out the advisory holder");
+    release.await.expect("release task");
+
+    let _ = sqlx::query("ROLLBACK").execute(&mut *holder).await;
+    drop(holder);
+    drop_scratch_db(&admin, db.pool.clone(), &name).await;
 }
 
 /// The armed writer pool (`Db::new`) must enforce the floor end-to-end

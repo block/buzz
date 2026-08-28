@@ -85,6 +85,15 @@ where
     let mut lock_conn = crate::observability::acquire(pool, crate::observability::PoolRole::Writer)
         .await?
         .detach();
+    // This dedicated connection intentionally waits for the current migration
+    // or schema-destruction owner and may then run long DDL. Exempt those two
+    // phases from runtime lock/statement budgets. Keep the idle-in-transaction
+    // timeout: a client wedged idle mid-migration is still a lock holder that
+    // should be reaped. The detached connection is closed below and never
+    // returns these session settings to the pool.
+    sqlx::raw_sql("SET lock_timeout = 0; SET statement_timeout = 0")
+        .execute(&mut lock_conn)
+        .await?;
     crate::observability::observe_advisory_lock(
         crate::observability::LockType::MigrationSchemaSafety,
         sqlx::query("SELECT pg_advisory_lock($1)")
