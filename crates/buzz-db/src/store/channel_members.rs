@@ -1519,6 +1519,29 @@ impl Db {
     }
 }
 
+/// Get an active member role using the caller's transaction.
+///
+/// Authorization callers must acquire [`acquire_channel_membership_lock`] first
+/// and hold the transaction through the dependent mutation.
+pub async fn get_member_role_in_transaction(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    pubkey: &[u8],
+) -> Result<Option<String>> {
+    let row = sqlx::query(
+        "SELECT cm.role::text AS role FROM channel_members cm \
+         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
+         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.pubkey = $3 AND cm.removed_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(pubkey)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(|r| r.try_get("role")).transpose()?)
+}
+
 #[cfg(test)]
 mod postgres_tests {
     use super::*;
@@ -3210,27 +3233,3 @@ mod postgres_tests {
         drop_scratch_db(&admin, pool, &scratch_name).await;
     }
 }
-
-/// Get an active member role using the caller's transaction.
-///
-/// Authorization callers must acquire [`acquire_channel_membership_lock`] first
-/// and hold the transaction through the dependent mutation.
-pub async fn get_member_role_in_transaction(
-    tx: &mut Transaction<'_, Postgres>,
-    community_id: CommunityId,
-    channel_id: Uuid,
-    pubkey: &[u8],
-) -> Result<Option<String>> {
-    let row = sqlx::query(
-        "SELECT cm.role::text AS role FROM channel_members cm \
-         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
-         WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.pubkey = $3 AND cm.removed_at IS NULL",
-    )
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .bind(pubkey)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(row.map(|r| r.try_get("role")).transpose()?)
-}
-

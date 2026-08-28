@@ -21,10 +21,11 @@ pub use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
 // Keep the established channel module paths compatible while membership SQL
 // and invariants live in their dedicated store module.
 pub use crate::channel_members::{
-    acquire_channel_membership_lock, add_member, get_accessible_channel_ids, get_accessible_channels, get_bot_members,
-    get_member_count, get_member_counts_bulk, get_member_role, get_member_role_in_transaction, get_members, get_members_bulk,
-    get_users_bulk, is_member, list_large_channel_rosters_needing_reconciliation,
-    lock_member_snapshot, membership_pairs, remove_member, verify_channel_roster_fence_behavior,
+    acquire_channel_membership_lock, add_member, get_accessible_channel_ids,
+    get_accessible_channels, get_bot_members, get_member_count, get_member_counts_bulk,
+    get_member_role, get_member_role_in_transaction, get_members, get_members_bulk, get_users_bulk,
+    is_member, list_large_channel_rosters_needing_reconciliation, lock_member_snapshot,
+    membership_pairs, remove_member, verify_channel_roster_fence_behavior,
     verify_channel_roster_fence_catalog, AccessibleChannel, BotChannelEntry, BotMemberRecord,
     LargeChannelRoster, LockedMemberSnapshot, MemberRecord, UserRecord,
 };

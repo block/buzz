@@ -906,6 +906,24 @@ pub async fn create_workflow_run(
     Ok(id)
 }
 
+/// Find the committed result of a manual trigger within its tenant and workflow.
+/// The command event and run commit atomically, so a retry can recover this ID.
+pub async fn get_workflow_run_id_by_trigger(
+    pool: &PgPool,
+    community_id: CommunityId,
+    workflow_id: Uuid,
+    trigger_event_id: &[u8],
+) -> Result<Option<Uuid>> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM workflow_runs WHERE community_id = $1 AND workflow_id = $2 AND trigger_event_id = $3",
+    )
+    .bind(community_id.as_uuid())
+    .bind(workflow_id)
+    .bind(trigger_event_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
 /// Fetch a single workflow run by ID, scoped to its community.
 pub async fn get_workflow_run(
     pool: &PgPool,
@@ -1352,6 +1370,24 @@ pub async fn find_by_owner_and_name(
 // -- Run and approval Db API --------------------------------------------------
 
 impl Db {
+    /// Recover the committed run ID for an exact manual-trigger retry.
+    #[datastore_span(name = "get_workflow_run_id_by_trigger", system = "postgresql")]
+    pub async fn get_workflow_run_id_by_trigger(
+        &self,
+        community_id: CommunityId,
+        workflow_id: Uuid,
+        trigger_event_id: &[u8],
+    ) -> Result<Option<Uuid>> {
+        crate::workflow::get_workflow_run_id_by_trigger(
+            &self.pool,
+            community_id,
+            workflow_id,
+            trigger_event_id,
+        )
+        .await
+    }
+
+
     /// Fetch and share-lock one workflow on an existing transaction.
     #[datastore_span(name = "get_workflow_for_share_in_transaction", system = "postgresql")]
     pub async fn get_workflow_for_share_in_transaction(

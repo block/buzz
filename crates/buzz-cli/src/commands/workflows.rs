@@ -181,7 +181,7 @@ async fn current_workflow_revision(
 /// Trigger a workflow — sign and submit a kind:46020 event.
 ///
 /// When `inputs` is provided, it is parsed as a JSON object and used as the
-/// event content (MCP parity). When omitted, the event content is `{}`.
+/// event content (MCP parity). When omitted, the event content is empty.
 pub async fn cmd_trigger_workflow(
     client: &BuzzClient,
     workflow_id: &str,
@@ -190,37 +190,28 @@ pub async fn cmd_trigger_workflow(
     let wf_uuid = parse_uuid(workflow_id)?;
     let revision = current_workflow_revision(client, workflow_id).await?;
 
+    let builder = workflow_trigger_builder(wf_uuid, &revision, inputs)?;
+    let event = client.sign_event(builder)?;
+    let resp = client.submit_event(event).await?;
+    println!("{}", normalize_write_response(&resp));
+    Ok(())
+}
+
+fn workflow_trigger_builder(
+    workflow_id: uuid::Uuid,
+    revision: &str,
+    inputs: Option<&str>,
+) -> Result<nostr::EventBuilder, CliError> {
     if let Some(raw) = inputs {
-        // Parse and validate it is a JSON object, then build the event manually
-        // so we can embed the inputs as the event content.
         let parsed: serde_json::Value = serde_json::from_str(raw)
             .map_err(|e| CliError::Usage(format!("--inputs is not valid JSON: {e}")))?;
-        if !parsed.is_object() {
-            return Err(CliError::Usage("--inputs must be a JSON object".into()));
-        }
-        let content = serde_json::to_string(&parsed).unwrap_or_default();
-        use nostr::{EventBuilder, Kind, Tag};
-        let tags = vec![
-            Tag::parse(["d", &wf_uuid.to_string()])
-                .map_err(|e| CliError::Other(format!("tag error: {e}")))?,
-            Tag::parse(["e", revision.as_str()])
-                .map_err(|e| CliError::Other(format!("tag error: {e}")))?,
-        ];
-        let builder = EventBuilder::new(
-            Kind::Custom(buzz_sdk::kind::KIND_WORKFLOW_TRIGGER as u16),
-            &content,
-        )
-        .tags(tags);
-        let event = client.sign_event(builder)?;
-        let resp = client.submit_event(event).await?;
-        println!("{}", normalize_write_response(&resp));
+        let object = parsed
+            .as_object()
+            .ok_or_else(|| CliError::Usage("--inputs must be a JSON object".into()))?;
+        buzz_sdk::build_workflow_trigger_with_inputs(workflow_id, revision, object).map_err(sdk_err)
     } else {
-        let builder = buzz_sdk::build_workflow_trigger(wf_uuid, &revision).map_err(sdk_err)?;
-        let event = client.sign_event(builder)?;
-        let resp = client.submit_event(event).await?;
-        println!("{}", normalize_write_response(&resp));
+        buzz_sdk::build_workflow_trigger(workflow_id, revision).map_err(sdk_err)
     }
-    Ok(())
 }
 
 /// Approve or deny a workflow step — sign and submit a kind:46030 (grant) or 46031 (deny) event.
@@ -272,6 +263,35 @@ pub async fn dispatch(cmd: crate::WorkflowsCmd, client: &BuzzClient) -> Result<(
         } => {
             // approved is already a bool — no parse_bool_flag needed
             cmd_approve_step(client, &token, approved, note.as_deref()).await
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trigger_builders_preserve_inputs_and_distinguish_same_second_operations() {
+        let keys = nostr::Keys::generate();
+        let workflow_id = uuid::Uuid::new_v4();
+        let revision = "ab".repeat(32);
+        let timestamp = nostr::Timestamp::from(1_700_000_000);
+        for inputs in [None, Some(r#"{"message":"hello"}"#)] {
+            let build = || {
+                workflow_trigger_builder(workflow_id, &revision, inputs)
+                    .unwrap()
+                    .custom_created_at(timestamp)
+                    .sign_with_keys(&keys)
+                    .unwrap()
+            };
+            let first = build();
+            let second = build();
+            assert_ne!(first.id, second.id);
+            assert_eq!(first.content, inputs.unwrap_or(""));
+        }
+        for invalid in ["not-json", "[]", "null", "1"] {
+            assert!(workflow_trigger_builder(workflow_id, &revision, Some(invalid)).is_err());
         }
     }
 }

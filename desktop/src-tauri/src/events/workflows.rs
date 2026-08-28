@@ -36,12 +36,10 @@ pub fn build_workflow_trigger(
     workflow_id: &str,
     definition_event_id: &str,
 ) -> Result<EventBuilder, String> {
-    EventId::from_hex(definition_event_id).map_err(|_| "invalid workflow revision".to_string())?;
-    let tags = vec![
-        tag(vec!["d", workflow_id])?,
-        tag(vec!["e", definition_event_id])?,
-    ];
-    Ok(EventBuilder::new(Kind::Custom(46020), "").tags(tags))
+    let workflow_id =
+        uuid::Uuid::parse_str(workflow_id).map_err(|_| "invalid workflow id".to_string())?;
+    buzz_sdk_pkg::build_workflow_trigger(workflow_id, definition_event_id)
+        .map_err(|error| error.to_string())
 }
 
 /// Kind 46030 — grant an approval token (with optional note).
@@ -54,4 +52,25 @@ pub fn build_approval_grant(token: &str, note: Option<&str>) -> Result<EventBuil
 pub fn build_approval_deny(token: &str, note: Option<&str>) -> Result<EventBuilder, String> {
     let tags = vec![tag(vec!["t", token])?];
     Ok(EventBuilder::new(Kind::Custom(46031), note.unwrap_or("")).tags(tags))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manual_trigger_invocations_in_one_second_are_distinct() {
+        let keys = nostr::Keys::generate();
+        let workflow_id = uuid::Uuid::new_v4().to_string();
+        let revision = "ab".repeat(32);
+        let build = || {
+            build_workflow_trigger(&workflow_id, &revision)
+                .unwrap()
+                .custom_created_at(nostr::Timestamp::from(1_700_000_000))
+                .sign_with_keys(&keys)
+                .unwrap()
+        };
+        assert_ne!(build().id, build().id);
+        assert!(build_workflow_trigger(&workflow_id, "not-an-event-id").is_err());
+    }
 }

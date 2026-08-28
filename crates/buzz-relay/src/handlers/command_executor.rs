@@ -991,11 +991,17 @@ async fn handle_workflow_trigger(
     // triggers as global events leaks workflow IDs to unrelated relay members.
     let mut tx = match persist_command_event(&state.db, tenant, event, workflow.channel_id).await? {
         PersistResult::Duplicate => {
-            return Ok(IngestResult {
-                event_id: event.id.to_hex(),
-                accepted: true,
-                message: "duplicate: already processed".into(),
-            });
+            // A lost response does not lose the result: event and run committed
+            // together. Read from the primary, including after a concurrent retry.
+            let run_id = state
+                .db
+                .get_workflow_run_id_by_trigger(community_id, workflow_id, event.id.as_bytes())
+                .await
+                .map_err(|e| IngestError::Internal(format!("error: recover workflow run: {e}")))?
+                .ok_or_else(|| {
+                    IngestError::Internal("error: stored workflow trigger has no run".into())
+                })?;
+            return Ok(workflow_trigger_response(event, run_id));
         }
         PersistResult::Inserted(tx) => tx,
     };
@@ -1116,8 +1122,12 @@ async fn handle_workflow_trigger(
             .await;
     });
 
-    // 6. Return response
-    Ok(IngestResult {
+    // 6. Return the same result shape for initial delivery and exact replay.
+    Ok(workflow_trigger_response(event, run_id))
+}
+
+fn workflow_trigger_response(event: &Event, run_id: Uuid) -> IngestResult {
+    IngestResult {
         event_id: event.id.to_hex(),
         accepted: true,
         message: format!(
@@ -1126,7 +1136,7 @@ async fn handle_workflow_trigger(
                 "run_id": run_id.to_string(),
             })
         ),
-    })
+    }
 }
 
 /// Enforce the approver_spec field against the requesting pubkey.
@@ -1740,11 +1750,29 @@ mod postgres_tests {
         workflow_id: Uuid,
         revision: &str,
     ) -> Event {
+        workflow_trigger_event_at(
+            keys,
+            workflow_id,
+            revision,
+            Timestamp::now().as_secs(),
+            &Uuid::new_v4().to_string(),
+        )
+    }
+
+    fn workflow_trigger_event_at(
+        keys: &Keys,
+        workflow_id: Uuid,
+        revision: &str,
+        created_at: u64,
+        request_id: &str,
+    ) -> Event {
         EventBuilder::new(Kind::Custom(KIND_WORKFLOW_TRIGGER as u16), "")
             .tags(vec![
                 Tag::parse(["d", workflow_id.to_string().as_str()]).expect("d tag"),
                 Tag::parse(["e", revision]).expect("revision tag"),
+                Tag::parse(["request-id", request_id]).expect("request identity"),
             ])
+            .custom_created_at(Timestamp::from(created_at))
             .sign_with_keys(keys)
             .expect("sign workflow trigger")
     }
@@ -2042,44 +2070,7 @@ mod postgres_tests {
         ));
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn concurrent_human_owner_manual_triggers_do_not_starve_one_connection_pool() {
-        let (state, tenant, human, _agent, workflow_id, revision) =
-            manual_trigger_test_context().await;
-        let triggers = (0..8)
-            .map(|_| workflow_trigger_event(&human, workflow_id, &revision))
-            .collect::<Vec<_>>();
-
-        let results = tokio::time::timeout(std::time::Duration::from_secs(8), async {
-            let mut tasks = tokio::task::JoinSet::new();
-            for trigger in triggers {
-                let state = Arc::clone(&state);
-                let tenant = tenant.clone();
-                let auth = http_auth(&human);
-                tasks.spawn(async move {
-                    handle_workflow_trigger(&tenant, &state, &trigger, &auth).await
-                });
-            }
-            let mut results = Vec::new();
-            while let Some(result) = tasks.join_next().await {
-                results.push(result.expect("trigger task must not panic"));
-            }
-            results
-        })
-        .await
-        .expect("concurrent triggers must drain rather than pool-starve");
-
-        assert_eq!(results.len(), 8);
-        for result in results {
-            assert!(
-                result
-                    .expect("concurrent human-owner trigger must succeed")
-                    .accepted,
-                "manual trigger should be accepted"
-            );
-        }
-    }
+    mod trigger_delivery;
 
     #[test]
     fn workflow_revision_parser_accepts_create_and_valid_update() {
