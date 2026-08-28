@@ -189,14 +189,34 @@ fn thread_tags(thread_ref: &ThreadRef, tags: &mut Vec<Tag>) -> Result<(), SdkErr
     Ok(())
 }
 
-/// Deduplicate and cap mentions, emitting p-tags.
+/// Validate, deduplicate, and cap mentions, emitting p-tags.
+///
+/// Validation lives here rather than in [`crate::mentions::normalize_mention_pubkeys`]
+/// because this helper is the single choke point every mention reaches: it is
+/// shared by `build_message`, `build_forum_post`, and `build_forum_comment`, and
+/// a caller may hand those builders an explicit list without going through the
+/// normalizer at all. Without a check here, `"not-a-pubkey"`, `""`, and
+/// `"../../etc/passwd"` were lowercased into `p` tags and signed, so the
+/// composer reported a successful mention that could notify nobody.
+///
+/// [`check_pubkey_hex`] is reused deliberately: it is the SDK's existing
+/// structural pubkey contract (64 ASCII hex, returned lowercased) and is already
+/// applied before other builders emit `p` tags, so mentions now agree with the
+/// rest of this module and yield the same [`SdkError::InvalidInput`]. Adopting
+/// `nostr::PublicKey::from_hex`'s stricter on-curve rule would be a wider
+/// consistency change across every `check_pubkey_hex` call site, not a
+/// mentions-only fix.
+///
+/// The cap is checked before validation so an over-cap list still reports
+/// [`SdkError::TooManyMentions`] rather than being masked by whichever entry
+/// happens to be malformed.
 fn mention_tags(mentions: &[&str], tags: &mut Vec<Tag>) -> Result<(), SdkError> {
     if mentions.len() > crate::mentions::MENTION_CAP {
         return Err(SdkError::TooManyMentions);
     }
     let mut seen = std::collections::HashSet::new();
     for &hex in mentions {
-        let lower = hex.to_ascii_lowercase();
+        let lower = check_pubkey_hex(hex, "mention pubkey")?;
         if seen.insert(lower.clone()) {
             tags.push(tag(&["p", &lower])?);
         }
@@ -2355,6 +2375,12 @@ mod tests {
         Uuid::new_v4()
     }
 
+    /// A distinct well-formed 64-character hex pubkey per index, for tests that
+    /// need many valid mentions.
+    fn distinct_pubkey_hex(i: u8) -> String {
+        format!("{i:02x}{}", "ab".repeat(31))
+    }
+
     fn tag_values(event: &nostr::Event, key: &str) -> Vec<String> {
         event
             .tags
@@ -2537,6 +2563,131 @@ mod tests {
         let ev = sign(build_message(cid, "hi", None, &[hex, hex], false, &[]).unwrap());
         let p_tags = tag_values(&ev, "p");
         assert_eq!(p_tags.len(), 1);
+    }
+
+    /// Every structurally invalid mention must be refused by all three builders
+    /// that share `mention_tags`, rather than lowercased into a `p` tag and
+    /// signed. See #6291.
+    #[test]
+    fn malformed_mention_pubkeys_are_refused_by_every_builder() {
+        let cid = uuid();
+        let root = event_id();
+        let tr = ThreadRef {
+            root_event_id: root,
+            parent_event_id: root,
+        };
+        let short = "a".repeat(63);
+        let long = "a".repeat(65);
+        // Empty, non-hex, and both off-by-one lengths. The wrong-alphabet cases
+        // are pinned separately from the wrong-length cases because a
+        // length-only check would otherwise pass: "zzzz" is caught by length,
+        // but a 64-character non-hex string is not.
+        let non_hex_64 = "z".repeat(64);
+        let path_like_64 = format!("../../etc/passwd{}", "0".repeat(48));
+        for bad in [
+            "",
+            "not-a-pubkey",
+            "zzzz",
+            "../../etc/passwd",
+            short.as_str(),
+            long.as_str(),
+            non_hex_64.as_str(),
+            path_like_64.as_str(),
+        ] {
+            assert!(
+                matches!(
+                    build_message(cid, "hi", None, &[bad], false, &[]),
+                    Err(SdkError::InvalidInput(_))
+                ),
+                "build_message must refuse mention {bad:?}"
+            );
+            assert!(
+                matches!(
+                    build_forum_post(cid, "hi", &[bad], &[]),
+                    Err(SdkError::InvalidInput(_))
+                ),
+                "build_forum_post must refuse mention {bad:?}"
+            );
+            assert!(
+                matches!(
+                    build_forum_comment(cid, "hi", &tr, &[bad], &[]),
+                    Err(SdkError::InvalidInput(_))
+                ),
+                "build_forum_comment must refuse mention {bad:?}"
+            );
+        }
+    }
+
+    /// One malformed entry must refuse the whole list rather than being silently
+    /// dropped: a filtered mention looks successful to the composer while
+    /// notifying nobody.
+    #[test]
+    fn one_malformed_mention_refuses_the_whole_list() {
+        let cid = uuid();
+        let valid = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
+        let result = build_message(cid, "hi", None, &[valid, "nope", valid], false, &[]);
+        assert!(matches!(result, Err(SdkError::InvalidInput(_))));
+    }
+
+    /// Validation must not break the two behaviours callers already rely on:
+    /// uppercase hex is legitimate input and is canonicalized to lowercase, and
+    /// duplicates across cases collapse to a single `p` tag.
+    #[test]
+    fn valid_mentions_are_canonicalized_and_deduped_across_case() {
+        let cid = uuid();
+        let upper = "ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234";
+        let lower = upper.to_ascii_lowercase();
+        let root = event_id();
+        let tr = ThreadRef {
+            root_event_id: root,
+            parent_event_id: root,
+        };
+
+        let ev = sign(build_message(cid, "hi", None, &[upper], false, &[]).unwrap());
+        assert_eq!(
+            tag_values(&ev, "p"),
+            vec![lower.clone()],
+            "uppercase hex must be accepted and lowercased"
+        );
+
+        // Same pubkey in both spellings is one person, so one p tag.
+        let ev = sign(build_message(cid, "hi", None, &[upper, &lower], false, &[]).unwrap());
+        assert_eq!(tag_values(&ev, "p"), vec![lower.clone()]);
+
+        let ev = sign(build_forum_post(cid, "hi", &[upper], &[]).unwrap());
+        assert_eq!(tag_values(&ev, "p"), vec![lower.clone()]);
+
+        let ev = sign(build_forum_comment(cid, "hi", &tr, &[upper], &[]).unwrap());
+        assert_eq!(tag_values(&ev, "p"), vec![lower]);
+    }
+
+    /// The cap is checked before per-entry validation, so an over-cap list of
+    /// well-formed pubkeys keeps reporting `TooManyMentions`, and a list that is
+    /// both over-cap *and* malformed reports `TooManyMentions` too rather than
+    /// changing which error callers see.
+    #[test]
+    fn too_many_mentions_takes_precedence_over_validation() {
+        let cid = uuid();
+        let hexes: Vec<String> = (0..51u8).map(distinct_pubkey_hex).collect();
+        let mut refs: Vec<&str> = hexes.iter().map(String::as_str).collect();
+        refs.push("not-a-pubkey");
+        assert!(matches!(
+            build_message(cid, "hi", None, &refs, false, &[]),
+            Err(SdkError::TooManyMentions)
+        ));
+    }
+
+    /// A list exactly at the cap still signs, so the guard cannot have moved the
+    /// boundary.
+    #[test]
+    fn mentions_at_the_cap_still_sign() {
+        let cid = uuid();
+        let hexes: Vec<String> = (0..crate::mentions::MENTION_CAP as u8)
+            .map(distinct_pubkey_hex)
+            .collect();
+        let refs: Vec<&str> = hexes.iter().map(String::as_str).collect();
+        let ev = sign(build_message(cid, "hi", None, &refs, false, &[]).unwrap());
+        assert_eq!(tag_values(&ev, "p").len(), crate::mentions::MENTION_CAP);
     }
 
     #[test]

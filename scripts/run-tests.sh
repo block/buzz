@@ -120,6 +120,13 @@ run_unit_tests() {
   # `just test-unit` — the two lists must stay in step.
   run_test_step "buzz-agent unit tests" \
     cargo test -p buzz-agent --lib -- --nocapture
+
+  # buzz-sdk builders/mentions: pure event-construction unit tests (no infra)
+  # that pin the signed wire shape — tag order, NIP-10 markers, and the mention
+  # `p`-tag validation from #6291. Mirrors the nextest path in `just test-unit`
+  # — the two lists must stay in step.
+  run_test_step "buzz-sdk tests" \
+    cargo test -p buzz-sdk -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------
