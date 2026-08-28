@@ -45,6 +45,10 @@ export const meetingsQueryKeys = {
 
 /** Poll cadence for a pending payment intent (plan §5.1: ~3s). */
 export const PAYMENT_STATUS_POLL_INTERVAL_MS = 3_000;
+
+/** Stop polling `payment/status` after this many consecutive fetch failures so a
+ * dead endpoint doesn't loop forever (`retry: false`). */
+export const PAYMENT_STATUS_MAX_POLL_FAILURES = 5;
 /** Plans rarely change within a session. */
 export const MEETING_PLANS_STALE_TIME_MS = 5 * 60 * 1_000;
 
@@ -252,6 +256,15 @@ export function usePaymentStatusQuery(
     },
     queryKey: meetingsQueryKeys.payment(relayUrl, intentId ?? ""),
     refetchInterval: (query) => {
+      // Give up on an endpoint that keeps failing — `retry: false` means a
+      // persistent 5xx would otherwise loop every 3s forever with no backoff.
+      // A handful of retries still rides out a transient blip mid-invoice.
+      if (
+        query.state.status === "error" &&
+        query.state.fetchFailureCount >= PAYMENT_STATUS_MAX_POLL_FAILURES
+      ) {
+        return false;
+      }
       const status = query.state.data?.status;
       if (status === undefined) return PAYMENT_STATUS_POLL_INTERVAL_MS;
       return isTerminalPaymentOutcome(classifyPaymentStatus(status))
@@ -288,8 +301,14 @@ export function useModerateRoomMutation(livekitJwt: string | undefined) {
       return moderateRoom(relayUrl, input.action, livekitJwt, input.payload);
     },
     onSuccess: () => {
+      // Room lists only. Invalidating the `all` prefix also matches the active
+      // LiveKit token query, which would remint the JWT and bounce the host's
+      // own call on every moderation action.
       void queryClient.invalidateQueries({
-        queryKey: meetingsQueryKeys.all(relayUrl),
+        queryKey: meetingsQueryKeys.rooms(relayUrl),
+      });
+      void queryClient.invalidateQueries({
+        queryKey: ["meetings", relayUrl, "my-rooms"],
       });
     },
   });

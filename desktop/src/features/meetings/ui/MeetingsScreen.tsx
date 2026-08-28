@@ -137,6 +137,7 @@ export function MeetingsScreen({
             Start a meeting
           </h2>
           <StartMeetingForm
+            key={view.prefillRoom ?? ""}
             autoFocus={view.focusStart}
             errorMessage={transientMessage}
             hostingError={hostingError}

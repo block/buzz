@@ -180,7 +180,12 @@ const ROUTE_PAYMENT_STATUS: Proxied = Proxied {
     upstream: "/api/payment/status",
     post: false,
     auth: HivetalkAuth::ChallengeHeaders,
-    metered: true,
+    // Read-only poll, not a write action. The client polls this every few
+    // seconds for the multi-minute life of an invoice; the dedicated
+    // `MeetingActions` bucket (default 10/min) is for subscribe / register-room
+    // / get-token / moderation and would 429 the poll ~30s in. The general
+    // per-principal HTTP limit still applies.
+    metered: false,
     required_query: &["id"],
     filter: Filter::Object(&[
         "expires_at",

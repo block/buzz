@@ -9,6 +9,7 @@ import { getDmParticipantPreview } from "@/features/channels/lib/dmParticipantDi
 import { ChannelGlyph } from "@/features/channels/ui/ChannelGlyph";
 import { ChannelHeaderStatusBadge } from "@/features/channels/ui/ChannelHeaderStatusBadge";
 import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
+import { StartMeetingButton } from "@/features/meetings/ui/StartMeetingButton";
 import {
   DEFAULT_HOVER_PROFILE_STATUS_GEOMETRY,
   ProfileAvatarWithStatus,
@@ -96,6 +97,13 @@ export function ChannelScreenHeader({
       <SquareTerminal />
     </Button>
   ) : null;
+  const meetingButton =
+    activeChannel && activeChannel.channelType !== "dm" ? (
+      <StartMeetingButton
+        channelId={activeChannel.id}
+        channelName={activeChannel.name}
+      />
+    ) : null;
   const channelActions = activeChannel ? (
     showJoinButton ? (
       <div className="flex items-center gap-1">
@@ -126,9 +134,10 @@ export function ChannelScreenHeader({
     headerEndActions
   );
   const actions =
-    terminalButton || channelActions ? (
+    terminalButton || meetingButton || channelActions ? (
       <div className="flex items-center gap-1">
         {terminalButton}
+        {meetingButton}
         {channelActions}
       </div>
     ) : null;
