@@ -715,6 +715,7 @@ pub fn run() {
             commands::tasks::tasks_list,
             commands::tasks::tasks_create,
             commands::tasks::tasks_set_status,
+            commands::tasks::tasks_set_assignee,
             commands::tasks::tasks_my_workspaces,
             mesh_start_node,
             mesh_stop_node,

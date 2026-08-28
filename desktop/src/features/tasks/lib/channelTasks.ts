@@ -83,6 +83,24 @@ export async function setChannelTaskStatus(
   });
 }
 
+/**
+ * REG-16: assign or clear a task's owner.
+ *
+ * `assignee: null` UNASSIGNS — the relay's PATCH treats the field as doubly
+ * optional (absent = leave alone, null = clear), and the Tauri shim emits an
+ * explicit JSON null so that distinction survives the wire.
+ */
+export async function setChannelTaskAssignee(
+  taskId: string,
+  assignee: string | null,
+): Promise<ChannelTask> {
+  const { invokeTauri } = await import("@/shared/api/tauri");
+  return invokeTauri<ChannelTask>("tasks_set_assignee", {
+    taskId,
+    assignee,
+  });
+}
+
 export async function listMyWorkspaceTasks(
   relayBases: string[],
 ): Promise<ChannelTaskSource[]> {

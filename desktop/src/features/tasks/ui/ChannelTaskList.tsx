@@ -7,6 +7,8 @@ import {
   type ChannelTask,
 } from "@/features/tasks/lib/channelTasks";
 import { useChannelTasks, useCreateChannelTask, useSetChannelTaskStatus } from "@/features/tasks/lib/useChannelTasks";
+import type { OwnerCandidate } from "@/features/tasks/lib/ownerSuggestion";
+import { SuggestedOwners } from "@/features/tasks/ui/SuggestedOwners";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { cn } from "@/shared/lib/cn";
@@ -23,6 +25,31 @@ export function ChannelTaskList({ channelId }: { channelId: string | null }) {
   const createTask = useCreateChannelTask(channelId);
   const setStatus = useSetChannelTaskStatus();
   const [draft, setDraft] = React.useState("");
+
+  /**
+   * REG-16 v1 candidate source: the people already visible in this task list.
+   * Deliberately derived from data the client ALREADY has (task authors and
+   * current assignees) rather than a new roster fetch — a suggestion is not a
+   * grant, and the relay stays the sole authority on who may be assigned.
+   * A richer channel-member/agent source is the next slice.
+   */
+  const ownerCandidates: OwnerCandidate[] = React.useMemo(() => {
+    const seen = new Map<string, OwnerCandidate>();
+    for (const task of tasks.data ?? []) {
+      for (const pubkey of [task.createdBy, task.assignee]) {
+        if (pubkey && !seen.has(pubkey)) {
+          seen.set(pubkey, {
+            kind: "identity",
+            displayName: null,
+            isAgent: false,
+            isMember: true,
+            pubkey,
+          });
+        }
+      }
+    }
+    return [...seen.values()];
+  }, [tasks.data]);
 
   const onToggle = (task: ChannelTask) => {
     setStatus.mutate(
@@ -119,6 +146,9 @@ export function ChannelTaskList({ channelId }: { channelId: string | null }) {
                     )}
                     <span className="min-w-0 break-words">{task.title}</span>
                   </button>
+                  {task.assignee === null ? (
+                    <SuggestedOwners candidates={ownerCandidates} task={task} />
+                  ) : null}
                 </li>
               );
             })}
