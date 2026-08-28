@@ -897,7 +897,7 @@ mod tests {
         assert!(migrations[32].sql.as_str().contains("kind = 30179"));
         assert!(migrations[32].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30179"));
-        assert!(include_str!("../../../schema/schema.sql")
+        assert!(include_str!("../../../../schema/schema.sql")
             .contains("kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200)"));
 
         // Public push-gateway authority is intentionally deployment-global and
@@ -1156,7 +1156,7 @@ mod tests {
         // parameters. Its post-apply reconciliation must restore and verify
         // both parts of the live heartbeat contract for fresh bootstraps.
         let pgschema_reconciliation =
-            include_str!("../../../scripts/reconcile-schema-after-pgschema.sql");
+            include_str!("../../../../scripts/reconcile-schema-after-pgschema.sql");
         assert!(pgschema_reconciliation
             .contains("ALTER TABLE replica_heartbeat SET (vacuum_truncate = false)"));
         assert!(pgschema_reconciliation.contains("INSERT INTO replica_heartbeat (id) VALUES (1)"));
