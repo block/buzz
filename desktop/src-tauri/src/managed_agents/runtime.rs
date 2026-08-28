@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tauri::AppHandle;
 
-use super::agent_env::{build_buzz_agent_provider_defaults, idle_pool_sleep_env};
+use super::agent_env::{apply_harness_lifecycle_env, build_buzz_agent_provider_defaults};
 
 use crate::{
     managed_agents::{
@@ -533,7 +533,7 @@ pub fn spawn_agent_child(
     command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
-    command.env("BUZZ_ACP_IDLE_POOL_SLEEP", idle_pool_sleep_env(lazy));
+    apply_harness_lifecycle_env(&mut command, lazy, record.start_on_app_launch);
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
     match &resolved_mcp_command {

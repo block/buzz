@@ -15,6 +15,11 @@ use base64::Engine as _;
 /// normal back-and-forth but a truly quiet harness stops paying for workers.
 const IDLE_POOL_SLEEP_SECS: &str = "900";
 
+/// Seconds a manually started harness may remain quiet before the whole
+/// process exits. Auto-start agents deliberately keep their relay listener;
+/// manual-start agents are demand-scoped and should not retain one forever.
+const MANUAL_HARNESS_IDLE_EXIT_SECS: &str = "900";
+
 /// Value for `BUZZ_ACP_IDLE_POOL_SLEEP`. Idle re-sleep is only meaningful for
 /// lazy harnesses (the harness ignores it otherwise); gate to `lazy` here so
 /// the env reads inert (`"0"` = disabled) for eager harnesses. This is a
@@ -25,6 +30,33 @@ pub(super) fn idle_pool_sleep_env(lazy: bool) -> &'static str {
     } else {
         "0"
     }
+}
+
+/// Value for `BUZZ_ACP_EXIT_AFTER_INACTIVITY`.
+///
+/// The inactivity reaper is only enabled for lazy, manual-start agents. An
+/// auto-start agent's contract is continuous relay availability, while an
+/// eager harness may have been launched for setup or another bounded flow
+/// whose lifetime is owned by its caller.
+pub(super) fn exit_after_inactivity_env(lazy: bool, start_on_app_launch: bool) -> &'static str {
+    if lazy && !start_on_app_launch {
+        MANUAL_HARNESS_IDLE_EXIT_SECS
+    } else {
+        "0"
+    }
+}
+
+/// Apply Desktop-owned ACP harness lifetime policy to a child process.
+pub(super) fn apply_harness_lifecycle_env(
+    command: &mut std::process::Command,
+    lazy: bool,
+    start_on_app_launch: bool,
+) {
+    command.env("BUZZ_ACP_IDLE_POOL_SLEEP", idle_pool_sleep_env(lazy));
+    command.env(
+        "BUZZ_ACP_EXIT_AFTER_INACTIVITY",
+        exit_after_inactivity_env(lazy, start_on_app_launch),
+    );
 }
 
 /// Return the baked-in build-time env pairs as a map.
@@ -141,8 +173,18 @@ pub(crate) fn parse_agent_env_lines(raw: &str) -> Vec<(&str, &str)> {
 mod tests {
     use super::{
         baked_build_env, build_buzz_agent_provider_defaults, build_env_map,
-        discovery_env_with_baked_floor, parse_agent_env_lines,
+        discovery_env_with_baked_floor, exit_after_inactivity_env, idle_pool_sleep_env,
+        parse_agent_env_lines,
     };
+
+    #[test]
+    fn lazy_manual_harnesses_reap_but_auto_start_harnesses_keep_listening() {
+        assert_eq!(exit_after_inactivity_env(true, false), "900");
+        assert_eq!(exit_after_inactivity_env(true, true), "0");
+        assert_eq!(exit_after_inactivity_env(false, false), "0");
+        assert_eq!(idle_pool_sleep_env(true), "900");
+        assert_eq!(idle_pool_sleep_env(false), "0");
+    }
 
     #[test]
     fn buzz_agent_provider_defaults_empty_in_oss_build() {
