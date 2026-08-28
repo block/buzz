@@ -3167,7 +3167,8 @@ impl Db {
     }
 
     /// Delete a workflow only when it belongs to the provided owner.
-    /// Returns the deleted workflow's `channel_id`.
+    /// Returns the deleted workflow's `channel_id`, or `Ok(None)` when no
+    /// row matched (idempotent no-op).
     #[datastore_span(name = "delete_workflow_for_owner", system = "postgresql")]
     pub async fn delete_workflow_for_owner(
         &self,

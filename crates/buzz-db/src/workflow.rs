@@ -768,7 +768,10 @@ pub async fn delete_workflow(pool: &PgPool, community_id: CommunityId, id: Uuid)
 /// workflow just by learning its UUID.
 ///
 /// Returns the deleted workflow's `channel_id` so the caller can invalidate
-/// the per-channel trigger cache without a separate lookup.
+/// the per-channel trigger cache without a separate lookup. Returns `Ok(None)`
+/// when no row matched (already deleted, never existed, or owned by someone
+/// else) — NIP-09 deletion is idempotent, so a repeat delete must be a no-op
+/// rather than an error (issue #6986).
 pub async fn delete_workflow_for_owner(
     pool: &PgPool,
     community_id: CommunityId,
@@ -787,7 +790,7 @@ pub async fn delete_workflow_for_owner(
 
     match row {
         Some(row) => Ok(row.try_get("channel_id")?),
-        None => Err(DbError::NotFound(format!("workflow {id}"))),
+        None => Ok(None),
     }
 }
 
