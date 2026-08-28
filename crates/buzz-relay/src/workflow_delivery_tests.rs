@@ -241,9 +241,8 @@ async fn removed_open_channel_member_cannot_read_or_count_wakes() {
         .expect("message");
     f.authority(run, &message).await.expect("member authority");
     let filter = serde_json::json!({"kinds":[buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE], "#p":[f.agent.public_key().to_hex()], "#h":[f.channel.to_string()]});
-    let body = axum::body::Bytes::from(
-        serde_json::to_vec(&serde_json::json!({"filters":[filter]})).expect("body"),
-    );
+    let body =
+        axum::body::Bytes::from(serde_json::to_vec(&serde_json::json!([filter])).expect("body"));
     let before =
         crate::api::bridge::query_events(State(f.state.clone()), f.headers(), body.clone())
             .await
