@@ -21,6 +21,12 @@ test("query keys are stable and scoped under the relay prefix", () => {
     "my-rooms",
     "abc",
   ]);
+  assert.deepEqual(meetingsQueryKeys.token(RELAY, "standup"), [
+    "meetings",
+    RELAY,
+    "token",
+    "standup",
+  ]);
 });
 
 test("room and my-room keys share the invalidation prefix", () => {
@@ -28,6 +34,7 @@ test("room and my-room keys share the invalidation prefix", () => {
   for (const key of [
     meetingsQueryKeys.rooms(RELAY),
     meetingsQueryKeys.myRooms(RELAY, "abc"),
+    meetingsQueryKeys.token(RELAY, "standup"),
   ]) {
     assert.deepEqual(key.slice(0, prefix.length), prefix);
   }

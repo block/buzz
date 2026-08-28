@@ -1,8 +1,9 @@
 import { RefreshCw } from "lucide-react";
+import * as React from "react";
 
 import { MeetingError } from "@/features/meetings/api";
 import type { ActiveRoom } from "@/features/meetings/api";
-import { CallViewPlaceholder } from "@/features/meetings/ui/CallViewPlaceholder";
+import { LazyCallView } from "@/features/meetings/ui/lazyCallView";
 import { MeetingRoomList } from "@/features/meetings/ui/MeetingRoomList";
 import {
   isHostingSetupError,
@@ -59,7 +60,15 @@ export function MeetingsScreen({
   }
 
   if (view.kind === "call") {
-    return <CallViewPlaceholder onLeave={onLeaveCall} room={view.room} />;
+    return (
+      <React.Suspense fallback={<ViewLoadingFallback kind="meetings" />}>
+        <LazyCallView
+          onLeave={onLeaveCall}
+          onSetupHosting={onSetupHosting}
+          room={view.room}
+        />
+      </React.Suspense>
+    );
   }
 
   const hostingError = isHostingSetupError(registerError);

@@ -1,9 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { MeetingError } from "@/features/meetings/api";
+import type { ModerationAction } from "@/features/meetings/relay";
 import {
+  getMeetingToken,
   listRooms,
   listRoomsByPubkey,
+  moderateRoom,
   registerRoom,
 } from "@/features/meetings/relay";
 import { useMeetingsCapability } from "@/features/meetings/useMeetingsCapability";
@@ -23,7 +26,13 @@ export const meetingsQueryKeys = {
   rooms: (relayUrl: string) => ["meetings", relayUrl, "rooms"] as const,
   myRooms: (relayUrl: string, pubkey: string) =>
     ["meetings", relayUrl, "my-rooms", pubkey] as const,
+  token: (relayUrl: string, room: string) =>
+    ["meetings", relayUrl, "token", room] as const,
 };
+
+/** LiveKit access tokens are time-limited; refetch a still-mounted call view's
+ * token no more than once a minute. */
+export const MEETING_TOKEN_STALE_TIME_MS = 60_000;
 
 function useActiveRelayUrl(): string {
   const { activeCommunity } = useCommunities();
@@ -82,6 +91,80 @@ export function useRegisterRoomMutation() {
         );
       }
       return registerRoom(relayUrl, capability, roomName);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        queryKey: meetingsQueryKeys.all(relayUrl),
+      });
+    },
+  });
+}
+
+/**
+ * Fetch the LiveKit access token + SFU URL for `room`. Rejects with a
+ * `MeetingError` — a 402 routes callers to the Phase 5 hosting path, same as
+ * `useRegisterRoomMutation`. Disabled until the relay capability and a signed-in
+ * identity are both known.
+ */
+export function useMeetingTokenQuery(room: string) {
+  const relayUrl = useActiveRelayUrl();
+  const { capability } = useMeetingsCapability();
+  const identity = useIdentityQuery().data;
+  const pubkey = identity?.pubkey ?? "";
+  const participantName = identity?.displayName?.trim() || "Guest";
+
+  return useQuery({
+    enabled:
+      relayUrl.length > 0 &&
+      capability !== null &&
+      pubkey.length > 0 &&
+      room.length > 0,
+    queryFn: ({ signal }) => {
+      if (!capability) {
+        throw new MeetingError(
+          "not_configured",
+          0,
+          "Meetings isn't enabled on this relay.",
+        );
+      }
+      return getMeetingToken(
+        relayUrl,
+        capability,
+        room,
+        participantName,
+        pubkey,
+        signal,
+      );
+    },
+    queryKey: meetingsQueryKeys.token(relayUrl, room),
+    refetchOnWindowFocus: false,
+    retry: false,
+    staleTime: MEETING_TOKEN_STALE_TIME_MS,
+  });
+}
+
+/**
+ * Host-control mutation. `livekitJwt` is the token returned by
+ * `useMeetingTokenQuery`; HiveTalk authorizes each call from the `owner` /
+ * `moderator` claims inside it. A successful call invalidates the room lists so
+ * a kick/mute is reflected in participant counts on the next poll.
+ */
+export function useModerateRoomMutation(livekitJwt: string | undefined) {
+  const relayUrl = useActiveRelayUrl();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input: {
+      action: ModerationAction;
+      payload: Record<string, unknown>;
+    }) => {
+      if (!livekitJwt) {
+        throw new MeetingError(
+          "bad_signature",
+          0,
+          "You need to be connected to the room to use host controls.",
+        );
+      }
+      return moderateRoom(relayUrl, input.action, livekitJwt, input.payload);
     },
     onSuccess: () => {
       void queryClient.invalidateQueries({
