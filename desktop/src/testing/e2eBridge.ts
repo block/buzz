@@ -13279,6 +13279,16 @@ export function maybeInstallE2eTauriMocks() {
           payload as { runtimeId?: string },
           activeConfig,
         );
+      case "run_folds_cli": {
+        // Accumulator panel: default to an empty fold list so the gated
+        // section renders its empty state without a real CLI spawn.
+        const args = (payload as { args?: string[] })?.args ?? [];
+        return {
+          stdout: args[0] === "list" ? "[]" : "{}",
+          stderr: "",
+          exitCode: 0,
+        };
+      }
       case "discover_backend_providers":
         return activeConfig?.mock?.backendProviders ?? [];
       case "probe_backend_provider": {
