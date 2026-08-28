@@ -2261,7 +2261,11 @@ class _FakeRelaySession extends RelaySessionNotifier {
   final List<NostrFilter> directoryQueryFilters = [];
   final List<NostrFilter> membershipQueryFilters = [];
   final List<NostrFilter> subscribeFilters = [];
-  final Map<int, (NostrFilter, void Function(NostrEvent))> _subscriptions = {};
+  final Map<
+    int,
+    (NostrFilter, void Function(NostrEvent), void Function(String message)?)
+  >
+  _subscriptions = {};
   int _nextSubscriptionKey = 0;
   Completer<void>? _pausedSubscribe;
   Completer<void>? _subscribeStarted;
@@ -2282,9 +2286,10 @@ class _FakeRelaySession extends RelaySessionNotifier {
   int unsubscribeCount = 0;
   int totalSubscribeCount = 0;
   int subscribeFailures = 0;
+  int successfulSubscribesBeforeFailure = 0;
 
   Set<String> get activeChannels => {
-    for (final (filter, _) in _subscriptions.values)
+    for (final (filter, _, _) in _subscriptions.values)
       ...filter.tags['#h'] ?? const <String>[],
   };
 
@@ -2663,13 +2668,16 @@ class _FakeRelaySession extends RelaySessionNotifier {
       _pausedSubscribe = null;
       _subscribeStarted = null;
     }
-    if (subscribeFailures > 0) {
+    if (subscribeFailures > 0 && successfulSubscribesBeforeFailure == 0) {
       subscribeFailures--;
       subscribeFilters.remove(filter);
       throw StateError('live subscription failed');
     }
+    if (successfulSubscribesBeforeFailure > 0) {
+      successfulSubscribesBeforeFailure--;
+    }
     final subscriptionKey = ++_nextSubscriptionKey;
-    _subscriptions[subscriptionKey] = (filter, onEvent);
+    _subscriptions[subscriptionKey] = (filter, onEvent, onClosed);
     return () {
       final subscription = _subscriptions.remove(subscriptionKey);
       if (subscription == null) return;
@@ -2678,13 +2686,22 @@ class _FakeRelaySession extends RelaySessionNotifier {
     };
   }
 
+  void closeSubscriptionContaining(String channelId, String message) {
+    final entry = _subscriptions.entries.singleWhere(
+      (entry) => entry.value.$1.tags['#h']?.contains(channelId) ?? false,
+    );
+    _subscriptions.remove(entry.key);
+    subscribeFilters.remove(entry.value.$1);
+    entry.value.$3?.call(message);
+  }
+
   void setStatus(SessionStatus status) {
     state = SessionState(status: status);
   }
 
   /// Emit a live event to all subscribers.
   void emit(NostrEvent event) {
-    for (final (_, listener) in List.of(_subscriptions.values)) {
+    for (final (_, listener, _) in List.of(_subscriptions.values)) {
       listener(event);
     }
   }

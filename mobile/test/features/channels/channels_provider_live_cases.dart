@@ -223,6 +223,72 @@ void _liveSubscriptionTests() {
   );
 
   test(
+    'terminal closure reinstalls desired coverage without retiring fallback',
+    () async {
+      final channelIds = [
+        for (var i = 1; i <= 129; i++) _generatedChannelId(i),
+      ];
+      final addedId = _generatedChannelId(0);
+      final session = _FakeRelaySession(
+        memberships: [for (final id in channelIds) _membership(id, myPk)],
+        metadata: [for (final id in channelIds) _meta(id: id, name: id)],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await _waitUntil(() => session.activeSubscriptionCount == 2);
+
+      session.memberships.add(_membership(addedId, myPk));
+      session.metadata.add(_meta(id: addedId, name: addedId));
+      session.subscribeFailures = 1;
+      await container.read(channelsProvider.notifier).refresh();
+      await _settle();
+      expect(session.activeChannels, containsAll(channelIds));
+
+      session.closeSubscriptionContaining(
+        channelIds.last,
+        'restricted: terminal closure',
+      );
+      await _waitUntil(() => session.activeChannels.contains(addedId));
+
+      expect(session.activeChannels, containsAll({...channelIds, addedId}));
+      expect(session.activeSubscriptionCount, 2);
+    },
+  );
+
+  test(
+    'partial replacement churn keeps complete coverage with bounded fallbacks',
+    () async {
+      var channelIds = [for (var i = 100; i < 356; i++) _generatedChannelId(i)];
+      final session = _FakeRelaySession(
+        memberships: [for (final id in channelIds) _membership(id, myPk)],
+        metadata: [for (final id in channelIds) _meta(id: id, name: id)],
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+      await container.read(channelsProvider.future);
+      await _waitUntil(() => session.activeSubscriptionCount == 2);
+
+      for (var cycle = 0; cycle < 7; cycle++) {
+        final addedId = _generatedChannelId(99 - cycle);
+        channelIds = [addedId, ...channelIds.take(255)];
+        session.memberships = [
+          for (final id in channelIds) _membership(id, myPk),
+        ];
+        session.metadata = [
+          for (final id in channelIds) _meta(id: id, name: id),
+        ];
+        session.successfulSubscribesBeforeFailure = 1;
+        session.subscribeFailures = 1;
+        await container.read(channelsProvider.notifier).refresh();
+        await _settle();
+        expect(session.activeChannels, containsAll(channelIds));
+        expect(session.activeSubscriptionCount, lessThanOrEqualTo(3));
+      }
+    },
+  );
+
+  test(
     'retired replacement cleans up even when the next generation disconnects',
     () async {
       final session = _FakeRelaySession(

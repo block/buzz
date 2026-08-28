@@ -40,10 +40,13 @@ const _authoredRootIdsPrefix = 'buzz-thread-authored.v1';
 class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   static const _backstopInterval = Duration(seconds: 60);
 
-  final Map<String, void Function()> _unsubscribersByLiveChunk = {};
+  final Map<String, _LiveChunkSubscription> _liveSubscriptionsByChunk = {};
   Future<void> _liveSubscriptionQueue = Future.value();
   Set<String> _desiredLiveChannelIds = const {};
   int _subscriptionVersion = 0;
+  int _nextLiveChunkGeneration = 0;
+  bool _liveReconcileRunning = false;
+  bool _liveReconcileRequested = false;
   String? _subscriptionRelayBaseUrl;
   Timer? _backstopTimer;
   final Map<String, int> _latestObservedByChannel = {};

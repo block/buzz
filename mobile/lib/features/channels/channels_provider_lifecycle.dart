@@ -78,11 +78,14 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     final session = _lifecycleRef.read(relaySessionProvider.notifier);
     for (final chunk in desiredChunks) {
       final chunkKey = _liveChunkKey(chunk);
-      if (_unsubscribersByLiveChunk.containsKey(chunkKey)) continue;
+      if (_liveSubscriptionsByChunk.containsKey(chunkKey)) continue;
       if (_lifecycleRef.read(relaySessionProvider).status !=
           SessionStatus.connected) {
         return;
       }
+      final generation = ++_nextLiveChunkGeneration;
+      final subscription = _LiveChunkSubscription(generation);
+      _liveSubscriptionsByChunk[chunkKey] = subscription;
       try {
         final unsubscribe = await session.subscribe(
           NostrFilter(
@@ -101,8 +104,12 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
             }
             _handleLiveEvent(event);
           },
+          onClosed: (message) =>
+              _handleLiveChunkClosed(chunkKey, generation, message),
         );
+        subscription.unsubscribe = unsubscribe;
         if (!_lifecycleRef.mounted || !fence.isCurrent) {
+          _liveSubscriptionsByChunk.remove(chunkKey);
           unsubscribe();
           if (!fence.isCurrent) throw const _StaleChannelRefresh();
           return;
@@ -113,18 +120,20 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
             _lifecycleRef.read(relayConfigProvider).baseUrl != relayBaseUrl ||
             _subscriptionRelayBaseUrl != relayBaseUrl ||
             !chunk.every(_desiredLiveChannelIds.contains)) {
+          _liveSubscriptionsByChunk.remove(chunkKey);
           unsubscribe();
           return;
         }
-        final replaced = _unsubscribersByLiveChunk[chunkKey];
-        if (replaced != null) {
+        if (_liveSubscriptionsByChunk[chunkKey] != subscription) {
           unsubscribe();
           continue;
         }
-        _unsubscribersByLiveChunk[chunkKey] = unsubscribe;
       } on _StaleChannelRefresh {
         rethrow;
       } catch (error) {
+        if (_liveSubscriptionsByChunk[chunkKey] == subscription) {
+          _liveSubscriptionsByChunk.remove(chunkKey);
+        }
         if (!_lifecycleRef.mounted) return;
         debugPrint(
           '[ChannelsNotifier] live subscription failed for '
@@ -150,41 +159,91 @@ extension _ChannelsNotifierLiveSubscriptions on ChannelsNotifier {
     );
   }
 
+  void _handleLiveChunkClosed(String chunkKey, int generation, String message) {
+    final subscription = _liveSubscriptionsByChunk[chunkKey];
+    if (subscription == null || subscription.generation != generation) return;
+    _liveSubscriptionsByChunk.remove(chunkKey);
+    debugPrint(
+      '[ChannelsNotifier] live subscription closed by relay: $message',
+    );
+    _requestLiveReconcile();
+  }
+
+  void _requestLiveReconcile() {
+    if (!_lifecycleRef.mounted ||
+        _lifecycleRef.read(relaySessionProvider).status !=
+            SessionStatus.connected) {
+      return;
+    }
+    if (_liveReconcileRunning) {
+      _liveReconcileRequested = true;
+      return;
+    }
+    _liveReconcileRunning = true;
+    unawaited(() async {
+      try {
+        do {
+          _liveReconcileRequested = false;
+          await _backstopRefresh();
+        } while (_liveReconcileRequested && _lifecycleRef.mounted);
+      } finally {
+        _liveReconcileRunning = false;
+      }
+    }());
+  }
+
   void _removeUndesiredLiveChunks() {
-    final desiredKeys = chunkChannelIdsForLiveSubscriptions(
+    final desiredChunks = chunkChannelIdsForLiveSubscriptions(
       _desiredLiveChannelIds,
-    ).map(_liveChunkKey).toSet();
-    final coveredIds = {
-      for (final key in _unsubscribersByLiveChunk.keys)
-        if (desiredKeys.contains(key)) ...key.split('\u0000'),
-    };
-    for (final entry in _unsubscribersByLiveChunk.entries.toList()) {
-      if (desiredKeys.contains(entry.key)) continue;
-      // A failed or retired replacement must not take unchanged channels
-      // offline. Drop an old chunk only once its still-desired channels have
-      // replacement coverage (or none of its channels remain desired).
-      final stillNeeded = entry.key
-          .split('\u0000')
-          .any(
-            (id) =>
-                _desiredLiveChannelIds.contains(id) && !coveredIds.contains(id),
-          );
-      if (stillNeeded) continue;
-      _unsubscribersByLiveChunk.remove(entry.key);
-      entry.value();
+    );
+    final desiredKeys = desiredChunks.map(_liveChunkKey).toSet();
+    final retainedKeys = <String>{...desiredKeys};
+    final uncoveredIds = <String>{};
+    for (final chunk in desiredChunks) {
+      final key = _liveChunkKey(chunk);
+      if (!_liveSubscriptionsByChunk.containsKey(key)) {
+        uncoveredIds.addAll(chunk);
+      }
+    }
+    final obsolete = _liveSubscriptionsByChunk.entries
+        .where((entry) => !desiredKeys.contains(entry.key))
+        .toList();
+    while (uncoveredIds.isNotEmpty) {
+      MapEntry<String, _LiveChunkSubscription>? best;
+      var bestCoverage = 0;
+      for (final entry in obsolete) {
+        if (retainedKeys.contains(entry.key)) continue;
+        final coverage = entry.key
+            .split('\u0000')
+            .where(uncoveredIds.contains)
+            .length;
+        if (coverage > bestCoverage) {
+          best = entry;
+          bestCoverage = coverage;
+        }
+      }
+      if (best == null) break;
+      retainedKeys.add(best.key);
+      uncoveredIds.removeAll(best.key.split('\u0000'));
+    }
+    for (final entry in _liveSubscriptionsByChunk.entries.toList()) {
+      if (retainedKeys.contains(entry.key)) continue;
+      _liveSubscriptionsByChunk.remove(entry.key);
+      entry.value.unsubscribe?.call();
     }
   }
 
   void _clearRetainedLiveChunks() {
-    for (final unsubscribe in _unsubscribersByLiveChunk.values) {
-      unsubscribe();
+    for (final subscription in _liveSubscriptionsByChunk.values) {
+      subscription.unsubscribe?.call();
     }
-    _unsubscribersByLiveChunk.clear();
+    _liveSubscriptionsByChunk.clear();
   }
 
   void _clearLiveSubscriptions() {
     _subscriptionVersion++;
     _desiredLiveChannelIds = const {};
+    _liveReconcileRequested = false;
     _clearRetainedLiveChunks();
     _subscriptionRelayBaseUrl = null;
     _backstopTimer?.cancel();
@@ -211,3 +270,10 @@ List<List<String>> chunkChannelIdsForLiveSubscriptions(
 }
 
 String _liveChunkKey(List<String> channelIds) => channelIds.join('\u0000');
+
+class _LiveChunkSubscription {
+  _LiveChunkSubscription(this.generation);
+
+  final int generation;
+  void Function()? unsubscribe;
+}
