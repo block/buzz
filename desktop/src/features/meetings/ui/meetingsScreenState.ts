@@ -5,6 +5,7 @@
  */
 
 import { MeetingError, type MeetingErrorKind } from "@/features/meetings/api";
+import type { SubscribeIntent } from "@/features/meetings/api";
 
 export type MeetingsDeepLink = {
   room?: string;
@@ -51,6 +52,14 @@ const HOSTING_ERROR_KINDS: ReadonlySet<MeetingErrorKind> = new Set([
  * a transient error + retry. */
 export function isHostingSetupError(error: unknown): boolean {
   return error instanceof MeetingError && HOSTING_ERROR_KINDS.has(error.kind);
+}
+
+/** The existing invoice carried on a `409 pending_invoice` register/token
+ * failure, if the body parsed as one — `SubscribeView` resumes from it. */
+export function pendingInvoiceFromError(
+  error: unknown,
+): SubscribeIntent | undefined {
+  return error instanceof MeetingError ? error.pendingInvoice : undefined;
 }
 
 /** True when a live badge should render for a room row. */

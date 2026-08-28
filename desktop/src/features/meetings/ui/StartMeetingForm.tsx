@@ -76,8 +76,8 @@ export function StartMeetingForm({
         >
           <p className="text-sm font-medium">Hosting not enabled</p>
           <p className="text-xs text-muted-foreground">
-            Starting a meeting needs an active HiveTalk subscription. Payment
-            setup arrives in a later update.
+            Starting a meeting needs an active HiveTalk subscription. Set one up
+            with any Lightning wallet — you'll come straight back here.
           </p>
           <Button
             onClick={onSetupHosting}

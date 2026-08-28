@@ -1,5 +1,6 @@
 import { RefreshCw } from "lucide-react";
 import * as React from "react";
+import type { ReactNode } from "react";
 
 import { MeetingError } from "@/features/meetings/api";
 import type { ActiveRoom } from "@/features/meetings/api";
@@ -26,6 +27,10 @@ type MeetingsScreenProps = {
   onSetupHosting: () => void;
   onLeaveCall: () => void;
   onRefresh: () => void;
+  /** Subscription status pill for the header (Phase 5). */
+  subscriptionBadge?: ReactNode;
+  /** Subscribe / payment dialog, mounted once at screen scope (Phase 5). */
+  subscribeDialog?: ReactNode;
 };
 
 export function MeetingsScreen({
@@ -40,6 +45,8 @@ export function MeetingsScreen({
   onSetupHosting,
   onLeaveCall,
   onRefresh,
+  subscriptionBadge,
+  subscribeDialog,
 }: MeetingsScreenProps) {
   if (view.kind === "loading") {
     return <ViewLoadingFallback kind="meetings" />;
@@ -67,6 +74,7 @@ export function MeetingsScreen({
           onSetupHosting={onSetupHosting}
           room={view.room}
         />
+        {subscribeDialog}
       </React.Suspense>
     );
   }
@@ -82,14 +90,17 @@ export function MeetingsScreen({
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-6 px-4 py-6 sm:px-6">
         <PageHeader
           action={
-            <Button
-              aria-label="Refresh meetings"
-              onClick={onRefresh}
-              size="icon"
-              variant="ghost"
-            >
-              <RefreshCw className="h-4 w-4" />
-            </Button>
+            <div className="flex items-center gap-2">
+              {subscriptionBadge}
+              <Button
+                aria-label="Refresh meetings"
+                onClick={onRefresh}
+                size="icon"
+                variant="ghost"
+              >
+                <RefreshCw className="h-4 w-4" />
+              </Button>
+            </div>
           }
           description="Live video rooms hosted on this community's relay."
           title="Meetings"
@@ -136,6 +147,7 @@ export function MeetingsScreen({
           />
         </section>
       </div>
+      {subscribeDialog}
     </div>
   );
 }

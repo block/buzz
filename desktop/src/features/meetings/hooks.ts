@@ -4,11 +4,19 @@ import { MeetingError } from "@/features/meetings/api";
 import type { ModerationAction } from "@/features/meetings/relay";
 import {
   getMeetingToken,
+  getPaymentStatus,
+  getPlans,
+  getSubscription,
   listRooms,
   listRoomsByPubkey,
   moderateRoom,
   registerRoom,
+  subscribe,
 } from "@/features/meetings/relay";
+import {
+  classifyPaymentStatus,
+  isTerminalPaymentOutcome,
+} from "@/features/meetings/ui/subscribeState";
 import { useMeetingsCapability } from "@/features/meetings/useMeetingsCapability";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -28,7 +36,17 @@ export const meetingsQueryKeys = {
     ["meetings", relayUrl, "my-rooms", pubkey] as const,
   token: (relayUrl: string, room: string) =>
     ["meetings", relayUrl, "token", room] as const,
+  plans: (relayUrl: string) => ["meetings", relayUrl, "plans"] as const,
+  subscription: (relayUrl: string, pubkey: string) =>
+    ["meetings", relayUrl, "subscription", pubkey] as const,
+  payment: (relayUrl: string, intentId: string) =>
+    ["meetings", relayUrl, "payment", intentId] as const,
 };
+
+/** Poll cadence for a pending payment intent (plan §5.1: ~3s). */
+export const PAYMENT_STATUS_POLL_INTERVAL_MS = 3_000;
+/** Plans rarely change within a session. */
+export const MEETING_PLANS_STALE_TIME_MS = 5 * 60 * 1_000;
 
 /** LiveKit access tokens are time-limited; refetch a still-mounted call view's
  * token no more than once a minute. */
@@ -140,6 +158,109 @@ export function useMeetingTokenQuery(room: string) {
     refetchOnWindowFocus: false,
     retry: false,
     staleTime: MEETING_TOKEN_STALE_TIME_MS,
+  });
+}
+
+/** Subscription plans offered by the relay's HiveTalk provider. Membership-gated
+ * but needs no HiveTalk signature, so it runs as soon as the relay is known. */
+export function usePlansQuery() {
+  const relayUrl = useActiveRelayUrl();
+  return useQuery({
+    enabled: relayUrl.length > 0,
+    queryFn: ({ signal }) => getPlans(relayUrl, signal),
+    queryKey: meetingsQueryKeys.plans(relayUrl),
+    staleTime: MEETING_PLANS_STALE_TIME_MS,
+  });
+}
+
+/**
+ * The signed-in identity's HiveTalk subscription status for this relay. Drives
+ * the Meetings-header badge; disabled until the relay capability and a signed-in
+ * identity are both known. Rejects with a `MeetingError`.
+ */
+export function useSubscriptionQuery() {
+  const relayUrl = useActiveRelayUrl();
+  const { capability } = useMeetingsCapability();
+  const pubkey = useIdentityQuery().data?.pubkey ?? "";
+  return useQuery({
+    enabled: relayUrl.length > 0 && capability !== null && pubkey.length > 0,
+    queryFn: ({ signal }) => {
+      if (!capability) {
+        throw new MeetingError(
+          "not_configured",
+          0,
+          "Meetings isn't enabled on this relay.",
+        );
+      }
+      return getSubscription(relayUrl, capability, signal);
+    },
+    queryKey: meetingsQueryKeys.subscription(relayUrl, pubkey),
+    refetchOnWindowFocus: false,
+    retry: false,
+    staleTime: MEETING_ROOMS_STALE_TIME_MS,
+  });
+}
+
+/**
+ * Start a subscription purchase. Resolves with the BOLT11 `SubscribeIntent`;
+ * rejects with a `MeetingError` — a `409 pending_invoice` carries the existing
+ * intent in `error.pendingInvoice`, which `SubscribeView` surfaces as-is.
+ */
+export function useSubscribeMutation() {
+  const relayUrl = useActiveRelayUrl();
+  const { capability } = useMeetingsCapability();
+  return useMutation({
+    mutationFn: (plan: string) => {
+      if (!capability) {
+        throw new MeetingError(
+          "not_configured",
+          0,
+          "Meetings isn't enabled on this relay.",
+        );
+      }
+      return subscribe(relayUrl, capability, plan);
+    },
+  });
+}
+
+/**
+ * Poll a payment intent until it settles or expires. `enabled` should track the
+ * invoice panel being mounted; the interval stops itself once the fetched
+ * status is terminal so a settled intent isn't re-fetched forever.
+ */
+export function usePaymentStatusQuery(
+  intentId: string | undefined,
+  enabled: boolean,
+) {
+  const relayUrl = useActiveRelayUrl();
+  const { capability } = useMeetingsCapability();
+  return useQuery({
+    enabled:
+      enabled &&
+      relayUrl.length > 0 &&
+      capability !== null &&
+      (intentId?.length ?? 0) > 0,
+    queryFn: ({ signal }) => {
+      if (!capability || !intentId) {
+        throw new MeetingError(
+          "not_configured",
+          0,
+          "Meetings isn't enabled on this relay.",
+        );
+      }
+      return getPaymentStatus(relayUrl, capability, intentId, signal);
+    },
+    queryKey: meetingsQueryKeys.payment(relayUrl, intentId ?? ""),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      if (status === undefined) return PAYMENT_STATUS_POLL_INTERVAL_MS;
+      return isTerminalPaymentOutcome(classifyPaymentStatus(status))
+        ? false
+        : PAYMENT_STATUS_POLL_INTERVAL_MS;
+    },
+    refetchOnWindowFocus: false,
+    retry: false,
+    staleTime: 0,
   });
 }
 
