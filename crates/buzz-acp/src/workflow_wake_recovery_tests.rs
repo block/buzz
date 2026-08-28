@@ -1,0 +1,168 @@
+// Exhausted HTTP authority retry through the real relay command/replay loop.
+use super::*;
+use buzz_core::kind::{KIND_STREAM_MESSAGE, KIND_WORKFLOW_DEF, KIND_WORKFLOW_MENTION_WAKE};
+use buzz_core::workflow_wake::WorkflowMentionWake;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+#[tokio::test]
+async fn exhausted_authority_failure_replays_exact_wake_and_verifies_before_dispatch() {
+    let agent = Keys::generate();
+    let owner = Keys::generate();
+    let relay_key = Keys::generate();
+    let channel = Uuid::new_v4();
+    let run = Uuid::new_v4();
+    let workflow = Uuid::new_v4();
+    let definition = EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF as u16),
+        "name: wake\ntrigger:\n  on: message_posted\nsteps:\n  - id: notify\n    action: send_message\n    text: work\n")
+        .tags([Tag::parse(["d", &workflow.to_string()]).unwrap(),
+            Tag::parse(["h", &channel.to_string()]).unwrap()])
+        .sign_with_keys(&owner).unwrap();
+    let message = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "work")
+        .tags([
+            Tag::parse(["h", &channel.to_string()]).unwrap(),
+            Tag::public_key(agent.public_key()),
+            Tag::parse(["workflow-run", &run.to_string()]).unwrap(),
+            Tag::parse(["workflow-definition", &definition.id.to_hex()]).unwrap(),
+            Tag::parse(["workflow-step", "notify"]).unwrap(),
+        ])
+        .sign_with_keys(&relay_key)
+        .unwrap();
+    let wake =
+        WorkflowMentionWake::new(agent.public_key(), channel, run, definition.id, message.id)
+            .sign(&relay_key)
+            .unwrap();
+    let body = json!({"run_id":run, "channel_id":channel, "workflow_id":workflow,
+        "definition_event_id":definition.id.to_hex(), "workflow_owner":owner.public_key().to_hex(),
+        "definition":definition, "message":message})
+    .to_string();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    // Four failures exhaust the entire bounded request budget; the fifth
+    // request is possible only after the transport has replayed the wake.
+    let http_server = tokio::spawn(async move {
+        for index in 0..5 {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let len = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..len]);
+            assert!(request.starts_with(&format!("GET /workflow-wakes/{run}/")));
+            let (status, response) = if index < 4 {
+                (503, "")
+            } else {
+                (200, body.as_str())
+            };
+            stream.write_all(format!("HTTP/1.1 {status} test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
+        }
+    });
+    let http = reqwest::Client::new();
+    let rest = RestClient {
+        http: http.clone(),
+        base_url: format!("http://{address}"),
+        keys: agent.clone(),
+        auth_tag_json: None,
+    };
+    let (ws, mut server) = test_ws_pair().await;
+    let (event_tx, event_rx) = mpsc::channel(16);
+    let (observer_control_tx, observer_control_rx) = mpsc::channel(16);
+    let (cmd_tx, cmd_rx) = mpsc::channel(16);
+    let bg = tokio::spawn(run_background_task(
+        ws,
+        VecDeque::new(),
+        event_tx,
+        observer_control_tx,
+        cmd_rx,
+        agent.clone(),
+        "ws://unused".into(),
+        agent.public_key().to_hex(),
+        None,
+    ));
+    let mut harness = HarnessRelay {
+        event_rx,
+        observer_control_rx: Some(observer_control_rx),
+        cmd_tx,
+        http,
+        relay_url: "ws://unused".into(),
+        keys: agent.clone(),
+        auth_tag: None,
+        bg_handle: Some(bg),
+    };
+    harness
+        .subscribe_channel_from(
+            channel,
+            ChannelFilter {
+                kinds: Some(vec![KIND_WORKFLOW_MENTION_WAKE]),
+                require_mention: false,
+            },
+            Some(wake.created_at.as_secs()),
+        )
+        .await
+        .unwrap();
+    let initial = next_test_frame(&mut server).await;
+    let frame = json!(["EVENT", channel_sub_id(channel), wake]).to_string();
+    server
+        .send(Message::Text(frame.clone().into()))
+        .await
+        .unwrap();
+    let received = timeout(Duration::from_secs(2), harness.next_event())
+        .await
+        .unwrap()
+        .unwrap();
+    let authenticated =
+        crate::workflow_wake::authenticate(&received.event, relay_key.public_key()).unwrap();
+    let error = rest
+        .workflow_wake_authority(authenticated.run_id(), &authenticated.message_event_id())
+        .await
+        .expect_err("all four requests fail");
+    assert!(error.is_transient());
+    assert!(
+        harness.event_rx.try_recv().is_err(),
+        "no fabricated event on lookup failure"
+    );
+    harness
+        .replay_event(
+            channel,
+            received.event.id.to_hex(),
+            received.event.created_at.as_secs(),
+        )
+        .await
+        .unwrap();
+    let replay = next_test_frame(&mut server).await;
+    assert_eq!(replay[0], "REQ");
+    assert_eq!(replay[1], initial[1]);
+    assert_eq!(replay[2]["kinds"], json!([KIND_WORKFLOW_MENTION_WAKE]));
+    assert_eq!(replay[2]["#h"], json!([channel.to_string()]));
+    assert_eq!(replay[2]["#p"], json!([agent.public_key().to_hex()]));
+    assert!(replay[2]["since"].as_u64().unwrap() <= wake.created_at.as_secs());
+    server
+        .send(Message::Text(frame.clone().into()))
+        .await
+        .unwrap();
+    let replayed = timeout(Duration::from_secs(2), harness.next_event())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(replayed.event.id, wake.id);
+    let authority = rest
+        .workflow_wake_authority(run, &message.id)
+        .await
+        .unwrap();
+    let (verified, principal) = crate::workflow_wake::verify(
+        &replayed.event,
+        authority,
+        relay_key.public_key(),
+        agent.public_key(),
+        channel,
+    )
+    .expect("full authority verified");
+    assert_eq!(verified.id, message.id);
+    assert_eq!(principal, owner.public_key().to_hex());
+    server.send(Message::Text(frame.into())).await.unwrap();
+    assert!(
+        timeout(Duration::from_millis(100), harness.next_event())
+            .await
+            .is_err(),
+        "normal dedup resumes"
+    );
+    http_server.await.unwrap();
+    harness.shutdown().await;
+}

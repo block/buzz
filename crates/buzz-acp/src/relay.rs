@@ -4969,74 +4969,8 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test(start_paused = true)]
-    async fn workflow_wake_authority_retries_transient_failure_then_recovers() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let keys = Keys::generate();
-        let relay = Keys::generate();
-        let run_id = Uuid::new_v4();
-        let channel_id = Uuid::new_v4();
-        let workflow_id = Uuid::new_v4();
-        let definition = EventBuilder::text_note("definition")
-            .sign_with_keys(&keys)
-            .expect("definition");
-        let message = EventBuilder::text_note("message")
-            .sign_with_keys(&relay)
-            .expect("message");
-        let authority = serde_json::json!({
-            "run_id": run_id,
-            "channel_id": channel_id,
-            "workflow_id": workflow_id,
-            "definition_event_id": definition.id.to_hex(),
-            "workflow_owner": keys.public_key().to_hex(),
-            "definition": definition,
-            "message": message,
-        });
-        let body = authority.to_string();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind authority server");
-        let address = listener.local_addr().expect("authority server address");
-        let server = tokio::spawn(async move {
-            for (status, response_body) in [(503, String::new()), (200, body)] {
-                let (mut stream, _) = listener.accept().await.expect("accept authority request");
-                let mut request = [0u8; 4096];
-                let _ = stream
-                    .read(&mut request)
-                    .await
-                    .expect("read authority request");
-                stream
-                    .write_all(
-                        format!(
-                            "HTTP/1.1 {status} test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
-                            response_body.len()
-                        )
-                        .as_bytes(),
-                    )
-                    .await
-                    .expect("write authority response");
-            }
-        });
-        let client = RestClient {
-            http: reqwest::Client::new(),
-            base_url: format!("http://{address}"),
-            keys,
-            auth_tag_json: None,
-        };
-
-        let fetch = tokio::spawn(async move {
-            client
-                .workflow_wake_authority(run_id, &message.id)
-                .await
-                .expect("transient authority failure should recover")
-        });
-        tokio::task::yield_now().await;
-        tokio::time::advance(Duration::from_secs(5)).await;
-        let received = fetch.await.expect("join authority fetch");
-        server.await.expect("join authority server");
-        assert_eq!(received.run_id, run_id);
-        assert_eq!(received.message.id, message.id);
+    mod workflow_wake_recovery_tests {
+        include!("workflow_wake_recovery_tests.rs");
     }
 
     #[test]
