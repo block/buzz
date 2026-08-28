@@ -425,10 +425,10 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
   await expect(
     page.getByTestId(`composer-address-lock-${relayPubkey}`),
   ).toHaveCount(0);
-  await input.fill("local");
+  await input.pressSequentially("local");
   await page.getByTestId("send-message").click();
   await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "local"))
+    .poll(() => readOutgoingMentionPubkeys(page, "@carl local"))
     .toEqual([managedPubkey]);
   await expect(input).toHaveText("@carl ");
 
@@ -448,7 +448,7 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
   await expect(
     page.getByTestId(`composer-address-lock-${managedPubkey}`),
   ).toHaveCount(0);
-  await input.fill("remote");
+  await input.pressSequentially("remote");
   await page.getByTestId("send-message").click();
   const sendWithoutInviting = page.getByRole("button", { name: "Do nothing" });
   try {
@@ -458,7 +458,7 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
     // In-channel selections send immediately without opening the prompt.
   }
   await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "remote"))
+    .poll(() => readOutgoingMentionPubkeys(page, "@carl remote"))
     .toEqual([relayPubkey]);
 
   await page.getByTestId("channel-members-trigger").click();
