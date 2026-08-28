@@ -60,6 +60,7 @@ export function useAgentAddressLockPicker({
   mentions,
   onAddressAgentMention,
   onAutoPinAgentMention,
+  onImplicitPrefixInserted,
   onPulseAddressLock,
   profiles,
   richText,
@@ -73,6 +74,8 @@ export function useAgentAddressLockPicker({
     suggestion: MentionSuggestion,
     options: { reinstateExcluded: boolean },
   ) => void;
+  /** Records the exact automatic prefix at the moment it is inserted. */
+  onImplicitPrefixInserted?: (prefix: string) => void;
   onPulseAddressLock: (pubkey: string) => void;
   profiles?: UserProfileLookup;
   richText: UseRichTextEditorResult;
@@ -241,10 +244,12 @@ export function useAgentAddressLockPicker({
         });
         const { text } = richText.getPlainTextAndCursor();
         if (getMentionOffsets(text, suggestion.displayName).length === 0) {
+          const insertedText = `@${suggestion.displayName} `;
+          onImplicitPrefixInserted?.(insertedText);
           applyAutocompleteEdit({
             replaceFromOffset: 0,
             replaceToOffset: 0,
-            insertText: `@${suggestion.displayName} `,
+            insertText: insertedText,
             preserveSelection: text.length > 0,
             reassertMentionCaret: false,
           });
@@ -297,6 +302,7 @@ export function useAgentAddressLockPicker({
       mentions.openMentionPicker,
       mentions.registerMentionPubkey,
       onAddressAgentMention,
+      onImplicitPrefixInserted,
       onPulseAddressLock,
       removeAddressedAgentMentions,
       richText.getPlainTextAndCursor,
@@ -386,8 +392,21 @@ export function useAgentAddressLockPicker({
           return { pubkey, displayName };
         });
       const { text } = richText.getPlainTextAndCursor();
+      // A profile can rename an agent while this draft is off-screen. Mention
+      // refs retain the identity of its already-inserted automatic prefix, so
+      // use that identity as well as the current display name when deciding
+      // whether restoration is needed.
+      const presentAgentPubkeys = new Set(
+        mentions
+          .getDraftMentionRefs(text)
+          .filter((ref) => ref.isAgent)
+          .map((ref) => normalizePubkey(ref.pubkey)),
+      );
       for (const agent of targetAgents) {
-        if (getMentionOffsets(text, agent.displayName).length > 0) {
+        if (
+          presentAgentPubkeys.has(agent.pubkey) ||
+          getMentionOffsets(text, agent.displayName).length > 0
+        ) {
           mentions.registerMentionPubkey(agent.displayName, agent.pubkey, {
             isAgent: true,
           });
@@ -398,6 +417,7 @@ export function useAgentAddressLockPicker({
         (agent) =>
           (!unpinnedAgentPubkeysRef.current.has(agent.pubkey) ||
             allowedUnpinned.has(agent.pubkey)) &&
+          !presentAgentPubkeys.has(agent.pubkey) &&
           getMentionOffsets(text, agent.displayName).length === 0,
       );
       if (missingAgents.length === 0) return text;
@@ -410,6 +430,7 @@ export function useAgentAddressLockPicker({
       const insertedText = `${missingAgents
         .map((agent) => `@${agent.displayName}`)
         .join(" ")} `;
+      onImplicitPrefixInserted?.(insertedText);
       applyAutocompleteEdit({
         replaceFromOffset: 0,
         replaceToOffset: 0,
@@ -426,8 +447,10 @@ export function useAgentAddressLockPicker({
     [
       applyAutocompleteEdit,
       audience.pubkeys,
+      mentions.getDraftMentionRefs,
       mentions.getMentionDisplayName,
       mentions.registerMentionPubkey,
+      onImplicitPrefixInserted,
       profiles,
       richText.focusEnd,
       richText.getPlainTextAndCursor,

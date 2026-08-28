@@ -789,6 +789,49 @@ test("repeatedly selecting an explicitly unpinned agent keeps its mentions manua
   assert.deepEqual(pulsedPubkeys, []);
 });
 
+test("restoring after an agent rename keeps the existing automatic mention", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  const appliedEdits = [];
+  const registeredMentions = [];
+  const oldName = "OldName";
+  const newName = "NewName";
+  const { result, rerender } = renderHook(
+    ({ displayName }) =>
+      useAgentAddressLockPicker({
+        applyAutocompleteEdit: (edit) => appliedEdits.push(edit),
+        audience: { pubkeys: ["agent-pubkey"], addPubkey: () => {} },
+        audienceScope: "channel-scope",
+        mentions: {
+          getDraftMentionRefs: () => [
+            { displayName: oldName, pubkey: "agent-pubkey", isAgent: true },
+          ],
+          getMentionDisplayName: () => displayName,
+          registerMentionPubkey: (...args) => registeredMentions.push(args),
+        },
+        onPulseAddressLock: () => {},
+        profiles: {},
+        richText: {
+          getPlainTextAndCursor: () => ({
+            text: `@${oldName} authored draft`,
+            cursor: 23,
+          }),
+        },
+      }),
+    { initialProps: { displayName: oldName } },
+  );
+
+  rerender({ displayName: newName });
+  act(() => result.current.restoreAddressedAgentMentions());
+
+  assert.deepEqual(appliedEdits, []);
+  assert.deepEqual(registeredMentions, [
+    [newName, "agent-pubkey", { isAgent: true }],
+  ]);
+});
+
 test("an addressed agent keeps its resolved name while mention state clears during send", async () => {
   const { renderHook } = await import("@testing-library/react");
   const { useAgentAddressLockPicker } = await import(

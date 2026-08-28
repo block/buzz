@@ -464,21 +464,20 @@ function MessageComposerImpl({
         pubkeys: suggestion.pubkey ? [suggestion.pubkey] : [],
       });
     },
+    onImplicitPrefixInserted: (prefix) => {
+      if (!effectiveDraftKey) return;
+      implicitAgentMentionPrefixByDraftRef.current.set(
+        effectiveDraftKey,
+        prefix,
+      );
+      trimMapToSize(implicitAgentMentionPrefixByDraftRef.current, 200);
+    },
     onPulseAddressLock: addressPulse.pulseOne,
     profiles,
     richText,
   });
   addressedMentionRestore.restoreAddressedAgentMentionsRef.current =
     restoreAddressedAgentMentions;
-  if (effectiveDraftKey) {
-    implicitAgentMentionPrefixByDraftRef.current.set(
-      effectiveDraftKey,
-      lockedAgents.length > 0
-        ? `${lockedAgents.map((agent) => `@${agent.displayName}`).join(" ")} `
-        : "",
-    );
-    trimMapToSize(implicitAgentMentionPrefixByDraftRef.current, 200);
-  }
   React.useLayoutEffect(() => {
     if (!audienceScope || editTarget != null) return;
     restoreAddressedAgentMentions();
