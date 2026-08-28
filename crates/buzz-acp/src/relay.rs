@@ -4446,6 +4446,72 @@ mod tests {
     }
 
     #[test]
+    fn default_mentions_builds_complete_recipient_gated_subscription_shape() {
+        let channel = Uuid::new_v4();
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let req = build_channel_req(
+            "sub",
+            channel,
+            &agent,
+            123,
+            &ChannelFilter {
+                kinds: Some(vec![
+                    buzz_core::kind::KIND_STREAM_MESSAGE,
+                    buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE,
+                    buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED,
+                    buzz_core::kind::KIND_STREAM_REMINDER,
+                ]),
+                require_mention: true,
+            },
+        );
+        let req = req.as_array().expect("REQ array");
+
+        assert_eq!(req.len(), 4);
+        assert_eq!(
+            req[2]["kinds"],
+            json!([
+                buzz_core::kind::KIND_STREAM_MESSAGE,
+                buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED,
+                buzz_core::kind::KIND_STREAM_REMINDER,
+            ])
+        );
+        assert_eq!(req[2]["#p"], json!([agent]));
+        assert_eq!(req[2]["#h"], json!([channel.to_string()]));
+        assert_eq!(
+            req[3]["kinds"],
+            json!([buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE])
+        );
+        assert_eq!(req[3]["#p"], json!([agent]));
+        assert_eq!(req[3]["#h"], json!([channel.to_string()]));
+    }
+
+    #[test]
+    fn durable_workflow_wake_is_requested_on_reconnect() {
+        let channel = Uuid::new_v4();
+        let agent = nostr::Keys::generate().public_key().to_hex();
+        let req = build_channel_req(
+            "sub",
+            channel,
+            &agent,
+            456,
+            &ChannelFilter {
+                kinds: Some(vec![buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE]),
+                require_mention: true,
+            },
+        );
+        let req = req.as_array().expect("REQ array");
+
+        assert_eq!(req.len(), 3);
+        assert_eq!(
+            req[2]["kinds"],
+            json!([buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE])
+        );
+        assert_eq!(req[2]["#p"], json!([agent]));
+        assert_eq!(req[2]["#h"], json!([channel.to_string()]));
+        assert_eq!(req[2]["since"], json!(456));
+    }
+
+    #[test]
     fn workflow_wake_uses_exact_recipient_filter_when_mentions_are_disabled() {
         let channel = Uuid::new_v4();
         let agent = nostr::Keys::generate().public_key().to_hex();

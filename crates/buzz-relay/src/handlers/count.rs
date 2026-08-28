@@ -38,8 +38,9 @@ pub async fn handle_count(
         }
     };
 
-    // P-gated kinds (gift wraps, member notifications, observer frames) require
-    // the caller's own pubkey in the #p tag — same enforcement as WS REQ handler.
+    // Result-gated kinds (DM visibility, agent metrics, and workflow wakes)
+    // require the caller's own pubkey in the #p tag for explicit-kind filters.
+    // Kindless filters remain valid and are restricted by per-event gates.
     let authed_pubkey_hex = hex::encode(&pubkey_bytes);
     if !super::req::p_gated_filters_authorized(&filters, &authed_pubkey_hex) {
         conn.send(RelayMessage::closed(

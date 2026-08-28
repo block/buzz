@@ -1340,6 +1340,7 @@ pub fn resolve_channel_filters(
 ) -> HashMap<Uuid, ChannelFilter> {
     use buzz_core::kind::{
         KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
+        KIND_WORKFLOW_MENTION_WAKE,
     };
 
     let target_channels: Vec<Uuid> = if let Some(ref overrides) = config.channels_override {
@@ -1359,6 +1360,7 @@ pub fn resolve_channel_filters(
             let kinds = config.kinds_override.clone().unwrap_or_else(|| {
                 vec![
                     KIND_STREAM_MESSAGE,
+                    KIND_WORKFLOW_MENTION_WAKE,
                     KIND_WORKFLOW_APPROVAL_REQUESTED,
                     KIND_STREAM_REMINDER,
                 ]
@@ -1442,6 +1444,7 @@ pub fn resolve_dynamic_channel_filter(
 ) -> Option<ChannelFilter> {
     use buzz_core::kind::{
         KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
+        KIND_WORKFLOW_MENTION_WAKE,
     };
 
     // In Mentions/All mode, if the operator explicitly constrained channels
@@ -1464,6 +1467,7 @@ pub fn resolve_dynamic_channel_filter(
             kinds: Some(config.kinds_override.clone().unwrap_or_else(|| {
                 vec![
                     KIND_STREAM_MESSAGE,
+                    KIND_WORKFLOW_MENTION_WAKE,
                     KIND_WORKFLOW_APPROVAL_REQUESTED,
                     KIND_STREAM_REMINDER,
                 ]
@@ -1613,11 +1617,35 @@ mod tests {
         for ch in &channels {
             let f = result.get(ch).expect("channel should be present");
             assert!(f.require_mention, "mentions mode requires mention");
-            let kinds = f.kinds.as_ref().expect("should have kinds");
-            assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE));
-            assert!(kinds.contains(&buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED));
-            assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_REMINDER));
+            assert_eq!(
+                f.kinds,
+                Some(vec![
+                    buzz_core::kind::KIND_STREAM_MESSAGE,
+                    buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE,
+                    buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED,
+                    buzz_core::kind::KIND_STREAM_REMINDER,
+                ])
+            );
         }
+    }
+
+    #[test]
+    fn test_mentions_mode_dynamic_default_kinds_include_workflow_wake() {
+        let config = test_config(SubscribeMode::Mentions);
+        let channel = Uuid::new_v4();
+        let filter = resolve_dynamic_channel_filter(&config, channel, &[])
+            .expect("dynamic channel should be subscribed");
+
+        assert!(filter.require_mention);
+        assert_eq!(
+            filter.kinds,
+            Some(vec![
+                buzz_core::kind::KIND_STREAM_MESSAGE,
+                buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE,
+                buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED,
+                buzz_core::kind::KIND_STREAM_REMINDER,
+            ])
+        );
     }
 
     #[test]

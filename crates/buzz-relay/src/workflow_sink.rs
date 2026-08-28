@@ -8,7 +8,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 
-use buzz_core::kind::KIND_STREAM_MESSAGE;
+use buzz_core::kind::{KIND_STREAM_MESSAGE, KIND_WORKFLOW_MENTION_WAKE};
 use buzz_core::workflow_wake::WorkflowMentionWake;
 use buzz_workflow::action_sink::{ActionSink, ActionSinkError, WorkflowMessageContext};
 use chrono::Utc;
@@ -479,8 +479,7 @@ impl ActionSink for RelayActionSink {
                 .await
                 .map_err(|e| ActionSinkError::Database(e.to_string()))?;
 
-            // 5. Post-persist side effects (fan-out, search, audit)
-            //    Only if actually inserted (idempotency guard).
+            // 5. Post-persist side effects (fan-out, search, audit).
             if was_inserted {
                 let _ = dispatch_persistent_event(
                     &tenant,
@@ -491,25 +490,39 @@ impl ActionSink for RelayActionSink {
                     None,
                 )
                 .await;
+            }
 
-                for wake in build_workflow_wakes(
-                    &state.relay_keypair,
-                    channel_uuid,
-                    run_id,
-                    definition_event_id,
-                    event.id,
-                    mentioned_pubkeys,
-                )? {
-                    crate::handlers::event::dispatch_ephemeral_event(
+            // Persist one recipient-gated identifier wake for every mentioned
+            // agent. This also runs when the message insert was an idempotent
+            // duplicate, so a retry repairs a crash/failure between message and
+            // wake persistence instead of permanently losing the notification.
+            for wake in build_workflow_wakes(
+                &state.relay_keypair,
+                channel_uuid,
+                run_id,
+                definition_event_id,
+                event.id,
+                mentioned_pubkeys,
+            )? {
+                let (stored_wake, wake_inserted) = state
+                    .db
+                    .insert_event(tenant.community(), &wake, Some(channel_uuid))
+                    .await
+                    .map_err(|error| ActionSinkError::Database(error.to_string()))?;
+                if wake_inserted {
+                    let _ = dispatch_persistent_event(
                         &tenant,
                         &state,
-                        wake,
-                        Some(channel_uuid),
+                        &stored_wake,
+                        KIND_WORKFLOW_MENTION_WAKE,
+                        &author_pubkey_hex,
+                        None,
                     )
                     .await;
                 }
+            }
 
-                // A threaded reply changed its thread's counters — push a fresh
+            if was_inserted {
                 // relay-signed kind:39005 so subscribed clients update badge
                 // counts without refetching the head window, exactly as the
                 // ingest path does after a reply insert. Fan-out-only and

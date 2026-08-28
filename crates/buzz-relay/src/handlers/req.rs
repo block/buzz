@@ -222,16 +222,10 @@ pub async fn handle_req(
         return;
     }
 
-    // Applied BEFORE the NIP-50 search branch so that an authenticated member
-    // cannot use `{"search":"...","kinds":[30174]}` (or similar for p-gated
-    // kinds) to harvest indexed-but-globally-stored sensitive events. Search
-    // hits are looked up by event id and returned without the per-filter
-    // post-check the historical-delivery branch applies, so the gate must run
-    // here, up front. P-gated authorization applies to every subscription;
-    // the other global-event gates below remain global-only.
-    // P-gated events require an exact authenticated recipient even when they
-    // are channel-scoped. Channel membership alone is not authority to observe
-    // another recipient's ephemeral workflow wake.
+    // Applied BEFORE the NIP-50 search branch so an explicit sensitive-kind
+    // filter cannot harvest indexed private events. Kindless channel filters
+    // remain valid NIP-01 wildcards; every returned event is independently
+    // checked at the shared result gate, and live fan-out uses the same check.
     let authed_pubkey_hex = hex::encode(&pubkey_bytes);
     if !p_gated_filters_authorized(&filters, &authed_pubkey_hex) {
         conn.send(RelayMessage::closed(
@@ -1322,13 +1316,17 @@ fn extract_channel_id_from_filters(filters: &[Filter]) -> Option<uuid::Uuid> {
 pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: &str) -> bool {
     let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
     filters.iter().all(|filter| {
-        // A kindless full-text search cannot surface a p-gated event: persistent
-        // p-gated kinds have a NULL search vector and ephemeral kinds are never
-        // stored. Keep explicit p-gated kind searches subject to the recipient
-        // check, but do not close ordinary channel searches merely because their
-        // omitted kind set is theoretically broad.
+        // Kindless full-text searches cannot surface p-gated rows, and a
+        // kindless channel filter is safe to register: global p-gated events
+        // cannot enter its channel index, while channel-scoped workflow wakes
+        // are removed by the shared per-event recipient gate. Preserve the
+        // stricter rule for global wildcards and explicit p-gated kinds.
+        let has_channel_scope = filter
+            .generic_tags
+            .get(&nostr::SingleLetterTag::lowercase(nostr::Alphabet::H))
+            .is_some_and(|values| !values.is_empty());
         let can_match_p_gated = filter.kinds.as_ref().map_or_else(
-            || filter.search.is_none(),
+            || filter.search.is_none() && !has_channel_scope,
             |ks| {
                 ks.iter()
                     .any(|kind| P_GATED_KINDS.contains(&(kind.as_u16() as u32)))
@@ -2050,6 +2048,20 @@ mod tests {
             filter_with_channel(channel_id),
         ];
         assert_eq!(extract_channel_id_from_filters(&filters), Some(channel_id));
+    }
+
+    /// A channel-scoped kindless wildcard remains admissible. P-gated global
+    /// kinds cannot enter the channel subscription index, and the only
+    /// channel-scoped p-gated kind (workflow wake) is result-gated per recipient.
+    #[test]
+    fn channel_wildcard_preserves_all_mode_without_weakening_wakes() {
+        let authed = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let channel = uuid::Uuid::new_v4();
+        assert!(p_gated_filters_authorized(
+            &[filter_with_channel(channel)],
+            authed
+        ));
+        assert!(!p_gated_filters_authorized(&[Filter::new()], authed));
     }
 
     #[test]

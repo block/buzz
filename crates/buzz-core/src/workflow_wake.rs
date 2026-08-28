@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::kind::KIND_WORKFLOW_MENTION_WAKE;
 
-/// A relay-signed, ephemeral hint that a workflow message mentioned one agent.
+/// A relay-signed, durable hint that a workflow message mentioned one agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorkflowMentionWake {
     recipient: PublicKey,

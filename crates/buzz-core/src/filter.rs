@@ -11,10 +11,10 @@ pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
     filters.iter().any(|f| filter_match_one(f, event))
 }
 
-/// Result-level read authorization for relay-signed events whose content is
-/// private to a single viewer. Currently gates `KIND_DM_VISIBILITY` and
-/// `KIND_AGENT_TURN_METRIC`: the reader MUST equal the event's `#p` tag
-/// (owner). Returns `true` for every other kind.
+/// Result-level read authorization for events whose content or envelope is
+/// private to a single viewer. Currently gates `KIND_DM_VISIBILITY`,
+/// `KIND_AGENT_TURN_METRIC`, and `KIND_WORKFLOW_MENTION_WAKE`: the reader MUST
+/// equal the event's `#p` tag (owner/recipient). Returns `true` for every other kind.
 ///
 /// This guards every delivery surface — WS historical pull (`req.rs`), HTTP
 /// bridge (`bridge.rs`), and live fan-out (`event.rs`) — so a query that
@@ -22,7 +22,10 @@ pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
 /// a known event id) still cannot read another user's private event.
 pub fn reader_authorized_for_event(event: &nostr::Event, reader_pubkey_hex: &str) -> bool {
     let kind = crate::kind::event_kind_u32(event);
-    if kind != crate::kind::KIND_DM_VISIBILITY && kind != crate::kind::KIND_AGENT_TURN_METRIC {
+    if kind != crate::kind::KIND_DM_VISIBILITY
+        && kind != crate::kind::KIND_AGENT_TURN_METRIC
+        && kind != crate::kind::KIND_WORKFLOW_MENTION_WAKE
+    {
         return true;
     }
     let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
