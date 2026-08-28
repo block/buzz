@@ -266,6 +266,32 @@ fn approval_json(approval: &buzz_db::workflow::ApprovalRecord) -> Value {
     })
 }
 
+// A missing/revoked authority is terminal; unavailable storage is not. Keep
+// this distinction at the endpoint so ACP's bounded transport retries can work.
+fn wake_lookup_error(error: buzz_db::DbError) -> (StatusCode, Json<Value>) {
+    use buzz_db::DbError;
+    let status = match &error {
+        DbError::NotFound(_) => StatusCode::NOT_FOUND,
+        DbError::Sqlx(sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed) => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        DbError::Sqlx(sqlx::Error::Database(error))
+            if error.code().is_some_and(|code| {
+                code.starts_with("08")
+                    || matches!(
+                        code.as_ref(),
+                        "40001" | "40P01" | "53300" | "57P01" | "57P02" | "57P03"
+                    )
+            }) =>
+        {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    tracing::warn!(%error, %status, "workflow wake authority lookup failed");
+    api_error(status, "workflow wake authority unavailable")
+}
+
 /// `GET /workflow-wakes/{run_id}/{message_id}` — exact authority bundle for one wake.
 pub async fn workflow_wake_authority(
     State(state): State<Arc<AppState>>,
@@ -290,12 +316,12 @@ pub async fn workflow_wake_authority(
         .db
         .get_workflow_run(tenant.community(), run_id)
         .await
-        .map_err(|_| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
+        .map_err(wake_lookup_error)?;
     let workflow = state
         .db
         .get_workflow(tenant.community(), run.workflow_id)
         .await
-        .map_err(|_| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
+        .map_err(wake_lookup_error)?;
     let definition_id = run
         .definition_event_id
         .as_deref()
@@ -307,13 +333,13 @@ pub async fn workflow_wake_authority(
         .db
         .get_workflow_revision(tenant.community(), definition_id)
         .await
-        .map_err(|error| internal_error(&format!("workflow definition lookup: {error}")))?
+        .map_err(wake_lookup_error)?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
     let message = state
         .db
         .get_event_by_id(tenant.community(), message_id.as_bytes())
         .await
-        .map_err(|error| internal_error(&format!("workflow message lookup: {error}")))?
+        .map_err(wake_lookup_error)?
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
 
     let recipient_hex = recipient.to_hex();
@@ -326,20 +352,31 @@ pub async fn workflow_wake_authority(
     let message_channel = message
         .channel_id
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
-    enforce_current_channel_read(
+    let auth_tag = headers
+        .get("x-auth-tag")
+        .and_then(|value| value.to_str().ok());
+    super::relay_members::enforce_relay_membership(
         &state,
-        &tenant,
-        &headers,
-        &recipient,
-        message_channel,
-        "workflow wake not accessible",
+        tenant.community(),
+        &recipient.to_bytes(),
+        auth_tag,
     )
-    .await?;
+    .await
+    .map_err(|(status, body)| {
+        // This shared boundary exposes database lookup failures as 500, while
+        // explicit roster/authentication denials retain their terminal status.
+        let status = if status == StatusCode::INTERNAL_SERVER_ERROR {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            status
+        };
+        (status, body)
+    })?;
     if !state
         .db
         .is_member(tenant.community(), message_channel, &recipient.to_bytes())
         .await
-        .map_err(|error| internal_error(&format!("workflow wake membership: {error}")))?
+        .map_err(wake_lookup_error)?
     {
         return Err(api_error(
             StatusCode::FORBIDDEN,
@@ -389,6 +426,33 @@ mod tests {
         assert_eq!(
             request_path("/workflows/id/runs", None),
             "/workflows/id/runs"
+        );
+    }
+
+    #[test]
+    fn wake_lookup_failure_is_not_authority_revocation() {
+        use buzz_db::DbError;
+        for error in [
+            sqlx::Error::PoolClosed,
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset)),
+        ] {
+            assert_eq!(
+                wake_lookup_error(DbError::Sqlx(error)).0,
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+        }
+        assert_eq!(
+            wake_lookup_error(DbError::NotFound("run".into())).0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            wake_lookup_error(DbError::InvalidData("bad row".into())).0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            wake_lookup_error(DbError::Sqlx(sqlx::Error::ColumnNotFound("bad".into()))).0,
+            StatusCode::INTERNAL_SERVER_ERROR
         );
     }
 

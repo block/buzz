@@ -30,8 +30,8 @@ const MIGRATION_0008_SQL: &str =
 const MIGRATION_0014_SQL: &str = include_str!("../../../migrations/0014_push_lease_fts.sql");
 const MIGRATION_0033_SQL: &str =
     include_str!("../../../migrations/0033_private_managed_agent_fts.sql");
-const MIGRATION_0036_SQL: &str =
-    include_str!("../../../migrations/0036_workflow_mention_wake_fts.sql");
+const MIGRATION_0041_SQL: &str =
+    include_str!("../../../migrations/0041_workflow_mention_wake_fts.sql");
 
 async fn setup() -> (PgPool, String) {
     setup_with_search_policy(true).await
@@ -94,7 +94,7 @@ async fn setup_with_search_policy(apply_fresh_allowlist: bool) -> (PgPool, Strin
     pool.execute(MIGRATION_0033_SQL)
         .await
         .expect("apply 0033 migration");
-    pool.execute(MIGRATION_0036_SQL)
+    pool.execute(MIGRATION_0041_SQL)
         .await
         .expect("apply 0036 migration");
     (pool, schema)
