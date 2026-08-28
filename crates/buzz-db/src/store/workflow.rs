@@ -1387,7 +1387,6 @@ impl Db {
         .await
     }
 
-
     /// Fetch and share-lock one workflow on an existing transaction.
     #[datastore_span(name = "get_workflow_for_share_in_transaction", system = "postgresql")]
     pub async fn get_workflow_for_share_in_transaction(
@@ -1420,7 +1419,6 @@ impl Db {
         )
         .await
     }
-
 
     /// Create a new workflow run.
     #[datastore_span(name = "create_workflow_run", system = "postgresql")]

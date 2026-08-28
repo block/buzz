@@ -1580,6 +1580,7 @@ mod postgres_tests {
             .connect(&url)
             .await
             .expect("connect workflow persistence test database");
+        // The harness prepares the schema (CI uses pgschema, not SQLx history).
         let db = buzz_db::Db::from_pool(pool);
         if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
             db.migrate()
@@ -1605,11 +1606,8 @@ mod postgres_tests {
         let setup_pool = sqlx::PgPool::connect(&url)
             .await
             .expect("connect workflow trigger setup database");
+        // The harness prepares the schema (CI uses pgschema, not SQLx history).
         let setup_db = buzz_db::Db::from_pool(setup_pool.clone());
-        setup_db
-            .migrate()
-            .await
-            .expect("migrate workflow trigger test database");
 
         let host = format!("workflow-trigger-{}.example", Uuid::new_v4().simple());
         let community = setup_db
