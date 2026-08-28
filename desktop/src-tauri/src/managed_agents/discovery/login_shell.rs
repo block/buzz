@@ -89,10 +89,25 @@ enum LoginShellPath {
     Probed(Option<String>),
 }
 
-fn path_cache() -> &'static std::sync::Mutex<LoginShellPath> {
+/// Cache plus a monotonic generation counter. `refresh_login_shell_path` bumps
+/// the generation and resets the state together; a probe records the generation
+/// it started under and may only publish its result while that generation is
+/// still current. This stops a slow, pre-refresh probe from committing a stale
+/// (often false-negative) PATH over the fresh value a post-refresh probe wrote.
+struct PathCache {
+    generation: u64,
+    state: LoginShellPath,
+}
+
+fn path_cache() -> &'static std::sync::Mutex<PathCache> {
     use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<LoginShellPath>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(LoginShellPath::Uninit))
+    static CACHE: OnceLock<Mutex<PathCache>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        Mutex::new(PathCache {
+            generation: 0,
+            state: LoginShellPath::Uninit,
+        })
+    })
 }
 
 fn fetch_login_shell_path_inner() -> Option<String> {
@@ -120,45 +135,70 @@ fn fetch_login_shell_path_inner() -> Option<String> {
 /// to invalidate the cache so the next call re-fetches — e.g. after the user
 /// installs Node.js mid-session and clicks Retry.
 ///
-/// The lock is never held while the login shell spawns: we check for a cached
-/// value, release the lock, run the shell, then re-lock to write. Two concurrent
-/// callers may both run the shell (last-writer-wins is fine — both produce the
-/// same result), but neither blocks a concurrent agent spawn on the Mutex.
+/// The lock is never held while the login shell spawns: we read the cached
+/// value and the current generation, release the lock, run the shell, then
+/// re-lock to publish. Publication is generation-guarded so a probe that
+/// started before a [`refresh_login_shell_path`] can never overwrite the fresh
+/// value: if the generation moved while the probe ran, its result is discarded.
+/// Within one generation two callers may both probe; a failure/timeout result
+/// (`None`) never clobbers an already-committed success, so a slow timeout can't
+/// undo a peer's fresh PATH.
 pub fn login_shell_path() -> Option<String> {
-    // Fast path: return cached result without spawning a shell.
-    {
+    // Fast path: return the cached result and capture the generation the probe
+    // will run under, all under a single lock.
+    let generation = {
         let guard = path_cache().lock().unwrap_or_else(|e| e.into_inner());
-        if let LoginShellPath::Probed(ref result) = *guard {
+        if let LoginShellPath::Probed(ref result) = guard.state {
             return result.clone();
         }
-    }
+        guard.generation
+    };
 
     // Slow path: spawn shell outside any lock.
     let result = fetch_login_shell_path_inner();
 
-    // Write back; last-writer-wins is safe here.
-    {
-        let mut guard = path_cache().lock().unwrap_or_else(|e| e.into_inner());
-        *guard = LoginShellPath::Probed(result.clone());
-    }
+    // Publish only if our generation is still current, and never let a failure
+    // overwrite a peer's committed success within the same generation.
+    publish_probe_result(generation, result.clone());
 
     result
+}
+
+/// Commit a probe's `result` under the generation it started with.
+///
+/// A probe whose generation is stale (a [`refresh_login_shell_path`] ran while
+/// it was probing) is dropped. Within a live generation a failure/timeout
+/// (`None`) never overwrites an already-committed success. This is the sole
+/// writer of a probed value, so the two race outcomes are decided here.
+fn publish_probe_result(generation: u64, result: Option<String>) {
+    let mut guard = path_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if guard.generation != generation {
+        return;
+    }
+    let keep_committed_success =
+        result.is_none() && matches!(guard.state, LoginShellPath::Probed(Some(_)));
+    if !keep_committed_success {
+        guard.state = LoginShellPath::Probed(result);
+    }
 }
 
 /// Invalidate the login-shell PATH cache so the next [`login_shell_path`] call
 /// re-fetches from a fresh login shell.
 ///
 /// Called before every install/retry operation and on Doctor Re-run so a
-/// newly-installed tool becomes visible without restarting the app.
+/// newly-installed tool becomes visible without restarting the app. Bumping the
+/// generation revokes any in-flight probe's writeback, so a shell that started
+/// before this refresh cannot recache its now-stale result.
 pub(crate) fn refresh_login_shell_path() {
     let mut guard = path_cache().lock().unwrap_or_else(|e| e.into_inner());
-    *guard = LoginShellPath::Uninit;
+    guard.generation = guard.generation.wrapping_add(1);
+    guard.state = LoginShellPath::Uninit;
 }
 
 #[cfg(test)]
 pub(crate) fn is_login_shell_path_uninit() -> bool {
     matches!(
-        *path_cache().lock().unwrap_or_else(|e| e.into_inner()),
+        path_cache().lock().unwrap_or_else(|e| e.into_inner()).state,
         LoginShellPath::Uninit
     )
 }
@@ -250,4 +290,75 @@ pub(crate) fn parse_semver_tag(s: &str) -> Option<(u64, u64, u64)> {
     let patch_str = parts.next()?;
     let patch = patch_str.split('-').next()?.parse::<u64>().ok()?;
     Some((major, minor, patch))
+}
+
+#[cfg(test)]
+mod path_cache_race_tests {
+    use super::*;
+
+    fn cached_probe() -> Option<Option<String>> {
+        match path_cache().lock().unwrap_or_else(|e| e.into_inner()).state {
+            LoginShellPath::Uninit => None,
+            LoginShellPath::Probed(ref v) => Some(v.clone()),
+        }
+    }
+
+    fn generation() -> u64 {
+        path_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .generation
+    }
+
+    /// A probe that started before a refresh must not recache its stale result.
+    /// Models the P1 interleaving: probe A captures generation G; a forced
+    /// refresh bumps to G+1 and (via probe B) commits a fresh PATH; then A
+    /// finishes late with a false-negative `None`. A's publish must be dropped
+    /// because its generation is stale, leaving B's fresh value intact.
+    #[test]
+    fn stale_probe_cannot_commit_after_refresh() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+        refresh_login_shell_path();
+
+        // Probe A starts here.
+        let gen_a = generation();
+
+        // A forced refresh invalidates the cache; probe B (new generation) then
+        // commits a fresh PATH.
+        refresh_login_shell_path();
+        let gen_b = generation();
+        assert_ne!(gen_a, gen_b, "refresh must bump the generation");
+        publish_probe_result(gen_b, Some("/fresh/bin".to_string()));
+
+        // Probe A finishes late with a false-negative and tries to publish
+        // under its stale generation.
+        publish_probe_result(gen_a, None);
+
+        assert_eq!(
+            cached_probe(),
+            Some(Some("/fresh/bin".to_string())),
+            "a pre-refresh probe must not overwrite the post-refresh fresh PATH"
+        );
+    }
+
+    /// Within one generation a slow failure/timeout must not clobber a peer's
+    /// already-committed success. Two cold callers race under generation G: the
+    /// success lands first, the timeout (`None`) lands second and is dropped.
+    #[test]
+    fn timeout_does_not_clobber_committed_success() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+        refresh_login_shell_path();
+        let gen = generation();
+
+        // Caller 1 succeeds.
+        publish_probe_result(gen, Some("/usr/local/bin".to_string()));
+        // Caller 2 times out later in the same generation.
+        publish_probe_result(gen, None);
+
+        assert_eq!(
+            cached_probe(),
+            Some(Some("/usr/local/bin".to_string())),
+            "a same-generation timeout must not overwrite a committed success"
+        );
+    }
 }
