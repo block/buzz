@@ -153,7 +153,7 @@ pub const RESULT_GATED_KINDS: &[u32] = &[
 /// `#p` values exactly equal the authenticated reader's pubkey. For stored
 /// (non-ephemeral) kinds in this set, the storage layer additionally writes a
 /// NULL `search_tsv` so the event is unsearchable through NIP-50 FTS
-/// (`schema/schema.sql` and `migrations/0001_initial_schema.sql` — drift
+/// (`schema/schema.sql` and the forward FTS migrations — drift
 /// caught by `p_gated_persistent_kinds_have_storage_null_tsvector` in
 /// `crates/buzz-search/tests/fts_integration.rs`).
 ///
@@ -847,6 +847,7 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
             | KIND_DM_VISIBILITY
             | KIND_THREAD_SUMMARY
             | KIND_WINDOW_BOUNDS
+            | KIND_WORKFLOW_MENTION_WAKE
     )
 }
 
@@ -919,8 +920,9 @@ mod tests {
     }
 
     #[test]
-    fn nip43_membership_snapshot_is_relay_only() {
+    fn relay_generated_kinds_are_relay_only() {
         assert!(is_relay_only_kind(KIND_NIP43_MEMBERSHIP_LIST));
+        assert!(is_relay_only_kind(KIND_WORKFLOW_MENTION_WAKE));
         assert!(!is_relay_only_kind(KIND_NIP43_LEAVE_REQUEST));
     }
 

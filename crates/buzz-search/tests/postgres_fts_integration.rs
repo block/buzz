@@ -30,8 +30,14 @@ const MIGRATION_0008_SQL: &str =
 const MIGRATION_0014_SQL: &str = include_str!("../../../migrations/0014_push_lease_fts.sql");
 const MIGRATION_0033_SQL: &str =
     include_str!("../../../migrations/0033_private_managed_agent_fts.sql");
+const MIGRATION_0036_SQL: &str =
+    include_str!("../../../migrations/0036_workflow_mention_wake_fts.sql");
 
 async fn setup() -> (PgPool, String) {
+    setup_with_search_policy(true).await
+}
+
+async fn setup_with_search_policy(apply_fresh_allowlist: bool) -> (PgPool, String) {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
     let schema = format!("fts_test_{}", Uuid::new_v4().simple());
     // Connect to the default schema first to create the test schema.
@@ -77,15 +83,20 @@ async fn setup() -> (PgPool, String) {
     pool.execute(MIGRATION_0007_SQL)
         .await
         .expect("apply 0007 migration");
-    pool.execute(MIGRATION_0008_SQL)
-        .await
-        .expect("apply 0008 migration");
+    if apply_fresh_allowlist {
+        pool.execute(MIGRATION_0008_SQL)
+            .await
+            .expect("apply 0008 migration");
+    }
     pool.execute(MIGRATION_0014_SQL)
         .await
         .expect("apply 0014 migration");
     pool.execute(MIGRATION_0033_SQL)
         .await
         .expect("apply 0033 migration");
+    pool.execute(MIGRATION_0036_SQL)
+        .await
+        .expect("apply 0036 migration");
     (pool, schema)
 }
 
@@ -1414,8 +1425,8 @@ async fn author_only_kinds_are_storage_level_unsearchable() {
 /// search entry point could surface tokenized content from these kinds. The
 /// L1 NULL tsvector is the unbreakable backstop: `@@` mathematically cannot
 /// match NULL. This test catches the drift where someone adds a persistent
-/// kind to `P_GATED_KINDS` without the matching `schema/schema.sql` +
-/// `migrations/0001_initial_schema.sql` skip-set update.
+/// kind to `P_GATED_KINDS` without the matching desired schema and forward
+/// migration exclusion.
 ///
 /// Ephemeral kinds (20000–29999) are skipped: they are never stored, so the
 /// storage-layer defense does not apply to them regardless of the schema
@@ -1428,7 +1439,10 @@ async fn author_only_kinds_are_storage_level_unsearchable() {
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
-    let (pool, schema) = setup().await;
+    // Exercise the brownfield negative skip-set. The fresh-install positive
+    // allowlist would make every unknown kind unsearchable and let a missing
+    // per-kind migration pass vacuously.
+    let (pool, schema) = setup_with_search_policy(false).await;
 
     let c = mk_community(&pool, "p-gated-tripwire.example").await;
     let token = "pgated_tripwire_marker_qwerty";

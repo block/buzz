@@ -48,6 +48,14 @@ pub fn requires_verified_wake(event: &Event, relay_pubkey: PublicKey) -> bool {
         && single_tag(event, "workflow-step").is_some()
 }
 
+/// Authenticate and parse a relay-signed workflow wake before any authority lookup.
+pub fn authenticate(wake_event: &Event, relay_pubkey: PublicKey) -> Option<WorkflowMentionWake> {
+    if wake_event.pubkey != relay_pubkey || wake_event.verify().is_err() {
+        return None;
+    }
+    WorkflowMentionWake::parse(wake_event).ok()
+}
+
 /// Verify every authority edge and return the visible message plus its signed author principal.
 pub fn verify(
     wake_event: &Event,
@@ -56,10 +64,7 @@ pub fn verify(
     agent_pubkey: PublicKey,
     subscription_channel: Uuid,
 ) -> Option<(Event, String)> {
-    if wake_event.pubkey != relay_pubkey || wake_event.verify().is_err() {
-        return None;
-    }
-    let wake = WorkflowMentionWake::parse(wake_event).ok()?;
+    let wake = authenticate(wake_event, relay_pubkey)?;
     if wake.recipient() != agent_pubkey
         || authority.workflow_owner != authority.definition.pubkey.to_hex()
         || wake.run_id() != authority.run_id
@@ -255,6 +260,23 @@ mod tests {
             &ordinary,
             fixture.relay.public_key()
         ));
+    }
+
+    #[test]
+    fn rejects_forged_wake_before_authority_lookup() {
+        let fixture = Fixture::valid();
+        let forged = WorkflowMentionWake::new(
+            fixture.agent.public_key(),
+            fixture.channel,
+            fixture.run,
+            fixture.definition.id,
+            fixture.message.id,
+        )
+        .sign(&Keys::generate())
+        .expect("forged wake");
+
+        assert!(authenticate(&forged, fixture.relay.public_key()).is_none());
+        assert!(authenticate(&fixture.wake, fixture.relay.public_key()).is_some());
     }
 
     #[test]

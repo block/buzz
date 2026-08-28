@@ -3224,11 +3224,11 @@ async fn tokio_main() -> Result<()> {
                             let (buzz_event, admission_author_override) = if kind_u32
                                 == buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE
                             {
-                                let Some(wake) = buzz_core::workflow_wake::WorkflowMentionWake::parse(
+                                let Some(wake) = workflow_wake::authenticate(
                                     &buzz_event.event,
-                                )
-                                .ok()
-                                else {
+                                    workflow_relay_pubkey,
+                                ) else {
+                                    tracing::warn!("workflow wake authentication failed");
                                     continue;
                                 };
                                 let authority = match ctx

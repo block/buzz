@@ -911,7 +911,7 @@ mod postgres_tests {
         assert!(migrations[32].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30179"));
         assert!(include_str!("../../../../schema/schema.sql")
-            .contains("kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200)"));
+            .contains("kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200, 44620)"));
 
         // Public push-gateway authority is intentionally deployment-global and
         // durable: immediate revocation and hostile-relay admission cannot be
@@ -1193,6 +1193,13 @@ mod postgres_tests {
                 .count(),
             2
         );
+
+        // Durable workflow wakes are recipient-gated and must remain outside
+        // full-text search on both fresh and brownfield databases.
+        assert_eq!(migrations[35].version, 36);
+        let workflow_wake_fts = migrations[35].sql.as_str();
+        assert!(workflow_wake_fts.contains("kind = 44620"));
+        assert!(desired_schema.contains("44200, 44620"));
 
         // pgschema intentionally reconciles DDL, not seed DML or table storage
         // parameters. Its post-apply reconciliation must restore and verify
