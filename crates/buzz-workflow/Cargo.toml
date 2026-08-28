@@ -12,6 +12,7 @@ buzz-core = { workspace = true }
 buzz-db   = { workspace = true }
 buzz-deletion = { workspace = true }
 hex         = { workspace = true }
+sha2        = { workspace = true }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 serde_yaml  = { workspace = true }

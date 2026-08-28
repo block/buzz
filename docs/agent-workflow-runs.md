@@ -64,3 +64,9 @@ The durable database remains authoritative. Signed Nostr events are the realtime
 Every event carries d (the run UUID), h, workflow, and run tags. Task-scoped receipts also carry task. Each independently addressed worker has its own p tag; textual at-mentions are not a routing primitive. Receipts are signed by the actual worker or coordinator identity and are excluded from workflow triggers and the general activity feed.
 
 The agent-facing CLI exposes buzz agent-runs status and history as read-only queries. They never issue an LLM turn or extend a deadline. Snapshot, task, checkpoint, artifact, and transition subcommands publish signed events through the generic Nostr bridge; they do not add a feature-specific HTTP endpoint. Pass --participant once for each worker identity and use --content - for JSON from stdin.
+
+## Shared document ingestion
+
+Format-specific adapters provide the original source bytes and extracted UTF-8 pages. The workflow core does not pretend to parse PDF or OCR itself. It builds one deterministic immutable manifest containing the source SHA-256, physical page, optional logical label (for example, a printed folio), UTF-8 byte range, stable chunk id, chunk SHA-256, and canonical manifest SHA-256.
+
+Every worker in a run consumes the same manifest hash. Verification rejects source, coordinate, chunk, or manifest tampering. Retrieval is deterministic and bounded to at most 32 chunks and 256 KiB per call; callers may filter by chunk id, physical page, logical label, and case-insensitive terms. The scheduler persists the manifest as a versioned workflow artifact before agent fan-out.

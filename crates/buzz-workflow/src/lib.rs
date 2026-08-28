@@ -31,11 +31,16 @@
 //! ```
 
 pub mod action_sink;
+pub mod document;
 pub mod error;
 pub mod executor;
 pub mod schema;
 
 pub use action_sink::{ActionSink, ActionSinkError};
+pub use document::{
+    build_document_manifest, retrieve_document_chunks, verify_document_manifest, DocumentChunk,
+    DocumentError, DocumentInput, DocumentManifest, ExtractedPage, IngestLimits, RetrievalQuery,
+};
 pub use error::{PartialProgress, WorkflowError};
 pub use executor::ExecutionResult;
 pub use schema::{ActionDef, Step, TriggerDef, WorkflowDef};
