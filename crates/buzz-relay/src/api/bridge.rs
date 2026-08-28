@@ -187,7 +187,7 @@ async fn check_nip98_replay_with_guard(
                 "NIP-98 replay guard failed; rejecting request fail-closed"
             );
             Err(api_error(
-                StatusCode::UNAUTHORIZED,
+                StatusCode::SERVICE_UNAVAILABLE,
                 "NIP-98: replay check unavailable",
             ))
         }
@@ -2876,7 +2876,8 @@ mod postgres_tests {
     /// This test does not require Redis — it injects a guard that always
     /// returns `Err`, exercising the `Err =>` arm in
     /// `check_nip98_replay_with_guard` directly. Bites if the arm is changed
-    /// to admit (`Ok(())` / `Ok(true)`) instead of returning 401.
+    /// to admit (`Ok(())` / `Ok(true)`) instead of returning retryable 503.
+    /// A dependency outage is not a replay or invalid-credential verdict.
     #[tokio::test]
     async fn nip98_replay_check_fails_closed_when_guard_errors() {
         use buzz_auth::AuthError;
@@ -2884,23 +2885,29 @@ mod postgres_tests {
         use std::future::Future;
         use std::pin::Pin;
 
-        struct AlwaysErrGuard;
-        impl Nip98ReplayGuard for AlwaysErrGuard {
+        struct TestGuard {
+            unavailable: bool,
+        }
+        impl Nip98ReplayGuard for TestGuard {
             fn try_mark_in_scope<'a>(
                 &'a self,
                 _scope: &'a str,
                 _event_id: &'a EventId,
                 _ttl_secs: u64,
             ) -> Pin<Box<dyn Future<Output = Result<bool, AuthError>> + Send + 'a>> {
-                Box::pin(async {
-                    Err(AuthError::Internal(
-                        "simulated Redis pool acquire failure".into(),
-                    ))
+                Box::pin(async move {
+                    if self.unavailable {
+                        Err(AuthError::Internal(
+                            "simulated Redis pool acquire failure".into(),
+                        ))
+                    } else {
+                        Ok(false)
+                    }
                 })
             }
         }
 
-        let guard = AlwaysErrGuard;
+        let guard = TestGuard { unavailable: true };
         let tenant = fresh_tenant("relay-a.example");
         let event_id_bytes = fresh_nip98_event_id_bytes();
 
@@ -2909,8 +2916,8 @@ mod postgres_tests {
             .expect_err("guard error MUST fail closed, never admit");
         assert_eq!(
             status,
-            StatusCode::UNAUTHORIZED,
-            "fail-closed must return 401"
+            StatusCode::SERVICE_UNAVAILABLE,
+            "fail-closed dependency failure must remain retryable"
         );
         let msg = body
             .get("error")
@@ -2921,6 +2928,14 @@ mod postgres_tests {
             "fail-closed body must carry the unavailable signal so callers can \
              distinguish unavailability from replay; got body = {body:?}"
         );
+        let (status, _) = check_nip98_replay_with_guard(
+            &TestGuard { unavailable: false },
+            &tenant,
+            event_id_bytes,
+        )
+        .await
+        .expect_err("a real replay stays denied");
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     /// Build a signed NIP-98 event JSON string for `url` + `method`, mirroring
