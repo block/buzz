@@ -36,6 +36,11 @@ impl Fixture {
             CreateCommunityWithOwnerResult::Created(record) => record.id,
             other => panic!("unexpected {other:?}"),
         };
+        state
+            .db
+            .ensure_user(community, &owner.public_key().to_bytes())
+            .await
+            .expect("owner user");
         let channel = state
             .db
             .create_channel(
