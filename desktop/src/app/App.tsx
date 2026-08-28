@@ -565,7 +565,7 @@ function CommunityApp({
           <div
             aria-hidden="true"
             className={cn(
-              "fixed inset-0 z-50 transition-opacity",
+              "pointer-events-none fixed inset-0 z-50 transition-opacity",
               bootSplashPhase === "fading" ? "opacity-0" : "opacity-100",
             )}
             data-testid="boot-splash-overlay"
