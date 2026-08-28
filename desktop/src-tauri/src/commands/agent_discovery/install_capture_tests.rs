@@ -216,6 +216,33 @@ fn test_observer_caps_a_pathologically_long_line() {
     );
 }
 
+/// The cap lands at a byte offset, so a line of multi-byte text hits it
+/// mid-character. Hangul is three bytes per syllable and 4096 is not a
+/// multiple of three, so this line is guaranteed to be cut inside one --
+/// which must trim the partial syllable, not emit U+FFFD in its place.
+#[test]
+fn test_observer_caps_a_long_multibyte_line_without_replacement_chars() {
+    let huge = "\u{ac00}".repeat(100_000); // 가
+
+    let lines = observed_lines(&[huge.as_bytes(), b"\n"]);
+
+    assert_eq!(lines.len(), 1);
+    assert!(
+        lines[0].len() <= LineSplitter::MAX_LINE,
+        "line must be capped, got {} bytes",
+        lines[0].len()
+    );
+    assert!(
+        !lines[0].contains('\u{fffd}'),
+        "cap must trim the partial syllable, not replace it: {:?}",
+        lines[0].chars().rev().take(4).collect::<String>()
+    );
+    assert!(
+        lines[0].chars().all(|c| c == '\u{ac00}'),
+        "every surviving char must be intact"
+    );
+}
+
 /// A drain with no observer still captures — the log and UI views do not
 /// depend on anyone watching.
 #[test]

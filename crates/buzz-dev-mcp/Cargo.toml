@@ -49,5 +49,8 @@ nix = { version = "0.31", default-features = false, features = ["signal", "proce
 # resident (pulled transitively), so this adds no new crate. Win32_Security is
 # required because CreateJobObjectW takes a SECURITY_ATTRIBUTES parameter;
 # Win32_System_Threading supplies IO_COUNTERS inside the extended-limit struct.
+# Win32_Globalization supplies MultiByteToWideChar, which the shell tool uses to
+# read child output written in the machine's ANSI codepage (cp949 and friends)
+# rather than replacing every non-ASCII byte with U+FFFD.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading"] }

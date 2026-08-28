@@ -964,8 +964,72 @@ fn align_to_char_boundary(buf: &[u8], start: usize) -> usize {
     i
 }
 
+/// Decode captured child output.
+///
+/// UTF-8 first, so every tool that already speaks it (git, node, cargo, the
+/// MSYS coreutils bash runs) decodes byte-for-byte as before.
+///
+/// The fallback exists because Windows has no `LANG`. On POSIX the child
+/// inherits `LANG`/`LC_CTYPE` and answers in UTF-8; on Windows a console
+/// program built against the CRT writes the machine's *ANSI codepage* instead
+/// -- cp949 on a Korean install, cp936 on a Chinese one. Those bytes are not
+/// valid UTF-8, so a plain lossy decode turns every Hangul syllable into
+/// `U+FFFD` and the model reads a run of replacement characters where the
+/// filename was. Decoding through the system codepage recovers the text the
+/// user sees in their own console.
 fn lossy(buf: Vec<u8>) -> String {
-    String::from_utf8(buf).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+    match String::from_utf8(buf) {
+        Ok(s) => s,
+        Err(e) => decode_non_utf8(e.as_bytes()),
+    }
+}
+
+#[cfg(not(windows))]
+fn decode_non_utf8(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Windows: reinterpret non-UTF-8 output as the system ANSI codepage, falling
+/// back to the lossy decode when the conversion fails. `CP_ACP` rather than a
+/// hard-coded 949 -- the right codepage is whichever one the child's CRT
+/// actually encoded with, which is the machine's, not one we can name here.
+#[cfg(windows)]
+fn decode_non_utf8(bytes: &[u8]) -> String {
+    ansi_codepage_decode(bytes).unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned())
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn ansi_codepage_decode(bytes: &[u8]) -> Option<String> {
+    use windows_sys::Win32::Globalization::{MultiByteToWideChar, CP_ACP};
+
+    if bytes.is_empty() {
+        return Some(String::new());
+    }
+    let len = i32::try_from(bytes.len()).ok()?;
+
+    // Flags stay 0 (not `MB_ERR_INVALID_CHARS`): a tail slice can begin inside
+    // a double-byte sequence, and substituting that one lead byte beats
+    // rejecting the whole 8 KiB window.
+    //
+    // SAFETY: `bytes` is a readable slice of `len` bytes. A null destination
+    // with a zero count is the documented length probe, so nothing is written.
+    let wide_len =
+        unsafe { MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), len, std::ptr::null_mut(), 0) };
+    if wide_len <= 0 {
+        return None;
+    }
+
+    let mut wide = vec![0u16; wide_len as usize];
+    // SAFETY: same input slice, and `wide` holds exactly the `wide_len`
+    // elements the probe above asked for.
+    let written =
+        unsafe { MultiByteToWideChar(CP_ACP, 0, bytes.as_ptr(), len, wide.as_mut_ptr(), wide_len) };
+    if written <= 0 {
+        return None;
+    }
+    wide.truncate(written as usize);
+    String::from_utf16(&wide).ok()
 }
 
 fn rotate_artifacts(state: &SharedState, new_path: PathBuf) {
@@ -991,6 +1055,49 @@ mod tests {
     fn make_state(cwd: &std::path::Path) -> SharedState {
         let shim = Shim::install().expect("shim install");
         SharedState::new(cwd.to_path_buf(), shim).expect("state new")
+    }
+
+    /// UTF-8 output must survive untouched -- the fallback is only for bytes
+    /// that are not valid UTF-8, so the common path cannot regress.
+    #[test]
+    fn lossy_passes_utf8_through_unchanged() {
+        let text = "한글 output with emoji 🐝 and ascii";
+
+        assert_eq!(lossy(text.as_bytes().to_vec()), text);
+    }
+
+    /// The Windows fallback decodes through `CP_ACP`, which is 1252 on the CI
+    /// runner rather than 949. Assert the property that holds on any codepage:
+    /// high bytes become real characters instead of replacement characters.
+    #[cfg(windows)]
+    #[test]
+    fn lossy_decodes_non_utf8_bytes_through_the_system_codepage() {
+        // 0xB0 0xA1 is "가" in cp949 and two mapped characters in cp1252.
+        // Neither is valid UTF-8, so today's decode yields U+FFFD twice.
+        let decoded = lossy(vec![b'>', b' ', 0xB0, 0xA1, b'\n']);
+
+        assert!(
+            !decoded.contains('\u{fffd}'),
+            "ANSI-codepage bytes must decode, not be replaced: {decoded:?}"
+        );
+        assert!(
+            decoded.starts_with("> "),
+            "ASCII prefix intact: {decoded:?}"
+        );
+        assert!(
+            decoded.ends_with('\n'),
+            "trailing newline intact: {decoded:?}"
+        );
+    }
+
+    /// Bytes that no codepage can rescue still degrade to the lossy decode
+    /// rather than dropping the stream.
+    #[test]
+    fn lossy_never_loses_the_ascii_around_undecodable_bytes() {
+        let decoded = lossy(vec![b'o', b'k', 0xFF, b'!']);
+
+        assert!(decoded.starts_with("ok"), "got {decoded:?}");
+        assert!(decoded.ends_with('!'), "got {decoded:?}");
     }
 
     /// Pull the JSON body out of a CallToolResult so tests can assert on fields.

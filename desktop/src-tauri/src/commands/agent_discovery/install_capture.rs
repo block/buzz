@@ -180,7 +180,12 @@ impl LineSplitter {
     fn feed(&mut self, chunk: &[u8], mut emit: impl FnMut(&str)) {
         for byte in chunk {
             if *byte == b'\n' {
-                let line = String::from_utf8_lossy(&self.partial).trim().to_string();
+                // `MAX_LINE` cuts at a byte offset, so a line that reached
+                // the cap can end mid-character -- and every char past
+                // U+07FF is multi-byte, which is all of Hangul. Trim that
+                // partial sequence the way `BoundedOutput::render` does
+                // rather than emitting a trailing replacement character.
+                let line = decode(utf8_prefix(&self.partial)).trim().to_string();
                 self.partial.clear();
                 if !line.is_empty() {
                     emit(&line);
