@@ -81,9 +81,7 @@ Future<T?> showBuzzModalBottomSheet<T>({
         ),
       ),
     ),
-    backgroundColor: isIos || title != null
-        ? Colors.transparent
-        : backgroundColor,
+    backgroundColor: isIos || title != null ? Colors.transparent : surfaceColor,
     barrierLabel: barrierLabel,
     elevation: elevation,
     shape: shape,

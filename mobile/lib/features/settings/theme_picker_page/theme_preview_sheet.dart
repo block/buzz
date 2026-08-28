@@ -84,9 +84,16 @@ class _ThemePreviewExperience extends HookConsumerWidget {
     void applySelection() {
       unawaited(HapticFeedback.mediumImpact());
       final notifier = ref.read(communityThemeProvider.notifier);
-      notifier.setMode(draftMode.value);
-      notifier.setTheme(selectedEntry.name);
-      if (supportsAccent) notifier.setAccent(draftAccent.value);
+      final currentAccent = ref.read(communityThemeProvider).accent;
+      notifier.setPreference(
+        CommunityThemePreference(
+          theme: selectedEntry.name,
+          accent: supportsAccent
+              ? accentColors[draftAccent.value].wireValue
+              : currentAccent,
+          followSystem: draftMode.value == ThemeMode.system,
+        ),
+      );
       Navigator.of(context).pop();
     }
 

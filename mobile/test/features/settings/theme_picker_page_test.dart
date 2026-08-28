@@ -17,6 +17,7 @@ Future<SharedPreferences> _pumpPicker(
   WidgetTester tester, {
   Map<String, Object> prefs = const {},
   bool reduceMotion = false,
+  CommunityThemeNotifier Function()? themeNotifier,
 }) async {
   final instance = await _prefs(prefs);
   await tester.pumpWidget(
@@ -25,7 +26,11 @@ Future<SharedPreferences> _pumpPicker(
         data: MediaQueryData(disableAnimations: reduceMotion),
         child: const ThemePickerPage(),
       ),
-      overrides: [savedPrefsProvider.overrideWithValue(instance)],
+      overrides: [
+        savedPrefsProvider.overrideWithValue(instance),
+        if (themeNotifier != null)
+          communityThemeProvider.overrideWith(themeNotifier),
+      ],
     ),
   );
   await tester.pumpAndSettle();
@@ -129,6 +134,22 @@ void main() {
         expect(border.top.strokeAlign, BorderSide.strokeAlignOutside);
       },
     );
+
+    testWidgets('exposes only image labels for decorative previews', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      try {
+        await _pumpPicker(tester);
+
+        expect(find.bySemanticsLabel(RegExp('Theme preview')), findsNothing);
+        expect(find.bySemanticsLabel(RegExp('Home preview')), findsWidgets);
+        expect(find.bySemanticsLabel(RegExp('Chat preview')), findsWidgets);
+        expect(find.bySemanticsLabel(RegExp('Community')), findsNothing);
+      } finally {
+        semantics.dispose();
+      }
+    });
 
     testWidgets('theme name trails the preview during a swipe', (tester) async {
       await _pumpPicker(tester);
@@ -372,6 +393,22 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('theme-preview-set')));
       await tester.pumpAndSettle();
       expect(instance.getString('buzz_color_scheme'), isNot('buzz'));
+    });
+
+    testWidgets('Set submits one complete theme preference', (tester) async {
+      final notifier = _RecordingCommunityThemeNotifier();
+      await _pumpPicker(tester, themeNotifier: () => notifier);
+
+      await _swipeToNextTheme(tester);
+      expect(notifier.preferenceWrites, 0);
+
+      await tester.tap(find.byKey(const ValueKey('theme-preview-set')));
+      await tester.pumpAndSettle();
+
+      expect(notifier.preferenceWrites, 1);
+      expect(notifier.lastPreference?.theme, isNot('buzz'));
+      expect(notifier.lastPreference?.followSystem, isTrue);
+      expect(notifier.lastPreference?.accent, defaultCommunityTheme.accent);
     });
 
     testWidgets('preserves the stored accent when leaving Buzz', (
@@ -687,4 +724,19 @@ void main() {
       );
     });
   });
+}
+
+class _RecordingCommunityThemeNotifier extends CommunityThemeNotifier {
+  int preferenceWrites = 0;
+  CommunityThemePreference? lastPreference;
+
+  @override
+  CommunityThemePreference build() => defaultCommunityTheme;
+
+  @override
+  void setPreference(CommunityThemePreference preference) {
+    preferenceWrites++;
+    lastPreference = preference;
+    state = preference;
+  }
 }

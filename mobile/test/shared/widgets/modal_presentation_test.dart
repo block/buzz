@@ -444,6 +444,57 @@ void main() {
     },
   );
 
+  testWidgets('untitled Android sheets paint the utility route surface', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => FilledButton(
+                onPressed: () => showBuzzModalBottomSheet<void>(
+                  context: context,
+                  builder: (sheetContext) => ColoredBox(
+                    key: const ValueKey('untitled-sheet-container'),
+                    color: Theme.of(
+                      sheetContext,
+                    ).colorScheme.surfaceContainerHighest,
+                    child: const SizedBox(
+                      height: 80,
+                      child: Text('Sheet body'),
+                    ),
+                  ),
+                ),
+                child: const Text('Open sheet'),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Open sheet'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<BottomSheet>(find.byType(BottomSheet)).backgroundColor,
+        lightColorScheme.surfaceContainerHighest,
+      );
+      expect(
+        tester
+            .widget<ColoredBox>(
+              find.byKey(const ValueKey('untitled-sheet-container')),
+            )
+            .color,
+        lightColorScheme.surface,
+      );
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
   testWidgets('sheet divider appears only when content scrolls under header', (
     tester,
   ) async {

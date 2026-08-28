@@ -28,37 +28,33 @@ class _ThemeHomePreview extends StatelessWidget {
             topSectionGradient: topSectionGradient,
           );
 
-    return Semantics(
-      label: 'Theme preview',
-      image: true,
-      child: Container(
-        key: const ValueKey('theme-home-preview'),
-        padding: const EdgeInsets.symmetric(vertical: Grid.twelve),
-        decoration: BoxDecoration(
-          color: context.colors.surfaceContainerLow,
-          borderRadius: BorderRadius.circular(Radii.container),
-        ),
-        clipBehavior: Clip.antiAlias,
-        child: FittedBox(
-          fit: BoxFit.contain,
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _PreviewDeviceFrame(
-                key: const ValueKey('theme-home-device-preview'),
-                theme: previewTheme,
-                semanticLabel: 'Home preview',
-                child: const _FigmaHomeScreen(),
-              ),
-              const SizedBox(width: 96),
-              _PreviewDeviceFrame(
-                key: const ValueKey('theme-chat-device-preview'),
-                theme: previewTheme,
-                semanticLabel: 'Chat preview',
-                child: const _FigmaChatScreen(),
-              ),
-            ],
-          ),
+    return Container(
+      key: const ValueKey('theme-home-preview'),
+      padding: const EdgeInsets.symmetric(vertical: Grid.twelve),
+      decoration: BoxDecoration(
+        color: context.colors.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(Radii.container),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: FittedBox(
+        fit: BoxFit.contain,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _PreviewDeviceFrame(
+              key: const ValueKey('theme-home-device-preview'),
+              theme: previewTheme,
+              semanticLabel: 'Home preview',
+              child: const _FigmaHomeScreen(),
+            ),
+            const SizedBox(width: 96),
+            _PreviewDeviceFrame(
+              key: const ValueKey('theme-chat-device-preview'),
+              theme: previewTheme,
+              semanticLabel: 'Chat preview',
+              child: const _FigmaChatScreen(),
+            ),
+          ],
         ),
       ),
     );
@@ -79,6 +75,8 @@ class _PreviewDeviceFrame extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => Semantics(
+    container: true,
+    excludeSemantics: true,
     label: semanticLabel,
     image: true,
     child: Padding(
