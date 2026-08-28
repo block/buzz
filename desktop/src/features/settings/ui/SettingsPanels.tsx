@@ -9,6 +9,7 @@ import {
   Download,
   FlaskConical,
   Keyboard,
+  Layers,
   LayoutTemplate,
   MessagesSquare,
   MonitorCog,
@@ -62,6 +63,7 @@ import {
   ThreadLayoutSetting,
 } from "./AppearanceSettingsControls";
 import { ChannelTemplatesSettingsCard } from "./ChannelTemplatesSettingsCard";
+import { AccumulatorSettingsCard } from "@/features/accumulator/ui/AccumulatorSettingsCard";
 import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
 import { KeyboardShortcutsCard } from "./KeyboardShortcutsCard";
 import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeSettingsCard";
@@ -83,6 +85,7 @@ import { VoiceSettingsCard } from "./VoiceSettingsCard";
 
 export type SettingsSection =
   | "profile"
+  | "accumulator"
   | "notifications"
   | "voice"
   | "experimental"
@@ -103,6 +106,7 @@ export const DEFAULT_SETTINGS_SECTION: SettingsSection = "profile";
 
 const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "profile",
+  "accumulator",
   "notifications",
   "voice",
   "experimental",
@@ -187,6 +191,12 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     label: "Channel templates",
     icon: LayoutTemplate,
     featureGate: "channel-templates",
+  },
+  {
+    value: "accumulator",
+    label: "Accumulator",
+    icon: Layers,
+    featureGate: "accumulator",
   },
   {
     value: "compute",
@@ -836,6 +846,8 @@ export function renderSettingsSection(
       return <AgentsSettingsPanel />;
     case "channel-templates":
       return <ChannelTemplatesSettingsCard />;
+    case "accumulator":
+      return <AccumulatorSettingsCard />;
     case "compute":
       return <MeshComputeSettingsCard />;
     case "appearance":

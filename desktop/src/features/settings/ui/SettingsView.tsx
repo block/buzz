@@ -63,6 +63,7 @@ const settingsNavGroups: Array<{
       "custom-emoji",
       "local-archive",
       "channel-templates",
+      "accumulator",
     ],
   },
   {
