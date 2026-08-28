@@ -1439,19 +1439,12 @@ async fn resume_workflow_after_approval(
         return;
     }
 
-    let workflow = match db.get_workflow(community_id, workflow_id).await {
-        Ok(w) => w,
+    let (run, def) = match engine.load_run_definition(community_id, run_id).await {
+        Ok(loaded) => loaded,
         Err(e) => {
-            tracing::error!("resume_workflow: failed to fetch workflow {workflow_id}: {e}");
-            return;
-        }
-    };
-
-    let def: buzz_workflow::WorkflowDef = match serde_json::from_value(workflow.definition.clone())
-    {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::error!("resume_workflow: failed to parse workflow definition: {e}");
+            tracing::error!(
+                "resume_workflow: failed to load signed definition for run {run_id}: {e}"
+            );
             if let Err(db_err) = db
                 .update_workflow_run(
                     community_id,
@@ -1461,7 +1454,7 @@ async fn resume_workflow_after_approval(
                     &run.execution_trace,
                     Some(buzz_db::workflow::WorkflowRunFailure {
                         code: "invalid_definition",
-                        message: &format!("definition parse error: {e}"),
+                        message: &format!("signed run definition unavailable: {e}"),
                     }),
                 )
                 .await
@@ -1471,6 +1464,30 @@ async fn resume_workflow_after_approval(
             return;
         }
     };
+
+    if run.workflow_id != workflow_id {
+        tracing::error!(
+            "resume_workflow: approval workflow {workflow_id} does not match run workflow {}",
+            run.workflow_id
+        );
+        if let Err(e) = db
+            .update_workflow_run(
+                community_id,
+                run_id,
+                RunStatus::Failed,
+                run.current_step,
+                &run.execution_trace,
+                Some(buzz_db::workflow::WorkflowRunFailure {
+                    code: "approval_binding_mismatch",
+                    message: "approval does not belong to the workflow run",
+                }),
+            )
+            .await
+        {
+            tracing::error!("resume_workflow: failed to mark mismatched run as failed: {e}");
+        }
+        return;
+    }
 
     // Reconstruct step_outputs from execution trace for template resolution
     let mut initial_outputs: std::collections::HashMap<String, serde_json::Value> =
@@ -1514,6 +1531,34 @@ async fn resume_workflow_after_approval(
 mod postgres_tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+    #[derive(Default)]
+    struct RecordingActionSink {
+        messages: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl buzz_workflow::ActionSink for RecordingActionSink {
+        fn send_message(
+            &self,
+            _community_id: CommunityId,
+            _channel_id: &str,
+            text: &str,
+            _author_pubkey: &str,
+            _reply_to: Option<&str>,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<String, buzz_workflow::ActionSinkError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            self.messages
+                .lock()
+                .expect("recording action sink lock")
+                .push(text.to_string());
+            Box::pin(async { Ok("recorded-event".to_string()) })
+        }
+    }
 
     async fn persistence_test_context() -> (buzz_db::Db, TenantContext) {
         let url = std::env::var("BUZZ_TEST_DATABASE_URL")
@@ -1597,7 +1642,9 @@ mod postgres_tests {
             concat!(
                 "name: manual-trigger-pool\n",
                 "trigger:\n  on: message_posted\n",
-                "steps:\n  - id: send\n    action: send_message\n    text: done\n",
+                "steps:\n",
+                "  - id: approval\n    action: request_approval\n    from: '@owner'\n    message: approve\n",
+                "  - id: send\n    action: send_message\n    text: done\n",
             ),
         )
         .tags(vec![
@@ -1788,6 +1835,163 @@ mod postgres_tests {
                 .await
                 .expect("workflow principal must be able to trigger its own workflow");
         assert!(agent_result.message.contains("\"run_id\""));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn approval_resume_executes_the_run_bound_signed_revision() {
+        let (state, tenant, _human, agent, workflow_id, revision_a) =
+            manual_trigger_test_context().await;
+        let community_id = tenant.community();
+        let db = state.db.clone();
+        let trigger_context = serde_json::to_value(TriggerContext {
+            channel_id: exact_tag_value(&revision_a, "h")
+                .unwrap_or_default()
+                .to_string(),
+            ..TriggerContext::default()
+        })
+        .expect("serialize trigger context");
+        let run_id = db
+            .create_workflow_run(
+                community_id,
+                workflow_id,
+                Some(revision_a.id.as_bytes()),
+                None,
+                Some(&trigger_context),
+            )
+            .await
+            .expect("create revision A run");
+        db.update_workflow_run(
+            community_id,
+            run_id,
+            RunStatus::WaitingApproval,
+            0,
+            &serde_json::json!([{
+                "step_id": "approval",
+                "output": {"approved": true}
+            }]),
+            None,
+        )
+        .await
+        .expect("suspend revision A run for approval");
+
+        let channel_id = Uuid::parse_str(exact_tag_value(&revision_a, "h").expect("channel tag"))
+            .expect("channel UUID");
+        let revision_b = EventBuilder::new(
+            Kind::Custom(KIND_WORKFLOW_DEF as u16),
+            concat!(
+                "name: revision-b\n",
+                "trigger:\n  on: message_posted\n",
+                "steps:\n",
+                "  - id: approval\n    action: request_approval\n    from: '@owner'\n    message: approve\n",
+                "  - id: after\n    action: send_message\n    text: revision B\n",
+            ),
+        )
+        .tags(vec![
+            Tag::parse(["d", workflow_id.to_string().as_str()]).expect("d tag"),
+            Tag::parse(["h", channel_id.to_string().as_str()]).expect("h tag"),
+        ])
+        .sign_with_keys(&agent)
+        .expect("sign revision B");
+        let (_, definition_b_json) = buzz_workflow::WorkflowEngine::parse_yaml(&revision_b.content)
+            .expect("parse revision B");
+        let definition_b_hash = compute_definition_hash(&definition_b_json);
+        let mut tx = db
+            .begin_transaction()
+            .await
+            .expect("begin revision B update");
+        buzz_db::event::insert_event_in_transaction(
+            &mut tx,
+            community_id,
+            &revision_b,
+            Some(channel_id),
+        )
+        .await
+        .expect("persist revision B");
+        db.upsert_workflow(
+            &mut tx,
+            community_id,
+            workflow_id,
+            Some(channel_id),
+            &agent.public_key().to_bytes(),
+            "revision-b",
+            &definition_b_json,
+            &definition_b_hash,
+            revision_b.id.as_bytes(),
+        )
+        .await
+        .expect("materialize revision B");
+        tx.commit().await.expect("commit revision B update");
+
+        let sink = Arc::new(RecordingActionSink::default());
+        state.workflow_engine.set_action_sink(sink.clone());
+        resume_workflow_after_approval(
+            Arc::clone(&state.workflow_engine),
+            db.clone(),
+            community_id,
+            run_id,
+            workflow_id,
+            1,
+        )
+        .await;
+
+        let resumed = db
+            .get_workflow_run(community_id, run_id)
+            .await
+            .expect("load resumed run");
+        assert_eq!(resumed.status, RunStatus::Completed);
+        assert_eq!(
+            sink.messages
+                .lock()
+                .expect("recorded messages lock")
+                .as_slice(),
+            ["done"],
+            "approval resume must execute revision A, never current revision B"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn approval_resume_fails_closed_without_a_signed_run_revision() {
+        let (state, tenant, _human, _agent, workflow_id, _revision) =
+            manual_trigger_test_context().await;
+        let community_id = tenant.community();
+        let db = state.db.clone();
+        let run_id = db
+            .create_workflow_run(community_id, workflow_id, None, None, None)
+            .await
+            .expect("create legacy revisionless run");
+        db.update_workflow_run(
+            community_id,
+            run_id,
+            RunStatus::WaitingApproval,
+            0,
+            &serde_json::json!([]),
+            None,
+        )
+        .await
+        .expect("suspend revisionless run");
+
+        resume_workflow_after_approval(
+            Arc::clone(&state.workflow_engine),
+            db.clone(),
+            community_id,
+            run_id,
+            workflow_id,
+            1,
+        )
+        .await;
+
+        let failed = db
+            .get_workflow_run(community_id, run_id)
+            .await
+            .expect("load failed run");
+        assert_eq!(failed.status, RunStatus::Failed);
+        assert_eq!(failed.error_code.as_deref(), Some("invalid_definition"));
+        assert!(failed
+            .error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("no owner-signed definition revision")));
     }
 
     #[tokio::test]

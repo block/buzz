@@ -1778,7 +1778,31 @@ mod workflows {
             .to_string()
     }
 
-    /// Fire a workflow by id on `http_base`'s community (kind:46020, `d`=id).
+    /// Fetch the current owner-signed workflow revision from `http_base`'s
+    /// community. Manual triggers must name this exact event id.
+    async fn workflow_revision(http_base: &str, keys: &Keys, workflow_id: &str) -> String {
+        let resp = reqwest::Client::new()
+            .get(format!("{http_base}/workflows/{workflow_id}/revision"))
+            .header("X-Pubkey", keys.public_key().to_hex())
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("GET workflow revision from {http_base} failed: {e}"));
+        let status = resp.status();
+        let body = resp.text().await.expect("read workflow revision body");
+        assert!(
+            status.is_success(),
+            "workflow revision lookup against {http_base} failed with {status}: {body}"
+        );
+        let event: serde_json::Value = serde_json::from_str(&body)
+            .unwrap_or_else(|e| panic!("parse workflow revision JSON: {e} ({body:?})"));
+        event["id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("workflow revision response missing event id: {event}"))
+            .to_string()
+    }
+
+    /// Fire an exact workflow revision on `http_base`'s community
+    /// (kind:46020, `d`=workflow id, `e`=signed revision id).
     /// Returns a normalized `{accepted, message}` body so the caller can assert
     /// on the *wire-observable* accept/reject and message. The HTTP bridge maps
     /// `IngestError::Rejected` to HTTP 400 + `{error}` while the WS door maps the
@@ -1788,9 +1812,13 @@ mod workflows {
         http_base: &str,
         keys: &Keys,
         workflow_id: &str,
+        revision: &str,
     ) -> serde_json::Value {
         let event = EventBuilder::new(Kind::Custom(KIND_WORKFLOW_TRIGGER), "")
-            .tags(vec![Tag::parse(["d", workflow_id]).unwrap()])
+            .tags(vec![
+                Tag::parse(["d", workflow_id]).unwrap(),
+                Tag::parse(["e", revision]).unwrap(),
+            ])
             .sign_with_keys(keys)
             .unwrap();
 
@@ -1837,9 +1865,11 @@ mod workflows {
     ///      This deliberately removes "not a member of U in B" as an alternate
     ///      cause of the B rejection — K *is* a member of U in B.
     ///   2. Define a workflow in `U` under **A** (kind:30620). The server
-    ///      generates `W` and returns it. `W` is an A-community row.
-    ///   3. Fire `W` under host **B** (kind:46020, `d`=W) as K. Must be
-    ///      rejected — `accepted == false` and the generic `workflow not found`
+    ///      generates `W` and returns it. Retrieve its current signed revision
+    ///      `R` through A's authenticated revision endpoint. `W` and `R` are
+    ///      A-community records.
+    ///   3. Fire `W`/`R` under host **B** (kind:46020, `d`=W, `e`=R) as K. Must
+    ///      be rejected — `accepted == false` and the generic `workflow not found`
     ///      message — because `get_workflow(B_community, W)` finds nothing: `W`
     ///      exists only in A. K's membership of U-in-B is irrelevant; the
     ///      lookup never reaches the membership check.
@@ -1893,11 +1923,17 @@ mod workflows {
             uuid::Uuid::parse_str(&workflow_id).is_ok(),
             "server-generated workflow_id must be a UUID, got {workflow_id:?}"
         );
+        let revision = workflow_revision(&http_a, &keys, &workflow_id).await;
+        assert_eq!(
+            revision.len(),
+            64,
+            "signed workflow revision must be a 32-byte event id"
+        );
 
-        // (3) Fire W under host B as K. Must fail closed: W is an A-community
-        // row, and get_workflow(B_community, W) finds nothing. K is a member of
-        // U in B, so a leak here is the community fence failing, not membership.
-        let b_resp = trigger_workflow(&http_b, &keys, &workflow_id).await;
+        // (3) Fire W/R under host B as K. Keep the trigger grammar otherwise
+        // valid with A's real signed revision so only tenant-scoped workflow
+        // resolution can explain the rejection.
+        let b_resp = trigger_workflow(&http_b, &keys, &workflow_id, &revision).await;
         assert_eq!(
             b_resp["accepted"].as_bool(),
             Some(false),
@@ -1915,7 +1951,7 @@ mod workflows {
         // proves the B rejection is community confinement, not an
         // untriggerable workflow, and exercises the same-community happy path
         // through the fence under test.
-        let a_resp = trigger_workflow(&http_a, &keys, &workflow_id).await;
+        let a_resp = trigger_workflow(&http_a, &keys, &workflow_id, &revision).await;
         assert_eq!(
             a_resp["accepted"].as_bool(),
             Some(true),
