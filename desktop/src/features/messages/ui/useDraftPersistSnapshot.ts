@@ -77,6 +77,17 @@ function scopedDraftKey(draftKey: string): string {
 }
 
 /**
+ * Make an asynchronously recovered draft visible again after the optimistic
+ * send path marked its previous empty editor state as authoritative.
+ */
+export function markRecoveredDraftRestorable(
+  scope: string,
+  draftKey: string,
+): void {
+  authoritativelyClearedDraftKeys.delete(`${scope}:${draftKey}`);
+}
+
+/**
  * Owns the draft-persist lifecycle for `MessageComposer`.
  *
  * This hook:

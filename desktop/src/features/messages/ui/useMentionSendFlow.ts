@@ -24,7 +24,13 @@ import {
   buildOutgoingMessage,
   type ImetaMedia,
 } from "@/features/messages/lib/imetaMediaMarkdown";
+import {
+  getDraftStoreScope,
+  loadDraftEntryForScope,
+  persistDraftEntryForScope,
+} from "@/features/messages/lib/useDrafts";
 import { useActivePreparedLinkPreviews } from "./useActivePreparedLinkPreviews";
+import { markRecoveredDraftRestorable } from "./useDraftPersistSnapshot";
 import { invokeTauri } from "@/shared/api/tauri";
 import type { AcpRuntime, ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
@@ -335,8 +341,9 @@ export function useMentionSendFlow({
           ? prepareBackgroundMediaUpload(draft.queuedAttachments)
           : null;
       const persistPreflightDraft = () => {
-        if (isSendCancelled() || !draft.recoveryDraftKey) return;
-        drafts.persistDraft(
+        if (!draft.recoveryDraftKey) return;
+        persistDraftEntryForScope(
+          draft.recoveryDraftStoreScope,
           draft.recoveryDraftKey,
           draft.savedContent,
           draft.capturedChannelId ?? draft.recoveryDraftKey,
@@ -344,14 +351,21 @@ export function useMentionSendFlow({
           [...draft.savedSpoileredAttachmentUrls],
           draft.savedMentionRefs,
         );
+        markRecoveredDraftRestorable(
+          draft.recoveryDraftStoreScope,
+          draft.recoveryDraftKey,
+        );
         saveQueuedAttachmentsForDraft(
           draft.recoveryDraftKey,
           draft.queuedAttachments,
         );
       };
       const persistCanceledDraft = () => {
-        if (isSendCancelled() || !draft.recoveryDraftKey) return;
-        const existing = drafts.loadDraft(draft.recoveryDraftKey);
+        if (!draft.recoveryDraftKey) return;
+        const existing = loadDraftEntryForScope(
+          draft.recoveryDraftStoreScope,
+          draft.recoveryDraftKey,
+        );
         if (
           existing &&
           (existing.content !== draft.savedContent ||
@@ -364,13 +378,18 @@ export function useMentionSendFlow({
         ) {
           return;
         }
-        drafts.persistDraft(
+        persistDraftEntryForScope(
+          draft.recoveryDraftStoreScope,
           draft.recoveryDraftKey,
           draft.savedContent,
           draft.capturedChannelId ?? draft.recoveryDraftKey,
           draft.savedImeta,
           [...draft.savedSpoileredAttachmentUrls],
           draft.savedMentionRefs,
+        );
+        markRecoveredDraftRestorable(
+          draft.recoveryDraftStoreScope,
+          draft.recoveryDraftKey,
         );
       };
       let composerCleared = false;
@@ -681,6 +700,7 @@ export function useMentionSendFlow({
       if (isMentionSendPendingRef.current) {
         return;
       }
+      const recoveryDraftStoreScope = getDraftStoreScope();
       isMentionSendPendingRef.current = true;
       setIsMentionSendPending(true);
       const isSendCancelled = () =>
@@ -798,6 +818,7 @@ export function useMentionSendFlow({
           savedSpoileredAttachmentUrls: new Set(spoileredAttachmentUrls),
           sentDraftKey,
           recoveryDraftKey,
+          recoveryDraftStoreScope,
           savedMentionRefs,
         };
         if (promptNonMemberPubkeys.length > 0) {

@@ -118,6 +118,39 @@ export function getDraftStoreScope(): string {
   return storageKey();
 }
 
+function readExplicitStore(scope: string): Map<string, DraftState> {
+  if (scope === storageKey()) return readStore();
+  const map = new Map<string, DraftState>();
+  const raw = localStorage.getItem(scope);
+  if (!raw) return map;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      parsed !== null &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed)
+    ) {
+      for (const [key, value] of Object.entries(parsed as StoredDrafts)) {
+        if (!key.startsWith("sent:") && isValidDraftState(value)) {
+          map.set(key, value);
+        }
+      }
+    }
+  } catch {
+    // Match readStore's fail-open corruption behavior without mutating an
+    // inactive workspace while its owner is away.
+  }
+  return map;
+}
+
+function flushExplicitStore(
+  scope: string,
+  map: Map<string, DraftState>,
+): boolean {
+  const value = Object.fromEntries(map);
+  return setLocalStorageItemWithRecovery(scope, JSON.stringify(value));
+}
+
 function legacyStorageKey(): string {
   return `${LEGACY_DRAFT_STORE_KEY_PREFIX}:${currentPubkey}`;
 }
@@ -301,6 +334,14 @@ export function loadDraftEntry(draftKey: string): DraftState | undefined {
   return readStore().get(draftKey);
 }
 
+/** Read a draft from the workspace scope captured before an async send. */
+export function loadDraftEntryForScope(
+  scope: string,
+  draftKey: string,
+): DraftState | undefined {
+  return readExplicitStore(scope).get(draftKey);
+}
+
 export function deleteDraftEntry(draftKey: string): void {
   discardQueuedAttachmentsForDraft(draftKey);
   clearDraftEntry(draftKey);
@@ -459,6 +500,55 @@ export function persistDraftEntry(
   } else {
     clearDraftEntry(draftKey);
   }
+}
+
+/**
+ * Recover an async send into the exact workspace that owned it, even when the
+ * active relay/identity changed while publication was in flight.
+ */
+export function persistDraftEntryForScope(
+  scope: string,
+  draftKey: string,
+  content: string,
+  channelId: string,
+  pendingImeta: ImetaMedia[],
+  spoileredAttachmentUrls: string[],
+  mentionRefs: DraftMentionRef[] = [],
+): void {
+  if (scope === storageKey()) {
+    persistDraftEntry(
+      draftKey,
+      content,
+      channelId,
+      pendingImeta,
+      spoileredAttachmentUrls,
+      mentionRefs,
+    );
+    return;
+  }
+  const map = readExplicitStore(scope);
+  const hasContent = content.trim().length > 0 || pendingImeta.length > 0;
+  if (!hasContent) {
+    map.delete(draftKey);
+    flushExplicitStore(scope, map);
+    return;
+  }
+  const existing = map.get(draftKey);
+  const now = new Date().toISOString();
+  map.set(draftKey, {
+    content,
+    selectionEnd: content.length,
+    selectionStart: content.length,
+    channelId,
+    createdAt: existing?.createdAt ?? now,
+    updatedAt: now,
+    pendingImeta,
+    mentionRefs,
+    spoileredAttachmentUrls,
+    status: "active",
+  });
+  evictOldest(map);
+  flushExplicitStore(scope, map);
 }
 
 /**

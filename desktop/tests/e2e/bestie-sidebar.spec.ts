@@ -28,6 +28,10 @@ const bestie = {
   relayUrl: RELAY_A,
   status: "running" as const,
 };
+const bestieInCommunityB = {
+  ...bestie,
+  relayUrl: COMMUNITY_B.relayUrl,
+};
 
 async function seedCommunities(
   page: import("@playwright/test").Page,
@@ -316,4 +320,243 @@ test("a delayed Bestie open is scoped to its rendered community and signer", asy
   await page.waitForTimeout(1_150);
   await expect(page.getByTestId("chat-title")).toHaveCount(0);
   await expect(page.getByTestId("open-bestie-dm")).toHaveCount(0);
+});
+
+test("emoji and overflow expand from one measured message toolbar surface", async ({
+  page,
+}) => {
+  await installMockBridge(page, { managedAgents: [bestie] });
+  await page.setViewportSize({ width: 1000, height: 760 });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const messageId = await page.evaluate(() => {
+    const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+    if (!emit) throw new Error("Mock message emitter is unavailable.");
+    return emit({
+      channelName: "general",
+      content: "Bloom architecture check",
+      id: "c".repeat(64),
+    }).id;
+  });
+
+  const row = page.locator(`[data-message-id="${messageId}"]`);
+  await expect(row).toContainText("Bloom architecture check");
+  await row.hover();
+  const container = row.getByTestId(
+    `message-action-bloom-container-${messageId}`,
+  );
+  const closedBox = await container.boundingBox();
+  expect(closedBox).not.toBeNull();
+  await row.getByTestId(`react-message-${messageId}`).click();
+  await expect(
+    row.getByTestId(`reaction-bloom-panel-${messageId}`),
+  ).toBeVisible();
+  await expect(container).toHaveAttribute("popover", "manual");
+  await expect(
+    row.locator(`[data-testid="message-action-bloom-container-${messageId}"]`),
+  ).toHaveCount(1);
+  const reactionBox = await container.boundingBox();
+  expect(reactionBox).not.toBeNull();
+  expect(
+    Math.abs(
+      (closedBox?.x ?? 0) +
+        (closedBox?.width ?? 0) -
+        ((reactionBox?.x ?? 0) + (reactionBox?.width ?? 0)),
+    ),
+  ).toBeLessThanOrEqual(1);
+
+  await page.keyboard.press("Escape");
+  await row.getByTestId(`more-actions-${messageId}`).click();
+  await expect(
+    row.getByTestId(`more-actions-panel-${messageId}`),
+  ).toBeVisible();
+  const overflowBox = await container.boundingBox();
+  expect(overflowBox).not.toBeNull();
+  expect(
+    Math.abs(
+      (closedBox?.x ?? 0) +
+        (closedBox?.width ?? 0) -
+        ((overflowBox?.x ?? 0) + (overflowBox?.width ?? 0)),
+    ),
+  ).toBeLessThanOrEqual(1);
+});
+
+test("a message can be handed to Bestie with an optional note", async ({
+  page,
+}) => {
+  await installMockBridge(page, { managedAgents: [bestie] });
+  await page.setViewportSize({ width: 1000, height: 760 });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const messageId = await page.evaluate(() => {
+    const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+    if (!emit) throw new Error("Mock message emitter is unavailable.");
+    return emit({
+      channelName: "general",
+      content:
+        "Please fold this launch decision into tomorrow's priorities and name one owner.",
+      id: "d".repeat(64),
+    }).id;
+  });
+
+  const row = page.locator(`[data-message-id="${messageId}"]`);
+  await expect(row).toContainText("launch decision");
+  await row.hover();
+  await row.getByTestId(`send-to-bestie-${messageId}`).click();
+
+  const actionBar = row.getByTestId(`message-action-bar-${messageId}`);
+  const popover = page.getByTestId(`bestie-popover-${messageId}`);
+  await expect(actionBar).toHaveAttribute("data-bloom-surface", "bestie");
+  await expect(popover).toBeVisible();
+  await expect(popover).toContainText("Bestie");
+  await expect(popover).toContainText("Please fold this launch decision");
+
+  const snapshot = popover.getByTestId(`bestie-message-snapshot-${messageId}`);
+  const snapshotBody = popover.getByTestId(
+    `bestie-message-snapshot-body-${messageId}`,
+  );
+  const [popoverBox, snapshotBox, snapshotBodyBox] = await Promise.all([
+    popover.boundingBox(),
+    snapshot.boundingBox(),
+    snapshotBody.boundingBox(),
+  ]);
+  expect(popoverBox).not.toBeNull();
+  expect(snapshotBox).not.toBeNull();
+  expect(snapshotBodyBox).not.toBeNull();
+  if (popoverBox && snapshotBox && snapshotBodyBox) {
+    expect(popoverBox.width).toBeLessThanOrEqual(328);
+    expect(snapshotBox.width / (popoverBox.width - 32)).toBeCloseTo(0.75, 1);
+    expect(Math.abs(snapshotBox.x - (popoverBox.x + 16))).toBeLessThanOrEqual(
+      1,
+    );
+    expect(snapshotBox.height).toBeLessThan(64);
+    expect(snapshotBodyBox.height).toBeLessThanOrEqual(14);
+  }
+
+  const composer = popover.getByTestId("message-composer");
+  await expect(composer.getByRole("button", { name: "Send" })).toBeEnabled();
+  await composer
+    .locator('[contenteditable="true"]')
+    .fill("Make sure product and engineering agree on the owner.");
+  await composer.getByRole("button", { name: "Send" }).click();
+
+  await expect(popover).toBeHidden();
+  await page.getByTestId("open-bestie-dm").click();
+  const sentMessage = page.getByTestId("message-row").last();
+  await expect(sentMessage).toContainText(
+    "Make sure product and engineering agree on the owner.",
+  );
+  await expect(sentMessage).toContainText("Open original message");
+});
+
+test("a Bestie handoff fails closed across a community switch and preserves its draft", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      managedAgents: [bestie, bestieInCommunityB],
+      sendMessageDelayMs: 1_000,
+    },
+    { skipCommunitySeed: true },
+  );
+  await seedCommunities(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const messageId = await page.evaluate(() => {
+    const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+    if (!emit) throw new Error("Mock message emitter is unavailable.");
+    return emit({
+      channelName: "general",
+      content: "Keep this handoff in its original community",
+      id: "e".repeat(64),
+    }).id;
+  });
+
+  const draft = "This note must stay in Alpha.";
+  const row = page.locator(`[data-message-id="${messageId}"]`);
+  await row.hover();
+  await row.getByTestId(`send-to-bestie-${messageId}`).click();
+  const popover = page.getByTestId(`bestie-popover-${messageId}`);
+  const editor = popover.locator('[contenteditable="true"]');
+  await editor.fill(draft);
+  await popover.getByRole("button", { name: "Send" }).click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_COMMAND_LOG__?.findLast(
+            (entry) => entry.command === "send_channel_message",
+          )?.payload,
+      ),
+    )
+    .toMatchObject({
+      content: expect.stringContaining(draft),
+      expectedRelayUrl: RELAY_A,
+      expectedSignerPubkey: OWNER_PUBKEY,
+    });
+
+  await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("buzz-active-community-id"),
+      ),
+    )
+    .toBe(COMMUNITY_B.id);
+  await page.waitForTimeout(1_150);
+
+  // The two fixtures intentionally resolve to the same participant-derived
+  // DM id. An unscoped send would therefore appear in both tenant views.
+  await page
+    .getByTestId("sidebar-channel-content")
+    .getByRole("button", { name: /Bestie/ })
+    .first()
+    .click();
+  await expect(page.getByTestId("chat-title")).toHaveText("Bestie");
+  await expect(page.getByTestId("message-timeline")).not.toContainText(draft);
+
+  await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("buzz-active-community-id"),
+      ),
+    )
+    .toBe(COMMUNITY_A.id);
+  await page
+    .getByTestId("sidebar-channel-content")
+    .getByRole("button", { name: /Bestie/ })
+    .first()
+    .click();
+  await expect(page.getByTestId("chat-title")).toHaveText("Bestie");
+  await expect(page.getByTestId("message-timeline")).not.toContainText(draft);
+
+  await page.getByTestId("channel-general").click();
+  await page.evaluate((id) => {
+    const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+    if (!emit) throw new Error("Mock message emitter is unavailable.");
+    emit({
+      channelName: "general",
+      content: "Keep this handoff in its original community",
+      id,
+    });
+  }, messageId);
+  const restoredRow = page.locator(`[data-message-id="${messageId}"]`);
+  await restoredRow.hover();
+  await restoredRow.getByTestId(`send-to-bestie-${messageId}`).click();
+  const restoredPopover = page.getByTestId(`bestie-popover-${messageId}`);
+  await expect(restoredPopover.locator('[contenteditable="true"]')).toHaveText(
+    draft,
+  );
+  await page.evaluate(() => {
+    if (window.__BUZZ_E2E__?.mock) {
+      window.__BUZZ_E2E__.mock.sendMessageDelayMs = 0;
+    }
+  });
+  await restoredPopover.getByRole("button", { name: "Send" }).click();
+  await expect(restoredPopover).toBeHidden();
+  await page.getByTestId("open-bestie-dm").click();
+  await expect(page.getByTestId("message-timeline")).toContainText(draft);
 });

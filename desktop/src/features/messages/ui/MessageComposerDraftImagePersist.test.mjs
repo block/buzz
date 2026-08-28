@@ -232,12 +232,16 @@ import { act } from "react";
 
 // Production hook under test — owns the restore effect, cleanup, and the
 // synchronous ref write that is the StrictMode fix.
-import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot.ts";
+import {
+  markRecoveredDraftRestorable,
+  useDraftPersistLifecycle,
+} from "./useDraftPersistSnapshot.ts";
 
 // Real storage functions — the test uses them, not a replica.
 import {
   clearAllDrafts,
   deleteDraftEntry,
+  getDraftStoreScope,
   initDraftStore,
   loadDraftEntry,
   persistDraftEntry,
@@ -636,6 +640,53 @@ test("draft_lifecycle_persists_an_explicit_clear_before_async_rerender", async (
 
   const remounted = await mountStrictMode(HarnessComposer);
   assert.equal(editorContent, "", "the deleted body must not be restored");
+  await remounted.unmount();
+});
+
+test("draft_lifecycle_restores_an_async_send_recovery_after_optimistic_clear", async () => {
+  const DRAFT_KEY = "chan-send-recovery";
+  const ORIGINAL = "recover this failed send";
+  setupStore("pubkey-send-recovery");
+  persistDraftEntry(DRAFT_KEY, ORIGINAL, DRAFT_KEY, [], []);
+
+  let editorContent = "";
+  let trackAuthoredContent;
+  const spoileredRef = { current: new Set() };
+
+  function HarnessComposer() {
+    ({ trackAuthoredContent } = useDraftPersistLifecycle({
+      effectiveDraftKey: DRAFT_KEY,
+      channelId: DRAFT_KEY,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: () => [],
+      restoreMentionRefs: () => {},
+      livePendingImeta: [],
+      setPendingImeta: () => {},
+      setContent: (content) => {
+        editorContent = content;
+      },
+      clearContent: () => {
+        editorContent = "";
+      },
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => editorContent,
+    }));
+    return null;
+  }
+
+  const handle = await mountStrictMode(HarnessComposer);
+  assert.equal(editorContent, ORIGINAL);
+  trackAuthoredContent("");
+  editorContent = "";
+  await handle.unmount();
+
+  persistDraftEntry(DRAFT_KEY, ORIGINAL, DRAFT_KEY, [], []);
+  markRecoveredDraftRestorable(getDraftStoreScope(), DRAFT_KEY);
+
+  const remounted = await mountStrictMode(HarnessComposer);
+  assert.equal(editorContent, ORIGINAL);
   await remounted.unmount();
 });
 

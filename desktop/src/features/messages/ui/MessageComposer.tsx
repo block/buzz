@@ -70,6 +70,7 @@ import { useComposerLinkPreviews } from "./useComposerLinkPreviews";
 import { scheduleSettleGatedAutoSubmit } from "./messageComposerAutoSubmit";
 import type { MessageComposerProps } from "./MessageComposer.types";
 function MessageComposerImpl({
+  allowEmptySend = false,
   audienceContext = null,
   channelId = null,
   channelName,
@@ -599,13 +600,12 @@ function MessageComposerImpl({
       });
       return;
     }
-    // Normal send
     const currentPendingImeta = media.pendingImetaRef.current;
     const currentQueuedAttachments = media.queuedAttachmentsRef.current;
     const hasMedia =
       currentPendingImeta.length > 0 || currentQueuedAttachments.length > 0;
     if (
-      (!trimmed && !hasMedia) ||
+      (!allowEmptySend && !trimmed && !hasMedia) ||
       disabledRef.current ||
       isSendingRef.current ||
       isSubmitLockedRef.current ||
@@ -652,6 +652,7 @@ function MessageComposerImpl({
       onPreparingMentionSendChange?.(false);
     }
   }, [
+    allowEmptySend,
     channelId,
     channelLinks.clearChannels,
     customEmoji,
@@ -684,7 +685,6 @@ function MessageComposerImpl({
     mentions.revalidateMentionPubkeys,
   ]);
   submitMessageRef.current = submitMessage;
-  // Draft auto-submit runs once after persisted editor state loads.
   const onAutoSubmitCompleteRef = React.useRef(onAutoSubmitComplete);
   onAutoSubmitCompleteRef.current = onAutoSubmitComplete;
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally fires once on mount only
@@ -782,12 +782,12 @@ function MessageComposerImpl({
     setPendingImeta: media.setPendingImeta,
     uploadFile: media.uploadFile,
   });
-  // ── Send button state ───────────────────────────────────────────────
   const sendDisabled =
     composerDisabled ||
     media.isUploading ||
     mentionSendFlow.isPreparingMentionSend ||
-    (isContentEmpty &&
+    (!allowEmptySend &&
+      isContentEmpty &&
       media.pendingImeta.length === 0 &&
       media.queuedAttachments.length === 0);
   const handleCaptureSelection = React.useCallback(() => {}, []);

@@ -24,6 +24,7 @@ export type MessageComposerEditTarget = {
 };
 
 export type MessageComposerProps = {
+  allowEmptySend?: boolean;
   audienceContext?: {
     type: "channel" | "thread";
   } | null;

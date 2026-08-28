@@ -47,6 +47,8 @@ import {
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
 import { isPositiveEmojiParticle } from "@/shared/ui/EmojiBurstProvider";
+import { useFeatureEnabled } from "@/shared/features";
+import { MessageActionBloomBar } from "./MessageActionBloomBar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
@@ -381,7 +383,28 @@ function isCustomEmojiShortcode(emoji: string) {
   return emoji.startsWith(":") && emoji.endsWith(":");
 }
 
-export const MessageActionBar = React.memo(function MessageActionBar({
+export type MessageActionBarProps = {
+  channelId?: string | null;
+  message: TimelineMessage;
+  onDelete?: (message: TimelineMessage) => void;
+  onEdit?: (message: TimelineMessage) => void;
+  onExpandedChange?: (expanded: boolean) => void;
+  onFollowThread?: (message: TimelineMessage) => void;
+  onMarkUnread?: (message: TimelineMessage) => void;
+  onMarkRead?: (message: TimelineMessage) => void;
+  onReactionBadgeBurstRequest?: (emoji: string) => void;
+  onReactionSelect?: (emoji: string) => Promise<void>;
+  onRemindLater?: (message: TimelineMessage) => void;
+  onReply?: (message: TimelineMessage) => void;
+  onSendToChannel?: (message: TimelineMessage) => Promise<void>;
+  onUnfollowThread?: (message: TimelineMessage) => void;
+  reactionErrorMessage?: string | null;
+  reactions: TimelineReaction[];
+  isFollowingThread?: boolean;
+  isUnread?: boolean;
+};
+
+const LegacyMessageActionBar = React.memo(function LegacyMessageActionBar({
   channelId,
   message,
   onDelete,
@@ -399,29 +422,7 @@ export const MessageActionBar = React.memo(function MessageActionBar({
   reactions,
   isFollowingThread,
   isUnread,
-}: {
-  /** Channel UUID — required for the "Copy link" action; when omitted the
-   *  action is hidden (callers like the home inbox that lack the context). */
-  channelId?: string | null;
-  message: TimelineMessage;
-  onDelete?: (message: TimelineMessage) => void;
-  onEdit?: (message: TimelineMessage) => void;
-  onFollowThread?: (message: TimelineMessage) => void;
-  onMarkUnread?: (message: TimelineMessage) => void;
-  onMarkRead?: (message: TimelineMessage) => void;
-  onReactionBadgeBurstRequest?: (emoji: string) => void;
-  onReactionSelect?: (emoji: string) => Promise<void>;
-  onRemindLater?: (message: TimelineMessage) => void;
-  onReply?: (message: TimelineMessage) => void;
-  onSendToChannel?: (message: TimelineMessage) => Promise<void>;
-  onUnfollowThread?: (message: TimelineMessage) => void;
-  reactionErrorMessage?: string | null;
-  reactions: TimelineReaction[];
-  isFollowingThread?: boolean;
-  /** Current read state of the clicked message, from the same predicate the
-   *  unread badge uses. Drives the single mark-read/unread toggle label. */
-  isUnread?: boolean;
-}) {
+}: MessageActionBarProps) {
   const [isReactionPickerOpen, setIsReactionPickerOpen] = React.useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = React.useState(false);
   const customEmoji = useCustomEmoji();
@@ -633,6 +634,19 @@ export const MessageActionBar = React.memo(function MessageActionBar({
         </div>
       </div>
     </div>
+  );
+});
+
+LegacyMessageActionBar.displayName = "LegacyMessageActionBar";
+
+export const MessageActionBar = React.memo(function MessageActionBar(
+  props: MessageActionBarProps,
+) {
+  const bestieEnabled = useFeatureEnabled("bestie");
+  return bestieEnabled ? (
+    <MessageActionBloomBar {...props} />
+  ) : (
+    <LegacyMessageActionBar {...props} />
   );
 });
 

@@ -1,4 +1,11 @@
-import { Ban, CircleSlash, Clock, ShieldCheck, UserMinus } from "lucide-react";
+import {
+  Ban,
+  ChevronRight,
+  CircleSlash,
+  Clock,
+  ShieldCheck,
+  UserMinus,
+} from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
@@ -201,6 +208,177 @@ export function MessageModerationMenuItems({
           Ban author from community
         </DropdownMenuItem>
       )}
+    </>
+  );
+}
+
+/** Same moderation capabilities for the in-tree message action surface. */
+export function MessageModerationInlineItems({
+  channelId,
+  message,
+  onAction,
+}: {
+  channelId?: string | null;
+  message: TimelineMessage;
+  onAction?: () => void;
+}) {
+  const relayMembershipQuery = useMyRelayMembershipQuery();
+  const relayRole = relayMembershipQuery.data?.role;
+  const canModerate = relayRole === "owner" || relayRole === "admin";
+  const identityQuery = useIdentityQuery();
+  const targetPubkey = message.signerPubkey ?? null;
+  const isSelf =
+    targetPubkey != null &&
+    identityQuery.data?.pubkey != null &&
+    normalizePubkey(targetPubkey) ===
+      normalizePubkey(identityQuery.data.pubkey);
+  const enabled = canModerate && targetPubkey != null && !isSelf;
+  const restrictionsQuery = useModerationRestrictionsQuery(enabled);
+  const banMutation = useBanMemberMutation();
+  const unbanMutation = useUnbanMemberMutation();
+  const timeoutMutation = useTimeoutMemberMutation();
+  const untimeoutMutation = useUntimeoutMemberMutation();
+  const removeMutation = useRemoveChannelMemberMutation(channelId ?? null);
+  const [showTimeouts, setShowTimeouts] = React.useState(false);
+  const isPending =
+    banMutation.isPending ||
+    unbanMutation.isPending ||
+    timeoutMutation.isPending ||
+    untimeoutMutation.isPending ||
+    removeMutation.isPending;
+
+  const restriction = React.useMemo(() => {
+    if (targetPubkey == null) return null;
+    const key = normalizePubkey(targetPubkey);
+    return (
+      restrictionsQuery.data?.find((r) => normalizePubkey(r.pubkey) === key) ??
+      null
+    );
+  }, [restrictionsQuery.data, targetPubkey]);
+  const isBanned = restriction?.banned ?? false;
+  const timedOut = isTimedOut(restriction?.mutedUntil ?? null);
+  const itemClassName =
+    "flex min-h-9 w-full select-none items-center gap-2 rounded-lg py-2 pl-2 pr-4 text-left text-sm outline-hidden transition-colors hover:bg-muted/50 focus-visible:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 [&>svg]:size-4 [&>svg]:shrink-0";
+
+  const run = async (action: () => Promise<unknown>, success: string) => {
+    try {
+      await action();
+      toast.success(success);
+      onAction?.();
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Moderation action failed",
+      );
+    }
+  };
+
+  if (!enabled || targetPubkey == null) return null;
+
+  return (
+    <>
+      <hr className="-mx-1 my-1 border-0 border-t border-muted" />
+      {timedOut ? (
+        <button
+          className={itemClassName}
+          data-testid={`message-untimeout-${message.id}`}
+          disabled={isPending}
+          onClick={() =>
+            void run(
+              () => untimeoutMutation.mutateAsync(targetPubkey),
+              "Timeout lifted",
+            )
+          }
+          role="menuitem"
+          type="button"
+        >
+          <ShieldCheck />
+          Lift timeout
+        </button>
+      ) : (
+        <>
+          <button
+            aria-expanded={showTimeouts}
+            className={itemClassName}
+            data-testid={`message-timeout-${message.id}`}
+            disabled={isPending}
+            onClick={() => setShowTimeouts((current) => !current)}
+            role="menuitem"
+            type="button"
+          >
+            <Clock />
+            Time out author
+            <ChevronRight
+              className={`ml-auto transition-transform ${showTimeouts ? "rotate-90" : ""}`}
+            />
+          </button>
+          {showTimeouts ? (
+            <div className="pl-6">
+              {TIMEOUT_PRESETS.map((preset) => (
+                <button
+                  className={itemClassName}
+                  data-testid={`message-timeout-${preset.seconds}-${message.id}`}
+                  disabled={isPending}
+                  key={preset.seconds}
+                  onClick={() =>
+                    void run(
+                      () =>
+                        timeoutMutation.mutateAsync({
+                          pubkey: targetPubkey,
+                          expiresAt:
+                            Math.floor(Date.now() / 1000) + preset.seconds,
+                        }),
+                      "Author timed out",
+                    )
+                  }
+                  role="menuitem"
+                  type="button"
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </>
+      )}
+
+      {channelId ? (
+        <button
+          className={`${itemClassName} text-destructive`}
+          data-testid={`message-kick-${message.id}`}
+          disabled={isPending}
+          onClick={() =>
+            void run(
+              () => removeMutation.mutateAsync(targetPubkey),
+              "Author removed from channel",
+            )
+          }
+          role="menuitem"
+          type="button"
+        >
+          <UserMinus />
+          Kick from channel
+        </button>
+      ) : null}
+
+      <button
+        className={`${itemClassName} ${isBanned ? "" : "text-destructive"}`}
+        data-testid={`message-${isBanned ? "unban" : "ban"}-${message.id}`}
+        disabled={isPending}
+        onClick={() =>
+          void run(
+            () =>
+              isBanned
+                ? unbanMutation.mutateAsync(targetPubkey)
+                : banMutation.mutateAsync({ pubkey: targetPubkey }),
+            isBanned ? "Ban lifted" : "Author banned",
+          )
+        }
+        role="menuitem"
+        type="button"
+      >
+        {isBanned ? <CircleSlash /> : <Ban />}
+        {isBanned ? "Lift ban" : "Ban author from community"}
+      </button>
     </>
   );
 }

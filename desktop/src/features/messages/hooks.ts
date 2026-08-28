@@ -453,6 +453,8 @@ export function useSendMessageMutation(
       sentFromThreadRootId?: string | null;
       sentFromThreadRootExcerpt?: string | null;
       transport?: "auto" | "http";
+      expectedRelayUrl?: string;
+      expectedSignerPubkey?: string;
     },
     MessageQueryContext | undefined
   >({
@@ -467,6 +469,8 @@ export function useSendMessageMutation(
       sentFromThreadRootId,
       sentFromThreadRootExcerpt,
       transport = "auto",
+      expectedRelayUrl,
+      expectedSignerPubkey,
     }) => {
       // Prefer a channel captured by the caller at compose time. Otherwise,
       // resolve a captured id from the shared channel cache so navigation
@@ -492,6 +496,11 @@ export function useSendMessageMutation(
 
       if (!identity) {
         throw new Error("No identity available for sending messages.");
+      }
+      if (Boolean(expectedRelayUrl) !== Boolean(expectedSignerPubkey)) {
+        throw new Error(
+          "Scoped message sends require both a relay and signer identity.",
+        );
       }
 
       // `mediaTags` arrives as the merged outgoing tag set (imeta + NIP-30
@@ -531,7 +540,8 @@ export function useSendMessageMutation(
         parentEventId ||
         imetaTags.length > 0 ||
         emojiTags.length > 0 ||
-        linkPreviewTags.length > 0
+        linkPreviewTags.length > 0 ||
+        expectedRelayUrl
       ) {
         const cachedMessages =
           queryClient.getQueryData<RelayEvent[]>(
@@ -559,8 +569,8 @@ export function useSendMessageMutation(
           mentionTags,
           linkPreviewTags,
           sentFromThreadTag,
-          undefined,
-          undefined,
+          expectedRelayUrl,
+          expectedSignerPubkey,
           suppliedRootEventId,
         );
 

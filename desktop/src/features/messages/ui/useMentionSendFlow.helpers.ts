@@ -32,6 +32,7 @@ export type PendingNonMemberMentionSend = {
   savedSpoileredAttachmentUrls: Set<string>;
   sentDraftKey: string | null | undefined;
   recoveryDraftKey: string | null | undefined;
+  recoveryDraftStoreScope: string;
   savedMentionRefs: DraftMentionRef[];
 };
 

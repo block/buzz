@@ -171,6 +171,7 @@ export const MessageRow = React.memo(
     const [expandedDiffId, setExpandedDiffId] = React.useState<string | null>(
       null,
     );
+    const [isActionBarExpanded, setIsActionBarExpanded] = React.useState(false);
     const linkPreviewsSuppressed = hasLinkPreviewSuppression(message.tags);
     const removeLinkPreviewsForEveryone =
       channelId && onEdit && !message.pending && !linkPreviewsSuppressed
@@ -559,11 +560,11 @@ export const MessageRow = React.memo(
         ownerPubkey={message.ownerPubkey}
       />
     ) : null;
-
     const actionBarNode = (
       <div
         className={cn(
-          "absolute right-2 top-1 z-10 sm:pointer-events-none",
+          "absolute right-2 top-1 sm:pointer-events-none",
+          isActionBarExpanded ? "z-[60]" : "z-50",
           actionBarPlacement === "floating"
             ? isContinuation
               ? "sm:-top-3 sm:-translate-y-1/2"
@@ -578,6 +579,7 @@ export const MessageRow = React.memo(
           message={message}
           onDelete={onDelete}
           onEdit={onEdit}
+          onExpandedChange={setIsActionBarExpanded}
           onFollowThread={onFollowThread}
           onMarkUnread={onMarkUnread}
           onMarkRead={onMarkRead}
@@ -882,10 +884,10 @@ export const MessageRow = React.memo(
             }}
           />
         ) : null}
-
         <article
           className={cn(
-            "group/message relative z-10 rounded-2xl transition-colors",
+            "group/message relative rounded-2xl transition-colors",
+            isActionBarExpanded ? "z-[60]" : "z-10",
             playEntrance && "motion-enter-conversation",
             "py-conversation-row",
             hoverBackground
@@ -929,8 +931,6 @@ export const MessageRow = React.memo(
         </article>
       </div>
     );
-    // Callbacks (onReply, onToggleReaction) intentionally excluded: inline arrows
-    // from parent create new refs every render — including them defeats memo.
   },
   (prev, next) =>
     prev.message.id === next.message.id &&

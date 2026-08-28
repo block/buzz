@@ -55,10 +55,13 @@ import {
   getActiveDraftEntries,
   getAllDraftEntries,
   getSentDraftEntries,
+  getDraftStoreScope,
   initDraftStore,
   loadDraftEntry,
+  loadDraftEntryForScope,
   markDraftSentEntry,
   persistDraftEntry,
+  persistDraftEntryForScope,
   renameDraftEntry,
   saveDraftEntry,
   subscribeToStore,
@@ -1043,6 +1046,35 @@ test("cross_relay_isolation_via_initDraftStore_without_clearAllDrafts", () => {
   assert.ok(v2a, "v2 key for relay A must exist");
   assert.ok(v2b, "v2 key for relay B must exist");
   assert.notEqual(v2a, v2b, "buckets must differ");
+});
+
+test("captured scope recovers an in-flight draft after the active relay changes", () => {
+  installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-in-flight";
+  initDraftStore(pk, "wss://relay-a.example.com");
+  const capturedScope = getDraftStoreScope();
+
+  initDraftStore(pk, "wss://relay-b.example.com");
+  persistDraftEntryForScope(
+    capturedScope,
+    "bestie-share:event",
+    "Keep this in relay A",
+    "bestie-share:event",
+    [],
+    [],
+  );
+
+  assert.equal(loadDraftEntry("bestie-share:event"), undefined);
+  assert.equal(
+    loadDraftEntryForScope(capturedScope, "bestie-share:event")?.content,
+    "Keep this in relay A",
+  );
+  initDraftStore(pk, "wss://relay-a.example.com");
+  assert.equal(
+    loadDraftEntry("bestie-share:event")?.content,
+    "Keep this in relay A",
+  );
 });
 
 test("legacy_migration_v1_entries_readable_after_scoped_init_v1_key_removed", () => {
