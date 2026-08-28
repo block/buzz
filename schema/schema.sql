@@ -380,6 +380,23 @@ CREATE TABLE workflows (
     FOREIGN KEY (community_id, channel_id) REFERENCES channels (community_id, id)
 );
 
+
+-- A legacy writer does not mention definition_event_id. Column-targeted triggers
+-- fire even for equal-value rewrites, where comparing OLD/NEW would invent
+-- provenance. New writers rebind separately while still holding the row lock
+-- in the signed-event transaction. Operational status/enabled updates keep it.
+CREATE FUNCTION invalidate_workflow_revision() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.definition_event_id := NULL;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER workflows_invalidate_revision
+BEFORE UPDATE OF id, community_id, owner_pubkey, channel_id, name, definition, definition_hash
+ON workflows
+FOR EACH ROW EXECUTE FUNCTION invalidate_workflow_revision();
+
 CREATE INDEX idx_workflows_channel_active ON workflows (community_id, channel_id, status, enabled);
 -- Scheduler scans enabled schedule workflows; community_id returned per row so
 -- side effects run under the owning tenant's context (Lane0 contract §4a.5).

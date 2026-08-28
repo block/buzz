@@ -365,6 +365,19 @@ pub async fn upsert_workflow(
         )));
     }
 
+    // The database invalidates provenance on every materialization UPDATE,
+    // including old-pod and equal-value writes. Rebind only after that write,
+    // while this transaction still owns the row lock. Readers cannot see the
+    // intermediate NULL, and a later legacy writer will clear the binding.
+    sqlx::query(
+        "UPDATE workflows SET definition_event_id = $3 WHERE community_id = $1 AND id = $2",
+    )
+    .bind(community_id.as_uuid())
+    .bind(id)
+    .bind(definition_event_id)
+    .execute(&mut **tx)
+    .await?;
+
     Ok(())
 }
 
@@ -1704,6 +1717,10 @@ impl Db {
 }
 
 // -- Tests --------------------------------------------------------------------
+
+#[cfg(test)]
+#[path = "workflow_revision_tests.rs"]
+mod revision_postgres_tests;
 
 #[cfg(test)]
 mod postgres_tests {

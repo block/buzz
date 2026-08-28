@@ -1173,9 +1173,20 @@ mod postgres_tests {
         assert!(workflow_revision_binding.contains("ALTER TABLE workflows"));
         assert!(workflow_revision_binding.contains("ALTER TABLE workflow_runs"));
         assert!(workflow_revision_binding.contains("octet_length(definition_event_id) = 32"));
-        assert!(!workflow_revision_binding
-            .to_ascii_lowercase()
-            .contains("update "));
+        assert!(!workflow_revision_binding.contains("UPDATE workflows"));
+        let revision_guard = |sql: &str| {
+            let start = sql
+                .find("CREATE FUNCTION invalidate_workflow_revision()")
+                .unwrap();
+            let end = sql[start..]
+                .find("FOR EACH ROW EXECUTE FUNCTION invalidate_workflow_revision();")
+                .unwrap();
+            sql[start..start + end].to_owned()
+        };
+        assert_eq!(
+            revision_guard(workflow_revision_binding),
+            revision_guard(desired_schema)
+        );
         assert_eq!(
             desired_schema
                 .matches("octet_length(definition_event_id) = 32")
