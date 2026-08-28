@@ -161,6 +161,7 @@ export function useAgentAddressLockPicker({
           lockedAgentPubkeys.has(pubkey)
         ) {
           const excludePubkey = audience.excludePubkey ?? audience.removePubkey;
+          onImplicitPrefixRemoved?.(pubkey);
           excludePubkey(pubkey);
         }
       }
@@ -172,6 +173,7 @@ export function useAgentAddressLockPicker({
       audienceScope,
       lockedAgentPubkeys,
       mentions.getDraftMentionRefs,
+      onImplicitPrefixRemoved,
     ],
   );
 

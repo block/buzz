@@ -1138,6 +1138,47 @@ test("an authored duplicate leading mention survives draft restoration", async (
     .toBe("@Morgarita authored duplicate");
 });
 
+test("typed deletion preserves an identical authored mention in drafts", async ({
+  page,
+}) => {
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  await automaticallyMention(composer, "Morgarita");
+
+  const selectAllShortcut = await page.evaluate(() =>
+    /mac|iphone|ipad|ipod/i.test(navigator.platform) ? "Meta+A" : "Control+A",
+  );
+  await input.press(selectAllShortcut);
+  await input.press("Backspace");
+  await expect(input).toHaveText("");
+  await expect(
+    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
+  ).toHaveCount(0);
+
+  await input.pressSequentially("@Morgarita manual after typed deletion");
+  await page.goto(`/#/channels/${RANDOM_CHANNEL_ID}`, {
+    waitUntil: "domcontentloaded",
+  });
+  await expect
+    .poll(() =>
+      page.evaluate((channelId) => {
+        for (const storageKey of Object.keys(window.localStorage)) {
+          if (!storageKey.startsWith("buzz-drafts.v2:")) continue;
+          const draft = (
+            JSON.parse(
+              window.localStorage.getItem(storageKey) ?? "{}",
+            ) as Record<string, { content?: string }>
+          )[channelId];
+          if (draft) return draft.content ?? "";
+        }
+        return "";
+      }, CHANNEL_ID),
+    )
+    .toBe("@Morgarita manual after typed deletion");
+});
+
 test("removing an automatic mention preserves an identical authored mention in drafts", async ({
   page,
 }) => {
