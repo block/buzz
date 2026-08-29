@@ -8,9 +8,11 @@
 //!
 //! See conformance row 50.
 
-use buzz_core::CommunityId;
 use sqlx::{PgPool, QueryBuilder, Row};
 use uuid::Uuid;
+
+use buzz_core::CommunityId;
+use buzz_datastore_tracing::datastore_span;
 
 use crate::error::SearchError;
 
@@ -213,6 +215,7 @@ fn normalized_search_text(q: &str) -> Option<String> {
 ///
 /// `community_id = $ctx` is the first predicate and is non-negotiable. There
 /// is no code path through this function that omits it.
+#[datastore_span(name = "search", system = "postgresql")]
 pub async fn search(pool: &PgPool, query: &SearchQuery) -> Result<SearchResult, SearchError> {
     let Some(search_text) = normalized_search_text(&query.q) else {
         return Ok(SearchResult {

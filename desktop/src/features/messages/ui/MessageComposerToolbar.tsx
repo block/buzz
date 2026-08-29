@@ -1,10 +1,16 @@
 import * as React from "react";
 import type { Editor } from "@tiptap/react";
 import { AnimatePresence, motion } from "motion/react";
-import { ALargeSmall, ArrowUp, AtSign, Paperclip, X } from "lucide-react";
+import { ALargeSmall, Paperclip, X } from "lucide-react";
 
+import type { MediaUploadController } from "@/features/messages/lib/useMediaUpload";
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import {
+  type ComposerAddressAgent,
+  ComposerMentionButton,
+  ComposerSendButton,
+} from "./ComposerAddressControls";
 import { ComposerEmojiPicker } from "./ComposerEmojiPicker";
 import { FormattingToolbar } from "./FormattingToolbar";
 import { SelectionFormattingTray } from "./SelectionFormattingTray";
@@ -15,42 +21,62 @@ const presenceSpring = {
   stiffness: 400,
   damping: 28,
 } as const;
+const NO_ADDRESSED_AGENTS: readonly ComposerAddressAgent[] = [];
+const ignoreAddressRemoval = () => {};
 
 export const MessageComposerToolbar = React.memo(
   function MessageComposerToolbar({
+    addressedAgents = NO_ADDRESSED_AGENTS,
+    autoPinConfirmationTitle,
     composerDisabled,
     editor,
     extraActions,
     formattingDisabled,
+    gifMediaController,
     isEmojiPickerOpen,
     isFormattingOpen,
     isSending,
     isUploading,
     onCaptureSelection,
+    onAutoPinConfirmationDismiss,
+    onAutoPinConfirmationHoverChange,
+    onAutoPinConfirmationTurnOff,
     onEmojiPickerOpenChange,
     onEmojiSelect,
     onFormattingToggle,
     onLinkButton,
     onOpenMentionPicker,
     onPaperclip,
+    onRemoveAddressedAgent = ignoreAddressRemoval,
+    pulseVersionByPubkey,
     sendDisabled,
+    shakeVersionByPubkey,
   }: {
+    addressedAgents?: readonly ComposerAddressAgent[];
+    autoPinConfirmationTitle?: string | null;
     composerDisabled: boolean;
     editor: Editor | null;
     extraActions?: React.ReactNode;
     formattingDisabled: boolean;
+    gifMediaController: Pick<MediaUploadController, "setPendingImeta">;
     isEmojiPickerOpen: boolean;
     isFormattingOpen: boolean;
     isSending: boolean;
     isUploading: boolean;
     onCaptureSelection: () => void;
+    onAutoPinConfirmationDismiss?: () => void;
+    onAutoPinConfirmationHoverChange?: (hovered: boolean) => void;
+    onAutoPinConfirmationTurnOff?: () => void;
     onEmojiPickerOpenChange: (open: boolean) => void;
     onEmojiSelect: (emoji: string) => void;
     onFormattingToggle: (pressed: boolean) => void;
     onLinkButton: () => void;
     onOpenMentionPicker: () => void;
     onPaperclip: () => void;
+    onRemoveAddressedAgent?: (pubkey: string) => void;
+    pulseVersionByPubkey?: Readonly<Record<string, number>>;
     sendDisabled: boolean;
+    shakeVersionByPubkey?: Readonly<Record<string, number>>;
   }) {
     return (
       <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
@@ -158,24 +184,20 @@ export const MessageComposerToolbar = React.memo(
                 exit={{ opacity: 0, x: -12 }}
                 transition={presenceSpring}
               >
-                {/* disableHoverableContent keeps tooltips from lingering over the editor. */}
-                <Tooltip disableHoverableContent>
-                  <TooltipTrigger asChild>
-                    <Button
-                      aria-label="Mention someone"
-                      data-testid="message-insert-mention"
-                      disabled={composerDisabled}
-                      onClick={onOpenMentionPicker}
-                      onMouseDown={onCaptureSelection}
-                      size="icon"
-                      type="button"
-                      variant="ghost"
-                    >
-                      <AtSign />
-                    </Button>
-                  </TooltipTrigger>
-                  <TooltipContent>Mention someone</TooltipContent>
-                </Tooltip>
+                <ComposerMentionButton
+                  agents={addressedAgents}
+                  confirmationTitle={autoPinConfirmationTitle}
+                  disabled={composerDisabled}
+                  onConfirmationDismiss={onAutoPinConfirmationDismiss}
+                  onConfirmationHoverChange={onAutoPinConfirmationHoverChange}
+                  onConfirmationTurnOff={onAutoPinConfirmationTurnOff}
+                  onCaptureSelection={onCaptureSelection}
+                  onOpen={onOpenMentionPicker}
+                  onRemove={onRemoveAddressedAgent}
+                  pulseVersionByPubkey={pulseVersionByPubkey}
+                  shakeVersionByPubkey={shakeVersionByPubkey}
+                  showAgents
+                />
                 <Tooltip disableHoverableContent>
                   <TooltipTrigger asChild>
                     <Button
@@ -194,6 +216,7 @@ export const MessageComposerToolbar = React.memo(
                 </Tooltip>
                 <ComposerEmojiPicker
                   disabled={composerDisabled}
+                  gifMediaController={gifMediaController}
                   onClose={() => editor?.commands.focus()}
                   onEmojiSelect={onEmojiSelect}
                   onOpenChange={onEmojiPickerOpenChange}
@@ -231,23 +254,10 @@ export const MessageComposerToolbar = React.memo(
 
         <div className="flex items-center gap-2">
           {extraActions}
-          <Button
-            aria-label={isSending ? "Sending" : "Send message"}
-            className="rounded-full"
-            data-testid="send-message"
-            disabled={sendDisabled || isSending}
-            size="icon"
-            type="submit"
-          >
-            {isSending ? (
-              <span
-                aria-hidden
-                className="h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent"
-              />
-            ) : (
-              <ArrowUp aria-hidden />
-            )}
-          </Button>
+          <ComposerSendButton
+            isSending={isSending}
+            sendDisabled={sendDisabled}
+          />
         </div>
       </div>
     );

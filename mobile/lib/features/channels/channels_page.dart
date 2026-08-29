@@ -19,6 +19,7 @@ import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/bee_refresh_indicator.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
+import '../../shared/widgets/buzz_titled_sheet_layout.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
 import '../../shared/widgets/modal_presentation.dart';
@@ -29,7 +30,7 @@ import '../../shared/custom_emoji/custom_emoji_render.dart';
 import '../profile/profile_avatar.dart';
 import '../profile/profile_provider.dart';
 import '../profile/presence_cache_provider.dart';
-import '../profile/user_cache_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
 import '../pairing/pairing_page.dart';
 import '../pairing/pairing_provider.dart';
 import 'channel.dart';
@@ -52,6 +53,7 @@ import '../../shared/read_state/read_state_time.dart';
 import 'unread_badge/observed_unread_event.dart';
 
 part 'channels_page/body.dart';
+part 'channels_page/browse_channels_sheet.dart';
 part 'channels_page/sections.dart';
 part 'channels_page/channel_tile.dart';
 part 'channels_page/sheets.dart';
@@ -61,7 +63,7 @@ part 'channels_page/community.dart';
 part 'channels_page/quick_actions.dart';
 part 'channels_page/quick_actions_launcher.dart';
 
-enum _QuickAction { createChannel, newDm }
+enum _QuickAction { createChannel, newDm, browseChannels }
 
 const double _kChannelSectionInset = Grid.gutter;
 const double _kChannelLeadingWidth = 22.0;
@@ -85,7 +87,8 @@ const double _kChannelLabelInset =
 /// sections while the labels stay on [_kChannelLabelInset].
 const double _kDmAvatarSize = _kChannelIconSize;
 
-const double _kTopSectionAvatarSize = 40.0;
+const double _kTopSectionCommunityAvatarSize = 40.0;
+const double _kTopSectionProfileAvatarSize = 36.0;
 const double _kTopSectionBottomPadding = Grid.xxs;
 
 /// The top section's avatars are 40dp circles, which fill their box edge to
@@ -165,7 +168,8 @@ class ChannelsPage extends HookConsumerWidget {
 
   final WidgetBuilder settingsPageBuilder;
 
-  /// Reports the Settings route's raw animation progress from 0 to 1.
+  /// Reports Settings route progress so its foreground and Home's background
+  /// render from the same timeline.
   final ValueChanged<double> onSettingsTransitionProgress;
 
   /// Notifies this page when its already-selected tab is tapped again.
@@ -303,7 +307,8 @@ class ChannelsPage extends HookConsumerWidget {
       ref.invalidate(communityIconProvider);
       showBuzzModalBottomSheet<void>(
         context: context,
-        showDragHandle: true,
+        showCloseButton: false,
+        showDragHandle: false,
         builder: (_) => const _CommunitySwitcherSheet(),
       );
     }
@@ -330,6 +335,7 @@ class ChannelsPage extends HookConsumerWidget {
             : 20,
         showBottomDivider: false,
         leading: _CommunityIndicator(onTap: openCommunitySwitcher),
+        centerTitle: false,
         titleStyle: headerTitleStyle,
         title: _CommunityHeaderTitle(
           style: headerTitleStyle,
@@ -341,15 +347,15 @@ class ChannelsPage extends HookConsumerWidget {
             height: Grid.xl,
             child: Center(
               child: ProfileAvatar(
-                size: _kTopSectionAvatarSize,
+                size: _kTopSectionProfileAvatarSize,
+                showPresence: false,
                 onTap: () {
                   unawaited(HapticFeedback.lightImpact());
-                  Navigator.of(context).push(
-                    _SettingsPageRoute(
-                      builder: settingsPageBuilder,
-                      onTransitionProgress: onSettingsTransitionProgress,
-                    ),
+                  final route = _SettingsPageRoute(
+                    builder: settingsPageBuilder,
+                    onTransitionProgress: onSettingsTransitionProgress,
                   );
+                  Navigator.of(context).push(route);
                 },
               ),
             ),
@@ -387,23 +393,34 @@ class _SettingsPageRoute extends PageRouteBuilder<void> {
              builder(context),
          transitionsBuilder: _buildSettingsTransition,
          opaque: false,
-         transitionDuration: const Duration(milliseconds: 190),
-         reverseTransitionDuration: const Duration(milliseconds: 190),
+         allowSnapshotting: false,
+         transitionDuration: const Duration(milliseconds: 150),
+         reverseTransitionDuration: const Duration(milliseconds: 150),
        );
 
   final ValueChanged<double> onTransitionProgress;
 
   Animation<double>? _progressAnimation;
+  bool _hasStartedForwardTransition = false;
 
   @override
   void install() {
     super.install();
     _progressAnimation = animation?..addListener(_reportProgress);
-    _reportProgress();
   }
 
   void _reportProgress() {
-    onTransitionProgress(_progressAnimation?.value ?? 0);
+    final progressAnimation = _progressAnimation;
+    if (progressAnimation == null) return;
+
+    // ProxyAnimation briefly exposes the previous completed value while the
+    // route installs its new controller. Ignore that handoff notification and
+    // begin reporting only once the route is genuinely moving forward.
+    if (!_hasStartedForwardTransition) {
+      if (progressAnimation.status != AnimationStatus.forward) return;
+      _hasStartedForwardTransition = true;
+    }
+    onTransitionProgress(progressAnimation.value);
   }
 
   @override
@@ -420,41 +437,26 @@ class _SettingsPageRoute extends PageRouteBuilder<void> {
   ) {
     if (MediaQuery.disableAnimationsOf(context)) return child;
 
-    final incoming = CurvedAnimation(
+    final motion = CurvedAnimation(
       parent: animation,
-      curve: Curves.easeOutCubic,
+      // Keep the complete page on one timeline. A gentler forward ease keeps
+      // the entrance visible without letting scale finish ahead of opacity;
+      // the existing reverse curve preserves the exit motion.
+      curve: Curves.easeOutQuad,
       reverseCurve: Curves.easeOutCubic,
     );
     return FadeTransition(
       key: const ValueKey('settings-transition-opacity'),
-      opacity: _SettingsOpacityAnimation(incoming),
+      opacity: motion,
       child: RepaintBoundary(
         key: const ValueKey('settings-transition-layer'),
         child: ScaleTransition(
-          scale: Tween<double>(begin: 1.04, end: 1).animate(incoming),
+          key: const ValueKey('settings-transition-scale'),
+          scale: Tween<double>(begin: 1.04, end: 1).animate(motion),
           alignment: Alignment.center,
           child: child,
         ),
       ),
     );
-  }
-}
-
-/// Keeps Settings already composed on entry while retaining a complete exit
-/// fade. Reading the parent live also keeps opacity synchronized with scale on
-/// the route's first frame.
-class _SettingsOpacityAnimation extends Animation<double>
-    with AnimationWithParentMixin<double> {
-  _SettingsOpacityAnimation(this.parent);
-
-  @override
-  final Animation<double> parent;
-
-  @override
-  double get value {
-    final progress = parent.value;
-    return parent.status == AnimationStatus.reverse
-        ? progress
-        : 0.8 + (0.2 * progress);
   }
 }

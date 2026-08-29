@@ -195,6 +195,7 @@ h1 {
 .feedback-filters label {
   display: grid;
   gap: 0.45rem;
+  min-width: 0;
 }
 
 .feedback-filters label > span {
@@ -221,6 +222,8 @@ h1 {
 }
 
 .feedback-filters select {
+  width: 100%;
+  min-width: 0;
   padding: 0 2.25rem 0 1rem;
 }
 
@@ -301,14 +304,31 @@ h1 {
   gap: 0.4rem;
   color: rgb(35 30 30 / 62%);
   font-size: 0.78rem;
+}
+
+.feedback-status select {
+  font: inherit;
+  padding: 0.25rem 0.4rem;
+  border-radius: 0.4rem;
+  border: 1px solid rgb(35 30 30 / 18%);
+  background: #fff;
+  color: #231e1e;
   cursor: pointer;
 }
 
-.feedback-status input {
-  width: 1rem;
-  height: 1rem;
-  margin: 0;
-  accent-color: #231e1e;
+.feedback-status select:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+.status-error {
+  color: #b3261e;
+  font-size: 0.72rem;
+}
+
+.provenance-unavailable {
+  font-style: italic;
+  color: rgb(35 30 30 / 45%);
 }
 
 .record-open-link {
@@ -665,6 +685,18 @@ dd {
 
 .state.error {
   color: #9f2424;
+}
+
+.auth-prompt button {
+  margin-top: 1rem;
+}
+
+.attachment-placeholder {
+  min-height: 8rem;
+  display: grid;
+  place-content: center;
+  color: rgb(35 30 30 / 48%);
+  font-size: 0.8rem;
 }
 
 @media (max-width: 720px) {

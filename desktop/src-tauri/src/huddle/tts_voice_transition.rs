@@ -9,6 +9,8 @@ use std::{
     },
 };
 
+use super::{HumanFloor, PlaybackCoordinator, SynthesisFlightGuard};
+
 use crate::huddle::pocket::{load_voice_style, VoiceStyle, DEFAULT_VOICE, VOICE_FILE_EXT};
 
 #[derive(Debug)]
@@ -32,51 +34,29 @@ pub(super) type CancelSignals<'a> = (&'a AtomicBool, &'a AtomicBool);
 
 #[derive(Clone)]
 pub(super) struct PlaybackProbe {
-    player: Arc<Mutex<Option<Arc<rodio::Player>>>>,
-    pub(super) player_ops: Arc<Mutex<()>>,
-    synthesis_in_flight: Arc<AtomicBool>,
-}
-
-pub(super) struct SynthesisFlightGuard {
-    playback_probe: PlaybackProbe,
-}
-
-impl Drop for SynthesisFlightGuard {
-    fn drop(&mut self) {
-        self.playback_probe.set_synthesis_in_flight(false);
-    }
+    playback: Arc<Mutex<Option<Arc<PlaybackCoordinator>>>>,
 }
 
 impl PlaybackProbe {
     pub(super) fn new() -> Self {
         Self {
-            player: Arc::new(Mutex::new(None)),
-            player_ops: Arc::new(Mutex::new(())),
-            synthesis_in_flight: Arc::new(AtomicBool::new(false)),
+            playback: Arc::new(Mutex::new(None)),
         }
     }
 
-    pub(super) fn install(&self, player: Arc<rodio::Player>) {
-        self.player
+    pub(super) fn install(&self, playback: Arc<PlaybackCoordinator>) {
+        self.playback
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .replace(player);
+            .replace(playback);
     }
 
-    pub(super) fn set_synthesis_in_flight(&self, in_flight: bool) {
-        let _ops = super::lock_player_ops(&self.player_ops);
-        self.synthesis_in_flight.store(in_flight, Ordering::Release);
+    pub(super) fn begin_synthesis(&self) -> Option<SynthesisFlightGuard> {
+        self.playback().map(|playback| playback.begin_synthesis())
     }
 
-    pub(super) fn begin_synthesis(&self) -> SynthesisFlightGuard {
-        self.set_synthesis_in_flight(true);
-        SynthesisFlightGuard {
-            playback_probe: self.clone(),
-        }
-    }
-
-    fn player(&self) -> Option<Arc<rodio::Player>> {
-        self.player
+    pub(super) fn playback(&self) -> Option<Arc<PlaybackCoordinator>> {
+        self.playback
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
@@ -94,6 +74,7 @@ impl fmt::Debug for PlaybackProbe {
 #[derive(Debug)]
 pub(super) struct QueuedText {
     pub(super) generation: u64,
+    pub(super) floor_epoch: u64,
     pub(super) route_id: u64,
     pub(super) speaker_pubkey: Option<String>,
     pub(super) speaker_generation: u64,
@@ -105,6 +86,7 @@ pub(super) struct QueuedText {
 pub(crate) struct TtsTextSender {
     pub(super) text_tx: SyncSender<QueuedText>,
     pub(super) generation: u64,
+    pub(super) human_floor: HumanFloor,
     pub(super) speaker_generations: SpeakerGenerations,
 }
 
@@ -117,9 +99,11 @@ impl TtsTextSender {
         voice_reference: String,
         text: String,
     ) -> Result<(), String> {
+        let floor_epoch = self.human_floor.epoch();
         self.text_tx
             .send(QueuedText {
                 generation: self.generation,
+                floor_epoch,
                 route_id,
                 speaker_pubkey: Some(speaker_pubkey),
                 speaker_generation,
@@ -199,19 +183,18 @@ pub(super) fn request_active_speaker_cancel(
     playback_probe: &PlaybackProbe,
     expected_speaker_pubkey: &str,
 ) -> bool {
-    let Some(player) = playback_probe.player() else {
+    let Some(playback) = playback_probe.playback() else {
         return false;
     };
-    let _ops = super::lock_player_ops(&playback_probe.player_ops);
-    let playback_live =
-        !player.empty() || playback_probe.synthesis_in_flight.load(Ordering::Acquire);
-    request_active_speaker_cancel_while_locked(
-        generations,
-        active_speaker,
-        cancellation,
-        playback_live,
-        expected_speaker_pubkey,
-    )
+    playback.with_playback_live(|playback_live| {
+        request_active_speaker_cancel_while_locked(
+            generations,
+            active_speaker,
+            cancellation,
+            playback_live,
+            expected_speaker_pubkey,
+        )
+    })
 }
 
 fn request_active_speaker_cancel_while_locked(
@@ -472,6 +455,76 @@ fn log_cancelled_route(route_id: u64, reason: &str) {
     eprintln!("buzz-desktop: tts stage=queue status=dropped reason={reason} route_id={route_id}");
 }
 
+/// Check for cancel or shutdown. Returns `true` if the caller should break/continue.
+/// On cancel: drains the text queue and clears the cancel flag.
+///
+/// `playback` is the coordinator shared with the barge-in monitor; replacing
+/// playback is serialized with append and with the monitor's stale observation.
+pub(super) fn handle_cancel_or_shutdown(
+    cancel_signals: CancelSignals<'_>,
+    shutdown: &AtomicBool,
+    tts_active: &AtomicBool,
+    text_state: CancelTextState<'_>,
+    voice_change_ack: &VoiceChangeAck,
+    active_route_id: Option<u64>,
+    playback: Option<&PlaybackCoordinator>,
+) -> bool {
+    let (cancel, voice_cancel) = cancel_signals;
+    let (text_rx, deferred_text, current_text) = text_state;
+    if shutdown.load(Ordering::Acquire) {
+        eprintln!(
+            "buzz-desktop: tts stage=cancellation reason=shutdown route_id={}",
+            active_route_id.unwrap_or(0)
+        );
+        release_playback(playback, tts_active);
+        return true;
+    }
+    if cancel.load(Ordering::Acquire) || voice_cancel.load(Ordering::Acquire) {
+        // Serialize with begin_voice_change so the generation boundary and
+        // cancel consumption are observed as one transition.
+        let pending_voice_change = voice_change_ack
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        // Consume at the serialization point. A later barge-in remains true
+        // for the next pass instead of being overwritten after queue cleanup.
+        let barge_in = cancel.swap(false, Ordering::AcqRel);
+        voice_cancel.store(false, Ordering::Release);
+        eprintln!(
+            "buzz-desktop: tts stage=cancellation reason={} route_id={}",
+            if barge_in { "barge_in" } else { "voice_switch" },
+            active_route_id.unwrap_or(0)
+        );
+        let preserve_generation = (!barge_in)
+            .then(|| {
+                pending_voice_change
+                    .as_ref()
+                    .map(|pending| pending.generation)
+            })
+            .flatten();
+        retain_cancelled_text(deferred_text, current_text, text_rx, preserve_generation);
+        // Consume the flag at the coordinator serialization point: once
+        // released with `cancel == false`, a stale monitor observation cannot
+        // replace fresh post-cancel playback.
+        release_playback(playback, tts_active);
+        return true;
+    }
+    false
+}
+
+/// Silence playback and release the mic gate as one transition. When a player
+/// is live the release is published inside the replacement, so an append that
+/// wins the coordinator handoff cannot have its own activity publication
+/// overwritten by this `false`. With nothing live there is no transition to
+/// join and the gate is released directly.
+fn release_playback(playback: Option<&PlaybackCoordinator>, tts_active: &AtomicBool) {
+    let released = playback.is_some_and(|playback| {
+        playback.cancel_if_live(|| true, || tts_active.store(false, Ordering::Release))
+    });
+    if !released {
+        tts_active.store(false, Ordering::Release);
+    }
+}
+
 #[cfg(test)]
 mod speaker_generation_tests {
     use super::*;
@@ -480,27 +533,65 @@ mod speaker_generation_tests {
         let channels = std::num::NonZero::new(1).expect("non-zero channels");
         let sample_rate = std::num::NonZero::new(24_000).expect("non-zero sample rate");
         let (mixer, _mixer_source) = rodio::mixer::mixer(channels, sample_rate);
-        let player = Arc::new(rodio::Player::connect_new(&mixer));
+        let playback = Arc::new(PlaybackCoordinator::new(&mixer));
         if playback_live {
-            player.append(rodio::buffer::SamplesBuffer::new(
-                channels,
-                sample_rate,
-                vec![0.0; 24_000],
-            ));
+            playback.append_if(
+                rodio::buffer::SamplesBuffer::new(channels, sample_rate, vec![0.0; 24_000]),
+                |_| true,
+                || {},
+            );
         }
         let probe = PlaybackProbe::new();
-        probe.install(player);
+        probe.install(playback);
         probe
     }
 
     fn queued_speech(speaker_pubkey: &str, speaker_generation: u64) -> QueuedText {
         QueuedText {
+            floor_epoch: 0,
             generation: 1,
             route_id: 1,
             speaker_pubkey: Some(speaker_pubkey.to_string()),
             speaker_generation,
             voice_reference: Some("pocket:mary".to_string()),
             text: "Hello".to_string(),
+        }
+    }
+
+    /// A cancellation releases the mic gate whether or not there was audio to
+    /// silence. With a live player the release rides inside the replacement;
+    /// with nothing live there is no transition to join, and skipping the
+    /// release would strand the gate open with the worker already past the
+    /// utterance.
+    #[test]
+    fn cancellation_releases_the_mic_gate_with_or_without_live_playback() {
+        for playback_live in [false, true] {
+            let probe = playback_probe(playback_live);
+            let playback = probe.playback().expect("installed coordinator");
+            let cancel = AtomicBool::new(true);
+            let voice_cancel = AtomicBool::new(false);
+            let shutdown = AtomicBool::new(false);
+            let tts_active = AtomicBool::new(true);
+            let voice_change_ack = Arc::new(Mutex::new(None));
+            let (_text_tx, text_rx) = mpsc::channel();
+            let mut deferred_text = VecDeque::new();
+            let mut current_text = None;
+
+            assert!(handle_cancel_or_shutdown(
+                (&cancel, &voice_cancel),
+                &shutdown,
+                &tts_active,
+                (&text_rx, &mut deferred_text, &mut current_text),
+                &voice_change_ack,
+                None,
+                Some(&playback),
+            ));
+
+            assert!(
+                !tts_active.load(Ordering::Acquire),
+                "cancellation must release the mic gate (playback_live={playback_live})"
+            );
+            assert!(playback.empty(), "cancellation silences any queued audio");
         }
     }
 

@@ -7,7 +7,8 @@
     "skipLibCheck": true,
     "paths": {
       "@/*": ["./src/*"],
-      "@features-manifest": ["../preview-features.json"]
+      "@features-manifest": ["../preview-features.json"],
+      "@model-capabilities-manifest": ["../scripts/model-capabilities.json"]
     },
 
     /* Bundler mode */

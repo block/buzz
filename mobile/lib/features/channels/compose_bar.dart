@@ -24,12 +24,14 @@ import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/anchored_popover_menu.dart';
 import '../../shared/widgets/buzz_loading_indicator.dart';
 import '../../shared/widgets/keyboard_dismiss_on_drag.dart';
+import '../../shared/widgets/ios_glass_navigation_button.dart';
 import '../../shared/widgets/mobile_tab_footer_backdrop.dart';
 import '../../shared/widgets/modal_presentation.dart';
-import '../profile/user_cache_provider.dart';
-import '../profile/user_profile.dart';
+import '../../shared/profile/user_cache_provider.dart';
+import '../../shared/profile/user_profile.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../../shared/deeplink/deep_link.dart';
 import '../activity/compose_drafts_provider.dart';
 import 'camera_capture_cleanup.dart';
 import 'channel.dart';
@@ -57,3 +59,11 @@ part 'compose_bar/send_button.dart';
 part 'compose_bar/layout.dart';
 part 'compose_bar/dock.dart';
 part 'compose_bar/compose_bar_widget.dart';
+
+/// Callback used by channels and threads to submit composer content.
+typedef ComposeBarOnSend =
+    Future<void> Function(
+      String content,
+      List<String> mentionPubkeys, {
+      List<List<String>> mediaTags,
+    });

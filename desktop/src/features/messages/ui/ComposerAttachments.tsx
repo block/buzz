@@ -13,7 +13,6 @@ import {
   X,
 } from "lucide-react";
 
-import type { BlobDescriptor } from "@/shared/api/tauri";
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 import {
@@ -226,7 +225,7 @@ function composerMediaStyle(): React.CSSProperties {
 }
 
 type MediaAttachmentItemProps = {
-  attachment: BlobDescriptor;
+  attachment: ImetaMedia;
   isSpoilered: boolean;
   onEditSave?: (url: string, bytes: Uint8Array) => Promise<void>;
   onRemove: (url: string) => void;
@@ -266,6 +265,18 @@ const MediaAttachmentItem = React.forwardRef<
 
   const hash = shortHash(attachment.sha256);
   const isVideo = attachment.type.startsWith("video/");
+  // One accessible name for every control/label in this item. Provider media
+  // (e.g. KLIPY GIFs) carries a `displayLabel` but no content hash; ordinary
+  // uploads keep their historical type-aware `Attachment <hash>` /
+  // `Video attachment <hash>` name; only genuinely hashless non-provider media
+  // falls back to a filename.
+  const mediaLabel =
+    attachment.displayLabel?.trim() ||
+    (attachment.sha256
+      ? isVideo
+        ? `Video attachment ${hash}`
+        : `Attachment ${hash}`
+      : attachment.filename?.trim() || `Attachment ${hash}`);
   const thumbUrl = attachment.thumb
     ? rewriteRelayUrl(attachment.thumb)
     : rewriteRelayUrl(attachment.url);
@@ -275,7 +286,11 @@ const MediaAttachmentItem = React.forwardRef<
       ? rewriteRelayUrl(attachment.thumb)
       : undefined;
 
-  const canEdit = !isVideo && onEditSave !== undefined;
+  // Only Buzz-hosted uploads have a content hash. URL-only provider media
+  // must remain externally hosted instead of being copied into storage by the
+  // image editor's save path.
+  const canEdit =
+    !isVideo && onEditSave !== undefined && attachment.sha256.length === 64;
   const canRevert =
     !isVideo && onRevert !== undefined && originalUrl !== undefined;
 
@@ -338,40 +353,41 @@ const MediaAttachmentItem = React.forwardRef<
         style={composerMediaStyle()}
       >
         <DialogPrimitive.Root open={open} onOpenChange={handleOpenChange}>
-          <DialogPrimitive.Trigger asChild>
-            <div className="h-full w-full cursor-pointer overflow-hidden rounded-2xl border border-border/70">
-              {isVideo ? (
-                <div className="relative flex h-full w-full items-center justify-center bg-muted text-white">
-                  {videoPosterUrl ? (
-                    <img
-                      src={videoPosterUrl}
-                      alt={`Video attachment ${hash}`}
-                      className="h-full w-full object-cover"
-                    />
-                  ) : (
-                    <div className="h-full w-full bg-muted/80" />
-                  )}
-                  <div className="absolute inset-0 bg-black/15" />
-                  <div className="absolute flex h-5 w-5 items-center justify-center rounded-full bg-black/55 backdrop-blur-sm">
-                    <Play className="h-4 w-4 fill-white text-white" />
-                  </div>
+          <DialogPrimitive.Trigger
+            aria-label={mediaLabel}
+            className="h-full w-full cursor-pointer overflow-hidden rounded-2xl border border-border/70"
+          >
+            {isVideo ? (
+              <div className="relative flex h-full w-full items-center justify-center bg-muted text-white">
+                {videoPosterUrl ? (
+                  <img
+                    src={videoPosterUrl}
+                    alt=""
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <div className="h-full w-full bg-muted/80" />
+                )}
+                <div className="absolute inset-0 bg-black/15" />
+                <div className="absolute flex h-5 w-5 items-center justify-center rounded-full bg-black/55 backdrop-blur-sm">
+                  <Play className="h-4 w-4 fill-white text-white" />
                 </div>
-              ) : (
-                <img
-                  src={thumbUrl}
-                  alt={`Attachment ${hash}`}
-                  className="h-full w-full object-cover"
-                />
-              )}
-              {isSpoilered ? (
-                <div
-                  className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl bg-background/55 text-foreground/70 backdrop-blur-[1px]"
-                  data-composer-media-spoiler=""
-                >
-                  <HatGlasses className="h-4 w-4" />
-                </div>
-              ) : null}
-            </div>
+              </div>
+            ) : (
+              <img
+                src={thumbUrl}
+                alt=""
+                className="h-full w-full object-cover"
+              />
+            )}
+            {isSpoilered ? (
+              <div
+                className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl bg-background/55 text-foreground/70 backdrop-blur-[1px]"
+                data-composer-media-spoiler=""
+              >
+                <HatGlasses className="h-4 w-4" />
+              </div>
+            ) : null}
           </DialogPrimitive.Trigger>
           <DialogPrimitive.Portal>
             <DialogPrimitive.Overlay
@@ -387,7 +403,7 @@ const MediaAttachmentItem = React.forwardRef<
               onEscapeKeyDown={handleEscapeKeyDown}
             >
               <DialogPrimitive.Title className="sr-only">
-                Attachment {hash} preview
+                {mediaLabel} preview
               </DialogPrimitive.Title>
               <DialogPrimitive.Description className="sr-only">
                 Full-size attachment preview. Press Escape or click outside to
@@ -401,7 +417,7 @@ const MediaAttachmentItem = React.forwardRef<
               ) : null}
               {mode === "edit" && !isVideo ? (
                 <ComposerImageEditor
-                  alt={`Attachment ${hash}`}
+                  alt={mediaLabel}
                   src={rewriteRelayUrl(attachment.url)}
                   sourceUrl={attachment.url}
                   sourceType={attachment.type}
@@ -421,7 +437,7 @@ const MediaAttachmentItem = React.forwardRef<
                 />
               ) : (
                 <img
-                  alt={`Attachment ${hash}`}
+                  alt=""
                   className={cn(
                     "relative max-h-[90vh] max-w-[90vw] rounded-lg object-contain",
                     isSpoilered && "blur-2xl brightness-75",
@@ -515,7 +531,7 @@ const MediaAttachmentItem = React.forwardRef<
         <Tooltip disableHoverableContent>
           <TooltipTrigger asChild>
             <button
-              aria-label="Remove attachment"
+              aria-label={`Remove ${mediaLabel}`}
               type="button"
               onClick={() => onRemove(attachment.url)}
               className={COMPOSER_MEDIA_REMOVE_CLASS}

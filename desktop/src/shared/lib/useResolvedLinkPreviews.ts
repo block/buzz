@@ -3,20 +3,20 @@ import * as React from "react";
 import { invokeTauri } from "@/shared/api/tauri";
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
-import { eventToRepository } from "@/features/projects/projectModels";
+import {
+  eventToExplicitProject,
+  eventToRepository,
+} from "@/features/projects/projectModels";
 import { eventToProjectIssue } from "@/features/projects/projectIssues.mjs";
 import { eventToProjectPullRequest } from "@/features/projects/projectPullRequests.mjs";
 import {
   KIND_GIT_ISSUE,
   KIND_GIT_PULL_REQUEST,
-  KIND_GIT_STATUS_CLOSED,
-  KIND_GIT_STATUS_DRAFT,
-  KIND_GIT_STATUS_MERGED,
-  KIND_GIT_STATUS_OPEN,
+  KIND_PROJECT_ANNOUNCEMENT,
   KIND_REPO_ANNOUNCEMENT,
 } from "@/shared/constants/kinds";
 
-import { parseEntityLink } from "./entityLink";
+import { isEntityLink, parseEntityLink } from "./entityLink";
 import {
   buzzEntityFallbackTitle,
   type SupportedLinkPreview,
@@ -84,6 +84,13 @@ function metadataCacheKey(href: string): string {
   } catch {
     return href.split("#", 1)[0] ?? href;
   }
+}
+
+function isNegativeMetadata(metadata: LinkPreviewMetadata | null): boolean {
+  // A cached NEGATIVE is a result that should be retried when the URL freshly
+  // re-enters the composer: a hard miss (null) or a transient image failure.
+  // A healthy hit (`image`/`rejected`/no state) is a settled positive.
+  return metadata === null || metadata.imageFetchState === "transient_failure";
 }
 
 function metadataExpiry(
@@ -186,6 +193,23 @@ function createMetadataLoader({
     deleteKey(key: string) {
       cache.delete(key);
     },
+    /**
+     * Drop a cached NEGATIVE result (a resolved null or a transient failure) so
+     * the next load refetches. Used when a URL freshly enters the composer: a
+     * user pasting a link that previously blanked should get a new attempt now,
+     * not the stale miss. A healthy cached hit and an in-flight fetch are left
+     * untouched, so passive scroll re-renders still ride the cache as before.
+     * Returns whether a negative entry was actually dropped, so callers can
+     * invalidate their own derived state (e.g. retained React metadata) in step.
+     */
+    invalidateNegative(href: string): boolean {
+      const key = metadataCacheKey(href);
+      const cached = cache.get(key);
+      if (!cached || cached instanceof Promise) return false;
+      if (!isNegativeMetadata(cached.metadata)) return false;
+      cache.delete(key);
+      return true;
+    },
     load,
     peek,
     reset() {
@@ -209,13 +233,13 @@ function fetchLinkPreviewMetadata(
 const metadataLoader = createMetadataLoader({
   fetcher: fetchLinkPreviewMetadata,
 });
-const ENTITY_STATUS_KINDS = [
-  KIND_GIT_STATUS_OPEN,
-  KIND_GIT_STATUS_MERGED,
-  KIND_GIT_STATUS_CLOSED,
-  KIND_GIT_STATUS_DRAFT,
-];
 
+/** Share the same deduplicated metadata job between composer rendering and send preparation. */
+export async function loadLinkPreviewMetadata(
+  href: string,
+): Promise<LinkPreviewMetadata | null> {
+  return (await metadataLoader.load(href)).metadata;
+}
 type EntityEventFetcher = (
   filter: Parameters<typeof relayClient.fetchEvents>[0],
 ) => Promise<RelayEvent[]>;
@@ -236,6 +260,34 @@ export async function fetchBuzzEntityMetadata(
   if (!parsed.ok) return null;
 
   const { owner, dtag } = parsed.value;
+  if (parsed.value.type === "project") {
+    const projectAddress = `${KIND_PROJECT_ANNOUNCEMENT}:${owner}:${dtag}`;
+    const projectEvents = await fetchEvents({
+      kinds: [KIND_PROJECT_ANNOUNCEMENT],
+      authors: [owner],
+      "#d": [dtag],
+      limit: 1,
+    });
+    const project = projectEvents
+      .map((event) => eventToExplicitProject(event, new Map(), new Map()))
+      .find((candidate) => candidate?.projectAddress === projectAddress);
+    if (!project) return null;
+
+    const repositoryCount = project.repositoryAddresses.length;
+    return {
+      siteName: project.name,
+      faviconDataUrl: null,
+      imageDataUrl: null,
+      imageDomain: null,
+      title: project.description || project.name,
+      description: compactMetadata([
+        repositoryCount > 0
+          ? `${repositoryCount} ${repositoryCount === 1 ? "repository" : "repositories"}`
+          : null,
+      ]),
+    };
+  }
+
   const repoAddress = `${KIND_REPO_ANNOUNCEMENT}:${owner}:${dtag}`;
   const repoEvents = await fetchEvents({
     kinds: [KIND_REPO_ANNOUNCEMENT],
@@ -281,39 +333,30 @@ export async function fetchBuzzEntityMetadata(
   });
   if (!root) return null;
 
-  const trustedAuthors = [...new Set([root.pubkey.toLowerCase(), owner])];
-  const statusEvents = await fetchEvents({
-    kinds: ENTITY_STATUS_KINDS,
-    authors: trustedAuthors,
-    "#e": [id],
-    limit: 20,
-  });
-  if (type === "issue") {
-    const issue = eventToProjectIssue(root, statusEvents);
-    return {
-      ...base,
-      title: issue.title,
-      description: compactMetadata([issue.status, ...issue.labels.slice(0, 2)]),
-    };
-  }
-
-  const pullRequest = eventToProjectPullRequest(root, [], [], statusEvents);
-  const source = pullRequest.branchName;
-  const target = pullRequest.targetBranch ?? repository.defaultBranch;
+  const title =
+    type === "issue"
+      ? eventToProjectIssue(root).title
+      : eventToProjectPullRequest(root).title;
   return {
     ...base,
-    title: pullRequest.title,
-    description: compactMetadata([
-      pullRequest.status,
-      source ? `${source} → ${target}` : null,
-      pullRequest.commit?.slice(0, 7),
-    ]),
+    title,
+    // Issue and PR bodies are markdown and often begin with headings. Keep
+    // their fetched subject as tooltip/card context without fetching or
+    // flattening body/status metadata into an unrendered description string.
+    description: null,
   };
 }
 
 const entityMetadataLoader = createMetadataLoader({
   fetcher: fetchBuzzEntityMetadata,
 });
+
+/** Share deduplicated relay-native entity metadata across cards and inline tooltips. */
+export async function loadBuzzEntityMetadata(
+  href: string,
+): Promise<LinkPreviewMetadata | null> {
+  return (await entityMetadataLoader.load(href)).metadata;
+}
 
 /** Clear ephemeral metadata when the active relay/community changes. */
 export function resetLinkPreviewMetadataCache(): void {
@@ -338,9 +381,7 @@ type ResolvedMetadataByHref = Record<
 
 /** Only auto-generated titles may be replaced; explicit markdown labels win. */
 export function shouldResolveTitle(preview: SupportedLinkPreview): boolean {
-  if (preview.kind !== "buzz-pull-request" && preview.kind !== "buzz-issue") {
-    return true;
-  }
+  if (!isEntityLink(preview.href)) return true;
   const parsed = parseEntityLink(preview.href);
   return parsed.ok && preview.title === buzzEntityFallbackTitle(parsed.value);
 }
@@ -388,7 +429,8 @@ export function isBuzzEntityPreview(preview: SupportedLinkPreview): boolean {
   return (
     preview.kind === "buzz-pull-request" ||
     preview.kind === "buzz-issue" ||
-    preview.kind === "buzz-repository"
+    preview.kind === "buzz-repository" ||
+    preview.kind === "buzz-project"
   );
 }
 
@@ -417,15 +459,128 @@ export function withEntityFallbacks(
 
 export function useResolvedLinkPreviews(
   previews: SupportedLinkPreview[],
+  {
+    refetchNewNegatives = false,
+    liveHrefs,
+    liveHrefVersions,
+  }: {
+    /**
+     * When a preview href is newly present since the last run, drop any cached
+     * NEGATIVE (null/transient-fail) metadata for it so it refetches instead of
+     * resolving to a stale miss. Used by the composer: a freshly pasted link
+     * should get a new attempt. Off by default so passive renders (the message
+     * list) keep riding the cache. Healthy cached hits are never invalidated.
+     */
+    refetchNewNegatives?: boolean;
+    /**
+     * The hrefs present in the caller's LIVE (undebounced) content. When given,
+     * newness is judged against this set instead of the resolved `previews`, so
+     * a URL that leaves and re-enters the live content is treated as re-entered
+     * even when a debounce swallowed the intermediate empty state (the composer
+     * debounces resolution, so `previews` may never observe the URL leaving).
+     * Resolution timing still follows `previews`; only the invalidation decision
+     * uses this. Omit to track newness against `previews` (the default).
+     */
+    liveHrefs?: readonly string[];
+    /**
+     * Per-href entry versions captured at the live editor-update boundary.
+     * Unlike committed href-set equality, a bumped version preserves an
+     * intermediate leave/re-entry even when React batches both updates into one
+     * commit with the same final href set.
+     */
+    liveHrefVersions?: ReadonlyMap<string, number>;
+  } = {},
 ): ResolvedLinkPreview[] {
   const [resolvedMetadata, setResolvedMetadata] =
     React.useState<ResolvedMetadataByHref>({});
   const [retryGeneration, setRetryGeneration] = React.useState(0);
-
+  const seenHrefsRef = React.useRef<Set<string>>(new Set());
+  const handledHrefVersionsRef = React.useRef<Map<string, number>>(new Map());
+  // Drive newness tracking from a stable string key so an equivalent href list
+  // does not restart the effect. The effect closes over the committed render's
+  // hrefs; do not mirror them into a ref during render, because an abandoned
+  // concurrent render could otherwise leak uncommitted presence into the live
+  // effect from the previous commit.
+  const currentHrefs = liveHrefs ?? previews.map((preview) => preview.href);
+  const newnessKey = currentHrefs
+    .map((href) => `${href}\0${liveHrefVersions?.get(href) ?? ""}`)
+    .join("\n");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: newnessKey is the stable identity for currentHrefs; depending on the freshly allocated array would rerun this effect every render.
   React.useEffect(() => {
     let cancelled = false;
     let retryAt = Number.POSITIVE_INFINITY;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    if (refetchNewNegatives) {
+      // Invalidate first, before the peek/load loop below reads the cache, so a
+      // newly-present href loads fresh instead of resolving to its stale miss.
+      // buzz:// entity links resolve off the relay, not this cache — skip them.
+      // Newness is judged against the live href set when supplied (so a
+      // debounce-swallowed leave/re-entry still counts), else against previews.
+      const seen = seenHrefsRef.current;
+      const handledVersions = handledHrefVersionsRef.current;
+      const liveNow = currentHrefs;
+      // Preserve handled hrefs only while they remain live. A live href is not
+      // marked handled until its debounced preview exists and invalidation has
+      // actually been attempted; otherwise blank -> paste would consume
+      // newness during the 350ms debounce and later reuse the stale negative.
+      const next = new Set<string>(
+        [...seen].filter((href) => liveNow.includes(href)),
+      );
+      const nextVersions = new Map(
+        [...handledVersions].filter(([href]) => liveNow.includes(href)),
+      );
+      const reenteredKeys: string[] = [];
+      for (const preview of previews) {
+        const version = liveHrefVersions?.get(preview.href);
+        const alreadyHandled =
+          version === undefined
+            ? seen.has(preview.href)
+            : handledVersions.get(preview.href) === version;
+        if (
+          alreadyHandled ||
+          !liveNow.includes(preview.href) ||
+          preview.href.startsWith("buzz://")
+        ) {
+          continue;
+        }
+        // Drop any settled NEGATIVE from the SHARED loader cache so the load
+        // below refetches instead of resolving to the stale miss. (A no-op when
+        // the shared entry is healthy, in-flight, or absent.)
+        metadataLoader.invalidateNegative(preview.href);
+        reenteredKeys.push(metadataCacheKey(preview.href));
+        next.add(preview.href);
+        if (version !== undefined) nextVersions.set(preview.href, version);
+      }
+      seenHrefsRef.current = next;
+      handledHrefVersionsRef.current = nextVersions;
+      // Dropping the loader entry alone is not enough: this hook retains its own
+      // resolved metadata, and the render that scheduled this effect already
+      // read the stale negative from it. Clear this hook's OWN negative key for
+      // every re-entered href — gating on whether the shared loader dropped a
+      // settled entry misses the case where another hook left an in-flight
+      // Promise in the shared cache (invalidateNegative leaves Promises alone
+      // and the loop below merely coalesces onto it), which would otherwise
+      // keep this hook's retained `transient_failure` as a `snapshotReady`
+      // fallback the composer could turn into a sendable snapshot tag from stale
+      // metadata until that fetch resolves. Clearing the local negative renders
+      // the re-entered link as pending until the fresh load wins. Healthy local
+      // hits are kept, so passive re-renders still show their card instantly.
+      if (reenteredKeys.length > 0) {
+        setResolvedMetadata((current) => {
+          let changed = false;
+          const nextMetadata = { ...current };
+          for (const key of reenteredKeys) {
+            const value = nextMetadata[key];
+            if (value !== undefined && isNegativeMetadata(value)) {
+              delete nextMetadata[key];
+              changed = true;
+            }
+          }
+          return changed ? nextMetadata : current;
+        });
+      }
+    }
 
     const scheduleRetry = (
       { expiresAt, key }: Pick<MetadataLoadResult, "expiresAt" | "key">,
@@ -485,7 +640,7 @@ export function useResolvedLinkPreviews(
       for (const cancel of cancelScheduledLoads) cancel();
       if (retryTimer !== null) clearTimeout(retryTimer);
     };
-  }, [previews, retryGeneration]);
+  }, [previews, refetchNewNegatives, retryGeneration, newnessKey]);
 
   return React.useMemo(
     () =>

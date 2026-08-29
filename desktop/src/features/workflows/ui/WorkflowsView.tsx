@@ -1,27 +1,56 @@
-import { Plus, RefreshCw, Zap } from "lucide-react";
+import { Plus, RefreshCw } from "lucide-react";
 import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { stringify as yamlStringify } from "yaml";
+import { toast } from "sonner";
 
-import { allWorkflowsQueryKey } from "@/features/workflows/hooks";
+import {
+  allWorkflowsQueryKey,
+  workflowListFocusRefetchPolicy,
+  workflowQueryKey,
+} from "@/features/workflows/hooks";
+import { getWorkflowActivationWarning } from "@/features/workflows/ui/workflowActivationWarning";
 import { WorkflowCard } from "@/features/workflows/ui/WorkflowCard";
 import { WorkflowDeleteDialog } from "@/features/workflows/ui/WorkflowDeleteDialog";
-import { WorkflowDetailPanel } from "@/features/workflows/ui/WorkflowDetailPanel";
-import { WorkflowDialog } from "@/features/workflows/ui/WorkflowDialog";
+import { WorkflowEditorHost } from "@/features/workflows/ui/WorkflowEditorHost";
+import { useWorkflowListAuthorPresentations } from "@/features/workflows/ui/useWorkflowListAuthorPresentations";
+import { useWorkflowListMessagePresentations } from "@/features/workflows/ui/useWorkflowListMessagePresentations";
+import type { WorkflowEditorRoute } from "@/features/workflows/ui/WorkflowsScreen";
+import type { WorkflowEditorPane } from "@/features/workflows/ui/workflowEditorPane";
+import {
+  getWorkflowEnabled,
+  withWorkflowEnabled,
+} from "@/features/workflows/ui/workflowDefinition";
 import type { Channel, Workflow } from "@/shared/api/types";
 import {
   deleteWorkflow,
   getChannelsWorkflows,
   triggerWorkflow,
+  updateWorkflow,
 } from "@/shared/api/tauriWorkflows";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/shared/ui/alert-dialog";
 import { Button } from "@/shared/ui/button";
-import { Card } from "@/shared/ui/card";
+import { PageHeader } from "@/shared/ui/PageHeader";
 import { Skeleton } from "@/shared/ui/skeleton";
 
 type WorkflowsViewProps = {
   channels: Channel[];
-  onCloseWorkflow: () => void;
-  onSelectWorkflow: (workflowId: string) => void;
-  selectedWorkflowId: string | null;
+  editor: WorkflowEditorRoute | null;
+  onCloseEditor: () => void;
+  onCreateWorkflow: () => void;
+  onDuplicateWorkflow: (workflowId: string) => void;
+  onEditWorkflow: (workflowId: string) => void;
+  onViewWorkflow: (workflowId: string) => void;
+  onEditorPaneChange: (pane: WorkflowEditorPane) => void;
 };
 
 type WorkflowWithChannel = {
@@ -29,52 +58,66 @@ type WorkflowWithChannel = {
   channelName: string;
 };
 
-type DialogState =
-  | { mode: "closed" }
-  | { mode: "create" }
-  | { mode: "edit"; workflow: Workflow }
-  | { mode: "duplicate"; workflow: Workflow };
+const WORKFLOW_CARD_GRID_CLASS =
+  "grid grid-cols-1 gap-3 [@container(min-width:42rem)]:grid-cols-2 [@container(min-width:63rem)]:grid-cols-3";
 
 function WorkflowsListSkeleton() {
   return (
-    <div className="space-y-2">
+    <div className={WORKFLOW_CARD_GRID_CLASS}>
       {["first", "second", "third", "fourth"].map((card) => (
-        <Card className="p-4" key={card}>
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0 flex-1 space-y-3">
-              <div className="flex items-center gap-2">
-                <Skeleton className="h-5 w-44" />
-                <Skeleton className="h-5 w-16 rounded-full" />
-              </div>
-              <Skeleton className="h-4 w-full max-w-2xl" />
-              <div className="flex flex-wrap gap-2">
-                <Skeleton className="h-5 w-20 rounded-full" />
-                <Skeleton className="h-5 w-24 rounded-full" />
-                <Skeleton className="h-5 w-16 rounded-full" />
-              </div>
+        <div
+          className="flex min-h-60 flex-col rounded-2xl bg-muted/50 p-5 shadow-xs"
+          key={card}
+        >
+          <div className="flex items-start justify-between">
+            <div className="flex items-center gap-2">
+              <Skeleton className="h-9 w-9 rounded-xl" />
+              <Skeleton className="h-4 w-4" />
+              <Skeleton className="h-9 w-9 rounded-xl" />
             </div>
-            <div className="hidden shrink-0 gap-2 sm:flex">
-              <Skeleton className="h-8 w-8 rounded-lg" />
-              <Skeleton className="h-8 w-8 rounded-lg" />
-            </div>
+            <Skeleton className="h-6 w-16 rounded-full" />
           </div>
-        </Card>
+          <Skeleton className="mt-5 h-3 w-28" />
+          <Skeleton className="mt-2 h-6 w-full" />
+          <Skeleton className="mt-2 h-6 w-4/5" />
+          <Skeleton className="mt-auto h-4 w-32" />
+        </div>
       ))}
     </div>
   );
 }
 
+function CreateWorkflowCard({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      aria-label="Create Workflow"
+      className="group relative flex min-h-60 w-full min-w-0 items-center justify-center overflow-hidden rounded-2xl border border-dashed border-border/80 bg-transparent text-muted-foreground shadow-xs transition-colors hover:border-border hover:bg-muted/70 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+      data-testid="new-workflow-card"
+      onClick={onClick}
+      type="button"
+    >
+      <Plus className="h-7 w-7 transition-colors" />
+    </button>
+  );
+}
+
 export function WorkflowsView({
   channels,
-  onCloseWorkflow,
-  onSelectWorkflow,
-  selectedWorkflowId,
+  editor,
+  onCloseEditor,
+  onCreateWorkflow,
+  onDuplicateWorkflow,
+  onEditWorkflow,
+  onViewWorkflow,
+  onEditorPaneChange,
 }: WorkflowsViewProps) {
-  const [dialogState, setDialogState] = React.useState<DialogState>({
-    mode: "closed",
-  });
   const [deleteTarget, setDeleteTarget] = React.useState<Workflow | null>(null);
+  const [activationTarget, setActivationTarget] =
+    React.useState<Workflow | null>(null);
   const queryClient = useQueryClient();
+
+  const editorWorkflowId =
+    editor && editor.mode !== "create" ? editor.workflowId : null;
 
   const memberChannels = channels.filter((c) => c.isMember);
   const channelIds = memberChannels.map((c) => c.id).sort();
@@ -101,11 +144,13 @@ export function WorkflowsView({
       return results;
     },
     enabled: memberChannels.length > 0,
-    staleTime: 30_000,
-    refetchOnWindowFocus: true,
+    ...workflowListFocusRefetchPolicy,
   });
 
   const allWorkflows = allWorkflowsQuery.data ?? [];
+  const workflows = allWorkflows.map(({ workflow }) => workflow);
+  const authorPresentations = useWorkflowListAuthorPresentations(workflows);
+  const messagePresentations = useWorkflowListMessagePresentations(workflows);
 
   const triggerMutation = useMutation({
     mutationFn: (workflowId: string) => triggerWorkflow(workflowId),
@@ -118,10 +163,40 @@ export function WorkflowsView({
 
   const deleteMutation = useMutation({
     mutationFn: (workflowId: string) => deleteWorkflow(workflowId),
-    onSuccess: (_data, workflowId) => {
-      if (selectedWorkflowId === workflowId) {
-        onCloseWorkflow();
-      }
+    onSuccess: () => {
+      void queryClient.invalidateQueries({
+        predicate: (query) =>
+          query.queryKey[0] === "workflows" ||
+          query.queryKey[0] === "workflows-all",
+      });
+    },
+  });
+
+  const toggleEnabledMutation = useMutation({
+    mutationFn: (workflow: Workflow) =>
+      updateWorkflow(
+        workflow.id,
+        yamlStringify(
+          withWorkflowEnabled(
+            workflow.definition,
+            !getWorkflowEnabled(workflow.definition),
+          ),
+        ),
+        workflow.revision,
+      ),
+    onError: (error) => {
+      toast.error("Couldn’t change workflow status", {
+        description:
+          error instanceof Error
+            ? error.message
+            : "The workflow was not changed. Try again.",
+      });
+    },
+    onSuccess: (_data, workflow) => {
+      setActivationTarget(null);
+      void queryClient.invalidateQueries({
+        queryKey: workflowQueryKey(workflow.id),
+      });
       void queryClient.invalidateQueries({
         predicate: (query) =>
           query.queryKey[0] === "workflows" ||
@@ -141,30 +216,58 @@ export function WorkflowsView({
     [],
   );
 
-  const deleteOne = deleteMutation.mutate;
+  const deleteOne = deleteMutation.mutateAsync;
   const handleConfirmDelete = React.useCallback(
-    (workflow: Workflow) => {
-      deleteOne(workflow.id);
-      setDeleteTarget(null);
+    async (workflow: Workflow) => {
+      try {
+        await deleteOne(workflow.id);
+        setDeleteTarget(null);
+        // Deleting the workflow the editor is pointed at would otherwise leave
+        // that editor open on a workflow that no longer exists.
+        if (workflow.id === editorWorkflowId) onCloseEditor();
+      } catch {
+        // React Query stores the error; keep the confirmation and editor open.
+      }
     },
-    [deleteOne],
+    [deleteOne, editorWorkflowId, onCloseEditor],
+  );
+
+  const handleView = React.useCallback(
+    (workflow: Workflow) => onViewWorkflow(workflow.id),
+    [onViewWorkflow],
   );
 
   const handleEdit = React.useCallback(
-    (workflow: Workflow) => setDialogState({ mode: "edit", workflow }),
-    [],
+    (workflow: Workflow) => onEditWorkflow(workflow.id),
+    [onEditWorkflow],
   );
 
   const handleDuplicate = React.useCallback(
-    (workflow: Workflow) => setDialogState({ mode: "duplicate", workflow }),
-    [],
+    (workflow: Workflow) => onDuplicateWorkflow(workflow.id),
+    [onDuplicateWorkflow],
   );
 
-  const handleDialogOpenChange = React.useCallback((open: boolean) => {
-    if (!open) {
-      setDialogState({ mode: "closed" });
-    }
-  }, []);
+  const toggleEnabled = toggleEnabledMutation.mutate;
+  const handleToggleEnabled = React.useCallback(
+    (workflow: Workflow) => {
+      if (
+        !getWorkflowEnabled(workflow.definition) &&
+        getWorkflowActivationWarning(yamlStringify(workflow.definition))
+      ) {
+        setActivationTarget(workflow);
+        return;
+      }
+      toggleEnabled(workflow);
+    },
+    [toggleEnabled],
+  );
+  const activationWarning = activationTarget
+    ? getWorkflowActivationWarning(yamlStringify(activationTarget.definition))
+    : null;
+
+  const editorWorkflowHint = allWorkflows.find(
+    ({ workflow }) => workflow.id === editorWorkflowId,
+  )?.workflow;
 
   return (
     <div
@@ -172,102 +275,127 @@ export function WorkflowsView({
       data-testid="workflows-view"
     >
       <div
-        className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 pb-4 pt-4"
+        className="flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-7 sm:px-6 sm:py-8"
         data-scroll-restoration-id="workflows-list"
       >
-        <div className="mb-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <h2 className="text-lg font-semibold">Workflows</h2>
-            <Button
-              aria-label="Refresh workflows"
-              disabled={allWorkflowsQuery.isFetching}
-              onClick={() => void allWorkflowsQuery.refetch()}
-              size="icon"
-              variant="ghost"
-            >
-              <RefreshCw
-                className={`h-4 w-4 ${allWorkflowsQuery.isFetching ? "animate-spin" : ""}`}
-              />
-            </Button>
-          </div>
-          <Button onClick={() => setDialogState({ mode: "create" })} size="sm">
-            <Plus className="mr-1 h-4 w-4" />
-            Create Workflow
-          </Button>
-        </div>
+        <div className="mx-auto w-full max-w-6xl space-y-8 [container-type:inline-size]">
+          <PageHeader
+            action={
+              <Button
+                aria-label="Refresh workflows"
+                disabled={allWorkflowsQuery.isFetching}
+                onClick={() => void allWorkflowsQuery.refetch()}
+                size="icon"
+                variant="ghost"
+              >
+                <RefreshCw
+                  className={`h-4 w-4 ${allWorkflowsQuery.isFetching ? "animate-spin" : ""}`}
+                />
+              </Button>
+            }
+            description="Automations that keep your community moving."
+            title="Workflows"
+          />
 
-        {allWorkflowsQuery.isLoading ? (
-          <WorkflowsListSkeleton />
-        ) : allWorkflowsQuery.isError ? (
-          <div className="flex flex-1 flex-col items-center justify-center gap-2 text-muted-foreground">
-            <p className="text-sm text-red-400">Failed to load workflows</p>
-            <Button
-              onClick={() => void allWorkflowsQuery.refetch()}
-              size="sm"
-              variant="outline"
-            >
-              Retry
-            </Button>
-          </div>
-        ) : allWorkflows.length === 0 ? (
-          <div className="flex flex-1 flex-col items-center justify-center gap-3 text-muted-foreground">
-            <Zap className="h-10 w-10 opacity-30" />
-            <p className="text-sm">No workflows yet</p>
-            <Button
-              onClick={() => setDialogState({ mode: "create" })}
-              size="sm"
-              variant="outline"
-            >
-              <Plus className="mr-1 h-4 w-4" />
-              Create your first workflow
-            </Button>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {allWorkflows.map(({ workflow, channelName }) => (
-              <WorkflowCard
-                channelName={channelName}
-                isActive={selectedWorkflowId === workflow.id}
-                key={workflow.id}
-                onDelete={handleDelete}
-                onDuplicate={handleDuplicate}
-                onEdit={handleEdit}
-                onSelect={onSelectWorkflow}
-                onTrigger={handleTrigger}
-                workflow={workflow}
-              />
-            ))}
-          </div>
-        )}
+          {allWorkflowsQuery.isLoading ? (
+            <WorkflowsListSkeleton />
+          ) : allWorkflowsQuery.isError ? (
+            <div className="flex flex-col items-center justify-center gap-2 py-16 text-muted-foreground">
+              <p className="text-sm text-red-400">Failed to load workflows</p>
+              <Button
+                onClick={() => void allWorkflowsQuery.refetch()}
+                size="sm"
+                variant="outline"
+              >
+                Retry
+              </Button>
+            </div>
+          ) : (
+            <div className={WORKFLOW_CARD_GRID_CLASS}>
+              <CreateWorkflowCard onClick={onCreateWorkflow} />
+              {allWorkflows.map(({ workflow, channelName }) => (
+                <WorkflowCard
+                  authorPresentation={authorPresentations.get(workflow.id)}
+                  channelName={channelName}
+                  isTogglingEnabled={
+                    toggleEnabledMutation.isPending &&
+                    toggleEnabledMutation.variables?.id === workflow.id
+                  }
+                  key={workflow.id}
+                  messagePresentation={messagePresentations.get(workflow.id)}
+                  onDelete={handleDelete}
+                  onDuplicate={handleDuplicate}
+                  onEdit={handleEdit}
+                  onToggleEnabled={handleToggleEnabled}
+                  onTrigger={handleTrigger}
+                  onView={handleView}
+                  workflow={workflow}
+                />
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
-      {selectedWorkflowId ? (
-        <div className="w-[400px] shrink-0">
-          <WorkflowDetailPanel
-            key={selectedWorkflowId}
-            onClose={onCloseWorkflow}
-            onEdit={handleEdit}
-            workflowId={selectedWorkflowId}
-          />
-        </div>
-      ) : null}
-
-      <WorkflowDialog
+      <WorkflowEditorHost
         channels={memberChannels}
-        mode={dialogState.mode === "closed" ? "create" : dialogState.mode}
-        onOpenChange={handleDialogOpenChange}
-        open={dialogState.mode !== "closed"}
-        workflow={
-          dialogState.mode === "edit" || dialogState.mode === "duplicate"
-            ? dialogState.workflow
-            : null
-        }
+        editor={editor}
+        onClose={onCloseEditor}
+        onDeleteWorkflow={handleDelete}
+        onDuplicateWorkflow={onDuplicateWorkflow}
+        onEditWorkflow={onEditWorkflow}
+        onEditorPaneChange={onEditorPaneChange}
+        onTriggerWorkflow={handleTrigger}
+        workflowHint={editorWorkflowHint}
       />
 
+      <AlertDialog
+        onOpenChange={(open) => {
+          if (!open && !toggleEnabledMutation.isPending) {
+            setActivationTarget(null);
+          }
+        }}
+        open={activationTarget !== null}
+      >
+        <AlertDialogContent data-testid="workflow-activation-confirmation">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {activationWarning?.title ?? "Turn on this workflow?"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {activationWarning?.description ??
+                "Turn it on to let it run immediately, or keep it off until you’re ready."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep off</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={toggleEnabledMutation.isPending}
+              onClick={(event) => {
+                if (!activationTarget) return;
+                event.preventDefault();
+                toggleEnabled(activationTarget);
+              }}
+            >
+              Turn on
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <WorkflowDeleteDialog
+        error={
+          deleteMutation.error instanceof Error
+            ? deleteMutation.error.message
+            : null
+        }
+        isPending={deleteMutation.isPending}
         onConfirm={handleConfirmDelete}
         onOpenChange={(open) => {
-          if (!open) setDeleteTarget(null);
+          if (!open) {
+            deleteMutation.reset();
+            setDeleteTarget(null);
+          }
         }}
         open={deleteTarget !== null}
         workflow={deleteTarget}

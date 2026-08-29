@@ -40,6 +40,7 @@ void showRemindMeLaterSheet({
 
   showBuzzModalBottomSheet<void>(
     context: context,
+    title: 'Remind me about this message',
     showDragHandle: true,
     builder: (sheetContext) => SafeArea(
       child: IconTheme.merge(
@@ -56,16 +57,6 @@ void showRemindMeLaterSheet({
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Padding(
-                  padding: const EdgeInsets.only(
-                    left: Grid.half,
-                    bottom: Grid.xxs,
-                  ),
-                  child: Text(
-                    'Remind me about this message',
-                    style: Theme.of(sheetContext).textTheme.titleSmall,
-                  ),
-                ),
                 for (final preset in reminderTimePresets)
                   ListTile(
                     leading: const Icon(LucideIcons.clock),

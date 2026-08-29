@@ -25,6 +25,7 @@
 
 use std::time::Duration;
 
+use buzz_sdk::nip_oa;
 use buzz_test_client::BuzzTestClient;
 use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag, Timestamp};
 
@@ -92,8 +93,14 @@ fn repo_announcement(keys: &Keys, repo_d: &str) -> nostr::Event {
 /// A NIP-09 `a`-tag-only deletion at a NIP-33 coordinate. No `e` tag, so the
 /// relay takes the coordinate-delete path rather than the event-id path.
 /// `created_at` defaults to now when `None`.
-fn coordinate_delete(keys: &Keys, kind: u16, d_tag: &str, created_at: Option<u64>) -> nostr::Event {
-    let coord = format!("{kind}:{}:{d_tag}", keys.public_key().to_hex());
+fn coordinate_delete_for_author(
+    signer: &Keys,
+    author: &Keys,
+    kind: u16,
+    d_tag: &str,
+    created_at: Option<u64>,
+) -> nostr::Event {
+    let coord = format!("{kind}:{}:{d_tag}", author.public_key().to_hex());
     let builder =
         EventBuilder::new(Kind::Custom(5), "")
             .tags(vec![Tag::parse(["a", coord.as_str()]).unwrap()]);
@@ -101,8 +108,26 @@ fn coordinate_delete(keys: &Keys, kind: u16, d_tag: &str, created_at: Option<u64
         Some(ts) => builder.custom_created_at(Timestamp::from(ts)),
         None => builder,
     }
-    .sign_with_keys(keys)
+    .sign_with_keys(signer)
     .unwrap()
+}
+
+fn coordinate_delete(keys: &Keys, kind: u16, d_tag: &str, created_at: Option<u64>) -> nostr::Event {
+    coordinate_delete_for_author(keys, keys, kind, d_tag, created_at)
+}
+
+async fn connect_agent_with_owner(agent: &Keys, owner: &Keys) -> BuzzTestClient {
+    let tag_json = nip_oa::compute_auth_tag(owner, &agent.public_key(), "kind=9")
+        .expect("compute NIP-OA auth tag");
+    let auth_tag = nip_oa::parse_auth_tag(&tag_json).expect("parse NIP-OA auth tag");
+    let mut client = BuzzTestClient::connect_unauthenticated(&relay_url())
+        .await
+        .expect("connect agent unauthenticated");
+    client
+        .authenticate_with_nip_oa(agent, &auth_tag)
+        .await
+        .expect("authenticate agent with NIP-OA owner");
+    client
 }
 
 fn addressable_filter(kind: u16, author: &Keys, d_tag: &str) -> Filter {
@@ -343,6 +368,93 @@ async fn test_project_tombstone_deletes_coordinate_and_spares_members() {
     );
 
     client.disconnect().await.expect("disconnect");
+}
+
+/// NIP-OA extends NIP-09 coordinate ownership: a human owner may delete an
+/// agent-authored project, while an unrelated signer must be rejected without
+/// changing the live project head.
+#[tokio::test]
+#[ignore]
+async fn test_agent_owner_can_delete_agent_project_but_third_party_cannot() {
+    let agent = Keys::generate();
+    let owner = Keys::generate();
+    let third_party = Keys::generate();
+    let project_d = unique("agent-owned-project");
+
+    let mut agent_client = connect_agent_with_owner(&agent, &owner).await;
+    let ok = agent_client
+        .send_event(project_event(
+            &agent,
+            &project_d,
+            "Agent project",
+            &[],
+            None,
+        ))
+        .await
+        .expect("send agent project");
+    assert!(ok.accepted, "relay rejected agent project: {}", ok.message);
+
+    let mut third_party_client = BuzzTestClient::connect(&relay_url(), &third_party)
+        .await
+        .expect("connect third party");
+    let ok = third_party_client
+        .send_event(coordinate_delete_for_author(
+            &third_party,
+            &agent,
+            PROJECT_KIND,
+            &project_d,
+            None,
+        ))
+        .await
+        .expect("send third-party tombstone");
+    assert!(
+        !ok.accepted,
+        "unrelated signer deleted an agent-owned project"
+    );
+    let still_live = query(
+        &mut third_party_client,
+        "agent-owner-third-party-rejected",
+        addressable_filter(PROJECT_KIND, &agent, &project_d),
+    )
+    .await;
+    assert_eq!(
+        still_live.len(),
+        1,
+        "rejected tombstone changed project state"
+    );
+
+    let mut owner_client = BuzzTestClient::connect(&relay_url(), &owner)
+        .await
+        .expect("connect owner");
+    let ok = owner_client
+        .send_event(coordinate_delete_for_author(
+            &owner,
+            &agent,
+            PROJECT_KIND,
+            &project_d,
+            None,
+        ))
+        .await
+        .expect("send owner tombstone");
+    assert!(
+        ok.accepted,
+        "relay rejected owner deletion of agent project: {}",
+        ok.message
+    );
+    let deleted = query(
+        &mut owner_client,
+        "agent-owner-deleted",
+        addressable_filter(PROJECT_KIND, &agent, &project_d),
+    )
+    .await;
+    assert!(deleted.is_empty(), "owner tombstone left project live");
+
+    agent_client.disconnect().await.expect("disconnect agent");
+    third_party_client
+        .disconnect()
+        .await
+        .expect("disconnect third party");
+    owner_client.disconnect().await.expect("disconnect owner");
 }
 
 /// NIP-09 scopes an `a`-tag deletion to versions at or before the deletion's own

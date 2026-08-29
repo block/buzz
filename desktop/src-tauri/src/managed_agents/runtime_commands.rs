@@ -137,86 +137,91 @@ pub fn put_managed_agent_runtime_lifecycle(
     Ok(status)
 }
 
+// Keep disk, process, and mutex work off the main thread so opening members cannot stall the UI.
 #[tauri::command]
-pub fn list_managed_agent_runtimes(
+pub async fn list_managed_agent_runtimes(
     app: AppHandle,
 ) -> Result<Vec<ManagedAgentRuntimeStatus>, String> {
-    // This command is polled whenever the members sidebar opens and refetched
-    // on every status event — load the per-row status inputs once, outside
-    // the locks, instead of hitting disk per row while holding them.
-    let personas = load_personas(&app).unwrap_or_default();
-    let global = load_global_agent_config(&app).unwrap_or_default();
-    let state = app.state::<AppState>();
-    let _transition = state
-        .managed_agent_runtime_transition
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let _store = state
-        .managed_agents_store_lock
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let mut records = load_managed_agents(&app)?;
-    let mut runtimes = state
-        .managed_agent_processes
-        .lock()
-        .map_err(|e| e.to_string())?;
-    let exited_keys: Vec<_> = runtimes
-        .iter_mut()
-        .filter_map(|(key, runtime)| match runtime.child.try_wait() {
-            Ok(Some(_)) | Err(_) => Some(key.clone()),
-            Ok(None) => None,
-        })
-        .collect();
-    let records_changed = !exited_keys.is_empty();
-    let mut statuses = Vec::new();
-    for key in exited_keys {
-        runtimes.remove(&key);
-        super::remove_agent_runtime_receipt(&app, &key);
-        state.clear_agent_session_cache(&key);
-        if let Some(record) = records
+    tokio::task::spawn_blocking(move || {
+        // This command is polled whenever the members sidebar opens and refetched
+        // on every status event — load the per-row status inputs once, outside
+        // the locks, instead of hitting disk per row while holding them.
+        let personas = load_personas(&app).unwrap_or_default();
+        let global = load_global_agent_config(&app).unwrap_or_default();
+        let state = app.state::<AppState>();
+        let _transition = state
+            .managed_agent_runtime_transition
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let _store = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let mut records = load_managed_agents(&app)?;
+        let mut runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let exited_keys: Vec<_> = runtimes
             .iter_mut()
-            .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))
-        {
-            record.updated_at = crate::util::now_iso();
-            record.last_stopped_at = Some(record.updated_at.clone());
-            let status = status_for_with(
+            .filter_map(|(key, runtime)| match runtime.child.try_wait() {
+                Ok(Some(_)) | Err(_) => Some(key.clone()),
+                Ok(None) => None,
+            })
+            .collect();
+        let records_changed = !exited_keys.is_empty();
+        let mut statuses = Vec::new();
+        for key in exited_keys {
+            runtimes.remove(&key);
+            super::remove_agent_runtime_receipt(&app, &key);
+            state.clear_agent_session_cache(&key);
+            if let Some(record) = records
+                .iter_mut()
+                .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))
+            {
+                record.updated_at = crate::util::now_iso();
+                record.last_stopped_at = Some(record.updated_at.clone());
+                let status = status_for_with(
+                    &app,
+                    record,
+                    &key,
+                    None,
+                    None,
+                    StatusInputs {
+                        personas: &personas,
+                        global: &global,
+                    },
+                );
+                emit_status(&app, &status);
+                statuses.push(status);
+            }
+        }
+        statuses.extend(runtimes.iter().filter_map(|(key, runtime)| {
+            let record = records
+                .iter()
+                .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))?;
+            Some(status_for_with(
                 &app,
                 record,
-                &key,
-                None,
+                key,
+                Some(runtime),
                 None,
                 StatusInputs {
                     personas: &personas,
                     global: &global,
                 },
-            );
-            emit_status(&app, &status);
-            statuses.push(status);
+            ))
+        }));
+        drop(runtimes);
+        // Records are only mutated above when a runtime exited — skip the store
+        // rewrite on the common nothing-changed poll.
+        if records_changed {
+            save_managed_agents(&app, &records)?;
         }
-    }
-    statuses.extend(runtimes.iter().filter_map(|(key, runtime)| {
-        let record = records
-            .iter()
-            .find(|record| record.pubkey.eq_ignore_ascii_case(&key.pubkey))?;
-        Some(status_for_with(
-            &app,
-            record,
-            key,
-            Some(runtime),
-            None,
-            StatusInputs {
-                personas: &personas,
-                global: &global,
-            },
-        ))
-    }));
-    drop(runtimes);
-    // Records are only mutated above when a runtime exited — skip the store
-    // rewrite on the common nothing-changed poll.
-    if records_changed {
-        save_managed_agents(&app, &records)?;
-    }
-    Ok(statuses)
+        Ok(statuses)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
 pub(crate) fn start_managed_agent_runtime_pair_lazy(
@@ -571,6 +576,18 @@ pub async fn reconcile_managed_agent_runtimes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_managed_agent_runtimes_returns_a_future() {
+        fn assert_async_command<F, Fut>(_command: F)
+        where
+            F: Fn(AppHandle) -> Fut,
+            Fut: std::future::Future<Output = Result<Vec<ManagedAgentRuntimeStatus>, String>>,
+        {
+        }
+
+        assert_async_command(list_managed_agent_runtimes);
+    }
 
     fn payload(
         relay_url: &str,

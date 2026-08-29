@@ -1,9 +1,11 @@
 import * as React from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import {
   deleteManagedAgentWithRules,
   type ManagedAgentActionResult,
 } from "@/features/agents/lib/managedAgentControlActions";
+import { invalidateChannelMembersRosters } from "@/features/channels/rosterFreshness";
 import { removeChannelMember } from "@/shared/api/tauri";
 import type {
   AgentPersona,
@@ -46,6 +48,7 @@ export function useProfileAgentDeletion({
   presenceLookup,
   relayAgents,
 }: UseProfileAgentDeletionInput) {
+  const queryClient = useQueryClient();
   const removeAgentFromAllChannels = React.useCallback(
     async (agentPubkey: string) => {
       const normalizedPubkey = agentPubkey.toLowerCase();
@@ -67,8 +70,12 @@ export function useProfileAgentDeletion({
           removeChannelMember(channelId, agentPubkey),
         ),
       );
+      // Direct writes bypass the member mutations' invalidation; without
+      // this, the deleted agent stays in cached rosters for the freshness
+      // window.
+      await invalidateChannelMembersRosters(queryClient, channelIds);
     },
-    [channels, relayAgents],
+    [channels, queryClient, relayAgents],
   );
 
   const deleteManagedAgentRecord = React.useCallback(

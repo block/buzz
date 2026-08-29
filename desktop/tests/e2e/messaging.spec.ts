@@ -1,9 +1,16 @@
+import { readFileSync } from "node:fs";
+
 import { expect, test, type Locator } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
 import { openSettings } from "../helpers/settings";
+
+const LINK_PREVIEW_IMAGE = readFileSync(
+  new URL("../fixtures/github-pr-5629-og.png", import.meta.url),
+);
+const LINK_PREVIEW_IMAGE_DATA_URL = `data:image/png;base64,${LINK_PREVIEW_IMAGE.toString("base64")}`;
 
 async function waitForReadyComposerSnapshots(
   page: import("@playwright/test").Page,
@@ -208,8 +215,7 @@ test.beforeEach(async ({ page }, testInfo) => {
                       siteName: "GitHub",
                       description:
                         "A polished, stable preview for shared links.",
-                      imageDataUrl:
-                        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                      imageDataUrl: LINK_PREVIEW_IMAGE_DATA_URL,
                       imageDomain: "opengraph.githubassets.com",
                       faviconDataUrl:
                         "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -246,6 +252,16 @@ test.beforeEach(async ({ page }, testInfo) => {
                       }
                     : testInfo.title.includes(
                           "Enter during an in-flight snapshot upload",
+                        ) ||
+                        testInfo.title.includes("Skip wins the upload race") ||
+                        testInfo.title.includes(
+                          "async metadata beyond old cutoff",
+                        ) ||
+                        testInfo.title.includes(
+                          "async upload beyond metadata budget",
+                        ) ||
+                        testInfo.title.includes(
+                          "immediately pressing Enter prepares",
                         )
                       ? {
                           linkPreviewMetadata: {
@@ -256,11 +272,22 @@ test.beforeEach(async ({ page }, testInfo) => {
                               "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
                             imageDomain: "opengraph.githubassets.com",
                           },
-                          linkPreviewMetadataDelayMs: 300,
-                          linkPreviewUploadDelayMs: 1_200,
+                          linkPreviewMetadataDelayMs: testInfo.title.includes(
+                            "async metadata beyond old cutoff",
+                          )
+                            ? 4_000
+                            : 300,
+                          linkPreviewUploadDelayMs: testInfo.title.includes(
+                            "async upload beyond metadata budget",
+                          )
+                            ? 4_000
+                            : 1_200,
                         }
                       : testInfo.title.includes(
                             "snapshot thumbnail upload failure",
+                          ) ||
+                          testInfo.title.includes(
+                            "snapshot media upload failure",
                           )
                         ? {
                             linkPreviewMetadata: {
@@ -280,47 +307,74 @@ test.beforeEach(async ({ page }, testInfo) => {
                               "link-preview-image",
                             ],
                           }
-                        : testInfo.title.includes("link preview") ||
-                            testInfo.title.includes("supported Compact")
+                        : testInfo.title.includes(
+                              "sent link preview media uses",
+                            )
                           ? {
+                              mediaProxyInitiallyUnavailable: true,
                               linkPreviewMetadata: {
                                 title: "Buzz pull request",
                                 siteName: "GitHub",
                                 description:
                                   "A sender-authored preview snapshot.",
-                                imageDataUrl: null,
-                                imageDomain: null,
+                                imageDataUrl:
+                                  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                                imageDomain: "opengraph.githubassets.com",
+                                faviconDataUrl:
+                                  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
                               },
-                              linkPreviewMetadataDelayMs:
-                                testInfo.title.includes(
-                                  "loading card before cold resolver work",
-                                )
-                                  ? 10_000
-                                  : testInfo.title.includes(
-                                        "send does not wait",
-                                      )
-                                    ? 3_000
-                                    : testInfo.title.includes("draft auto-send")
-                                      ? 500
-                                      : testInfo.title.includes(
-                                            "style defaults",
-                                          ) ||
-                                          testInfo.title.includes(
-                                            "attachment-sized",
-                                          )
-                                        ? 1_500
-                                        : undefined,
-                              linkPreviewMetadataStartBlockMs:
-                                testInfo.title.includes(
-                                  "loading card before cold resolver work",
-                                )
-                                  ? 150
-                                  : undefined,
                             }
-                          : undefined;
+                          : testInfo.title.includes("link preview") ||
+                              testInfo.title.includes("supported Compact")
+                            ? {
+                                linkPreviewMetadata: {
+                                  title: "Buzz pull request",
+                                  siteName: "GitHub",
+                                  description:
+                                    "A sender-authored preview snapshot.",
+                                  imageDataUrl: null,
+                                  imageDomain: null,
+                                },
+                                linkPreviewMetadataDelayMs:
+                                  testInfo.title.includes(
+                                    "loading card before cold resolver work",
+                                  )
+                                    ? 10_000
+                                    : testInfo.title.includes(
+                                          "explicit cancellation suppresses a pending",
+                                        ) ||
+                                        testInfo.title.includes(
+                                          "settled-empty promoted link preview",
+                                        )
+                                      ? 10_000
+                                      : testInfo.title.includes(
+                                            "draft auto-send",
+                                          )
+                                        ? 500
+                                        : testInfo.title.includes(
+                                              "style defaults",
+                                            ) ||
+                                            testInfo.title.includes(
+                                              "attachment-sized",
+                                            )
+                                          ? 1_500
+                                          : undefined,
+                                linkPreviewMetadataStartBlockMs:
+                                  testInfo.title.includes(
+                                    "loading card before cold resolver work",
+                                  )
+                                    ? 150
+                                    : undefined,
+                              }
+                            : undefined;
   const mock = testInfo.title.includes("unresolvable preview")
     ? { linkPreviewMetadata: null, linkPreviewMetadataDelayMs: 800 }
-    : baseMock;
+    : {
+        ...baseMock,
+        ...(testInfo.title.includes("clears Sending after")
+          ? { sendMessageDelayMs: 800 }
+          : {}),
+      };
   await installMockBridge(page, mock);
 });
 
@@ -462,6 +516,84 @@ test("markdown tables overflow wide content and fill the message when narrow", a
     .toBeLessThanOrEqual(1);
 });
 
+test("sent link preview media uses the authenticated proxy in compact and rich cards", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246?proxy=1";
+  const fallbackMediaPattern =
+    /^buzz-media:\/\/localhost\/media\/[\da-f]{64}\.png$/;
+  const proxyMediaPattern =
+    /^http:\/\/127\.0\.0\.1:54321\/media\/[\da-f]{64}\.png$/;
+  await page.route("http://127.0.0.1:54321/media/**", (route) =>
+    route.fulfill({
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"><rect width="40" height="20" fill="#22c55e"/></svg>',
+      contentType: "image/svg+xml",
+    }),
+  );
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("message-input").fill(previewUrl);
+  await waitForReadyComposerSnapshots(page);
+  await page.getByTestId("send-message").click();
+
+  const row = page.getByTestId("message-row").last();
+  const compactPreview = row.locator(
+    '[data-link-preview="github-pull-request"]',
+  );
+  const compactThumbnail = compactPreview
+    .locator("[data-link-preview-thumbnail] img")
+    .first();
+  const compactFavicon = compactPreview.locator(
+    "img[data-link-preview-hostname-favicon]",
+  );
+  await expect(compactThumbnail).toHaveAttribute("src", fallbackMediaPattern);
+  await expect(compactFavicon).toHaveAttribute("src", fallbackMediaPattern);
+
+  const releasedPort = await page.evaluate(() =>
+    window.__BUZZ_E2E_RELEASE_MEDIA_PROXY__?.(),
+  );
+  expect(releasedPort).toBe(54321);
+  await expect(compactThumbnail).toHaveAttribute("src", proxyMediaPattern);
+  await expect(compactFavicon).toHaveAttribute("src", proxyMediaPattern);
+  await expect
+    .poll(() => compactThumbnail.evaluate((image) => image.naturalWidth))
+    .toBe(40);
+
+  // The compact thumbnail sits flush against the card shell's left edge, so the
+  // shell's smooth-corner clip carves those corners. It must therefore carry
+  // the same treatment itself, or its right corners render as a plain arc
+  // against the shell's smoothed left corners. See the invariant in
+  // `shared/ui/smoothCorners.ts`.
+  const compactThumbnailFrame = compactPreview
+    .locator("[data-link-preview-thumbnail]")
+    .first();
+  await expectCornerRadiusPx(compactPreview, 16);
+  await expectCornerRadiusPx(compactThumbnailFrame, 16);
+  await expectSmoothCorners(compactThumbnailFrame);
+
+  await openSettings(page, "appearance");
+  await page.getByTestId("link-preview-style-rich").click();
+  await expect(page.getByTestId("link-preview-style-rich")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await page.getByTestId("settings-back-to-app").click();
+
+  const richPreview = row.locator(
+    '[data-link-preview="github-pull-request"][data-link-preview-inline]',
+  );
+  const richThumbnail = richPreview
+    .locator("[data-link-preview-thumbnail] img")
+    .first();
+  const richFavicon = richPreview.locator("img[data-link-preview-favicon]");
+  await expect(richThumbnail).toHaveAttribute("src", proxyMediaPattern);
+  await expect(richFavicon).toHaveAttribute("src", proxyMediaPattern);
+  await expect
+    .poll(() => richThumbnail.evaluate((image) => image.naturalWidth))
+    .toBe(40);
+});
+
 test("link preview style defaults to compact and Rich unfurls descriptions", async ({
   page,
 }) => {
@@ -507,13 +639,14 @@ test("link preview style defaults to compact and Rich unfurls descriptions", asy
   }
 
   await openSettings(page, "appearance");
-  await expect(page.getByTestId("link-preview-style-trigger")).toHaveText(
-    "Compact",
+  await expect(page.getByTestId("link-preview-style-compact")).toHaveAttribute(
+    "aria-pressed",
+    "true",
   );
-  await page.getByTestId("link-preview-style-trigger").click();
   await page.getByTestId("link-preview-style-rich").click();
-  await expect(page.getByTestId("link-preview-style-trigger")).toHaveText(
-    "Rich",
+  await expect(page.getByTestId("link-preview-style-rich")).toHaveAttribute(
+    "aria-pressed",
+    "true",
   );
   await expect
     .poll(() =>
@@ -565,8 +698,11 @@ test("link preview style defaults to compact and Rich unfurls descriptions", asy
   }
 
   await openSettings(page, "appearance");
-  await page.getByTestId("link-preview-style-trigger").click();
   await page.getByTestId("link-preview-style-compact").click();
+  await expect(page.getByTestId("link-preview-style-compact")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
 });
 
 for (const [pasteShape, wrapUrl] of [
@@ -612,11 +748,9 @@ for (const [pasteShape, wrapUrl] of [
       .locator("[data-composer-link-previews]")
       .locator('[data-link-preview="github-pull-request"]');
     await expect(input).toContainText(previewUrl, { timeout: 1_000 });
-    await expect(composerPreview).toHaveAttribute(
-      "data-state",
-      /^(processing|done)$/,
-      { timeout: 1_000 },
-    );
+    await expect(
+      composerPreview.locator('[data-slot="attachment"]'),
+    ).toHaveAttribute("data-state", /^(processing|done)$/, { timeout: 1_000 });
     await expect(page.getByTestId("send-message")).toBeEnabled();
   });
 }
@@ -764,7 +898,7 @@ test("unresolvable preview disappears after the terminal miss", async ({
   await expect(row.locator("[data-link-preview]")).toHaveCount(0);
 });
 
-test("send does not wait for a pending link preview snapshot", async ({
+test("explicit cancellation suppresses a pending link preview and sends without it", async ({
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246?send=pending";
@@ -773,29 +907,56 @@ test("send does not wait for a pending link preview snapshot", async ({
   await page.getByTestId("message-input").fill(previewUrl);
 
   const composerPreviews = page.locator("[data-composer-link-previews]");
+  const card = composerPreviews.locator(
+    '[data-link-preview="github-pull-request"]',
+  );
+  const send = page.getByTestId("send-message");
+  const cancel = card.getByTestId("composer-hide-link-previews");
+  const progress = card.getByTestId("link-preview-progress");
+  const textPlaceholder = card.getByTestId("link-preview-text-placeholder");
   await expect(composerPreviews).toHaveAttribute(
     "data-ready-snapshot-count",
     "0",
   );
-  await expect(
-    composerPreviews.locator('[data-link-preview="github-pull-request"]'),
-  ).toHaveAttribute("data-image-state", "pending");
+  await expect(card).toHaveAttribute("data-image-state", "pending");
+  await expect(cancel).toHaveAttribute(
+    "aria-label",
+    "Send without link previews",
+  );
+  await expect(cancel).toHaveAttribute("title", "Send without link previews");
+  await expect(progress).toBeVisible();
+  await expect(progress).not.toHaveAttribute("aria-valuenow");
+  await expect(textPlaceholder).toBeVisible();
+  await expect(card.locator("[data-link-preview-hostname]")).toHaveCount(0);
+  await expect(card.getByText("github.com", { exact: true })).toHaveCount(0);
+  await expect(cancel).toHaveCSS("opacity", "0");
+  await card.hover();
+  await expect(cancel).toHaveCSS("opacity", "1");
+  await expect(card).toHaveCSS("overflow", "visible");
+  await expect(card.locator('[data-slot="attachment"]')).toHaveCSS(
+    "overflow",
+    "hidden",
+  );
 
-  // While metadata is still resolving Send is disabled so the button does not
-  // flicker ready -> not-ready. But a link whose metadata stalls must not trap
-  // the composer: past the disable cap Send re-enables even though the card is
-  // still pending, and sending ships a bare link with no snapshot tag.
-  await expect(page.getByTestId("send-message")).toBeDisabled();
+  // The mock metadata takes ten seconds. Submit is intentionally available:
+  // the pending work is promoted into the floating background preparation UI.
+  await expect(send).toBeEnabled();
+  await page.waitForTimeout(2_200);
   await expect(composerPreviews).toHaveAttribute(
     "data-has-pending-snapshots",
-    "false",
+    "true",
   );
-  await expect(
-    composerPreviews.locator('[data-link-preview="github-pull-request"]'),
-  ).toHaveAttribute("data-image-state", "pending");
-  await expect(page.getByTestId("send-message")).toBeEnabled();
+  await expect(card).toHaveAttribute("data-image-state", "pending");
+  await expect(send).toBeEnabled();
 
-  await page.getByTestId("send-message").click();
+  // The explicit escape suppresses all previews, preserves the draft link, and
+  // makes the durable no-preview intent sendable immediately.
+  await cancel.click();
+  await expect(composerPreviews).toHaveCount(0);
+  await expect(page.getByTestId("message-input")).toContainText(previewUrl);
+  await expect(send).toBeEnabled();
+  await send.click();
+
   const row = page.getByTestId("message-row").last();
   await expect(row).toContainText(previewUrl);
   await expect(row.locator("[data-link-preview]")).toHaveCount(0);
@@ -808,10 +969,10 @@ test("send does not wait for a pending link preview snapshot", async ({
       call?.payload as { linkPreviewTags?: string[][] | null } | undefined
     )?.linkPreviewTags;
   });
-  expect(linkPreviewTags ?? []).toEqual([]);
+  expect(linkPreviewTags).toEqual([["link-preview", "none"]]);
 });
 
-test("Enter during an in-flight snapshot upload cannot ship a bare link", async ({
+test("Enter during an in-flight snapshot upload hands off and sends once", async ({
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246";
@@ -820,27 +981,16 @@ test("Enter during an in-flight snapshot upload cannot ship a bare link", async 
   const input = page.getByTestId("message-input");
   await input.fill(previewUrl);
 
-  const composerPreviews = page.locator("[data-composer-link-previews]");
-  const card = composerPreviews.locator("[data-link-preview-composer-card]");
-  await expect(card).toBeVisible();
-  // Metadata resolves (image painted) but the sendable tag is not ready yet:
-  // the snapshot media upload is still in flight (linkPreviewUploadDelayMs), so
-  // the composer reports the preview as still pending.
+  const card = page.locator("[data-link-preview-composer-card]");
   await expect(card).toHaveAttribute("data-image-state", "image");
   await expect(card).toHaveAttribute("data-snapshot-tag-ready", "false");
-  await expect(composerPreviews).toHaveAttribute(
-    "data-has-pending-snapshots",
-    "true",
-  );
 
-  // Drive Enter (not a disabled-button click, which the browser swallows on its
-  // own) while the upload is deterministically in flight. The synchronous submit
-  // guard must reject it: no send_channel_message call may occur before the tag
-  // is ready, or the link would ship bare. This is the core Enter-bypass fix —
-  // the disabled state is enforced on the keyboard path, not just the button.
-  await expect(input).toBeFocused();
   await input.press("Enter");
-  await input.press("Enter");
+  await expect(input).toHaveText("");
+  const progress = page.getByTestId("composer-upload-progress");
+  await expect(progress).toHaveAccessibleName("Preparing link preview");
+  await expect(page.getByTestId("composer-upload-cancel")).toHaveText("Skip");
+
   const sendsDuringUpload = await page.evaluate(
     () =>
       (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
@@ -849,37 +999,171 @@ test("Enter during an in-flight snapshot upload cannot ship a bare link", async 
   );
   expect(sendsDuringUpload).toBe(0);
 
-  // Once the upload settles the tag is captured and Send re-enables. Sending
-  // now lands the preview snapshot matching the body.
-  await expect(card).toHaveAttribute("data-snapshot-tag-ready", "true");
-  await expect(page.getByTestId("send-message")).toBeEnabled();
-  await input.press("Enter");
   const row = page.getByTestId("message-row").last();
   await expect(row).toContainText(previewUrl);
   await expect(row.locator("[data-link-preview]")).toBeVisible();
+  await expect(progress).toHaveCount(0);
+  const sends = await page.evaluate(
+    () =>
+      (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+        (entry) => entry.command === "send_channel_message",
+      ).length,
+  );
+  expect(sends).toBe(1);
+});
 
-  const linkPreviewTags = await page.evaluate(() => {
+test("async metadata beyond old cutoff still produces preview image", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246?slow=metadata";
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+  await input.fill(previewUrl);
+  await input.press("Enter");
+
+  const progress = page.getByTestId("composer-upload-progress");
+  await expect(progress).toHaveAccessibleName("Preparing link preview");
+  await page.waitForTimeout(3_200);
+  await expect(progress).toBeVisible();
+
+  const row = page.getByTestId("message-row").last();
+  await expect(row).toContainText(previewUrl);
+  await expect(row.locator("[data-link-preview]")).toHaveAttribute(
+    "data-image-state",
+    "image",
+  );
+});
+
+test("async upload beyond metadata budget retains preview image", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246?slow=image";
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+  await input.fill(previewUrl);
+  await input.press("Enter");
+
+  const progress = page.getByTestId("composer-upload-progress");
+  await expect(progress).toHaveAccessibleName("Preparing link preview");
+  await page.waitForTimeout(3_200);
+  await expect(progress).toBeVisible();
+
+  const row = page.getByTestId("message-row").last();
+  await expect(row).toContainText(previewUrl);
+  await expect(row.locator("[data-link-preview]")).toHaveAttribute(
+    "data-image-state",
+    "image",
+  );
+  const tags = await page.evaluate(() => {
     const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
       .reverse()
       .find((entry) => entry.command === "send_channel_message");
-    return (
-      call?.payload as { linkPreviewTags?: string[][] | null } | undefined
-    )?.linkPreviewTags;
+    return (call?.payload as { linkPreviewTags?: string[][] }).linkPreviewTags;
   });
-  expect(linkPreviewTags?.map((tag) => tag[3])).toEqual([previewUrl]);
+  expect(tags?.[0]?.[7]).toContain("/media/");
+  expect(tags?.[0]?.[8]).not.toBe("");
 });
 
-test("draft auto-send with a link preview waits for settling and sends exactly once", async ({
+test("Skip wins the upload race and sends without preview", async ({
   page,
 }) => {
-  // Regression for the one-shot auto-submit blocker: a confirmed Drafts-panel
-  // "Send message" for a draft containing a supported link is normally still
-  // inside the preview settling window when the mount-only auto-submit effect
-  // fires. The old effect cleared the ?autoSend trigger then fired submit once
-  // at setTimeout(0); submit bailed at the pending-snapshot guard and the
-  // one-shot never retried, so the confirmed draft was silently never sent.
-  // The effect must instead wait until settling finishes, then send exactly
-  // once — with the resolved snapshot tag attached.
+  const previewUrl = "https://github.com/block/buzz/pull/3246?skip=1";
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+  await input.fill(previewUrl);
+  await expect(
+    page.locator("[data-link-preview-composer-card]"),
+  ).toHaveAttribute("data-snapshot-tag-ready", "false");
+
+  await input.press("Enter");
+  const skip = page.getByTestId("composer-upload-cancel");
+  await expect(skip).toHaveText("Skip");
+  await skip.click();
+
+  const row = page.getByTestId("message-row").last();
+  await expect(row).toContainText(previewUrl);
+  await expect(row.locator("[data-link-preview]")).toHaveCount(0);
+  await page.waitForTimeout(1_500);
+  const calls = await page.evaluate(() =>
+    (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+      (entry) => entry.command === "send_channel_message",
+    ),
+  );
+  expect(calls).toHaveLength(1);
+  expect(
+    (calls[0]?.payload as { linkPreviewTags?: string[][] }).linkPreviewTags,
+  ).toEqual([]);
+});
+
+test("promoted link preview send clears Sending after REST publication", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246?pending=preview";
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+  await input.fill(previewUrl);
+  await input.press("Enter");
+
+  const row = page.getByTestId("message-row").last();
+  await expect(row).toContainText(previewUrl);
+  await expect(row).toContainText("Sending…");
+  await expect(row.locator("[data-link-preview]")).toBeVisible();
+  await expect(row).not.toContainText("Sending…");
+
+  const restCalls = await page.evaluate(() =>
+    (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+      (entry) => entry.command === "send_channel_message",
+    ),
+  );
+  expect(restCalls).toHaveLength(1);
+  expect(
+    (restCalls[0]?.payload as { linkPreviewTags?: string[][] }).linkPreviewTags,
+  ).toHaveLength(1);
+});
+
+test("settled-empty promoted link preview send uses REST and clears Sending after Skip", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246?pending=empty";
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+  await input.fill(previewUrl);
+  await input.press("Enter");
+  await page.getByTestId("composer-upload-cancel").click();
+
+  const row = page.getByTestId("message-row").last();
+  await expect(row).toContainText(previewUrl);
+  await expect(row).toContainText("Sending…");
+  await expect(row).not.toContainText("Sending…");
+  await expect(row.locator("[data-link-preview]")).toHaveCount(0);
+
+  const result = await page.evaluate(() => ({
+    restCalls: (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+      (entry) => entry.command === "send_channel_message",
+    ),
+    websocketSends: (window.__BUZZ_E2E_SIGNED_EVENTS__ ?? []).filter(
+      (event) => event.kind === 9,
+    ),
+  }));
+  expect(result.restCalls).toHaveLength(1);
+  expect(
+    (result.restCalls[0]?.payload as { linkPreviewTags?: string[][] })
+      .linkPreviewTags,
+  ).toEqual([]);
+  expect(result.websocketSends).toHaveLength(0);
+});
+
+test("draft auto-send promotes link preview preparation and sends exactly once", async ({
+  page,
+}) => {
+  // A confirmed Drafts-panel send must fire once immediately, promote preview
+  // preparation into the background flow, and eventually publish one enriched
+  // event rather than consuming the one-shot trigger while the hook debounces.
   const previewUrl = "https://github.com/block/buzz/pull/3246?draft=autosend";
   const channelId = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 
@@ -934,9 +1218,7 @@ test("draft auto-send with a link preview waits for settling and sends exactly o
   await expect(dialog).toBeVisible({ timeout: 4_000 });
   await dialog.getByRole("button", { name: "Send", exact: true }).click();
 
-  // Exactly one send eventually fires (after the ~500 ms metadata settle), and
-  // it carries the link preview snapshot tag — proving the draft was not
-  // dropped during the settling window and did not double-send on retry.
+  // Exactly one publish eventually fires and carries the promoted snapshot.
   await expect
     .poll(async () =>
       page.evaluate(
@@ -996,7 +1278,7 @@ test("rapid Enter presses on a ready link preview send exactly once", async ({
     .toBe(1);
 });
 
-test("pasting a link preview and immediately pressing Enter waits for resolution", async ({
+test("pasting a link and immediately pressing Enter prepares it after submit", async ({
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246?fast=send";
@@ -1004,39 +1286,23 @@ test("pasting a link preview and immediately pressing Enter waits for resolution
   await page.getByTestId("channel-general").click();
   const input = page.getByTestId("message-input");
 
-  // Fill the URL and press Enter within the debounce window, before resolution
-  // has even started. The live-candidate guard must treat the unresolved link
-  // as pending and reject the Enter, so the message cannot ship bare.
   await input.fill(previewUrl);
   await input.press("Enter");
-  const sendsBeforeResolution = await page.evaluate(
-    () =>
-      (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
-        (entry) => entry.command === "send_channel_message",
-      ).length,
-  );
-  expect(sendsBeforeResolution).toBe(0);
+  await expect(input).toHaveText("");
+  await expect(page.getByTestId("composer-upload-cancel")).toHaveText("Skip");
 
-  // The debounce fires, resolution + upload complete, and only then does Send
-  // become available. A press now lands the snapshot.
-  await waitForReadyComposerSnapshots(page);
-  await input.press("Enter");
   const row = page.getByTestId("message-row").last();
   await expect(row).toContainText(previewUrl);
   await expect(row.locator("[data-link-preview]")).toBeVisible();
-
-  const linkPreviewTags = await page.evaluate(() => {
-    const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
-      .reverse()
-      .find((entry) => entry.command === "send_channel_message");
-    return (
-      call?.payload as { linkPreviewTags?: string[][] | null } | undefined
-    )?.linkPreviewTags;
-  });
-  expect(linkPreviewTags?.map((tag) => tag[3])).toEqual([previewUrl]);
+  const calls = await page.evaluate(() =>
+    (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? []).filter(
+      (entry) => entry.command === "send_channel_message",
+    ),
+  );
+  expect(calls).toHaveLength(1);
 });
 
-test("a snapshot thumbnail upload failure toasts and still sends with the favicon", async ({
+test("a snapshot media upload failure preserves a metadata-only preview", async ({
   page,
 }) => {
   const previewUrl = "https://github.com/block/buzz/pull/3246?upload=fail";
@@ -1044,41 +1310,28 @@ test("a snapshot thumbnail upload failure toasts and still sends with the favico
   await page.getByTestId("channel-general").click();
   const input = page.getByTestId("message-input");
   await input.fill(previewUrl);
-
-  // The thumbnail upload is configured to reject while the favicon succeeds.
-  // The preview must degrade to the surviving favicon rather than dropping the
-  // whole card or spinning forever: a tag still lands, Send still enables.
-  await waitForReadyComposerSnapshots(page);
-  await expect(
-    page
-      .locator("[data-sonner-toast]")
-      .filter({ hasText: "Something went wrong with the thumbnail" }),
-  ).toBeVisible();
-  await expect(page.getByTestId("send-message")).toBeEnabled();
-
   await input.press("Enter");
+
   const row = page.getByTestId("message-row").last();
   await expect(row).toContainText(previewUrl);
   await expect(row.locator("[data-link-preview]")).toBeVisible();
-
-  // The snapshot tag exists (survivor media) but carries no image url — proving
-  // the graceful per-media degrade rather than a dropped or all-or-nothing tag.
-  const imageUrl = await page.evaluate(() => {
+  const tags = await page.evaluate(() => {
     const call = [...(window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])]
       .reverse()
       .find((entry) => entry.command === "send_channel_message");
-    const tags = (
-      call?.payload as { linkPreviewTags?: string[][] | null } | undefined
-    )?.linkPreviewTags;
-    const snapshot = tags?.find(
-      (tag) => tag[0] === "link-preview" && tag[1] === "snapshot",
-    );
-    // Snapshot tag layout: ["link-preview","snapshot",<version>,<url>,...pairs].
-    const pairs = snapshot?.slice(4) ?? [];
-    const imageIndex = pairs.indexOf("image");
-    return imageIndex >= 0 ? pairs[imageIndex + 1] : null;
+    return (call?.payload as { linkPreviewTags?: string[][] }).linkPreviewTags;
   });
-  expect(imageUrl).toBeFalsy();
+  expect(tags).toHaveLength(1);
+  expect(tags?.[0]?.slice(0, 7)).toEqual([
+    "link-preview",
+    "snapshot",
+    "1",
+    previewUrl,
+    "Buzz pull request",
+    "GitHub",
+    "A sender-authored preview snapshot.",
+  ]);
+  expect(tags?.[0]?.slice(7)).toEqual(["", "", "", ""]);
 });
 
 test("editing a message excludes link previews entirely", async ({ page }) => {
@@ -1189,11 +1442,10 @@ test("composer link preview embeds stay attachment-sized while loading and ready
       });
     }
 
-    await expect
-      .poll(() =>
-        card.evaluate((element) => element.getAttribute("data-state")),
-      )
-      .toBe("done");
+    await expect(card.locator('[data-slot="attachment"]')).toHaveAttribute(
+      "data-state",
+      "done",
+    );
     const ready = await card.evaluate((element) => ({
       height: element.getBoundingClientRect().height,
       width: element.getBoundingClientRect().width,
@@ -1217,6 +1469,55 @@ test("composer link preview embeds stay attachment-sized while loading and ready
     expect(initial.thumbnailHeight).toBe(55);
     expect(initial.thumbnailWidth).toBe(55);
     expect(ready).toEqual(initial);
+  }
+});
+
+test("compact link preview image geometry truncates long titles to one line", async ({
+  page,
+}) => {
+  const previewUrl = "https://github.com/block/buzz/pull/3246?geometry=1";
+  // Sent snapshot media is relay-hosted and rewritten through the
+  // authenticated media proxy (#5627), so serve the fixture from the mock
+  // proxy origin rather than the raw relay origin.
+  await page.route("http://127.0.0.1:54321/media/**", (route) =>
+    route.fulfill({
+      body: LINK_PREVIEW_IMAGE,
+      contentType: "image/png",
+    }),
+  );
+  await page.setViewportSize({ width: 800, height: 700 });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("message-input").fill(previewUrl);
+  await waitForReadyComposerSnapshots(page);
+  await page.getByTestId("send-message").click();
+
+  const row = page.getByTestId("message-row").last();
+  const card = row.locator('[data-link-preview="github-pull-request"]');
+  const thumbnail = card.locator("[data-link-preview-thumbnail]");
+  const title = card.locator('[data-slot="attachment-title"]');
+  const image = thumbnail.locator("img");
+  await expect(card).toHaveAttribute("data-image-state", "image");
+  await expect(image).toHaveJSProperty("complete", true);
+  await expect(card).toHaveCSS("height", "64px");
+  await expect(thumbnail).toHaveCSS("height", "64px");
+  await expect(thumbnail).toHaveCSS("width", "104px");
+  await expect(title).toHaveText(
+    "Ship a wider horizontal preview with a two-line title that wraps cleanly",
+  );
+  await expect(title).toHaveCSS("white-space", "nowrap");
+  await expect
+    .poll(() =>
+      title.evaluate((element) => element.scrollWidth - element.clientWidth),
+    )
+    .toBeGreaterThan(1);
+
+  if (process.env.BUZZ_LINK_PREVIEW_SCREENSHOTS_DIR) {
+    await waitForAnimations(page);
+    await row.screenshot({
+      animations: "disabled",
+      path: `${process.env.BUZZ_LINK_PREVIEW_SCREENSHOTS_DIR}/recipient-compact-long-title.png`,
+    });
   }
 });
 
@@ -1267,8 +1568,11 @@ test("mixed link preview image outcomes keep Compact and Rich fallbacks stable",
   ).toHaveCount(0);
 
   await openSettings(page, "appearance");
-  await page.getByTestId("link-preview-style-trigger").click();
   await page.getByTestId("link-preview-style-rich").click();
+  await expect(page.getByTestId("link-preview-style-rich")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   await page.getByTestId("settings-back-to-app").click();
 
   const richCards = row.locator(
@@ -1337,8 +1641,11 @@ test("link preview browser image errors render a fallback", async ({
   ).toHaveCount(0);
 
   await openSettings(page, "appearance");
-  await page.getByTestId("link-preview-style-trigger").click();
   await page.getByTestId("link-preview-style-rich").click();
+  await expect(page.getByTestId("link-preview-style-rich")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
   await page.getByTestId("settings-back-to-app").click();
 
   const richCard = row.locator(
@@ -1572,6 +1879,394 @@ test("emoji picker inserts emoji into the draft and keeps focus in the composer"
   await expect(input).toHaveText("Ship🚀 now");
 });
 
+test("relay GIF capability gates the composer picker", async ({ page }) => {
+  await page.route("http://localhost:3000/info", (route) =>
+    route.fulfill({
+      body: JSON.stringify({ supported_extensions: [] }),
+      contentType: "application/nostr+json",
+    }),
+  );
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const pickerButton = page.getByTestId("composer-emoji-button");
+  await expect(pickerButton).toHaveAccessibleName("Insert emoji");
+  await pickerButton.click();
+  await expect(page.getByRole("tab", { name: "GIFs" })).toHaveCount(0);
+});
+
+test("relay GIF search selects content-only media and reports the share", async ({
+  page,
+}) => {
+  const searchBodies: Array<{
+    customer_id: string;
+    locale: string;
+    query: string;
+  }> = [];
+  const shareBodies: Array<{ customer_id: string; slug: string }> = [];
+  const gifUrl = "https://static.klipy.com/e2e-ship-it.gif";
+  const previewUrl = "https://static.klipy.com/e2e-ship-it.webp";
+
+  await page.route("http://localhost:3000/info", (route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        gif: {
+          provider: "klipy",
+          search: "/gifs/search",
+          share: "/gifs/share",
+        },
+        supported_extensions: ["buzz-gif"],
+      }),
+      contentType: "application/nostr+json",
+    }),
+  );
+  await page.route("http://localhost:3000/gifs/search", async (route) => {
+    searchBodies.push(JSON.parse(route.request().postData() ?? "{}"));
+    await route.fulfill({
+      body: JSON.stringify({
+        result: true,
+        data: {
+          data: [
+            {
+              id: null,
+              file: {
+                md: {
+                  gif: { height: 180, size: 42, url: gifUrl, width: 320 },
+                },
+                sm: {
+                  webp: {
+                    height: 90,
+                    size: 12,
+                    url: previewUrl,
+                    width: 160,
+                  },
+                },
+              },
+              slug: "e2e-ship-it",
+              title: "Ship it",
+              type: "gif",
+            },
+          ],
+        },
+      }),
+      contentType: "application/json",
+    });
+  });
+  await page.route("http://localhost:3000/gifs/share", async (route) => {
+    shareBodies.push(JSON.parse(route.request().postData() ?? "{}"));
+    await route.fulfill({ status: 204 });
+  });
+  await page.route("https://static.klipy.com/e2e-ship-it.*", (route) =>
+    route.fulfill({
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#7c3aed"/></svg>',
+      contentType: "image/svg+xml",
+    }),
+  );
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const pickerButton = page.getByTestId("composer-emoji-button");
+  await expect(pickerButton).toHaveAccessibleName("Insert emoji or GIF");
+  await pickerButton.click();
+  await page.getByRole("tab", { name: "GIFs" }).click();
+
+  await expect.poll(() => searchBodies.map(({ query }) => query)).toContain("");
+  await expect(
+    page.getByRole("button", { name: "Choose Ship it" }),
+  ).toBeVisible();
+
+  await page.getByRole("searchbox", { name: "Search KLIPY" }).fill("celebrate");
+  await expect
+    .poll(() => searchBodies.map(({ query }) => query))
+    .toContain("celebrate");
+  await page.getByRole("button", { name: "Choose Ship it" }).click();
+
+  await expect(page.getByTestId("composer-media-attachment")).toBeVisible();
+  await expect
+    .poll(() => shareBodies)
+    .toEqual([
+      {
+        customer_id: searchBodies.at(-1)?.customer_id,
+        slug: "e2e-ship-it",
+      },
+    ]);
+
+  await page.getByTestId("send-message").click();
+  await expect(page.getByTestId("composer-media-attachment")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate((expectedUrl) => {
+        return Boolean(
+          (
+            window as Window & {
+              __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
+                content?: string;
+                kind?: number;
+              }>;
+            }
+          ).__BUZZ_E2E_SIGNED_EVENTS__?.some(
+            (event) => event.kind === 9 && event.content?.includes(expectedUrl),
+          ),
+        );
+      }, gifUrl),
+    )
+    .toBe(true);
+  const matchingEvent = await page.evaluate((expectedUrl) => {
+    return (
+      window as Window & {
+        __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
+          content?: string;
+          kind?: number;
+          tags?: string[][];
+        }>;
+      }
+    ).__BUZZ_E2E_SIGNED_EVENTS__?.find(
+      (event) => event.kind === 9 && event.content?.includes(expectedUrl),
+    );
+  }, gifUrl);
+  expect(matchingEvent?.content).toBe(`![image](${gifUrl})`);
+  expect(matchingEvent?.tags?.some((tag) => tag[0] === "imeta")).toBe(false);
+});
+
+async function routeGifMocks(page: import("@playwright/test").Page) {
+  const gifs = [
+    {
+      animated: "https://static.klipy.com/e2e-party.gif",
+      poster: "https://static.klipy.com/e2e-party.jpg",
+      slug: "e2e-party",
+      title: "Party parrot",
+    },
+    {
+      animated: "https://static.klipy.com/e2e-thumbs-up.gif",
+      poster: "https://static.klipy.com/e2e-thumbs-up.jpg",
+      slug: "e2e-thumbs-up",
+      title: "Thumbs up",
+    },
+  ];
+
+  await page.route("http://localhost:3000/info", (route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        gif: {
+          provider: "klipy",
+          search: "/gifs/search",
+          share: "/gifs/share",
+        },
+        supported_extensions: ["buzz-gif"],
+      }),
+      contentType: "application/nostr+json",
+    }),
+  );
+  await page.route("http://localhost:3000/gifs/search", (route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        result: true,
+        data: {
+          data: gifs.map((gif) => ({
+            id: null,
+            file: {
+              md: {
+                gif: { height: 180, size: 42, url: gif.animated, width: 320 },
+              },
+              sm: {
+                jpg: { height: 90, size: 8, url: gif.poster, width: 160 },
+                webp: {
+                  height: 90,
+                  size: 12,
+                  url: `${gif.animated.replace(/\.gif$/, ".webp")}`,
+                  width: 160,
+                },
+              },
+            },
+            slug: gif.slug,
+            title: gif.title,
+            type: "gif",
+          })),
+        },
+      }),
+      contentType: "application/json",
+    }),
+  );
+  await page.route("http://localhost:3000/gifs/share", (route) =>
+    route.fulfill({ status: 204 }),
+  );
+  await page.route("https://static.klipy.com/e2e-*", (route) =>
+    route.fulfill({
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="#7c3aed"/></svg>',
+      contentType: "image/svg+xml",
+    }),
+  );
+
+  return gifs;
+}
+
+async function openGifGrid(page: import("@playwright/test").Page) {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.getByTestId("composer-emoji-button").click();
+  await page.getByRole("tab", { name: "GIFs" }).click();
+  await expect(page.getByTestId("klipy-gif-grid")).toBeVisible();
+}
+
+test("reduced-motion GIF grid renders static posters, not animated previews", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const gifs = await routeGifMocks(page);
+  await openGifGrid(page);
+
+  const grid = page.getByTestId("klipy-gif-grid");
+  // Each GIF stays identifiable and selectable by its accessible name.
+  for (const gif of gifs) {
+    await expect(
+      grid.getByRole("button", { name: `Choose ${gif.title}` }),
+    ).toBeVisible();
+  }
+
+  const sources = await grid
+    .locator("img")
+    .evaluateAll((imgs) =>
+      imgs.map((img) => (img as HTMLImageElement).getAttribute("src")),
+    );
+  // The static poster is shown; no animated preview URL enters the DOM.
+  expect(sources).toEqual(gifs.map((gif) => gif.poster));
+  for (const gif of gifs) {
+    expect(sources).not.toContain(gif.animated);
+    expect(sources.some((src) => src?.endsWith(".webp"))).toBe(false);
+  }
+});
+
+test("reduced-motion GIF grid falls back to a named static placeholder", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.route("http://localhost:3000/info", (route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        gif: {
+          provider: "klipy",
+          search: "/gifs/search",
+          share: "/gifs/share",
+        },
+        supported_extensions: ["buzz-gif"],
+      }),
+      contentType: "application/nostr+json",
+    }),
+  );
+  // A GIF with no jpg asset: reduced motion must not fall back to animation.
+  await page.route("http://localhost:3000/gifs/search", (route) =>
+    route.fulfill({
+      body: JSON.stringify({
+        result: true,
+        data: {
+          data: [
+            {
+              id: null,
+              file: {
+                md: {
+                  gif: {
+                    height: 180,
+                    size: 42,
+                    url: "https://static.klipy.com/e2e-no-poster.gif",
+                    width: 320,
+                  },
+                },
+                sm: {
+                  webp: {
+                    height: 90,
+                    size: 12,
+                    url: "https://static.klipy.com/e2e-no-poster.webp",
+                    width: 160,
+                  },
+                },
+              },
+              slug: "e2e-no-poster",
+              title: "No poster clip",
+              type: "gif",
+            },
+          ],
+        },
+      }),
+      contentType: "application/json",
+    }),
+  );
+  await page.route("http://localhost:3000/gifs/share", (route) =>
+    route.fulfill({ status: 204 }),
+  );
+
+  await openGifGrid(page);
+
+  const grid = page.getByTestId("klipy-gif-grid");
+  await expect(
+    grid.getByRole("button", { name: "Choose No poster clip" }),
+  ).toBeVisible();
+  await expect(grid.getByTestId("klipy-gif-static-placeholder")).toHaveText(
+    "No poster clip",
+  );
+  await expect(grid.locator("img")).toHaveCount(0);
+});
+
+test("normal-motion GIF grid renders animated previews", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "no-preference" });
+  const gifs = await routeGifMocks(page);
+  await openGifGrid(page);
+
+  const sources = await page
+    .getByTestId("klipy-gif-grid")
+    .locator("img")
+    .evaluateAll((imgs) =>
+      imgs.map((img) => (img as HTMLImageElement).getAttribute("src")),
+    );
+  // Animated `.webp` previews are used; static jpg posters stay out of the DOM.
+  expect(sources.every((src) => src?.endsWith(".webp"))).toBe(true);
+  for (const gif of gifs) {
+    expect(sources).not.toContain(gif.poster);
+  }
+});
+
+test("selected GIFs keep distinct accessible names in the composer and lightbox", async ({
+  page,
+}) => {
+  const gifs = await routeGifMocks(page);
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  // Select two differently titled GIFs.
+  for (const gif of gifs) {
+    await page.getByTestId("composer-emoji-button").click();
+    await page.getByRole("tab", { name: "GIFs" }).click();
+    await page
+      .getByTestId("klipy-gif-grid")
+      .getByRole("button", { name: `Choose ${gif.title}` })
+      .click();
+  }
+
+  const thumbnails = page.getByTestId("composer-media-attachment");
+  await expect(thumbnails).toHaveCount(2);
+
+  // Composer thumbnails carry distinct accessible names from the GIF titles.
+  for (const gif of gifs) {
+    await expect(
+      thumbnails.getByRole("button", { name: gif.title, exact: true }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: `Remove ${gif.title}` }),
+    ).toHaveCount(1);
+  }
+
+  // Each lightbox dialog is titled by the same GIF name.
+  for (const gif of gifs) {
+    await thumbnails
+      .getByRole("button", { name: gif.title, exact: true })
+      .click();
+    await expect(
+      page.getByRole("dialog", { name: `${gif.title} preview` }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Close", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+  }
+});
+
 test("empty message cannot be sent", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
@@ -1700,9 +2395,15 @@ test("day divider appears in timeline", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Welcome to #general",
+    "Welcome to general",
   );
-  await expect(page.getByTestId("message-timeline-day-divider")).toBeVisible();
+  // `.first()`: the seeds are backdated by up to 120s, so a run that straddles
+  // midnight UTC legitimately renders two dividers (Yesterday + Today) and a
+  // bare locator fails Playwright strict mode. The intent is "a divider
+  // appears", which the first divider proves on both sides of midnight.
+  await expect(
+    page.getByTestId("message-timeline-day-divider").first(),
+  ).toBeVisible();
 });
 
 test("send message to DM channel p-tags the recipient", async ({ page }) => {
@@ -1731,6 +2432,286 @@ test("send message to DM channel p-tags the recipient", async ({ page }) => {
       }, message),
     )
     .toContainEqual(["p", TEST_IDENTITIES.alice.pubkey]);
+});
+
+test("sends a thread message to its parent channel with a root-thread link", async ({
+  page,
+}) => {
+  const timestamp = Date.now();
+  const rootContent = `🧵 Share source thread ${timestamp}`;
+  const priorChannelMessage = `Prior channel message ${timestamp}`;
+  const replySummary = `Share this reply ${timestamp}`;
+  const attachmentSha = "d".repeat(64);
+  const attachmentUrl = `http://localhost:3000/media/${attachmentSha}.txt`;
+  const customEmojiUrl = "https://example.com/send-to-channel-party.svg";
+  const previewUrl = "https://github.com/block/buzz/pull/5305";
+  const ownReplyContent = [
+    `${replySummary} with @alice :party:`,
+    `[launch-notes.txt](${attachmentUrl})`,
+    previewUrl,
+  ].join("\n\n");
+  const imetaTag = [
+    "imeta",
+    `url ${attachmentUrl}`,
+    "m text/plain",
+    `x ${attachmentSha}`,
+    "size 42",
+    "filename launch-notes.txt",
+  ];
+  const emojiTag = ["emoji", "party", customEmojiUrl];
+  const mentionTag = ["mention", TEST_IDENTITIES.alice.pubkey];
+  const linkPreviewTag = [
+    "link-preview",
+    "snapshot",
+    "1",
+    previewUrl,
+    "Add Send to channel for thread messages",
+    "GitHub",
+    "A shared link preview preserved from the source thread message.",
+    "",
+    "",
+    "",
+    "",
+  ];
+
+  await page.route(customEmojiUrl, (route) =>
+    route.fulfill({
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><circle cx="16" cy="16" r="15" fill="#a78bfa"/><path d="M8 18l5 5 11-13" fill="none" stroke="white" stroke-width="3"/></svg>',
+      contentType: "image/svg+xml",
+    }),
+  );
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      (window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+        channelName: "general",
+      }) ??
+        false),
+  );
+
+  const { ownReplyId, rootId } = await page.evaluate(
+    ({ alicePubkey, ownReply, root, semanticTags }) => {
+      const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) throw new Error("Mock message emitter is unavailable.");
+      const rootEvent = emit({
+        channelName: "general",
+        content: root,
+        pubkey: alicePubkey,
+      });
+      const ownReplyEvent = emit({
+        channelName: "general",
+        content: ownReply,
+        extraTags: semanticTags,
+        mentionPubkeys: [alicePubkey],
+        parentEventId: rootEvent.id,
+      });
+      return {
+        ownReplyId: ownReplyEvent.id,
+        rootId: rootEvent.id,
+      };
+    },
+    {
+      alicePubkey: TEST_IDENTITIES.alice.pubkey,
+      ownReply: ownReplyContent,
+      root: rootContent,
+      semanticTags: [imetaTag, emojiTag, mentionTag, linkPreviewTag],
+    },
+  );
+
+  const timeline = page.getByTestId("message-timeline");
+  const rootRow = timeline.locator(`[data-message-id="${rootId}"]`);
+  await expect(rootRow).toContainText(rootContent);
+
+  await page.getByTestId("message-input").fill(priorChannelMessage);
+  await page.getByTestId("send-message").click();
+  const priorChannelRow = timeline
+    .getByTestId("message-row")
+    .filter({ hasText: priorChannelMessage });
+  await expect(priorChannelRow).toBeVisible();
+  await expect(priorChannelRow.getByTestId("message-send-status")).toHaveCount(
+    0,
+  );
+
+  await timeline
+    .locator(
+      `[data-testid="message-thread-summary"][data-thread-head-id="${rootId}"]`,
+    )
+    .click();
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadRootRow = threadPanel.locator(`[data-message-id="${rootId}"]`);
+  const rootMoreActions = threadRootRow.getByTestId(`more-actions-${rootId}`);
+  await rootMoreActions.click({ force: true });
+  await expect(page.getByRole("menu")).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Send to channel" }),
+  ).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("menu")).toHaveCount(0);
+
+  const ownReplyRow = threadPanel.locator(`[data-message-id="${ownReplyId}"]`);
+  await expect(ownReplyRow).toContainText(replySummary);
+  await ownReplyRow
+    .getByTestId(`more-actions-${ownReplyId}`)
+    .click({ force: true });
+  const sendToChannelItem = page.getByRole("menuitem", {
+    name: "Send to channel",
+  });
+  const sendToChannelIcon = sendToChannelItem.getByTestId(
+    "send-to-channel-icon",
+  );
+  await expect(sendToChannelIcon).toBeVisible();
+  await expect(sendToChannelIcon).toHaveAttribute("aria-hidden", "true");
+  await expect(sendToChannelIcon).toHaveClass(/lucide-hash-arrow-in/);
+  await expect
+    .poll(async () => {
+      const box = await sendToChannelIcon.boundingBox();
+      return box ? [box.width, box.height] : null;
+    })
+    .toEqual([16, 16]);
+  await sendToChannelItem.click();
+
+  await expect(
+    page.locator("[data-sonner-toast]").filter({ hasText: "Sent to channel" }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate((content) => {
+        return Boolean(
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).findLast(
+            (entry) =>
+              entry.command === "send_channel_message" &&
+              (entry.payload as { content?: string } | undefined)?.content ===
+                content,
+          ),
+        );
+      }, ownReplyContent),
+    )
+    .toBe(true);
+  const sentPayload = await page.evaluate(
+    (content) =>
+      (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).findLast(
+        (entry) =>
+          entry.command === "send_channel_message" &&
+          (entry.payload as { content?: string } | undefined)?.content ===
+            content,
+      )?.payload as Record<string, unknown> | undefined,
+    ownReplyContent,
+  );
+  expect(sentPayload).toMatchObject({
+    channelId: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+    content: ownReplyContent,
+    emojiTags: [emojiTag],
+    linkPreviewTags: [linkPreviewTag],
+    mediaTags: [imetaTag],
+    mentionPubkeys: [TEST_IDENTITIES.alice.pubkey],
+    mentionTags: [mentionTag],
+    parentEventId: null,
+    sentFromThreadTag: ["buzz:sent-from-thread", rootId, rootContent],
+  });
+
+  await page.getByTestId("auxiliary-panel-close").click();
+
+  const sharedRow = timeline
+    .getByTestId("message-row")
+    .filter({ hasText: replySummary })
+    .last();
+  await expect
+    .poll(async () => {
+      if (await sharedRow.isVisible()) return true;
+      const scrollToLatest = page.getByTestId("message-scroll-to-latest");
+      if (await scrollToLatest.isVisible()) await scrollToLatest.click();
+      return false;
+    })
+    .toBe(true);
+  await expect(sharedRow.getByTestId("message-author")).toHaveText(
+    "npub1mock...",
+  );
+  await expect(sharedRow.getByTestId("message-avatar-fallback")).toBeVisible();
+  await expect(sharedRow.locator('[data-mention=""]')).toContainText("alice");
+  await expect(sharedRow.locator("img[data-custom-emoji]")).toHaveAttribute(
+    "src",
+    customEmojiUrl,
+  );
+  await expect(sharedRow.getByTestId("file-card")).toContainText(
+    "launch-notes.txt",
+  );
+  await expect(
+    sharedRow.locator('[data-link-preview="github-pull-request"]'),
+  ).toContainText("Add Send to channel for thread messages");
+  const sourceLine = sharedRow.getByTestId("sent-from-thread");
+  await expect(sourceLine).toContainText("Sent from thread:");
+  await expect(sourceLine).toHaveClass(/message-markdown/);
+  await expect(sourceLine).toHaveClass(/pt-0\.5/);
+  await expect(sourceLine).toHaveClass(/text-sm/);
+  await expect(sourceLine).toHaveClass(/font-normal/);
+  await expect(sourceLine).toHaveClass(/leading-4/);
+  await expect(sourceLine).toHaveClass(/text-muted-foreground\/70/);
+  const rootLink = sourceLine.locator("[data-message-link]");
+  const sourcePrefix = sourceLine.locator("span").first();
+  const rootLinkLabel = rootContent;
+  await expect(rootLink).toHaveText(rootLinkLabel);
+  await expect(rootLink).toHaveAttribute(
+    "aria-label",
+    "Open thread in general",
+  );
+  await expect(rootLink).toHaveAttribute("title", rootLinkLabel);
+  await expect(rootLink).toHaveClass(/max-w-80/);
+  await expect(rootLink).toHaveClass(/truncate/);
+  await expect(rootLink).toHaveClass(/inline-block/);
+  await expect(rootLink).toHaveClass(/font-medium/);
+  await expect(rootLink).not.toHaveClass(/mention-chip/);
+  await expect(rootLink).not.toHaveClass(/border-b/);
+  const rootLinkText = rootLink.locator("[data-message-link-text]");
+  const rootLinkEmoji = rootLink.locator("[data-message-link-emoji]");
+  await expect(rootLinkText).toHaveText(` Share source thread ${timestamp}`);
+  await expect(rootLinkText).not.toHaveClass(/border-b/);
+  await expect(rootLinkEmoji).toHaveText("🧵");
+  await expect(rootLinkEmoji).not.toHaveClass(/border-b/);
+  await expect(rootLink).not.toHaveAttribute("data-hovered");
+  const [prefixColor, linkColorBeforeHover] = await Promise.all([
+    sourcePrefix.evaluate((element) => getComputedStyle(element).color),
+    rootLink.evaluate((element) => getComputedStyle(element).color),
+  ]);
+  expect(linkColorBeforeHover).not.toBe(prefixColor);
+  await expect
+    .poll(() =>
+      rootLink.evaluate((element) => getComputedStyle(element).backgroundColor),
+    )
+    .toBe("rgba(0, 0, 0, 0)");
+  await expect
+    .poll(() =>
+      rootLinkText.evaluate((element) => getComputedStyle(element).boxShadow),
+    )
+    .toBe("none");
+
+  await rootLink.hover();
+  await expect(rootLink).toHaveAttribute("data-hovered", "");
+  await expect
+    .poll(() => rootLink.evaluate((element) => getComputedStyle(element).color))
+    .toBe(linkColorBeforeHover);
+  await expect
+    .poll(() =>
+      rootLinkText.evaluate(
+        (element) => getComputedStyle(element).boxShadow !== "none",
+      ),
+    )
+    .toBe(true);
+
+  await expect
+    .poll(() =>
+      rootLinkEmoji.evaluate((element) => getComputedStyle(element).boxShadow),
+    )
+    .toBe("none");
+
+  await rootLink.click();
+  await expect(threadPanel).toBeVisible();
+  await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
+    rootContent,
+  );
 });
 
 test("shows your avatar on your own message when profile avatar is set", async ({
@@ -1778,7 +2759,7 @@ test("opens a single-level thread panel with inline expansion", async ({
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");
   await expect(page.getByTestId("message-timeline")).toContainText(
-    "Welcome to #general",
+    "Welcome to general",
   );
 
   const timeline = page.getByTestId("message-timeline");
@@ -1801,7 +2782,7 @@ test("opens a single-level thread panel with inline expansion", async ({
   await rootMessage.getByRole("button", { name: "Reply" }).click();
   await expect(threadPanel).toBeVisible();
   await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
-    "Welcome to #general",
+    "Welcome to general",
   );
 
   await threadComposer.fill(firstReply);
@@ -1947,7 +2928,7 @@ test("opens a single-level thread panel with inline expansion", async ({
   await rootSummaryRow.click();
   await expect(threadPanel).toBeVisible();
   await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
-    "Welcome to #general",
+    "Welcome to general",
   );
 
   const firstReplyRow = threadReplies
@@ -1958,7 +2939,7 @@ test("opens a single-level thread panel with inline expansion", async ({
   await firstReplyRow.getByRole("button", { name: "Reply" }).click();
 
   await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
-    "Welcome to #general",
+    "Welcome to general",
   );
   await expect(threadPanel.getByTestId("message-thread-back")).toHaveCount(0);
 
@@ -2376,6 +3357,1225 @@ test("thread composer keeps focus after sending a thread reply", async ({
 
   await expect(threadInput).toBeFocused();
 });
+
+test("editing the thread root uses and focuses the main composer", async ({
+  page,
+}) => {
+  const root = `Root edit routing ${Date.now()}`;
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const mainInput = page
+    .getByTestId("channel-composer-overlay")
+    .getByTestId("message-input");
+  await mainInput.fill(root);
+  await mainInput.press("Enter");
+
+  const timeline = page.getByTestId("message-timeline");
+  const timelineRoot = timeline.getByTestId("message-row").last();
+  await expect(timelineRoot).toContainText(root);
+  await timelineRoot.hover();
+  await timelineRoot.getByRole("button", { name: "Reply" }).click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+  const threadRoot = threadPanel.getByTestId("message-row").first();
+  await threadRoot.hover();
+  await threadRoot.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Edit message" }).click();
+
+  await expect(page.getByTestId("edit-target")).toHaveCount(1);
+  await expect(threadPanel.getByTestId("edit-target")).toHaveCount(0);
+  await expect(mainInput).toHaveText(root);
+  await expect(mainInput).toBeFocused();
+});
+
+test("editing a pre-seeded thread reply uses and focuses the thread composer", async ({
+  page,
+}) => {
+  const root = `Reply edit routing root ${Date.now()}`;
+  const reply = `Reply edit routing ${Date.now()}`;
+
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+  const { replyId, rootId } = await page.evaluate(
+    ({ replyContent, rootContent }) => {
+      const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) throw new Error("Mock message emitter is unavailable.");
+      const rootEvent = emit({
+        channelName: "general",
+        content: rootContent,
+      });
+      const replyEvent = emit({
+        channelName: "general",
+        content: replyContent,
+        parentEventId: rootEvent.id,
+      });
+      return { replyId: replyEvent.id, rootId: rootEvent.id };
+    },
+    { replyContent: reply, rootContent: root },
+  );
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  const timelineRoot = page
+    .getByTestId("message-timeline")
+    .locator(`[data-message-id="${rootId}"]`);
+  await expect(timelineRoot).toContainText(root);
+  await timelineRoot.hover();
+  await timelineRoot.getByRole("button", { name: "Reply" }).click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadInput = threadPanel.getByTestId("message-input");
+  const threadReply = threadPanel.locator(`[data-message-id="${replyId}"]`);
+  await expect(threadReply).toContainText(reply);
+  await threadReply.hover();
+  await threadReply.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Edit message" }).click();
+
+  await expect(threadPanel.getByTestId("edit-target")).toBeVisible();
+  await expect(threadInput).toHaveText(reply);
+  await expect(threadInput).toBeFocused();
+});
+
+test("thread composer switches directly between visible reply edits", async ({
+  page,
+}) => {
+  const root = `Thread edit switch root ${Date.now()}`;
+  const first = `Thread edit switch first ${Date.now()}`;
+  const second = `Thread edit switch second ${Date.now()}`;
+
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+  const { firstId, rootId, secondId } = await page.evaluate(
+    ({ firstContent, rootContent, secondContent }) => {
+      const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) throw new Error("Mock message emitter is unavailable.");
+      const rootEvent = emit({
+        channelName: "general",
+        content: rootContent,
+      });
+      const firstEvent = emit({
+        channelName: "general",
+        content: firstContent,
+        parentEventId: rootEvent.id,
+      });
+      const secondEvent = emit({
+        channelName: "general",
+        content: secondContent,
+        parentEventId: rootEvent.id,
+      });
+      return {
+        firstId: firstEvent.id,
+        rootId: rootEvent.id,
+        secondId: secondEvent.id,
+      };
+    },
+    { firstContent: first, rootContent: root, secondContent: second },
+  );
+
+  await page.getByTestId("channel-general").click();
+  const timelineRoot = page
+    .getByTestId("message-timeline")
+    .locator(`[data-message-id="${rootId}"]`);
+  await timelineRoot.hover();
+  await timelineRoot.getByRole("button", { name: "Reply" }).click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadInput = threadPanel.getByTestId("message-input");
+  const secondReply = threadPanel.locator(`[data-message-id="${secondId}"]`);
+  await secondReply.hover();
+  await secondReply.getByRole("button", { name: "More actions" }).click();
+  await page.getByTestId(`edit-message-${secondId}`).click();
+  await expect(threadInput).toHaveText(second);
+
+  const firstReply = threadPanel.locator(`[data-message-id="${firstId}"]`);
+  await firstReply.hover();
+  await firstReply.getByRole("button", { name: "More actions" }).click();
+  await page.getByTestId(`edit-message-${firstId}`).click();
+
+  await expect(threadInput).toHaveText(first);
+  await expect(threadInput).toBeFocused();
+  await expect(page.getByRole("menu")).toHaveCount(0);
+  await expect(page.getByText("Finish or cancel your edit first.")).toHaveCount(
+    0,
+  );
+});
+
+test("editing a broadcast reply from a thread returns to the main composer", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+  const { broadcastId, rootId } = await page.evaluate(() => {
+    const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+    if (!emit) throw new Error("Mock message emitter is unavailable.");
+    const rootEvent = emit({
+      channelName: "general",
+      content: "Broadcast edit root",
+    });
+    const broadcastEvent = emit({
+      channelName: "general",
+      content: "Broadcast reply to edit",
+      parentEventId: rootEvent.id,
+      extraTags: [["broadcast", "1"]],
+    });
+    return { broadcastId: broadcastEvent.id, rootId: rootEvent.id };
+  });
+
+  await page.getByTestId("channel-general").click();
+  const timelineRoot = page.locator(`[data-message-id="${rootId}"]`);
+  await timelineRoot.hover();
+  await timelineRoot
+    .getByRole("button", { name: "Reply" })
+    .click({ force: true });
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const broadcastReply = threadPanel.locator(
+    `[data-message-id="${broadcastId}"]`,
+  );
+  await expect(broadcastReply).toContainText("Broadcast reply to edit");
+  await broadcastReply.hover();
+  await broadcastReply.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Edit message" }).click();
+
+  await expect(threadPanel.getByTestId("edit-target")).toHaveCount(0);
+  const mainInput = page
+    .getByTestId("channel-composer-overlay")
+    .getByTestId("message-input");
+  await expect(mainInput).toHaveText("Broadcast reply to edit");
+  await expect(mainInput).toBeFocused();
+});
+
+test("editing a live thread reply uses and focuses the thread composer", async ({
+  page,
+}) => {
+  const root = `Live reply edit root ${Date.now()}`;
+  const reply = `Live reply edit ${Date.now()}`;
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const mainInput = page
+    .getByTestId("channel-composer-overlay")
+    .getByTestId("message-input");
+  await mainInput.fill(root);
+  await mainInput.press("Enter");
+  const timelineRoot = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .last();
+  await timelineRoot.hover();
+  await timelineRoot
+    .getByRole("button", { name: "Reply" })
+    .click({ force: true });
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadInput = threadPanel.getByTestId("message-input");
+  await threadInput.fill(reply);
+  await threadInput.press("Enter");
+  const threadReply = threadPanel.getByTestId("message-row").last();
+  await expect(threadReply).toContainText(reply);
+  await threadReply.hover();
+  await threadReply.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Edit message" }).click();
+
+  await expect(threadPanel.getByTestId("edit-target")).toBeVisible();
+  await expect(threadInput).toHaveText(reply);
+  await expect(threadInput).toBeFocused();
+});
+
+test("editing a thread root in single-panel view returns to the main composer", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 860, height: 720 });
+  const root = `Narrow root edit ${Date.now()}`;
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+  await input.fill(root);
+  await input.press("Enter");
+  const timelineRoot = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .last();
+  await timelineRoot.hover();
+  await timelineRoot
+    .getByRole("button", { name: "Reply" })
+    .click({ force: true });
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadRoot = threadPanel.getByTestId("message-row").first();
+  await threadRoot.hover();
+  await threadRoot.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Edit message" }).click();
+
+  await expect(threadPanel).toBeHidden();
+  const mainInput = page
+    .getByTestId("channel-composer-overlay")
+    .getByTestId("message-input");
+  await expect(mainInput).toHaveText(root);
+  await expect(mainInput).toBeFocused();
+});
+
+test("editing a thread root in focus mode dismisses the drawer before focusing the main composer", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("buzz.channels.threadViewMode", "focus");
+  });
+  const root = `Focus root edit ${Date.now()}`;
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const mainInput = page
+    .getByTestId("channel-composer-overlay")
+    .getByTestId("message-input");
+  await mainInput.fill(root);
+  await mainInput.press("Enter");
+  const timelineRoot = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .last();
+  await timelineRoot.hover();
+  await timelineRoot
+    .getByRole("button", { name: "Reply" })
+    .click({ force: true });
+
+  const drawer = page.getByTestId("focus-thread-drawer");
+  const threadRoot = drawer.getByTestId("message-row").first();
+  await threadRoot.hover();
+  await threadRoot.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Edit message" }).click();
+
+  await expect(drawer).toBeHidden();
+  await expect(mainInput).toHaveText(root);
+  await expect(mainInput).toBeFocused();
+});
+
+test("focus mode preserves an active reply edit, then Escape makes root editing available", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    localStorage.setItem("buzz.channels.threadViewMode", "focus");
+  });
+  const root = `Focus guarded root ${Date.now()}`;
+  const reply = `Focus guarded reply ${Date.now()}`;
+  const unsaved = `${reply} unsaved`;
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const mainInput = page
+    .getByTestId("channel-composer-overlay")
+    .getByTestId("message-input");
+  await mainInput.fill(root);
+  await mainInput.press("Enter");
+  const timelineRoot = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .last();
+  await timelineRoot.hover();
+  await timelineRoot
+    .getByRole("button", { name: "Reply" })
+    .click({ force: true });
+
+  const drawer = page.getByTestId("focus-thread-drawer");
+  const threadInput = drawer.getByTestId("message-input");
+  await threadInput.fill(reply);
+  await threadInput.press("Enter");
+  const threadReply = drawer
+    .getByTestId("message-row")
+    .filter({ hasText: reply })
+    .last();
+  await expect(threadReply).toContainText(reply);
+  const threadReplyId = await threadReply.getAttribute("data-message-id");
+  expect(threadReplyId).not.toBeNull();
+  await threadReply.hover();
+  await threadReply.getByRole("button", { name: "More actions" }).click();
+  await page
+    .locator('[role="menu"]:visible')
+    .getByTestId(`edit-message-${threadReplyId}`)
+    .click();
+  await expect(page.locator('[role="menu"]:visible')).toHaveCount(0);
+  await threadInput.fill(unsaved);
+
+  const threadRoot = drawer
+    .getByTestId("message-thread-head")
+    .getByTestId("message-row");
+  const rootMessageId = await threadRoot.getAttribute("data-message-id");
+  expect(rootMessageId).not.toBeNull();
+  expect(rootMessageId).not.toBe(threadReplyId);
+  await threadRoot.hover();
+  await threadRoot.getByRole("button", { name: "More actions" }).click();
+  await page
+    .locator('[role="menu"]:visible')
+    .getByTestId(`edit-message-${rootMessageId}`)
+    .click();
+  await expect(page.locator('[role="menu"]:visible')).toHaveCount(0);
+  await expect(drawer).toBeVisible();
+  await expect(threadInput).toHaveText(unsaved);
+  await expect(
+    page.getByText("Finish or cancel your edit first."),
+  ).toBeVisible();
+
+  // A refused cross-message edit must not remain deferred and appear later.
+  await page.getByTestId("focus-thread-drawer-scrim").click({
+    force: true,
+    position: { x: 10, y: 360 },
+  });
+  await expect(drawer).toBeVisible();
+  await expect(threadInput).toHaveText(unsaved);
+
+  // Selecting Edit for the active message keeps the existing toggle-to-cancel behavior.
+  await threadReply.hover();
+  await threadReply.getByRole("button", { name: "More actions" }).click();
+  await page
+    .locator('[role="menu"]:visible')
+    .getByTestId(`edit-message-${threadReplyId}`)
+    .click();
+  await expect(drawer.getByTestId("edit-target")).toHaveCount(0);
+  await expect(threadInput).toHaveText("");
+
+  // Focus-mode Escape reaches the composer before the drawer close handler.
+  await threadInput.click();
+  await page.keyboard.press("ArrowUp");
+  await expect(drawer.getByTestId("edit-target")).toBeVisible();
+  await threadInput.fill(unsaved);
+  await page.keyboard.press("Escape");
+  await expect(drawer.getByTestId("edit-target")).toHaveCount(0);
+  await expect(drawer).toBeVisible();
+
+  await threadRoot.hover();
+  await threadRoot.getByRole("button", { name: "More actions" }).click();
+  await page
+    .locator('[role="menu"]:visible')
+    .getByTestId(`edit-message-${rootMessageId}`)
+    .click();
+  await expect(drawer).toBeHidden();
+  await expect(mainInput).toHaveText(root);
+});
+
+test("ArrowUp routes a narrow thread root without consuming into a hidden composer", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 860, height: 720 });
+  const root = `Narrow ArrowUp root ${Date.now()}`;
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+  await input.fill(root);
+  await input.press("Enter");
+  const timelineRoot = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .last();
+  await timelineRoot.hover();
+  await timelineRoot
+    .getByRole("button", { name: "Reply" })
+    .click({ force: true });
+  const threadInput = page
+    .getByTestId("message-thread-panel")
+    .getByTestId("message-input");
+  await expect(threadInput).toBeFocused();
+  await page.keyboard.press("ArrowUp");
+  await expect(page.getByTestId("message-thread-panel")).toBeHidden();
+  const mainInput = page
+    .getByTestId("channel-composer-overlay")
+    .getByTestId("message-input");
+  await expect(mainInput).toHaveText(root);
+  await expect(mainInput).toBeFocused();
+});
+
+test("closing a thread while editing a reply preserves the typed edit", async ({
+  page,
+}) => {
+  const root = `Close guard root ${Date.now()}`;
+  const reply = `Close guard reply ${Date.now()}`;
+  const edited = `${reply} with unsaved text`;
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const mainInput = page
+    .getByTestId("channel-composer-overlay")
+    .getByTestId("message-input");
+  await mainInput.fill(root);
+  await mainInput.press("Enter");
+  const timelineRoot = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .last();
+  await timelineRoot.hover();
+  await timelineRoot
+    .getByRole("button", { name: "Reply" })
+    .click({ force: true });
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadInput = threadPanel.getByTestId("message-input");
+  await threadInput.fill(reply);
+  await threadInput.press("Enter");
+  const threadReply = threadPanel.getByTestId("message-row").last();
+  await expect(threadReply).toContainText(reply);
+  await threadReply.hover();
+  await threadReply.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Edit message" }).click();
+  await threadInput.fill(edited);
+
+  await threadPanel.getByTestId("auxiliary-panel-close").click();
+
+  await expect(threadPanel).toBeVisible();
+  await expect(threadPanel.getByTestId("edit-target")).toBeVisible();
+  await expect(threadInput).toHaveText(edited);
+  await expect(
+    page.getByText("Finish or cancel your edit before leaving the thread."),
+  ).toBeVisible();
+});
+
+test("main ArrowUp ignores closed-thread replies and edits the visible timeline message", async ({
+  page,
+}) => {
+  const root = `Main ArrowUp root ${Date.now()}`;
+  const reply = `Main ArrowUp hidden reply ${Date.now()}`;
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const mainInput = page
+    .getByTestId("channel-composer-overlay")
+    .getByTestId("message-input");
+  await mainInput.fill(root);
+  await mainInput.press("Enter");
+  const timelineRoot = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .last();
+  await timelineRoot.hover();
+  await timelineRoot
+    .getByRole("button", { name: "Reply" })
+    .click({ force: true });
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadInput = threadPanel.getByTestId("message-input");
+  await threadInput.fill(reply);
+  await threadInput.press("Enter");
+  await expect(threadPanel).toContainText(reply);
+  await threadPanel.getByTestId("auxiliary-panel-close").click();
+  await expect(threadPanel).toBeHidden();
+
+  await mainInput.click();
+  await page.keyboard.press("ArrowUp");
+  await expect(page.getByTestId("edit-target")).toBeVisible();
+  await expect(mainInput).toHaveText(root);
+
+  // No hidden reply edit may block reopening its thread.
+  await mainInput.press("Escape");
+  await timelineRoot.hover();
+  await timelineRoot
+    .getByRole("button", { name: "Reply" })
+    .click({ force: true });
+  await expect(threadPanel).toBeVisible();
+});
+
+test("main ArrowUp refuses to replace a dirty thread edit", async ({
+  page,
+}) => {
+  const root = `Main ArrowUp refusal root ${Date.now()}`;
+  const reply = `Main ArrowUp refusal reply ${Date.now()}`;
+  const unsaved = `${reply} with unsaved text`;
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const mainInput = page
+    .getByTestId("channel-composer-overlay")
+    .getByTestId("message-input");
+  await mainInput.fill(root);
+  await mainInput.press("Enter");
+  const timelineRoot = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .last();
+  await timelineRoot.hover();
+  await timelineRoot
+    .getByRole("button", { name: "Reply" })
+    .click({ force: true });
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadInput = threadPanel.getByTestId("message-input");
+  await threadInput.fill(reply);
+  await threadInput.press("Enter");
+  const threadReply = threadPanel.getByTestId("message-row").last();
+  await expect(threadReply).toContainText(reply);
+  await threadReply.hover();
+  await threadReply.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Edit message" }).click();
+  await threadInput.fill(unsaved);
+
+  await mainInput.click();
+  await page.keyboard.press("ArrowUp");
+  await expect(
+    page.getByText("Finish or cancel your edit first."),
+  ).toBeVisible();
+  await expect(threadPanel.getByTestId("edit-target")).toBeVisible();
+  await expect(threadInput).toHaveText(unsaved);
+  await expect(mainInput).toHaveText("");
+
+  // Refusal must not arm a deferred edit that appears after cancellation.
+  await threadInput.press("Escape");
+  await expect(threadPanel.getByTestId("edit-target")).toHaveCount(0);
+  await expect(mainInput).toHaveText("");
+});
+
+test("main composer switches directly between visible message edits", async ({
+  page,
+}) => {
+  const first = `Main edit switch first ${Date.now()}`;
+  const second = `Main edit switch second ${Date.now()}`;
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const mainInput = page
+    .getByTestId("channel-composer-overlay")
+    .getByTestId("message-input");
+  await mainInput.fill(first);
+  await mainInput.press("Enter");
+  await expect(
+    page
+      .getByTestId("message-timeline")
+      .getByTestId("message-row")
+      .filter({ hasText: first }),
+  ).toBeVisible();
+  await page.waitForTimeout(1_100);
+  await mainInput.fill(second);
+  await mainInput.press("Enter");
+  await expect(
+    page
+      .getByTestId("message-timeline")
+      .getByTestId("message-row")
+      .filter({ hasText: second }),
+  ).toBeVisible();
+
+  await mainInput.click();
+  await page.keyboard.press("ArrowUp");
+  await expect(mainInput).toHaveText(second);
+
+  const firstMessage = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .filter({ hasText: first })
+    .last();
+  await firstMessage.hover();
+  await firstMessage.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Edit message" }).click();
+
+  await expect(mainInput).toHaveText(first);
+  await expect(mainInput).toBeFocused();
+  await expect(page.getByText("Finish or cancel your edit first.")).toHaveCount(
+    0,
+  );
+});
+
+test("a refused message deep link retries after the thread edit is canceled", async ({
+  page,
+}) => {
+  const sourceRoot = `Deep link retry source ${Date.now()}`;
+  const reply = `Deep link retry reply ${Date.now()}`;
+  const destinationRoot = `Deep link retry destination ${Date.now()}`;
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const mainInput = page
+    .getByTestId("channel-composer-overlay")
+    .getByTestId("message-input");
+  await mainInput.fill(destinationRoot);
+  await mainInput.press("Enter");
+  const destination = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .filter({ hasText: destinationRoot })
+    .last();
+  const destinationId = await destination.getAttribute("data-message-id");
+  expect(destinationId).not.toBeNull();
+  await mainInput.fill(
+    `Retry link buzz://message?channel=9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50&id=${destinationId}`,
+  );
+  await mainInput.press("Enter");
+  const destinationLink = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Retry link" })
+    .last()
+    .getByRole("button", { name: "Open message in channel general" });
+  await expect(destinationLink).toBeVisible();
+
+  await mainInput.fill(sourceRoot);
+  await mainInput.press("Enter");
+  const source = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .filter({ hasText: sourceRoot })
+    .last();
+  await source.hover();
+  await source.getByRole("button", { name: "Reply" }).click({ force: true });
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadInput = threadPanel.getByTestId("message-input");
+  await threadInput.fill(reply);
+  await threadInput.press("Enter");
+  const threadReply = threadPanel
+    .getByTestId("message-row")
+    .filter({ hasText: reply })
+    .last();
+  await threadReply.hover();
+  await threadReply.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Edit message" }).click();
+  await threadInput.fill(`${reply} unsaved`);
+
+  const threadUrl = page.url();
+  expect(threadUrl).toContain(
+    `thread=${await source.getAttribute("data-message-id")}`,
+  );
+  await destinationLink.click();
+  await expect(
+    page.getByText("Finish or cancel your edit before leaving the thread."),
+  ).toBeVisible();
+  await expect(threadPanel).toBeVisible();
+  await expect(threadPanel.getByTestId("edit-target")).toBeVisible();
+  await expect(threadInput).toHaveText(`${reply} unsaved`);
+  await expect(page).toHaveURL(threadUrl);
+
+  // The preserved edit remains rendered and cancelable rather than becoming a
+  // hidden target that soft-locks the route.
+  await threadInput.press("Escape");
+  await expect(threadPanel.getByTestId("edit-target")).toHaveCount(0);
+  await expect(threadInput).toHaveText("");
+  await destinationLink.click();
+  await expect(page).not.toHaveURL(threadUrl);
+  const routedDestination = page
+    .getByTestId("message-timeline")
+    .locator(`[data-message-id="${destinationId}"]`);
+  await expect(threadPanel).toBeVisible();
+  await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
+    destinationRoot,
+  );
+  await expect(routedDestination).toBeVisible();
+  await expect(routedDestination).toHaveClass(/route-target-highlight-fade/);
+});
+
+test("a refused sent-from-thread link preserves the edit and retries after cancel", async ({
+  page,
+}) => {
+  const sourceRoot = `Sent-from-thread guard source ${Date.now()}`;
+  const sourceReply = `Sent-from-thread guard reply ${Date.now()}`;
+  const destinationRoot = `Sent-from-thread guard destination ${Date.now()}`;
+  const sharedMessage = `Sent-from-thread guard shared ${Date.now()}`;
+  const dirtyReply = `${sourceReply} unsaved`;
+
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+  const { destinationRootId, sourceRootId } = await page.evaluate(
+    ({ destinationRoot, sharedMessage, sourceReply, sourceRoot }) => {
+      const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) throw new Error("Mock message emitter is unavailable.");
+      const destination = emit({
+        channelName: "general",
+        content: destinationRoot,
+      });
+      const source = emit({ channelName: "general", content: sourceRoot });
+      emit({
+        channelName: "general",
+        content: sourceReply,
+        parentEventId: source.id,
+      });
+      emit({
+        channelName: "general",
+        content: sharedMessage,
+        extraTags: [["buzz:sent-from-thread", destination.id, destinationRoot]],
+      });
+      return { destinationRootId: destination.id, sourceRootId: source.id };
+    },
+    { destinationRoot, sharedMessage, sourceReply, sourceRoot },
+  );
+
+  await page.getByTestId("channel-general").click();
+  const timeline = page.getByTestId("message-timeline");
+  const source = timeline.locator(`[data-message-id="${sourceRootId}"]`);
+  await source.hover();
+  await source.getByRole("button", { name: "Reply" }).click({ force: true });
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadInput = threadPanel.getByTestId("message-input");
+  const reply = threadPanel
+    .getByTestId("message-row")
+    .filter({ hasText: sourceReply })
+    .last();
+  await reply.hover();
+  await reply.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Edit message" }).click();
+  await threadInput.fill(dirtyReply);
+
+  const threadUrl = page.url();
+  expect(threadUrl).toContain(`thread=${sourceRootId}`);
+  const sentFromThreadLink = timeline
+    .getByTestId("message-row")
+    .filter({ hasText: sharedMessage })
+    .getByTestId("sent-from-thread")
+    .locator("[data-message-link]");
+  await sentFromThreadLink.click();
+  await expect(
+    page.getByText("Finish or cancel your edit before leaving the thread."),
+  ).toBeVisible();
+  await expect(threadPanel).toBeVisible();
+  await expect(threadPanel.getByTestId("edit-target")).toBeVisible();
+  await expect(threadInput).toHaveText(dirtyReply);
+  await expect(page).toHaveURL(threadUrl);
+
+  await threadInput.press("Escape");
+  await expect(threadPanel.getByTestId("edit-target")).toHaveCount(0);
+  await sentFromThreadLink.click();
+  await expect(page).not.toHaveURL(threadUrl);
+  await expect(threadPanel).toBeVisible();
+  await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
+    destinationRoot,
+  );
+  await expect(page).toHaveURL(new RegExp(`thread=${destinationRootId}`));
+});
+
+test("a refused search result preserves the edit and retries after cancel", async ({
+  page,
+}) => {
+  const sourceRoot = `Search guard source ${Date.now()}`;
+  const sourceReply = `Search guard reply ${Date.now()}`;
+  const destinationRoot = `Search guard destination ${Date.now()}`;
+  const dirtyReply = `${sourceReply} unsaved byte-for-byte`;
+
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+  const { destinationRootId, sourceRootId } = await page.evaluate(
+    ({ destinationRoot, sourceReply, sourceRoot }) => {
+      const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) throw new Error("Mock message emitter is unavailable.");
+      const destination = emit({
+        channelName: "general",
+        content: destinationRoot,
+      });
+      const source = emit({ channelName: "general", content: sourceRoot });
+      emit({
+        channelName: "general",
+        content: sourceReply,
+        parentEventId: source.id,
+      });
+      return { destinationRootId: destination.id, sourceRootId: source.id };
+    },
+    { destinationRoot, sourceReply, sourceRoot },
+  );
+
+  await page.getByTestId("channel-general").click();
+  const timeline = page.getByTestId("message-timeline");
+  const source = timeline.locator(`[data-message-id="${sourceRootId}"]`);
+  await source.hover();
+  await source.getByRole("button", { name: "Reply" }).click({ force: true });
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadInput = threadPanel.getByTestId("message-input");
+  const reply = threadPanel
+    .getByTestId("message-row")
+    .filter({ hasText: sourceReply })
+    .last();
+  await reply.hover();
+  await reply.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Edit message" }).click();
+  await threadInput.fill(dirtyReply);
+
+  const threadUrl = page.url();
+  expect(threadUrl).toContain(`thread=${sourceRootId}`);
+  await page.getByTestId("open-search").click();
+  await page.getByTestId("search-dialog-input").fill(destinationRoot);
+  const destinationResult = page.getByTestId(
+    `search-result-${destinationRootId}`,
+  );
+  await expect(destinationResult).toBeVisible();
+  await destinationResult.click();
+
+  const refusal = page.getByText(
+    "Finish or cancel your edit before leaving the thread.",
+  );
+  await expect(refusal).toHaveCount(1);
+  await expect(threadPanel).toBeVisible();
+  await expect(threadPanel.getByTestId("edit-target")).toBeVisible();
+  await expect(threadInput).toHaveText(dirtyReply);
+  await expect(page).toHaveURL(threadUrl);
+
+  await threadInput.press("Escape");
+  await expect(threadPanel.getByTestId("edit-target")).toHaveCount(0);
+  await page.getByTestId("open-search").click();
+  await page.getByTestId("search-dialog-input").fill(destinationRoot);
+  await destinationResult.click();
+  await expect(page).not.toHaveURL(threadUrl);
+  await expect(threadPanel.getByTestId("message-thread-head")).toContainText(
+    destinationRoot,
+  );
+  await expect(page).toHaveURL(new RegExp(`thread=${destinationRootId}`));
+});
+
+test("a refused forum search result preserves the edit and retries after cancel", async ({
+  page,
+}) => {
+  const sourceRoot = `Forum guard source ${Date.now()}`;
+  const sourceReply = `Forum guard reply ${Date.now()}`;
+  const dirtyReply = `${sourceReply} unsaved byte-for-byte`;
+
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+  const sourceRootId = await page.evaluate(
+    ({ sourceReply, sourceRoot }) => {
+      const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) throw new Error("Mock message emitter is unavailable.");
+      const source = emit({ channelName: "general", content: sourceRoot });
+      emit({
+        channelName: "general",
+        content: sourceReply,
+        parentEventId: source.id,
+      });
+      return source.id;
+    },
+    { sourceReply, sourceRoot },
+  );
+
+  await page.getByTestId("channel-general").click();
+  const source = page
+    .getByTestId("message-timeline")
+    .locator(`[data-message-id="${sourceRootId}"]`);
+  await source.hover();
+  await source.getByRole("button", { name: "Reply" }).click({ force: true });
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadInput = threadPanel.getByTestId("message-input");
+  const reply = threadPanel
+    .getByTestId("message-row")
+    .filter({ hasText: sourceReply })
+    .last();
+  await reply.hover();
+  await reply.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Edit message" }).click();
+  await threadInput.fill(dirtyReply);
+
+  const threadUrl = page.url();
+  const editTarget = threadPanel.getByTestId("edit-target");
+  await expect(editTarget).toBeVisible();
+  await page.getByTestId("open-search").click();
+  await page
+    .getByTestId("search-dialog-input")
+    .fill("Release checklist: async feedback thread.");
+  const forumResult = page.getByTestId(
+    "search-result-mock-forum-release-thread",
+  );
+  await expect(forumResult).toBeVisible();
+  await forumResult.click();
+
+  const refusal = page.getByText(
+    "Finish or cancel your edit before leaving the thread.",
+  );
+  await expect(refusal).toHaveCount(1);
+  await expect(threadPanel).toBeVisible();
+  await expect(editTarget).toBeVisible();
+  await expect(threadInput).toHaveText(dirtyReply);
+  await expect(page).toHaveURL(threadUrl);
+
+  await threadInput.press("Escape");
+  await expect(threadPanel.getByTestId("edit-target")).toHaveCount(0);
+  await page.getByTestId("open-search").click();
+  await page
+    .getByTestId("search-dialog-input")
+    .fill("Release checklist: async feedback thread.");
+  await forumResult.click();
+  await expect(page).toHaveURL(
+    /#\/channels\/a27e1ee9-76a6-5bdf-a5d5-1d85610dad11\/posts\/mock-forum-release-thread$/,
+  );
+  await expect(
+    page.locator('[data-forum-event-id="mock-forum-release-thread"]'),
+  ).toContainText("Release checklist: async feedback thread.");
+});
+
+for (const targetKind of ["reply", "root"] as const) {
+  test(`a refused same-thread ${targetKind} target preserves the edit and retries after cancel`, async ({
+    page,
+  }) => {
+    const sourceRoot = `Same-thread ${targetKind} guard root ${Date.now()}`;
+    const sourceReply = `Same-thread ${targetKind} guard reply ${Date.now()}`;
+    const dirtyReply = `${sourceReply}  unsaved byte-for-byte 🧵`;
+
+    await page.goto("/");
+    await page.waitForFunction(
+      () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+    );
+    const { sourceReplyId, sourceRootId } = await page.evaluate(
+      ({ sourceReply, sourceRoot, targetKind }) => {
+        const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+        if (!emit) throw new Error("Mock message emitter is unavailable.");
+        const root = emit({ channelName: "general", content: sourceRoot });
+        const reply = emit({
+          channelName: "general",
+          content: sourceReply,
+          parentEventId: root.id,
+        });
+        const targetId = targetKind === "reply" ? reply.id : root.id;
+        emit({
+          channelName: "general",
+          content: `Same-thread ${targetKind} target buzz://message?channel=9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50&id=${targetId}&thread=${root.id}`,
+        });
+        return { sourceReplyId: reply.id, sourceRootId: root.id };
+      },
+      { sourceReply, sourceRoot, targetKind },
+    );
+
+    await page.getByTestId("channel-general").click();
+    const timeline = page.getByTestId("message-timeline");
+    const source = timeline.locator(`[data-message-id="${sourceRootId}"]`);
+    await source.hover();
+    await source.getByRole("button", { name: "Reply" }).click({ force: true });
+
+    const threadPanel = page.getByTestId("message-thread-panel");
+    const threadInput = threadPanel.getByTestId("message-input");
+    const reply = threadPanel.locator(`[data-message-id="${sourceReplyId}"]`);
+    await reply.hover();
+    await reply.getByRole("button", { name: "More actions" }).click();
+    await page.getByRole("menuitem", { name: "Edit message" }).click();
+    await threadInput.fill(dirtyReply);
+
+    const targetLink = timeline
+      .getByTestId("message-row")
+      .filter({ hasText: `Same-thread ${targetKind} target` })
+      .getByRole("button", { name: "Open message in channel general" });
+    const navigationBefore = await page.evaluate(() => ({
+      historyLength: history.length,
+      url: location.href,
+    }));
+    const sendsBefore = await page.evaluate(
+      () =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+          (entry) => entry.command === "send_channel_message",
+        ).length,
+    );
+
+    await targetLink.click();
+
+    const refusal = page.getByText(
+      "Finish or cancel your edit before leaving the thread.",
+    );
+    await expect(refusal).toHaveCount(1);
+    await expect(threadPanel).toBeVisible();
+    await expect(threadPanel.getByTestId("edit-target")).toBeVisible();
+    await expect(threadInput).toHaveText(dirtyReply);
+    expect(await threadInput.textContent()).toBe(dirtyReply);
+    await expect(page).toHaveURL(navigationBefore.url);
+    expect(await page.evaluate(() => history.length)).toBe(
+      navigationBefore.historyLength,
+    );
+    expect(
+      await page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+            (entry) => entry.command === "send_channel_message",
+          ).length,
+      ),
+    ).toBe(sendsBefore);
+
+    await threadInput.press("Escape");
+    await expect(threadPanel.getByTestId("edit-target")).toHaveCount(0);
+    await targetLink.click();
+    await expect
+      .poll(() => page.evaluate(() => history.length))
+      .toBeGreaterThan(navigationBefore.historyLength);
+    await expect(threadPanel).toBeVisible();
+    await expect(
+      threadPanel.locator(
+        `[data-message-id="${targetKind === "reply" ? sourceReplyId : sourceRootId}"]`,
+      ),
+    ).toBeVisible();
+  });
+}
+
+test("a refused channel switch preserves the reply edit and retries after cancel", async ({
+  page,
+}) => {
+  const sourceRoot = `Channel-switch guard root ${Date.now()}`;
+  const sourceReply = `Channel-switch guard reply ${Date.now()}`;
+  const dirtyReply = `${sourceReply}  unsaved byte-for-byte 🧵`;
+
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+  const { sourceReplyId, sourceRootId } = await page.evaluate(
+    ({ sourceReply, sourceRoot }) => {
+      const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) throw new Error("Mock message emitter is unavailable.");
+      const root = emit({ channelName: "general", content: sourceRoot });
+      const reply = emit({
+        channelName: "general",
+        content: sourceReply,
+        parentEventId: root.id,
+      });
+      return { sourceReplyId: reply.id, sourceRootId: root.id };
+    },
+    { sourceReply, sourceRoot },
+  );
+
+  await page.getByTestId("channel-general").click();
+  const source = page
+    .getByTestId("message-timeline")
+    .locator(`[data-message-id="${sourceRootId}"]`);
+  await source.hover();
+  await source.getByRole("button", { name: "Reply" }).click({ force: true });
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadInput = threadPanel.getByTestId("message-input");
+  const reply = threadPanel.locator(`[data-message-id="${sourceReplyId}"]`);
+  await reply.hover();
+  await reply.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Edit message" }).click();
+  await threadInput.fill(dirtyReply);
+
+  const navigationBefore = await page.evaluate(() => ({
+    historyLength: history.length,
+    url: location.href,
+  }));
+  const sendsBefore = await page.evaluate(
+    () =>
+      (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+        (entry) => entry.command === "send_channel_message",
+      ).length,
+  );
+
+  await page.getByTestId("channel-random").click();
+
+  await expect(
+    page.getByText("Finish or cancel your edit before leaving the thread."),
+  ).toHaveCount(1);
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect(threadPanel).toBeVisible();
+  await expect(threadPanel.getByTestId("edit-target")).toBeVisible();
+  await expect(threadInput).toHaveText(dirtyReply);
+  expect(await threadInput.textContent()).toBe(dirtyReply);
+  await expect(page).toHaveURL(navigationBefore.url);
+  expect(await page.evaluate(() => history.length)).toBe(
+    navigationBefore.historyLength,
+  );
+  expect(
+    await page.evaluate(
+      () =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+          (entry) => entry.command === "send_channel_message",
+        ).length,
+    ),
+  ).toBe(sendsBefore);
+
+  await threadInput.press("Escape");
+  await expect(threadPanel.getByTestId("edit-target")).toHaveCount(0);
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await expect(page).not.toHaveURL(navigationBefore.url);
+});
+
+for (const backInput of ["button", "keyboard"] as const) {
+  test(`a refused ${backInput} Back preserves the reply edit and retries after cancel`, async ({
+    page,
+  }) => {
+    const sourceRoot = `History guard root ${backInput} ${Date.now()}`;
+    const sourceReply = `History guard reply ${backInput} ${Date.now()}`;
+    const dirtyReply = `${sourceReply}  unsaved byte-for-byte 🧵`;
+
+    await page.goto("/");
+    await page.waitForFunction(
+      () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+    );
+    const { sourceReplyId, sourceRootId } = await page.evaluate(
+      ({ sourceReply, sourceRoot }) => {
+        const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+        if (!emit) throw new Error("Mock message emitter is unavailable.");
+        const root = emit({ channelName: "general", content: sourceRoot });
+        const reply = emit({
+          channelName: "general",
+          content: sourceReply,
+          parentEventId: root.id,
+        });
+        return { sourceReplyId: reply.id, sourceRootId: root.id };
+      },
+      { sourceReply, sourceRoot },
+    );
+
+    await page.getByTestId("channel-random").click();
+    await page.getByTestId("channel-general").click();
+    const source = page
+      .getByTestId("message-timeline")
+      .locator(`[data-message-id="${sourceRootId}"]`);
+    await source.hover();
+    await source.getByRole("button", { name: "Reply" }).click({ force: true });
+
+    const threadPanel = page.getByTestId("message-thread-panel");
+    const threadInput = threadPanel.getByTestId("message-input");
+    const reply = threadPanel.locator(`[data-message-id="${sourceReplyId}"]`);
+    await reply.hover();
+    await reply.getByRole("button", { name: "More actions" }).click();
+    await page.getByRole("menuitem", { name: "Edit message" }).click();
+    await threadInput.fill(dirtyReply);
+
+    const navigationBefore = await page.evaluate(() => ({
+      historyLength: history.length,
+      url: location.href,
+    }));
+    const sendsBefore = await page.evaluate(
+      () =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+          (entry) => entry.command === "send_channel_message",
+        ).length,
+    );
+    const invokeBack = async () => {
+      if (backInput === "button") {
+        await page.getByTestId("global-back").click();
+        return;
+      }
+      await page.keyboard.press(
+        process.platform === "darwin" ? "Meta+[" : "Alt+ArrowLeft",
+      );
+    };
+
+    await invokeBack();
+
+    await expect(
+      page.getByText("Finish or cancel your edit before leaving the thread."),
+    ).toHaveCount(1);
+    await expect(page.getByTestId("chat-title")).toHaveText("general");
+    await expect(threadPanel).toBeVisible();
+    await expect(threadPanel.getByTestId("edit-target")).toBeVisible();
+    await expect(threadInput).toHaveText(dirtyReply);
+    expect(await threadInput.textContent()).toBe(dirtyReply);
+    await expect(page).toHaveURL(navigationBefore.url);
+    expect(await page.evaluate(() => history.length)).toBe(
+      navigationBefore.historyLength,
+    );
+    expect(
+      await page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+            (entry) => entry.command === "send_channel_message",
+          ).length,
+      ),
+    ).toBe(sendsBefore);
+
+    await threadInput.press("Escape");
+    await expect(threadPanel.getByTestId("edit-target")).toHaveCount(0);
+    await expect(page.getByTestId("global-back")).toBeEnabled();
+    await invokeBack();
+    await expect(page).not.toHaveURL(navigationBefore.url);
+  });
+}
 
 test("ArrowUp in an empty composer edits your last message right after sending", async ({
   page,

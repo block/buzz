@@ -10,8 +10,7 @@ use axum::body::Bytes;
 use axum::extract::ws::{Message as WsMessage, Utf8Bytes as WsUtf8Bytes};
 use dashmap::DashMap;
 use futures_util::future::join_all;
-use tokio::sync::mpsc;
-use tokio::sync::Semaphore;
+use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -36,6 +35,55 @@ use crate::connection::{ConnectionSubscriptions, RestartClose};
 use crate::subscription::SubscriptionRegistry;
 
 pub(crate) type ScopedPubkeyKey = (CommunityId, [u8; 32]);
+
+/// Why a community-bound socket is being asked to stop.
+///
+/// Only deletion is externally attributed today. Ordinary lifecycle exits keep
+/// using cancellation alone and therefore retain the existing bare-close
+/// behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CommunityDisconnectReason {
+    CommunityDeleted,
+}
+
+impl CommunityDisconnectReason {
+    pub(crate) fn close_message(self) -> WsMessage {
+        match self {
+            Self::CommunityDeleted => WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+                code: axum::extract::ws::close_code::POLICY,
+                reason: WsUtf8Bytes::from_static("community deleted"),
+            })),
+        }
+    }
+}
+
+/// Per-socket lifecycle controls shared by the registry and the writer.
+#[derive(Clone)]
+pub(crate) struct CommunityConnectionControl {
+    cancel: CancellationToken,
+    reason_tx: watch::Sender<Option<CommunityDisconnectReason>>,
+}
+
+impl CommunityConnectionControl {
+    pub(crate) fn new(cancel: CancellationToken) -> Self {
+        let (reason_tx, _reason_rx) = watch::channel(None);
+        Self { cancel, reason_tx }
+    }
+
+    pub(crate) fn cancellation_token(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+
+    pub(crate) fn disconnect_reason(&self) -> watch::Receiver<Option<CommunityDisconnectReason>> {
+        self.reason_tx.subscribe()
+    }
+
+    fn disconnect_community(&self) {
+        self.reason_tx
+            .send_replace(Some(CommunityDisconnectReason::CommunityDeleted));
+        self.cancel.cancel();
+    }
+}
 
 /// Leaves headroom under the process-wide drain deadline for a stalled writer.
 const RESTART_CLOSE_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -68,7 +116,7 @@ struct ConnEntry {
 /// registration cancels the token; archival before registration is observed by
 /// the revalidation. The returned guard removes the entry on every exit path.
 pub struct CommunityConnectionRegistry {
-    connections: Arc<DashMap<Uuid, (CommunityId, CancellationToken)>>,
+    connections: Arc<DashMap<Uuid, (CommunityId, CommunityConnectionControl)>>,
 }
 
 impl Default for CommunityConnectionRegistry {
@@ -86,26 +134,27 @@ impl CommunityConnectionRegistry {
     }
 
     /// Registers one socket and returns a guard that deregisters it on drop.
-    pub fn register(
+    pub(crate) fn register(
         &self,
         connection_id: Uuid,
         community_id: CommunityId,
-        cancel: CancellationToken,
+        control: CommunityConnectionControl,
     ) -> CommunityConnectionGuard {
         self.connections
-            .insert(connection_id, (community_id, cancel));
+            .insert(connection_id, (community_id, control));
         CommunityConnectionGuard {
             connection_id,
             connections: Arc::clone(&self.connections),
         }
     }
 
-    /// Cancels every socket type currently bound to `community_id`.
+    /// Disconnects every socket type currently bound to `community_id` and
+    /// attributes the close to community deletion.
     pub fn disconnect_community(&self, community_id: CommunityId) -> usize {
         let mut closed = 0;
         for entry in self.connections.iter() {
             if entry.value().0 == community_id {
-                entry.value().1.cancel();
+                entry.value().1.disconnect_community();
                 closed += 1;
             }
         }
@@ -124,7 +173,7 @@ impl CommunityConnectionRegistry {
 /// Removes a socket lifecycle registration on every handler exit path.
 pub struct CommunityConnectionGuard {
     connection_id: Uuid,
-    connections: Arc<DashMap<Uuid, (CommunityId, CancellationToken)>>,
+    connections: Arc<DashMap<Uuid, (CommunityId, CommunityConnectionControl)>>,
 }
 
 impl Drop for CommunityConnectionGuard {
@@ -137,20 +186,21 @@ impl Drop for CommunityConnectionGuard {
 ///
 /// The ordering is the archival admission invariant: archive-before-query is
 /// observed by the query, while archive-after-registration sees the token.
-pub async fn run_registered_community_connection<Check, CheckFuture, Run, RunFuture>(
+pub(crate) async fn run_registered_community_connection<Check, CheckFuture, Run, RunFuture>(
     registry: &CommunityConnectionRegistry,
     connection_id: Uuid,
     community_id: CommunityId,
-    cancel: CancellationToken,
+    control: CommunityConnectionControl,
     check_active: Check,
     run: Run,
 ) where
     Check: FnOnce() -> CheckFuture,
     CheckFuture: Future<Output = Result<bool, buzz_db::DbError>>,
-    Run: FnOnce() -> RunFuture,
+    Run: FnOnce(CommunityConnectionControl) -> RunFuture,
     RunFuture: Future<Output = ()>,
 {
-    let _guard = registry.register(connection_id, community_id, cancel.clone());
+    let cancel = control.cancel.clone();
+    let _guard = registry.register(connection_id, community_id, control.clone());
     if !matches!(check_active().await, Ok(true)) {
         cancel.cancel();
         return;
@@ -158,7 +208,7 @@ pub async fn run_registered_community_connection<Check, CheckFuture, Run, RunFut
     if cancel.is_cancelled() {
         return;
     }
-    run().await;
+    run(control).await;
     cancel.cancel();
 }
 
@@ -672,6 +722,9 @@ pub struct AppState {
     /// replace this with process-local caching; replay freshness must survive
     /// cross-pod routing.
     pub nip98_replay: Arc<dyn Nip98ReplayGuard>,
+    /// Shared HTTP client for relay-proxied GIF provider requests. Reusing the
+    /// connection pool avoids a fresh TLS handshake for every search/share.
+    pub gif_http_client: reqwest::Client,
     /// Shared Redis-backed admission limits for ordinary HTTP and WebSocket work.
     pub admission_rate_limiter: Arc<RedisRateLimiter>,
 
@@ -802,6 +855,7 @@ impl AppState {
         );
         let nip98_replay: Arc<dyn Nip98ReplayGuard> =
             Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
+        let gif_http_client = crate::api::gifs::build_gif_http_client();
         let admission_rate_limiter = Arc::new(RedisRateLimiter::new(redis_pool.clone()));
         let audit_enabled = audit_arc.is_some();
         let state = Self {
@@ -862,6 +916,7 @@ impl AppState {
             shutting_down: Arc::new(AtomicBool::new(false)),
             started_at: Instant::now(),
             nip98_replay,
+            gif_http_client,
             admission_rate_limiter,
             observer_rate_limiter: Arc::new(DashMap::new()),
             media_upload_rate_limiter: Arc::new(DashMap::new()),
@@ -1676,14 +1731,29 @@ mod tests {
         let ordinary_a = CancellationToken::new();
         let audio_a = CancellationToken::new();
         let ordinary_b = CancellationToken::new();
-        let _ordinary_a_guard = registry.register(Uuid::new_v4(), community_a, ordinary_a.clone());
-        let _audio_a_guard = registry.register(Uuid::new_v4(), community_a, audio_a.clone());
-        let _ordinary_b_guard = registry.register(Uuid::new_v4(), community_b, ordinary_b.clone());
+        let ordinary_a_control = CommunityConnectionControl::new(ordinary_a.clone());
+        let audio_a_control = CommunityConnectionControl::new(audio_a.clone());
+        let ordinary_b_control = CommunityConnectionControl::new(ordinary_b.clone());
+        let ordinary_a_reason = ordinary_a_control.disconnect_reason();
+        let audio_a_reason = audio_a_control.disconnect_reason();
+        let ordinary_b_reason = ordinary_b_control.disconnect_reason();
+        let _ordinary_a_guard = registry.register(Uuid::new_v4(), community_a, ordinary_a_control);
+        let _audio_a_guard = registry.register(Uuid::new_v4(), community_a, audio_a_control);
+        let _ordinary_b_guard = registry.register(Uuid::new_v4(), community_b, ordinary_b_control);
 
         assert_eq!(registry.disconnect_community(community_a), 2);
         assert!(ordinary_a.is_cancelled());
         assert!(audio_a.is_cancelled());
         assert!(!ordinary_b.is_cancelled());
+        assert_eq!(
+            *ordinary_a_reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityDeleted)
+        );
+        assert_eq!(
+            *audio_a_reason.borrow(),
+            Some(CommunityDisconnectReason::CommunityDeleted)
+        );
+        assert_eq!(*ordinary_b_reason.borrow(), None);
     }
 
     #[tokio::test]
@@ -1700,9 +1770,9 @@ mod tests {
             &registry,
             Uuid::new_v4(),
             community,
-            cancel_before.clone(),
+            CommunityConnectionControl::new(cancel_before.clone()),
             || async { Ok(false) },
-            move || async move { started_before_run.store(true, Ordering::SeqCst) },
+            move |_| async move { started_before_run.store(true, Ordering::SeqCst) },
         )
         .await;
         assert!(cancel_before.is_cancelled());
@@ -1722,13 +1792,13 @@ mod tests {
             &registry,
             Uuid::new_v4(),
             community,
-            cancel_during.clone(),
+            CommunityConnectionControl::new(cancel_during.clone()),
             move || async move {
                 registered_check.notify_one();
                 resume_check.notified().await;
                 Ok(true)
             },
-            move || async move { started_during_run.store(true, Ordering::SeqCst) },
+            move |_| async move { started_during_run.store(true, Ordering::SeqCst) },
         );
         tokio::pin!(future);
         tokio::select! {
@@ -1751,9 +1821,21 @@ mod tests {
         let cancel_a = CancellationToken::new();
         let cancel_failed = CancellationToken::new();
         let cancel_c = CancellationToken::new();
-        let _guard_a = registry.register(Uuid::new_v4(), archived_a, cancel_a.clone());
-        let _guard_failed = registry.register(Uuid::new_v4(), failed, cancel_failed.clone());
-        let _guard_c = registry.register(Uuid::new_v4(), archived_c, cancel_c.clone());
+        let _guard_a = registry.register(
+            Uuid::new_v4(),
+            archived_a,
+            CommunityConnectionControl::new(cancel_a.clone()),
+        );
+        let _guard_failed = registry.register(
+            Uuid::new_v4(),
+            failed,
+            CommunityConnectionControl::new(cancel_failed.clone()),
+        );
+        let _guard_c = registry.register(
+            Uuid::new_v4(),
+            archived_c,
+            CommunityConnectionControl::new(cancel_c.clone()),
+        );
 
         let (closed, failures) =
             revalidate_registered_communities(&registry, |community| async move {
@@ -1784,7 +1866,11 @@ mod tests {
         let registry = CommunityConnectionRegistry::new();
         let community = CommunityId::from_uuid(Uuid::from_u128(0xa));
         let cancel = CancellationToken::new();
-        let guard = registry.register(Uuid::new_v4(), community, cancel.clone());
+        let guard = registry.register(
+            Uuid::new_v4(),
+            community,
+            CommunityConnectionControl::new(cancel.clone()),
+        );
         assert_eq!(registry.bound_communities(), HashSet::from([community]));
 
         drop(guard);

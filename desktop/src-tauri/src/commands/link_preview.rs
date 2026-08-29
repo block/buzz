@@ -1,9 +1,8 @@
 use std::{io::Cursor, net::IpAddr, time::Duration};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use image::ImageDecoder;
-
 use futures_util::StreamExt;
+use image::ImageDecoder;
 use reqwest::{
     header::{ACCEPT, CONTENT_TYPE, LOCATION, USER_AGENT},
     redirect::Policy,
@@ -11,8 +10,12 @@ use reqwest::{
 use serde::Serialize;
 use url::Url;
 
+#[path = "link_preview_image_retry.rs"]
+mod image_retry;
 #[path = "link_preview_rate_limit.rs"]
 mod rate_limit;
+#[path = "link_preview_youtube.rs"]
+mod youtube;
 
 use rate_limit::{image_host_cooldown_remaining, retry_after_duration, set_image_host_cooldown};
 
@@ -67,6 +70,10 @@ async fn fetch_link_preview_metadata_inner(
     let mut url = Url::parse(href.trim()).map_err(|error| format!("invalid URL: {error}"))?;
     validate_public_https_url(&url).await?;
 
+    if youtube::is_video_url(&url) {
+        return youtube::fetch_oembed_metadata(&url).await;
+    }
+
     for redirect_count in 0..=MAX_REDIRECTS {
         let response = send_pinned_request(&url, "text/html,application/xhtml+xml;q=0.9").await?;
 
@@ -103,10 +110,13 @@ async fn fetch_link_preview_metadata_inner(
                     Some(image_url) => Some(
                         tokio::time::timeout(
                             PREVIEW_FETCH_TIMEOUT,
-                            fetch_sanitized_image(image_url, false),
+                            fetch_sanitized_image_with_retry(image_url, false),
                         )
                         .await
-                        .unwrap_or(Err(ImageFetchError::Transient { retry_after: None })),
+                        .unwrap_or(Err(ImageFetchError::Transient {
+                            retry_after: None,
+                            retry_inline: false,
+                        })),
                     ),
                     None => None,
                 }
@@ -144,7 +154,7 @@ fn apply_image_result(
             metadata.image_domain = Some(domain);
             metadata.image_fetch_state = LinkPreviewImageFetchState::Image;
         }
-        Some(Err(ImageFetchError::Transient { retry_after })) => {
+        Some(Err(ImageFetchError::Transient { retry_after, .. })) => {
             metadata.image_fetch_state = LinkPreviewImageFetchState::TransientFailure;
             metadata.image_retry_after_ms =
                 retry_after.and_then(|duration| u64::try_from(duration.as_millis()).ok());
@@ -313,8 +323,21 @@ fn extract_image_url(html: &str, page_url: &Url) -> Option<Url> {
 
 #[derive(Debug, PartialEq)]
 enum ImageFetchError {
-    Transient { retry_after: Option<Duration> },
+    Transient {
+        retry_after: Option<Duration>,
+        retry_inline: bool,
+    },
     Rejected,
+}
+
+async fn fetch_sanitized_image_with_retry(
+    url: Url,
+    preserve_transparency: bool,
+) -> Result<(String, String), ImageFetchError> {
+    image_retry::retry_transient_image_fetch(|| {
+        fetch_sanitized_image(url.clone(), preserve_transparency)
+    })
+    .await
 }
 
 async fn fetch_sanitized_image(
@@ -328,11 +351,15 @@ async fn fetch_sanitized_image(
         if let Some(retry_after) = image_host_cooldown_remaining(&url) {
             return Err(ImageFetchError::Transient {
                 retry_after: Some(retry_after),
+                retry_inline: false,
             });
         }
         let response = send_pinned_request(&url, "image/jpeg,image/png,image/webp")
             .await
-            .map_err(|_| ImageFetchError::Transient { retry_after: None })?;
+            .map_err(|_| ImageFetchError::Transient {
+                retry_after: None,
+                retry_inline: true,
+            })?;
         if response.status().is_redirection() {
             if redirect_count == MAX_REDIRECTS {
                 return Err(ImageFetchError::Rejected);
@@ -359,7 +386,10 @@ async fn fetch_sanitized_image(
                 if let Some(retry_after) = retry_after {
                     set_image_host_cooldown(&url, retry_after);
                 }
-                return Err(ImageFetchError::Transient { retry_after });
+                return Err(ImageFetchError::Transient {
+                    retry_after,
+                    retry_inline: status != reqwest::StatusCode::TOO_MANY_REQUESTS,
+                });
             }
             return Err(ImageFetchError::Rejected);
         }
@@ -705,6 +735,7 @@ mod tests {
             &mut metadata,
             Some(Err(ImageFetchError::Transient {
                 retry_after: Some(std::time::Duration::from_secs(15)),
+                retry_inline: false,
             })),
         );
         assert_eq!(

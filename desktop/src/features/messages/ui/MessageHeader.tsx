@@ -1,4 +1,4 @@
-import type * as React from "react";
+import * as React from "react";
 
 import { cn } from "@/shared/lib/cn";
 
@@ -14,12 +14,67 @@ export function MessageHeaderRow({
   return (
     <div
       className={cn(
-        "flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0 leading-4",
+        "flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0 leading-message-author",
         className,
       )}
+      data-testid="message-header"
     >
       {children}
     </div>
+  );
+}
+
+/**
+ * Divider between two pieces of message-header metadata.
+ *
+ * The header runs several independent facts together on one line, and without a
+ * divider they read as one phrase: an agent message came out as "managed by You
+ * 9:53 AM". A middot is what the rest of the app already uses for this
+ * (`MessageThreadSummaryRow`, project rows, the mention list).
+ *
+ * `aria-hidden` because the divider is punctuation for the eye only — the header
+ * already reads as separate nodes to a screen reader, and `MessageAgentOwner`
+ * supplies its own "Agent managed by" label.
+ *
+ * No horizontal margin: `MessageHeaderRow` is a flex row with `gap-x-1.5`, so
+ * spacing comes from the container. Adding margin here double-spaces it.
+ */
+export function MessageMetaSeparator() {
+  return (
+    <span aria-hidden="true" className="text-xs text-muted-foreground/40">
+      ·
+    </span>
+  );
+}
+
+/**
+ * Renders divider-separated header metadata segments in order, skipping empty
+ * slots. Each divider is grouped with the segment it precedes so the two wrap
+ * together — as loose siblings in a flex-wrap row, a divider can end up alone
+ * at the start of the second line.
+ */
+export function MessageMetaSegments({
+  segments,
+}: {
+  segments: ReadonlyArray<{ key: string; node: React.ReactNode }>;
+}) {
+  const present = segments.filter((slot) => Boolean(slot.node));
+  return (
+    <>
+      {present.map(({ key, node }, index) =>
+        index === 0 ? (
+          <React.Fragment key={key}>{node}</React.Fragment>
+        ) : (
+          <span
+            className="inline-flex min-w-0 items-baseline gap-x-1.5"
+            key={key}
+          >
+            <MessageMetaSeparator />
+            {node}
+          </span>
+        ),
+      )}
+    </>
   );
 }
 
@@ -39,7 +94,7 @@ export function MessageAuthorText({
   return (
     <Component
       className={cn(
-        "truncate text-sm font-bold leading-4 tracking-tight",
+        "truncate text-message font-semibold leading-message-author tracking-normal",
         hoverUnderline && "hover:underline",
         className,
       )}

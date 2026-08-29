@@ -33,6 +33,8 @@ export function useSidebarActivityOverflow({
 
   return {
     ...activityOverflow,
+    unreadMessageAboveChannelIds: messageOverflow.unreadAboveChannelIds,
+    unreadMessageBelowChannelIds: messageOverflow.unreadBelowChannelIds,
     unreadAboveLabel: getSidebarActivityOverflowLabel({
       activityCount: activityOverflow.unreadAboveCount,
       messageCount: messageOverflow.unreadAboveCount,
