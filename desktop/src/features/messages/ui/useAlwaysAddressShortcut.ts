@@ -6,21 +6,28 @@ import type { MentionSuggestion } from "./MentionAutocomplete";
 
 export function useAlwaysAddressShortcut({
   enabled,
+  lockedAgent,
   mentions,
   onOpenPicker,
   onToggle,
 }: {
   enabled: boolean;
+  lockedAgent?: Pick<MentionSuggestion, "avatarUrl" | "displayName" | "pubkey">;
   mentions: UseMentionsResult;
   onOpenPicker: (insertTrigger?: boolean) => void;
   onToggle: (suggestion: MentionSuggestion) => void;
 }) {
-  const { isMentionOpen, mentionSelectedIndex, suggestions } = mentions;
+  const {
+    getDefaultAgentSuggestion,
+    isMentionOpen,
+    mentionSelectedIndex,
+    suggestions,
+  } = mentions;
   return React.useCallback(
     (event: React.KeyboardEvent): boolean => {
       if (
         !enabled ||
-        event.key !== "Enter" ||
+        event.code !== "KeyM" ||
         !hasPrimaryShortcutModifier(event) ||
         event.altKey ||
         !event.shiftKey
@@ -30,19 +37,23 @@ export function useAlwaysAddressShortcut({
 
       event.preventDefault();
       if (event.repeat) return true;
-      if (!isMentionOpen) {
-        onOpenPicker(false);
+      const suggestion = isMentionOpen
+        ? suggestions[mentionSelectedIndex]
+        : lockedAgent
+          ? { ...lockedAgent, isAgent: true }
+          : getDefaultAgentSuggestion();
+      if (!suggestion?.isAgent || !suggestion.pubkey) {
+        if (!isMentionOpen) onOpenPicker(false);
         return true;
       }
-
-      const suggestion = suggestions[mentionSelectedIndex];
-      if (!suggestion?.isAgent || !suggestion.pubkey) return true;
       onToggle(suggestion);
       return true;
     },
     [
       enabled,
+      getDefaultAgentSuggestion,
       isMentionOpen,
+      lockedAgent,
       mentionSelectedIndex,
       onOpenPicker,
       onToggle,

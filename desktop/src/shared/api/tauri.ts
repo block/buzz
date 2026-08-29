@@ -43,6 +43,7 @@ import type {
 
 export * from "@/shared/api/tauriChannels";
 export { sendChannelMessage } from "@/shared/api/tauriMessages";
+export { getEventById, getEventsByIds } from "@/shared/api/tauriEvents";
 
 type RawPresenceLookup = Record<string, PresenceStatus>;
 
@@ -64,7 +65,7 @@ type RawFeedItem = {
   channel_name: string;
   channel_type: string | null;
   tags: string[][];
-  category: "mention" | "needs_action" | "activity" | "agent_activity";
+  category: HomeFeedResponse["feed"]["mentions"][number]["category"];
 };
 
 type RawHomeFeedResponse = {
@@ -463,11 +464,6 @@ export async function searchMessages(
     hits: response.hits.map(fromRawSearchHit),
     found: response.found,
   };
-}
-
-export async function getEventById(eventId: string): Promise<RelayEvent> {
-  const eventJson = await invokeTauri<string>("get_event", { eventId });
-  return JSON.parse(eventJson) as RelayEvent;
 }
 
 type RawThreadCursor = {
@@ -992,7 +988,7 @@ export async function getBakedBuildEnvKeys(): Promise<string[]> {
  *
  * The value is already masked in Rust for secret keys (keys not in the
  * explicit safe-to-reveal allowlist: `BUZZ_AGENT_PROVIDER`, `BUZZ_AGENT_MODEL`,
- * `DATABRICKS_HOST`, `DATABRICKS_MODEL`). Non-allowlisted keys have their
+ * `DATABRICKS_HOST`, `DATABRICKS_MODEL`, `DATABRICKS_MODEL_FILTER`). Non-allowlisted keys have their
  * values replaced with `••••••`. Non-secret values are shown as-is.
  * Empty-value keys are filtered out.
  */

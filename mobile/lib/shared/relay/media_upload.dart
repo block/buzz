@@ -17,6 +17,8 @@ import 'media_auth.dart';
 import 'mp4_fast_start.dart';
 import 'relay_provider.dart';
 
+part 'media_upload/platform_bindings.dart';
+
 const _mediaUploadPath = '/upload';
 const _legacyMediaUploadPath = '/media/upload';
 const _mediaUploadPlatformChannelName = 'buzz/media_upload';
@@ -44,17 +46,6 @@ final _mediaUploadPlatformChannel = MethodChannel(
   _mediaUploadPlatformChannelName,
 );
 
-/// Whether saving media needs Android's pre-scoped-storage runtime permission.
-Future<bool> requiresLegacyMediaStoragePermission() async {
-  if (defaultTargetPlatform != TargetPlatform.android) {
-    return false;
-  }
-  return await _mediaUploadPlatformChannel.invokeMethod<bool>(
-        _requiresLegacyMediaStoragePermissionMethod,
-      ) ??
-      false;
-}
-
 const _allowedImageMimeTypes = {
   'image/jpeg',
   'image/png',
@@ -67,6 +58,9 @@ const _maxFileSizeBytes = 100 * 1024 * 1024; // 100MB
 const _mediaPolicyUploadMessage = "We couldn't prepare this image for upload.";
 
 typedef PickGalleryImage = Future<XFile?> Function();
+
+/// Captures one image with the system camera, or returns null when cancelled.
+typedef PickCameraImage = Future<XFile?> Function();
 
 /// Selects multiple gallery images for upload in picker order.
 typedef PickGalleryImages = Future<List<XFile>> Function();
@@ -218,6 +212,7 @@ class MediaUploadService {
   final String _baseUrl;
   final String? _nsec;
   final PickGalleryImage _pickGalleryImage;
+  final PickCameraImage? _pickCameraImage;
   final PickGalleryImages _pickGalleryImages;
   final PickGalleryVideo _pickGalleryVideo;
   final PickAttachmentFile? _pickAttachmentFile;
@@ -234,6 +229,7 @@ class MediaUploadService {
     required String baseUrl,
     required String? nsec,
     required PickGalleryImage pickGalleryImage,
+    PickCameraImage? pickCameraImage,
     PickGalleryImages? pickGalleryImages,
     required PickGalleryVideo pickGalleryVideo,
     PickAttachmentFile? pickAttachmentFile,
@@ -247,6 +243,7 @@ class MediaUploadService {
   }) : _baseUrl = baseUrl,
        _nsec = nsec,
        _pickGalleryImage = pickGalleryImage,
+       _pickCameraImage = pickCameraImage,
        _pickGalleryImages =
            pickGalleryImages ??
            (() async {
@@ -273,6 +270,23 @@ class MediaUploadService {
 
   Future<BlobDescriptor?> pickAndUploadImage() async {
     final pickedImage = await _pickGalleryImage();
+    if (pickedImage == null) return null;
+    return uploadImage(pickedImage);
+  }
+
+  /// Opens the system photo library without uploading the selected image.
+  Future<XFile?> pickGalleryImage() => _pickGalleryImage();
+
+  /// Opens the system camera without uploading the captured image.
+  Future<XFile?> captureImage() async => _pickCameraImage?.call();
+
+  /// Produces displayable, sanitized image bytes before an upload begins.
+  Future<Uint8List> prepareImageBytes(XFile image) async =>
+      (await _prepareUploadImage(image)).bytes;
+
+  /// Opens the system camera and uploads the captured image.
+  Future<BlobDescriptor?> captureAndUploadImage() async {
+    final pickedImage = await _pickCameraImage?.call();
     if (pickedImage == null) return null;
     return uploadImage(pickedImage);
   }
@@ -979,21 +993,3 @@ Future<Uint8List> _invokeRequiredPlatformBytesMethod(
   }
   return result;
 }
-
-final mediaUploadServiceProvider = Provider<MediaUploadService>((ref) {
-  final config = ref.watch(relayConfigProvider);
-  final picker = ImagePicker();
-  final service = MediaUploadService(
-    baseUrl: config.baseUrl,
-    nsec: config.nsec,
-    pickGalleryImage: () => picker.pickImage(
-      source: ImageSource.gallery,
-      requestFullMetadata: false,
-    ),
-    pickGalleryImages: () => picker.pickMultiImage(requestFullMetadata: false),
-    pickGalleryVideo: () => picker.pickVideo(source: ImageSource.gallery),
-    pickAttachmentFile: file_selector.openFile,
-  );
-  ref.onDispose(service.dispose);
-  return service;
-});

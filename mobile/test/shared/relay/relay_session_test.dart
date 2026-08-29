@@ -749,6 +749,61 @@ void main() {
     },
   );
 
+  test('retryable CLOSED reports retrying until replay is ready', () async {
+    final timers = <_ManualTimer>[];
+    final socket = _RecordingRelaySocket();
+    final deliveredEvents = <NostrEvent>[];
+    final statuses = <RelaySubscriptionStatus>[];
+    final session = RelaySessionNotifier(
+      retryTimerFactory: (duration, callback) {
+        final timer = _ManualTimer(duration, callback);
+        timers.add(timer);
+        return timer;
+      },
+    );
+    session.debugAttachSocketForTest(socket);
+
+    final subscribe = session.subscribeWithStatus(
+      _channelFilter,
+      deliveredEvents.add,
+      onStatusChanged: (status) {
+        if (status == RelaySubscriptionStatus.ready) {
+          expect(deliveredEvents, hasLength(statuses.isEmpty ? 0 : 1));
+        }
+        statuses.add(status);
+      },
+    );
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    final unsubscribe = await subscribe;
+    expect(statuses, [RelaySubscriptionStatus.ready]);
+
+    session.debugHandleMessage(['CLOSED', 'l-1', 'error: relay overloaded']);
+    expect(statuses, [
+      RelaySubscriptionStatus.ready,
+      RelaySubscriptionStatus.retrying,
+    ]);
+
+    timers.single.fire();
+    await Future<void>.delayed(Duration.zero);
+    session.debugHandleMessage([
+      'EVENT',
+      'l-1',
+      _event(createdAt: 30).toJson(),
+    ]);
+    expect(statuses, [
+      RelaySubscriptionStatus.ready,
+      RelaySubscriptionStatus.retrying,
+    ]);
+
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    expect(statuses, [
+      RelaySubscriptionStatus.ready,
+      RelaySubscriptionStatus.retrying,
+      RelaySubscriptionStatus.ready,
+    ]);
+    unsubscribe();
+  });
+
   test('CLOSED retries back off and reset after EOSE', () async {
     final timers = <_ManualTimer>[];
     final socket = _RecordingRelaySocket();
@@ -978,6 +1033,42 @@ void main() {
       inInclusiveRange(3990, 4000),
     );
     expect(gateTimers.single.duration, const Duration(seconds: 4));
+    unsubscribe();
+  });
+
+  test('rate-limited live CLOSED honors an immediate retry hint', () async {
+    final retryTimers = <_ManualTimer>[];
+    final gateTimers = <_ManualTimer>[];
+    final gate = RelayRateLimitGate(
+      timerFactory: (duration, callback) {
+        final timer = _ManualTimer(duration, callback);
+        gateTimers.add(timer);
+        return timer;
+      },
+    );
+    final session = RelaySessionNotifier(
+      rateLimitGate: gate,
+      retryTimerFactory: (duration, callback) {
+        final timer = _ManualTimer(duration, callback);
+        retryTimers.add(timer);
+        return timer;
+      },
+    );
+    final socket = _RecordingRelaySocket();
+    session.debugAttachSocketForTest(socket);
+    final subscribe = session.subscribe(_channelFilter, (_) {});
+    session.debugHandleMessage(['EOSE', 'l-1']);
+    final unsubscribe = await subscribe;
+
+    session.debugHandleMessage([
+      'CLOSED',
+      'l-1',
+      'rate-limited: quota exceeded; retry in 0s',
+    ]);
+
+    expect(retryTimers.single.duration, const Duration(seconds: 1));
+    expect(gateTimers, isEmpty);
+    expect(gate.isActive, isFalse);
     unsubscribe();
   });
 

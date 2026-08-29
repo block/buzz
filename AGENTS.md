@@ -226,7 +226,9 @@ channel and derives its containing root. An optional `thread` parameter is
 accepted only when it matches that derived root. The explicit
 `--channel <uuid> --event <hex>` form remains available.
 
-All reads return sig-stripped JSON arrays; all writes return
+All event reads return normalized JSON arrays. Normal output preserves the seven
+canonical signed Nostr event fields (`id`, `pubkey`, `kind`, `content`,
+`created_at`, `tags`, `sig`); all writes return
 `{event_id, accepted, message}`; creates add the entity ID. Exit codes:
 0=ok, 1=input error, 2=network/relay, 3=auth, 4=other, 5=write conflict (NIP-33 LWW).
 
@@ -467,6 +469,7 @@ description. See [PR #803](https://github.com/block/buzz/pull/803).
 4. **Worktrees: `cd` in the same command** — shell CWD doesn't persist between tool calls. Use `cd /path && cargo build` as one command.
 5. **Desktop crate excluded from root workspace** — `cargo test` at repo root does NOT run desktop tests. Use `cargo test --manifest-path desktop/src-tauri/Cargo.toml` explicitly.
 6. **React render perf: `React.memo` is all-or-nothing** — it only skips a re-render when *every* prop is reference-stable; one unstable prop (inline arrow/JSX, or a hook returning a fresh `{}`/`[]`/`Map` each render) defeats it. Two repeat offenders: (a) React Query results (`useMutation`/`useQuery`) are a **new object each render** — depend on the stable method (`mutation.mutateAsync`), not the object; (b) derived `Map`/array state that recomputes on a version bump — wrap in a content-equality ref cache (`shared/hooks/useStableReference.ts`). When chasing interaction lag, **measure with DevTools closed and no perf probes** (an open Web Inspector + per-keystroke `console.log` inflate the numbers), and isolate by removing one suspect at a time rather than guessing.
+7. **`pgschema` omits seed DML and some storage parameters** — Fresh desired-state bootstraps use `./bin/pgschema apply`, which does not execute `INSERT` statements or preserve every table storage parameter from `schema/schema.sql`. Put each unsupported invariant in `scripts/reconcile-schema-after-pgschema.sql` as an idempotent convergence statement plus a live catalog or data assertion. Every `pgschema apply` caller must run that script. A string assertion against `schema.sql` alone does not prove the pgschema-created database has the intended state.
 
 ---
 

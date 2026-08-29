@@ -1,5 +1,5 @@
 import * as React from "react";
-import { AtSign, Bot, ChevronRight, Users } from "lucide-react";
+import { Bot, ChevronRight, Pin, Users } from "lucide-react";
 import { OtherSetupAgentMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { motion } from "motion/react";
 import type { TeamMentionMember } from "@/features/messages/lib/mentionCandidates";
@@ -44,6 +44,7 @@ type MentionAutocompleteProps = {
   keepMentionedAgentsPinned?: boolean;
   onKeepMentionedAgentsPinnedChange?: (value: boolean) => void;
   openOptionsRequest?: number;
+  onOptionsRevealComplete?: (request: number) => void;
   onDismiss?: () => void;
   position?: "above" | "below";
 };
@@ -65,6 +66,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   keepMentionedAgentsPinned = true,
   onKeepMentionedAgentsPinnedChange,
   openOptionsRequest = 0,
+  onOptionsRevealComplete,
   onDismiss,
   position = "above",
 }: MentionAutocompleteProps) {
@@ -74,6 +76,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   const optionsId = React.useId();
   const keepPinnedSwitchId = React.useId();
   const [optionsOpen, setOptionsOpen] = React.useState(false);
+  const handledOptionsRequestRef = React.useRef(0);
   const alwaysAddressShortcut = getPlatformKeysById("always-address-agent");
 
   React.useEffect(() => {
@@ -90,10 +93,17 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   }, [suggestions.length]);
 
   React.useEffect(() => {
-    if (openOptionsRequest > 0) {
-      setOptionsOpen(true);
+    if (openOptionsRequest <= handledOptionsRequestRef.current) return;
+    handledOptionsRequestRef.current = openOptionsRequest;
+
+    // The first request waits for the entrance to finish. Once visible, apply
+    // later requests in place so toggling a pin cannot replay that entrance.
+    if (optionsOpen) {
+      onOptionsRevealComplete?.(openOptionsRequest);
+      return;
     }
-  }, [openOptionsRequest]);
+    setOptionsOpen(true);
+  }, [onOptionsRevealComplete, openOptionsRequest, optionsOpen]);
 
   React.useEffect(() => {
     if (!onDismiss) return;
@@ -173,8 +183,14 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 <motion.div
                   animate={{ opacity: 1, y: 0 }}
                   className="w-72"
+                  data-testid="mention-options-settings"
                   id={optionsId}
                   initial={{ opacity: 0, y: 4 }}
+                  onAnimationComplete={() => {
+                    if (openOptionsRequest > 0) {
+                      onOptionsRevealComplete?.(openOptionsRequest);
+                    }
+                  }}
                   transition={{ duration: 0.16, ease: "easeOut" }}
                 >
                   <div className="flex min-h-12 items-center justify-between gap-3 px-3 py-2">
@@ -390,7 +406,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                     <TooltipTrigger asChild>
                       <span className="absolute right-3 top-1/2 inline-flex -translate-y-1/2">
                         <Toggle
-                          aria-label={`${isAlwaysAddressed ? "Stop automatically mentioning" : "Automatically mention"} ${suggestion.displayName}`}
+                          aria-label={`${isAlwaysAddressed ? "Don't automatically mention" : "Automatically mention"} ${suggestion.displayName}${isAlwaysAddressed ? " in this conversation" : ""}`}
                           className="h-6 w-6 p-0 data-[state=on]:bg-primary/15 data-[state=on]:text-primary"
                           data-always-address-pubkey={suggestion.pubkey?.toLowerCase()}
                           data-testid={`mention-always-address-${suggestion.pubkey}`}
@@ -406,7 +422,12 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                           size="xs"
                           type="button"
                         >
-                          <AtSign aria-hidden="true" className="h-3.5 w-3.5" />
+                          <Pin
+                            aria-hidden="true"
+                            className="h-3.5 w-3.5"
+                            data-testid="mention-auto-pin-icon"
+                            fill={isAlwaysAddressed ? "currentColor" : "none"}
+                          />
                         </Toggle>
                       </span>
                     </TooltipTrigger>
@@ -416,11 +437,11 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                     >
                       <span>
                         {isAlwaysAddressed
-                          ? "Stop automatically mentioning"
+                          ? "Don't automatically mention in this conversation"
                           : "Automatically mention"}
                       </span>
                       {alwaysAddressShortcut ? (
-                        <kbd className="flex items-center gap-0.5 rounded border border-primary-foreground/20 bg-primary-foreground/10 px-1 py-0 font-mono text-sm text-primary-foreground/70">
+                        <kbd className="flex items-center gap-0.5 rounded border border-secondary-foreground/20 bg-secondary-foreground/10 px-1 py-0 font-mono text-sm text-secondary-foreground">
                           {(alwaysAddressShortcut.includes("+")
                             ? alwaysAddressShortcut.split("+")
                             : Array.from(alwaysAddressShortcut)

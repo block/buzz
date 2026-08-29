@@ -2,9 +2,15 @@ import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import {
+  channelLifecycle,
+  channelLifecycleLabel,
+} from "@/features/channels/lib/channelLifecycle";
+import {
   DEFAULT_EPHEMERAL_TTL_SECONDS,
   formatTtlDuration,
 } from "@/features/channels/lib/ephemeralChannel";
+import { useIsProjectHomeChannel } from "@/features/projects/lib/projectHomeChannel";
+import type { Channel } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -13,6 +19,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
+import { EditableInfoFieldRow } from "./ChannelManagementSheetRows";
 import { ChannelTypePicker } from "./ChannelTypePicker";
 
 const EPHEMERAL_TIMEOUT_OPTIONS = [
@@ -32,7 +39,34 @@ const CHANNEL_TYPE_RESIZE_TRANSITION = {
   ease: [0.23, 1, 0.32, 1],
 } as const;
 
+export function ChannelTypeDetailRow({
+  canEdit,
+  channel,
+  onEdit,
+}: {
+  canEdit: boolean;
+  channel: Channel;
+  onEdit?: () => void;
+}) {
+  const projectHome = useIsProjectHomeChannel(channel.id);
+  const lifecycle = channelLifecycle({
+    projectHome,
+    temporary: channel.ttlSeconds !== null,
+  });
+
+  return (
+    <EditableInfoFieldRow
+      editTestId="channel-management-edit-channel-type"
+      label="Channel type"
+      onEdit={canEdit ? onEdit : undefined}
+      testId="channel-management-type"
+      value={channelLifecycleLabel(lifecycle, channel.ttlSeconds)}
+    />
+  );
+}
+
 export function ChannelTypeSettings({
+  channelId,
   disabled,
   label = "Channel type",
   onOpenChange,
@@ -43,6 +77,7 @@ export function ChannelTypeSettings({
   testIdPrefix,
   ttlSeconds,
 }: {
+  channelId?: string | null;
   disabled?: boolean;
   label?: string;
   onOpenChange?: (open: boolean) => void;
@@ -53,6 +88,8 @@ export function ChannelTypeSettings({
   testIdPrefix: string;
   ttlSeconds: number;
 }) {
+  const projectHome = useIsProjectHomeChannel(channelId);
+  const lifecycle = channelLifecycle({ projectHome, temporary });
   const shouldReduceMotion = useReducedMotion();
   const channelTypeResizeTransition = shouldReduceMotion
     ? { duration: 0 }
@@ -82,17 +119,18 @@ export function ChannelTypeSettings({
         <span className="text-sm font-medium text-foreground">{label}</span>
         <ChannelTypePicker
           align="end"
+          allowProject={projectHome}
           className="-mr-2.5"
           disabled={disabled}
+          lifecycle={lifecycle}
+          onLifecycleChange={(next) => onTemporaryChange(next === "temporary")}
           onOpenChange={onOpenChange}
-          onTemporaryChange={onTemporaryChange}
           open={open}
-          temporary={temporary}
           testId={`${testIdPrefix}-channel-type`}
         />
       </div>
       <AnimatePresence initial={false}>
-        {temporary ? (
+        {temporary && !projectHome ? (
           <motion.div
             animate={{ height: "auto", opacity: 1 }}
             className="overflow-hidden"

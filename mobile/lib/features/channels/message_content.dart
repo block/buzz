@@ -289,7 +289,11 @@ class MessageContent extends HookConsumerWidget {
             agentMentionPubkeys: resolvedAgentMentionPubkeys,
             onMentionTap: onMentionTap,
           ),
-          CustomEmojiMd(customEmoji, size: inlineCustomEmojiSize),
+          CustomEmojiMd(
+            customEmoji,
+            content: finalContent,
+            size: inlineCustomEmojiSize,
+          ),
           _ChannelLinkMd(
             channelNames: resolvedChannelNames,
             onChannelTap: resolvedChannelTap,

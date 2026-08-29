@@ -3,6 +3,7 @@ mod app_menu;
 mod app_state;
 mod archive;
 mod builderlab;
+mod channel_head_cache;
 mod commands;
 mod deep_link;
 mod egress_guard;
@@ -40,6 +41,7 @@ mod relay_admission;
 mod reset;
 mod secret_store;
 mod shutdown;
+mod team_catalog;
 mod templates;
 mod terminal_runtime;
 #[cfg_attr(not(test), allow(dead_code))]
@@ -94,11 +96,7 @@ use tauri_plugin_window_state::StateFlags;
 use tray_menu::show_main_window;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // mesh-llm's async chains (model download, node start/join) overflow
-    // tokio's default 2 MiB worker stacks — a stack-guard SIGABRT, not a
-    // panic. Upstream mesh-llm and mesh-console both run on 8 MiB worker
-    // stacks for this reason; give Tauri's command runtime the same headroom
-    // before anything else touches tauri::async_runtime.
+    // mesh-llm async chains overflow tokio's default 2 MiB stacks; run on 8 MiB like upstream.
     #[cfg(feature = "mesh-llm")]
     match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -234,6 +232,7 @@ pub fn run() {
         .manage(archive::sync::ArchiveSyncState::default())
         .manage(native_relay_client::NativeRelayClient::default())
         .manage(observed_unread::ObservedUnreadStore::default())
+        .manage(channel_head_cache::ChannelHeadCacheStore::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
             #[cfg(target_os = "macos")]
@@ -650,6 +649,7 @@ pub fn run() {
             add_reaction,
             remove_reaction,
             get_event,
+            get_events,
             show_native_notification,
             #[cfg(target_os = "macos")]
             macos_notifications::take_pending_activations,
@@ -721,9 +721,13 @@ pub fn run() {
             discover_backend_providers,
             probe_backend_provider,
             persona_catalog::fetch_persona_catalog,
+            team_catalog::fetch_team_catalog,
             unread_catch_up::unread_catch_up,
             observed_unread::observed_unread_open_scope,
             observed_unread::observed_unread_ingest,
+            channel_head_cache::channel_head_cache_load,
+            channel_head_cache::channel_head_cache_store,
+            channel_head_cache::channel_head_cache_clear,
             list_personas,
             create_persona,
             update_persona,
@@ -740,6 +744,8 @@ pub fn run() {
             list_teams,
             create_team,
             update_team,
+            set_team_shared,
+            add_team_from_catalog,
             delete_team,
             export_agent_snapshot,
             card_mint_key_status,

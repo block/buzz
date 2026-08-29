@@ -34,6 +34,7 @@ import {
   useHideDmMutation,
   useOpenDmMutation,
 } from "@/features/channels/hooks";
+import { useDmResurfaceFromMessages } from "@/features/channels/useDmResurfaceFromMessages";
 import { useUnreadChannels } from "@/features/channels/useUnreadChannels";
 import { useMembershipNotifications } from "@/features/channels/useMembershipNotifications";
 import { useFeedItemState } from "@/features/home/useFeedItemState";
@@ -505,6 +506,11 @@ export function AppShell() {
   const { applyCanvas, applyAgents } = useApplyTemplate();
   const openDmMutation = useOpenDmMutation();
   const hideDmMutation = useHideDmMutation();
+  useDmResurfaceFromMessages({
+    pubkey: identityQuery.data?.pubkey,
+    relayUrl: communitiesHook.activeCommunity?.relayUrl,
+    reopen: openDmMutation.mutateAsync,
+  });
   const {
     browseDialogType,
     openBrowseChannels: handleOpenBrowseChannels,
@@ -648,8 +654,8 @@ export function AppShell() {
   );
 
   const handleOpenSearchResult = React.useCallback(
-    (hit: SearchHit) => {
-      void openSearchHit(hit);
+    (hit: SearchHit, query: string) => {
+      void openSearchHit(hit, { query });
     },
     [openSearchHit],
   );

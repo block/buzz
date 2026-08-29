@@ -274,6 +274,14 @@ fn extract_before_id(raw: &Value) -> BeforeId {
     }
 }
 
+fn extract_buzz_channel(raw: &Value) -> Option<&str> {
+    raw.get("#buzz-channel")
+        .and_then(Value::as_array)
+        .filter(|values| values.len() == 1)
+        .and_then(|values| values.first())
+        .and_then(Value::as_str)
+}
+
 /// True when the raw filter opts into a bridge extension flag (`top_level`,
 /// `include_summaries`, `include_aux`). Absent or non-boolean = false.
 fn extension_flag(raw: &Value, key: &str) -> bool {
@@ -393,6 +401,83 @@ const WINDOW_AUX_DELETE_KINDS: [u32; 2] = [
     buzz_core::kind::KIND_NIP29_DELETE_EVENT,
 ];
 
+/// Page size for one aux-closure hop. Matches the DB clamp
+/// (`buzz_db::DEFAULT_MAX_PAGE_LIMIT`) so each page is one full query.
+const AUX_PAGE_LIMIT: i64 = buzz_db::DEFAULT_MAX_PAGE_LIMIT;
+/// Upper bound on pages drained per hop: 64k aux events referencing one page
+/// of rows is far past any real thread; past it we log and stop rather than
+/// loop forever against a pathological write pattern.
+const AUX_MAX_PAGES: usize = 64;
+
+fn build_aux_query(
+    community: buzz_core::CommunityId,
+    target_ids: Vec<String>,
+    kinds: &[u32],
+) -> buzz_db::EventQuery {
+    let mut query = buzz_db::EventQuery::for_community(community);
+    query.kinds = Some(kinds.iter().map(|kind| *kind as i32).collect());
+    query.e_tags = Some(target_ids);
+    query
+}
+
+/// Where an aux hop reads from: the window path pins the request's proved
+/// read session; the thread path takes the routed display-read fast path.
+enum AuxReader<'a> {
+    Session(&'a mut buzz_db::ReadSession),
+    Routed(&'a buzz_db::Db, &'static str),
+    #[cfg(test)]
+    Fake(&'a mut (dyn FnMut(&buzz_db::EventQuery) -> Vec<buzz_core::StoredEvent> + Send)),
+}
+
+impl AuxReader<'_> {
+    async fn fetch(
+        &mut self,
+        query: &buzz_db::EventQuery,
+    ) -> buzz_db::Result<Vec<buzz_core::StoredEvent>> {
+        match self {
+            AuxReader::Session(session) => session.query_events(query).await,
+            AuxReader::Routed(db, path) => db.query_events_routed(path, query).await,
+            #[cfg(test)]
+            AuxReader::Fake(fetch) => Ok(fetch(query)),
+        }
+    }
+}
+
+/// Drain every event matching `query`, walking the `(created_at, id)` keyset
+/// cursor `query_events` already orders by until a short page. An aux hop
+/// over a reaction-heavy page can exceed a single page clamp, and because
+/// results are newest-first a one-shot query silently drops the *oldest*
+/// edits and deletions — rendering original or deleted content, not merely
+/// losing decoration.
+async fn query_all_pages(
+    mut query: buzz_db::EventQuery,
+    page_limit: i64,
+    reader: &mut AuxReader<'_>,
+) -> buzz_db::Result<Vec<buzz_core::StoredEvent>> {
+    query.limit = Some(page_limit);
+    let mut events = Vec::new();
+    for _ in 0..AUX_MAX_PAGES {
+        let page = reader.fetch(&query).await?;
+        let next = if page.len() as i64 >= page_limit {
+            page.last().map(|se| (se.event.created_at, se.event.id))
+        } else {
+            None
+        };
+        events.extend(page);
+        let Some((created_at, id)) = next else {
+            return Ok(events);
+        };
+        query.until = chrono::DateTime::from_timestamp(created_at.as_secs() as i64, 0);
+        query.before_id = Some(id.to_bytes().to_vec());
+    }
+    tracing::warn!(
+        pages = AUX_MAX_PAGES,
+        events = events.len(),
+        "aux closure hop exceeded page cap; returning truncated closure"
+    );
+    Ok(events)
+}
+
 /// Serve one `top_level: true` channel-window filter on the bridge `/query`
 /// path (docs/bridge-channel-window.md). Appends, in order: row events, the
 /// aux closure (`include_aux`), `39005` thread-summary overlays
@@ -496,14 +581,15 @@ async fn handle_channel_window_filter(
             std::collections::HashSet::new();
         let mut hop_ids = row_ids_hex.clone();
         for hop_kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
-            let mut aux_query = buzz_db::EventQuery::for_community(tenant.community());
-            aux_query.kinds = Some(hop_kinds.iter().map(|k| *k as i32).collect());
-            aux_query.e_tags = Some(std::mem::take(&mut hop_ids));
-            aux_query.limit = Some(1000);
-            let aux_events = session
-                .query_events(&aux_query)
-                .await
-                .map_err(|e| internal_error(&format!("window aux error: {e}")))?;
+            let aux_query =
+                build_aux_query(tenant.community(), std::mem::take(&mut hop_ids), hop_kinds);
+            let aux_events = query_all_pages(
+                aux_query,
+                AUX_PAGE_LIMIT,
+                &mut AuxReader::Session(&mut session),
+            )
+            .await
+            .map_err(|e| internal_error(&format!("window aux error: {e}")))?;
             for se in aux_events {
                 if !seen_aux.insert(se.event.id) {
                     continue;
@@ -1039,8 +1125,10 @@ async fn query_events_authed(
         .await;
     }
 
-    if let Some(presence_events) = synthesize_presence(state, tenant, &filters).await {
-        return Ok(Json(Value::Array(presence_events)));
+    if let Some(presence_result) =
+        synthesize_presence(&state.pubsub, &state.relay_keypair, tenant, &filters).await
+    {
+        return presence_result.map(|events| Json(Value::Array(events)));
     }
 
     let mut events: Vec<Value> = Vec::new();
@@ -1203,6 +1291,8 @@ async fn query_events_authed(
             .await
             .map_err(|e| internal_error(&format!("thread query error: {e}")))?;
 
+        let mut thread_row_ids = Vec::with_capacity(thread_replies.len() + 1);
+        thread_row_ids.push(root_hex.to_string());
         for reply in thread_replies {
             let se = reply.stored_event;
             if !event_in_accessible_channel(&se, &accessible_channels) {
@@ -1214,8 +1304,43 @@ async fn query_events_authed(
             if !buzz_core::filter::reader_authorized_for_event(&se.event, &authed_pubkey_hex) {
                 continue;
             }
+            thread_row_ids.push(se.event.id.to_hex());
             if let Ok(v) = serde_json::to_value(&se.event) {
                 events.push(v);
+            }
+        }
+
+        if extension_flag(raw, "include_aux") && !thread_row_ids.is_empty() {
+            let mut seen_aux = std::collections::HashSet::new();
+            let mut hop_ids = thread_row_ids;
+            for hop_kinds in [&WINDOW_AUX_KINDS[..], &WINDOW_AUX_DELETE_KINDS[..]] {
+                let aux_query =
+                    build_aux_query(tenant.community(), std::mem::take(&mut hop_ids), hop_kinds);
+                let aux_events = query_all_pages(
+                    aux_query,
+                    AUX_PAGE_LIMIT,
+                    &mut AuxReader::Routed(&state.db, "bridge_thread_aux"),
+                )
+                .await
+                .map_err(|e| internal_error(&format!("thread aux query error: {e}")))?;
+                for se in aux_events {
+                    if !seen_aux.insert(se.event.id)
+                        || !event_in_accessible_channel(&se, &accessible_channels)
+                        || !buzz_core::filter::reader_authorized_for_event(
+                            &se.event,
+                            &authed_pubkey_hex,
+                        )
+                    {
+                        continue;
+                    }
+                    hop_ids.push(se.event.id.to_hex());
+                    if let Ok(value) = serde_json::to_value(&se.event) {
+                        events.push(value);
+                    }
+                }
+                if hop_ids.is_empty() {
+                    break;
+                }
             }
         }
         handled.insert(idx);
@@ -1250,6 +1375,9 @@ async fn query_events_authed(
             extract_channel_from_filter(filter),
             &accessible_channels,
         );
+        if let Some(channel) = extract_buzz_channel(raw) {
+            query.custom_tag = Some(("buzz-channel".into(), channel.into()));
+        }
         // Shared-gated visibility pushdown: must mirror WS REQ so that a page of
         // newer private events does not starve older shared ones off the page.
         if crate::handlers::req::filter_can_match_shared_gated_kinds(filter) {
@@ -2050,12 +2178,19 @@ pub async fn workflow_webhook(
 /// presence from Redis instead of querying the DB (ephemeral events are never
 /// stored, and kind:40902 snapshots are relay-generated on demand).
 ///
-/// Returns `Some(events)` if handled, `None` to fall through to normal query.
+/// Returns `None` when the filters are not a presence query (fall through to
+/// the normal query path). Returns `Some(Ok(events))` when a presence snapshot
+/// was produced — an empty vec is an authoritative "all offline" answer.
+/// Returns `Some(Err(_))` when the backing Redis lookup failed: callers must
+/// propagate that as an error response rather than a fake-empty success, so a
+/// consumer cannot mistake a backend outage for an authoritative snapshot.
+#[allow(clippy::type_complexity)]
 async fn synthesize_presence(
-    state: &AppState,
+    pubsub: &buzz_pubsub::PubSubManager,
+    relay_keypair: &nostr::Keys,
     tenant: &buzz_core::tenant::TenantContext,
     filters: &[nostr::Filter],
-) -> Option<Vec<Value>> {
+) -> Option<Result<Vec<Value>, (StatusCode, Json<Value>)>> {
     use buzz_core::kind::{KIND_PRESENCE_SNAPSHOT, KIND_PRESENCE_UPDATE};
 
     // Only intercept if every filter targets kind:20001 or 40902 with authors.
@@ -2075,22 +2210,23 @@ async fn synthesize_presence(
     }
 
     if all_pubkeys.is_empty() {
-        return Some(Vec::new());
+        return Some(Ok(Vec::new()));
     }
 
     // Dedup pubkeys.
     all_pubkeys.sort_by_key(|pk| pk.to_hex());
     all_pubkeys.dedup();
 
-    // Look up Redis.
-    let presence_map = state
-        .pubsub
-        .get_presence_bulk(tenant, &all_pubkeys)
-        .await
-        .unwrap_or_default();
+    // Look up Redis. A lookup failure must surface as an error, not a
+    // fake-empty success — otherwise a Redis outage is indistinguishable from
+    // an authoritative all-offline snapshot to the consumer.
+    let presence_map = match pubsub.get_presence_bulk(tenant, &all_pubkeys).await {
+        Ok(map) => map,
+        Err(e) => return Some(Err(internal_error(&format!("presence lookup: {e}")))),
+    };
 
     if presence_map.is_empty() {
-        return Some(Vec::new());
+        return Some(Ok(Vec::new()));
     }
 
     // Synthesize kind:20001 events signed by the relay.
@@ -2102,20 +2238,30 @@ async fn synthesize_presence(
     let mut events = Vec::with_capacity(presence_map.len());
     for (pubkey_hex, status) in &presence_map {
         // Build a synthetic event: relay-signed, content = status, p-tag = subject.
-        let tags = vec![nostr::Tag::parse(["p", pubkey_hex]).ok()?];
-        let event =
-            nostr::EventBuilder::new(nostr::Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
-                .tags(tags)
-                .custom_created_at(nostr::Timestamp::from(now))
-                .sign_with_keys(&state.relay_keypair)
-                .ok()?;
+        // A build/sign failure here is an internal fault, not a "not a presence
+        // query" signal, so surface it as an error rather than falling through.
+        let tags = match nostr::Tag::parse(["p", pubkey_hex]) {
+            Ok(tag) => vec![tag],
+            Err(e) => return Some(Err(internal_error(&format!("presence tag: {e}")))),
+        };
+        let event = match nostr::EventBuilder::new(
+            nostr::Kind::Custom(KIND_PRESENCE_UPDATE as u16),
+            status,
+        )
+        .tags(tags)
+        .custom_created_at(nostr::Timestamp::from(now))
+        .sign_with_keys(relay_keypair)
+        {
+            Ok(event) => event,
+            Err(e) => return Some(Err(internal_error(&format!("presence sign: {e}")))),
+        };
 
         if let Ok(v) = serde_json::to_value(&event) {
             events.push(v);
         }
     }
 
-    Some(events)
+    Some(Ok(events))
 }
 
 // ── Moderation queue reads (L6 — Quinn) ───────────────────────────────────────
@@ -2371,6 +2517,155 @@ mod tests {
         ];
 
         assert!(!has_mixed_search_filters(&filters));
+    }
+
+    /// Production-wiring seam for the Redis-outage boundary. Drives the real
+    /// `synthesize_presence` with a `PubSubManager` whose pool points at a
+    /// closed port, so the `get_presence_bulk` lookup fails. A presence-snapshot
+    /// filter must yield `Some(Err(500))` — never `Some(Ok([]))`, which would
+    /// let a consumer mistake a backend outage for an authoritative all-offline
+    /// snapshot. Restoring `unwrap_or_default()` inside `synthesize_presence`
+    /// turns this red (it would return `Some(Ok([]))`), which is what protects
+    /// the error-mapping seam Thufir found otherwise mutation-unprotected.
+    #[tokio::test]
+    async fn synthesize_presence_surfaces_redis_failure_as_error_response() {
+        use buzz_core::kind::KIND_PRESENCE_SNAPSHOT;
+
+        // Pool at a closed port: get_presence_bulk's connection attempt fails.
+        let dead_pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("pool builds lazily");
+        let pubsub = buzz_pubsub::PubSubManager::new("redis://127.0.0.1:1", dead_pool)
+            .await
+            .expect("PubSubManager::new performs no IO");
+        let relay_keypair = Keys::generate();
+        let tenant = fresh_tenant("relay.example");
+
+        // A presence-snapshot query for a concrete author reaches the Redis
+        // lookup (an empty author set would short-circuit to an empty snapshot).
+        let filters = vec![nostr::Filter::new()
+            .kind(Kind::Custom(KIND_PRESENCE_SNAPSHOT as u16))
+            .author(Keys::generate().public_key())];
+
+        let result = synthesize_presence(&pubsub, &relay_keypair, &tenant, &filters).await;
+
+        match result {
+            Some(Err((status, _))) => assert_eq!(
+                status,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "a Redis lookup failure must surface as HTTP 500"
+            ),
+            other => panic!(
+                "a Redis outage must yield Some(Err(500)), not a fake-empty success: {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn thread_aux_query_targets_root_and_replies() {
+        let tenant = fresh_tenant("relay.example");
+        let targets = vec!["root".to_string(), "reply".to_string()];
+        let query = build_aux_query(tenant.community(), targets.clone(), &WINDOW_AUX_KINDS);
+
+        assert_eq!(query.e_tags, Some(targets));
+        assert_eq!(
+            query.kinds,
+            Some(WINDOW_AUX_KINDS.iter().map(|kind| *kind as i32).collect())
+        );
+        assert_eq!(query.limit, None);
+        assert_eq!(query.until, None);
+        assert_eq!(query.before_id, None);
+    }
+
+    fn aux_event(keys: &Keys, created_at: u64, content: &str) -> buzz_core::StoredEvent {
+        let ev = EventBuilder::new(Kind::Custom(7), content)
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(keys)
+            .unwrap();
+        buzz_core::StoredEvent::new(ev, None)
+    }
+
+    /// Carl/#6572: a one-shot `limit=1000` aux query is newest-first, so the
+    /// oldest reactions/edits/deletions past the clamp vanished. The paged
+    /// drain must walk the keyset cursor until a short page and return every
+    /// event exactly once.
+    #[tokio::test]
+    async fn query_all_pages_drains_past_the_page_clamp() {
+        let keys = Keys::generate();
+        // Newest-first store: 5 events, two sharing a second so the id
+        // tiebreak is exercised.
+        let mut store = [
+            aux_event(&keys, 50, "e"),
+            aux_event(&keys, 40, "d1"),
+            aux_event(&keys, 40, "d2"),
+            aux_event(&keys, 30, "c"),
+            aux_event(&keys, 10, "a"),
+        ];
+        store.sort_by(|l, r| {
+            r.event
+                .created_at
+                .cmp(&l.event.created_at)
+                .then(l.event.id.cmp(&r.event.id))
+        });
+        let expected: Vec<_> = store.iter().map(|se| se.event.id).collect();
+        let mut calls = Vec::new();
+
+        let tenant = fresh_tenant("relay.example");
+        let query = build_aux_query(tenant.community(), vec!["root".into()], &WINDOW_AUX_KINDS);
+        let mut fetch = |q: &buzz_db::EventQuery| {
+            calls.push((q.limit, q.until, q.before_id.clone()));
+            // Emulate `query_events_on`: `created_at < until OR
+            // (created_at = until AND id > before_id)`, newest-first, limit.
+            let page: Vec<_> = store
+                .iter()
+                .filter(|se| match (q.until, q.before_id.as_deref()) {
+                    (Some(until), Some(before)) => {
+                        let ts = se.event.created_at.as_secs() as i64;
+                        ts < until.timestamp()
+                            || (ts == until.timestamp()
+                                && se.event.id.as_bytes().as_slice() > before)
+                    }
+                    _ => true,
+                })
+                .take(q.limit.unwrap() as usize)
+                .cloned()
+                .collect();
+            page
+        };
+        let events = query_all_pages(query, 2, &mut AuxReader::Fake(&mut fetch))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            events.iter().map(|se| se.event.id).collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(calls.len(), 3, "2 full pages + 1 short page");
+        assert!(calls.iter().all(|(limit, _, _)| *limit == Some(2)));
+        assert_eq!(calls[0].1, None);
+        // Second page resumes from the last row of the first (ts 40, larger id).
+        assert_eq!(calls[1].1.unwrap().timestamp(), 40);
+        assert_eq!(
+            calls[1].2.as_deref(),
+            Some(store[1].event.id.as_bytes().as_slice())
+        );
+        assert_eq!(calls[2].1.unwrap().timestamp(), 30);
+    }
+
+    #[tokio::test]
+    async fn query_all_pages_stops_at_one_short_page() {
+        let tenant = fresh_tenant("relay.example");
+        let query = build_aux_query(tenant.community(), vec!["root".into()], &WINDOW_AUX_KINDS);
+        let mut calls = 0;
+        let mut fetch = |_q: &buzz_db::EventQuery| {
+            calls += 1;
+            Vec::new()
+        };
+        let events = query_all_pages(query, 1000, &mut AuxReader::Fake(&mut fetch))
+            .await
+            .unwrap();
+        assert!(events.is_empty());
+        assert_eq!(calls, 1);
     }
 
     #[test]
@@ -3023,6 +3318,22 @@ mod tests {
         assert!(
             search_hit_accepted(&filter, &stored, &[scoped_channel], &reader),
             "channel-scoped hit must be accepted when caller has access to that channel"
+        );
+    }
+
+    #[test]
+    fn extract_buzz_channel_requires_one_string_value() {
+        assert_eq!(
+            extract_buzz_channel(&serde_json::json!({"#buzz-channel": ["channel-a"]})),
+            Some("channel-a")
+        );
+        assert_eq!(
+            extract_buzz_channel(&serde_json::json!({"#buzz-channel": ["channel-a", "channel-b"]})),
+            None
+        );
+        assert_eq!(
+            extract_buzz_channel(&serde_json::json!({"#buzz-channel": [42]})),
+            None
         );
     }
 

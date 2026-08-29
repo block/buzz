@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 
 test.beforeEach(async ({ page }) => {
+  // Every admin API call returns 200, so the probe resolves to disabled mode
+  // and the dashboard renders without a credential.
   await page.route("**/api/admin/v1/**", async (route) => {
     await route.fulfill({ contentType: "application/json", body: "[]" });
   });
@@ -224,6 +226,74 @@ test("feedback can be searched and filtered by community and time", async ({
   await expect(page.getByText("Calls are much more reliable")).toHaveCount(0);
 });
 
+test("feedback filters keep long community names usable", async ({ page }) => {
+  await page.route("**/api/admin/v1/feedback", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify([
+        {
+          id: "long-community",
+          communityId: "long-community",
+          communityHost: `${"long-community-name.".repeat(4)}buzz.example.com`,
+          submitterPubkey: "21".repeat(32),
+          category: "bug",
+          bodySummary: "The filter row stays within its container",
+          receivedAt: new Date().toISOString(),
+        },
+      ]),
+    }),
+  );
+
+  for (const viewport of [
+    { name: "desktop", width: 1200 },
+    { name: "mobile", width: 720 },
+  ]) {
+    await test.step(viewport.name, async () => {
+      await page.setViewportSize({ width: viewport.width, height: 720 });
+      await page.goto("/feedback");
+
+      const filters = page.locator(".feedback-filters");
+      const search = page.getByRole("searchbox", { name: "Search feedback" });
+      const community = page.getByRole("combobox", { name: "Community" });
+      const status = page.getByLabel("Status");
+      await expect(filters).toBeVisible();
+      await expect(community).toBeVisible();
+      await expect(status).toBeVisible();
+
+      const [filtersBox, searchBox, communityBox, statusBox] =
+        await Promise.all([
+          filters.boundingBox(),
+          search.boundingBox(),
+          community.boundingBox(),
+          status.boundingBox(),
+        ]);
+      if (!filtersBox || !searchBox || !communityBox || !statusBox) {
+        throw new Error("feedback filter bounds were unavailable");
+      }
+      expect(statusBox.x + statusBox.width).toBeLessThanOrEqual(
+        filtersBox.x + filtersBox.width,
+      );
+
+      if (viewport.name === "desktop") {
+        const rootFontSize = await page.evaluate(() =>
+          Number.parseFloat(
+            getComputedStyle(document.documentElement).fontSize,
+          ),
+        );
+        expect(communityBox.width).toBeGreaterThanOrEqual(14 * rootFontSize);
+      } else {
+        expect(Math.abs(communityBox.width - searchBox.width)).toBeLessThan(1);
+      }
+
+      const pageWidths = await page.evaluate(() => ({
+        client: document.documentElement.clientWidth,
+        scroll: document.documentElement.scrollWidth,
+      }));
+      expect(pageWidths.scroll).toBe(pageWidths.client);
+    });
+  }
+});
+
 test("feedback status is stored locally by feedback id", async ({ page }) => {
   await page.route("**/api/admin/v1/feedback", (route) =>
     route.fulfill({
@@ -301,16 +371,10 @@ test("feedback attachments render from imeta without raw markdown", async ({
   await expect(page.getByText("![image]", { exact: false })).toHaveCount(0);
   await expect(
     page.getByRole("img", { name: "screenshot.png" }),
-  ).toHaveAttribute(
-    "src",
-    `/api/admin/v1/feedback/${id}/attachments/${"a".repeat(64)}`,
-  );
+  ).toHaveAttribute("src", /^blob:/);
   await expect(
     page.getByRole("link", { name: /diagnostics.txt/ }),
-  ).toHaveAttribute(
-    "href",
-    `/api/admin/v1/feedback/${id}/attachments/${"b".repeat(64)}`,
-  );
+  ).toHaveAttribute("href", /^blob:/);
   const fileHeight = await page
     .locator(".file-attachment")
     .evaluate((element) => element.getBoundingClientRect().height);

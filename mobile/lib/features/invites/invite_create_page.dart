@@ -31,8 +31,11 @@ class CommunityInvitePage extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final roleAsync = ref.watch(currentCommunityRoleProvider);
     return FrostedScaffold(
-      backgroundColor: context.colors.surface,
-      appBar: const FrostedAppBar(title: Text('Invite to community')),
+      useUtilitySurfaceTheme: true,
+      appBar: const FrostedAppBar(
+        centerTitle: true,
+        title: Text('Invite to community'),
+      ),
       body: roleAsync.when(
         loading: () => const Center(
           child: BuzzLoadingIndicator(

@@ -233,7 +233,9 @@ async function openReviewWithPostedTimecode(
 
   await page.getByRole("button", { name: "Attach file" }).click();
   await expect(
-    page.getByTestId("message-composer").getByAltText("Video attachment bbbb"),
+    page
+      .getByTestId("message-composer")
+      .getByRole("button", { name: "Video attachment bbbb", exact: true }),
   ).toBeVisible();
   await page.getByTestId("send-message").click();
   await expect(page.getByText("Sending")).toHaveCount(0);
@@ -289,8 +291,12 @@ test("video upload previews use poster frames and inline videos open review mode
   await page.getByRole("button", { name: "Attach file" }).click();
 
   const composer = page.getByTestId("message-composer");
-  const composerPoster = composer.getByAltText("Video attachment bbbb");
-  await expect(composerPoster).toBeVisible();
+  const composerTrigger = composer.getByRole("button", {
+    name: "Video attachment bbbb",
+    exact: true,
+  });
+  await expect(composerTrigger).toBeVisible();
+  const composerPoster = composerTrigger.locator("img");
   await expect(composerPoster).toHaveAttribute("src", POSTER_DATA_URL);
 
   const box = await composerPoster.boundingBox();
@@ -930,6 +936,67 @@ test("inline video hover reveals a timeline without a second play control", asyn
   await expect
     .poll(() => video.evaluate((element) => element.paused))
     .toBe(true);
+});
+
+test("expanded video controls fade with the video hover boundary", async ({
+  page,
+}) => {
+  await installVideoReviewHarness(page);
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general");
+
+  await emitMockMessage(page, "general", `![video](${VIDEO_URL})`, {
+    extraTags: [
+      [
+        "imeta",
+        `url ${VIDEO_URL}`,
+        "m video/mp4",
+        `x ${VIDEO_SHA}`,
+        "size 987654",
+        "dim 160x80",
+        "duration 12.5",
+        `image ${POSTER_DATA_URL}`,
+        "filename launch-demo.mp4",
+      ],
+    ],
+  });
+
+  await page.getByRole("button", { name: "Open video review" }).last().click();
+
+  const dialog = page.getByTestId("video-review-dialog");
+  const mediaSurface = dialog.locator(".video-review-media-surface");
+  const controls = dialog.locator(".video-review-controls");
+  await expect(mediaSurface).toBeVisible();
+
+  await dialog.getByTestId("video-review-comments-panel").hover();
+  const restingControlsBox = await controls.boundingBox();
+  expect(restingControlsBox).not.toBeNull();
+  await expect(controls).toHaveCSS("opacity", "0");
+
+  await mediaSurface.hover();
+  await expect(controls).toHaveCSS("opacity", "1");
+  const hoveredControlsBox = await controls.boundingBox();
+  expect(hoveredControlsBox).not.toBeNull();
+  expect(
+    Math.abs((hoveredControlsBox?.y ?? 0) - (restingControlsBox?.y ?? 0)),
+  ).toBeLessThan(0.5);
+  await expect(controls).toHaveCSS("transition-property", "opacity");
+  await expect(controls).toHaveCSS("transition-duration", "0.15s");
+
+  const playButton = controls.getByRole("button", { name: /review video$/ });
+  await playButton.click();
+  await expect(playButton).toBeFocused();
+  await dialog.getByTestId("video-review-comments-panel").hover();
+  await expect(controls).toHaveCSS("opacity", "0");
+
+  await page.keyboard.press("Tab");
+  await expect(controls).toHaveCSS("opacity", "1");
+
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await expect(controls).toHaveCSS("transition-property", "none");
 });
 
 test("video replies in threads open the review comments view", async ({
