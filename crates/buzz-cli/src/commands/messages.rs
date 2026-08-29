@@ -372,24 +372,12 @@ pub async fn cmd_get_messages(
         "limit": limit
     });
 
-    // If specific kinds requested, override — reject invalid values rather than
-    // silently dropping them (fixes #6945).
+    // If specific kinds requested, override
     if let Some(k) = kinds {
-        let kind_list: Vec<u64> = k
-            .split(',')
-            .map(|s| {
-                let trimmed = s.trim();
-                trimmed.parse::<u64>().map_err(|_| {
-                    CliError::Usage(format!("invalid kind value in --kinds: {:?}", trimmed))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if kind_list.is_empty() {
-            return Err(CliError::Usage(
-                "--kinds requires at least one valid kind number".to_string(),
-            ));
+        let kind_list: Vec<u64> = k.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        if !kind_list.is_empty() {
+            filter["kinds"] = serde_json::json!(kind_list);
         }
-        filter["kinds"] = serde_json::json!(kind_list);
     }
 
     if let Some(b) = before {

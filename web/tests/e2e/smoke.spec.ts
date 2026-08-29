@@ -260,16 +260,18 @@ test("invite asks Safari users to choose their Mac download", async ({
   await context.close();
 });
 
-test("invite download falls back for mobile and non-desktop devices", async ({
+test("invite download links iOS users to App Store and Android to Play Store", async ({
   browser,
 }) => {
-  const unsupportedDevices = [
+  const mobileDevices = [
     {
       name: "iPhone Safari",
       platform: "iPhone",
       userAgent:
         "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15",
       maxTouchPoints: 5,
+      expectedHref:
+        "https://apps.apple.com/us/app/buzz-chat-with-your-hive/id6779728271",
     },
     {
       name: "iPadOS desktop mode",
@@ -277,6 +279,8 @@ test("invite download falls back for mobile and non-desktop devices", async ({
       userAgent:
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15) AppleWebKit/605.1.15",
       maxTouchPoints: 5,
+      expectedHref:
+        "https://apps.apple.com/us/app/buzz-chat-with-your-hive/id6779728271",
     },
     {
       name: "Android phone",
@@ -284,16 +288,12 @@ test("invite download falls back for mobile and non-desktop devices", async ({
       userAgent:
         "Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 Mobile",
       maxTouchPoints: 5,
-    },
-    {
-      name: "ChromeOS",
-      platform: "Linux x86_64",
-      userAgent: "Mozilla/5.0 (X11; CrOS x86_64 16093.68.0) AppleWebKit/537.36",
-      maxTouchPoints: 0,
+      expectedHref:
+        "https://play.google.com/store/apps/details?id=xyz.block.buzz.mobile",
     },
   ];
 
-  for (const device of unsupportedDevices) {
+  for (const device of mobileDevices) {
     const context = await browser.newContext({ userAgent: device.userAgent });
     await context.addInitScript(({ platform, maxTouchPoints }) => {
       Object.defineProperties(navigator, {
@@ -313,37 +313,70 @@ test("invite download falls back for mobile and non-desktop devices", async ({
         body: JSON.stringify({ policy: null }),
       });
     });
-    await page.route("https://api.github.com/**", async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        headers: { "Access-Control-Allow-Origin": "*" },
-        body: JSON.stringify([
-          {
-            draft: false,
-            prerelease: false,
-            assets: [
-              {
-                name: "Buzz_0.4.9_x64.dmg",
-                browser_download_url:
-                  "https://github.com/block/buzz/releases/download/v0.4.9/Buzz_0.4.9_x64.dmg",
-              },
-              {
-                name: "Buzz_0.4.9_amd64.AppImage",
-                browser_download_url:
-                  "https://github.com/block/buzz/releases/download/v0.4.9/Buzz_0.4.9_amd64.AppImage",
-              },
-            ],
-          },
-        ]),
-      });
-    });
 
     await page.goto("/invite/demo-code");
     await expect(
-      page.getByRole("link", { name: "Download it now" }),
+      page.getByRole("link", {
+        name: /Get it on the App Store|Get it on Google Play/,
+      }),
       device.name,
-    ).toHaveAttribute("href", "https://github.com/block/buzz/releases");
+    ).toHaveAttribute("href", device.expectedHref);
     await context.close();
   }
+});
+
+test("invite download falls back for non-phone unsupported devices", async ({
+  browser,
+}) => {
+  const context = await browser.newContext({
+    userAgent: "Mozilla/5.0 (X11; CrOS x86_64 16093.68.0) AppleWebKit/537.36",
+  });
+  await context.addInitScript(() => {
+    Object.defineProperties(navigator, {
+      platform: { configurable: true, value: "Linux x86_64" },
+      maxTouchPoints: { configurable: true, value: 0 },
+      userAgentData: {
+        configurable: true,
+        value: { platform: "Linux x86_64", mobile: false },
+      },
+    });
+  });
+  const page = await context.newPage();
+  await page.route("**/api/join-policy", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ policy: null }),
+    });
+  });
+  await page.route("https://api.github.com/**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: JSON.stringify([
+        {
+          draft: false,
+          prerelease: false,
+          assets: [
+            {
+              name: "Buzz_0.4.9_amd64.AppImage",
+              browser_download_url:
+                "https://github.com/block/buzz/releases/download/v0.4.9/Buzz_0.4.9_amd64.AppImage",
+            },
+          ],
+        },
+      ]),
+    });
+  });
+
+  await page.goto("/invite/demo-code");
+  await expect(
+    page.getByRole("link", { name: "Download it now" }),
+    "ChromeOS",
+  ).toHaveAttribute(
+    "href",
+    "https://github.com/block/buzz/releases/download/v0.4.9/Buzz_0.4.9_amd64.AppImage",
+  );
+  await context.close();
 });

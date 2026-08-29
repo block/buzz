@@ -1,11 +1,21 @@
 export const BUZZ_RELEASES_URL = "https://github.com/block/buzz/releases";
+export const BUZZ_APP_STORE_URL =
+  "https://apps.apple.com/us/app/buzz-chat-with-your-hive/id6779728271";
+export const BUZZ_PLAY_STORE_URL =
+  "https://play.google.com/store/apps/details?id=xyz.block.buzz.mobile";
 const BUZZ_RELEASES_API_URL =
   "https://api.github.com/repos/block/buzz/releases?per_page=10";
 const CACHE_KEY = "buzz.latestDownload.v1";
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
 export type BuzzDownloadPlatform = {
-  operatingSystem: "linux" | "macos" | "windows" | "unknown";
+  operatingSystem:
+    | "linux"
+    | "macos"
+    | "windows"
+    | "ios"
+    | "android"
+    | "unknown";
   architecture: "arm64" | "x64" | "unknown";
 };
 
@@ -36,13 +46,28 @@ function normalizeOperatingSystem(
 
   // Compatibility tokens are treacherous: iPadOS can report MacIntel and a
   // Macintosh UA, while Android and ChromeOS expose Linux platform strings.
-  // Reject non-desktop devices before admitting desktop-looking signals.
+  // Detect specific mobile platforms first, then reject other non-desktop devices.
   const isIPadDesktopMode =
     platform === "macintel" && navigatorValue.maxTouchPoints > 1;
+
+  // Detect iOS (iPhone, iPad, iPod)
+  if (
+    /iphone|ipad|ipod/.test(userAgent) ||
+    platform === "iphone" ||
+    isIPadDesktopMode
+  ) {
+    return "ios";
+  }
+
+  // Detect Android
+  if (/android/.test(userAgent)) {
+    return "android";
+  }
+
+  // Reject other non-desktop devices (tablets, feature phones, etc.)
   const isUnsupportedDevice =
     userAgentData?.mobile === true ||
-    isIPadDesktopMode ||
-    /android|iphone|ipad|ipod|mobile|tablet|windows phone|iemobile|opera mini|opera mobi|webos|blackberry|bb10|kindle|silk|kaios|cros/.test(
+    /mobile|tablet|windows phone|iemobile|opera mini|opera mobi|webos|blackberry|bb10|kindle|silk|kaios|cros/.test(
       userAgent,
     );
   if (isUnsupportedDevice) return "unknown";
@@ -124,10 +149,26 @@ function assetPattern(platform: BuzzDownloadPlatform): RegExp | undefined {
   }
 }
 
+/** Return the appropriate app store URL for a mobile platform, if known. */
+function mobileStoreUrl(platform: BuzzDownloadPlatform): string | undefined {
+  switch (platform.operatingSystem) {
+    case "ios":
+      return BUZZ_APP_STORE_URL;
+    case "android":
+      return BUZZ_PLAY_STORE_URL;
+    default:
+      return undefined;
+  }
+}
+
 export function selectBuzzDownloadUrl(
   releases: GitHubRelease[],
   platform: BuzzDownloadPlatform,
 ): string | undefined {
+  // Mobile platforms always go to the appropriate app store.
+  const mobileUrl = mobileStoreUrl(platform);
+  if (mobileUrl) return mobileUrl;
+
   const pattern = assetPattern(platform);
   if (!pattern) return undefined;
 
@@ -142,6 +183,10 @@ export function selectBuzzDownloadUrl(
 export async function resolveBuzzDownloadUrlForPlatform(
   platform: BuzzDownloadPlatform,
 ): Promise<string> {
+  // Mobile platforms resolve to a fixed store URL — no API call needed.
+  const mobileUrl = mobileStoreUrl(platform);
+  if (mobileUrl) return mobileUrl;
+
   try {
     const cached = JSON.parse(sessionStorage.getItem(CACHE_KEY) ?? "null") as {
       expiresAt: number;

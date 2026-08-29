@@ -58,7 +58,9 @@ pub fn validate_repo_id(s: &str) -> Result<(), CliError> {
         )));
     }
     Ok(())
-}/// Validate content does not exceed MAX_CONTENT_BYTES (65,536).
+}
+
+/// Validate content does not exceed MAX_CONTENT_BYTES (65,536).
 pub fn validate_content_size(content: &str) -> Result<(), CliError> {
     if content.len() > MAX_CONTENT_BYTES {
         return Err(CliError::Usage(format!(

@@ -2,6 +2,8 @@ import buzzAppIcon from "@/assets/app-icon@3x.png";
 import { claimInviteInBrowser } from "@/features/invite/invite-api";
 import {
   BUZZ_RELEASES_URL,
+  BUZZ_APP_STORE_URL,
+  BUZZ_PLAY_STORE_URL,
   type BuzzDownloadPlatform,
   detectBuzzDownloadPlatform,
   resolveBuzzDownloadUrlForPlatform,
@@ -86,7 +88,7 @@ export function InvitePage({ code }: { code: string }) {
         const config = (await response.json()) as { policy?: JoinPolicy };
         setPolicy(config.policy ?? null);
       })
-      .catch(() => setPolicy(undefined));
+      .catch(() => setPolicy(null));
   }, []);
 
   const acceptPolicy = async (): Promise<string | undefined> => {
@@ -286,7 +288,11 @@ export function InvitePage({ code }: { code: string }) {
               setShowMacChoice(true);
             }}
           >
-            Download it now
+            {downloadUrl === BUZZ_APP_STORE_URL
+              ? "Get it on the App Store"
+              : downloadUrl === BUZZ_PLAY_STORE_URL
+                ? "Get it on Google Play"
+                : "Download it now"}
           </a>
         </p>
       </div>
