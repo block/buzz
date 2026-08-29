@@ -82,3 +82,7 @@
 - 根因：`StartupChangelogDialog` 虽然设置了 `modal={false}`，但共享 `DialogContent` 仍无条件创建全屏 `DialogOverlay`。透明 Overlay 仍覆盖整个 WebView，造成底层界面无法交互。
 - 处理：为 `DialogContent` 增加 `showOverlay` 选项；启动更新日志使用 `showOverlay={false}`，同时保留普通设置对话框的默认模态遮罩。
 - 结果：更新日志仍在启动时显示，但不再阻塞 Community/Relay 恢复操作；关闭按钮、右上角关闭和 Esc 仍可用。
+
+### 追加定位：非模态 Dialog 仍参与全局交互管理
+
+- 处理：启动更新日志不再使用 Radix Dialog，改为普通的非模态浮层；不创建 Overlay、FocusScope 或 DismissableLayer，仅浮层内容本身接收点击。

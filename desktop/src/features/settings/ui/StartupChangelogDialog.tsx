@@ -1,16 +1,8 @@
 import * as React from "react";
 import { getVersion } from "@tauri-apps/api/app";
+import { X } from "lucide-react";
 
 import { RECENT_STARTUP_CHANGELOG } from "@/app/startupChangelog";
-import {
-  Dialog,
-  DialogClose,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/shared/ui/dialog";
 import { Button } from "@/shared/ui/button";
 
 // The dialog is mounted alongside the community view. Community recovery and
@@ -30,37 +22,50 @@ export function StartupChangelogDialog() {
     setOpen(false);
   }, []);
 
-  const handleOpenChange = React.useCallback(
-    (nextOpen: boolean) => {
-      if (!nextOpen) {
-        dismiss();
-        return;
-      }
-      setOpen(true);
-    },
-    [dismiss],
-  );
-
   React.useEffect(() => {
     void getVersion()
       .then(setVersion)
       .catch(() => setVersion(null));
   }, []);
 
+  React.useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") dismiss();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [dismiss, open]);
+
   if (isE2e) {
     return null;
   }
 
+  if (!open) return null;
+
   return (
-    <Dialog modal={false} onOpenChange={handleOpenChange} open={open}>
-      <DialogContent
-        className="max-h-[85vh] overflow-y-auto sm:max-w-lg"
-        showOverlay={false}
-      >
-        <DialogHeader>
-          <DialogTitle>更新日志{version ? ` · v${version}` : ""}</DialogTitle>
-          <DialogDescription>最近 10 日的 Buzz 修改记录</DialogDescription>
-        </DialogHeader>
+    <div
+      aria-label="更新日志"
+      className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center p-4"
+      role="dialog"
+    >
+      <section className="pointer-events-auto relative grid max-h-[85vh] w-[calc(100vw-2rem)] max-w-lg gap-4 overflow-y-auto rounded-2xl bg-background p-6 shadow-2xl">
+        <button
+          aria-label="关闭更新日志"
+          className="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+          onClick={dismiss}
+          type="button"
+        >
+          <X aria-hidden="true" className="h-4 w-4" />
+        </button>
+        <header className="grid gap-2 pr-8 text-left">
+          <h2 className="text-xl font-semibold">
+            更新日志{version ? ` · v${version}` : ""}
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            最近 10 日的 Buzz 修改记录
+          </p>
+        </header>
         <div className="grid gap-5 py-2">
           {RECENT_STARTUP_CHANGELOG.map((section) => (
             <section className="grid gap-2" key={section.date}>
@@ -73,14 +78,12 @@ export function StartupChangelogDialog() {
             </section>
           ))}
         </div>
-        <DialogFooter>
-          <DialogClose asChild>
-            <Button onClick={dismiss} type="button">
-              知道了
-            </Button>
-          </DialogClose>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        <div className="flex justify-end">
+          <Button onClick={dismiss} type="button">
+            知道了
+          </Button>
+        </div>
+      </section>
+    </div>
   );
 }
