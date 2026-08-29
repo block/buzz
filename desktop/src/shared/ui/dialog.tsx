@@ -47,6 +47,8 @@ type DialogContentProps = React.ComponentPropsWithoutRef<
   closeButtonClassName?: string;
   /** Extra classes for this dialog's backdrop. */
   overlayClassName?: string;
+  /** Render the full-screen backdrop. Informational panels can omit it. */
+  showOverlay?: boolean;
   overlayVariant?: "default" | "transparent";
   showCloseButton?: boolean;
   /**
@@ -70,6 +72,7 @@ const DialogContent = React.forwardRef<
       closeButtonClassName,
       overlayClassName,
       overlayVariant = "default",
+      showOverlay = true,
       showCloseButton = true,
       surface = "default",
       ...props
@@ -77,15 +80,17 @@ const DialogContent = React.forwardRef<
     ref,
   ) => (
     <DialogPortal>
-      <DialogOverlay
-        data-testid="dialog-overlay"
-        className={cn(
-          overlayVariant === "transparent"
-            ? "bg-transparent backdrop-blur-none"
-            : undefined,
-          overlayClassName,
-        )}
-      />
+      {showOverlay ? (
+        <DialogOverlay
+          data-testid="dialog-overlay"
+          className={cn(
+            overlayVariant === "transparent"
+              ? "bg-transparent backdrop-blur-none"
+              : undefined,
+            overlayClassName,
+          )}
+        />
+      ) : null}
       <div
         className={cn(
           "pointer-events-none fixed inset-0 z-50 grid place-items-center overflow-x-hidden overflow-y-auto",
