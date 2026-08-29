@@ -719,6 +719,8 @@ pub struct PromptContext {
     pub channel_info: ChannelInfoResolver,
     /// Max messages to include in thread/DM context. 0 = disabled.
     pub context_message_limit: u32,
+    /// Max UTF-8 bytes of fetched thread/DM message content. 0 = unlimited.
+    pub context_byte_limit: u32,
     /// Max turns per session before proactive rotation. 0 = disabled.
     pub max_turns_per_session: u32,
     /// Permission mode to apply after session creation. `Default` = skip.
@@ -2436,6 +2438,10 @@ pub async fn run_prompt_task(
     // Event IDs represented by this prompt. Commit only after ACP reports a
     // successful turn; failed/cancelled prompts must be retryable without loss.
     let mut pending_delivered_event_ids = HashSet::new();
+    let prompt_build_started = std::time::Instant::now();
+    let mut conversation_context_messages = 0usize;
+    let mut conversation_context_bytes = 0usize;
+    let mut conversation_context_truncated = false;
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
@@ -2490,6 +2496,13 @@ pub async fn run_prompt_task(
             });
         let conversation_context =
             conversation_context_delta(conversation_context, &delivered_ids, &rendered_batch_ids);
+        let conversation_context =
+            limit_conversation_context_bytes(conversation_context, ctx.context_byte_limit as usize);
+        if let Some(stats) = conversation_context_stats(conversation_context.as_ref()) {
+            conversation_context_messages = stats.messages;
+            conversation_context_bytes = stats.content_bytes;
+            conversation_context_truncated = stats.truncated;
+        }
         pending_delivered_event_ids.extend(rendered_batch_ids);
         pending_delivered_event_ids.extend(conversation_context_event_ids(
             conversation_context.as_ref(),
@@ -2569,6 +2582,7 @@ pub async fn run_prompt_task(
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
     let prompt_bytes: usize = prompt_blocks.iter().map(|block| block.len()).sum();
+    let prompt_build_ms = prompt_build_started.elapsed().as_millis();
     let has_standing_context = match &source {
         PromptSource::Channel(_) => !standing.sections().is_empty(),
         PromptSource::Heartbeat => ctx.base_prompt.is_some(),
@@ -2578,6 +2592,11 @@ pub async fn run_prompt_task(
     tracing::info!(
         target: "pool::prompt",
         prompt_bytes,
+        prompt_build_ms,
+        conversation_context_messages,
+        conversation_context_bytes,
+        conversation_context_truncated,
+        context_byte_limit = ctx.context_byte_limit,
         standing_context_included,
         delivered_event_delta = pending_delivered_event_ids.len(),
         "prompt context delivery"
@@ -2586,6 +2605,11 @@ pub async fn run_prompt_task(
         "prompt_context_delivery",
         serde_json::json!({
             "promptBytes": prompt_bytes,
+            "promptBuildMs": prompt_build_ms,
+            "conversationContextMessages": conversation_context_messages,
+            "conversationContextBytes": conversation_context_bytes,
+            "conversationContextTruncated": conversation_context_truncated,
+            "contextByteLimit": ctx.context_byte_limit,
             "standingContextIncluded": standing_context_included,
             "eventDeltaCount": pending_delivered_event_ids.len(),
         }),
@@ -3482,6 +3506,140 @@ fn conversation_context_delta(
             })
         }
     }
+}
+
+const CONTEXT_TRUNCATION_MARKER: &str = "\n[... context truncated; fetch full history from Buzz]";
+const MAX_CONTEXT_MESSAGE_BYTES: usize = 8 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConversationContextStats {
+    messages: usize,
+    content_bytes: usize,
+    truncated: bool,
+}
+
+fn conversation_context_stats(
+    context: Option<&ConversationContext>,
+) -> Option<ConversationContextStats> {
+    let (messages, truncated) = match context? {
+        ConversationContext::Thread {
+            messages,
+            truncated,
+            ..
+        }
+        | ConversationContext::Dm {
+            messages,
+            truncated,
+            ..
+        } => (messages, *truncated),
+    };
+    Some(ConversationContextStats {
+        messages: messages.len(),
+        content_bytes: messages.iter().map(|message| message.content.len()).sum(),
+        truncated,
+    })
+}
+
+/// Bound fetched context by content bytes while retaining the most useful
+/// structure: the thread root (when present) and the newest messages.
+/// Individual messages are capped as well, preventing one large event from
+/// consuming the entire context window. A zero budget preserves legacy
+/// behavior.
+fn limit_conversation_context_bytes(
+    context: Option<ConversationContext>,
+    max_bytes: usize,
+) -> Option<ConversationContext> {
+    if max_bytes == 0 {
+        return context;
+    }
+
+    let limit_messages = |mut messages: Vec<ContextMessage>, preserve_root: bool| {
+        let per_message_limit = if preserve_root && messages.len() > 1 {
+            MAX_CONTEXT_MESSAGE_BYTES.min(max_bytes / 2)
+        } else {
+            MAX_CONTEXT_MESSAGE_BYTES.min(max_bytes)
+        };
+        let mut truncated = false;
+        for message in &mut messages {
+            truncated |= truncate_context_content(&mut message.content, per_message_limit);
+        }
+
+        let mut content_bytes: usize = messages.iter().map(|message| message.content.len()).sum();
+        while content_bytes > max_bytes && messages.len() > usize::from(preserve_root) + 1 {
+            let remove_at = usize::from(preserve_root);
+            content_bytes = content_bytes.saturating_sub(messages[remove_at].content.len());
+            messages.remove(remove_at);
+            truncated = true;
+        }
+
+        if content_bytes > max_bytes {
+            let newest = messages.len().saturating_sub(1);
+            let other_bytes: usize = messages
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != newest)
+                .map(|(_, message)| message.content.len())
+                .sum();
+            truncated |= truncate_context_content(
+                &mut messages[newest].content,
+                max_bytes.saturating_sub(other_bytes),
+            );
+        }
+
+        (messages, truncated)
+    };
+
+    match context? {
+        ConversationContext::Thread {
+            messages,
+            total,
+            root_present,
+            truncated,
+        } => {
+            let (messages, budget_truncated) = limit_messages(messages, root_present);
+            (!messages.is_empty()).then_some(ConversationContext::Thread {
+                messages,
+                total,
+                root_present,
+                truncated: truncated || budget_truncated,
+            })
+        }
+        ConversationContext::Dm {
+            messages,
+            total,
+            truncated,
+        } => {
+            let (messages, budget_truncated) = limit_messages(messages, false);
+            (!messages.is_empty()).then_some(ConversationContext::Dm {
+                messages,
+                total,
+                truncated: truncated || budget_truncated,
+            })
+        }
+    }
+}
+
+fn truncate_context_content(content: &mut String, max_bytes: usize) -> bool {
+    if content.len() <= max_bytes {
+        return false;
+    }
+    if max_bytes == 0 {
+        content.clear();
+        return true;
+    }
+
+    let marker = if max_bytes > CONTEXT_TRUNCATION_MARKER.len() {
+        CONTEXT_TRUNCATION_MARKER
+    } else {
+        ""
+    };
+    let mut end = max_bytes.saturating_sub(marker.len()).min(content.len());
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    content.truncate(end);
+    content.push_str(marker);
+    true
 }
 
 /// Fetch conversation context (thread or DM) for a batch before prompting.
@@ -6865,6 +7023,120 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     }
 
     #[test]
+    fn context_byte_budget_preserves_thread_root_and_newest_message() {
+        let context = ConversationContext::Thread {
+            messages: vec![
+                context_message("root", &"r".repeat(10)),
+                context_message("old", &"o".repeat(10)),
+                context_message("middle", &"m".repeat(10)),
+                context_message("newest", &"n".repeat(10)),
+            ],
+            total: 4,
+            root_present: true,
+            truncated: false,
+        };
+
+        let limited = limit_conversation_context_bytes(Some(context), 20)
+            .expect("root and newest context remain");
+        match limited {
+            ConversationContext::Thread {
+                messages,
+                total,
+                root_present,
+                truncated,
+            } => {
+                assert_eq!(
+                    messages
+                        .iter()
+                        .map(|message| message.event_id.as_str())
+                        .collect::<Vec<_>>(),
+                    vec!["root", "newest"]
+                );
+                assert_eq!(total, 4);
+                assert!(root_present);
+                assert!(truncated);
+                assert!(
+                    messages
+                        .iter()
+                        .map(|message| message.content.len())
+                        .sum::<usize>()
+                        <= 20
+                );
+            }
+            _ => panic!("expected thread context"),
+        }
+    }
+
+    #[test]
+    fn context_byte_budget_truncates_utf8_on_char_boundary() {
+        let context = ConversationContext::Dm {
+            messages: vec![context_message("newest", &"é".repeat(10))],
+            total: 1,
+            truncated: false,
+        };
+
+        let limited =
+            limit_conversation_context_bytes(Some(context), 7).expect("newest context remains");
+        let ConversationContext::Dm {
+            messages,
+            truncated,
+            ..
+        } = limited
+        else {
+            panic!("expected DM context");
+        };
+        assert!(truncated);
+        assert!(messages[0].content.len() <= 7);
+        assert!(messages[0]
+            .content
+            .is_char_boundary(messages[0].content.len()));
+    }
+
+    #[test]
+    fn default_context_byte_budget_caps_worst_case_message_window() {
+        let messages = (0..12)
+            .map(|index| {
+                context_message(
+                    if index == 0 { "root" } else { "reply" },
+                    &"x".repeat(65_536),
+                )
+            })
+            .collect();
+        let context = ConversationContext::Thread {
+            messages,
+            total: 12,
+            root_present: true,
+            truncated: false,
+        };
+
+        let limited = limit_conversation_context_bytes(
+            Some(context),
+            crate::config::DEFAULT_CONTEXT_BYTE_LIMIT as usize,
+        )
+        .expect("bounded context remains");
+        let stats = conversation_context_stats(Some(&limited)).expect("context stats");
+        assert!(stats.content_bytes <= crate::config::DEFAULT_CONTEXT_BYTE_LIMIT as usize);
+        assert!(stats.truncated);
+        assert_eq!(stats.messages, 4, "root plus three newest replies fit");
+    }
+
+    #[test]
+    fn zero_context_byte_budget_preserves_legacy_unbounded_content() {
+        let content = "x".repeat(MAX_CONTEXT_MESSAGE_BYTES + 1);
+        let context = ConversationContext::Dm {
+            messages: vec![context_message("message", &content)],
+            total: 1,
+            truncated: false,
+        };
+
+        let unlimited =
+            limit_conversation_context_bytes(Some(context), 0).expect("unbounded context remains");
+        let stats = conversation_context_stats(Some(&unlimited)).expect("context stats");
+        assert_eq!(stats.content_bytes, content.len());
+        assert!(!stats.truncated);
+    }
+
+    #[test]
     fn test_json_to_context_message_missing_pubkey_uses_default() {
         let obj = json!({ "content": "hello" });
         let msg = json_to_context_message(&obj).expect("should parse");
@@ -8229,6 +8501,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
                 },
             ),
             context_message_limit: 0,
+            context_byte_limit: crate::config::DEFAULT_CONTEXT_BYTE_LIMIT,
             max_turns_per_session: 0,
             permission_mode: PermissionMode::Default,
             agent_keys: agent_keys.clone(),

@@ -35,6 +35,14 @@ pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 /// deadline (`max_turn_duration + IN_FLIGHT_DEADLINE_BUFFER_SECS`).
 pub(crate) const MAX_TURN_DURATION_CEILING_SECS: u64 = 604_800;
 
+/// Default UTF-8 byte budget for fetched thread/DM message content.
+///
+/// The message-count window alone is not sufficient because a single Buzz
+/// event may contain up to 64 KiB. A 32 KiB content budget keeps routine turns
+/// bounded while preserving the thread root and newest context. Set to 0 to
+/// retain the legacy unbounded-bytes behavior.
+pub(crate) const DEFAULT_CONTEXT_BYTE_LIMIT: u32 = 32 * 1024;
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("failed to parse nostr keys: {0}")]
@@ -373,6 +381,12 @@ pub struct CliArgs {
           value_parser = clap::value_parser!(u32).range(0..=100))]
     pub context_message_limit: u32,
 
+    /// Maximum UTF-8 bytes of fetched thread/DM message content to render.
+    /// Preserves the thread root and newest messages. 0 disables the byte cap.
+    #[arg(long, env = "BUZZ_ACP_CONTEXT_BYTE_LIMIT", default_value_t = DEFAULT_CONTEXT_BYTE_LIMIT,
+          value_parser = clap::value_parser!(u32).range(0..=1_048_576))]
+    pub context_byte_limit: u32,
+
     /// Maximum turns per session before proactive rotation. 0 = disabled
     /// (rotate only on MaxTokens / MaxTurnRequests).
     #[arg(long, env = "BUZZ_ACP_MAX_TURNS_PER_SESSION", default_value_t = 0,
@@ -543,6 +557,8 @@ pub struct Config {
     pub no_mention_filter: bool,
     pub config_path: PathBuf,
     pub context_message_limit: u32,
+    /// Max UTF-8 bytes of fetched thread/DM message content. 0 = unlimited.
+    pub context_byte_limit: u32,
     /// Maximum turns per session before proactive rotation. 0 = disabled.
     pub max_turns_per_session: u32,
     pub presence_enabled: bool,
@@ -1120,6 +1136,7 @@ impl Config {
             no_mention_filter: args.no_mention_filter,
             config_path: args.config,
             context_message_limit: args.context_message_limit,
+            context_byte_limit: args.context_byte_limit,
             max_turns_per_session: args.max_turns_per_session,
             presence_enabled: !args.no_presence,
             typing_enabled: !args.no_typing,
@@ -1164,7 +1181,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} context_byte_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1179,6 +1196,7 @@ impl Config {
             self.multiple_event_handling,
             self.ignore_self,
             self.context_message_limit,
+            self.context_byte_limit,
             self.max_turns_per_session,
             self.presence_enabled,
             self.typing_enabled,
@@ -1496,6 +1514,7 @@ mod tests {
             no_mention_filter: false,
             config_path: PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
+            context_byte_limit: DEFAULT_CONTEXT_BYTE_LIMIT,
             max_turns_per_session: 0,
             presence_enabled: true,
             typing_enabled: true,
@@ -2284,6 +2303,32 @@ channels = "ALL"
         assert!(
             s.contains("heartbeat=30s"),
             "summary should include heartbeat=30s, got: {s}"
+        );
+    }
+
+    #[test]
+    fn context_byte_limit_defaults_and_accepts_cli_value() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert_eq!(default.context_byte_limit, DEFAULT_CONTEXT_BYTE_LIMIT);
+
+        let configured = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--context-byte-limit",
+            "65536",
+        ]);
+        assert_eq!(configured.context_byte_limit, 65_536);
+    }
+
+    #[test]
+    fn test_summary_includes_context_byte_limit() {
+        let config = test_config(SubscribeMode::Mentions);
+        let summary = config.summary();
+        assert!(
+            summary.contains("context_byte_limit=32768"),
+            "summary should include context byte limit: {summary}"
         );
     }
 
