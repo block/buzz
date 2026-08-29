@@ -96,7 +96,7 @@ build-release:
 trusted-buzz-acp-release:
     #!/usr/bin/env bash
     set -euo pipefail
-    repo_root="{{justfile_directory()}}"
+    repo_root="$(cd "{{justfile_directory()}}" && pwd -P)"
     export CARGO_INCREMENTAL=0
     export RUSTFLAGS="--remap-path-prefix=${repo_root}=/buzz-source"
     cargo build --release -p buzz-acp
