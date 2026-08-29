@@ -9,7 +9,7 @@
 //! Action dispatch uses placeholder implementations that log intent.
 //! Real event emission is wired in WF-07/08 (relay integration).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use buzz_core::tenant::CommunityId;
 use evalexpr::HashMapContext;
@@ -45,7 +45,8 @@ impl TriggerContext {
     /// Look up a trigger field by name.
     ///
     /// Returns `Some(&str)` for known fields; for webhook triggers, also
-    /// checks `webhook_fields`. Returns `None` for unknown names.
+    /// checks `webhook_fields`, which are keyed by dotted path
+    /// (`release.tag_name`). Returns `None` for unknown names.
     pub fn get_field(&self, name: &str) -> Option<&str> {
         match name {
             "text" => Some(&self.text),
@@ -55,6 +56,65 @@ impl TriggerContext {
             "emoji" => Some(&self.emoji),
             "message_id" => Some(&self.message_id),
             other => self.webhook_fields.get(other).map(|s| s.as_str()),
+        }
+    }
+}
+
+/// Maximum number of flattened fields extracted from a webhook body.
+///
+/// Real payloads (a GitHub `push` with many commits, for example) can nest
+/// deeply and widely; the caps bound both the work done here and the size of
+/// the trigger context persisted with every run.
+const MAX_WEBHOOK_FIELDS: usize = 512;
+
+/// Maximum nesting depth walked when flattening a webhook body.
+const MAX_WEBHOOK_DEPTH: usize = 6;
+
+/// Flatten a webhook JSON body into the dotted keys templates address.
+///
+/// Top-level scalars keep their bare name (`action`), and nested values are
+/// reachable by path (`release.tag_name`, `commits.0.message`) so a template
+/// can pull a field out of a provider payload without a pre-flattening proxy.
+/// Objects and arrays are *also* kept under their own key as compact JSON, so
+/// `{{trigger.release}}` still renders the subtree rather than nothing.
+///
+/// Returns an empty map for a body that is not a JSON object.
+pub fn flatten_webhook_body(body: &JsonValue) -> HashMap<String, String> {
+    let mut fields = HashMap::new();
+    if let JsonValue::Object(map) = body {
+        for (key, value) in map {
+            flatten_webhook_value(&mut fields, key, value, 1);
+        }
+    }
+    fields
+}
+
+/// Insert `value` at `path`, recursing into containers until the depth cap.
+fn flatten_webhook_value(
+    fields: &mut HashMap<String, String>,
+    path: &str,
+    value: &JsonValue,
+    depth: usize,
+) {
+    if fields.len() >= MAX_WEBHOOK_FIELDS {
+        return;
+    }
+
+    match value {
+        JsonValue::Object(map) if depth < MAX_WEBHOOK_DEPTH => {
+            fields.insert(path.to_owned(), value.to_string());
+            for (key, child) in map {
+                flatten_webhook_value(fields, &format!("{path}.{key}"), child, depth + 1);
+            }
+        }
+        JsonValue::Array(items) if depth < MAX_WEBHOOK_DEPTH => {
+            fields.insert(path.to_owned(), value.to_string());
+            for (index, child) in items.iter().enumerate() {
+                flatten_webhook_value(fields, &format!("{path}.{index}"), child, depth + 1);
+            }
+        }
+        scalar_or_capped => {
+            fields.insert(path.to_owned(), json_to_string(scalar_or_capped));
         }
     }
 }
@@ -276,13 +336,26 @@ pub fn build_eval_context(
 
     // Register webhook fields first as `trigger_FIELD` so that standard trigger
     // fields inserted below always take precedence and cannot be spoofed.
+    //
+    // Webhook keys are dotted paths (`release.tag_name`) and may contain other
+    // characters evalexpr cannot parse as an identifier, so they are exposed
+    // with those separators collapsed to underscores
+    // (`trigger_release_tag_name`). Collect into a BTreeMap first so two keys
+    // that sanitize to the same name resolve the same way on every run.
+    let mut webhook_vars: BTreeMap<String, &String> = BTreeMap::new();
     for (key, val) in &trigger_ctx.webhook_fields {
+        let name: String = key
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { '_' })
+            .collect();
         // Skip any key that would collide with a standard trigger_ or steps_ variable.
-        if key.starts_with("trigger_") || key.starts_with("steps_") {
+        if name.starts_with("trigger_") || name.starts_with("steps_") {
             continue;
         }
-        let var_name = format!("trigger_{key}");
-        ctx.set_value(var_name, Value::String(val.clone()))
+        webhook_vars.entry(name).or_insert(val);
+    }
+    for (name, val) in webhook_vars {
+        ctx.set_value(format!("trigger_{name}"), Value::String(val.clone()))
             .map_err(|e| WorkflowError::ConditionError(e.to_string()))?;
     }
 
@@ -1816,6 +1889,113 @@ mod tests {
         let ctx = make_trigger();
         assert!(ctx.get_field("nonexistent").is_none());
         assert!(ctx.get_field("").is_none());
+    }
+
+    #[test]
+    fn flatten_webhook_body_exposes_nested_paths() {
+        let body = json!({
+            "action": "published",
+            "release": { "tag_name": "v1.4.0", "draft": false },
+            "repository": { "owner": { "login": "block" }, "name": "buzz" }
+        });
+        let fields = flatten_webhook_body(&body);
+
+        assert_eq!(fields.get("action").map(String::as_str), Some("published"));
+        assert_eq!(
+            fields.get("release.tag_name").map(String::as_str),
+            Some("v1.4.0")
+        );
+        assert_eq!(
+            fields.get("release.draft").map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(
+            fields.get("repository.owner.login").map(String::as_str),
+            Some("block")
+        );
+        // Containers stay addressable as compact JSON.
+        assert!(fields
+            .get("release")
+            .is_some_and(|v| v.contains("tag_name")));
+    }
+
+    #[test]
+    fn flatten_webhook_body_indexes_arrays() {
+        let body = json!({ "commits": [{ "message": "first" }, { "message": "second" }] });
+        let fields = flatten_webhook_body(&body);
+        assert_eq!(
+            fields.get("commits.0.message").map(String::as_str),
+            Some("first")
+        );
+        assert_eq!(
+            fields.get("commits.1.message").map(String::as_str),
+            Some("second")
+        );
+    }
+
+    #[test]
+    fn flatten_webhook_body_ignores_non_objects() {
+        assert!(flatten_webhook_body(&json!([1, 2, 3])).is_empty());
+        assert!(flatten_webhook_body(&json!("hello")).is_empty());
+    }
+
+    #[test]
+    fn flatten_webhook_body_caps_depth_and_count() {
+        // Beyond the depth cap the subtree is kept whole rather than walked.
+        let deep = json!({ "a": { "b": { "c": { "d": { "e": { "f": { "g": 1 } } } } } } });
+        let fields = flatten_webhook_body(&deep);
+        assert!(fields.contains_key("a.b.c.d.e"));
+        assert!(!fields.contains_key("a.b.c.d.e.f.g"));
+
+        let wide: serde_json::Map<String, JsonValue> = (0..MAX_WEBHOOK_FIELDS * 2)
+            .map(|i| (format!("k{i}"), json!(i)))
+            .collect();
+        assert_eq!(
+            flatten_webhook_body(&JsonValue::Object(wide)).len(),
+            MAX_WEBHOOK_FIELDS
+        );
+    }
+
+    #[test]
+    fn resolve_nested_webhook_field() {
+        let mut ctx = make_trigger();
+        ctx.webhook_fields = flatten_webhook_body(&json!({
+            "action": "published",
+            "release": { "tag_name": "v1.4.0" }
+        }));
+        let out = resolve_template(
+            "GitHub: {{trigger.action}} {{trigger.release.tag_name}}",
+            &ctx,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(out, "GitHub: published v1.4.0");
+    }
+
+    #[tokio::test]
+    async fn condition_nested_webhook_field_registered() {
+        let mut ctx = make_trigger();
+        ctx.webhook_fields = flatten_webhook_body(&json!({ "release": { "tag_name": "v1.4.0" } }));
+        let result = evaluate_condition(
+            "trigger_release_tag_name == \"v1.4.0\"",
+            &ctx,
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn condition_webhook_field_cannot_spoof_standard_var() {
+        let mut ctx = make_trigger();
+        ctx.webhook_fields
+            .insert("trigger.author".to_owned(), "attacker".to_owned());
+        let result =
+            evaluate_condition("trigger_author == \"abc123def456\"", &ctx, &HashMap::new())
+                .await
+                .unwrap();
+        assert!(result);
     }
 
     #[test]

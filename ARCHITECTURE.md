@@ -531,6 +531,19 @@ Note: Both `TriggerDef` and `ActionDef` use serde internally-tagged enums. Trigg
 
 **4 trigger types:** `message_posted`, `reaction_added`, `schedule`, `webhook`
 
+**Webhook trigger fields:** the POSTed JSON body is flattened into dotted
+template variables, so a provider payload can be addressed in place — no
+pre-flattening proxy. A GitHub release hook exposes `{{trigger.action}}`,
+`{{trigger.release.tag_name}}`, `{{trigger.repository.full_name}}`, and array
+elements by index (`{{trigger.commits.0.message}}`); objects and arrays also
+render as compact JSON under their own key. In `if:`/`filter:` expressions the
+same fields use underscores, since evalexpr cannot parse dotted identifiers:
+`trigger_release_tag_name`. Flattening is capped at 6 levels deep and 512
+fields, and webhook keys can never shadow the standard `trigger_*` variables.
+An unresolved `{{...}}` is emitted literally rather than as an empty string, so
+a placeholder showing up verbatim in a posted message means that field was not
+in the body.
+
 **7 action types:**
 
 | Action | Description |
