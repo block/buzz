@@ -229,6 +229,7 @@ impl Llm {
                 input_tokens = ?response.input_tokens,
                 cached_input_tokens = ?response.cached_input_tokens,
                 output_tokens = ?response.output_tokens,
+                stop = ?response.stop,
                 "llm: call completed"
             );
         }

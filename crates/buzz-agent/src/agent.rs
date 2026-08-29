@@ -68,6 +68,13 @@ fn replace_unsupported_images(history: &mut [HistoryItem]) -> usize {
 /// [`Config::require_reply`](crate::config::Config::require_reply).
 const MAX_REPLY_NAGS: u32 = 2;
 
+/// Output-token threshold below which a turn with no tool calls and no
+/// assistant message is considered a silent-death candidate and triggers a
+/// WARN.  The observed failure signature is 2–12 tokens (model returns an
+/// essentially empty completion).  Legitimate one-sentence replies land well
+/// above this value even in the most terse case.
+const SILENT_TURN_TOKEN_THRESHOLD: u64 = 10;
+
 /// Server label on the synthetic reply-guard objection.
 ///
 /// Not a real MCP server. It rides the same tool-result path as `_Stop` hook
@@ -702,6 +709,19 @@ impl RunCtx<'_> {
                     reasoning_details: response.reasoning_details.clone(),
                 });
                 let stop = map_stop(response.stop);
+                // Diagnostic: warn when the turn ends with no tool calls and
+                // suspiciously few output tokens — the "silent death" signature
+                // (model returns an essentially empty completion, 2-12 tokens,
+                // no actions, no message).  Fires before the stop hook so the
+                // warning appears in the log even if the hook rejects the stop
+                // and the loop continues.  Does not alter control flow.
+                if is_silent_turn(response.output_tokens) {
+                    tracing::warn!(
+                        stop = ?response.stop,
+                        output_tokens = ?response.output_tokens,
+                        "agent: turn ended with no tool calls and near-zero output tokens — possible silent model/gateway early-stop"
+                    );
+                }
                 // Only gate genuine end_turn — don't override max_tokens/refusal.
                 if stop == StopReason::EndTurn {
                     if stop_rejections >= self.cfg.stop_max_rejections {
@@ -1286,6 +1306,19 @@ fn map_stop(p: ProviderStop) -> StopReason {
     }
 }
 
+/// Returns `true` when a no-tool-call turn looks like a silent death: the
+/// provider stopped with no tool calls and the reported output tokens are
+/// below [`SILENT_TURN_TOKEN_THRESHOLD`].
+///
+/// `None` output tokens (provider omitted usage) also triggers the warning —
+/// an absent token count on a near-empty completion is equally suspicious.
+///
+/// Extracted as a pure function so it can be tested without standing up an
+/// async agent loop.
+fn is_silent_turn(output_tokens: Option<u64>) -> bool {
+    output_tokens.map_or(true, |t| t < SILENT_TURN_TOKEN_THRESHOLD)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1633,6 +1666,51 @@ mod tests {
             acc,
             Some(Some(identity)),
             "three identical rounds must remain consistently proven"
+        );
+    }
+
+    // ---- is_silent_turn -----------------------------------------------------
+
+    /// Token counts below the threshold are the silent-death signature.
+    /// This pair (0 and threshold-1) catches an off-by-one on either edge and
+    /// an always-false mutation that would never warn.
+    #[test]
+    fn is_silent_turn_fires_below_threshold() {
+        assert!(
+            is_silent_turn(Some(0)),
+            "zero output tokens must be a silent turn"
+        );
+        assert!(
+            is_silent_turn(Some(SILENT_TURN_TOKEN_THRESHOLD - 1)),
+            "one below threshold must be a silent turn"
+        );
+    }
+
+    /// Exactly at the threshold is no longer considered silent: a legitimate
+    /// one-sentence reply sits well above this value.
+    #[test]
+    fn is_silent_turn_silent_at_threshold_boundary() {
+        // At exactly the threshold the turn is NOT silent — the threshold is
+        // the first *non-silent* value.  Paired with the below-threshold test
+        // to catch both sides of an off-by-one.
+        assert!(
+            !is_silent_turn(Some(SILENT_TURN_TOKEN_THRESHOLD)),
+            "exactly at threshold must not be a silent turn"
+        );
+        assert!(
+            !is_silent_turn(Some(SILENT_TURN_TOKEN_THRESHOLD + 1)),
+            "above threshold must not be a silent turn"
+        );
+    }
+
+    /// `None` tokens (provider omitted usage) is also treated as a silent-turn
+    /// candidate — an absent token count on a near-empty completion is equally
+    /// suspicious and must not suppress the warning.
+    #[test]
+    fn is_silent_turn_fires_on_none_tokens() {
+        assert!(
+            is_silent_turn(None),
+            "absent output tokens must be a silent turn"
         );
     }
 }
