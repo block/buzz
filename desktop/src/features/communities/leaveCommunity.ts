@@ -35,6 +35,24 @@ function membershipIsAlreadyAbsent(error: unknown): boolean {
   );
 }
 
+/**
+ * Network failures must not trap a user in a locally configured community.
+ * Keep protocol and permission errors fail-closed so an actual relay rejection
+ * is still shown instead of silently removing the local entry.
+ */
+export function isLeaveConnectivityFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  return [
+    "timed out",
+    "relay unreachable",
+    "couldn't send",
+    "connection",
+    "websocket",
+    "network",
+    "fetch failed",
+  ].some((marker) => message.includes(marker));
+}
+
 export type LeaveCommunityResult =
   | { status: "left" }
   | { status: "already-absent" };

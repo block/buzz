@@ -375,14 +375,21 @@ pub async fn query_relay_at(
         serde_json::to_vec(filters).map_err(|e| format!("filter serialization failed: {e}"))?;
     let auth = build_nip98_auth_header(&Method::POST, &url, &body_bytes, state)?;
 
-    let response = relay_http_client(state, &url)
-        .post(&url)
-        .header("Authorization", auth)
-        .header("Content-Type", "application/json")
-        .body(body_bytes)
-        .send()
-        .await
-        .map_err(|e| classify_request_error(&e))?;
+    let request = |client: &reqwest::Client| {
+        client
+            .post(&url)
+            .header("Authorization", auth.clone())
+            .header("Content-Type", "application/json")
+            .body(body_bytes.clone())
+    };
+    let response = match request(relay_http_client(state, &url)).send().await {
+        Ok(response) => response,
+        Err(error) if !relay_url_bypasses_proxy(&url) => request(&state.direct_relay_http_client)
+            .send()
+            .await
+            .map_err(|_| classify_request_error(&error))?,
+        Err(error) => return Err(classify_request_error(&error)),
+    };
 
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);

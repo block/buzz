@@ -184,12 +184,23 @@ function AppLoadingGate() {
 
 // Quiet gate for switching between already-set-up communities: visually empty
 // unless the switch takes long, so fast switches don't flash the boot splash.
-function CommunitySwitchGate() {
+function CommunitySwitchGate({
+  onRetry,
+  onChangeCommunity,
+}: {
+  onRetry: () => void;
+  onChangeCommunity: () => void;
+}) {
   const [showSpinner, setShowSpinner] = useState(false);
+  const [showRecovery, setShowRecovery] = useState(false);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setShowSpinner(true), 300);
-    return () => window.clearTimeout(timer);
+    const recoveryTimer = window.setTimeout(() => setShowRecovery(true), 8_000);
+    return () => {
+      window.clearTimeout(timer);
+      window.clearTimeout(recoveryTimer);
+    };
   }, []);
 
   return (
@@ -206,6 +217,29 @@ function CommunitySwitchGate() {
           className="h-auto w-20"
           tintClassName="text-muted-foreground"
         />
+      ) : null}
+      {showRecovery ? (
+        <div className="absolute bottom-10 grid gap-2 text-center">
+          <p className="text-sm text-muted-foreground">
+            Community 连接时间过长
+          </p>
+          <div className="flex justify-center gap-2">
+            <button
+              className="rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground"
+              onClick={onRetry}
+              type="button"
+            >
+              重试
+            </button>
+            <button
+              className="rounded-md border border-border px-3 py-2 text-sm"
+              onClick={onChangeCommunity}
+              type="button"
+            >
+              更换 Community
+            </button>
+          </div>
+        </div>
       ) : null}
     </div>
   );
@@ -261,9 +295,13 @@ function CommunityQueryProvider({ children }: { children: ReactNode }) {
 function AppReady({
   isSharedIdentity,
   isCommunitySwitch,
+  onRetryCommunity,
+  onChangeCommunity,
 }: {
   isSharedIdentity: boolean;
   isCommunitySwitch: boolean;
+  onRetryCommunity: () => void;
+  onChangeCommunity: () => void;
 }) {
   const onboarding = useAppOnboardingState(isSharedIdentity);
 
@@ -291,7 +329,14 @@ function AppReady({
   }
 
   if (onboarding.stage === "blocking") {
-    return isCommunitySwitch ? <CommunitySwitchGate /> : <AppLoadingGate />;
+    return isCommunitySwitch ? (
+      <CommunitySwitchGate
+        onChangeCommunity={onChangeCommunity}
+        onRetry={onRetryCommunity}
+      />
+    ) : (
+      <AppLoadingGate />
+    );
   }
 
   if (onboarding.stage === "timeout") {
@@ -584,6 +629,8 @@ function CommunityApp({
           isCommunitySwitch={isCommunitySwitch}
           key={communityKey}
           isSharedIdentity={sharedIdentity}
+          onChangeCommunity={() => setIsCommunityChangeOpen(true)}
+          onRetryCommunity={reconnectCommunity}
         />
         {showBootSplashOverlay ? (
           <div
@@ -600,7 +647,10 @@ function CommunityApp({
         ) : null}
       </CommunityQueryProvider>
     ) : isCommunitySwitch ? (
-      <CommunitySwitchGate />
+      <CommunitySwitchGate
+        onChangeCommunity={() => setIsCommunityChangeOpen(true)}
+        onRetry={reconnectCommunity}
+      />
     ) : (
       <AppLoadingGate />
     );

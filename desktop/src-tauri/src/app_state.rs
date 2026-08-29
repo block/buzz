@@ -186,6 +186,10 @@ pub fn build_media_fetch_client() -> reqwest::Result<reqwest::Client> {
         .build()
 }
 
+/// Bound relay HTTP operations so a stalled proxy or half-open TCP connection
+/// cannot hold the desktop's community/startup gate forever.
+const RELAY_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 pub fn build_app_state() -> AppState {
     // Env var takes precedence (dev/CI). If absent, resolve_persisted_identity()
     // in setup() will replace the ephemeral placeholder with a persisted key.
@@ -207,6 +211,7 @@ pub fn build_app_state() -> AppState {
             .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
             .pool_idle_timeout(std::time::Duration::from_secs(10))
             .pool_max_idle_per_host(1)
+            .timeout(RELAY_HTTP_TIMEOUT)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()),
         direct_relay_http_client: reqwest::Client::builder()
@@ -214,6 +219,7 @@ pub fn build_app_state() -> AppState {
             .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
             .pool_idle_timeout(std::time::Duration::from_secs(10))
             .pool_max_idle_per_host(1)
+            .timeout(RELAY_HTTP_TIMEOUT)
             .build()
             .expect("direct relay HTTP client must build"),
         media_fetch_client: build_media_fetch_client().expect(

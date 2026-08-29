@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { KIND_NIP43_LEAVE_REQUEST, leaveCommunity } from "./leaveCommunity.ts";
+import {
+  KIND_NIP43_LEAVE_REQUEST,
+  isLeaveConnectivityFailure,
+  leaveCommunity,
+} from "./leaveCommunity.ts";
 
 const signedEvent = {
   id: "event-id",
@@ -171,5 +175,20 @@ test("turns an inactive relay timeout into an actionable leave error", async () 
       }),
     ),
     /Timed out while leaving the community\. Try again\./,
+  );
+});
+
+test("classifies relay connectivity failures for local cleanup", () => {
+  assert.equal(
+    isLeaveConnectivityFailure(new Error("Relay unreachable")),
+    true,
+  );
+  assert.equal(
+    isLeaveConnectivityFailure(new Error("WebSocket connection closed")),
+    true,
+  );
+  assert.equal(
+    isLeaveConnectivityFailure(new Error("invalid: relay owner cannot leave")),
+    false,
   );
 });

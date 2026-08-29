@@ -63,12 +63,34 @@ pub async fn submit_signed_event_at_with_keys(
     // Local proxies and stale pooled connections can reject a request before
     // any bytes reach the relay. Retry those connect failures with the exact
     // same signed event so a single click is reliable and remains idempotent.
-    let client = if super::relay_url_bypasses_proxy(&url) {
-        &state.direct_relay_http_client
-    } else {
-        &state.http_client
+    let response = match send_signed_event_request(
+        if super::relay_url_bypasses_proxy(&url) {
+            &state.direct_relay_http_client
+        } else {
+            &state.http_client
+        },
+        &url,
+        &auth_header,
+        &body_bytes,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) if !super::relay_url_bypasses_proxy(&url) => {
+            // Keep the canonical URL (and therefore the NIP-98 Host/u tag),
+            // but retry once without the system proxy. V2Ray and stale proxy
+            // pools can reject a public relay while direct HTTPS is healthy.
+            send_signed_event_request(
+                &state.direct_relay_http_client,
+                &url,
+                &auth_header,
+                &body_bytes,
+            )
+            .await
+            .map_err(|_| error)?
+        }
+        Err(error) => return Err(error),
     };
-    let response = send_signed_event_request(client, &url, &auth_header, &body_bytes).await?;
 
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);

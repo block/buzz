@@ -90,6 +90,13 @@ See CONTRIBUTING.md for full setup details and dependency requirements.
 
 ## Quality Gates
 
+### User Issue Log
+
+When fixing or diagnosing a user-reported issue, append a dated entry with the
+symptom, evidence-based diagnosis, handling, verification, and version/commit
+to [`docs/codex-issue-log.md`](docs/codex-issue-log.md). Never overwrite prior
+entries.
+
 Run `just ci` before every PR — it runs `fmt` + `clippy` + desktop lint +
 unit tests + builds. Clippy passing does not mean fmt passes; run both.
 
