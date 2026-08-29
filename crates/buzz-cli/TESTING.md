@@ -104,6 +104,22 @@ cargo clippy -p buzz-cli -- -D warnings
 # Expected: zero warnings
 ```
 
+### Automated downstream contract gate
+
+The CLI-side subset of the block/berd `skills/buzz-handoff` contract is
+covered by an offline black-box gate:
+
+```bash
+cargo test -p buzz-cli --test berd_handoff_contract
+```
+
+This test drives the public `buzz_cli::run_from_args` entry point against a
+loopback stub relay and asserts the command forms, compact output keys, message
+link reads, auth inputs, exit-code mapping, and edge cases (empty result sets,
+concurrent writers) that Berd shells out to. It does not replace the
+live-relay command runbook below; it only keeps the CLI contract from
+drifting silently in CI.
+
 ---
 
 ## 6. Live Testing — Command by Command
