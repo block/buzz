@@ -36,6 +36,7 @@ export type BuildMentionCandidatesInput = {
   managedAgents: readonly ManagedAgent[] | undefined;
   memberPubkeys: ReadonlySet<string>;
   members: readonly ChannelMember[] | undefined;
+  mentionChannelId: string | null;
   mentionableAgentPubkeys: ReadonlySet<string>;
   personaNameByPubkey: ReadonlyMap<string, string>;
   profiles: UserProfileLookup | undefined;
@@ -66,6 +67,7 @@ export function buildMentionCandidates({
   managedAgents,
   memberPubkeys,
   members,
+  mentionChannelId,
   mentionableAgentPubkeys,
   personaNameByPubkey,
   profiles,
@@ -167,7 +169,13 @@ export function buildMentionCandidates({
       kind: "identity",
       pubkey,
       displayName: agent.name,
-      isMember: false,
+      // Prefer the active channel's signed roster. The relay-agent directory
+      // is filtered by access policy, so its channel ids can legitimately omit
+      // a room where this identity is already a member.
+      isMember:
+        memberPubkeys.has(pubkey) ||
+        (mentionChannelId !== null &&
+          agent.channelIds.includes(mentionChannelId)),
       personaId:
         managedAgentPersonaIdsByPubkey.get(pubkey) ??
         (activePersonaById.has(pubkey) ? pubkey : undefined),
@@ -177,11 +185,12 @@ export function buildMentionCandidates({
     });
   }
   for (const agent of managedAgents ?? []) {
+    const pubkey = normalizePubkey(agent.pubkey);
     addCandidate({
       kind: "identity",
-      pubkey: agent.pubkey,
+      pubkey,
       displayName: agent.name,
-      isMember: false,
+      isMember: memberPubkeys.has(pubkey),
       isAgent: true,
       isActiveAgent: agent.status === "running" || agent.status === "deployed",
       isManagedAgent: true,

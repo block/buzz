@@ -405,7 +405,7 @@ export function projectsOverviewContext(
           section: "prs",
         },
       ],
-      title: "Projects",
+      title: "Activity",
     };
   }
 

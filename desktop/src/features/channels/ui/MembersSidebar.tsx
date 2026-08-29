@@ -12,6 +12,7 @@ import {
   coalesceAgentAutocompleteCandidates,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
+  isAgentDirectoryReady,
   isAgentIdentityInAllowedList,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import { isOtherSetupAgent } from "@/features/agents/lib/otherSetupAgent";
@@ -184,12 +185,8 @@ export function MembersSidebar({
     relayAgentsQuery,
   } = useClassifiedMembers(rawMembers, currentPubkey);
   const agentDirectoriesReady =
-    managedAgentsQuery.data !== undefined &&
-    managedAgentsQuery.error === null &&
-    !managedAgentsQuery.isFetching &&
-    relayAgentsQuery.data !== undefined &&
-    relayAgentsQuery.error === null &&
-    !relayAgentsQuery.isFetching;
+    isAgentDirectoryReady(managedAgentsQuery) &&
+    isAgentDirectoryReady(relayAgentsQuery);
   const activeMembers = React.useMemo(
     () =>
       [...people, ...bots].sort((left, right) =>

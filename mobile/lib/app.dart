@@ -29,6 +29,8 @@ import 'features/settings/settings_page.dart';
 import 'shared/auth/auth.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
+import 'shared/push/push_subscription_provider.dart';
+import 'shared/push/push_relay_capability_provider.dart';
 import 'shared/relay/relay.dart';
 import 'shared/read_state/read_state_provider.dart';
 import 'shared/theme/theme.dart';
@@ -325,6 +327,11 @@ class App extends HookConsumerWidget {
       ref.watch(observerRelayProvider);
       ref.watch(appLifecycleProvider);
       ref.watch(userStatusCacheProvider);
+      if (ref.watch(activeCommunityProvider).value?.pushNotificationsEnabled ==
+              true &&
+          ref.watch(currentRelayPushDescriptorProvider).value != null) {
+        ref.watch(pushSubscriptionSyncProvider);
+      }
       hasUnreadInbox = ref.watch(_unreadInboxItemCountProvider) > 0;
     }
 
@@ -389,16 +396,25 @@ class App extends HookConsumerWidget {
   }
 }
 
-Widget _buildSettingsPage(BuildContext context) => SettingsPage(
-  profileHeader: const SettingsProfileHeader(),
-  profileEditPageBuilder: (_) =>
-      const ProfileEditPage(startInPhotoEditor: true),
-  onEditDisplayName: showProfileDisplayNameEditor,
-  onEditProfileDescription: showProfileDescriptionEditor,
-  invitePageBuilder: (_) => const CommunityInvitePage(),
-  identityRecoveryPageBuilder: (_) =>
-      const PairingPage(addingCommunity: true, identityRecoveryOnly: true),
-);
+Widget _buildSettingsPage(BuildContext context) => const _SettingsPageContent();
+
+class _SettingsPageContent extends ConsumerWidget {
+  const _SettingsPageContent();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return SettingsPage(
+      profileHeader: const SettingsProfileHeader(),
+      profileEditPageBuilder: (_) =>
+          const ProfileEditPage(startInPhotoEditor: true),
+      onEditDisplayName: showProfileDisplayNameEditor,
+      onEditProfileDescription: showProfileDescriptionEditor,
+      invitePageBuilder: (_) => const CommunityInvitePage(),
+      identityRecoveryPageBuilder: (_) =>
+          const PairingPage(addingCommunity: true, identityRecoveryOnly: true),
+    );
+  }
+}
 
 class _SplashScreen extends StatelessWidget {
   const _SplashScreen();

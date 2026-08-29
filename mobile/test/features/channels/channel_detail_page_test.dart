@@ -4129,6 +4129,16 @@ void main() {
         );
 
         await tester.tap(find.text('Message #general'));
+        for (var frame = 0; frame < 15; frame += 1) {
+          await tester.pump(const Duration(milliseconds: 16));
+          expect(
+            find.byKey(const ValueKey('channel-jump-to-latest')),
+            findsNothing,
+            reason:
+                'Composer expansion must not expose Latest while tail-follow '
+                'layout catches up.',
+          );
+        }
         await tester.pumpAndSettle();
 
         expect(
@@ -4144,7 +4154,24 @@ void main() {
           findsNothing,
         );
 
-        tester.view.viewInsets = const FakeViewPadding(bottom: 300);
+        for (final inset in const [80.0, 160.0, 240.0, 300.0]) {
+          tester.view.viewInsets = FakeViewPadding(bottom: inset);
+          await tester.pump(const Duration(milliseconds: 16));
+          expect(
+            find.byKey(const ValueKey('channel-jump-to-latest')),
+            findsNothing,
+            reason:
+                'IME inset frames must not expose Latest while the followed '
+                'tail is being realigned.',
+          );
+        }
+        await tester.pump(androidImeMetricsSettleDelay);
+        expect(
+          find.byKey(const ValueKey('channel-jump-to-latest')),
+          findsNothing,
+          reason:
+              'Latest must stay hidden when settled IME padding is applied.',
+        );
         await tester.pumpAndSettle();
 
         expect(latestMessage, findsOneWidget);
@@ -10823,6 +10850,96 @@ void main() {
       );
     });
 
+    testWidgets(
+      'iOS thread keeps Latest hidden through composer and keyboard frames',
+      (tester) async {
+        final previousPlatform = debugDefaultTargetPlatformOverride;
+        debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+        try {
+          final rootEvent = _textMsg(
+            id: 'thread-root',
+            pubkey: 'alice',
+            content: 'A short thread',
+            createdAt: 1000,
+          );
+          final replies = [
+            for (var i = 0; i < 6; i++)
+              _textMsg(
+                id: 'reply-$i',
+                pubkey: i.isEven ? 'alice' : 'bob',
+                content: i.isEven ? 'hello' : 'testing',
+                createdAt: 1100 + i,
+                extraTags: const [
+                  ['e', 'thread-root', '', 'reply'],
+                ],
+              ),
+          ];
+
+          await tester.pumpWidget(
+            _buildTestable(
+              messages: [rootEvent],
+              threadReplies: {'thread-root': replies},
+              users: const {
+                'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+                'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+              },
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          final threadHead = formatTimeline([rootEvent]).single;
+          Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+            MaterialPageRoute<void>(
+              builder: (_) => ThreadDetailPage(
+                threadHead: threadHead,
+                allMessages: [threadHead],
+                channelId: _channelId,
+                currentPubkey: 'self',
+                isMember: true,
+                isArchived: false,
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          expect(
+            find.byKey(const ValueKey('thread-jump-to-latest')),
+            findsNothing,
+          );
+
+          await tester.tap(find.text('Reply in thread…').hitTestable());
+          for (var frame = 0; frame < 15; frame += 1) {
+            await tester.pump(const Duration(milliseconds: 16));
+            expect(
+              find.byKey(const ValueKey('thread-jump-to-latest')),
+              findsNothing,
+              reason:
+                  'Composer expansion must not expose Latest while followed '
+                  'tail geometry catches up.',
+            );
+          }
+
+          for (final inset in const [80.0, 160.0, 240.0, 300.0]) {
+            tester.view.viewInsets = FakeViewPadding(bottom: inset);
+            await tester.pump(const Duration(milliseconds: 16));
+            expect(
+              find.byKey(const ValueKey('thread-jump-to-latest')),
+              findsNothing,
+              reason:
+                  'IME inset frames must not expose Latest while the composer '
+                  'is following the thread tail.',
+            );
+          }
+          await tester.pumpAndSettle();
+        } finally {
+          debugDefaultTargetPlatformOverride = previousPlatform;
+        }
+      },
+    );
+
     for (final replyCount in [0, 1]) {
       testWidgets(
         'cached writable $replyCount-reply thread defers dock correction until measured',
@@ -11365,75 +11482,94 @@ void main() {
     testWidgets('short initial thread hydration remains top-anchored', (
       tester,
     ) async {
-      final rootEvent = _textMsg(
-        id: 'thread-root',
-        pubkey: 'alice',
-        content: 'Thread root',
-        createdAt: 1000,
-      );
-      final replies = [
-        _textMsg(
-          id: 'reply-1',
-          pubkey: 'bob',
-          content: 'First reply',
-          createdAt: 1100,
-          extraTags: const [
-            ['e', 'thread-root', '', 'reply'],
-          ],
-        ),
-        _textMsg(
-          id: 'reply-2',
-          pubkey: 'bob',
-          content: 'Second reply',
-          createdAt: 1101,
-          extraTags: const [
-            ['e', 'thread-root', '', 'reply'],
-          ],
-        ),
-      ];
-      final completer = Completer<List<NostrEvent>>();
-
-      await tester.pumpWidget(
-        _buildTestable(
-          messages: [rootEvent],
-          pendingThreadReplies: {'thread-root': completer.future},
-          users: const {
-            'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
-            'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
-          },
-        ),
-      );
-      await tester.pumpAndSettle();
-
-      final threadHead = formatTimeline([rootEvent]).single;
-      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
-        MaterialPageRoute<void>(
-          builder: (_) => ThreadDetailPage(
-            threadHead: threadHead,
-            allMessages: [threadHead],
-            channelId: _channelId,
-            currentPubkey: 'self',
-            isMember: true,
-            isArchived: false,
+      final previousPlatform = debugDefaultTargetPlatformOverride;
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      try {
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          _textMsg(
+            id: 'reply-1',
+            pubkey: 'bob',
+            content: 'First reply',
+            createdAt: 1100,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
           ),
-        ),
-      );
-      await tester.pumpAndSettle();
+          _textMsg(
+            id: 'reply-2',
+            pubkey: 'bob',
+            content: 'Second reply',
+            createdAt: 1101,
+            extraTags: const [
+              ['e', 'thread-root', '', 'reply'],
+            ],
+          ),
+        ];
+        final completer = Completer<List<NostrEvent>>();
 
-      final headFinder = find.byKey(
-        const ValueKey('thread-message-group-thread-root'),
-      );
-      final initialHeadY = tester.getTopLeft(headFinder).dy;
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            pendingThreadReplies: {'thread-root': completer.future},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+          ),
+        );
+        await tester.pumpAndSettle();
 
-      completer.complete(replies);
-      await tester.pumpAndSettle();
+        final threadHead = formatTimeline([rootEvent]).single;
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadHead,
+              allMessages: [threadHead],
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
 
-      expect(headFinder, findsOneWidget);
-      expect(
-        find.byKey(const ValueKey('thread-message-group-reply-2')),
-        findsOneWidget,
-      );
-      expect(tester.getTopLeft(headFinder).dy, closeTo(initialHeadY, 0.5));
+        final headFinder = find.byKey(
+          const ValueKey('thread-message-group-thread-root'),
+        );
+        final initialHeadY = tester.getTopLeft(headFinder).dy;
+        const latestButton = ValueKey('thread-jump-to-latest');
+        expect(find.byKey(latestButton), findsNothing);
+
+        completer.complete(replies);
+        await tester.pump();
+        for (var frame = 0; frame < 8; frame++) {
+          expect(
+            find.byKey(latestButton),
+            findsNothing,
+            reason:
+                'Ordinary thread entry must not expose Latest on frame $frame.',
+          );
+          await tester.pump();
+        }
+        await tester.pumpAndSettle();
+
+        expect(headFinder, findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-2')),
+          findsOneWidget,
+        );
+        expect(tester.getTopLeft(headFinder).dy, closeTo(initialHeadY, 0.5));
+        expect(find.byKey(latestButton), findsNothing);
+      } finally {
+        debugDefaultTargetPlatformOverride = previousPlatform;
+      }
     });
 
     testWidgets(
@@ -12807,6 +12943,81 @@ void main() {
       );
     }
 
+    testWidgets(
+      'thread shows Latest after composer tail correction exhausts and focus leaves',
+      (tester) async {
+        tester.view.physicalSize = const Size(400, 800);
+        tester.view.devicePixelRatio = 1;
+        addTearDown(tester.view.reset);
+
+        final rootEvent = _textMsg(
+          id: 'thread-root',
+          pubkey: 'alice',
+          content: 'Thread root',
+          createdAt: 1000,
+        );
+        final replies = [
+          for (var i = 0; i < 30; i++)
+            _textMsg(
+              id: 'reply-$i',
+              pubkey: 'bob',
+              content: 'Reply $i',
+              createdAt: 1100 + i,
+              extraTags: const [
+                ['e', 'thread-root', '', 'reply'],
+              ],
+            ),
+        ];
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [rootEvent],
+            threadReplies: {'thread-root': replies},
+            users: const {
+              'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
+              'bob': UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            },
+            home: ThreadDetailPage(
+              threadHead: formatTimeline([rootEvent]).single,
+              allMessages: formatTimeline([rootEvent, replies[5]]),
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+              initialMessageId: 'reply-5',
+              jumpThreadTailForTesting: () => true,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        const latestButton = ValueKey('thread-jump-to-latest');
+        expect(find.byKey(latestButton), findsOneWidget);
+
+        await tester.tap(find.text('Reply in thread…').hitTestable());
+        await tester.pump();
+        for (var frame = 0; frame < 10; frame++) {
+          await tester.pump();
+        }
+
+        final focusNode = tester
+            .widget<TextField>(find.byType(TextField))
+            .focusNode!;
+        expect(focusNode.hasFocus, isTrue);
+        expect(
+          find.byKey(const ValueKey('thread-message-group-reply-29')),
+          findsNothing,
+          reason: 'The lazy tail must remain unlaid after bounded correction.',
+        );
+
+        focusNode.unfocus();
+        await tester.pumpAndSettle();
+
+        expect(focusNode.hasFocus, isFalse);
+        expect(find.byKey(latestButton), findsOneWidget);
+      },
+    );
+
     testWidgets('thread hides initial tail placement until it is settled', (
       tester,
     ) async {
@@ -12983,19 +13194,35 @@ void main() {
       expect(find.byKey(const ValueKey('thread-jump-to-latest')), findsNothing);
     });
 
-    test(
-      'thread tail accepts exact scroll extent while item positions lag',
-      () {
+    test('thread tail ignores oscillating item positions at exact extent', () {
+      for (final tailItemIsVisible in [true, false, false, true, false]) {
         expect(
-          threadTailCorrectionReachedEnd(tailIsVisible: false, extentAfter: 0),
+          threadTailIsAtEffectiveEnd(
+            tailIsLaidOut: true,
+            tailIsVisible: tailItemIsVisible,
+            extentAfter: 0,
+          ),
           isTrue,
         );
-        expect(
-          threadTailCorrectionReachedEnd(tailIsVisible: false, extentAfter: 1),
-          isFalse,
-        );
-      },
-    );
+      }
+      expect(
+        threadTailIsAtEffectiveEnd(
+          tailIsLaidOut: true,
+          tailIsVisible: false,
+          extentAfter: 1,
+        ),
+        isFalse,
+      );
+      expect(
+        threadTailIsAtEffectiveEnd(
+          tailIsLaidOut: false,
+          tailIsVisible: false,
+          extentAfter: 0,
+        ),
+        isFalse,
+        reason: 'A not-yet-laid-out lazy tail cannot trust stale extent.',
+      );
+    });
 
     testWidgets('thread Latest settles across expanding lazy scroll extents', (
       tester,
@@ -13152,6 +13379,21 @@ void main() {
         expect(
           find.byKey(const ValueKey('thread-jump-to-latest')),
           findsNothing,
+        );
+
+        final landingScrollable = tester.state<ScrollableState>(
+          find.descendant(of: list, matching: find.byType(Scrollable)).first,
+        );
+        landingScrollable.position.jumpTo(
+          landingScrollable.position.maxScrollExtent - 24,
+        );
+        await tester.pump();
+        expect(
+          find.byKey(const ValueKey('thread-jump-to-latest')),
+          findsNothing,
+          reason:
+              'A stale landing measurement must not expose Latest before the '
+              'user explicitly browses history.',
         );
 
         await tester.drag(list, const Offset(0, 500));
@@ -13317,6 +13559,8 @@ void main() {
           find.descendant(of: list, matching: find.byType(Scrollable)).first,
         );
         positionedList.itemScrollController!.jumpTo(index: 5);
+        await tester.pumpAndSettle();
+        await tester.drag(list, const Offset(0, 20));
         await tester.pumpAndSettle();
         expect(
           find.byKey(const ValueKey('thread-message-group-reply-159')),

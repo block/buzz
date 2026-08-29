@@ -92,7 +92,7 @@ class InviteJoinSheet extends ConsumerWidget {
                 color: context.colors.surfaceContainerHighest.withValues(
                   alpha: 0.7,
                 ),
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(Radii.container),
                 border: Border.all(color: context.colors.outlineVariant),
               ),
               child: Text(

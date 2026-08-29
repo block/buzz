@@ -431,7 +431,12 @@ export const MentionHighlightExtension = Extension.create({
                   applying = false;
                 }
               }
-              setDomCaretAtPos(view, view.state.selection.from);
+              // Highlight refreshes can land after the user has moved focus to
+              // a popover. Keep settlement armed for the next keystroke, but
+              // never drag DOM selection back into an unfocused composer.
+              if (view.hasFocus()) {
+                setDomCaretAtPos(view, view.state.selection.from);
+              }
             },
             destroy() {
               settlement.cancel();

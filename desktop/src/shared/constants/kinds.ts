@@ -57,6 +57,11 @@ export const KIND_COMMUNITY_THEME = 30078;
 export const KIND_PERSONA = 30175;
 export const KIND_TEAM = 30176;
 export const KIND_MANAGED_AGENT = 30177;
+// Team catalog projection: a self-contained snapshot of a team plus every
+// member's safe definition, so a recipient can rebuild it without reading the
+// publisher's personas. Separate from KIND_TEAM (30176, the team's own wire
+// body) so an ordinary team edit cannot disturb catalog share state.
+export const KIND_TEAM_CATALOG = 30178;
 export const KIND_USER_STATUS = 30315;
 export const KIND_AGENT_OBSERVER_FRAME = 24200;
 export const KIND_AGENT_TURN_METRIC = 44200;

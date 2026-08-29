@@ -121,6 +121,7 @@ export default defineConfig({
         "**/send-channel-binding.spec.ts",
         "**/project-cold-start.spec.ts",
         "**/project-commit-detail.spec.ts",
+        "**/project-empty-state-alignment.spec.ts",
         "**/project-inbox.spec.ts",
         "**/projects-v3-screenshots.spec.ts",
         "**/project-issue-comments.spec.ts",
@@ -160,6 +161,7 @@ export default defineConfig({
         "**/huddle-transcription.spec.ts",
         "**/agent-numeric-tuning.spec.ts",
         "**/needs-restart-screenshots.spec.ts",
+        "**/team-catalog-screenshots.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],
@@ -181,6 +183,7 @@ export default defineConfig({
         "**/persona-env-vars.spec.ts",
         "**/persona-sync.spec.ts",
         "**/team-snapshot.spec.ts",
+        "**/team-catalog.spec.ts",
         "**/agents-everywhere.live.spec.ts",
         "**/relay-restart.live.spec.ts",
         "**/parity-ancestor-island.spec.ts",

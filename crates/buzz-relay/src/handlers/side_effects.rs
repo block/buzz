@@ -760,28 +760,38 @@ pub async fn validate_admin_event(
 }
 
 /// Emit a system message (kind 40099) signed by the relay keypair.
+///
+/// `idempotency_ts` is used as the event's `created_at`. Passing a stable
+/// timestamp (e.g. from the outbox row's `created_at`) makes re-tries produce
+/// the same Nostr event ID — the existing `ON CONFLICT DO NOTHING` in
+/// `insert_event` then provides DB-enforced delivery idempotency.
+///
+/// Returns `Err` if the event could not be durably inserted; fanout remains
+/// best-effort.
 pub async fn emit_system_message(
     tenant: &TenantContext,
     state: &Arc<AppState>,
     channel_id: Uuid,
     content: serde_json::Value,
+    idempotency_ts: chrono::DateTime<chrono::Utc>,
 ) -> anyhow::Result<()> {
     let channel_tag = Tag::parse(["h", &channel_id.to_string()])?;
 
+    let ts = nostr::Timestamp::from(idempotency_ts.timestamp() as u64);
     let event = EventBuilder::new(Kind::Custom(40099), content.to_string())
         .tags([channel_tag])
+        .custom_created_at(ts)
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign system message: {e}"))?;
 
-    if let Err(e) = state
+    // Durable insert is the completion boundary — propagate failure.
+    state
         .db
         .insert_event(tenant.community(), &event, Some(channel_id))
         .await
-    {
-        warn!(channel = %channel_id, error = %e, "system message insert failed");
-    }
+        .map_err(|e| anyhow::anyhow!("system message insert failed: {e}"))?;
 
-    // Fan out to subscribers
+    // Fan out to subscribers: best-effort, clients can retrieve the persisted event.
     if let Err(e) = state
         .pubsub
         .publish_event(tenant, EventTopic::Channel(channel_id), &event)
@@ -1068,8 +1078,16 @@ async fn store_group_members_event(
         .map(|timestamp| timestamp + 1)
         .unwrap_or(now)
         .max(now);
+    // A relay-signed roster of a channel the relay is itself a member of (the
+    // relay's moderation-DM key participates in the {relay, recipient} DM used
+    // for moderation notices) MUST retain the relay's own `p` tag. nostr's
+    // default `build_with_ctx` strips any `p` tag matching the signer, which
+    // would drop the relay from the snapshot and fail migration 0032's roster
+    // fence against the canonical two-member DM. `allow_self_tagging` keeps the
+    // snapshot faithful to `channel_members`.
     let event = EventBuilder::new(Kind::Custom(KIND_NIP29_GROUP_MEMBERS as u16), "")
         .tags(tags)
+        .allow_self_tagging()
         .custom_created_at(nostr::Timestamp::from(ts))
         .sign_with_keys(&state.relay_keypair)
         .map_err(|error| anyhow::anyhow!("failed to sign member snapshot: {error}"))?;
@@ -1391,6 +1409,7 @@ async fn handle_put_user(
             "actor": actor_hex,
             "target": target_hex,
         }),
+        chrono::Utc::now(),
     )
     .await?;
 
@@ -1463,6 +1482,7 @@ async fn handle_remove_user(
             "actor": actor_hex,
             "target": target_hex,
         }),
+        chrono::Utc::now(),
     )
     .await?;
 
@@ -1538,6 +1558,7 @@ async fn handle_edit_metadata(
                         serde_json::json!({
                             "type": "topic_changed", "actor": actor_hex, "topic": val
                         }),
+                        chrono::Utc::now(),
                     )
                     .await?;
                 }
@@ -1553,6 +1574,7 @@ async fn handle_edit_metadata(
                         serde_json::json!({
                             "type": "purpose_changed", "actor": actor_hex, "purpose": val
                         }),
+                        chrono::Utc::now(),
                     )
                     .await?;
                 }
@@ -1592,6 +1614,7 @@ async fn handle_edit_metadata(
                         serde_json::json!({
                             "type": "visibility_changed", "actor": actor_hex, "visibility": val
                         }),
+                        chrono::Utc::now(),
                     )
                     .await?;
                 }
@@ -1625,6 +1648,7 @@ async fn handle_edit_metadata(
                         serde_json::json!({
                             "type": "ttl_changed", "actor": actor_hex, "ttl_seconds": ttl_change
                         }),
+                        chrono::Utc::now(),
                     )
                     .await?;
                 }
@@ -1642,6 +1666,7 @@ async fn handle_edit_metadata(
                                 serde_json::json!({
                                     "type": "channel_archived", "actor": actor_hex
                                 }),
+                                chrono::Utc::now(),
                             )
                             .await?;
                         }
@@ -1657,6 +1682,7 @@ async fn handle_edit_metadata(
                                 serde_json::json!({
                                     "type": "channel_unarchived", "actor": actor_hex
                                 }),
+                                chrono::Utc::now(),
                             )
                             .await?;
 
@@ -1805,7 +1831,7 @@ async fn handle_delete_event_side_effect(
     copy_optional_string_field(event, &mut tombstone, "reason_code");
     copy_optional_string_field(event, &mut tombstone, "public_reason");
 
-    emit_system_message(tenant, state, channel_id, tombstone).await?;
+    emit_system_message(tenant, state, channel_id, tombstone, chrono::Utc::now()).await?;
 
     info!(target_event = %hex::encode(&target_id), "NIP-29 DELETE_EVENT processed");
     Ok(())
@@ -1910,6 +1936,7 @@ async fn handle_create_group(
         serde_json::json!({
             "type": "channel_created", "actor": actor_hex
         }),
+        chrono::Utc::now(),
     )
     .await?;
 
@@ -1979,6 +2006,7 @@ async fn handle_delete_group(
         serde_json::json!({
             "type": "channel_deleted", "actor": actor_hex
         }),
+        chrono::Utc::now(),
     )
     .await?;
 
@@ -2040,6 +2068,7 @@ async fn handle_join_request(
             "actor": actor_hex,
             "target": actor_hex,
         }),
+        chrono::Utc::now(),
     )
     .await?;
 
@@ -2103,6 +2132,7 @@ async fn handle_leave_request(
             "type": "member_left",
             "actor": actor_hex,
         }),
+        chrono::Utc::now(),
     )
     .await?;
 

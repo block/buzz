@@ -77,6 +77,11 @@ test("agent rows offer automatic mention controls", async () => {
   });
   assert.equal(action.getAttribute("aria-pressed"), "false");
   assert.equal(action.getAttribute("data-state"), "off");
+  const inactivePin = action.querySelector(
+    '[data-testid="mention-auto-pin-icon"]',
+  );
+  assert.match(inactivePin?.getAttribute("class") ?? "", /\blucide-pin\b/);
+  assert.equal(inactivePin?.getAttribute("fill"), "none");
   fireEvent.click(action);
   assert.deepEqual(toggled, [suggestion]);
   assert.deepEqual(selected, [suggestion]);
@@ -88,10 +93,14 @@ test("agent rows offer automatic mention controls", async () => {
     }),
   );
   const selectedAction = view.getByRole("button", {
-    name: "Stop automatically mentioning Agent Ada",
+    name: "Don't automatically mention Agent Ada in this conversation",
   });
   assert.equal(selectedAction.getAttribute("aria-pressed"), "true");
   assert.equal(selectedAction.getAttribute("data-state"), "on");
+  const activePin = selectedAction.querySelector(
+    '[data-testid="mention-auto-pin-icon"]',
+  );
+  assert.equal(activePin?.getAttribute("fill"), "currentColor");
   fireEvent.click(selectedAction);
   assert.deepEqual(toggled, [suggestion, suggestion]);
 });
@@ -166,6 +175,56 @@ test("options expand in place without replacing the people list", async () => {
     null,
   );
   assert.ok(view.getByRole("button", { name: "Mention Agent Ada" }));
+});
+
+test("automatic selection loads the setting once, then updates it in place", async () => {
+  const React = await import("react");
+  const { render } = await import("@testing-library/react");
+  const { MentionAutocomplete } = await import("./MentionAutocomplete.tsx");
+  const suggestion = {
+    pubkey: "agent-pubkey",
+    displayName: "Agent Ada",
+    isAgent: true,
+  };
+  const props = {
+    suggestions: [suggestion],
+    selectedIndex: 0,
+    onSelect: () => {},
+    keepMentionedAgentsPinned: false,
+    onKeepMentionedAgentsPinnedChange: () => {},
+  };
+  const view = render(
+    React.createElement(MentionAutocomplete, {
+      ...props,
+      openOptionsRequest: 0,
+    }),
+  );
+
+  view.rerender(
+    React.createElement(MentionAutocomplete, {
+      ...props,
+      openOptionsRequest: 1,
+    }),
+  );
+  assert.equal(
+    view.getByRole("button", { name: "Options" }).getAttribute("aria-expanded"),
+    "true",
+  );
+  const toggle = view.getByRole("switch", {
+    name: "Automatically mention agents",
+  });
+  const settings = view.getByTestId("mention-options-settings");
+  assert.equal(toggle.getAttribute("data-state"), "unchecked");
+
+  view.rerender(
+    React.createElement(MentionAutocomplete, {
+      ...props,
+      keepMentionedAgentsPinned: true,
+      openOptionsRequest: 2,
+    }),
+  );
+  assert.equal(view.getByTestId("mention-options-settings"), settings);
+  assert.equal(toggle.getAttribute("data-state"), "checked");
 });
 
 test("clicking outside dismisses the tray without intercepting its trigger", async () => {

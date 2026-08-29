@@ -179,12 +179,15 @@ globalThis.__TAURI_INTERNALS__ = {
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { act } from "react";
-import { QueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { QueryClientProvider } from "@tanstack/react-query";
 
 import {
   acpRuntimesQueryKey,
+  applyBootWarmGate,
+  getBootWarmSnapshot,
   refreshAcpRuntimes,
+  startBootWarm,
   useAcpRuntimesQueryForced,
 } from "./acpRuntimesQuery.ts";
 import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery.ts";
@@ -230,6 +233,144 @@ afterEach(() => {
   discoverHandler = () => Promise.resolve([]);
 });
 
+// Runs FIRST so the process-global boot-warm gate is observed from `idle`.
+// Covers Carl's ask: the cheap/forced race (a cold cheap catalog must read as
+// loading, not authoritative, while the first forced pass is in flight) and the
+// failure state (a failed forced pass must surface a retryable error carrying
+// the real reason, not a silent empty catalog), plus recovery on retry.
+describe("boot-warm gate drives cheap consumers through the initial pass", () => {
+  it("applyBootWarmGate: a non-empty cold catalog is not authoritative while pending or failed", () => {
+    // The real cold cheap response is NEVER empty: discovery always emits the
+    // known runtimes as not_installed/cli_missing rows plus presets. Model that
+    // wire shape so the gate is exercised against the payload it exists to
+    // gate, not a `[]` that never occurs in production.
+    const coldCatalog = {
+      data: [
+        rawEntry("codex", "unknown"),
+        rawEntry("goose", "unknown"),
+        rawEntry("claude-code", "unknown"),
+      ],
+      error: null,
+      isLoading: false,
+      isPending: false,
+      isFetching: false,
+      isError: false,
+    };
+    // A consumer maps `isLoading -> "loading"`, `isError -> "error"`, else
+    // `"ready"`. "Ready" is what blesses the cold rows as authoritative — the
+    // exact P2 defect. Assert neither pending nor failed reads as ready.
+    const readsAsReady = (q) => !q.isLoading && !q.isError;
+
+    const pending = applyBootWarmGate(coldCatalog, {
+      status: "pending",
+      error: null,
+    });
+    assert.equal(pending.isLoading, true);
+    assert.equal(pending.isPending, true);
+    assert.equal(
+      readsAsReady(pending),
+      false,
+      "pending must not read as ready",
+    );
+    // The catalog rows are preserved so a consumer reading `data ?? []` keeps
+    // them; only the lifecycle flags are overlaid.
+    assert.equal(pending.data.length, 3);
+
+    const reason = new Error("PATH probe timed out");
+    const failed = applyBootWarmGate(coldCatalog, {
+      status: "failed",
+      error: reason,
+    });
+    assert.equal(failed.isError, true);
+    assert.equal(failed.error, reason);
+    assert.equal(readsAsReady(failed), false, "failed must not read as ready");
+    assert.equal(failed.data.length, 3);
+
+    // idle/settled pass through untouched: onboarding renders before the warm
+    // starts (idle) and the warmed hot path (settled) must both read as ready.
+    for (const status of ["idle", "settled"]) {
+      const passed = applyBootWarmGate(coldCatalog, { status, error: null });
+      assert.equal(passed.isLoading, false);
+      assert.equal(passed.isError, false);
+      assert.equal(readsAsReady(passed), true, `${status} must read as ready`);
+    }
+  });
+
+  it("applyBootWarmGate: a warmed non-empty catalog reads as ready once settled", () => {
+    const warm = {
+      data: [rawEntry("codex", "logged_in")],
+      error: null,
+      isLoading: false,
+      isPending: false,
+      isFetching: false,
+      isError: false,
+    };
+    const settled = applyBootWarmGate(warm, { status: "settled", error: null });
+    assert.equal(settled.isLoading, false);
+    assert.equal(settled.isError, false);
+    assert.equal(settled.data.length, 1);
+  });
+
+  it("applyBootWarmGate: failed reads as a retryable error with the real reason", () => {
+    const cold = {
+      data: [],
+      error: null,
+      isLoading: true,
+      isPending: true,
+      isFetching: true,
+      isError: false,
+    };
+    const reason = new Error("PATH probe timed out");
+    const failed = applyBootWarmGate(cold, { status: "failed", error: reason });
+    assert.equal(failed.isError, true);
+    assert.equal(failed.error, reason);
+    assert.equal(failed.isLoading, false, "a failed warm is not still loading");
+  });
+
+  it("startBootWarm: failure marks the gate failed, a retry settles it", async () => {
+    assert.equal(
+      getBootWarmSnapshot().status,
+      "idle",
+      "gate must start idle before any warm",
+    );
+
+    const queryClient = makeQueryClient();
+    queryClient.mount();
+
+    // 1. First forced pass fails: the gate goes `failed` and captures the
+    //    reason, so cold cheap surfaces can show a retryable error.
+    let failForced = true;
+    discoverHandler = (args) =>
+      args?.force === true && failForced
+        ? Promise.reject(new Error("discovery boom"))
+        : Promise.resolve([]);
+    await startBootWarm(queryClient);
+    assert.equal(getBootWarmSnapshot().status, "failed");
+    assert.equal(getBootWarmSnapshot().error?.message, "discovery boom");
+
+    // 2. A retry that succeeds settles the gate and clears the error, so cheap
+    //    consumers stop overlaying and render the warmed catalog.
+    failForced = false;
+    discoverHandler = () => Promise.resolve([rawEntry("codex", "logged_in")]);
+    await startBootWarm(queryClient);
+    assert.equal(getBootWarmSnapshot().status, "settled");
+    assert.equal(getBootWarmSnapshot().error, null);
+
+    // 3. Once settled, further boot warms are no-ops (fixes the per-remount
+    //    re-fire): no additional forced probe fires.
+    const before = calls.filter(
+      (c) => c.command === "discover_acp_providers" && c.args?.force === true,
+    ).length;
+    await startBootWarm(queryClient);
+    const after = calls.filter(
+      (c) => c.command === "discover_acp_providers" && c.args?.force === true,
+    ).length;
+    assert.equal(after, before, "a settled gate must not re-fire the probe");
+
+    queryClient.unmount();
+  });
+});
+
 describe("refreshAcpRuntimes cannot dedup onto an in-flight cheap request", () => {
   it("runs a distinct force:true probe and writes it into the shared cache", async () => {
     const queryClient = makeQueryClient();
@@ -273,6 +414,59 @@ describe("refreshAcpRuntimes cannot dedup onto an in-flight cheap request", () =
       "shared cache must hold the forced result, not the later cheap one",
     );
 
+    queryClient.unmount();
+  });
+
+  it("an in-flight cheap query cannot clobber the forced result after refresh", async () => {
+    // Carl's settle-order finding: a cheap query in flight on the shared key
+    // must not land its (older) result after the forced catalog is written.
+    // `refreshAcpRuntimes` cancels the shared-key query before settling; this
+    // proves the cancel is load-bearing by holding a real cheap observer
+    // fetching, running the forced refresh, then resolving the cheap request
+    // late — its result must not overwrite the forced catalog, and the gate
+    // must settle on the forced state. (Removing the `cancelQueries` call makes
+    // the late cheap result win and fails this test.)
+    const queryClient = makeQueryClient();
+    queryClient.mount();
+
+    // Seed a pre-existing cold catalog, then start a mounted cheap observer that
+    // refetches and is held pending — the real in-flight shape.
+    queryClient.setQueryData(acpRuntimesQueryKey, [
+      rawEntry("codex", "unknown"),
+    ]);
+    const cheap = deferred();
+    discoverHandler = (args) => {
+      if (args?.force === false) return cheap.promise;
+      return Promise.resolve([rawEntry("codex", "logged_in")]);
+    };
+    const observer = new QueryObserver(queryClient, {
+      queryKey: acpRuntimesQueryKey,
+      queryFn: () => discoverAcpRuntimes(),
+      staleTime: 0,
+    });
+    const unsubscribe = observer.subscribe(() => {});
+    await new Promise((r) => setImmediate(r));
+
+    // Forced refresh completes and settles while the cheap observer is fetching.
+    await refreshAcpRuntimes(queryClient);
+
+    // The cheap request resolves afterward; its result must be dropped.
+    cheap.resolve([rawEntry("codex", "unknown")]);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+
+    assert.equal(
+      queryClient.getQueryData(acpRuntimesQueryKey)?.[0]?.authStatus.status,
+      "logged_in",
+      "shared cache must remain the forced result after a late cheap resolution",
+    );
+    assert.equal(
+      getBootWarmSnapshot().status,
+      "settled",
+      "the gate must settle on the forced catalog, not the stale cheap state",
+    );
+
+    unsubscribe();
     queryClient.unmount();
   });
 });

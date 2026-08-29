@@ -187,3 +187,30 @@ fn cheap_discovery_never_spawns_login_shell_even_when_cold() {
         "the forced path must probe the absent command via login shell at least once, got {forced}"
     );
 }
+
+/// Regression: `resolve_command_cached` (the cheap discovery path) must find a
+/// bundled sidecar sitting next to the executable via a filesystem stat, even
+/// with a cold resolve cache. Before the fix it consulted only the managed-shim
+/// dirs + cache, so `buzz-agent` reported "not installed" at every cold launch.
+/// Here the path form exercises the same `resolve_workspace_command` stat the
+/// cheap path now shares.
+#[cfg(unix)]
+#[test]
+fn cheap_path_resolves_workspace_sidecar_without_cache() {
+    use crate::managed_agents::discovery::resolve_command_cached;
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join(format!("buzz-sidecar-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let bin = dir.join("buzz-agent");
+    std::fs::write(&bin, "#!/bin/sh\n").expect("write sidecar");
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    assert_eq!(
+        resolve_command_cached(bin.to_str().expect("utf8 path")),
+        Some(bin.clone()),
+        "cheap path must resolve a bundled sidecar by path with a cold cache"
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}

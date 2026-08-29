@@ -425,10 +425,10 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
   await expect(
     page.getByTestId(`composer-address-lock-${relayPubkey}`),
   ).toHaveCount(0);
-  await input.fill("local");
+  await input.pressSequentially("local");
   await page.getByTestId("send-message").click();
   await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "local"))
+    .poll(() => readOutgoingMentionPubkeys(page, "@carl local"))
     .toEqual([managedPubkey]);
   await expect(input).toHaveText("@carl ");
 
@@ -448,7 +448,7 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
   await expect(
     page.getByTestId(`composer-address-lock-${managedPubkey}`),
   ).toHaveCount(0);
-  await input.fill("remote");
+  await input.pressSequentially("remote");
   await page.getByTestId("send-message").click();
   const sendWithoutInviting = page.getByRole("button", { name: "Do nothing" });
   try {
@@ -458,7 +458,7 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
     // In-channel selections send immediately without opening the prompt.
   }
   await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "remote"))
+    .poll(() => readOutgoingMentionPubkeys(page, "@carl remote"))
     .toEqual([relayPubkey]);
 
   await page.getByTestId("channel-members-trigger").click();
@@ -1673,30 +1673,60 @@ test("forum sends revalidate relay-agent authorization before signing", async ({
     .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
 });
 
-test("relay-only allowlisted agents are visible in channel mentions", async ({
+test("managed agents use the channel roster for membership labels", async ({
   page,
 }) => {
   await installMockBridge(page, {
-    relayAgents: [
+    managedAgents: [
       {
-        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
-        name: "quinn",
-        respondTo: "allowlist",
-        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
-        channelNames: ["general"],
+        pubkey: IN_CHANNEL_MANAGED_AGENT_PUBKEY,
+        name: "carl",
+        status: "running",
       },
     ],
   });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (channelId) =>
+          window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState([
+            "channels",
+            channelId,
+            "members",
+          ])?.status,
+        GENERAL_CHANNEL_ID,
+      ),
+    )
+    .toBe("success");
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock bridge is not installed.");
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels"],
+        exact: true,
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      pubkey: IN_CHANNEL_MANAGED_AGENT_PUBKEY,
+    },
+  );
 
   const input = page.getByTestId("message-input");
-  await input.fill("@quinn");
+  await input.fill("@carl");
 
-  const dropdown = autocomplete(page);
-  await expect(dropdown.getByText("quinn")).toBeVisible();
-  await expect(dropdown.getByText("agent")).toBeVisible();
+  const carlRow = autocomplete(page).locator("button", { hasText: "carl" });
+  await expect(carlRow).toBeVisible();
+  await expect(carlRow.getByText("agent")).toBeVisible();
+  await expect(carlRow.getByText("not in channel")).toHaveCount(0);
 });
 
 test("relay-agent directory errors fail closed and recover after a fresh fetch", async ({
@@ -1734,7 +1764,27 @@ test("relay-agent directory errors fail closed and recover after a fresh fetch",
       queryKey: ["relay-agents"],
     });
   });
-  await expect(autocomplete(page).getByText("quinn")).toHaveCount(0);
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState(["relay-agents"])
+            ?.fetchStatus,
+      ),
+    )
+    .toBe("fetching");
+  await expect(autocomplete(page).getByText("quinn")).toBeVisible({
+    timeout: 200,
+  });
+  await expect
+    .poll(async () =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_QUERY_CLIENT__?.getQueryState(["relay-agents"])
+            ?.fetchStatus,
+      ),
+    )
+    .toBe("idle");
   await expect(autocomplete(page).getByText("quinn")).toBeVisible();
 });
 
@@ -1915,6 +1965,56 @@ test("targeted revocation before send causes no agent side effects", async ({
       commandCount(baselineCommands, command),
     );
   }
+});
+
+test("selected relay agents are invited as bots before sending", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+  await expect(quinnRow).toBeVisible();
+  await expect(quinnRow.getByText("not in channel")).toHaveCount(0);
+  await quinnRow.click();
+  await page.keyboard.type("hello");
+
+  const baselinePayloadCount = (await readCommandPayloadLog(page)).length;
+  await page.getByTestId("send-message").click();
+  const inviteButton = page.getByRole("button", {
+    name: "Invite",
+    exact: true,
+  });
+  await expect(inviteButton).toBeVisible();
+  await inviteButton.click();
+
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
+    .toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  const sendCommands = (await readCommandPayloadLog(page)).slice(
+    baselinePayloadCount,
+  );
+  const addCommand = sendCommands.find(
+    (entry) => entry.command === "add_channel_members",
+  );
+  expect(addCommand?.payload).toMatchObject({
+    channelId: GENERAL_CHANNEL_ID,
+    pubkeys: [ALLOWLIST_RELAY_AGENT_PUBKEY],
+    role: "bot",
+  });
 });
 
 test("selected relay agents revoked after the invite prompt cause no side effects", async ({

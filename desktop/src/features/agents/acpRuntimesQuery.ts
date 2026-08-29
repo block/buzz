@@ -20,6 +20,153 @@ export const acpRuntimesQueryKey = ["acp-runtimes"] as const;
 export const acpRuntimesForcedQueryKey = ["acp-runtimes", "forced"] as const;
 
 /**
+ * Boot-warm gate for the *initial* forced discovery pass.
+ *
+ * The shared runtime catalog is in-memory only, so it starts cold every launch:
+ * the cheap discovery path reports every harness `(not installed)` until a
+ * forced pass warms it. Without a gate, the create/edit picker and Agents >
+ * Agent defaults surfaces read that cheap path and present the cold catalog as
+ * *authoritative* — blessing every harness as unavailable and blocking save —
+ * during the 20–65s boot probe, and forever if that probe fails.
+ *
+ * This module-level state lets cheap consumers (`useAcpRuntimesQuery`) treat the
+ * catalog as still-loading while the first forced pass is in flight and as a
+ * retryable error if it failed, instead of authoritative. It is process-global
+ * (one launch), so `startBootWarm` runs the warm exactly once no matter how many
+ * times `AppShell` mounts — that also fixes the per-remount re-fire.
+ *
+ * The seam that protects onboarding (which renders before `AppShell` fires the
+ * warm): the gate only overlays loading/error once the warm has *started*
+ * (`pending`/`failed`). While `idle` — no warm yet, e.g. the onboarding flow —
+ * cheap consumers behave exactly as before. A successful forced refresh from any
+ * surface settles the gate, so onboarding's own forced warm clears it too.
+ */
+export type AcpBootWarmStatus = "idle" | "pending" | "settled" | "failed";
+
+/**
+ * A stable snapshot object for `useSyncExternalStore`: `getSnapshot` must return
+ * a referentially-stable value between changes, so the object is rebuilt only in
+ * `setBootWarm`, never per read.
+ */
+let bootWarmSnapshot: { status: AcpBootWarmStatus; error: Error | null } = {
+  status: "idle",
+  error: null,
+};
+const bootWarmListeners = new Set<() => void>();
+
+function setBootWarm(status: AcpBootWarmStatus, error: Error | null) {
+  if (bootWarmSnapshot.status === status && bootWarmSnapshot.error === error) {
+    return;
+  }
+  bootWarmSnapshot = { status, error };
+  for (const listener of bootWarmListeners) listener();
+}
+
+export function subscribeBootWarm(listener: () => void) {
+  bootWarmListeners.add(listener);
+  return () => {
+    bootWarmListeners.delete(listener);
+  };
+}
+
+export function getBootWarmSnapshot() {
+  return bootWarmSnapshot;
+}
+
+/**
+ * Overlay the launch boot-warm gate onto a cheap-path query result so cheap
+ * consumers never present a cold catalog as authoritative. Pure so it can be
+ * unit-tested without a mounted hook.
+ *
+ * The cheap backend response is *never* empty on a cold cache — discovery
+ * always emits the full set of known runtimes (as `not_installed`/`cli_missing`
+ * rows) plus presets. Gating on `data.length` would therefore be a no-op for the
+ * exact payload this exists to gate, so the gate keys on the boot-warm state
+ * instead and always preserves `query.data`:
+ *
+ * - `pending` (first forced pass in flight) reads as loading, so a cold catalog
+ *   is presented as still-loading rather than a settled "everything
+ *   unavailable" list — even though those cold rows are non-empty.
+ * - `failed` (forced pass rejected) reads as a retryable error carrying the
+ *   probe's real reason.
+ * - `idle`/`settled` pass the query through unchanged, so onboarding (which
+ *   renders before the warm starts) and the warmed hot path are untouched.
+ *
+ * `query.data` is preserved on every branch: overlaying only the lifecycle
+ * flags means a consumer that reads `data ?? []` keeps its rows while a
+ * status-driven consumer correctly treats them as not-yet-authoritative.
+ */
+export function applyBootWarmGate<
+  Q extends {
+    data?: unknown[];
+    error: Error | null;
+    isLoading: boolean;
+    isPending: boolean;
+    isFetching: boolean;
+    isError: boolean;
+  },
+>(query: Q, bootWarm: { status: AcpBootWarmStatus; error: Error | null }): Q {
+  if (bootWarm.status === "pending") {
+    return { ...query, isLoading: true, isPending: true, isFetching: true };
+  }
+  if (bootWarm.status === "failed") {
+    return {
+      ...query,
+      isError: true,
+      error: bootWarm.error ?? query.error,
+      isLoading: false,
+    };
+  }
+  return query;
+}
+
+/**
+ * Run the initial forced discovery pass once per launch and drive the boot-warm
+ * gate. `AppShell` calls this on mount; the `pending`/`settled` short-circuit
+ * makes remounts no-ops (fixing the re-fire) while still retrying after a prior
+ * failure. Success is recorded by `refreshAcpRuntimes` itself (any forced
+ * success settles the gate); this only has to mark its own failure.
+ */
+export async function startBootWarm(
+  queryClient: ReturnType<typeof useQueryClient>,
+) {
+  const status: AcpBootWarmStatus = bootWarmSnapshot.status;
+  if (status === "pending" || status === "settled") {
+    return;
+  }
+  setBootWarm("pending", null);
+  const result = await refreshAcpRuntimes(queryClient);
+  // A concurrent forced success may have already settled the gate; only mark
+  // failed if this pass is still the pending one and it returned no catalog.
+  if (result === undefined && bootWarmSnapshot.status === "pending") {
+    setBootWarm("failed", lastForcedError);
+  }
+}
+
+/**
+ * A stable callback that re-runs the boot warm after it failed, for the retry
+ * affordance the cheap-path surfaces (create/edit picker, Agent defaults) show
+ * when the gate is in its `failed` state. `startBootWarm` is the retry
+ * primitive: from `failed` it transitions back through `pending` (so the
+ * surface shows loading again) to `settled` on success or `failed` with a fresh
+ * reason on another rejection. It no-ops while `pending`/`settled`, so a
+ * double-click cannot stack probes.
+ */
+export function useRetryBootWarm() {
+  const queryClient = useQueryClient();
+  return React.useCallback(() => {
+    void startBootWarm(queryClient);
+  }, [queryClient]);
+}
+
+/**
+ * The error from the most recent failed forced probe, surfaced through the
+ * boot-warm `failed` state so a cold catalog shows a real reason rather than a
+ * silent empty list. Cleared on the next forced success.
+ */
+let lastForcedError: Error | null = null;
+
+/**
  * Run a forced (full re-discovery) refresh and write the result into the shared
  * runtime-catalog cache.
  *
@@ -48,13 +195,20 @@ export async function refreshAcpRuntimes(
       staleTime: 0,
       gcTime: 0,
     });
-    queryClient.setQueryData(acpRuntimesQueryKey, result);
-    // A hot-surface cheap fetch may already be in flight on the shared key; cancel
-    // it so its (older, cached) result cannot land after and clobber the fresh
-    // forced catalog we just wrote.
+    // Cancel and *await* the in-flight cheap query on the shared key BEFORE
+    // writing the forced result. `cancelQueries` defaults to `revert: true`, so
+    // cancellation restores the cheap query's pre-fetch state; doing it after
+    // `setQueryData` would let that revert land last and clobber the fresh
+    // forced catalog, and the gate would then settle on the stale state. With
+    // the cancel awaited first, our `setQueryData` is the final write.
     await queryClient.cancelQueries({ queryKey: acpRuntimesQueryKey });
+    queryClient.setQueryData(acpRuntimesQueryKey, result);
+    // Any forced success proves the catalog is warm: settle the boot-warm gate
+    // and clear the last error, so cheap consumers stop overlaying loading/error.
+    lastForcedError = null;
+    setBootWarm("settled", null);
     return result;
-  } catch {
+  } catch (error) {
     // The forced probe rejected. `fetchQuery` has already recorded the error in
     // the forced key's query state, where `useAcpRuntimesQueryForced` projects
     // it into the hook's returned `error`/`isError`. Swallow the rejection here
@@ -63,7 +217,9 @@ export async function refreshAcpRuntimes(
     // paths) can keep `void refreshAcpRuntimes(...)` without ever leaking an
     // unhandled rejection, and a new call site can never reintroduce one. The
     // shared cache is left untouched so consumers keep the last good catalog
-    // alongside the surfaced error.
+    // alongside the surfaced error. Record the error so a failed boot warm can
+    // surface a real reason on the cheap-path surfaces (via the boot-warm gate).
+    lastForcedError = error instanceof Error ? error : new Error(String(error));
     return undefined;
   }
 }

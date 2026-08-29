@@ -18,6 +18,7 @@ import {
   getAgentIdentityPubkeys,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
+  isAgentDirectoryReady,
   isAgentMentionChannelType,
   rememberSelectedAgentPubkeys,
   uniqueAutocompleteLabels,
@@ -32,7 +33,6 @@ import type { ChannelMember, ChannelType } from "@/shared/api/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { detectPrefixQuery } from "@/shared/lib/detectPrefixQuery";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { channelMemberPubkeySet } from "@/shared/lib/rosterDerivations";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { useActiveAgentPubkeys } from "./useActiveAgentPubkeys";
 import { useDefaultAgentSuggestion } from "./useDefaultAgentSuggestion";
@@ -50,6 +50,7 @@ import {
 } from "./useMentionSelection";
 import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
+import { getMentionMemberPubkeys } from "./mentionMemberPubkeys";
 import {
   appendUniqueName,
   buildTeamMentionCandidates,
@@ -99,14 +100,8 @@ export function useMentions(
   const channelsQuery = useChannelsQuery();
   const personasQuery = usePersonasQuery();
   const teamsQuery = useTeamsQuery();
-  const managedAgentDirectoryReady =
-    managedAgentsQuery.data !== undefined &&
-    managedAgentsQuery.error === null &&
-    !managedAgentsQuery.isFetching;
-  const relayAgentDirectoryReady =
-    relayAgentsQuery.data !== undefined &&
-    relayAgentsQuery.error === null &&
-    !relayAgentsQuery.isFetching;
+  const managedAgentDirectoryReady = isAgentDirectoryReady(managedAgentsQuery);
+  const relayAgentDirectoryReady = isAgentDirectoryReady(relayAgentsQuery);
   const agentDirectoriesReady =
     managedAgentDirectoryReady && relayAgentDirectoryReady;
   const canSearchGlobalUsers = canSearchGlobalPeople && agentDirectoriesReady;
@@ -228,11 +223,9 @@ export function useMentions(
     () => new Set(activePersonas.map((persona) => persona.id)),
     [activePersonas],
   );
-  // Identity-cached (shared with the timeline's roster derivations) — the
-  // Set is built once per distinct roster instead of per consumer.
   const memberPubkeys = React.useMemo(
-    () => (members ? channelMemberPubkeySet(members) : new Set<string>()),
-    [members],
+    () => getMentionMemberPubkeys(channelId, channelsQuery.data, members),
+    [channelId, channelsQuery.data, members],
   );
   const agentIdentityPubkeys = React.useMemo(
     () =>
@@ -260,6 +253,7 @@ export function useMentions(
         managedAgents: managedAgentsQuery.data,
         memberPubkeys,
         members,
+        mentionChannelId,
         mentionableAgentPubkeys,
         personaNameByPubkey,
         profiles,
@@ -283,6 +277,7 @@ export function useMentions(
       managedAgentsQuery.data,
       memberPubkeys,
       members,
+      mentionChannelId,
       mentionableAgentPubkeys,
       personaNameByPubkey,
       profiles,
@@ -535,11 +530,11 @@ export function useMentions(
         appendUniqueName(current, trimmedName),
       );
       if (options?.isAgent) {
-        setSelectedAgentMentionNames((current) => {
-          const next = appendUniqueName(current, trimmedName);
-          selectedAgentMentionNamesRef.current = next;
-          return next;
-        });
+        selectedAgentMentionNamesRef.current = appendUniqueName(
+          selectedAgentMentionNamesRef.current,
+          trimmedName,
+        );
+        setSelectedAgentMentionNames(selectedAgentMentionNamesRef.current);
       }
     },
     [],

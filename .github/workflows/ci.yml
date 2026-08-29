@@ -780,6 +780,77 @@ jobs:
             --run-ignored ignored-only
         env:
           DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+      - name: Admin API nip98 read-write attribution test
+        # The only real HTTP → nip98 operator principal → mutation → cross-table
+        # attribution coverage: an authenticated operator's dismiss attributes
+        # to the operator's own key with relay_operator authority. Staffing
+        # PUT/DELETE attribution is covered by
+        # nip98_staffing_put_and_delete_write_attributed_audit_rows in the
+        # roster-audit lane below. #[ignore]d in the default suite — see
+        # api::admin::tests::nip98_operator_dismiss_succeeds_attributed_to_operator.
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and test(=api::admin::tests::nip98_operator_dismiss_succeeds_attributed_to_operator)' \
+            --run-ignored ignored-only
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+      - name: Admin API unrostered-signer replay invariant
+        # The only causal proof that a validly-signing but unrostered key cannot
+        # consume NIP-98 replay slots: it asserts principal resolution fails
+        # BEFORE the replay ID is claimed (tracking.claim_count() == 0). This
+        # test is non-ignored, so it runs neither in Backend Integration's
+        # ignored-only selectors nor in the infra-free unit job — the unit job's
+        # api::admin selector excludes it because DB-free it only passes by
+        # waiting out the ~30s sqlx acquire timeout on a read-route fallthrough.
+        # It lives here so a reachable Postgres resolves (and fails) the lookup
+        # fast instead of timing out.
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)'
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+      - name: Admin API roster-audit / timeout / canonicalization security tests
+        # Security-review fixes for the roster admin API, all #[ignore]d in the
+        # default suite (they need Postgres) and selected by no other job:
+        #  - buzz-db relay_operators::tests: audit pre-image trail, per-target
+        #    lock serialization, insertion-time audit ordering, and
+        #    audit-failure rollback coupling.
+        #  - buzz-db relay_operators::tests last-operator invariant: sole DB
+        #    operator cannot self-demote or self-delete to zero, config presence
+        #    lifts the guard, and concurrent cross-target deletes racing to zero
+        #    leave exactly one operator (roster-wide advisory lock).
+        #  - buzz-relay api::admin: NIP-98 staffing writes attributed audit rows,
+        #    adversarial expirationSecs rejected at the resolve route, mixed-case
+        #    staffing normalizes to one canonical row.
+        #
+        # --test-threads=1: the last-operator invariant counts the roster
+        # globally, and the sole-operator tests clear the roster then assert
+        # their operator is the only one. They must not race each other on the
+        # shared test roster, so this lane runs serially.
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            --test-threads=1 \
+            -E '(package(buzz-db) and test(=relay_operators::tests::roster_mutations_write_pre_image_audit_rows)) or (package(buzz-db) and test(=relay_operators::tests::concurrent_upserts_serialize_and_record_true_pre_image)) or (package(buzz-db) and test(=relay_operators::tests::audit_order_follows_seq_under_backward_clock)) or (package(buzz-db) and test(=relay_operators::tests::audit_insert_failure_rolls_back_roster_mutation)) or (package(buzz-db) and test(=relay_operators::tests::demoting_sole_db_operator_without_config_is_rejected)) or (package(buzz-db) and test(=relay_operators::tests::deleting_sole_db_operator_without_config_is_rejected)) or (package(buzz-db) and test(=relay_operators::tests::config_present_allows_deleting_last_db_operator)) or (package(buzz-db) and test(=relay_operators::tests::concurrent_deletes_racing_to_zero_leave_one_operator)) or (package(buzz-relay) and test(=api::admin::tests::nip98_staffing_put_and_delete_write_attributed_audit_rows)) or (package(buzz-relay) and test(=api::admin::tests::resolve_route_rejects_adversarial_expiration_and_leaves_report_open)) or (package(buzz-relay) and test(=api::admin::tests::mixed_case_non_config_staffing_normalizes_to_one_row))' \
+            --run-ignored ignored-only
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+      - name: Admin API escalation-scoping tests
+        # Escalation scoping for the moderation queue, all #[ignore]d (they need
+        # Postgres) and selected by no other job:
+        #  - GET /reports defaults to the escalated-only backstop, scope=all
+        #    restores full visibility, explicit status= overrides the default.
+        #  - member reports with category 'illegal' auto-escalate at ingestion
+        #    while every other category still lands 'open'.
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E '(package(buzz-relay) and test(=api::admin::tests::reports_default_lists_escalated_only)) or (package(buzz-relay) and test(=api::admin::tests::reports_scope_all_lists_every_status)) or (package(buzz-relay) and test(=api::admin::tests::reports_explicit_status_filter_overrides_default)) or (package(buzz-db) and test(=moderation::tests::illegal_report_auto_escalates_at_ingest)) or (package(buzz-db) and test(=moderation::tests::non_illegal_report_lands_open_at_ingest)) or (package(buzz-db) and test(=relay_admin_actions::tests::auto_escalated_report_reopens_like_an_admin_escalated_one))' \
+            --run-ignored ignored-only
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
       - name: Upload relay log
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -936,6 +1007,20 @@ jobs:
       - name: Build Android debug APK
         run: just mobile-build-android
 
+  mobile-swift:
+    name: Mobile Swift
+    runs-on: macos-latest
+    timeout-minutes: 10
+    needs: [changes]
+    if: needs.changes.outputs.mobile == 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Build
+        run: swift build --package-path mobile/ios/BuzzPushKit
+      - name: Build release
+        run: swift build -c release --package-path mobile/ios/BuzzPushKit
+      - name: Test
+        run: swift test --package-path mobile/ios/BuzzPushKit
   security:
     name: Security
     runs-on: ubuntu-latest
