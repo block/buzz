@@ -2345,6 +2345,230 @@ async fn add_member_with_role_ws(
     (ok.accepted, ok.message)
 }
 
+async fn send_canvas_event_ws(
+    client: &mut BuzzTestClient,
+    content: &str,
+    tags: Vec<Tag>,
+    signer: &Keys,
+) -> (bool, String) {
+    let event = EventBuilder::new(Kind::Custom(40_100), content)
+        .tags(tags)
+        .sign_with_keys(signer)
+        .expect("sign Canvas event");
+    let ok = client.send_event(event).await.expect("send Canvas event");
+    (ok.accepted, ok.message)
+}
+
+async fn set_canvas_ws(
+    client: &mut BuzzTestClient,
+    channel_id: &str,
+    content: &str,
+    signer: &Keys,
+) -> (bool, String) {
+    send_canvas_event_ws(
+        client,
+        content,
+        vec![Tag::parse(["h", channel_id]).expect("Canvas h tag")],
+        signer,
+    )
+    .await
+}
+
+async fn query_canvas_events(client: &mut BuzzTestClient, channel_id: &str) -> Vec<nostr::Event> {
+    let sid = sub_id("canvas");
+    let filter = Filter::new()
+        .kind(Kind::Custom(40_100))
+        .custom_tag(
+            SingleLetterTag::lowercase(Alphabet::H),
+            channel_id.to_string(),
+        )
+        .limit(20);
+    client
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe to Canvas events");
+    client
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("collect Canvas events")
+}
+
+/// Canvas is human-approved channel context. Owners/admins may revise it;
+/// bots, members, outsiders, cross-channel authors, and malformed events fail
+/// closed and never replace the stored revision.
+#[tokio::test]
+#[ignore]
+async fn test_canvas_writes_require_channel_owner_or_admin() {
+    let url = relay_url();
+    let owner_keys = Keys::generate();
+    let admin_keys = Keys::generate();
+    let member_keys = Keys::generate();
+    let bot_keys = Keys::generate();
+    let outsider_keys = Keys::generate();
+    let other_owner_keys = Keys::generate();
+
+    let mut owner_client = BuzzTestClient::connect(&url, &owner_keys)
+        .await
+        .expect("connect as owner");
+    let channel_id = create_private_channel_ws(&mut owner_client, &owner_keys).await;
+
+    for (keys, role) in [(&admin_keys, "admin"), (&bot_keys, "bot")] {
+        let (accepted, message) = add_member_with_role_ws(
+            &mut owner_client,
+            &channel_id,
+            &keys.public_key().to_hex(),
+            role,
+            &owner_keys,
+        )
+        .await;
+        assert!(accepted, "owner should add {role}: {message}");
+    }
+    let (accepted, message) = add_member_ws(
+        &mut owner_client,
+        &channel_id,
+        &member_keys.public_key().to_hex(),
+        &owner_keys,
+    )
+    .await;
+    assert!(accepted, "owner should add member: {message}");
+
+    let (accepted, message) = set_canvas_ws(
+        &mut owner_client,
+        &channel_id,
+        "# Approved owner Canvas",
+        &owner_keys,
+    )
+    .await;
+    assert!(accepted, "owner Canvas should be accepted: {message}");
+
+    let mut admin_client = BuzzTestClient::connect(&url, &admin_keys)
+        .await
+        .expect("connect as admin");
+    let (accepted, message) = set_canvas_ws(
+        &mut admin_client,
+        &channel_id,
+        "# Approved admin Canvas",
+        &admin_keys,
+    )
+    .await;
+    assert!(accepted, "admin Canvas should be accepted: {message}");
+
+    let mut member_client = BuzzTestClient::connect(&url, &member_keys)
+        .await
+        .expect("connect as member");
+    let (accepted, message) = set_canvas_ws(
+        &mut member_client,
+        &channel_id,
+        "# Unapproved member Canvas",
+        &member_keys,
+    )
+    .await;
+    assert!(!accepted, "member Canvas must be rejected");
+    assert!(
+        message.contains("owners or admins"),
+        "member rejection should name the authority boundary: {message}"
+    );
+
+    let mut bot_client = BuzzTestClient::connect(&url, &bot_keys)
+        .await
+        .expect("connect as bot");
+    let (accepted, _) = set_canvas_ws(
+        &mut bot_client,
+        &channel_id,
+        "# Unapproved bot Canvas",
+        &bot_keys,
+    )
+    .await;
+    assert!(!accepted, "bot Canvas must be rejected");
+
+    let mut outsider_client = BuzzTestClient::connect(&url, &outsider_keys)
+        .await
+        .expect("connect as outsider");
+    let (accepted, _) = set_canvas_ws(
+        &mut outsider_client,
+        &channel_id,
+        "# Unapproved outsider Canvas",
+        &outsider_keys,
+    )
+    .await;
+    assert!(!accepted, "nonmember Canvas must be rejected");
+
+    let mut other_owner_client = BuzzTestClient::connect(&url, &other_owner_keys)
+        .await
+        .expect("connect as other owner");
+    let other_channel_id =
+        create_private_channel_ws(&mut other_owner_client, &other_owner_keys).await;
+    let (accepted, _) = set_canvas_ws(
+        &mut member_client,
+        &other_channel_id,
+        "# Cross-channel Canvas",
+        &member_keys,
+    )
+    .await;
+    assert!(!accepted, "cross-channel Canvas must be rejected");
+
+    for (content, tags) in [
+        (
+            "   \n".to_string(),
+            vec![Tag::parse(["h", &channel_id]).expect("blank h tag")],
+        ),
+        (
+            "x".repeat(64 * 1024 + 1),
+            vec![Tag::parse(["h", &channel_id]).expect("oversize h tag")],
+        ),
+        ("# Missing scope".to_string(), Vec::new()),
+        (
+            "# Multiple scopes".to_string(),
+            vec![
+                Tag::parse(["h", &channel_id]).expect("first h tag"),
+                Tag::parse(["h", &other_channel_id]).expect("second h tag"),
+            ],
+        ),
+    ] {
+        let (accepted, _) =
+            send_canvas_event_ws(&mut owner_client, &content, tags, &owner_keys).await;
+        assert!(!accepted, "malformed Canvas must be rejected");
+    }
+
+    let stored = query_canvas_events(&mut owner_client, &channel_id).await;
+    let stored_contents: Vec<&str> = stored.iter().map(|event| event.content.as_str()).collect();
+    assert!(stored_contents.contains(&"# Approved owner Canvas"));
+    assert!(stored_contents.contains(&"# Approved admin Canvas"));
+    for rejected in [
+        "# Unapproved member Canvas",
+        "# Unapproved bot Canvas",
+        "# Unapproved outsider Canvas",
+        "# Cross-channel Canvas",
+        "# Missing scope",
+        "# Multiple scopes",
+    ] {
+        assert!(
+            !stored_contents.contains(&rejected),
+            "rejected revision reached storage: {rejected}"
+        );
+    }
+    let other_stored = query_canvas_events(&mut other_owner_client, &other_channel_id).await;
+    assert!(
+        other_stored
+            .iter()
+            .all(|event| event.content != "# Cross-channel Canvas"),
+        "cross-channel revision reached storage"
+    );
+
+    owner_client.disconnect().await.expect("disconnect owner");
+    admin_client.disconnect().await.expect("disconnect admin");
+    member_client.disconnect().await.expect("disconnect member");
+    bot_client.disconnect().await.expect("disconnect bot");
+    outsider_client
+        .disconnect()
+        .await
+        .expect("disconnect outsider");
+    other_owner_client
+        .disconnect()
+        .await
+        .expect("disconnect other owner");
+}
+
 /// Any active member can add any ordinary role to a private channel.
 #[tokio::test]
 #[ignore]
