@@ -890,12 +890,8 @@ export function ChannelScreen({
                   isFollowingThread={isNotifiedForEffectiveThread}
                   isSending={sendMessageMutation.isPending}
                   isSinglePanelView={isSinglePanelView}
-                  isTimelineError={messagesQuery.isError}
-                  isTimelineLoading={isTimelineLoading}
-                  onRetryTimeline={() => {
-                    void messagesQuery.refetch();
-                  }}
-                  messages={timelineMessages}
+                  isTimelineError={messagesQuery.isError} isTimelineLoading={isTimelineLoading}
+                  onRetryTimeline={() => void messagesQuery.refetch()} messages={timelineMessages}
                   threadSummaries={threadSummaries}
                   huddleThreadRepliesError={huddleThreadRepliesError}
                   onRetryHuddleThreadReplies={onRetryHuddleThreadReplies}
