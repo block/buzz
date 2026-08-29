@@ -151,9 +151,14 @@ describe("SuggestedOwners — mounted consumer of ownerSuggestion + useSetChanne
       );
     });
     // The mutation resolves through a dynamic import + async Tauri round trip
-    // (several microtask hops); give it real time to settle before asserting.
+    // (several microtask hops). A fixed sleep here raced that chain and failed
+    // 3/8 runs under load (invokeCalls still empty at 50ms). Poll for the call
+    // to land instead: deterministic when it works, bounded so it cannot hang.
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 50));
+      const deadline = Date.now() + 2000;
+      while (invokeCalls.length === 0 && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
     });
 
     assert.equal(invokeCalls.length, 1, "clicking must issue exactly one call");

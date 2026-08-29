@@ -39,10 +39,7 @@ export function isTaskDone(task: ChannelTask): boolean {
  * Sort newest-updated first (the relay already orders within a community, but
  * the My-Tasks fan-in merges sources and must re-order the merged list).
  */
-export function byUpdatedAtDesc(
-  a: ChannelTask,
-  b: ChannelTask,
-): number {
+export function byUpdatedAtDesc(a: ChannelTask, b: ChannelTask): number {
   return b.updatedAt - a.updatedAt;
 }
 

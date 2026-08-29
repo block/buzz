@@ -19,10 +19,8 @@ import {
   setChannelTaskStatus,
 } from "./channelTasks";
 
-export const channelTasksKey = (channelId: string | null) => [
-  "channel-tasks",
-  channelId,
-] as const;
+export const channelTasksKey = (channelId: string | null) =>
+  ["channel-tasks", channelId] as const;
 
 const myWorkspaceTasksKey = ["my-workspace-tasks"] as const;
 

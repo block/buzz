@@ -6,7 +6,11 @@ import {
   isTaskDone,
   type ChannelTask,
 } from "@/features/tasks/lib/channelTasks";
-import { useChannelTasks, useCreateChannelTask, useSetChannelTaskStatus } from "@/features/tasks/lib/useChannelTasks";
+import {
+  useChannelTasks,
+  useCreateChannelTask,
+  useSetChannelTaskStatus,
+} from "@/features/tasks/lib/useChannelTasks";
 import type { OwnerCandidate } from "@/features/tasks/lib/ownerSuggestion";
 import { SuggestedOwners } from "@/features/tasks/ui/SuggestedOwners";
 import { Button } from "@/shared/ui/button";
@@ -145,7 +149,9 @@ export function ChannelTaskList({ channelId }: { channelId: string | null }) {
         />
         <Button
           data-testid="channel-task-create"
-          disabled={channelId === null || draft.trim() === "" || createTask.isPending}
+          disabled={
+            channelId === null || draft.trim() === "" || createTask.isPending
+          }
           onClick={onCreate}
           size="sm"
           type="button"
@@ -156,7 +162,10 @@ export function ChannelTaskList({ channelId }: { channelId: string | null }) {
         </Button>
       </div>
       {tasks.isError ? (
-        <p className="text-sm text-muted-foreground" data-testid="channel-task-error">
+        <p
+          className="text-sm text-muted-foreground"
+          data-testid="channel-task-error"
+        >
           {tasks.error instanceof Error
             ? tasks.error.message
             : "Could not load tasks"}
@@ -164,7 +173,10 @@ export function ChannelTaskList({ channelId }: { channelId: string | null }) {
       ) : null}
       {tasks.data ? (
         tasks.data.length === 0 ? (
-          <p className="text-sm text-muted-foreground" data-testid="channel-task-empty">
+          <p
+            className="text-sm text-muted-foreground"
+            data-testid="channel-task-empty"
+          >
             No channel tasks yet.
           </p>
         ) : (

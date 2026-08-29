@@ -416,9 +416,7 @@ export function ViewLoadingFallback({
       {kind === "pulse" ? (
         <ChannelLoadingBody hasHeader={shouldShowChannelHeader} />
       ) : null}
-      {kind === "tasks" ? (
-        <CardListLoadingBody />
-      ) : null}
+      {kind === "tasks" ? <CardListLoadingBody /> : null}
     </div>
   );
 }
