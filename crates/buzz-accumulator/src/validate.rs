@@ -82,8 +82,11 @@ pub fn headings(output: &str) -> Vec<String> {
 /// jam several full ids together.
 ///
 /// `[event:<64 hex>]` yields that id; `[event:<id>, event:<id>]` yields both.
-/// A bracket without a full 64-hex id inside (shortened id, prose) is kept
-/// verbatim so it still fails validation loudly.
+/// A hex run splits into ids only when its length is an exact multiple of 64 —
+/// a 64-hex prefix with hex garbage appended must not pass as a valid id, so
+/// any other run of ≥ 64 is kept whole. A bracket without a full 64-hex id
+/// inside (shortened id, prose) is kept verbatim. Either way the impostor
+/// cannot match a real shown id, so it still fails validation loudly.
 pub fn cited_event_ids(citation_text: &str) -> BTreeSet<String> {
     let mut cited = BTreeSet::new();
     let mut rest = citation_text;
@@ -98,16 +101,22 @@ pub fn cited_event_ids(citation_text: &str) -> BTreeSet<String> {
             continue;
         }
         let before = cited.len();
-        // Consecutive non-overlapping 64-char windows over each maximal hex run.
+        // Non-overlapping 64-char windows over each maximal hex run whose
+        // length is an exact multiple of 64.
         let mut run_start: Option<usize> = None;
         for (i, c) in chunk.char_indices().chain([(chunk.len(), ' ')]) {
             if matches!(c, '0'..='9' | 'a'..='f') {
                 run_start.get_or_insert(i);
             } else if let Some(s) = run_start.take() {
-                let mut at = s;
-                while i - at >= 64 {
-                    cited.insert(chunk[at..at + 64].to_string());
-                    at += 64;
+                let len = i - s;
+                if len >= 64 && len % 64 == 0 {
+                    let mut at = s;
+                    while at < i {
+                        cited.insert(chunk[at..at + 64].to_string());
+                        at += 64;
+                    }
+                } else if len > 64 {
+                    cited.insert(chunk[s..i].to_string());
                 }
             }
         }
@@ -120,13 +129,13 @@ pub fn cited_event_ids(citation_text: &str) -> BTreeSet<String> {
 
 /// Validate model output against the artifact contract.
 ///
-/// - Freeform schemas (no sections) require only non-empty output.
-/// - Sectioned schemas require exactly the schema's H1 sections, in order.
-/// - When signals were shown (`source_event_ids` non-empty), the append
-///   sections must cite ≥ 1 of them and may cite nothing else. Citations the
-///   model merely re-emitted from the prior artifact's append sections are
-///   stripped before checking, so only this run's citations are judged
-///   against this run's shown ids.
+/// - The output must have exactly the schema's H1 sections, in order.
+/// - Append-section citations are always judged: every cited id must be one of
+///   this run's `source_event_ids` — a run that was shown nothing may cite
+///   nothing. Citations the model merely re-emitted from the prior artifact's
+///   append sections are stripped first, so only this run's citations are
+///   judged against this run's shown ids.
+/// - When signals were shown, the append sections must cite ≥ 1 of them.
 ///
 /// Any failure is [`Error::Nonconforming`]: the caller persists nothing.
 pub fn validate_output(
@@ -135,15 +144,6 @@ pub fn validate_output(
     previous_output: Option<&str>,
     source_event_ids: &[String],
 ) -> Result<(), Error> {
-    if schema.sections.is_empty() {
-        if output.trim().is_empty() {
-            return Err(Error::Nonconforming(format!(
-                "schema {:?} requires non-empty output",
-                schema.name
-            )));
-        }
-        return Ok(());
-    }
     let found = headings(output);
     if found != schema.sections {
         return Err(Error::Nonconforming(format!(
@@ -151,45 +151,46 @@ pub fn validate_output(
             schema.name, schema.sections, found
         )));
     }
-    if !source_event_ids.is_empty() {
-        if schema.append_sections.is_empty() {
-            return Err(Error::Nonconforming(format!(
-                "schema {:?} has no append section for event citations",
-                schema.name
-            )));
+    if schema.append_sections.is_empty() {
+        if source_event_ids.is_empty() {
+            return Ok(());
         }
-        let joined = |doc: &str| {
-            schema
-                .append_sections
-                .iter()
-                .map(|name| section(doc, name))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        let citation_text = joined(output);
-        let prior_citation_text = joined(previous_output.unwrap_or(""));
-        let new_citation_text = if !prior_citation_text.is_empty() {
-            citation_text.replacen(&prior_citation_text, "", 1)
-        } else {
-            citation_text
-        };
-        let cited = cited_event_ids(&new_citation_text);
-        let allowed: BTreeSet<&str> = source_event_ids.iter().map(String::as_str).collect();
-        let fabricated: Vec<&str> = cited
+        return Err(Error::Nonconforming(format!(
+            "schema {:?} has no append section for event citations",
+            schema.name
+        )));
+    }
+    let joined = |doc: &str| {
+        schema
+            .append_sections
             .iter()
-            .map(String::as_str)
-            .filter(|id| !allowed.contains(id))
-            .collect();
-        if !fabricated.is_empty() {
-            return Err(Error::Nonconforming(format!(
-                "append sections cite unknown source event ids: {fabricated:?}"
-            )));
-        }
-        if cited.is_empty() {
-            return Err(Error::Nonconforming(
-                "append sections are missing a source event citation".into(),
-            ));
-        }
+            .map(|name| section(doc, name))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let citation_text = joined(output);
+    let prior_citation_text = joined(previous_output.unwrap_or(""));
+    let new_citation_text = if !prior_citation_text.is_empty() {
+        citation_text.replacen(&prior_citation_text, "", 1)
+    } else {
+        citation_text
+    };
+    let cited = cited_event_ids(&new_citation_text);
+    let allowed: BTreeSet<&str> = source_event_ids.iter().map(String::as_str).collect();
+    let fabricated: Vec<&str> = cited
+        .iter()
+        .map(String::as_str)
+        .filter(|id| !allowed.contains(id))
+        .collect();
+    if !fabricated.is_empty() {
+        return Err(Error::Nonconforming(format!(
+            "append sections cite event ids that were not shown this run: {fabricated:?}"
+        )));
+    }
+    if !source_event_ids.is_empty() && cited.is_empty() {
+        return Err(Error::Nonconforming(
+            "append sections are missing a source event citation".into(),
+        ));
     }
     Ok(())
 }
@@ -235,7 +236,7 @@ pub fn splice_append_sections(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{CHANNEL_DIGEST_V1, FREEFORM_V1};
+    use crate::schema::CHANNEL_DIGEST_V1;
 
     fn id(c: char) -> String {
         std::iter::repeat_n(c, 64).collect()
@@ -270,15 +271,19 @@ mod tests {
     }
 
     #[test]
-    fn freeform_requires_only_non_empty() {
-        assert!(validate_output(&FREEFORM_V1, "  \n", None, &[]).is_err());
-        assert!(validate_output(&FREEFORM_V1, "anything", None, &[]).is_ok());
-    }
-
-    #[test]
     fn fabricated_citation_is_refused() {
         let out = digest(&format!("- made up [event:{}]", id('c')));
         let err = validate_output(&CHANNEL_DIGEST_V1, &out, None, &[id('a')]);
+        assert!(matches!(err, Err(Error::Nonconforming(_))));
+    }
+
+    #[test]
+    fn run_shown_nothing_may_cite_nothing() {
+        // A config-only rerun shows no signals: an empty Log passes…
+        assert!(validate_output(&CHANNEL_DIGEST_V1, &digest(""), None, &[]).is_ok());
+        // …but any citation is a fabrication and is refused.
+        let out = digest(&format!("- invented [event:{}]", id('c')));
+        let err = validate_output(&CHANNEL_DIGEST_V1, &out, None, &[]);
         assert!(matches!(err, Err(Error::Nonconforming(_))));
     }
 
@@ -303,6 +308,23 @@ mod tests {
         assert!(cited.contains(&id('a')) && cited.contains(&id('b')));
         let short = cited_event_ids("[event:abc123]");
         assert_eq!(short.into_iter().collect::<Vec<_>>(), vec!["abc123"]);
+    }
+
+    #[test]
+    fn hex_run_with_trailing_garbage_is_not_a_valid_prefix_id() {
+        // 64 valid hex chars + 6 more hex chars: must NOT yield the 64-char
+        // prefix (which could match a real shown id); the run is kept whole.
+        let run = format!("{}abcdef", id('a'));
+        let cited = cited_event_ids(&format!("[event:{run}]"));
+        assert!(!cited.contains(&id('a')));
+        assert!(cited.contains(&run));
+        let err = validate_output(
+            &CHANNEL_DIGEST_V1,
+            &digest(&format!("- padded [event:{run}]")),
+            None,
+            &[id('a')],
+        );
+        assert!(matches!(err, Err(Error::Nonconforming(_))));
     }
 
     #[test]

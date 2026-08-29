@@ -60,15 +60,24 @@ fn render_line(signal: &Signal, names: &BTreeMap<String, String>) -> String {
     format!("[{iso}] {who} <{}>: {text}", kind_label(signal.kind))
 }
 
+/// Smallest tail of an oversized line worth showing the model. A shorter
+/// sliver (a few characters of a long message) is not honest evidence — the
+/// line is dropped and stays pending rather than being sealed as covered.
+pub const MIN_TAIL_CHARS: usize = 256;
+
 /// Render `signals` (already materialized: time-ordered, deduped) into a
-/// transcript of at most `max_chars` characters, newest-first fill.
+/// transcript of at most `max_chars` characters and at most `max_items`
+/// lines, newest-first fill.
 ///
 /// If even the single newest line exceeds the budget, its identity is kept
-/// with a bounded `…`-prefixed tail rather than claiming an unseen event.
+/// with a `…`-prefixed tail of at least [`MIN_TAIL_CHARS`] — when the budget
+/// cannot afford even that, the line is dropped (stays pending) rather than
+/// sealed on a sliver.
 pub fn render_transcript(
     signals: &[Signal],
     names: &BTreeMap<String, String>,
     max_chars: usize,
+    max_items: usize,
 ) -> TranscriptRender {
     let rendered: Vec<(ShownSignal, String)> = signals
         .iter()
@@ -86,21 +95,20 @@ pub fn render_transcript(
     let mut used = 0usize;
     let mut trimmed = false;
     for (shown, line) in rendered.iter().rev() {
+        if kept.len() >= max_items {
+            break;
+        }
         let mut line = line.clone();
         let mut cost = line.chars().count() + usize::from(!kept.is_empty());
         if !kept.is_empty() && used + cost > max_chars {
             break;
         }
         if kept.is_empty() && cost > max_chars {
-            if max_chars == 0 {
+            if max_chars < MIN_TAIL_CHARS {
                 break;
             }
-            line = if max_chars == 1 {
-                "…".to_string()
-            } else {
-                let tail_start = line.chars().count() - (max_chars - 1);
-                format!("…{}", line.chars().skip(tail_start).collect::<String>())
-            };
+            let tail_start = line.chars().count() - (max_chars - 1);
+            line = format!("…{}", line.chars().skip(tail_start).collect::<String>());
             cost = line.chars().count();
             trimmed = true;
         }
@@ -150,7 +158,7 @@ mod tests {
             sig("e1", 1_700_000_000, "hello  there"),
             sig("e2", 1_700_000_060, "hi"),
         ];
-        let r = render_transcript(&signals, &names, 10_000);
+        let r = render_transcript(&signals, &names, 10_000, usize::MAX);
         assert!(!r.truncated);
         assert_eq!(r.shown.len(), 2);
         assert!(r.body.contains("riley <message>: hello there"));
@@ -161,11 +169,11 @@ mod tests {
     fn drops_oldest_first_and_marks_truncation() {
         let names = BTreeMap::new();
         let signals = vec![sig("e1", 100, "old old old"), sig("e2", 200, "new")];
-        let newest_len = render_transcript(&signals[1..], &names, 10_000)
+        let newest_len = render_transcript(&signals[1..], &names, 10_000, usize::MAX)
             .body
             .chars()
             .count();
-        let r = render_transcript(&signals, &names, newest_len);
+        let r = render_transcript(&signals, &names, newest_len, usize::MAX);
         assert!(r.truncated);
         assert_eq!(
             r.shown.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
@@ -179,20 +187,46 @@ mod tests {
     #[test]
     fn oversized_single_line_keeps_identity_with_bounded_tail() {
         let names = BTreeMap::new();
-        let signals = vec![sig("e1", 100, &"x".repeat(500))];
-        let r = render_transcript(&signals, &names, 40);
+        let signals = vec![sig("e1", 100, &"x".repeat(5_000))];
+        let r = render_transcript(&signals, &names, 400, usize::MAX);
         assert!(r.truncated);
         assert_eq!(r.shown.len(), 1);
         let last_line = r.body.lines().last().unwrap_or("");
         assert!(last_line.starts_with('…'));
-        assert_eq!(last_line.chars().count(), 40);
+        assert_eq!(last_line.chars().count(), 400);
+    }
+
+    #[test]
+    fn sliver_budget_drops_the_line_instead_of_sealing_it() {
+        // A tail below MIN_TAIL_CHARS is not honest evidence: show nothing,
+        // seal nothing — the event stays pending.
+        let names = BTreeMap::new();
+        let signals = vec![sig("e1", 100, &"x".repeat(5_000))];
+        let r = render_transcript(&signals, &names, MIN_TAIL_CHARS - 1, usize::MAX);
+        assert!(r.truncated);
+        assert!(r.shown.is_empty());
+        assert_eq!(r.body, "[…older events truncated to fit context budget…]");
+    }
+
+    #[test]
+    fn item_cap_keeps_newest_and_marks_truncation() {
+        let names = BTreeMap::new();
+        let signals: Vec<Signal> = (0..10)
+            .map(|i| sig(&format!("e{i}"), 100 + i, "m"))
+            .collect();
+        let r = render_transcript(&signals, &names, 10_000, 3);
+        assert!(r.truncated);
+        assert_eq!(
+            r.shown.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            vec!["e7", "e8", "e9"]
+        );
     }
 
     #[test]
     fn zero_budget_shows_nothing_and_says_so() {
         let names = BTreeMap::new();
         let signals = vec![sig("e1", 100, "hello")];
-        let r = render_transcript(&signals, &names, 0);
+        let r = render_transcript(&signals, &names, 0, usize::MAX);
         assert!(r.truncated);
         assert!(r.shown.is_empty());
         assert_eq!(r.body, "[…older events truncated to fit context budget…]");
@@ -203,13 +237,13 @@ mod tests {
         let names = BTreeMap::new();
         let mut s = sig("e1", 1_700_000_000, "deployed");
         s.kind = 40002;
-        let r = render_transcript(&[s], &names, 10_000);
+        let r = render_transcript(&[s], &names, 10_000, usize::MAX);
         assert!(r.body.contains("aabbccdd <kind-40002>:"));
     }
 
     #[test]
     fn empty_input_is_empty_and_honest() {
-        let r = render_transcript(&[], &BTreeMap::new(), 100);
+        let r = render_transcript(&[], &BTreeMap::new(), 100, usize::MAX);
         assert_eq!(r.body, "");
         assert!(!r.truncated);
         assert!(r.shown.is_empty());

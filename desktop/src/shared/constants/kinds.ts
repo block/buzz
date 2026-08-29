@@ -81,12 +81,6 @@ export const KIND_GIT_STATUS_DRAFT = 1633;
 // NIP-DV: relay-signed per-viewer DM visibility snapshot (d=viewer pubkey,
 // h-tags = currently-hidden DM channel ids).
 export const KIND_DM_VISIBILITY = 30622;
-// Accumulator folds. Mirror of buzz-core's KIND_FOLD_SPEC/KIND_FOLD_ARTIFACT.
-// Both author-only and NIP-44 encrypted to self; the desktop reads them via
-// the bundled `buzz folds` CLI, never directly.
-export const KIND_FOLD_SPEC = 30640;
-export const KIND_FOLD_ARTIFACT = 4640;
-
 // Human-visible "new content" message kinds. Used as the unread trigger set
 // (sidebar badges, catch-up queries) and as the Home-feed mention query.
 // Reactions, edits, diffs, deletions, and system messages are deliberately

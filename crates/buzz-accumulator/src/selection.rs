@@ -28,9 +28,16 @@ pub struct Selection {
 }
 
 impl Selection {
-    /// Validate and canonicalize (sort + dedupe) in place, so equal selections
-    /// serialize identically.
+    /// Validate and canonicalize (lowercase + sort + dedupe) in place, so
+    /// equal selections serialize identically and case variants of the same
+    /// id cannot silently select nothing.
     pub fn canonicalize(&mut self) -> Result<(), Error> {
+        for c in &mut self.channels {
+            *c = c.trim().to_ascii_lowercase();
+        }
+        for a in &mut self.authors {
+            *a = a.trim().to_ascii_lowercase();
+        }
         self.channels.sort();
         self.channels.dedup();
         self.authors.sort();
@@ -42,15 +49,20 @@ impl Selection {
                 "selection must name at least one channel or author".into(),
             ));
         }
-        if self.channels.iter().any(|c| c.trim().is_empty()) {
-            return Err(Error::InvalidSpec(
-                "selection has an empty channel id".into(),
-            ));
+        if let Some(c) = self.channels.iter().find(|c| !is_uuid(c)) {
+            return Err(Error::InvalidSpec(format!(
+                "channel {c:?} is not a channel UUID"
+            )));
         }
-        if self.authors.iter().any(|a| a.trim().is_empty()) {
-            return Err(Error::InvalidSpec(
-                "selection has an empty author pubkey".into(),
-            ));
+        if let Some(a) = self.authors.iter().find(|a| !is_hex_pubkey(a)) {
+            return Err(Error::InvalidSpec(format!(
+                "author {a:?} is not a 64-hex pubkey"
+            )));
+        }
+        if let Some(k) = self.kinds.iter().find(|k| **k > u16::MAX as u32) {
+            return Err(Error::InvalidSpec(format!(
+                "kind {k} is outside the event-kind range"
+            )));
         }
         Ok(())
     }
@@ -118,6 +130,21 @@ impl Selection {
     }
 }
 
+/// Lowercase hyphenated UUID: 8-4-4-4-12 hex digits.
+fn is_uuid(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit() && !c.is_ascii_uppercase(),
+        })
+}
+
+/// Lowercase 64-hex pubkey.
+fn is_hex_pubkey(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// Deterministically materialize fetched signals: `created_at ASC, id ASC`,
 /// duplicates (same id) removed.
 ///
@@ -155,6 +182,9 @@ mod tests {
         assert_eq!(ids, vec!["cc", "aa", "bb"]);
     }
 
+    const CH_A: &str = "59ca5528-71ea-4a53-a7f5-90c9fb2b1729";
+    const CH_B: &str = "a2228687-0000-4000-8000-000000000000";
+
     #[test]
     fn empty_selection_is_rejected() {
         let mut s = Selection::default();
@@ -162,15 +192,37 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_sorts_and_dedupes() {
+    fn canonicalize_lowercases_sorts_and_dedupes() {
         let mut s = Selection {
-            channels: vec!["b".into(), "a".into(), "b".into()],
+            channels: vec![CH_B.into(), CH_A.to_uppercase(), CH_B.into()],
             authors: vec![],
             kinds: vec![40002, 9, 9],
         };
         s.canonicalize().expect("valid");
-        assert_eq!(s.channels, vec!["a", "b"]);
+        assert_eq!(s.channels, vec![CH_A.to_string(), CH_B.to_string()]);
         assert_eq!(s.kinds, vec![9, 40002]);
+    }
+
+    #[test]
+    fn malformed_ids_and_out_of_range_kinds_are_rejected() {
+        let mut s = Selection {
+            channels: vec!["not-a-uuid".into()],
+            authors: vec![],
+            kinds: vec![],
+        };
+        assert!(s.canonicalize().is_err());
+        let mut s = Selection {
+            channels: vec![],
+            authors: vec!["abc123".into()],
+            kinds: vec![],
+        };
+        assert!(s.canonicalize().is_err());
+        let mut s = Selection {
+            channels: vec![CH_A.into()],
+            authors: vec![],
+            kinds: vec![70_000],
+        };
+        assert!(s.canonicalize().is_err());
     }
 
     #[test]

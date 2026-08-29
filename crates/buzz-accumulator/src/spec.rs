@@ -83,7 +83,7 @@ mod tests {
         FoldSpec {
             name: "team-digest".to_string(),
             selection: Selection {
-                channels: vec!["ch1".to_string()],
+                channels: vec!["59ca5528-71ea-4a53-a7f5-90c9fb2b1729".to_string()],
                 authors: vec![],
                 kinds: vec![],
             },

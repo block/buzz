@@ -1815,14 +1815,11 @@ pub enum FoldsCmd {
         /// Event kind to include (repeatable; default 9 = channel messages)
         #[arg(long = "kind")]
         kind: Vec<u32>,
-        /// Artifact schema: channel-digest@v1 or freeform@v1
-        #[arg(long, default_value = "channel-digest@v1")]
-        schema: String,
         /// Model handed to the fold runner (e.g. haiku, sonnet, opus)
         #[arg(long, default_value = "haiku")]
         model: String,
-        /// Fold instructions; pass `-` to read from stdin. Only
-        /// channel-digest@v1 has a built-in default prompt.
+        /// Fold instructions; pass `-` to read from stdin (defaults to the
+        /// built-in channel-digest prompt)
         #[arg(long)]
         instructions: Option<String>,
     },
@@ -1841,7 +1838,8 @@ pub enum FoldsCmd {
         /// Only consider signals created strictly before this unix timestamp
         #[arg(long)]
         until: Option<i64>,
-        /// Max signals fetched per compiled selection filter
+        /// Exhaustive-read bound per compiled selection filter; a window with
+        /// more matches errors (narrow --since/--until or raise this)
         #[arg(long, default_value_t = 500)]
         limit: u32,
     },
@@ -1854,7 +1852,8 @@ pub enum FoldsCmd {
         /// Only consider signals created strictly before this unix timestamp
         #[arg(long)]
         until: Option<i64>,
-        /// Max signals fetched per compiled selection filter
+        /// Exhaustive-read bound per compiled selection filter; a window with
+        /// more matches errors (narrow --since/--until or raise this)
         #[arg(long, default_value_t = 500)]
         limit: u32,
     },
@@ -1874,8 +1873,9 @@ pub enum FoldsCmd {
     /// Republish the latest artifact as a message in the fold's channel
     Share {
         name: String,
-        /// Target channel UUID — must be exactly the one channel the fold
-        /// reads from, so every cited signal is already visible there
+        /// Target channel UUID — must be exactly the one channel the
+        /// artifact's whole history has read from, so everything in it is
+        /// already visible there
         #[arg(long)]
         channel: String,
     },

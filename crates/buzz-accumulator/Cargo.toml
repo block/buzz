@@ -13,3 +13,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
 chrono = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

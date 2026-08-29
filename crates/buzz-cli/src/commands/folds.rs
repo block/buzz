@@ -41,6 +41,11 @@ use crate::validate::read_or_stdin;
 /// would re-show already-folded history; `query_all_bounded` errors instead.
 const MAX_ARTIFACT_CHAIN: u32 = 2_000;
 
+/// Largest artifact JSON the CLI will publish. NIP-44 v2 caps plaintext at
+/// 65,535 bytes; staying under it with headroom keeps "encrypt then publish"
+/// a step that cannot fail after the model spend.
+const MAX_ARTIFACT_PLAINTEXT: usize = 60_000;
+
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -157,18 +162,26 @@ async fn load_all_specs(client: &BuzzClient) -> Result<Vec<FoldSpec>, CliError> 
     });
     let events = client.query_all_bounded(filter, 500).await?;
     let mut specs = Vec::new();
+    let mut skipped = 0usize;
     for ev in &events {
         let Some(content) = event_field(ev, "content") else {
+            skipped += 1;
             continue;
         };
         // Skip undecryptable or malformed entries rather than failing the
         // whole listing; `get` on the specific name surfaces the error.
         let Ok(plain) = decrypt_from_self(client, content) else {
+            skipped += 1;
             continue;
         };
-        if let Ok(Some(spec)) = parse_spec_envelope(&plain) {
-            specs.push(spec);
+        match parse_spec_envelope(&plain) {
+            Ok(Some(spec)) => specs.push(spec),
+            Ok(None) => {}
+            Err(_) => skipped += 1,
         }
+    }
+    if skipped > 0 {
+        eprintln!("warning: skipped {skipped} unreadable fold-spec event(s)");
     }
     specs.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(specs)
@@ -176,10 +189,10 @@ async fn load_all_specs(client: &BuzzClient) -> Result<Vec<FoldSpec>, CliError> 
 
 /// Load the full artifact chain for `fold`, sorted by version ascending.
 ///
-/// Artifact events carry a plaintext `f` tag, but generic-tag filters are not
-/// pushed to storage for regular kinds, so this reads the caller's whole
-/// kind-4640 set (bounded, erroring on overflow rather than silently
-/// truncating the covered-ids union) and filters by payload.
+/// Artifact events carry no plaintext tags (the fold name stays private), so
+/// this reads the caller's whole kind-4640 set (bounded, erroring on overflow
+/// rather than silently truncating the covered-ids union) and filters by the
+/// decrypted payload's `fold` field.
 async fn load_artifacts(client: &BuzzClient, fold: &str) -> Result<Vec<ArtifactPayload>, CliError> {
     let me = client.keys().public_key().to_hex();
     let filter = serde_json::json!({
@@ -189,23 +202,26 @@ async fn load_artifacts(client: &BuzzClient, fold: &str) -> Result<Vec<ArtifactP
     });
     let events = client.query_all_bounded(filter, MAX_ARTIFACT_CHAIN).await?;
     let mut artifacts = Vec::new();
+    let mut skipped = 0usize;
     for ev in &events {
-        // Cheap pre-filter on the plaintext tag; payload is authoritative.
-        if event_tag(ev, "f").is_some_and(|f| f != fold) {
-            continue;
-        }
         let Some(content) = event_field(ev, "content") else {
+            skipped += 1;
             continue;
         };
         let Ok(plain) = decrypt_from_self(client, content) else {
+            skipped += 1;
             continue;
         };
         let Ok(payload) = serde_json::from_str::<ArtifactPayload>(&plain) else {
+            skipped += 1;
             continue;
         };
         if payload.fold == fold {
             artifacts.push(payload);
         }
+    }
+    if skipped > 0 {
+        eprintln!("warning: skipped {skipped} unreadable artifact event(s)");
     }
     artifacts.sort_by_key(|a| a.version);
     Ok(artifacts)
@@ -223,7 +239,11 @@ fn chain_state(artifacts: &[ArtifactPayload]) -> (Option<&ArtifactPayload>, BTre
 /// Fetch the signals a selection matches over `[since, until_exclusive)`.
 ///
 /// One relay query per compiled filter (multi-channel union filters are not
-/// reliable); the engine dedupes and orders during materialization.
+/// reliable), each read exhaustively up to `limit` — a window with more
+/// matches errors loudly (narrow `--since`/`--until` or raise `--limit`)
+/// instead of silently keeping only the newest page, which would leave older
+/// backlog permanently unfolded while reporting the fold as covered. The
+/// engine dedupes and orders during materialization.
 async fn fetch_signals(
     client: &BuzzClient,
     selection: &Selection,
@@ -233,7 +253,7 @@ async fn fetch_signals(
 ) -> Result<Vec<Signal>, CliError> {
     let mut signals = Vec::new();
     for filter in selection.compile_filters(since, until_exclusive, limit as usize) {
-        let events = client.query_paginated(filter, limit).await?;
+        let events = client.query_all_bounded(filter, limit).await?;
         for ev in &events {
             let (Some(id), Some(pubkey)) = (event_field(ev, "id"), event_field(ev, "pubkey"))
             else {
@@ -337,6 +357,10 @@ struct Preflight {
     spec: FoldSpec,
     prior: Option<ArtifactPayload>,
     plan: Plan,
+    /// The exact half-open window this plan drew from. `estimate` reports it
+    /// so a later `run --since … --until …` can replay the priced set.
+    since: i64,
+    until_exclusive: i64,
 }
 
 /// Load spec + artifact chain, fetch pending signals, and plan the run.
@@ -361,7 +385,13 @@ async fn preflight(
     let names = fetch_names(client, &authors).await;
     let plan = plan_run(&spec, prior.as_ref(), &covered, fetched, &names)
         .map_err(|e| CliError::Other(e.to_string()))?;
-    Ok(Preflight { spec, prior, plan })
+    Ok(Preflight {
+        spec,
+        prior,
+        plan,
+        since,
+        until_exclusive,
+    })
 }
 
 fn plan_json(name: &str, pre: &Preflight) -> serde_json::Value {
@@ -389,34 +419,28 @@ fn plan_json(name: &str, pre: &Preflight) -> serde_json::Value {
             "est_cost_usd": run.estimate.est_cost_usd,
             "window_fit": run.estimate.window_fit,
             "next_version": pre.prior.as_ref().map_or(1, |p| p.version + 1),
+            // Replay window: `run --since <since> --until <until_exclusive>`
+            // executes the same fetch this estimate priced.
+            "since": pre.since,
+            "until_exclusive": pre.until_exclusive,
         }),
     }
 }
 
 // --- subcommands ----------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
 async fn cmd_set(
     client: &BuzzClient,
     name: String,
     channels: Vec<String>,
     authors: Vec<String>,
     kinds: Vec<u32>,
-    schema: String,
     model: String,
     instructions: Option<String>,
 ) -> Result<(), CliError> {
     let instructions = match instructions {
         Some(value) => read_or_stdin(&value)?,
-        None if schema == buzz_accumulator::schema::CHANNEL_DIGEST_V1.name => {
-            buzz_accumulator::schema::CHANNEL_DIGEST_PROMPT.to_string()
-        }
-        None => {
-            return Err(CliError::Usage(format!(
-                "--instructions is required for schema {schema:?} (only {:?} has a default prompt)",
-                buzz_accumulator::schema::CHANNEL_DIGEST_V1.name
-            )));
-        }
+        None => buzz_accumulator::schema::CHANNEL_DIGEST_PROMPT.to_string(),
     };
     let mut spec = FoldSpec {
         name: name.clone(),
@@ -425,7 +449,7 @@ async fn cmd_set(
             authors,
             kinds,
         },
-        schema,
+        schema: buzz_accumulator::schema::CHANNEL_DIGEST_V1.name.to_string(),
         model,
         instructions,
     };
@@ -555,21 +579,80 @@ async fn cmd_run(
     let output = runner
         .run(&run.model_input, &pre.spec.model)
         .map_err(|e| CliError::Other(e.to_string()))?;
-    // Refusal path: nonconforming output errors here and nothing persists.
-    let artifact = complete_run(&pre.spec, pre.prior.as_ref(), run, &output, now_secs())
-        .map_err(|e| CliError::Other(e.to_string()))?;
-    let plaintext = serde_json::to_string(&artifact)
-        .map_err(|e| CliError::Other(format!("artifact serialization failed: {e}")))?;
-    let ciphertext = encrypt_to_self(client, &plaintext)?;
-    let tags = [
-        Tag::parse(["f", &artifact.fold])
-            .map_err(|e| CliError::Other(format!("failed to build f tag: {e}")))?,
-        Tag::parse(["v", &artifact.version.to_string()])
-            .map_err(|e| CliError::Other(format!("failed to build v tag: {e}")))?,
-    ];
-    let builder = EventBuilder::new(Kind::Custom(KIND_FOLD_ARTIFACT as u16), ciphertext).tags(tags);
-    let event = client.sign_event(builder)?;
-    let event_id = submit_checked(client, event, "artifact write was reported duplicate").await?;
+    // The model spend is behind us: from here on, any failure salvages the
+    // paid-for output to stdout instead of discarding it with the error.
+    let salvage = |action: &str, reason: &str| {
+        println!(
+            "{}",
+            serde_json::json!({
+                "fold": name,
+                "action": action,
+                "reason": reason,
+                "accepted": false,
+                "model_output": output,
+            })
+        );
+    };
+    // Refusal path: nonconforming output persists nothing.
+    let artifact = match complete_run(&pre.spec, pre.prior.as_ref(), run, &output, now_secs()) {
+        Ok(artifact) => artifact,
+        Err(e) => {
+            salvage("refused", &e.to_string());
+            return Err(CliError::Other(e.to_string()));
+        }
+    };
+    let plaintext = match serde_json::to_string(&artifact) {
+        Ok(p) => p,
+        Err(e) => {
+            let reason = format!("artifact serialization failed: {e}");
+            salvage("unpublished", &reason);
+            return Err(CliError::Other(reason));
+        }
+    };
+    if plaintext.len() > MAX_ARTIFACT_PLAINTEXT {
+        let reason = format!(
+            "artifact JSON is {} bytes, over the {MAX_ARTIFACT_PLAINTEXT}-byte encrypted-event \
+             ceiling; compact the fold before running again",
+            plaintext.len()
+        );
+        salvage("unpublished", &reason);
+        return Err(CliError::Other(reason));
+    }
+    // Version fence: if a concurrent run published while the model was
+    // thinking, abort instead of forking the chain at the same version.
+    let head = match load_artifacts(client, &name).await {
+        Ok(chain) => chain.last().map(|a| a.version),
+        Err(e) => {
+            salvage(
+                "unpublished",
+                &format!("pre-publish chain re-read failed: {e}"),
+            );
+            return Err(e);
+        }
+    };
+    if head.is_some_and(|v| v >= artifact.version) {
+        let reason = format!(
+            "a concurrent run already published v{} for this fold; nothing persisted — \
+             re-run to fold what is still pending",
+            head.unwrap_or_default()
+        );
+        salvage("unpublished", &reason);
+        return Err(CliError::Other(reason));
+    }
+    // No plaintext tags: the fold name lives only inside the encrypted payload.
+    let publish = async {
+        let ciphertext = encrypt_to_self(client, &plaintext)?;
+        let builder = EventBuilder::new(Kind::Custom(KIND_FOLD_ARTIFACT as u16), ciphertext);
+        let event = client.sign_event(builder)?;
+        submit_checked(client, event, "artifact write was reported duplicate").await
+    };
+    let event_id = match publish.await {
+        Ok(id) => id,
+        Err(e) => {
+            salvage("unpublished", &format!("artifact publish failed: {e}"));
+            return Err(e);
+        }
+    };
     println!(
         "{}",
         serde_json::json!({
@@ -638,25 +721,22 @@ async fn cmd_artifact(
 }
 
 /// The share taint rule: an artifact may be republished into a channel only
-/// when its selection reads from exactly that one channel — then every cited
-/// signal is already visible to the audience by construction. Author/kind
-/// narrowing within the channel is fine; a second channel or a channel-less
-/// selection is not.
-fn share_allowed(selection: &Selection, channel: &str) -> bool {
-    selection.channels.len() == 1 && selection.channels[0] == channel
+/// when every channel that ever fed its chain (`artifact.channels`, the
+/// union over all versions) is exactly that one channel — then every signal
+/// that ever folded in is already visible to the audience by construction.
+/// The check reads the artifact's provenance, not the live spec: a selection
+/// edit cannot launder history folded from elsewhere. Author/kind narrowing
+/// within the channel is fine; a second channel, a channel-less selection,
+/// or a pre-provenance artifact is not.
+fn share_allowed(artifact: &ArtifactPayload, channel: &str) -> bool {
+    artifact.channels.len() == 1 && artifact.channels[0] == channel
 }
 
 async fn cmd_share(client: &BuzzClient, name: String, channel: String) -> Result<(), CliError> {
-    let spec = load_spec(client, &name)
-        .await?
-        .ok_or_else(|| CliError::NotFound(format!("no fold named {name:?}")))?;
-    if !share_allowed(&spec.selection, &channel) {
-        return Err(CliError::Usage(format!(
-            "refusing to share: fold {name:?} reads {}, not exactly channel {channel} — \
-             sharing is only allowed into the single channel the fold reads from, so every \
-             cited signal is already visible to the audience",
-            spec.selection.describe(),
-        )));
+    // Provenance channels are canonicalized lowercase; match that.
+    let channel = channel.trim().to_ascii_lowercase();
+    if load_spec(client, &name).await?.is_none() {
+        return Err(CliError::NotFound(format!("no fold named {name:?}")));
     }
     let artifacts = load_artifacts(client, &name).await?;
     let artifact = artifacts.last().ok_or_else(|| {
@@ -664,6 +744,15 @@ async fn cmd_share(client: &BuzzClient, name: String, channel: String) -> Result
             "fold {name:?} has no artifact yet (run `buzz folds run {name}`)"
         ))
     })?;
+    if !share_allowed(artifact, &channel) {
+        return Err(CliError::Usage(format!(
+            "refusing to share: this artifact's history folded events from channel(s) {:?}, \
+             not exactly channel {channel} — sharing is only allowed into the single channel \
+             an artifact has ever read from, so everything in it is already visible to the \
+             audience",
+            artifact.channels,
+        )));
+    }
     let channel_uuid = channel
         .parse::<uuid::Uuid>()
         .map_err(|e| CliError::Usage(format!("--channel must be a channel UUID: {e}")))?;
@@ -699,22 +788,9 @@ pub async fn dispatch(cmd: crate::FoldsCmd, client: &BuzzClient) -> Result<(), C
             channel,
             author,
             kind,
-            schema,
             model,
             instructions,
-        } => {
-            cmd_set(
-                client,
-                name,
-                channel,
-                author,
-                kind,
-                schema,
-                model,
-                instructions,
-            )
-            .await
-        }
+        } => cmd_set(client, name, channel, author, kind, model, instructions).await,
         FoldsCmd::List => cmd_list(client).await,
         FoldsCmd::Get { name } => cmd_get(client, name).await,
         FoldsCmd::Delete { name } => cmd_delete(client, name).await,
@@ -752,14 +828,37 @@ mod tests {
         }
     }
 
+    fn artifact_with_channels(channels: &[&str]) -> ArtifactPayload {
+        ArtifactPayload {
+            fold: "x".into(),
+            version: 1,
+            output: "# Working Context\n\nS.\n\n# Log\n".into(),
+            shown_ids: vec![],
+            coverage_since: None,
+            coverage_until: None,
+            selection: selection(channels, &[]),
+            channels: channels.iter().map(|s| s.to_string()).collect(),
+            model: "haiku".into(),
+            schema: "channel-digest@v1".into(),
+            prompt_sha256: "0".repeat(64),
+            truncated: false,
+            created_at: 0,
+        }
+    }
+
     #[test]
-    fn share_requires_exactly_the_target_channel() {
-        assert!(share_allowed(&selection(&["ch1"], &[]), "ch1"));
-        // Author-narrowing within the channel keeps taint ⊆ {channel}.
-        assert!(share_allowed(&selection(&["ch1"], &["pk1"]), "ch1"));
-        assert!(!share_allowed(&selection(&["ch1"], &[]), "ch2"));
-        assert!(!share_allowed(&selection(&["ch1", "ch2"], &[]), "ch1"));
-        assert!(!share_allowed(&selection(&[], &["pk1"]), "ch1"));
+    fn share_requires_exactly_the_target_channel_in_provenance() {
+        assert!(share_allowed(&artifact_with_channels(&["ch1"]), "ch1"));
+        assert!(!share_allowed(&artifact_with_channels(&["ch1"]), "ch2"));
+        // A chain that EVER read a second channel stays untouchable, no
+        // matter what the live spec reads now.
+        assert!(!share_allowed(
+            &artifact_with_channels(&["ch1", "ch2"]),
+            "ch1"
+        ));
+        // Pre-provenance or author-only artifacts have no single-channel
+        // proof: blocked.
+        assert!(!share_allowed(&artifact_with_channels(&[]), "ch1"));
     }
 
     #[test]
