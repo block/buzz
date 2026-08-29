@@ -50,10 +50,7 @@ import {
   isThreadReply,
 } from "@/features/messages/lib/threading";
 import { hasPersistedHydratedChannel } from "@/features/messages/lib/channelHeadCache";
-import {
-  resolveTimelineLoadingLatch,
-  selectTimelineLoadingState,
-} from "@/features/messages/lib/timelineLoadingState";
+import { resolveTimelineQueryLoadingState } from "@/features/messages/lib/timelineLoadingState";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useIndependentThreadPanel } from "@/features/messages/useIndependentThreadPanel";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
@@ -616,27 +613,21 @@ export function ChannelScreen({
       setThreadScrollTargetId,
     });
   const settledChannelIdRef = React.useRef<string | null>(null);
-  const hasSettledThisChannel =
-    activeChannelId !== null && settledChannelIdRef.current === activeChannelId;
-  const timelineLoadingNow =
-    activeChannel !== null &&
-    activeChannel.channelType !== "forum" &&
-    selectTimelineLoadingState(
+  const { settledChannelId, isLoading: isTimelineLoading } =
+    resolveTimelineQueryLoadingState(
+      settledChannelIdRef.current,
+      activeChannelId,
       {
+        isEnabled:
+          activeChannel !== null && activeChannel.channelType !== "forum",
         isPending: messagesQuery.isPending,
         isFetching: messagesQuery.isFetching,
         isPlaceholderData: messagesQuery.isPlaceholderData,
         dataLength: messagesQuery.data?.length ?? null,
+        isError: messagesQuery.isError,
       },
-      hasSettledThisChannel ||
-        (activeChannelId !== null &&
-          hasPersistedHydratedChannel(queryClient, activeChannelId)),
-    );
-  const { settledChannelId, isLoading: isTimelineLoading } =
-    resolveTimelineLoadingLatch(
-      settledChannelIdRef.current,
-      activeChannelId,
-      timelineLoadingNow, !messagesQuery.isError,
+      activeChannelId !== null &&
+        hasPersistedHydratedChannel(queryClient, activeChannelId),
     );
   settledChannelIdRef.current = settledChannelId;
   const { welcomeKickoffStage, welcomeKickoffSettingUp } =

@@ -4,6 +4,7 @@ import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
 import {
   resolveTimelineLoadingLatch,
+  resolveTimelineQueryLoadingState,
   selectTimelineLoadingState,
 } from "./timelineLoadingState.ts";
 
@@ -25,21 +26,14 @@ function deferred() {
 }
 
 function resolveQueryLoading(result, settledChannelId = null) {
-  const loadingNow = selectTimelineLoadingState(
-    {
-      isPending: result.isPending,
-      isFetching: result.isFetching,
-      isPlaceholderData: result.isPlaceholderData,
-      dataLength: result.data?.length ?? null,
-    },
-    settledChannelId === "chan-a",
-  );
-  return resolveTimelineLoadingLatch(
-    settledChannelId,
-    "chan-a",
-    loadingNow,
-    !result.isError,
-  );
+  return resolveTimelineQueryLoadingState(settledChannelId, "chan-a", {
+    isEnabled: true,
+    isPending: result.isPending,
+    isFetching: result.isFetching,
+    isPlaceholderData: result.isPlaceholderData,
+    dataLength: result.data?.length ?? null,
+    isError: result.isError,
+  });
 }
 
 test("pending first fetch with no cache is loading", () => {
