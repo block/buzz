@@ -133,13 +133,24 @@ function repairCommunities(input: Community[]): CommunityRepairResult {
     seenIds.add(community.id);
 
     if (typeof community.relayUrl !== "string" || !community.relayUrl.trim()) {
+      // Keep incomplete legacy entries intact so a failed storage migration
+      // remains recoverable; the startup/community UI treats them as needing
+      // setup instead of attempting a relay connection.
       return true;
     }
 
     const relayUrl = normalizeRelayUrl(community.relayUrl.trim());
     try {
       const parsed = new URL(relayUrl);
-      if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+      if (
+        (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") ||
+        !parsed.hostname ||
+        parsed.username ||
+        parsed.password ||
+        parsed.search ||
+        parsed.hash ||
+        (parsed.pathname !== "" && parsed.pathname !== "/")
+      ) {
         changed = true;
         return false;
       }
@@ -150,6 +161,24 @@ function repairCommunities(input: Community[]): CommunityRepairResult {
     if (relayUrl !== community.relayUrl) {
       community.relayUrl = relayUrl;
       changed = true;
+    }
+
+    if (community.lanRelayUrl !== undefined) {
+      try {
+        const normalizedLanRelayUrl = normalizeLanRelayUrl(
+          typeof community.lanRelayUrl === "string"
+            ? community.lanRelayUrl
+            : "",
+        );
+        if (normalizedLanRelayUrl !== community.lanRelayUrl) {
+          community.lanRelayUrl = normalizedLanRelayUrl;
+          changed = true;
+        }
+      } catch {
+        // A stale LAN address must never poison the public relay connection.
+        delete community.lanRelayUrl;
+        changed = true;
+      }
     }
     return true;
   });

@@ -68,3 +68,10 @@
 - 定位：启动迁移只清理了 `buzz-channels.v1` 等目录索引缓存，却遗漏真正保存频道消息窗口的 `buzz-channel-messages.v1`；旧安装还会保留已经写入的 `buzz-storage-repair-v1` 标记，导致后续版本不会再次清理。
 - 处理：增加 `buzz-storage-repair-v2` 迁移标记，并将频道消息快照纳入一次性清理范围。清理仅删除可重建的社区/频道缓存，保留 Community、身份、Agent 配置和服务端聊天记录。
 - 验证：待运行桌面类型检查、Biome 和社区存储回归测试。
+
+## 2026-08-29：旧配置仍可能恢复无效 Relay 状态
+
+- 现象：清理频道缓存后，部分旧安装仍在打开 Inbox Thread 时卡住；截图同时显示 Thread 内容和 `Can't reach the relay`。
+- 根因：旧 Community 记录中的公网/LAN 地址此前只做了宽松格式检查，失效的 LAN 地址、带路径/参数的 Relay 地址仍可能被恢复；冷启动 URL 中的旧 Thread 还会触发无超时的 `getEventById`。
+- 处理：启动修复现在会丢弃空或带凭据、参数、路径的 Relay 配置，校验并规范 LAN 地址，失效 LAN 地址自动移除；冷启动 Thread anchor 增加 10 秒上限。
+- 结果：旧配置即使存在，也会降级到可用的公网 Community 或可操作的错误状态，不再让单个旧请求锁住界面。

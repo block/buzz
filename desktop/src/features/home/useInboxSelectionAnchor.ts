@@ -3,6 +3,8 @@ import * as React from "react";
 import { getEventById } from "@/shared/api/tauri";
 import type { FeedItem, HomeFeedResponse } from "@/shared/api/types";
 
+const COLD_ANCHOR_TIMEOUT_MS = 10_000;
+
 type SelectionAnchorResult = {
   /**
    * Flat list of all FeedItems from the home feed across all categories,
@@ -268,7 +270,15 @@ export function useInboxSelectionAnchor({
       return next;
     });
 
-    void getEventById(fetchAnchor).then(
+    const fetchPromise = getEventById(fetchAnchor);
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      window.setTimeout(
+        () => reject(new Error("Timed out resolving Inbox selection.")),
+        COLD_ANCHOR_TIMEOUT_MS,
+      );
+    });
+
+    void Promise.race([fetchPromise, timeoutPromise]).then(
       (event) => {
         if (!mountedRef.current) return;
         // Anchor superseded — remove inflight status so a back-navigation can
