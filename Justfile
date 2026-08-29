@@ -92,15 +92,29 @@ build:
 build-release:
     cargo build --workspace --release
 
-# Build the security-pinned ACP harness without embedding the checkout path.
+# Build the security-pinned ACP harness from one fixed, isolated checkout path.
 trusted-buzz-acp-release:
     #!/usr/bin/env bash
     set -euo pipefail
-    repo_root="$(cd "{{justfile_directory()}}" && pwd -P)"
+    source_root="$(cd "{{justfile_directory()}}" && pwd -P)"
+    source_commit="$(git -C "$source_root" rev-parse HEAD)"
+    build_parent="/Users/gabriel/.buzz/REPOS/.trusted-build"
+    build_root="$build_parent/buzz-acp"
+    mkdir -p "$build_parent"
+    if [[ ! -e "$build_root" && ! -L "$build_root" ]]; then
+        git -C "$source_root" worktree add --detach "$build_root" "$source_commit"
+    else
+        [[ -d "$build_root" && ! -L "$build_root" && "$(cd "$build_root" && pwd -P)" == "$build_root" ]]
+        [[ "$(git -C "$build_root" rev-parse --path-format=absolute --git-common-dir)" == "$(git -C "$source_root" rev-parse --path-format=absolute --git-common-dir)" ]]
+        git -C "$build_root" diff --quiet --no-ext-diff --
+        git -C "$build_root" diff --cached --quiet --no-ext-diff --
+        git -C "$build_root" switch --detach "$source_commit"
+    fi
+    [[ "$(git -C "$build_root" rev-parse HEAD)" == "$source_commit" ]]
     export CARGO_INCREMENTAL=0
-    export RUSTFLAGS="--remap-path-prefix=${repo_root}=/buzz-source"
-    cargo build --release -p buzz-acp
-    shasum -a 256 target/release/buzz-acp
+    export RUSTFLAGS="--remap-path-prefix=${build_root}=/buzz-source"
+    cargo build --manifest-path "$build_root/Cargo.toml" --release -p buzz-acp
+    shasum -a 256 "$build_root/target/release/buzz-acp"
 
 # Run repo lint, formatting, and repository policy checks
 check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check security-review-check file-size-check

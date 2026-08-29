@@ -7,6 +7,7 @@ umask 077
 readonly buzz_root="/Users/gabriel/.buzz/REPOS/buzz"
 readonly gabe_root="/Users/gabriel/.openclaw"
 readonly stacy_root="/Users/gabriel/stacy"
+readonly trusted_build_root="/Users/gabriel/.buzz/REPOS/.trusted-build/buzz-acp"
 readonly runtime_root="/Users/gabriel/.buzz/RUNTIME"
 readonly node_source="/Users/gabriel/.nvm/versions/node/v24.13.1/bin/node"
 readonly node_sha256="d36b3d980963d44bd2c5e844fac4cfeee26a167b744287a4e74a9575af9d0559"
@@ -176,9 +177,22 @@ done
 # Building is deliberately outside this privileged installer. Running Cargo or
 # Hermit here would consume user/repository tool configuration and turn a
 # delayed ordinary-child write into unsandboxed code execution. The landing
-# workflow supplies the reviewed `just trusted-buzz-acp-release` binary; this
-# installer accepts only its exact pinned digest below.
-readonly buzz_acp_source="$buzz_root/target/release/buzz-acp"
+# workflow supplies the reviewed `just trusted-buzz-acp-release` binary from a
+# fixed checkout path; this installer accepts only its exact commit and digest.
+[[ -d "$trusted_build_root" && ! -L "$trusted_build_root" && "$(/bin/realpath "$trusted_build_root")" == "$trusted_build_root" ]] || {
+  printf 'FATAL: trusted buzz-acp build checkout is unsafe\n' >&2
+  exit 1
+}
+[[ "$(run_git "$trusted_build_root" rev-parse HEAD)" == "$approved_buzz_commit" ]] || {
+  printf 'FATAL: trusted buzz-acp build checkout is not at the approved Buzz commit\n' >&2
+  exit 1
+}
+run_git "$trusted_build_root" diff --quiet --no-ext-diff -- && \
+  run_git "$trusted_build_root" diff --cached --quiet --no-ext-diff -- || {
+  printf 'FATAL: trusted buzz-acp build checkout has tracked changes\n' >&2
+  exit 1
+}
+readonly buzz_acp_source="$trusted_build_root/target/release/buzz-acp"
 verify_sha256 "$buzz_acp_source" "$buzz_acp_sha256"
 [[ "$(/usr/bin/env -i HOME=/Users/gabriel PATH=/usr/bin:/bin /usr/bin/file -b "$buzz_acp_source")" == *"Mach-O 64-bit executable arm64"* ]] || {
   printf 'FATAL: buzz-acp is not the reviewed arm64 Mach-O runtime\n' >&2
