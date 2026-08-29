@@ -33,6 +33,21 @@ afterEach(() => {
   else globalThis.IS_REACT_ACT_ENVIRONMENT = originalActEnvironment;
 });
 
+/**
+ * Resolve once `condition()` holds, or reject after `timeoutMs`. Used instead
+ * of a fixed sleep for work deferred across a task/frame boundary, whose real
+ * latency depends on jsdom's requestAnimationFrame timer.
+ */
+async function waitUntil(condition, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) {
+      throw new Error(`waitUntil timed out after ${timeoutMs}ms`);
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 5));
+  }
+}
+
 function installVisibilityStub() {
   let visibilityState = "visible";
   let focused = true;
@@ -287,9 +302,13 @@ describe("visibility-gated hooks", () => {
     focused = true;
     await act(async () => window.dispatchEvent(new window.Event("focus")));
     assert.deepEqual(observed, [1_000, false]);
-    await act(
-      async () => new Promise((resolve) => window.setTimeout(resolve, 10)),
-    );
+    // `scheduleAfterForegroundReady` is task -> animation frame -> task, and
+    // jsdom services requestAnimationFrame on a ~16ms timer, so a fixed 10ms
+    // wait raced the frame and failed roughly one run in three. Poll until the
+    // resume lands instead of guessing how long it takes.
+    await act(async () => {
+      await waitUntil(() => observed.length === 3);
+    });
     assert.deepEqual(observed, [1_000, false, 1_000]);
 
     await act(async () => root.unmount());
