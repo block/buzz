@@ -12,6 +12,7 @@ import 'dart:convert';
 import 'package:buzz/features/channels/thread_detail_page/task_detail_sheet.dart';
 import 'package:buzz/features/channels/thread_detail_page/thread_task_chip.dart';
 import 'package:buzz/shared/relay/relay.dart';
+import 'package:buzz/shared/tasks/task.dart';
 import 'package:buzz/shared/tasks/tasks_api.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/material.dart';
@@ -126,6 +127,12 @@ Future<void> _pumpSheet(
 
 final _titleFinder = find.byKey(const ValueKey('task-detail-title'));
 final _statusFinder = find.byKey(const ValueKey('task-detail-status'));
+final _statusLabelFinder = find.byKey(
+  const ValueKey('task-detail-status-label'),
+);
+final _statusErrorFinder = find.byKey(
+  const ValueKey('task-detail-status-error'),
+);
 final _summaryFinder = find.byKey(const ValueKey('task-detail-summary'));
 final _errorFinder = find.byKey(const ValueKey('task-detail-error'));
 final _retryFinder = find.byKey(const ValueKey('task-detail-retry'));
@@ -219,7 +226,10 @@ void main() {
         tester.widget<Text>(_titleFinder).data,
         'Ship the digest contract',
       );
-      expect(tester.widget<Text>(_statusFinder).data, 'In progress');
+      // HW-007 turned the status into an interactive control, so the label
+      // moved to its own key inside it. The assertion is unchanged in
+      // substance: the header still states the task's current status.
+      expect(tester.widget<Text>(_statusLabelFinder).data, 'In progress');
       expect(_summaryFinder, findsOneWidget);
       // The summary is promoted to its own card, so it must NOT also render
       // as a history row — that would show the same text twice.
@@ -471,6 +481,334 @@ void main() {
 
       expect(_titleFinder, findsNothing);
       expect(_openButton, findsOneWidget);
+    });
+  });
+
+  // HW-007: the status write surface. Every test drives the REAL TasksApi over
+  // a MockClient, so the PATCH body asserted here is the exact JSON the relay
+  // would receive — not a stubbed call record.
+  group('TaskDetailSheet status transition', () {
+    // Acceptance 1: the status is an interactive control, not static text.
+    testWidgets('renders the status as a tappable control', (tester) async {
+      await _pumpSheet(
+        tester,
+        nsec: nsec,
+        handler: (request) async => _detailResponse(),
+      );
+      await _openSheet(tester);
+      await tester.pumpAndSettle();
+
+      expect(_statusFinder, findsOneWidget);
+      expect(tester.widget<Text>(_statusLabelFinder).data, 'In progress');
+      // The control is a real gesture target, not decorated text.
+      final inkWell = find.ancestor(
+        of: _statusLabelFinder,
+        matching: find.byType(InkWell),
+      );
+      expect(inkWell, findsWidgets);
+      expect(tester.widget<InkWell>(inkWell.first).onTap, isNotNull);
+    });
+
+    // Acceptance 2: tapping presents all five statuses, current one marked.
+    testWidgets('tapping opens a picker listing all five statuses', (
+      tester,
+    ) async {
+      await _pumpSheet(
+        tester,
+        nsec: nsec,
+        handler: (request) async => _detailResponse(),
+      );
+      await _openSheet(tester);
+      await tester.pumpAndSettle();
+
+      await tester.tap(_statusFinder);
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('task-status-picker')), findsOneWidget);
+      for (final status in TaskStatus.values) {
+        expect(
+          find.byKey(ValueKey('task-status-option-${status.wireValue}')),
+          findsOneWidget,
+        );
+      }
+      // The task is in_progress, so exactly that option carries the marker.
+      expect(
+        find.byKey(const ValueKey('task-status-current-in_progress')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('task-status-current-todo')),
+        findsNothing,
+      );
+    });
+
+    // Acceptance 3 + 4: exactly one PATCH carrying ONLY status, then a
+    // re-fetch that sources both the new status and the new history row from
+    // the relay rather than from local state.
+    testWidgets('selecting a new status PATCHes status only, then re-fetches', (
+      tester,
+    ) async {
+      final methods = <String>[];
+      final patchBodies = <String>[];
+      var getCount = 0;
+      await _pumpSheet(
+        tester,
+        nsec: nsec,
+        handler: (request) async {
+          methods.add(request.method);
+          if (request.method == 'PATCH') {
+            patchBodies.add(request.body);
+            return http.Response(
+              jsonEncode(_taskJson(status: 'done')),
+              200,
+            );
+          }
+          getCount++;
+          // The relay appends the status_changed row itself; the second GET
+          // is what surfaces it. The first GET must NOT contain it, or the
+          // test could pass on stale data.
+          return http.Response(
+            jsonEncode({
+              'task': _taskJson(status: getCount == 1 ? 'in_progress' : 'done'),
+              'events': [
+                if (getCount > 1)
+                  _eventJson(
+                    id: 9,
+                    action: 'status_changed',
+                    fromStatus: 'in_progress',
+                    toStatus: 'done',
+                  ),
+              ],
+            }),
+            200,
+          );
+        },
+      );
+      await _openSheet(tester);
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<Text>(_statusLabelFinder).data, 'In progress');
+      expect(find.byKey(const ValueKey('task-event-row-9')), findsNothing);
+
+      await tester.tap(_statusFinder);
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('task-status-option-done')),
+      );
+      await tester.pumpAndSettle();
+
+      // EXACTLY ONE PATCH.
+      expect(methods.where((m) => m == 'PATCH').length, 1);
+      // Body carries ONLY status: no title, no priority, and no actor, role
+      // or ownership claim — the relay authorizes on channel membership.
+      expect(jsonDecode(patchBodies.single), {'status': 'done'});
+      // A re-fetch followed the write.
+      expect(getCount, 2);
+      // Both the new label AND the appended history row come from the
+      // re-fetch, not from local mutation.
+      expect(tester.widget<Text>(_statusLabelFinder).data, 'Done');
+      expect(find.byKey(const ValueKey('task-event-row-9')), findsOneWidget);
+      expect(_statusErrorFinder, findsNothing);
+    });
+
+    // Acceptance 5: selecting the CURRENT status sends nothing. The relay
+    // would reject an empty patch with 400 "patch must change at least one
+    // field", so the no-op is declined client-side.
+    testWidgets('selecting the current status sends no request', (
+      tester,
+    ) async {
+      final methods = <String>[];
+      await _pumpSheet(
+        tester,
+        nsec: nsec,
+        handler: (request) async {
+          methods.add(request.method);
+          return _detailResponse();
+        },
+      );
+      await _openSheet(tester);
+      await tester.pumpAndSettle();
+      expect(methods, ['GET']);
+
+      await tester.tap(_statusFinder);
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('task-status-option-in_progress')),
+      );
+      await tester.pumpAndSettle();
+
+      // No PATCH, and no re-fetch either: nothing changed.
+      expect(methods, ['GET']);
+      expect(tester.widget<Text>(_statusLabelFinder).data, 'In progress');
+      expect(_statusErrorFinder, findsNothing);
+    });
+
+    testWidgets('dismissing the picker without choosing sends no request', (
+      tester,
+    ) async {
+      final methods = <String>[];
+      await _pumpSheet(
+        tester,
+        nsec: nsec,
+        handler: (request) async {
+          methods.add(request.method);
+          return _detailResponse();
+        },
+      );
+      await _openSheet(tester);
+      await tester.pumpAndSettle();
+
+      await tester.tap(_statusFinder);
+      await tester.pumpAndSettle();
+      // Dismiss by popping the picker route, the same result as a barrier tap.
+      final pickerContext = tester.element(
+        find.byKey(const ValueKey('task-status-picker')),
+      );
+      Navigator.of(pickerContext).pop();
+      await tester.pumpAndSettle();
+
+      expect(methods, ['GET']);
+      expect(tester.widget<Text>(_statusLabelFinder).data, 'In progress');
+    });
+
+    // Acceptance 6: a rejected write shows the error AND leaves the status at
+    // the last relay-known value. Never a phantom local success.
+    testWidgets('a rejected PATCH shows an error and does not change status', (
+      tester,
+    ) async {
+      var getCount = 0;
+      await _pumpSheet(
+        tester,
+        nsec: nsec,
+        handler: (request) async {
+          if (request.method == 'PATCH') {
+            return http.Response('{"error":"task not found"}', 404);
+          }
+          getCount++;
+          return _detailResponse();
+        },
+      );
+      await _openSheet(tester);
+      await tester.pumpAndSettle();
+
+      await tester.tap(_statusFinder);
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('task-status-option-done')),
+      );
+      await tester.pumpAndSettle();
+
+      // The error is surfaced...
+      expect(_statusErrorFinder, findsOneWidget);
+      // ...the status stays at the last relay value, NOT the attempted one...
+      expect(tester.widget<Text>(_statusLabelFinder).data, 'In progress');
+      // ...and no re-fetch happened, because nothing was accepted.
+      expect(getCount, 1);
+      // The read surface survives: a failed WRITE is not a failed READ.
+      expect(_titleFinder, findsOneWidget);
+      expect(_errorFinder, findsNothing);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a 500 on write is surfaced the same way as a 404', (
+      tester,
+    ) async {
+      await _pumpSheet(
+        tester,
+        nsec: nsec,
+        handler: (request) async {
+          if (request.method == 'PATCH') {
+            return http.Response('{"error":"internal"}', 500);
+          }
+          return _detailResponse();
+        },
+      );
+      await _openSheet(tester);
+      await tester.pumpAndSettle();
+
+      await tester.tap(_statusFinder);
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('task-status-option-blocked')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(_statusErrorFinder, findsOneWidget);
+      expect(tester.widget<Text>(_statusLabelFinder).data, 'In progress');
+    });
+
+    // The relay's message is untrusted text like any other relay string.
+    testWidgets('clamps a hostile write-error message, no exceptions', (
+      tester,
+    ) async {
+      await _pumpSheet(
+        tester,
+        nsec: nsec,
+        handler: (request) async {
+          if (request.method == 'PATCH') {
+            return http.Response(
+              jsonEncode({'error': 'z' * 10000}),
+              400,
+            );
+          }
+          return _detailResponse();
+        },
+      );
+      await _openSheet(tester);
+      await tester.pumpAndSettle();
+
+      await tester.tap(_statusFinder);
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('task-status-option-done')),
+      );
+      await tester.pumpAndSettle();
+
+      final message = tester.widget<Text>(_statusErrorFinder).data!;
+      expect(message.runes.length, lessThanOrEqualTo(taskDetailBodyChars));
+      expect(tester.takeException(), isNull);
+    });
+
+    // A slow relay must not allow two PATCHes from an impatient double-tap.
+    testWidgets('shows a pending state and sends only one PATCH', (
+      tester,
+    ) async {
+      final patch = Completer<http.Response>();
+      var patchCount = 0;
+      await _pumpSheet(
+        tester,
+        nsec: nsec,
+        handler: (request) async {
+          if (request.method == 'PATCH') {
+            patchCount++;
+            return patch.future;
+          }
+          return _detailResponse();
+        },
+      );
+      await _openSheet(tester);
+      await tester.pumpAndSettle();
+
+      await tester.tap(_statusFinder);
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('task-status-option-done')),
+      );
+      await tester.pump();
+
+      // In flight: the control shows pending and refuses a second tap.
+      expect(
+        find.byKey(const ValueKey('task-detail-status-pending')),
+        findsOneWidget,
+      );
+      await tester.tap(_statusFinder, warnIfMissed: false);
+      await tester.pump();
+      expect(patchCount, 1);
+
+      // Settle so no future dangles past the test boundary.
+      patch.complete(http.Response(jsonEncode(_taskJson(status: 'done')), 200));
+      await tester.pumpAndSettle();
+      expect(patchCount, 1);
     });
   });
 }
