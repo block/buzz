@@ -777,6 +777,7 @@ pub fn run() {
             agent_access_owner_only,
             get_agent_config_surface,
             get_runtime_file_config,
+            get_runtime_setup_secret_status,
             get_baked_build_env_keys,
             get_baked_build_env,
             put_agent_session_config,

@@ -547,6 +547,14 @@ impl EventQueue {
         self.cancel_reasons.insert(batch.channel_id, reason);
     }
 
+    #[cfg(test)]
+    pub(crate) fn cancelled_event_count_for_test(&self, channel_id: &Uuid) -> usize {
+        self.cancelled_batches
+            .get(channel_id)
+            .map(Vec::len)
+            .unwrap_or(0)
+    }
+
     /// Returns `true` if any channel has pending events that are not in-flight
     /// and not throttled by `retry_after`.
     ///

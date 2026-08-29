@@ -10,6 +10,7 @@
     "externalBin": [
       "binaries/buzz-acp",
       "binaries/buzz-agent",
+      "binaries/buzz-manual-agent-acp",
       "binaries/buzz-dev-mcp",
       "binaries/git-credential-nostr",
       "binaries/buzz"

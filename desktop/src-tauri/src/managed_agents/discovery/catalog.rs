@@ -1,4 +1,6 @@
-use crate::managed_agents::HarnessSource;
+use crate::managed_agents::{
+    HarnessSource, RuntimeSetupField, RuntimeSetupFieldKind, RuntimeSetupFieldValidation,
+};
 
 use super::runtime_metadata::{KnownAcpRuntime, RuntimeAuthentication, RuntimeReadinessPolicy};
 
@@ -8,7 +10,33 @@ pub(super) const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io
 pub(super) const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/kingkillery/pkzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 
-pub(super) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
+pub(crate) fn runtime_setup_fields(runtime_id: &str) -> Vec<RuntimeSetupField> {
+    if runtime_id != "remote-agent-computer" {
+        return Vec::new();
+    }
+    vec![
+        RuntimeSetupField {
+            env_key: "MANUAL_AGENT_BASE_URL".to_string(),
+            label: "Manual Agent Tailnet URL".to_string(),
+            placeholder: "https://<device>.<tailnet>.ts.net:8443".to_string(),
+            helper_text: "Tailnet HTTPS origin for the Mac manual-agent service. Do not include a path.".to_string(),
+            kind: RuntimeSetupFieldKind::Url,
+            validation: RuntimeSetupFieldValidation::TailnetHttpsOrigin,
+            required: true,
+        },
+        RuntimeSetupField {
+            env_key: "MANUAL_AGENT_TOKEN".to_string(),
+            label: "Manual Agent app password".to_string(),
+            placeholder: "Paste the app password".to_string(),
+            helper_text: "Stored as a local secret and sent only in the authenticated request header; never added to messages.".to_string(),
+            kind: RuntimeSetupFieldKind::Secret,
+            validation: RuntimeSetupFieldValidation::AppPassword,
+            required: true,
+        },
+    ]
+}
+
+pub(crate) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
     KnownAcpRuntime {
         id: "goose",
         label: "Goose",
@@ -156,6 +184,41 @@ pub(super) const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &["model", "provider"],
         authentication: RuntimeAuthentication::NotApplicable,
         readiness_policy: RuntimeReadinessPolicy::AvailabilityOnly,
+    },
+    KnownAcpRuntime {
+        id: "remote-agent-computer",
+        label: "Remote agent computer",
+        commands: &["buzz-manual-agent-acp"],
+        aliases: &["manual-agent"],
+        avatar_url: "",
+        source: HarnessSource::Builtin,
+        default_args: &[],
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: None,
+        cli_install_commands: &[],
+        cli_install_commands_windows: &[],
+        adapter_install_commands: &[],
+        cli_install_instructions_url: "https://github.com/kingkillery/pkzz/tree/main/crates/buzz-manual-agent-acp",
+        adapter_install_instructions_url: "",
+        cli_install_hint: "Ships with Pkzz. Configure the Tailnet HTTPS URL and app password in its first-class connection fields.",
+        adapter_install_hint: "",
+        skill_dir: None,
+        supports_acp_model_switching: false,
+        model_env_var: Some("MANUAL_AGENT_MODEL"),
+        provider_env_var: None,
+        provider_locked: true,
+        default_env: &[],
+        config_file_path: None,
+        config_file_format: None,
+        supports_acp_native_config: false,
+        thinking_env_var: Some("MANUAL_AGENT_REASONING_EFFORT"),
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        max_rounds_env_var: None,
+        required_normalized_fields: &[],
+        authentication: RuntimeAuthentication::NotApplicable,
+        readiness_policy: RuntimeReadinessPolicy::Configuration,
     },
     KnownAcpRuntime {
         id: "ompk",

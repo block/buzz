@@ -94,7 +94,10 @@ pub async fn get_agent_models(
         command: _,
     } = discovery;
 
-    let merged_env = discovery_env_with_baked_floor(merged_env);
+    let mut merged_env = discovery_env_with_baked_floor(merged_env);
+    // Model discovery is not a runtime turn. Never project catalog setup
+    // credentials into provider requests or the `buzz-acp models` subprocess.
+    crate::managed_agents::setup_secrets::strip_setup_secret_env_values(&mut merged_env);
     // Resolve against the baked/process env when the record saved no provider,
     // so a build-provided provider still gets live discovery.
     let effective_provider =
@@ -229,7 +232,10 @@ pub async fn discover_agent_models(
         &input.definition_env,
         &input.env_vars,
     );
-    let merged_env = discovery_env_with_baked_floor(merged_env);
+    let mut merged_env = discovery_env_with_baked_floor(merged_env);
+    // A draft can still contain a newly typed app password. Keep it out of
+    // discovery; only a real spawn of the declaring runtime may receive it.
+    crate::managed_agents::setup_secrets::strip_setup_secret_env_values(&mut merged_env);
     // Recover a build-provided provider when the form has none, so the create
     // dialog discovers live models instead of falling through to the subprocess.
     let effective_provider = effective_discovery_provider(

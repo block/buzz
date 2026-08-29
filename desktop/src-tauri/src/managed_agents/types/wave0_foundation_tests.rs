@@ -76,6 +76,10 @@ fn runtime_readiness_wire_values_are_frozen() {
         "\"authentication_required\""
     );
     assert_eq!(
+        serde_json::to_string(&RuntimeReadinessStatus::ConfigurationRequired).unwrap(),
+        "\"configuration_required\""
+    );
+    assert_eq!(
         serde_json::to_string(&RuntimeReadinessStatus::ModelUnavailable).unwrap(),
         "\"model_unavailable\""
     );

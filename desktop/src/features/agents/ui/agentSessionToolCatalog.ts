@@ -31,6 +31,19 @@ export function normalizeToolStatus(status: string): ToolStatus {
   return "executing";
 }
 
+export function isTerminalToolStatus(status: ToolStatus) {
+  return status === "completed" || status === "failed";
+}
+
+export function mergeToolStatus(
+  existing: ToolStatus,
+  next: ToolStatus,
+): ToolStatus {
+  return isTerminalToolStatus(existing) && !isTerminalToolStatus(next)
+    ? existing
+    : next;
+}
+
 export function getToolStatusDisplay(status: ToolStatus, isError: boolean) {
   if (isError || status === "failed") {
     return {

@@ -1,7 +1,9 @@
 import type { RuntimeFileConfigSubset } from "@/shared/api/tauri";
+import type { RuntimeSetupField } from "@/shared/api/types";
 import {
   getBakedSatisfiedEnvKeys,
   getProviderApiKeyEnvVar,
+  isRuntimeSetupFieldValueValid,
   requiredCredentialEnvKeys,
 } from "@/features/agents/ui/agentConfigOptions";
 
@@ -11,14 +13,24 @@ export function getGlobalAgentCredentialState({
   provider,
   runtimeFileConfig,
   runtimeId,
+  setupFields = [],
 }: {
   bakedEnvKeys: readonly string[];
   envVars: Record<string, string>;
   provider: string;
   runtimeFileConfig: RuntimeFileConfigSubset | null | undefined;
   runtimeId: string;
+  setupFields?: readonly RuntimeSetupField[];
 }) {
-  const requiredEnvKeys = requiredCredentialEnvKeys(runtimeId, provider);
+  const requiredEnvKeys = requiredCredentialEnvKeys(
+    runtimeId,
+    provider,
+    setupFields,
+  );
+  const setupFieldsByKey = new Map(
+    setupFields.map((field) => [field.envKey, field]),
+  );
+  const setupFieldKeys = new Set(setupFieldsByKey.keys());
   const apiKeyEnvVar = getProviderApiKeyEnvVar(provider);
   const bakedSatisfiedEnvKeys = getBakedSatisfiedEnvKeys(
     requiredEnvKeys,
@@ -37,7 +49,7 @@ export function getGlobalAgentCredentialState({
       !fileSatisfiedEnvKeys.includes(key),
   );
   const advancedRequiredEnvKeys = displayedRequiredEnvKeys.filter(
-    (key) => key !== apiKeyEnvVar,
+    (key) => key !== apiKeyEnvVar && !setupFieldKeys.has(key),
   );
   const advancedFileSatisfiedEnvKeys = fileSatisfiedEnvKeys.filter(
     (key) => key !== apiKeyEnvVar,
@@ -52,6 +64,12 @@ export function getGlobalAgentCredentialState({
   const advancedCredentialMissing = advancedRequiredEnvKeys.some(
     (key) => (envVars[key] ?? "").trim().length === 0,
   );
+  const setupCredentialMissing = setupFields
+    .filter((field) => field.required)
+    .some((field) => {
+      if (bakedSatisfiedEnvKeys.includes(field.envKey)) return false;
+      return !isRuntimeSetupFieldValueValid(field, envVars[field.envKey]);
+    });
   const apiKeyMissing =
     apiKeyEnvVar !== null &&
     !apiKeyInherited &&
@@ -65,6 +83,8 @@ export function getGlobalAgentCredentialState({
     apiKeyFileSatisfied,
     apiKeyInherited,
     apiKeyValue,
-    credentialsValid: !advancedCredentialMissing && !apiKeyMissing,
+    credentialsValid:
+      !advancedCredentialMissing && !apiKeyMissing && !setupCredentialMissing,
+    setupCredentialMissing,
   };
 }

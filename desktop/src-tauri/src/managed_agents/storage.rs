@@ -265,7 +265,7 @@ fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> 
 
     let content = fs::read_to_string(&path)
         .map_err(|error| format!("failed to read agent store: {error}"))?;
-    serde_json::from_str(&content).map_err(|error| {
+    let mut records: Vec<ManagedAgentRecord> = serde_json::from_str(&content).map_err(|error| {
         // Fail loudly and preserve the evidence: a later in-app save rewrites
         // this file wholesale, which would silently destroy a malformed hand
         // edit. Best-effort file-authoring contract (see managed_agents::
@@ -274,7 +274,22 @@ fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> 
         // swallowed into an empty store.
         backup_invalid_store(&path);
         format!("failed to parse agent store (preserved as .invalid): {error}")
-    })
+    })?;
+
+    // One-time migration for builds that persisted catalog-declared setup
+    // secrets in ordinary env maps. The keyring write is read-back verified
+    // before the restricted JSON file is replaced. If secure storage is not
+    // available, fail here: the plaintext value must never be returned to a
+    // renderer projection or used as an implicit fallback.
+    if crate::managed_agents::setup_secrets::persist_and_strip_setup_secrets(&mut records)? {
+        write_agent_store_records(&path, &records)?;
+    }
+
+    // Hydration is Rust-internal. Renderer-facing response types redact these
+    // keys, while readiness/spawn consumes the actual value only for the
+    // effective runtime whose catalog declares it.
+    crate::managed_agents::setup_secrets::hydrate_setup_secrets(&mut records)?;
+    Ok(records)
 }
 
 /// Load the keyed agent *instances*. Key-less definitions (former personas,
@@ -427,15 +442,24 @@ fn write_agent_store(
     let mut all = definitions;
     all.extend(instances);
 
+    // Save-local clones only: persist every catalog-declared setup secret to
+    // the OS keyring and strip it before serialization. A keyring or read-back
+    // failure aborts before the JSON file is touched.
+    crate::managed_agents::setup_secrets::persist_and_strip_setup_secrets(&mut all)?;
+
     let path = managed_agents_store_path(app)?;
-    let payload = serde_json::to_vec_pretty(&all)
+    write_agent_store_records(&path, &all)
+}
+
+fn write_agent_store_records(path: &Path, records: &[ManagedAgentRecord]) -> Result<(), String> {
+    let payload = serde_json::to_vec_pretty(records)
         .map_err(|error| format!("failed to serialize agent store: {error}"))?;
 
     // `managed-agents.json` carries plaintext agent nsecs in the keyringless
     // fallback. Write it owner-only (`0o600`) unconditionally — harmless for the
     // keyring-backed case (it is the user's own agent store) and closes the
     // umask window a post-write `chmod` would leave open.
-    atomic_write_json_restricted(&path, &payload)
+    atomic_write_json_restricted(path, &payload)
 }
 
 /// Write each record's in-memory key to the keyring and blank the inline copy

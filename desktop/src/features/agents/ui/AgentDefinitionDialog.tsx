@@ -17,7 +17,7 @@ import { PersonaDropdownField } from "./PersonaDropdownField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { PersonaAdvancedFields } from "./PersonaAdvancedFields";
 import { PersonaModelField } from "./PersonaModelField";
-import { runtimeAvailabilityWarning } from "./runtimeAvailabilityWarning";
+import { RuntimeSetupGuidance } from "./RuntimeSetupGuidance";
 import { PersonaProviderApiKeyField } from "./PersonaProviderApiKeyField";
 import {
   canSubmitPersonaDialog,
@@ -40,7 +40,7 @@ import {
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   formatRuntimeOptionLabel,
   getDefaultPersonaRuntime,
-  isRuntimeReadyForNewSelection,
+  isRuntimeSelectableForConfiguration,
   getPersonaModelOptions,
   getPersonaProviderOptions,
   getProviderApiKeyLabel,
@@ -89,6 +89,7 @@ import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { buildRuntimeModelProviderPayload } from "./agentDefinitionSubmitPayload";
 import { AgentDefinitionDialogFooter } from "./AgentDefinitionDialogFooter";
 import { AddCustomHarnessDialog } from "./AddCustomHarnessDialog";
+import * as Setup from "./useRuntimeSetupState";
 import {
   ADD_CUSTOM_HARNESS_OPTION,
   runtimeDropdownAction,
@@ -157,18 +158,8 @@ export function AgentDefinitionDialog({
   const [behaviorDraft, setBehaviorDraft] = React.useState(
     emptyPersonaBehaviorDraft,
   );
-  // The seed the draft is diffed against at submit: an untouched quad
-  // submits no behavior group, keeping unrelated edits hash-quiet.
   const behaviorSeedRef = React.useRef(emptyPersonaBehaviorDraft);
-  // Tracks when the runtime was auto-seeded by the default-runtime effect in
-  // edit mode (i.e. the user never explicitly chose a runtime). Used to omit
-  // the seeded runtime from the submit payload for builtin definitions whose
-  // canonical runtime is null — the sync would revert it anyway.
   const isRuntimeAutoSeededRef = React.useRef(false);
-  // Guards the seeding effect so it fires at most once per dialog-open.
-  // Without this, clearing runtime back to "" via "No preference" would re-
-  // trigger the effect (the `runtime` dep would pass the length guard) and
-  // snap the dropdown back to the default — an edit-mode regression.
   const hasSeededForOpenRef = React.useRef(false);
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
@@ -390,6 +381,16 @@ export function AgentDefinitionDialog({
   }
 
   const selectedRuntime = runtimes.find((p) => p.id === runtime);
+  const setup = Setup.useRuntimeSetupState({
+    definitionId:
+      initialValues && "id" in initialValues ? initialValues.id : null,
+    disabled: isPending,
+    fields: selectedRuntime?.setupFields,
+    onChange: setEnvVars,
+    open,
+    runtimeId: runtime,
+    value: envVars,
+  });
   const blankRuntimeModelProviderEditable =
     initialModelProviderEditableWithoutRuntime && runtime.trim().length === 0;
   const runtimeCanChooseLlmProvider =
@@ -399,7 +400,6 @@ export function AgentDefinitionDialog({
     (runtime.trim().length > 0 && runtimeCanChooseLlmProvider) ||
     blankRuntimeModelProviderEditable;
   const trimmedProvider = provider.trim();
-  // Required credential env keys and file-layer config; silences requirements satisfied in the file layer.
   const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(runtime, {
     enabled: open,
   });
@@ -433,16 +433,13 @@ export function AgentDefinitionDialog({
     model,
     provider: trimmedProvider,
     providerEnvVar: selectedRuntime?.providerEnvVar,
+    setupFields: setup.fields,
+    setupSatisfiedEnvKeys: setup.configuredKeys,
     runtimeFileConfig,
     runtimeId: runtime,
   });
-  // requiredEnvKeys: the gate already handles baked-, global-, and file-
-  // satisfied keys so no further filtering is needed.
   const { requiredEnvKeys } = localModeGate;
   const localModeSatisfied = localModeGate.satisfied;
-  // Effective provider: agent value → global fallback → file fallback.
-  // Mirrors the chain inside computeLocalModeGate so model-option scoping and
-  // model requiredness are consistent with the readiness gate.
   const fileProvider = runtimeFileConfig?.provider?.trim() ?? "";
   const effectiveProvider =
     trimmedProvider || inheritedProviderDefault.value || fileProvider;
@@ -452,6 +449,7 @@ export function AgentDefinitionDialog({
     envVars,
     fileSatisfiedEnvKeys: localModeGate.fileSatisfiedEnvKeys,
     globalEnvVars: globalConfig.env_vars,
+    hiddenEnvKeys: setup.envKeys,
     provider: effectiveProvider,
     requiredEnvKeys,
   });
@@ -463,17 +461,12 @@ export function AgentDefinitionDialog({
     secretEnvVar: topLevelSecretEnvVar,
     value: apiKeyValue,
   } = apiKeyFieldState;
+  const hiddenKeys = Setup.hiddenKeys(topLevelSecretEnvVar, setup.envKeys);
   const providerIsRequired =
     aiConfigurationMode === "custom" && runtimeCanChooseLlmProvider;
   const modelFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
   const isExplicitModelRequired = aiConfigurationMode === "custom";
-  // Gate the provider requirement on the field's actual visibility, not the raw
-  // runtime capability. Codex/Claude hide the provider picker (they drive their
-  // own provider), so Customize must not require a provider there. But a
-  // runtime-less legacy/builtin definition still exposes the picker via
-  // blankRuntimeModelProviderEditable, so it must keep requiring a provider —
-  // otherwise Save could persist `provider: undefined` despite the visible field.
   const customAiPairSatisfied = agentAiConfigurationModeSatisfied(
     aiConfigurationMode,
     { provider, model },
@@ -481,8 +474,7 @@ export function AgentDefinitionDialog({
   );
   const selectedRuntimeIsReady =
     runtime.trim().length === 0 ||
-    isRuntimeReadyForNewSelection(selectedRuntime);
-  // Gate model/provider validity through missingNormalizedFields to avoid drift.
+    isRuntimeSelectableForConfiguration(selectedRuntime);
   const canSubmit =
     canSubmitPersonaDialog({ displayName, isPending }) &&
     (!isCreateMode || runtime.trim().length > 0) &&
@@ -490,10 +482,9 @@ export function AgentDefinitionDialog({
     (!isCreateMode || !createSubmitBlocked) &&
     personaBehaviorDraftValid(behaviorDraft) &&
     localModeSatisfied &&
+    !setup.queryFailed &&
     customAiPairSatisfied &&
     !isAvatarUploadPending;
-  // Merge global env as the base layer so credential keys satisfied via global
-  // config are available to model discovery — same rationale as in AgentInstanceEditDialog.
   const envVarsForDiscovery = React.useMemo(
     () => ({ ...globalConfig.env_vars, ...envVars }),
     [globalConfig.env_vars, envVars],
@@ -601,14 +592,12 @@ export function AgentDefinitionDialog({
       );
   const previewLabel = displayName.trim() || "Agent name";
   const previewAvatarUrl = avatarUrl.trim() || null;
-  const runtimeWarningText = selectedRuntime
-    ? runtimeAvailabilityWarning(selectedRuntime)
-    : null;
-  const runtimeWarning = runtimeWarningText ? (
-    <p className="text-xs text-warning">
-      {runtimeWarningText} Visit Settings &gt; Agents to set it up.
-    </p>
-  ) : null;
+  const runtimeWarning = (
+    <RuntimeSetupGuidance
+      configurationSatisfied={localModeSatisfied}
+      runtime={selectedRuntime}
+    />
+  );
   const advancedFieldsTransition = shouldReduceMotion
     ? { duration: 0 }
     : ADVANCED_FIELDS_MOTION_TRANSITION;
@@ -649,7 +638,7 @@ export function AgentDefinitionDialog({
     const nextRuntime = action.runtimeId;
     if (
       nextRuntime &&
-      !isRuntimeReadyForNewSelection(
+      !isRuntimeSelectableForConfiguration(
         runtimes.find((candidate) => candidate.id === nextRuntime),
       )
     )
@@ -837,6 +826,10 @@ export function AgentDefinitionDialog({
                 />
               ) : null}
 
+              {aiConfigurationMode === "custom" ? (
+                <Setup.RuntimeSetupFields {...setup.fieldProps} />
+              ) : null}
+
               {llmProviderFieldVisible && aiConfigurationMode === "custom" ? (
                 <div className="space-y-1.5">
                   <RequiredFieldLabel
@@ -993,9 +986,7 @@ export function AgentDefinitionDialog({
                       disabled={isPending}
                       envVars={envVars}
                       fileSatisfiedEnvKeys={localModeGate.fileSatisfiedEnvKeys}
-                      hiddenEnvKeys={
-                        topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []
-                      }
+                      hiddenEnvKeys={hiddenKeys}
                       inheritedEnvVars={inheritedEnvVarsForAdvanced}
                       model={model}
                       modelTuningRuntimeId={runtime}

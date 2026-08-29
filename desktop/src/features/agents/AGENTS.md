@@ -31,6 +31,31 @@ the resolved `entry.command` (which may be `null` for unavailable entries).
 The frontend reads `maxParallelism` from the catalog entry and never keeps a
 separate constant.
 
+**Remote agent computer metadata follows the same catalog rule.** The bundled
+`buzz-manual-agent-acp` adapter is declared as `remote-agent-computer` in
+`KnownAcpRuntime`. Its optional model and effort fields come from catalog env
+metadata; components must not special-case this runtime. Required connection
+settings are projected as catalog-owned `setup_fields`: render their labels,
+input treatment, hints, and validation from metadata. Non-secret values persist
+in the existing local environment map; fields whose catalog kind is `secret`
+persist only in the native OS credential store, scoped to the definition or
+instance. Renderer reads receive configured key names through the typed setup-
+secret status command, never the value or a token-shaped sentinel. Save-time
+keyring write plus raw read-back verification must succeed before the ordinary
+agent store is replaced; unavailable secure storage fails closed. Spawn may
+hydrate a secret only for the effective runtime whose catalog declares that
+field, and renderer/config/diagnostic projections must omit it. A secret setup
+value must never enter messages, shared cards, catalog metadata, diagnostics,
+other runtimes, or provider errors. Setup-required runtimes are user-selectable
+only when these fields exist, never eligible as an implicit default, and cannot
+be saved until their catalog validation succeeds.
+
+**Remote computer handoffs are origin-bound.** A completed remote run may emit
+an exact-session descriptor only when its normalized Tailnet HTTPS endpoint is
+the same origin as the configured `MANUAL_AGENT_BASE_URL`. Different hosts or
+ports fail closed before the descriptor reaches the transcript; the app
+password never enters the deep link.
+
 If you need a new capability fact (a new env key, a native option, a "supports
 X" flag): add it to `KnownAcpRuntime` first, expose it on
 `AcpRuntimeCatalogEntry`, then project it through the core. Do not shortcut

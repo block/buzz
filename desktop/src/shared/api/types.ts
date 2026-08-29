@@ -486,6 +486,7 @@ export type {
   AcpRuntimeCatalogEntry,
   AuthStatus,
   RuntimeReadinessStatus,
+  RuntimeSetupField,
 } from "./acpRuntimeTypes";
 
 export type {

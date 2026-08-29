@@ -841,6 +841,22 @@ fn draft_agent_model_discovery_env_omits_provider_when_absent() {
     );
 }
 
+#[test]
+fn draft_model_discovery_never_receives_runtime_setup_secrets() {
+    let env = BTreeMap::from([(
+        "MANUAL_AGENT_TOKEN".to_string(),
+        "test-app-password-0123456789-abcdef".to_string(),
+    )]);
+
+    for command in ["buzz-agent", "buzz-manual-agent-acp", "custom-agent"] {
+        let merged = draft_agent_model_discovery_env(command, None, &BTreeMap::new(), &env);
+        assert!(
+            !merged.contains_key("MANUAL_AGENT_TOKEN"),
+            "setup credentials must not enter model discovery for {command}"
+        );
+    }
+}
+
 /// The three-tier precedence this merge exists to preserve: main's inline
 /// `derived → definition_env → env_vars` layering was folded into
 /// `draft_agent_model_discovery_env`, so pin the order at every collision

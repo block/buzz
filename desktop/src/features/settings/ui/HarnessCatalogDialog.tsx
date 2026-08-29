@@ -38,6 +38,7 @@ import {
   catalogDialogEntries,
   catalogPrimaryAction,
   entryLoginHint,
+  entryIsOperationallyReady,
   entryStatusLabel,
   filterCatalogEntries,
   groupCatalogEntries,
@@ -362,7 +363,7 @@ function CatalogListItem({
   isCurrent: boolean;
   onSelect: () => void;
 }) {
-  const isReady = entry.availability === "available";
+  const isReady = entryIsOperationallyReady(entry);
 
   return (
     <button
@@ -400,7 +401,7 @@ function CatalogDetail({ entry }: { entry: AcpRuntimeCatalogEntry }) {
   const statusLabel = entryStatusLabel(entry);
   const loginHint = entryLoginHint(entry);
   const description = harnessDescription(entry.id);
-  const isReady = entry.availability === "available";
+  const isReady = entryIsOperationallyReady(entry);
   const docsUrl = entry.installInstructionsUrl.trim();
   const installOutputLine = useInstallOutputLine(entry.id, install.isPending);
 

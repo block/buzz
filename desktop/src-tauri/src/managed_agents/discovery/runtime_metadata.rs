@@ -47,6 +47,7 @@ impl RuntimeAuthentication {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuntimeReadinessPolicy {
     AvailabilityOnly,
+    Configuration,
     Authentication,
     AcpModelCatalog,
 }
@@ -192,6 +193,13 @@ mod tests {
             );
         }
 
+        let remote = known_acp_runtime_exact("remote-agent-computer").unwrap();
+        assert_eq!(remote.authentication, RuntimeAuthentication::NotApplicable);
+        assert_eq!(
+            remote.readiness_policy,
+            RuntimeReadinessPolicy::Configuration
+        );
+
         let claude = known_acp_runtime_exact("claude").unwrap();
         assert_eq!(
             claude.authentication,
@@ -217,6 +225,42 @@ mod tests {
             codex.readiness_policy,
             RuntimeReadinessPolicy::Authentication
         );
+    }
+
+    #[test]
+    fn remote_agent_computer_uses_the_bundled_authenticated_adapter() {
+        use super::super::catalog::runtime_setup_fields;
+
+        let runtime = known_acp_runtime_exact("remote-agent-computer")
+            .expect("remote agent computer must be rich metadata");
+        assert_eq!(runtime.source, HarnessSource::Builtin);
+        assert_eq!(runtime.commands, &["buzz-manual-agent-acp"]);
+        assert_eq!(runtime.aliases, &["manual-agent"]);
+        assert!(runtime.provider_locked);
+        assert_eq!(runtime.model_env_var, Some("MANUAL_AGENT_MODEL"));
+        assert_eq!(
+            runtime.thinking_env_var,
+            Some("MANUAL_AGENT_REASONING_EFFORT")
+        );
+        assert_eq!(
+            runtime.readiness_policy,
+            RuntimeReadinessPolicy::Configuration
+        );
+        let setup_fields = runtime_setup_fields(runtime.id);
+        assert_eq!(setup_fields.len(), 2);
+        assert_eq!(setup_fields[0].env_key, "MANUAL_AGENT_BASE_URL");
+        assert_eq!(
+            setup_fields[0].validation,
+            crate::managed_agents::RuntimeSetupFieldValidation::TailnetHttpsOrigin
+        );
+        assert_eq!(setup_fields[1].env_key, "MANUAL_AGENT_TOKEN");
+        assert!(setup_fields[1].kind == crate::managed_agents::RuntimeSetupFieldKind::Secret);
+        assert_eq!(
+            setup_fields[1].validation,
+            crate::managed_agents::RuntimeSetupFieldValidation::AppPassword
+        );
+        let serialized = serde_json::to_string(&setup_fields).expect("setup metadata serializes");
+        assert!(!serialized.contains("test-app-password"));
     }
 
     #[test]

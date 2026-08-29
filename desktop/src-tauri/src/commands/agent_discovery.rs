@@ -13,7 +13,6 @@ use crate::{
 
 mod adapter_install;
 mod post_install_verification;
-
 pub(crate) use adapter_install::plan_adapter_install;
 
 fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
@@ -151,6 +150,7 @@ pub async fn save_custom_harness(
         node_required: false,
         auth_status: AuthStatus::NotApplicable,
         runtime_readiness,
+        setup_fields: Vec::new(),
         can_connect_account: false,
         login_hint: None,
         source: HarnessSource::Custom,

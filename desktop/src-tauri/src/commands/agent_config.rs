@@ -44,6 +44,7 @@ fn sanitize_inherited_env(
     raw.iter()
         .filter(|(k, v)| {
             !is_reserved_env_key(k)
+                && !crate::managed_agents::setup_secrets::is_setup_secret_env_key(k)
                 && is_well_formed_env_key(k)
                 && !v.contains('\0')
                 && v.len() <= MAX_ENV_VALUE_BYTES
@@ -122,6 +123,10 @@ fn resolve_config_surface(
     session_cache: Option<&SessionConfigCache>,
     global: &GlobalAgentConfig,
 ) -> RuntimeConfigSurface {
+    // Setup secret values are a spawn-only keyring hydration detail. They
+    // never participate in the renderer-readable config surface.
+    crate::managed_agents::setup_secrets::strip_setup_secret_env_values(&mut record.env_vars);
+
     // Linked instances are definition-authoritative: clear stale materialized
     // model/provider/prompt so they can never masquerade as BuzzExplicit and
     // shadow definition values. Env var overrides are untouched.
@@ -171,6 +176,32 @@ pub async fn get_runtime_file_config(
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))
+}
+
+/// Return only whether catalog-declared setup secrets exist for the selected
+/// definition/instance scopes. Secret bytes remain in the OS keyring and are
+/// never serialized across IPC.
+#[tauri::command]
+pub async fn get_runtime_setup_secret_status(
+    runtime_id: String,
+    definition_id: Option<String>,
+    agent_pubkey: Option<String>,
+) -> Result<crate::managed_agents::setup_secrets::RuntimeSetupSecretStatus, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::managed_agents::setup_secrets::runtime_setup_secret_status(
+            runtime_id.trim(),
+            definition_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty()),
+            agent_pubkey
+                .as_deref()
+                .map(str::trim)
+                .filter(|pubkey| !pubkey.is_empty()),
+        )
+    })
+    .await
+    .map_err(|error| format!("spawn_blocking failed: {error}"))?
 }
 
 /// Return the key names of all non-empty baked build env vars.

@@ -75,7 +75,11 @@ pub struct AgentDefinition {
     /// Opaque to Pkzz — keys and values are runtime-specific.
     ///
     /// Stored as a BTreeMap for deterministic on-disk ordering.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        serialize_with = "crate::managed_agents::setup_secrets::serialize_env_without_setup_secrets"
+    )]
     pub env_vars: BTreeMap<String, String>,
     /// NIP-AP behavioral defaults, stored in WIRE shape (kebab-case string,
     /// not the `RespondTo` enum) so `persona_event_content` is a verbatim
@@ -307,7 +311,11 @@ pub struct ManagedAgentRecord {
     /// parent env < persona `env_vars` < this agent's `env_vars` (last wins).
     ///
     /// To "override" a persona env var: set the same key here.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        serialize_with = "crate::managed_agents::setup_secrets::serialize_env_without_setup_secrets"
+    )]
     pub env_vars: BTreeMap<String, String>,
     #[serde(default = "default_start_on_app_launch")]
     pub start_on_app_launch: bool,
@@ -563,7 +571,11 @@ pub struct ManagedAgentSummary {
     /// Fields that drifted since launch, redacted for display.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub restart_diff: Vec<super::spawn_snapshot::RestartDiffEntry>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        serialize_with = "crate::managed_agents::setup_secrets::serialize_env_without_setup_secrets"
+    )]
     pub env_vars: BTreeMap<String, String>,
     pub backend: BackendKind,
     pub backend_agent_id: Option<String>,
@@ -953,7 +965,10 @@ pub use catalog_source::CatalogSource;
 mod requests;
 pub use requests::*;
 mod runtime_catalog;
-pub use runtime_catalog::{AcpRuntimeCatalogEntry, HarnessSource, RuntimeReadinessStatus};
+pub use runtime_catalog::{
+    AcpRuntimeCatalogEntry, HarnessSource, RuntimeReadinessStatus, RuntimeSetupField,
+    RuntimeSetupFieldKind, RuntimeSetupFieldValidation,
+};
 
 #[cfg(test)]
 #[path = "types/wave0_foundation_tests.rs"]

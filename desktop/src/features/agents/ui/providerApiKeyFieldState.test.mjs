@@ -19,6 +19,19 @@ test("providerApiKeyFieldState_missingAnthropicKey_isTopLevelRequired", () => {
   assert.deepEqual(state.advancedRequiredEnvKeys, []);
 });
 
+test("setup-owned keys never duplicate in Advanced", () => {
+  const state = getProviderApiKeyFieldState({
+    bakedEnvKeys: [],
+    effectiveEnvVars: {},
+    envVars: {},
+    globalEnvVars: {},
+    hiddenEnvKeys: ["MANUAL_AGENT_BASE_URL", "MANUAL_AGENT_TOKEN"],
+    provider: "",
+    requiredEnvKeys: ["MANUAL_AGENT_BASE_URL", "MANUAL_AGENT_TOKEN"],
+  });
+  assert.deepEqual(state.advancedRequiredEnvKeys, []);
+});
+
 test("providerApiKeyFieldState_globalCredential_isInheritedWithoutDuplicateAdvancedRow", () => {
   const state = getProviderApiKeyFieldState({
     bakedEnvKeys: [],

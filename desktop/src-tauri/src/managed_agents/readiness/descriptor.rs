@@ -273,7 +273,11 @@ fn resolve_effective_agent_env_with_def(
     // Injected before persona/agent so per-agent values win on collision.
     // `merged_user_env` with an empty "lower" map applies reserved/malformed-key
     // filtering to the global map for free.
-    let global_env = merged_user_env(&BTreeMap::new(), &global.env_vars);
+    let mut global_env = merged_user_env(&BTreeMap::new(), &global.env_vars);
+    // Defense in depth for configs persisted by older builds: remote computer
+    // connection values are agent-scoped and must never fan out to every child.
+    global_env
+        .retain(|key, _| !crate::managed_agents::global_config::is_agent_scoped_setup_key(key));
     env.extend(global_env);
 
     // Layer 3b: merged user env — live persona env under the record's own
@@ -284,7 +288,26 @@ fn resolve_effective_agent_env_with_def(
         &crate::managed_agents::env_vars::live_persona_env(personas, record.persona_id.as_deref()),
         &record.env_vars,
     );
-    env.extend(user_env);
+    // Setup secrets are never an ambient env tier. Remove any baked/custom/
+    // legacy copy, then inject a hydrated keyring value only when the
+    // effective runtime's own catalog entry declares that secret field. This
+    // prevents a stored manual-agent token from crossing into another runtime
+    // after a harness switch.
+    crate::managed_agents::setup_secrets::strip_setup_secret_env_values(&mut env);
+    let allowed_setup_secrets: std::collections::BTreeSet<String> = runtime
+        .into_iter()
+        .flat_map(|runtime| {
+            crate::managed_agents::setup_secrets::runtime_setup_secret_fields(runtime.id)
+        })
+        .map(|field| field.env_key)
+        .collect();
+    for (key, value) in user_env {
+        if !crate::managed_agents::setup_secrets::is_setup_secret_env_key(&key)
+            || allowed_setup_secrets.contains(&key)
+        {
+            env.insert(key, value);
+        }
+    }
 
     // Pkzz shared compute is a native Pkzz provider. Translate it to buzz-agent's
     // OpenAI-compatible transport only in the effective runtime environment.
@@ -353,6 +376,41 @@ mod tests {
     }
 
     #[test]
+    fn setup_secret_reaches_only_the_catalog_runtime_that_declares_it() {
+        let mut record = record();
+        record.env_vars.insert(
+            "MANUAL_AGENT_TOKEN".to_string(),
+            "test-app-password-0123456789-abcdef".to_string(),
+        );
+
+        let remote =
+            crate::managed_agents::known_acp_runtime_exact("remote-agent-computer").unwrap();
+        let remote_env = resolve_effective_agent_env_with_def(
+            &record,
+            &[],
+            Some(remote),
+            &GlobalAgentConfig::default(),
+            None,
+            "buzz-manual-agent-acp",
+        );
+        assert_eq!(
+            remote_env.env.get("MANUAL_AGENT_TOKEN").map(String::as_str),
+            Some("test-app-password-0123456789-abcdef")
+        );
+
+        let ordinary = crate::managed_agents::known_acp_runtime_exact("buzz-agent").unwrap();
+        let ordinary_env = resolve_effective_agent_env_with_def(
+            &record,
+            &[],
+            Some(ordinary),
+            &GlobalAgentConfig::default(),
+            None,
+            "buzz-agent",
+        );
+        assert!(!ordinary_env.env.contains_key("MANUAL_AGENT_TOKEN"));
+    }
+
+    #[test]
     fn explicit_raw_command_never_selects_catalog_by_path() {
         let mut record = record();
         apply_harness_update(&mut record, &[], Some(None), Some("/opt/tools/ompk"), true)
@@ -390,5 +448,61 @@ mod tests {
             Some("/opt/tools/ompk")
         );
         assert!(selection.args.is_empty());
+    }
+
+    #[test]
+    fn remote_connection_values_never_fan_out_from_global_env() {
+        let record = record();
+        let global = GlobalAgentConfig {
+            env_vars: BTreeMap::from([
+                (
+                    "MANUAL_AGENT_BASE_URL".to_string(),
+                    "https://device.example-tailnet.ts.net:8787".to_string(),
+                ),
+                (
+                    "MANUAL_AGENT_TOKEN".to_string(),
+                    "do-not-inherit-this-app-password".to_string(),
+                ),
+                ("SAFE_GLOBAL".to_string(), "kept".to_string()),
+            ]),
+            ..GlobalAgentConfig::default()
+        };
+
+        let effective =
+            resolve_effective_agent_env_with_def(&record, &[], None, &global, None, "custom-acp");
+        assert!(!effective.env.contains_key("MANUAL_AGENT_BASE_URL"));
+        assert!(!effective.env.contains_key("MANUAL_AGENT_TOKEN"));
+        assert_eq!(
+            effective.env.get("SAFE_GLOBAL").map(String::as_str),
+            Some("kept")
+        );
+    }
+
+    #[test]
+    fn remote_connection_values_remain_available_at_agent_scope() {
+        let mut record = record();
+        record.env_vars.insert(
+            "MANUAL_AGENT_BASE_URL".to_string(),
+            "https://device.example-tailnet.ts.net:8787".to_string(),
+        );
+        record.env_vars.insert(
+            "MANUAL_AGENT_TOKEN".to_string(),
+            "agent-scoped-app-password-0123456789".to_string(),
+        );
+
+        let remote =
+            crate::managed_agents::known_acp_runtime_exact("remote-agent-computer").unwrap();
+        let effective = resolve_effective_agent_env_with_def(
+            &record,
+            &[],
+            Some(remote),
+            &GlobalAgentConfig::default(),
+            None,
+            "buzz-manual-agent-acp",
+        );
+        assert_eq!(
+            effective.env.get("MANUAL_AGENT_TOKEN").map(String::as_str),
+            Some("agent-scoped-app-password-0123456789")
+        );
     }
 }

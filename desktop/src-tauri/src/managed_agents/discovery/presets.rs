@@ -126,6 +126,7 @@ pub(crate) fn preset_catalog_entry(
         node_required: false,
         auth_status: AuthStatus::NotApplicable,
         runtime_readiness,
+        setup_fields: Vec::new(),
         can_connect_account: false,
         login_hint,
         source: HarnessSource::Preset,

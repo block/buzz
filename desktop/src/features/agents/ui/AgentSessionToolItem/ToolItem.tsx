@@ -1,14 +1,18 @@
 import * as React from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { MonitorUp } from "lucide-react";
 
 import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
 import { cn } from "@/shared/lib/cn";
+import { Button } from "@/shared/ui/button";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { TranscriptItem } from "../agentSessionTypes";
 import { getBuzzToolInfo } from "../agentSessionToolCatalog";
 import { buildCompactToolSummary } from "../agentSessionToolSummary";
+import { buildComputerSessionLink } from "../computerSessionLink";
 import type { AgentTranscriptIdentityProps } from "../activityRenderClasses/types";
 import {
   formatTranscriptTimestampTitle,
@@ -34,6 +38,7 @@ export function ToolItem({
   profiles?: UserProfileLookup;
 }) {
   const [isExpanded, setIsExpanded] = React.useState(false);
+  const [computerOpenError, setComputerOpenError] = React.useState(false);
   const hasArgs = Object.keys(item.args).length > 0;
   const hasResult = item.result.trim().length > 0;
   const canonicalToolName = item.buzzToolName ?? item.toolName;
@@ -56,6 +61,15 @@ export function ToolItem({
     },
     [],
   );
+  const openComputer = React.useCallback(async () => {
+    if (!item.computerSession) return;
+    setComputerOpenError(false);
+    try {
+      await openUrl(buildComputerSessionLink(item.computerSession));
+    } catch {
+      setComputerOpenError(true);
+    }
+  }, [item.computerSession]);
 
   if (compactSummary.presentation === "message") {
     return (
@@ -148,6 +162,25 @@ export function ToolItem({
           shellCommand={compactSummary.shellContent}
         />
       </details>
+      {item.status === "completed" && item.computerSession ? (
+        <div className="mt-1 flex items-center gap-2 pl-5">
+          <Button
+            data-testid="remote-computer-open"
+            onClick={() => void openComputer()}
+            size="xs"
+            type="button"
+            variant="outline"
+          >
+            <MonitorUp className="h-3.5 w-3.5" />
+            Open computer
+          </Button>
+          {computerOpenError ? (
+            <span className="text-2xs text-destructive" role="alert">
+              Mesh Computer could not be opened.
+            </span>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }

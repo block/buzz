@@ -8,6 +8,8 @@ import {
   getPersonaProviderOptions,
   getProviderApiKeyLabel,
   isRuntimeReadyForNewSelection,
+  isRuntimeSelectableForConfiguration,
+  isRuntimeSetupFieldValueValid,
   resetConfigForHarnessChange,
   shouldPersistImplicitRuntimePreference,
   sortPersonaRuntimes,
@@ -31,6 +33,27 @@ function makeRuntime(id, availability = "available", overrides = {}) {
     ...overrides,
   };
 }
+
+const REMOTE_SETUP_FIELDS = [
+  {
+    envKey: "MANUAL_AGENT_BASE_URL",
+    label: "Manual Agent Tailnet URL",
+    placeholder: "https://<device>.<tailnet>.ts.net:8443",
+    helperText: "Tailnet HTTPS origin",
+    kind: "url",
+    validation: "tailnet_https_origin",
+    required: true,
+  },
+  {
+    envKey: "MANUAL_AGENT_TOKEN",
+    label: "Manual Agent app password",
+    placeholder: "Paste the app password",
+    helperText: "Local secret",
+    kind: "secret",
+    validation: "app_password",
+    required: true,
+  },
+];
 
 // ── getPersonaProviderOptions — hideProviderIds ───────────────────────────────
 
@@ -200,6 +223,53 @@ test("implicit defaults persist only a ready runtime", () => {
     true,
   );
   assert.equal(shouldPersistImplicitRuntimePreference("ompk", unready), false);
+});
+
+test("setup-required runtime is selectable but never an implicit default", () => {
+  const remote = makeRuntime("remote-agent-computer", "available", {
+    runtimeReadiness: "configuration_required",
+    setupFields: REMOTE_SETUP_FIELDS,
+  });
+  assert.equal(isRuntimeReadyForNewSelection(remote), false);
+  assert.equal(isRuntimeSelectableForConfiguration(remote), true);
+  assert.equal(shouldPersistImplicitRuntimePreference(null, remote), false);
+  assert.equal(
+    isRuntimeSelectableForConfiguration({ ...remote, setupFields: [] }),
+    false,
+  );
+});
+
+test("runtime setup validation enforces HTTPS origins and strong app passwords", () => {
+  const [urlField, tokenField] = REMOTE_SETUP_FIELDS;
+  assert.equal(
+    isRuntimeSetupFieldValueValid(
+      urlField,
+      "https://device.example-tailnet.ts.net:8443",
+    ),
+    true,
+  );
+  for (const invalid of [
+    "http://device.example-tailnet.ts.net:8443",
+    "https://example.com",
+    "https://device..ts.net:8443",
+    "https://user:pass@device.example-tailnet.ts.net:8443",
+    "https://device.example-tailnet.ts.net:8443/runs",
+    "https://device.example-tailnet.ts.net:8443?token=secret",
+  ]) {
+    assert.equal(isRuntimeSetupFieldValueValid(urlField, invalid), false);
+  }
+  assert.equal(isRuntimeSetupFieldValueValid(tokenField, "short"), false);
+  assert.equal(
+    isRuntimeSetupFieldValueValid(
+      tokenField,
+      "test-app-password-0123456789-abcdef",
+    ),
+    true,
+  );
+  assert.deepEqual(
+    requiredCredentialEnvKeys("remote-agent-computer", "", REMOTE_SETUP_FIELDS),
+    ["MANUAL_AGENT_BASE_URL", "MANUAL_AGENT_TOKEN"],
+  );
 });
 
 test("runtime dropdown disables unready new selections but retains an edit's current choice", () => {

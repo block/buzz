@@ -52,7 +52,9 @@ export function catalogDialogEntries(
     .sort(compareCatalogEntries);
 }
 
-function entryIsOperationallyReady(entry: AcpRuntimeCatalogEntry): boolean {
+export function entryIsOperationallyReady(
+  entry: AcpRuntimeCatalogEntry,
+): boolean {
   return (
     entry.availability === "available" && entry.runtimeReadiness === "ready"
   );
@@ -153,6 +155,8 @@ export function entryStatusLabel(entry: AcpRuntimeCatalogEntry): string | null {
       return "CLI needed";
     case "available":
       switch (entry.runtimeReadiness) {
+        case "configuration_required":
+          return "Connection setup needed";
         case "authentication_required":
           return "Sign-in needed";
         case "model_unavailable":

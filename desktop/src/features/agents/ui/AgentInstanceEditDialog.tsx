@@ -89,6 +89,7 @@ import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 import { showAgentProfileSyncWarning } from "./agentProfileSyncWarning";
 import { AddCustomHarnessDialog } from "./AddCustomHarnessDialog";
 import { RuntimeSetupGuidance } from "./RuntimeSetupGuidance";
+import * as Setup from "./useRuntimeSetupState";
 import {
   runtimeDropdownAction,
   usePendingHarnessSelection,
@@ -253,7 +254,6 @@ export function AgentInstanceEditDialog({
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
   } = useAgentDialogDefaults({ inheritedEnvVars, open });
 
-  // Original (dialog-opening) capability: see resolveOriginalRuntimeSupportsProvider.
   const originalRuntimeSupportsProvider =
     resolveOriginalRuntimeSupportsProvider(
       runtimes,
@@ -261,9 +261,6 @@ export function AgentInstanceEditDialog({
       originalAgentCommand,
     );
 
-  // The runtime id active after submit: inheriting resolves from the LINKED PERSONA's
-  // runtime; falls back to dual-match (command path, then id) when unset. This single
-  // prospective id feeds BOTH the block-save gate and submit so they always agree.
   const prospectiveRuntimeId = React.useMemo(
     () =>
       resolveProspectiveRuntimeId({
@@ -290,6 +287,17 @@ export function AgentInstanceEditDialog({
   const prospectiveRuntime = runtimes.find(
     (r) => r.id === prospectiveRuntimeId,
   );
+  const setup = Setup.useRuntimeSetupState({
+    agentPubkey: agent.pubkey,
+    definitionId: linkedPersona?.id,
+    disabled: updateMutation.isPending,
+    fields: prospectiveRuntime?.setupFields,
+    inheritedFrom: inheritedEnvVars,
+    onChange: setEnvVars,
+    open,
+    runtimeId: prospectiveRuntimeId,
+    value: envVars,
+  });
   const llmProviderFieldVisible = runtimeSupportsLlmProviderSelection(
     prospectiveRuntime?.providerEnvVar,
   );
@@ -299,9 +307,6 @@ export function AgentInstanceEditDialog({
       ? ("error" as const)
       : ("ready" as const);
 
-  // One-shot focus: when the dialog opens from a card deep-link, scroll and
-  // focus the relevant field. The effect re-runs when `llmProviderFieldVisible`
-  // changes so a provider-field focus request fires once the field materializes.
   const normalizedFieldFocusFiredRef = React.useRef(false);
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — reset guard on these three; llmProviderFieldVisible drives the focus attempt below
   React.useEffect(() => {
@@ -331,8 +336,6 @@ export function AgentInstanceEditDialog({
     return () => cancelAnimationFrame(id);
   }, [open, initialFocus, agent.pubkey, llmProviderFieldVisible]);
 
-  // Provider + env to PERSIST on submit — also fed to the credential gate so gate, saved record,
-  // and spawn snapshot all agree on one resolved value. See resolveInheritedRuntimeSubmission.
   const inheritedSubmission = React.useMemo(
     () =>
       resolveInheritedRuntimeSubmission({
@@ -358,12 +361,12 @@ export function AgentInstanceEditDialog({
     ],
   );
 
-  // Runtime/provider-required credential state for the PROSPECTIVE post-submit runtime.
-  // globalProvider/globalEnvVars: fallback for empty per-agent provider; keys satisfied globally don't block Save.
   const { requiredEnvKeys, fileSatisfiedEnvKeys, requiredEnvKeyMissing } =
     useRequiredCredentialState({
       open,
       prospectiveRuntimeId,
+      setupFields: setup.fields,
+      setupSatisfiedEnvKeys: setup.satisfiedKeys,
       providerEnvVar: prospectiveRuntime?.providerEnvVar,
       provider: inheritedSubmission.provider ?? "",
       globalProvider: inheritedProviderDefault.value,
@@ -377,12 +380,6 @@ export function AgentInstanceEditDialog({
     enabled: open,
   });
 
-  // Merge global env as the base layer so credential keys satisfied via global
-  // config (e.g. ANTHROPIC_API_KEY) are available to model discovery. Use
-  // `inheritedSubmission.envVars` (the same snapshot the credential gate
-  // validates) rather than raw `envVars`, so an inherit-transition that layers
-  // in persona env vars is reflected in discovery. Agent-local env takes
-  // precedence, matching the agent → global → file spawn-path precedence.
   const envVarsForDiscovery = React.useMemo(
     () => ({ ...globalConfig.env_vars, ...inheritedSubmission.envVars }),
     [globalConfig.env_vars, inheritedSubmission.envVars],
@@ -421,6 +418,7 @@ export function AgentInstanceEditDialog({
     envVars,
     fileSatisfiedEnvKeys,
     globalEnvVars: globalConfig.env_vars,
+    hiddenEnvKeys: setup.envKeys,
     personaSatisfied,
     provider: effectiveProvider,
     requiredEnvKeys,
@@ -433,6 +431,7 @@ export function AgentInstanceEditDialog({
     secretEnvVar: topLevelSecretEnvVar,
     value: apiKeyValue,
   } = apiKeyFieldState;
+  const hiddenKeys = Setup.hiddenKeys(topLevelSecretEnvVar, setup.envKeys);
   // Clear model when provider scope changes and current model is no longer valid.
   React.useEffect(() => {
     if (
@@ -619,6 +618,7 @@ export function AgentInstanceEditDialog({
     }) &&
     canPinSelectedRuntime &&
     providerValid &&
+    !setup.queryFailed &&
     !updateMutation.isPending &&
     !isAvatarUploadPending;
 
@@ -978,6 +978,7 @@ export function AgentInstanceEditDialog({
                 open={isAddHarnessOpen}
               />
             </div>
+            <Setup.RuntimeSetupFields {...setup.fieldProps} />
             {selectedRuntimeId === "custom" && !inheritHarness ? (
               <div className="space-y-1.5">
                 <label
@@ -1181,9 +1182,7 @@ export function AgentInstanceEditDialog({
                       disabled={updateMutation.isPending}
                       envVars={envVars}
                       fileSatisfiedEnvKeys={fileSatisfiedEnvKeys}
-                      hiddenEnvKeys={
-                        topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []
-                      }
+                      hiddenEnvKeys={hiddenKeys}
                       focusKey={
                         initialFocus?.type === "env_key"
                           ? initialFocus.key

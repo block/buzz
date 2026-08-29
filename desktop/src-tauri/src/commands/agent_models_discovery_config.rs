@@ -109,5 +109,7 @@ pub(super) fn draft_agent_model_discovery_env(
     }
     let merged_with_def =
         crate::managed_agents::merged_user_env(&derived_env, &filtered_definition_env);
-    crate::managed_agents::merged_user_env(&merged_with_def, env_vars)
+    let mut merged = crate::managed_agents::merged_user_env(&merged_with_def, env_vars);
+    crate::managed_agents::setup_secrets::strip_setup_secret_env_values(&mut merged);
+    merged
 }

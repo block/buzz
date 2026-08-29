@@ -38,6 +38,7 @@ function entry(overrides = {}) {
     nodeRequired: false,
     authStatus: { status: "not_applicable" },
     runtimeReadiness: "ready",
+    setupFields: [],
     canConnectAccount: false,
     loginHint: null,
     ...overrides,
@@ -255,6 +256,17 @@ describe("stableRowOrder", () => {
 // ── entryStatusLabel ─────────────────────────────────────────────────────────
 
 describe("entryStatusLabel", () => {
+  it("names connection setup without claiming the binary is ready", () => {
+    assert.equal(
+      entryStatusLabel(
+        entry({
+          availability: "available",
+          runtimeReadiness: "configuration_required",
+        }),
+      ),
+      "Connection setup needed",
+    );
+  });
   it("config error wins over availability", () => {
     assert.equal(
       entryStatusLabel(

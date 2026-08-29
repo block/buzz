@@ -273,6 +273,9 @@ export function AgentConfigFields({
     [bakedEnv],
   );
   const selectedRuntimeId = selectedRuntime?.id ?? "";
+  const setupEnvKeys = (selectedRuntime?.setupFields ?? []).map(
+    (field) => field.envKey,
+  );
   const providerFieldVisible = hasRenderableAgentConfigField(
     fieldModel,
     "provider",
@@ -289,7 +292,8 @@ export function AgentConfigFields({
   );
   // CLI-login harnesses apply this setting through ACP rather than an env var
   // and provide their own default when no model override is persisted.
-  const modelIsOptional = modelField?.targetApplication.kind === "acpNative";
+  const modelIsOptional =
+    !providerFieldVisible || modelField?.targetApplication.kind === "acpNative";
   const modelIsValid =
     modelIsOptional ||
     (config.model?.trim().length ?? 0) > 0 ||
@@ -384,20 +388,10 @@ export function AgentConfigFields({
     showCustomModelOption,
   });
 
-  // Mount-time healing policy: onboarding page 4 edits the root config during
-  // first-run (no higher layers to inherit from), so acting on open is safe
-  // and intentional there — it heals stale state and picks a valid model.
-  // Evergreen surfaces (Settings, dialogs) edit saved data that may pair with
-  // higher layers (see PR #2148 review thread), so they only act after the
-  // user explicitly edits the provider in this session.
   const healOnMount =
     fieldModel.dependentValuePolicy.onCatalogMismatch === "onboardingCleanup";
   const userEditedProviderRef = React.useRef(false);
-  // Advanced visibility is user-controlled. Provider changes can add required
-  // rows, but must not open this section without an explicit toggle click.
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
-  // Read inside effects via ref so biome's exhaustive-deps stays honest:
-  // refs are stable, and healOnMount is captured at declaration.
   const mayMutateDependentFieldsRef = React.useRef(false);
   mayMutateDependentFieldsRef.current =
     healOnMount || userEditedProviderRef.current;
@@ -439,14 +433,6 @@ export function AgentConfigFields({
     ? (config.env_vars[effortPersistenceKey] ?? "")
     : "";
 
-  // When the selected harness changes outside this component (Back → setup
-  // page → choose a different harness → Next), the saved model can belong to
-  // the old harness. In onboarding, heal that stale value as soon as the new
-  // harness catalog proves it is unsupported; otherwise a Codex id like
-  // `gpt-5.5[low]` appears as a Claude Code custom model.
-  // Also clear when the Model control is omitted after a confirmed successful
-  // empty catalog — never while discovery failed/unavailable (transient
-  // failures must not erase saved model/effort).
   React.useEffect(() => {
     if (!healOnMount) return;
     const currentModel = (config.model ?? "").trim();
@@ -748,6 +734,7 @@ export function AgentConfigFields({
         fileSatisfiedKeys={advancedFileSatisfiedEnvKeys}
         hiddenKeys={[
           ...(apiKeyEnvVar ? [apiKeyEnvVar] : []),
+          ...setupEnvKeys,
           ...allStructuredKeys,
         ]}
         inheritedRows={bakedGenericRows}

@@ -1,6 +1,7 @@
 import type {
   AcpRuntimeCatalogEntry,
   GlobalAgentConfig,
+  RuntimeSetupField,
 } from "@/shared/api/types";
 import { getPersonaRuntimePreferenceRank } from "../lib/resolvePersonaRuntime";
 import { BUZZ_AGENT_THINKING_EFFORT } from "./buzzAgentConfig";
@@ -216,13 +217,53 @@ export function providerApiKeyUrl(
 export function requiredCredentialEnvKeys(
   runtimeId: string,
   provider: string,
+  setupFields: readonly RuntimeSetupField[] = [],
 ): readonly string[] {
+  const setupKeys = setupFields
+    .filter((field) => field.required)
+    .map((field) => field.envKey);
   const normalizedRuntime = runtimeId.trim();
   if (normalizedRuntime !== "buzz-agent" && normalizedRuntime !== "goose") {
-    return [];
+    return setupKeys;
   }
   const config = PROVIDER_CREDENTIAL_CONFIG[provider.trim().toLowerCase()];
-  return config?.requiredEnvKeys ?? [];
+  return [...new Set([...setupKeys, ...(config?.requiredEnvKeys ?? [])])];
+}
+
+/** Validate one configured value using only Rust-owned catalog metadata. */
+export function isRuntimeSetupFieldValueValid(
+  field: RuntimeSetupField,
+  value: string | null | undefined,
+): boolean {
+  const trimmed = value?.trim() ?? "";
+  if (!field.required && trimmed.length === 0) return true;
+  if (trimmed.length === 0) return false;
+
+  switch (field.validation) {
+    case "tailnet_https_origin": {
+      try {
+        const parsed = new URL(trimmed);
+        const hostname = parsed.hostname.toLowerCase();
+        const tailnetPrefix = hostname.endsWith(".ts.net")
+          ? hostname.slice(0, -".ts.net".length)
+          : "";
+        return (
+          parsed.protocol === "https:" &&
+          tailnetPrefix.length > 0 &&
+          !tailnetPrefix.endsWith(".") &&
+          parsed.username.length === 0 &&
+          parsed.password.length === 0 &&
+          parsed.pathname === "/" &&
+          parsed.search.length === 0 &&
+          parsed.hash.length === 0
+        );
+      } catch {
+        return false;
+      }
+    }
+    case "app_password":
+      return trimmed.length >= 32;
+  }
 }
 
 export function isMissingRequiredDropdownField(
@@ -531,7 +572,9 @@ export function formatRuntimeOptionLabel(runtime: AcpRuntimeCatalogEntry) {
           ? " (CLI missing)"
           : runtime.availability === "not_installed"
             ? " (not installed)"
-            : "";
+            : runtime.runtimeReadiness === "configuration_required"
+              ? " (setup required)"
+              : "";
   return `${runtime.label}${suffix}`;
 }
 
@@ -548,6 +591,24 @@ export function isRuntimeReadyForNewSelection(
   return (
     runtime?.availability === "available" &&
     runtime.runtimeReadiness === "ready"
+  );
+}
+
+/** A user may select setup-required runtimes only when the catalog supplies
+ * the first-class fields whose save gate can make that selection runnable. */
+export function isRuntimeSelectableForConfiguration(
+  runtime:
+    | (Pick<AcpRuntimeCatalogEntry, "availability" | "runtimeReadiness"> & {
+        setupFields?: readonly RuntimeSetupField[];
+      })
+    | null
+    | undefined,
+) {
+  return (
+    isRuntimeReadyForNewSelection(runtime) ||
+    (runtime?.availability === "available" &&
+      runtime.runtimeReadiness === "configuration_required" &&
+      (runtime.setupFields?.length ?? 0) > 0)
   );
 }
 
@@ -596,7 +657,7 @@ export function buildPersonaRuntimeDropdownOptions({
           candidate.availability !== "available") ||
         ((isCreateMode || candidate.id !== runtime.trim()) &&
           candidate.availability === "available" &&
-          !isRuntimeReadyForNewSelection(candidate)),
+          !isRuntimeSelectableForConfiguration(candidate)),
       label: `${formatRuntimeOptionLabel(candidate)}${
         isCreateMode && candidate.id === defaultRuntimeId ? " (default)" : ""
       }`,
@@ -670,12 +731,19 @@ export function isGloballySatisfiedCredentialKey(
   key: string,
   globalEnvVars: Record<string, string> | undefined,
   envVars: Record<string, string>,
+  setupField?: RuntimeSetupField,
 ): boolean {
   const globalValue = globalEnvVars?.[key] ?? "";
-  if (globalValue.length === 0) return false;
+  const globalIsValid = setupField
+    ? isRuntimeSetupFieldValueValid(setupField, globalValue)
+    : globalValue.length > 0;
+  if (!globalIsValid) return false;
   // Agent-local "" explicitly shadows the global — effective value is empty.
   const agentExplicitlyClearedKey =
-    key in envVars && (envVars[key] ?? "").length === 0;
+    key in envVars &&
+    (setupField
+      ? !isRuntimeSetupFieldValueValid(setupField, envVars[key])
+      : (envVars[key] ?? "").length === 0);
   return !agentExplicitlyClearedKey;
 }
 
@@ -734,6 +802,8 @@ export function computeLocalModeGate({
   provider,
   runtimeId,
   providerEnvVar,
+  setupFields = [],
+  setupSatisfiedEnvKeys = [],
   runtimeFileConfig,
 }: {
   /** Optional baked build env key names (Block-internal builds only).
@@ -763,6 +833,10 @@ export function computeLocalModeGate({
   runtimeId: string;
   /** Catalog-projected provider env var for the selected runtime. */
   providerEnvVar?: string | null;
+  /** Rust-catalog-owned setup fields for the selected runtime. */
+  setupFields?: readonly RuntimeSetupField[];
+  /** Key names confirmed present in native secure storage; values never cross IPC. */
+  setupSatisfiedEnvKeys?: readonly string[];
   /** Optional file-layer config for the runtime (e.g. goose config.yaml).
    *  When provided, requirements already satisfied there are silenced. */
   runtimeFileConfig?: RuntimeFileConfigSubset | null;
@@ -828,7 +902,15 @@ export function computeLocalModeGate({
   // Use the effective provider (env → global → file) so credential
   // requirements are computed correctly for all config sources.
   const providerForKeys = needsProviderSelection ? effectiveProvider : "";
-  const requiredKeys = requiredCredentialEnvKeys(runtimeId, providerForKeys);
+  const requiredKeys = requiredCredentialEnvKeys(
+    runtimeId,
+    providerForKeys,
+    setupFields,
+  );
+  const setupFieldsByKey = new Map(
+    setupFields.map((field) => [field.envKey, field]),
+  );
+  const setupSatisfiedSet = new Set(setupSatisfiedEnvKeys);
 
   // Keys satisfied by the baked build env (Block-internal builds only).
   const bakedSatisfiedSet = new Set(
@@ -844,6 +926,20 @@ export function computeLocalModeGate({
   const requiredEnvKeys: string[] = [];
   for (const key of requiredKeys) {
     const agentValue = envVars[key] ?? "";
+    const setupField = setupFieldsByKey.get(key);
+    if (setupField) {
+      // Remote connection values are intentionally agent-scoped. Global,
+      // baked, and runtime-file layers fan out too broadly for bearer tokens.
+      requiredEnvKeys.push(key);
+      const securelyStored = !(key in envVars) && setupSatisfiedSet.has(key);
+      if (
+        !securelyStored &&
+        !isRuntimeSetupFieldValueValid(setupField, agentValue)
+      ) {
+        missingEnvKeys.push(key);
+      }
+      continue;
+    }
     if (isGloballySatisfiedCredentialKey(key, globalEnvVars, envVars)) {
       // Globally satisfied and not shadowed by an explicit local empty override —
       // not a missing key, and no locked row needed.

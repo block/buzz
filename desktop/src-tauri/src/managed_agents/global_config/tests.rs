@@ -1,8 +1,9 @@
 use std::collections::BTreeMap;
 
 use super::{
-    normalize_global_config_fields, resolve_effective_model_provider, strip_empty_env_vars,
-    validate_global_config, GlobalAgentConfig,
+    normalize_global_config_fields, resolve_effective_model_provider,
+    strip_agent_scoped_setup_env_vars, strip_empty_env_vars, validate_global_config,
+    GlobalAgentConfig,
 };
 use crate::managed_agents::{AgentDefinition, BackendKind, ManagedAgentRecord, RespondTo};
 
@@ -22,6 +23,33 @@ fn config_with_env(pairs: &[(&str, &str)]) -> GlobalAgentConfig {
 fn validate_accepts_valid_env_vars() {
     let config = config_with_env(&[("ANTHROPIC_API_KEY", "sk-test"), ("MY_CUSTOM_KEY", "value")]);
     assert!(validate_global_config(&config).is_ok());
+}
+
+#[test]
+fn validate_rejects_remote_connection_values_at_global_scope() {
+    for key in ["MANUAL_AGENT_BASE_URL", "MANUAL_AGENT_TOKEN"] {
+        let config = config_with_env(&[(key, "not-global")]);
+        let error = validate_global_config(&config).expect_err("agent-scoped key must fail");
+        assert!(error.contains("remote agent definition or instance"));
+        assert!(error.contains(key));
+        assert!(!error.contains("not-global"));
+    }
+}
+
+#[test]
+fn legacy_global_remote_values_are_removed_without_touching_other_keys() {
+    let mut config = config_with_env(&[
+        ("MANUAL_AGENT_BASE_URL", "https://legacy.tailnet.ts.net"),
+        ("MANUAL_AGENT_TOKEN", "legacy-secret"),
+        ("SAFE_GLOBAL", "kept"),
+    ]);
+    assert!(strip_agent_scoped_setup_env_vars(&mut config));
+    assert_eq!(config.env_vars.len(), 1);
+    assert_eq!(
+        config.env_vars.get("SAFE_GLOBAL").map(String::as_str),
+        Some("kept")
+    );
+    assert!(!strip_agent_scoped_setup_env_vars(&mut config));
 }
 
 #[test]

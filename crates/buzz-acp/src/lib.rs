@@ -3185,6 +3185,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    Some(&ctx.rest_client),
                 ) == LoopAction::Exit
                 {
                     break;
@@ -3209,6 +3210,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
+                    Some(&ctx.rest_client),
                 );
                 if pool.live_count() == 0 && !any_respawn_in_flight(&crash_history) {
                     tracing::error!("all agents dead — exiting");
@@ -3769,6 +3771,7 @@ fn dispatch_pending(
         let result_tx = pool.result_tx();
         let ctx_clone = Arc::clone(ctx);
         let agent_index = agent.index;
+        let initialized_agent_name = agent.agent_name.clone();
 
         // Mid-turn non-cancelling steer seam: install the per-turn steer
         // receiver on the read loop so the main loop's mode-gate fork
@@ -3811,6 +3814,7 @@ fn dispatch_pending(
             abort_handle.id(),
             pool::TaskMeta {
                 agent_index,
+                initialized_agent_name,
                 channel_id: Some(channel_id),
                 turn_id,
                 recoverable_batch,
@@ -3857,6 +3861,16 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     };
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
+
+/// The remote-computer adapter uses this reserved application error after a
+/// side-effectful submission was attempted. Requeueing the batch could create
+/// a second computer run while the first is still active.
+fn is_non_retryable_remote_turn_error(error: &acp::AcpError) -> bool {
+    matches!(error, acp::AcpError::AgentError { code: -32041, .. })
+}
+
+const REMOTE_COMPUTER_AGENT_NAME: &str = "pkzz-remote-agent";
+const REMOTE_COMPUTER_RECONCILIATION_NOTICE: &str = "⚠️ The remote computer turn ended without an attested terminal state. It was not retried because doing so could duplicate side effects. Reconcile the remote run audit before re-sending.";
 
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
@@ -3919,7 +3933,45 @@ fn handle_prompt_result(
         // Don't requeue batches for channels the agent was removed from —
         // those events are stale and should be silently dropped.
         if !removed_channels.contains(&batch.channel_id) {
-            if matches!(
+            let is_remote_computer = result.agent.agent_name == REMOTE_COMPUTER_AGENT_NAME;
+            if is_remote_computer && matches!(&result.outcome, PromptOutcome::Cancelled) {
+                // The remote stop was acknowledged. The original prompt may
+                // already have produced computer side effects, so cancellation
+                // drops it instead of merging it into a later turn.
+                tracing::info!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "dropping cancelled remote computer batch without replay"
+                );
+            } else if is_remote_computer
+                && matches!(
+                    &result.outcome,
+                    PromptOutcome::CancelDrainTimeout(_)
+                        | PromptOutcome::Timeout(_)
+                        | PromptOutcome::AgentExited
+                        | PromptOutcome::Error(_)
+                )
+            {
+                // Each outcome is ambiguous after a side-effectful remote POST:
+                // the Mac job may still be running even though the local ACP
+                // adapter can no longer attest completion or stop.
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "dead-lettering uncertain remote computer batch without replay"
+                );
+                spawn_failure_notice(
+                    rest_client,
+                    &batch,
+                    REMOTE_COMPUTER_RECONCILIATION_NOTICE.to_string(),
+                );
+                if matches!(
+                    &result.outcome,
+                    PromptOutcome::Timeout(TimeoutKind::Hard { .. })
+                ) {
+                    hard_timeout_fate_suffix = Some(" — dead-lettered (remote side-effect safety)");
+                }
+            } else if matches!(
                 result.outcome,
                 PromptOutcome::Cancelled | PromptOutcome::CancelDrainTimeout(_)
             ) {
@@ -3993,6 +4045,21 @@ fn handle_prompt_result(
                     rest_client,
                     &batch,
                     format!("⚠️ I couldn't accept the execution request ({error})."),
+                );
+            } else if matches!(
+                &result.outcome,
+                PromptOutcome::Error(e) if is_non_retryable_remote_turn_error(e)
+            ) {
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "dead-lettering batch immediately — remote computer turn may have side effects"
+                );
+                spawn_failure_notice(
+                    rest_client,
+                    &batch,
+                    "⚠️ The remote computer turn failed after submission. It was not retried because doing so could duplicate side effects. Review the remote run audit before re-sending."
+                        .to_string(),
                 );
             } else if matches!(&result.outcome, PromptOutcome::Error(e) if is_auth_error(e)) {
                 // Auth errors are non-retryable: the token won't self-repair
@@ -4278,6 +4345,7 @@ fn recover_panicked_agent(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    rest_client: Option<&relay::RestClient>,
 ) {
     let task_id = join_error.id();
     let Some(meta) = pool.task_map_mut().remove(&task_id) else {
@@ -4285,15 +4353,29 @@ fn recover_panicked_agent(
         return;
     };
     let i = meta.agent_index;
+    let is_remote_computer = meta.initialized_agent_name == REMOTE_COMPUTER_AGENT_NAME;
 
     // Requeue BEFORE mark_complete (same rationale as handle_prompt_result).
     if let Some(batch) = meta.recoverable_batch {
         if let Some(ch) = meta.channel_id {
             if !removed_channels.contains(&ch) {
-                // Dead-letter on exhaustion is logged inside requeue(); a
-                // panic path has no outcome to report, so no notice here.
-                let _ = queue.requeue(batch);
-                tracing::warn!("requeued batch for panicked agent {i}");
+                if is_remote_computer {
+                    tracing::warn!(
+                        agent = i,
+                        channel_id = %ch,
+                        "dead-lettering panicked remote computer batch without replay"
+                    );
+                    spawn_failure_notice(
+                        rest_client,
+                        &batch,
+                        REMOTE_COMPUTER_RECONCILIATION_NOTICE.to_string(),
+                    );
+                } else {
+                    // Dead-letter on exhaustion is logged inside requeue(); a
+                    // panic path has no outcome to report, so no notice here.
+                    let _ = queue.requeue(batch);
+                    tracing::warn!("requeued batch for panicked agent {i}");
+                }
             } else {
                 tracing::debug!(
                     channel_id = %ch,
@@ -4320,6 +4402,8 @@ fn recover_panicked_agent(
             serde_json::json!({
                 "outcome": "panic",
                 "error": format!("Agent task panicked: {join_error}"),
+                "recovery": if is_remote_computer { "dead_lettered_remote_side_effect_safety" } else { "requeued_if_recoverable" },
+                "recoveryNotice": if is_remote_computer { Some(REMOTE_COMPUTER_RECONCILIATION_NOTICE) } else { None },
             }),
         );
     }
@@ -4376,6 +4460,7 @@ fn drain_ready_join_results(
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
+    rest_client: Option<&relay::RestClient>,
 ) -> LoopAction {
     while let Some(Some(join_result)) = pool.join_set.join_next().now_or_never() {
         if let Err(join_error) = join_result {
@@ -4392,6 +4477,7 @@ fn drain_ready_join_results(
                 respawn_tx,
                 respawn_tasks,
                 observer.clone(),
+                rest_client,
             );
             if pool.live_count() == 0 && !any_respawn_in_flight(crash_history) {
                 return LoopAction::Exit;
@@ -4421,6 +4507,7 @@ fn dispatch_heartbeat(
     let result_tx = pool.result_tx();
     let ctx_clone = Arc::clone(ctx);
     let agent_index = agent.index;
+    let initialized_agent_name = agent.agent_name.clone();
     let turn_id = Uuid::new_v4().to_string();
     let task_turn_id = turn_id.clone();
     let native_steer_source_event_ids = Arc::new(tokio::sync::Mutex::new(Vec::new()));
@@ -4443,6 +4530,7 @@ fn dispatch_heartbeat(
         abort_handle.id(),
         pool::TaskMeta {
             agent_index,
+            initialized_agent_name,
             channel_id: None,
             turn_id,
             recoverable_batch: None,
@@ -5214,6 +5302,7 @@ mod owner_control_command_tests {
             abort_handle.id(),
             pool::TaskMeta {
                 agent_index: 0,
+                initialized_agent_name: "unknown".to_string(),
                 channel_id: Some(channel_id),
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
@@ -6982,15 +7071,22 @@ mod error_outcome_emission_tests {
         );
     }
 
-    /// Spawn a real but inert agent subprocess (`cat`) so the error paths have
+    /// Spawn a real but inert agent subprocess so the error paths have
     /// an `OwnedAgent` to move into respawn or return to the pool. The error
     /// branches never talk to the subprocess.
     async fn dummy_agent(index: usize) -> OwnedAgent {
+        #[cfg(windows)]
+        let (program, args) = (
+            "cmd.exe",
+            vec!["/d".to_string(), "/c".to_string(), "more".to_string()],
+        );
+        #[cfg(not(windows))]
+        let (program, args): (&str, Vec<String>) = ("cat", vec![]);
         OwnedAgent {
             index,
-            acp: AcpClient::spawn("cat", &[], &[], false)
+            acp: AcpClient::spawn(program, &args, &[], false)
                 .await
-                .expect("spawn cat as inert agent"),
+                .expect("spawn inert agent"),
             state: Default::default(),
             model_capabilities: None,
             desired_model: None,
@@ -7018,6 +7114,7 @@ mod error_outcome_emission_tests {
             task_id,
             crate::pool::TaskMeta {
                 agent_index: 0,
+                initialized_agent_name: "unknown".to_string(),
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
@@ -7094,6 +7191,7 @@ mod error_outcome_emission_tests {
             task_id,
             crate::pool::TaskMeta {
                 agent_index: 0,
+                initialized_agent_name: "unknown".to_string(),
                 channel_id: Some(channel_id),
                 turn_id: "panic-turn-id".to_string(),
                 recoverable_batch: None,
@@ -7131,6 +7229,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
         );
 
         let panic = observer
@@ -7143,6 +7242,102 @@ mod error_outcome_emission_tests {
             Some(channel_id.to_string().as_str())
         );
         assert_eq!(panic.turn_id.as_deref(), Some("panic-turn-id"));
+    }
+
+    async fn queued_events_after_panicked_agent(agent_name: &str) -> (usize, usize, String) {
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "panic recovery test")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let mut pool = AgentPool::from_slots(vec![]);
+        let task_id = pool
+            .join_set
+            .spawn(async { panic!("simulated prompt-task panic") })
+            .id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                initialized_agent_name: agent_name.to_string(),
+                channel_id: Some(channel_id),
+                turn_id: "panic-replay-test-turn".to_string(),
+                recoverable_batch: Some(batch),
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let join_error = pool.join_set.join_next().await.unwrap().unwrap_err();
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut typing_channels = HashMap::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: Some(std::time::Instant::now() + Duration::from_secs(60)),
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let observer = ObserverHandle::in_process();
+
+        recover_panicked_agent(
+            &mut pool,
+            &mut queue,
+            &config,
+            join_error,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut typing_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(observer.clone()),
+            None,
+        );
+
+        let recovery = observer
+            .snapshot()
+            .into_iter()
+            .find(|event| event.kind == "agent_panic")
+            .and_then(|event| {
+                event
+                    .payload
+                    .get("recovery")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .expect("panic observer event includes recovery disposition");
+        (
+            queue.pending_channels(),
+            queue.queued_event_count(&channel_id),
+            recovery,
+        )
+    }
+
+    #[tokio::test]
+    async fn panic_recovery_never_replays_remote_computer_batch() {
+        assert_eq!(
+            queued_events_after_panicked_agent(REMOTE_COMPUTER_AGENT_NAME).await,
+            (0, 0, "dead_lettered_remote_side_effect_safety".to_string())
+        );
+        assert_eq!(
+            queued_events_after_panicked_agent("ordinary-agent").await,
+            (1, 1, "requeued_if_recoverable".to_string())
+        );
     }
 
     #[tokio::test]
@@ -7186,6 +7381,7 @@ mod error_outcome_emission_tests {
                 task_id,
                 crate::pool::TaskMeta {
                     agent_index: 0,
+                    initialized_agent_name: "unknown".to_string(),
                     channel_id: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
@@ -7277,6 +7473,7 @@ mod error_outcome_emission_tests {
                 task_id,
                 crate::pool::TaskMeta {
                     agent_index: 0,
+                    initialized_agent_name: "unknown".to_string(),
                     channel_id: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
@@ -7382,6 +7579,7 @@ mod error_outcome_emission_tests {
                 task_id,
                 crate::pool::TaskMeta {
                     agent_index: 0,
+                    initialized_agent_name: "unknown".to_string(),
                     channel_id: None,
                     turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
@@ -7458,6 +7656,7 @@ mod error_outcome_emission_tests {
             task_id,
             crate::pool::TaskMeta {
                 agent_index: 0,
+                initialized_agent_name: "unknown".to_string(),
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
@@ -7552,6 +7751,7 @@ mod error_outcome_emission_tests {
             task_id,
             crate::pool::TaskMeta {
                 agent_index: 0,
+                initialized_agent_name: "unknown".to_string(),
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
@@ -7668,6 +7868,7 @@ mod error_outcome_emission_tests {
             task_id,
             crate::pool::TaskMeta {
                 agent_index: 0,
+                initialized_agent_name: "unknown".to_string(),
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
@@ -7807,6 +8008,7 @@ mod error_outcome_emission_tests {
             task_id,
             crate::pool::TaskMeta {
                 agent_index: 0,
+                initialized_agent_name: "unknown".to_string(),
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
@@ -7959,6 +8161,20 @@ mod error_outcome_emission_tests {
         );
     }
 
+    #[test]
+    fn remote_side_effect_error_is_non_retryable_by_exact_code_only() {
+        let remote = acp::AcpError::AgentError {
+            code: -32041,
+            message: "sanitized remote failure".to_string(),
+        };
+        let ordinary = acp::AcpError::AgentError {
+            code: -32000,
+            message: "ordinary application failure".to_string(),
+        };
+        assert!(is_non_retryable_remote_turn_error(&remote));
+        assert!(!is_non_retryable_remote_turn_error(&ordinary));
+    }
+
     // ── auth error dead-letter behavior ────────────────────────────────────
 
     /// An auth-class `PromptOutcome::Error` must dead-letter immediately
@@ -7995,6 +8211,7 @@ mod error_outcome_emission_tests {
             task_id,
             crate::pool::TaskMeta {
                 agent_index: 0,
+                initialized_agent_name: "unknown".to_string(),
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
@@ -8047,6 +8264,140 @@ mod error_outcome_emission_tests {
         );
     }
 
+    async fn queued_events_after_agent_outcome(
+        agent_name: &str,
+        outcome: PromptOutcome,
+    ) -> (usize, usize, usize) {
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "test")
+            .sign_with_keys(&keys)
+            .unwrap();
+        let channel_id = uuid::Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let mut agent = dummy_agent(0).await;
+        agent.agent_name = agent_name.to_string();
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                initialized_agent_name: "unknown".to_string(),
+                channel_id: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = std::collections::HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".to_string(),
+            outcome,
+            batch: Some(batch),
+        };
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        (
+            queue.pending_channels(),
+            queue.queued_event_count(&channel_id),
+            queue.cancelled_event_count_for_test(&channel_id),
+        )
+    }
+
+    #[tokio::test]
+    async fn remote_computer_uncertain_lifecycle_and_error_outcomes_never_requeue() {
+        let json_error = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        let outcomes = [
+            PromptOutcome::Cancelled,
+            PromptOutcome::CancelDrainTimeout(std::time::Duration::from_secs(5)),
+            PromptOutcome::Timeout(TimeoutKind::Idle),
+            PromptOutcome::Timeout(TimeoutKind::Hard {
+                recently_active: false,
+            }),
+            PromptOutcome::Timeout(TimeoutKind::Hard {
+                recently_active: true,
+            }),
+            PromptOutcome::AgentExited,
+            PromptOutcome::Error(acp::AcpError::Io(std::io::Error::other(
+                "simulated transport failure",
+            ))),
+            PromptOutcome::Error(acp::AcpError::Json(json_error)),
+            PromptOutcome::Error(acp::AcpError::Protocol(
+                "simulated protocol failure".to_string(),
+            )),
+            PromptOutcome::Error(acp::AcpError::AgentError {
+                code: -32000,
+                message: "simulated outer adapter failure".to_string(),
+            }),
+        ];
+        for outcome in outcomes {
+            assert_eq!(
+                queued_events_after_agent_outcome(REMOTE_COMPUTER_AGENT_NAME, outcome).await,
+                (0, 0, 0)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_agent_lifecycle_outcomes_keep_existing_requeue_behavior() {
+        assert_eq!(
+            queued_events_after_agent_outcome("ordinary-agent", PromptOutcome::Cancelled).await,
+            (0, 0, 1)
+        );
+        let json_error = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        for outcome in [
+            PromptOutcome::Timeout(TimeoutKind::Idle),
+            PromptOutcome::AgentExited,
+            PromptOutcome::Error(acp::AcpError::Io(std::io::Error::other(
+                "simulated transport failure",
+            ))),
+            PromptOutcome::Error(acp::AcpError::Json(json_error)),
+            PromptOutcome::Error(acp::AcpError::Protocol(
+                "simulated protocol failure".to_string(),
+            )),
+        ] {
+            assert_eq!(
+                queued_events_after_agent_outcome("ordinary-agent", outcome).await,
+                (1, 1, 0)
+            );
+        }
+    }
+
     /// A non-auth application error (e.g. usage credits) must still follow the
     /// standard requeue path so today's behavior is unchanged.
     #[tokio::test]
@@ -8080,6 +8431,7 @@ mod error_outcome_emission_tests {
             task_id,
             crate::pool::TaskMeta {
                 agent_index: 0,
+                initialized_agent_name: "unknown".to_string(),
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,

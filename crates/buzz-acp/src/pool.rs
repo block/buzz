@@ -54,6 +54,10 @@ const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
 /// Metadata stored per in-flight task for panic recovery.
 pub struct TaskMeta {
     pub agent_index: usize,
+    /// Exact agent name returned by the ACP initialize handshake.
+    /// Panic recovery must use this attested process identity rather than a
+    /// catalog/runtime id that may alias a different implementation.
+    pub initialized_agent_name: String,
     pub channel_id: Option<Uuid>,
     /// Identifies terminal events when the task panics before returning a result.
     pub turn_id: String,

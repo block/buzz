@@ -328,6 +328,35 @@ test("buildTranscript de-duplicates repeated tool updates into one canonical row
   assert.equal(items[0].result, "hi");
 });
 
+test("remote computer terminal update retains only a validated exact-session descriptor", () => {
+  const [item] = toolItems([
+    acpToolUpdate(1, {
+      sessionUpdate: "tool_call",
+      toolCallId: "remote-run-1",
+      title: "Remote agent computer",
+      status: "in_progress",
+    }),
+    acpToolUpdate(2, {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "remote-run-1",
+      status: "completed",
+      rawOutput: {
+        computerSession: {
+          version: 1,
+          sessionId: "mesh-session-1",
+          endpoint: "https://mac.example-tailnet.ts.net:8443",
+        },
+      },
+    }),
+  ]);
+  assert.deepEqual(item.computerSession, {
+    version: 1,
+    sessionId: "mesh-session-1",
+    endpoint: "https://mac.example-tailnet.ts.net:8443",
+  });
+  assert.equal(item.status, "completed");
+});
+
 test("buildTranscript keeps a completed tool terminal when a late executing call arrives", () => {
   const [item] = toolItems([
     acpToolUpdate(50, {

@@ -13,9 +13,42 @@ use super::{AcpAvailabilityStatus, AuthStatus};
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeReadinessStatus {
     Ready,
+    ConfigurationRequired,
     AuthenticationRequired,
     ModelUnavailable,
     Unknown,
+}
+
+/// Input treatment for a runtime-specific setup field projected by the
+/// Rust-owned catalog. Values remain in local managed-agent environment maps;
+/// the catalog carries only field metadata.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSetupFieldKind {
+    Url,
+    Secret,
+}
+
+/// Validation policy for a runtime setup field. The frontend renders and
+/// validates from this catalog value; it never infers rules from a runtime id.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSetupFieldValidation {
+    TailnetHttpsOrigin,
+    AppPassword,
+}
+
+/// One required runtime-specific environment field rendered as first-class
+/// setup UX instead of an unlabeled Advanced environment row.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RuntimeSetupField {
+    pub env_key: String,
+    pub label: String,
+    pub placeholder: String,
+    pub helper_text: String,
+    pub kind: RuntimeSetupFieldKind,
+    pub validation: RuntimeSetupFieldValidation,
+    pub required: bool,
 }
 
 /// Origin of an ACP runtime catalog entry. Serializes as a lowercase string so the TypeScript consumer can switch on it without numeric comparisons.
@@ -65,6 +98,10 @@ pub struct AcpRuntimeCatalogEntry {
     pub auth_status: AuthStatus,
     /// Operational readiness derived from the Rust-owned runtime policy.
     pub runtime_readiness: RuntimeReadinessStatus,
+    /// Runtime-specific local setup fields. This metadata never contains the
+    /// configured values themselves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub setup_fields: Vec<RuntimeSetupField>,
     /// Whether this runtime exposes an account/setup connection flow. This is
     /// a metadata capability, not evidence that authentication is required.
     pub can_connect_account: bool,

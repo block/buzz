@@ -1330,7 +1330,7 @@ pub async fn delete_managed_agent(
             }
             save_managed_agents(&app, &records)?;
             // Remove the agent's nsec from the keyring after the record is gone.
-            crate::managed_agents::delete_agent_key(&pubkey);
+            crate::managed_agents::setup_secrets::delete_instance_credentials(&pubkey);
             // Tombstone-after-validation: only reached past the deployed-remote
             // guard above and a confirmed removal — never orphan a live remote
             // deployment's relay record. Inside the lock, before the block closes

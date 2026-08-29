@@ -37,9 +37,6 @@
 //! separately because it is not part of the process env — the harness reads
 //! it at startup.  We do not evaluate it here; it is exposed for future
 //! UI display only.
-
-use serde::{Deserialize, Serialize};
-
 use crate::managed_agents::{
     config_bridge::read_goose_file_config,
     discovery::{
@@ -47,17 +44,16 @@ use crate::managed_agents::{
     },
     types::{AcpAvailabilityStatus, RuntimeReadinessStatus},
 };
-
+use serde::{Deserialize, Serialize};
 mod cli_login;
 pub(crate) mod cli_probe;
 mod descriptor;
+mod manual_agent;
 pub(crate) use descriptor::{
     resolve_effective_agent_env, resolve_effective_harness_descriptor, EffectiveAgentEnv,
     EffectiveHarnessDescriptor,
 };
-
 // ── Requirement types ─────────────────────────────────────────────────────────
-
 /// A single missing piece of configuration, tagged with the UI surface that
 /// owns it so the UI can route each gap to the right affordance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,6 +199,9 @@ pub(crate) fn agent_readiness(effective: &EffectiveAgentEnv) -> AgentReadiness {
                 RuntimeReadinessStatus::AuthenticationRequired => {
                     "Complete the runtime account setup, then check again."
                 }
+                RuntimeReadinessStatus::ConfigurationRequired => {
+                    "Complete the required runtime fields, then check again."
+                }
                 RuntimeReadinessStatus::Ready => unreachable!(),
             };
             missing.push(Requirement::RuntimeReadiness {
@@ -251,6 +250,7 @@ fn collect_missing_requirements(
             rt,
         ),
         "codex" => cli_login::requirements(&["codex", "login", "status"], "run `codex login`", rt),
+        "remote-agent-computer" => manual_agent::requirements(effective),
         _ => vec![],
     }
 }
@@ -1158,7 +1158,7 @@ mod tests {
         // not resolvable in PATH produce a MissingBinary requirement rather than
         // being unconditionally Ready.  A command that IS resolvable should be Ready.
         // Use a known-present binary so the test is not environment-sensitive.
-        let env = make_env("sh", BTreeMap::new());
+        let env = make_env(if cfg!(windows) { "cmd" } else { "sh" }, BTreeMap::new());
         assert!(
             agent_readiness(&env).is_ready(),
             "unknown/custom command present in PATH should be Ready"

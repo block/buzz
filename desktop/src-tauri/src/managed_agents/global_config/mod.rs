@@ -30,6 +30,17 @@ use tauri::AppHandle;
 use crate::managed_agents::env_vars::{
     validate_user_env_keys, DERIVED_PROVIDER_MODEL_ENV_KEYS, MAX_ENV_VALUE_BYTES,
 };
+
+/// Catalog-declared connection settings must remain on that runtime's
+/// definition/instance. Global env is inherited by every agent process, so
+/// accepting these keys globally would disclose them cross-runtime.
+pub(crate) fn is_agent_scoped_setup_key(key: &str) -> bool {
+    crate::managed_agents::known_runtime_ids().any(|runtime_id| {
+        crate::managed_agents::runtime_setup_fields(runtime_id)
+            .iter()
+            .any(|field| field.env_key.eq_ignore_ascii_case(key))
+    })
+}
 use crate::managed_agents::storage::{atomic_write_json_restricted, managed_agents_base_dir};
 use crate::managed_agents::types::{AgentDefinition, ManagedAgentRecord};
 
@@ -100,6 +111,18 @@ pub fn validate_global_config(config: &GlobalAgentConfig) -> Result<(), String> 
     // Standard env-var key validation (POSIX shape, reserved-key check, NUL/size caps).
     validate_user_env_keys(&non_empty)?;
 
+    let agent_scoped: Vec<&str> = non_empty
+        .keys()
+        .filter(|key| is_agent_scoped_setup_key(key))
+        .map(String::as_str)
+        .collect();
+    if !agent_scoped.is_empty() {
+        return Err(format!(
+            "the following runtime connection keys must be configured on the remote agent definition or instance, not globally: {}",
+            agent_scoped.join(", ")
+        ));
+    }
+
     // Reject derived provider/model keys in global env_vars.
     let derived: Vec<&str> = non_empty
         .keys()
@@ -152,6 +175,16 @@ pub fn strip_empty_env_vars(config: &mut GlobalAgentConfig) {
     config.env_vars.retain(|_, v| !v.is_empty());
 }
 
+/// Remove runtime-scoped connection values persisted by older builds before
+/// global config reaches the renderer or any child-process env merge.
+pub fn strip_agent_scoped_setup_env_vars(config: &mut GlobalAgentConfig) -> bool {
+    let before = config.env_vars.len();
+    config
+        .env_vars
+        .retain(|key, _| !is_agent_scoped_setup_key(key));
+    before != config.env_vars.len()
+}
+
 /// Normalize `provider` and `model` to `None` when blank or whitespace-only.
 ///
 /// `Some("")` and `Some("  ")` have no meaningful value and break
@@ -188,7 +221,21 @@ pub fn load_global_agent_config(app: &AppHandle) -> Result<GlobalAgentConfig, St
     }
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("failed to read global agent config: {e}"))?;
-    serde_json::from_str(&content).map_err(|e| format!("failed to parse global agent config: {e}"))
+    let mut config: GlobalAgentConfig = serde_json::from_str(&content)
+        .map_err(|e| format!("failed to parse global agent config: {e}"))?;
+    if strip_agent_scoped_setup_env_vars(&mut config) {
+        // This legacy tier has no definition/instance scope to migrate into.
+        // Rewrite it immediately so plaintext connection credentials do not
+        // remain at rest after the first safe load. A rewrite failure aborts
+        // the read instead of silently leaving an insecure fallback behind.
+        save_global_agent_config(app, &config).map_err(|error| {
+            format!("failed to remove legacy runtime connection values from global config: {error}")
+        })?;
+        tracing::warn!(
+            "removed legacy MANUAL_AGENT connection values from global defaults; re-enter them on the remote agent definition or instance"
+        );
+    }
+    Ok(config)
 }
 
 /// Save the global agent config to disk.

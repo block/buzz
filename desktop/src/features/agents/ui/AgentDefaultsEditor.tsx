@@ -320,7 +320,8 @@ export function AgentDefaultsEditor({
             />
             {runtimeWarningText ? (
               <p className="text-xs text-warning">
-                {runtimeWarningText} Visit Settings &gt; Agents to set it up.
+                {runtimeWarningText} Choose a Ready harness for Global Defaults;
+                configure remote connections on each agent.
               </p>
             ) : null}
           </div>

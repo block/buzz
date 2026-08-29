@@ -13,6 +13,8 @@ export function runtimeAvailabilityWarning(
     switch (runtime.runtimeReadiness) {
       case "ready":
         return null;
+      case "configuration_required":
+        return `${runtime.label} needs its required connection fields configured.`;
       case "authentication_required":
         return loginHint
           ? `${runtime.label} requires sign-in. ${loginHint}`

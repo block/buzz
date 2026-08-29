@@ -23,6 +23,7 @@ export function useLocalModeGate(options: LocalModeGateOptions) {
     model,
     provider,
     providerEnvVar,
+    setupFields,
     runtimeFileConfig,
     runtimeId,
   } = options;
@@ -38,6 +39,7 @@ export function useLocalModeGate(options: LocalModeGateOptions) {
         model,
         provider,
         providerEnvVar,
+        setupFields,
         runtimeFileConfig,
         runtimeId,
       }),
@@ -51,6 +53,7 @@ export function useLocalModeGate(options: LocalModeGateOptions) {
       model,
       provider,
       providerEnvVar,
+      setupFields,
       runtimeFileConfig,
       runtimeId,
     ],

@@ -207,6 +207,44 @@ test("fromRawAcpRuntimeCatalogEntry maps generic readiness and account actions",
   assert.equal(entry.canConnectAccount, true);
 });
 
+test("fromRawAcpRuntimeCatalogEntry maps setup metadata without values", () => {
+  const entry = fromRawAcpRuntimeCatalogEntry({
+    id: "remote-agent-computer",
+    label: "Remote agent computer",
+    availability: "available",
+    command: "buzz-manual-agent-acp",
+    source: "builtin",
+    default_args: [],
+    can_auto_install: false,
+    install_hint: "",
+    install_instructions_url: "",
+    runtime_readiness: "configuration_required",
+    setup_fields: [
+      {
+        env_key: "MANUAL_AGENT_TOKEN",
+        label: "Manual Agent app password",
+        placeholder: "Paste the app password",
+        helper_text: "Local secret",
+        kind: "secret",
+        validation: "app_password",
+        required: true,
+      },
+    ],
+  });
+  assert.deepEqual(entry.setupFields, [
+    {
+      envKey: "MANUAL_AGENT_TOKEN",
+      label: "Manual Agent app password",
+      placeholder: "Paste the app password",
+      helperText: "Local secret",
+      kind: "secret",
+      validation: "app_password",
+      required: true,
+    },
+  ]);
+  assert.equal(JSON.stringify(entry).includes("test-app-password"), false);
+});
+
 test("fromRawAcpRuntimeCatalogEntry env round-trips through edit payload shape", () => {
   // Simulate the full save → re-open cycle: raw entry comes back from Rust
   // with definition_env populated; the edit form reads entry.definitionEnv.

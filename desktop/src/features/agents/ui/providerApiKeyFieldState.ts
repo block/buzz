@@ -27,6 +27,7 @@ export function getProviderApiKeyFieldState({
   envVars,
   fileSatisfiedEnvKeys = [],
   globalEnvVars,
+  hiddenEnvKeys = [],
   personaSatisfied = false,
   provider,
   requiredEnvKeys,
@@ -36,14 +37,16 @@ export function getProviderApiKeyFieldState({
   envVars: EnvVarsValue;
   fileSatisfiedEnvKeys?: readonly string[];
   globalEnvVars: EnvVarsValue;
+  hiddenEnvKeys?: readonly string[];
   personaSatisfied?: boolean;
   provider: string;
   requiredEnvKeys: readonly string[];
 }): ProviderApiKeyFieldState {
   const secretEnvVar = getProviderApiKeyEnvVar(provider);
-  const advancedRequiredEnvKeys = secretEnvVar
-    ? requiredEnvKeys.filter((key) => key !== secretEnvVar)
-    : requiredEnvKeys;
+  const hidden = new Set(hiddenEnvKeys);
+  const advancedRequiredEnvKeys = requiredEnvKeys.filter(
+    (key) => key !== secretEnvVar && !hidden.has(key),
+  );
   if (!secretEnvVar) {
     return {
       advancedRequiredEnvKeys,
@@ -105,6 +108,7 @@ export function useProviderApiKeyFieldState({
   envVars,
   fileSatisfiedEnvKeys,
   globalEnvVars,
+  hiddenEnvKeys,
   personaSatisfied,
   provider,
   requiredEnvKeys,
@@ -114,6 +118,7 @@ export function useProviderApiKeyFieldState({
   envVars: EnvVarsValue;
   fileSatisfiedEnvKeys?: readonly string[];
   globalEnvVars: EnvVarsValue;
+  hiddenEnvKeys?: readonly string[];
   personaSatisfied?: boolean;
   provider: string;
   requiredEnvKeys: readonly string[];
@@ -126,6 +131,7 @@ export function useProviderApiKeyFieldState({
         envVars,
         fileSatisfiedEnvKeys,
         globalEnvVars,
+        hiddenEnvKeys,
         personaSatisfied,
         provider,
         requiredEnvKeys,
@@ -136,6 +142,7 @@ export function useProviderApiKeyFieldState({
       envVars,
       fileSatisfiedEnvKeys,
       globalEnvVars,
+      hiddenEnvKeys,
       personaSatisfied,
       provider,
       requiredEnvKeys,

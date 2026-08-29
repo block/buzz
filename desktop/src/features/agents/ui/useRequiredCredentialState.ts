@@ -1,4 +1,5 @@
 import * as React from "react";
+import type { RuntimeSetupField } from "@/shared/api/types";
 
 import {
   useBakedBuildEnvKeysQuery,
@@ -8,6 +9,7 @@ import {
 import {
   getBakedSatisfiedEnvKeys,
   isGloballySatisfiedCredentialKey,
+  isRuntimeSetupFieldValueValid,
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
 } from "./agentConfigOptions";
@@ -49,6 +51,8 @@ export interface RequiredCredentialState {
 export function useRequiredCredentialState(params: {
   open: boolean;
   prospectiveRuntimeId: string;
+  setupFields?: readonly RuntimeSetupField[];
+  setupSatisfiedEnvKeys?: readonly string[];
   providerEnvVar?: string | null;
   provider: string;
   /** Global provider default; used as fallback when per-agent provider is empty. */
@@ -65,6 +69,8 @@ export function useRequiredCredentialState(params: {
   const {
     open,
     prospectiveRuntimeId,
+    setupFields = [],
+    setupSatisfiedEnvKeys = [],
     providerEnvVar,
     provider,
     globalProvider = "",
@@ -89,8 +95,20 @@ export function useRequiredCredentialState(params: {
   // All required keys for this runtime + provider combination.
   const allRequiredKeys = React.useMemo(
     () =>
-      requiredCredentialEnvKeys(prospectiveRuntimeId, providerForRequiredKeys),
-    [prospectiveRuntimeId, providerForRequiredKeys],
+      requiredCredentialEnvKeys(
+        prospectiveRuntimeId,
+        providerForRequiredKeys,
+        setupFields,
+      ),
+    [prospectiveRuntimeId, providerForRequiredKeys, setupFields],
+  );
+  const setupFieldsByKey = React.useMemo(
+    () => new Map(setupFields.map((field) => [field.envKey, field])),
+    [setupFields],
+  );
+  const setupSatisfiedSet = React.useMemo(
+    () => new Set(setupSatisfiedEnvKeys),
+    [setupSatisfiedEnvKeys],
   );
 
   // Keys covered by the baked build env — silenced, produce no info row.
@@ -103,21 +121,41 @@ export function useRequiredCredentialState(params: {
     if (!runtimeFileConfig) return [] as string[];
     return allRequiredKeys.filter(
       (key) =>
+        !setupFieldsByKey.has(key) &&
         !(key in envVars) &&
         !bakedSatisfiedKeys.includes(key) &&
         runtimeFileConfig.satisfiedEnvKeys.includes(key),
     );
-  }, [runtimeFileConfig, allRequiredKeys, envVars, bakedSatisfiedKeys]);
+  }, [
+    runtimeFileConfig,
+    allRequiredKeys,
+    envVars,
+    bakedSatisfiedKeys,
+    setupFieldsByKey,
+  ]);
 
   const requiredEnvKeys = React.useMemo(
     () =>
-      allRequiredKeys.filter(
-        (key) =>
+      allRequiredKeys.filter((key) => {
+        const setupField = setupFieldsByKey.get(key);
+        if (setupField) {
+          if (!(key in envVars) && setupSatisfiedSet.has(key)) {
+            return false;
+          }
+          return !isGloballySatisfiedCredentialKey(
+            key,
+            personaEnvVars,
+            envVars,
+            setupField,
+          );
+        }
+        return (
           !bakedSatisfiedKeys.includes(key) &&
           !fileSatisfiedEnvKeys.includes(key) &&
           !isGloballySatisfiedCredentialKey(key, globalEnvVars, envVars) &&
-          !isGloballySatisfiedCredentialKey(key, personaEnvVars, envVars),
-      ),
+          !isGloballySatisfiedCredentialKey(key, personaEnvVars, envVars)
+        );
+      }),
     [
       allRequiredKeys,
       bakedSatisfiedKeys,
@@ -125,12 +163,20 @@ export function useRequiredCredentialState(params: {
       globalEnvVars,
       personaEnvVars,
       envVars,
+      setupFieldsByKey,
+      setupSatisfiedSet,
     ],
   );
 
   const requiredEnvKeyMissing = React.useMemo(
-    () => hasMissingRequiredEnvKey(requiredEnvKeys, envVars),
-    [requiredEnvKeys, envVars],
+    () =>
+      requiredEnvKeys.some((key) => {
+        const setupField = setupFieldsByKey.get(key);
+        return setupField
+          ? !isRuntimeSetupFieldValueValid(setupField, envVars[key])
+          : hasMissingRequiredEnvKey([key], envVars);
+      }),
+    [requiredEnvKeys, envVars, setupFieldsByKey],
   );
 
   return {

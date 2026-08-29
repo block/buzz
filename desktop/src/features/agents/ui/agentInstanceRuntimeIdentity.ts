@@ -5,7 +5,7 @@ import type {
 
 import {
   formatRuntimeOptionLabel,
-  isRuntimeReadyForNewSelection,
+  isRuntimeSelectableForConfiguration,
   runtimeSupportsLlmProviderSelection,
   type PersonaDropdownOption,
 } from "./agentConfigOptions";
@@ -41,7 +41,7 @@ export function buildRuntimeDropdownOptions(
     ...runtimes.map((runtime) => ({
       disabled:
         runtime.id !== selectedRuntimeId &&
-        !isRuntimeReadyForNewSelection(runtime),
+        !isRuntimeSelectableForConfiguration(runtime),
       label: formatRuntimeOptionLabel(runtime),
       value: runtime.id,
     })),
@@ -77,7 +77,7 @@ export function canPersistRuntimePin({
     inheritHarness ||
     !runtimeTouched ||
     selectedRuntimeId === "custom" ||
-    isRuntimeReadyForNewSelection(selectedRuntime)
+    isRuntimeSelectableForConfiguration(selectedRuntime)
   );
 }
 

@@ -31,6 +31,111 @@ import {
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
 } from "./agentConfigOptions.tsx";
+
+const REMOTE_SETUP_FIELDS = [
+  {
+    envKey: "MANUAL_AGENT_BASE_URL",
+    label: "Manual Agent Tailnet URL",
+    placeholder: "https://<device>.<tailnet>.ts.net:8443",
+    helperText: "Tailnet HTTPS origin",
+    kind: "url",
+    validation: "tailnet_https_origin",
+    required: true,
+  },
+  {
+    envKey: "MANUAL_AGENT_TOKEN",
+    label: "Manual Agent app password",
+    placeholder: "Paste the app password",
+    helperText: "Local secret",
+    kind: "secret",
+    validation: "app_password",
+    required: true,
+  },
+];
+
+test("remote setup gate rejects missing, invalid, and locally shadowed values", () => {
+  const base = {
+    isProviderMode: false,
+    model: "",
+    provider: "",
+    runtimeId: "remote-agent-computer",
+    providerEnvVar: null,
+    setupFields: REMOTE_SETUP_FIELDS,
+  };
+  const missing = computeLocalModeGate({ ...base, envVars: {} });
+  assert.deepEqual(missing.missingEnvKeys, [
+    "MANUAL_AGENT_BASE_URL",
+    "MANUAL_AGENT_TOKEN",
+  ]);
+  assert.equal(missing.satisfied, false);
+
+  const legacyGlobal = {
+    MANUAL_AGENT_BASE_URL: "https://device.example-tailnet.ts.net:8443",
+    MANUAL_AGENT_TOKEN: "test-app-password-0123456789-abcdef",
+  };
+  assert.equal(
+    computeLocalModeGate({
+      ...base,
+      envVars: {},
+      globalEnvVars: legacyGlobal,
+    }).satisfied,
+    false,
+  );
+  const validLocal = computeLocalModeGate({
+    ...base,
+    envVars: legacyGlobal,
+    globalEnvVars: {},
+  });
+  assert.deepEqual(validLocal.missingEnvKeys, []);
+  assert.equal(validLocal.satisfied, true);
+
+  const publicHttps = computeLocalModeGate({
+    ...base,
+    envVars: {
+      ...legacyGlobal,
+      MANUAL_AGENT_BASE_URL: "https://example.com",
+    },
+  });
+  assert.deepEqual(publicHttps.missingEnvKeys, ["MANUAL_AGENT_BASE_URL"]);
+  assert.equal(publicHttps.satisfied, false);
+});
+
+test("secure-store key status satisfies a secret without a renderer value", () => {
+  const result = computeLocalModeGate({
+    envVars: {
+      MANUAL_AGENT_BASE_URL: "https://device.example-tailnet.ts.net:8443",
+    },
+    isProviderMode: false,
+    model: "",
+    provider: "",
+    providerEnvVar: null,
+    runtimeId: "remote-agent-computer",
+    setupFields: REMOTE_SETUP_FIELDS,
+    setupSatisfiedEnvKeys: ["MANUAL_AGENT_TOKEN"],
+  });
+
+  assert.equal(result.satisfied, true);
+  assert.deepEqual(result.missingEnvKeys, []);
+});
+
+test("an invalid local secret shadows secure-store configured status", () => {
+  const result = computeLocalModeGate({
+    envVars: {
+      MANUAL_AGENT_BASE_URL: "https://device.example-tailnet.ts.net:8443",
+      MANUAL_AGENT_TOKEN: "short",
+    },
+    isProviderMode: false,
+    model: "",
+    provider: "",
+    providerEnvVar: null,
+    runtimeId: "remote-agent-computer",
+    setupFields: REMOTE_SETUP_FIELDS,
+    setupSatisfiedEnvKeys: ["MANUAL_AGENT_TOKEN"],
+  });
+
+  assert.equal(result.satisfied, false);
+  assert.deepEqual(result.missingEnvKeys, ["MANUAL_AGENT_TOKEN"]);
+});
 import { hasMissingRequiredEnvKey } from "./personaRuntimeModel.ts";
 import {
   countNonSecretInheritedEnvVars,

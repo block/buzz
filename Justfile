@@ -163,7 +163,7 @@ _ensure-sidecar-stubs:
     set -euo pipefail
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
     mkdir -p desktop/src-tauri/binaries
-    SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
+    SIDECARS=(buzz-acp buzz-agent buzz-manual-agent-acp buzz-dev-mcp git-credential-nostr buzz)
     # MSVC emits <name>.exe and Tauri's externalBin validation expects
     # binaries/<name>-<triple>.exe on Windows; the Kubernetes provider sidecar
     # is not bundled there (tauri.windows.conf.json omits it). Keep in sync
@@ -273,6 +273,7 @@ desktop-release-build target="aarch64-apple-darwin":
     fi
     touch "desktop/src-tauri/binaries/buzz-acp-${TARGET}${EXE}"
     touch "desktop/src-tauri/binaries/buzz-agent-${TARGET}${EXE}"
+    touch "desktop/src-tauri/binaries/buzz-manual-agent-acp-${TARGET}${EXE}"
     touch "desktop/src-tauri/binaries/buzz-dev-mcp-${TARGET}${EXE}"
     touch "desktop/src-tauri/binaries/git-credential-nostr-${TARGET}${EXE}"
     touch "desktop/src-tauri/binaries/buzz-${TARGET}${EXE}"
@@ -490,7 +491,7 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
             fi
         done
     fi
-    cargo build -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
+    cargo build -p buzz-acp -p buzz-agent -p buzz-manual-agent-acp -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr -p buzz-relay
     if [[ -n "{{mesh}}" ]]; then
         export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
     fi
@@ -545,8 +546,8 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     # Mirror scripts/bundle-sidecars.sh: Windows bundles no Kubernetes provider
     # sidecar (tauri.windows.conf.json omits it from externalBin) and MSVC
     # emits <name>.exe, so both ends of the copy need the suffix there.
-    SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
-    BUILD_ARGS=(-p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr)
+    SIDECARS=(buzz-acp buzz-agent buzz-manual-agent-acp buzz-dev-mcp git-credential-nostr buzz)
+    BUILD_ARGS=(-p buzz-acp -p buzz-agent -p buzz-manual-agent-acp -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr)
     if [[ "$TARGET" == *windows* ]]; then
         EXE=".exe"
     else
@@ -588,7 +589,7 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
         *) export PATH="{{justfile_directory()}}/bin:$PATH" ;;
     esac
     pnpm install  # unconditional: staging must always start with a clean dep tree
-    cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    cargo build --release -p buzz-acp -p buzz-agent -p buzz-manual-agent-acp -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     FEATURES=()
     if [[ -n "{{mesh}}" ]]; then
         FEATURES=(--features mesh-llm)
@@ -633,7 +634,7 @@ production *ARGS: bootstrap _ensure-sidecar-stubs
         *) export PATH="{{justfile_directory()}}/bin:$PATH" ;;
     esac
     pnpm install  # unconditional: production must always start with a clean dep tree
-    cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    cargo build --release -p buzz-acp -p buzz-agent -p buzz-manual-agent-acp -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     FEATURES=()
     if [[ -n "{{mesh}}" ]]; then
         FEATURES=(--features mesh-llm)

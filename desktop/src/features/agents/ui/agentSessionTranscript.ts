@@ -5,9 +5,12 @@ import type {
   ToolStatus,
   TranscriptItem,
 } from "./agentSessionTypes";
+import { extractComputerSessionDescriptor } from "./computerSessionLink";
 import {
   findBuzzToolName,
   isGenericToolTitle,
+  isTerminalToolStatus,
+  mergeToolStatus,
   normalizeToolStatus,
 } from "./agentSessionToolCatalog";
 import { classifyTool } from "./agentSessionToolClassifier";
@@ -479,18 +482,6 @@ function upsertMetadata(
   });
 }
 
-function isTerminalToolStatus(status: ToolStatus) {
-  return status === "completed" || status === "failed";
-}
-
-function mergeToolStatus(existing: ToolStatus, next: ToolStatus): ToolStatus {
-  if (isTerminalToolStatus(existing) && !isTerminalToolStatus(next)) {
-    return existing;
-  }
-
-  return next;
-}
-
 function upsertTool(
   d: TranscriptDraft,
   id: string,
@@ -500,6 +491,7 @@ function upsertTool(
   status: ToolStatus,
   args: Record<string, unknown>,
   result: string,
+  computerSession: Extract<TranscriptItem, { type: "tool" }>["computerSession"],
   isError: boolean,
   timestamp: string,
   ctx: TranscriptItemContext,
@@ -540,6 +532,7 @@ function upsertTool(
       status: mergedStatus,
       args: updatedArgs,
       result: updatedResult,
+      computerSession: computerSession ?? existing.computerSession,
       isError: updatedIsError,
       completedAt:
         isTerminalToolStatus(mergedStatus) && existing.completedAt == null
@@ -573,6 +566,7 @@ function upsertTool(
     status,
     args,
     result,
+    computerSession,
     isError,
     timestamp,
     startedAt: timestamp,
@@ -947,6 +941,7 @@ export function processTranscriptEvent(
           normalizeToolStatus(asString(update.status) ?? "executing"),
           extractToolArgs(update),
           extractToolResult(update),
+          extractComputerSessionDescriptor(update),
           false,
           event.timestamp,
           ctx,
@@ -967,6 +962,7 @@ export function processTranscriptEvent(
           status,
           extractToolArgs(update),
           extractToolResult(update),
+          extractComputerSessionDescriptor(update),
           status === "failed",
           event.timestamp,
           ctx,

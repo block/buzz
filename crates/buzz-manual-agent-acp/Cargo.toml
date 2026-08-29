@@ -1,0 +1,24 @@
+[package]
+name = "buzz-manual-agent-acp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ACP adapter for authenticated remote manual-agent runners"
+
+[lib]
+name = "buzz_manual_agent_acp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "buzz-manual-agent-acp"
+path = "src/main.rs"
+
+[dependencies]
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "rt-multi-thread", "sync", "time"] }
+url.workspace = true
+uuid.workspace = true

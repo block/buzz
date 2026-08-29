@@ -1,4 +1,5 @@
 import type { LucideIcon } from "lucide-react";
+import type { ComputerSessionDescriptor } from "./computerSessionLink";
 
 export type ObserverEvent = {
   seq: number;
@@ -186,6 +187,7 @@ export type TranscriptItem =
       status: ToolStatus;
       args: Record<string, unknown>;
       result: string;
+      computerSession?: ComputerSessionDescriptor | null;
       isError: boolean;
       timestamp: string;
       startedAt: string;

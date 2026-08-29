@@ -16,9 +16,20 @@ export type AuthStatus =
 /** Operational readiness, independent from installation and auth status. */
 export type RuntimeReadinessStatus =
   | "ready"
+  | "configuration_required"
   | "authentication_required"
   | "model_unavailable"
   | "unknown";
+
+export type RuntimeSetupField = {
+  envKey: string;
+  label: string;
+  placeholder: string;
+  helperText: string;
+  kind: "url" | "secret";
+  validation: "tailnet_https_origin" | "app_password";
+  required: boolean;
+};
 
 export type AcpRuntimeCatalogEntry = {
   id: string;
@@ -50,6 +61,8 @@ export type AcpRuntimeCatalogEntry = {
   authStatus: AuthStatus;
   /** Rust-derived operational readiness; never inferred from the runtime ID. */
   runtimeReadiness: RuntimeReadinessStatus;
+  /** Rust-owned setup metadata. Configured values are never returned here. */
+  setupFields: RuntimeSetupField[];
   /** Whether the runtime exposes an account/setup connection flow. */
   canConnectAccount: boolean;
   /** Hint for completing authentication; null when not applicable or already logged in. */

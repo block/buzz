@@ -30,6 +30,15 @@ export type RawAcpRuntimeCatalogEntry = {
   auth_status: AuthStatus;
   /** Rust-owned operational readiness; absent only in older fixtures. */
   runtime_readiness?: AcpRuntimeCatalogEntry["runtimeReadiness"];
+  setup_fields?: Array<{
+    env_key: string;
+    label: string;
+    placeholder: string;
+    helper_text: string;
+    kind: "url" | "secret";
+    validation: "tailnet_https_origin" | "app_password";
+    required: boolean;
+  }>;
   /** Whether the runtime exposes an account-connection action. */
   can_connect_account?: boolean;
   login_hint?: string;
@@ -65,6 +74,15 @@ export function fromRawAcpRuntimeCatalogEntry(
     nodeRequired: entry.node_required,
     authStatus: entry.auth_status,
     runtimeReadiness: entry.runtime_readiness ?? "unknown",
+    setupFields: (entry.setup_fields ?? []).map((field) => ({
+      envKey: field.env_key,
+      label: field.label,
+      placeholder: field.placeholder,
+      helperText: field.helper_text,
+      kind: field.kind,
+      validation: field.validation,
+      required: field.required,
+    })),
     canConnectAccount: entry.can_connect_account ?? false,
     loginHint: entry.login_hint ?? null,
     source: entry.source,

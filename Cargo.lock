@@ -1058,6 +1058,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-manual-agent-acp"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-media"
 version = "0.1.0"
 dependencies = [

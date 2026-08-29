@@ -1,22 +1,20 @@
-use std::io::Read;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
-
 use crate::managed_agents::{
     buzz_managed_command_path, buzz_managed_node_bin_dir, buzz_managed_npm_bin_dir,
     AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, CommandAvailabilityInfo,
     HarnessSource, RuntimeReadinessStatus,
 };
-
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 mod identity;
 mod presets;
 mod runtime_metadata;
 #[macro_use]
 mod windows_install;
 mod catalog;
-use catalog::KNOWN_ACP_RUNTIMES;
+pub(crate) use catalog::{runtime_setup_fields, KNOWN_ACP_RUNTIMES};
 #[cfg(test)]
 use catalog::{BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL};
 #[allow(unused_imports)] // public foundation consumed by Wave 1 launch plumbing
@@ -29,7 +27,6 @@ pub(crate) use presets::{
 };
 use presets::{preset_catalog_entry, PRESET_HARNESSES};
 pub(crate) use runtime_metadata::{KnownAcpRuntime, RuntimeAuthentication, RuntimeReadinessPolicy};
-
 fn common_binary_paths() -> &'static [PathBuf] {
     static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     PATHS.get_or_init(|| {
@@ -1181,6 +1178,7 @@ fn readiness_from_metadata(
 
     match runtime.readiness_policy {
         RuntimeReadinessPolicy::AvailabilityOnly => RuntimeReadinessStatus::Ready,
+        RuntimeReadinessPolicy::Configuration => RuntimeReadinessStatus::ConfigurationRequired,
         RuntimeReadinessPolicy::Authentication => match auth_status {
             AuthStatus::LoggedIn | AuthStatus::NotApplicable => RuntimeReadinessStatus::Ready,
             AuthStatus::LoggedOut | AuthStatus::ConfigInvalid { .. } => {
@@ -1320,6 +1318,7 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             node_required,
             auth_status,
             runtime_readiness,
+            setup_fields: runtime_setup_fields(runtime.id),
             can_connect_account: runtime.authentication.can_connect_account(),
             login_hint,
             source: runtime.source,
@@ -1497,6 +1496,7 @@ pub fn discover_acp_runtimes_from(
                 // No auth probe for custom harnesses.
                 auth_status: AuthStatus::NotApplicable,
                 runtime_readiness,
+                setup_fields: Vec::new(),
                 can_connect_account: false,
                 login_hint: None,
                 source: HarnessSource::Custom,

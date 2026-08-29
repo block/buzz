@@ -356,6 +356,7 @@ pub(crate) fn descriptor_cached_readiness(
     };
     match runtime.readiness_policy {
         RuntimeReadinessPolicy::AvailabilityOnly => RuntimeReadinessStatus::Ready,
+        RuntimeReadinessPolicy::Configuration => RuntimeReadinessStatus::ConfigurationRequired,
         RuntimeReadinessPolicy::Authentication => RuntimeReadinessStatus::Unknown,
         RuntimeReadinessPolicy::AcpModelCatalog => {
             cached_runtime_readiness(&descriptor.command, &descriptor.args, &descriptor.env)

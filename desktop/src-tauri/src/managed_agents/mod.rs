@@ -35,6 +35,7 @@ mod runtime;
 mod runtime_commands;
 mod runtime_readiness;
 mod runtime_types;
+pub(crate) mod setup_secrets;
 pub(crate) mod snapshot_avatar;
 pub(crate) mod spawn_snapshot;
 pub(crate) mod storage;
