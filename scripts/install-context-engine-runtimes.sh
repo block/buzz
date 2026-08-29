@@ -176,8 +176,8 @@ done
 # Building is deliberately outside this privileged installer. Running Cargo or
 # Hermit here would consume user/repository tool configuration and turn a
 # delayed ordinary-child write into unsandboxed code execution. The landing
-# workflow supplies the reviewed binary; this installer accepts only its exact
-# pinned digest below.
+# workflow supplies the reviewed `just trusted-buzz-acp-release` binary; this
+# installer accepts only its exact pinned digest below.
 readonly buzz_acp_source="$buzz_root/target/release/buzz-acp"
 verify_sha256 "$buzz_acp_source" "$buzz_acp_sha256"
 [[ "$(/usr/bin/env -i HOME=/Users/gabriel PATH=/usr/bin:/bin /usr/bin/file -b "$buzz_acp_source")" == *"Mach-O 64-bit executable arm64"* ]] || {
