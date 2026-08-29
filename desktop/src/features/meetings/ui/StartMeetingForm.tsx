@@ -1,6 +1,9 @@
 import * as React from "react";
 
-import { validateMeetingRoomName } from "@/features/meetings/ui/meetingRoomName";
+import {
+  normalizeMeetingRoomName,
+  validateMeetingRoomName,
+} from "@/features/meetings/ui/meetingRoomName";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 
@@ -28,6 +31,12 @@ export function StartMeetingForm({
   const [value, setValue] = React.useState(initialValue);
   const [localError, setLocalError] = React.useState<string | null>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
+
+  // `register-room` only accepts URL-safe names, so what the user types is not
+  // always what gets created. Show the rewrite instead of springing it on them
+  // after the room exists.
+  const normalized = normalizeMeetingRoomName(value);
+  const showsRename = normalized.length > 0 && normalized !== value.trim();
 
   React.useEffect(() => {
     if (autoFocus) inputRef.current?.focus();
@@ -65,6 +74,15 @@ export function StartMeetingForm({
       </div>
       {localError ? (
         <p className="text-xs text-destructive">{localError}</p>
+      ) : null}
+      {showsRename && !localError ? (
+        <p
+          className="text-xs text-muted-foreground"
+          data-testid="room-name-preview"
+        >
+          Will be created as <span className="font-medium">{normalized}</span> —
+          room names allow letters, numbers, dashes and underscores.
+        </p>
       ) : null}
       {errorMessage && !hostingError ? (
         <p className="text-xs text-destructive">{errorMessage}</p>
