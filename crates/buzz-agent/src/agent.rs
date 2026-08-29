@@ -354,13 +354,13 @@ impl RunCtx<'_> {
         //
         // Named for what it proves: a *recognized attempt* to publish, not a
         // successful publish. See `is_buzz_reply_call`.
+        // Tracks whether a publish-shaped tool call was seen this turn, updated
+        // unconditionally (not gated on `require_reply`) so the silent-turn
+        // diagnostic has a turn-level view regardless of config.  A turn that
+        // ran read-only tools and then died at 3 tokens IS a silent death;
+        // only a genuine publish should suppress the WARN.
         let mut buzz_reply_call_seen = false;
         let mut reply_nags = 0u32;
-        // Tracks whether any tool call executed this turn (across all rounds),
-        // regardless of `require_reply`.  Used by the silent-turn diagnostic to
-        // distinguish a real multi-round turn (tools ran, short final response
-        // is normal) from a first-round die-with-no-action failure.
-        let mut any_tool_call_seen = false;
         // Per-`run()` reactive context-recovery budget. Per-turn, not
         // per-session: a fresh prompt deserves a fresh chance to recover, and
         // `max_rounds` defaults to 0 (unbounded) so it cannot bound this.
@@ -707,42 +707,33 @@ impl RunCtx<'_> {
                         "provider: stop=tool_use but zero tool_calls".into(),
                     ));
                 }
+                // Capture before response.text is moved into history.
+                let text_is_empty = response.text.trim().is_empty();
                 self.history.push(HistoryItem::Assistant {
                     text: response.text,
                     tool_calls: Vec::new(),
                     reasoning_details: response.reasoning_details.clone(),
                 });
                 let stop = map_stop(response.stop);
-                // Diagnostic: warn when the entire turn had no tool calls and
-                // the final response looks like a silent death.  Gated on
-                // `!any_tool_call_seen` so a normal multi-round turn — tools
-                // ran in prior rounds, short final completion is expected — is
-                // never mislabeled.  Two distinct cases:
-                //   • near-zero tokens (≤ 12): the observed failure signature.
-                //   • unknown usage (None) with no prior action: provider
-                //     omitted token counts and nothing happened — separately
-                //     diagnostic.
-                // Fires before the `_Stop` hook so the warning appears in the
-                // log even if the hook rejects the stop and the loop continues.
-                // Does not alter control flow.
-                if !any_tool_call_seen {
-                    match response.output_tokens {
-                        Some(t) if is_silent_turn(t) => {
-                            tracing::warn!(
-                                stop = ?response.stop,
-                                output_tokens = t,
-                                "agent: turn ended with no tool calls and near-zero output tokens — possible silent model/gateway early-stop"
-                            );
-                        }
-                        None => {
-                            tracing::warn!(
-                                stop = ?response.stop,
-                                "agent: turn ended with no tool calls and no usage reported — cannot confirm output size"
-                            );
-                        }
-                        _ => {}
-                    }
-                }
+                // Diagnostic: warn when no publish was seen across the whole
+                // turn, the final response has no visible text, and the
+                // token count looks silent.  Two independent gates:
+                //   1. `!buzz_reply_call_seen` — no publish attempt in any
+                //      round (read-only tool calls do NOT suppress: a turn
+                //      that ran tools but never published then died at 3
+                //      tokens is still a silent death).
+                //   2. `text_is_empty` — model emitted no visible text
+                //      (a terse reply like "OK" is not silent).
+                //   3. token count or usage-absent check.
+                // Fires before the `_Stop` hook so the warning appears in
+                // the log even if the hook rejects the stop and the loop
+                // continues.  Does not alter control flow.
+                warn_if_silent_turn(
+                    buzz_reply_call_seen,
+                    text_is_empty,
+                    response.output_tokens,
+                    response.stop,
+                );
                 // Only gate genuine end_turn — don't override max_tokens/refusal.
                 if stop == StopReason::EndTurn {
                     if stop_rejections >= self.cfg.stop_max_rejections {
@@ -787,10 +778,10 @@ impl RunCtx<'_> {
             }
             // Deliberately after truncation: a publish-shaped call that was
             // discarded never runs, so it must not suppress the reminder.
-            if !calls.is_empty() {
-                any_tool_call_seen = true;
-            }
-            if self.cfg.require_reply && !buzz_reply_call_seen {
+            // Updated unconditionally (not gated on `require_reply`) so the
+            // silent-turn diagnostic has a publish-aware turn-level signal
+            // regardless of config.
+            if !buzz_reply_call_seen {
                 buzz_reply_call_seen = calls.iter().any(|c| is_buzz_reply_call(c, self.mcp));
             }
             self.history.push(HistoryItem::Assistant {
@@ -1343,10 +1334,56 @@ fn is_silent_turn(output_tokens: u64) -> bool {
     output_tokens <= SILENT_TURN_TOKEN_THRESHOLD
 }
 
+/// Emits the silent-turn diagnostic WARN when the turn produced no publish,
+/// no visible text, and either near-zero or absent output tokens.
+///
+/// `buzz_reply_call_seen` is the publish-aware gate (from
+/// `is_buzz_reply_call`), updated unconditionally regardless of
+/// `require_reply`.  Read-only tool calls do NOT suppress the WARN — a turn
+/// that ran tools but never published and then died at 3 tokens is a silent
+/// death.
+///
+/// Two distinct WARN shapes:
+/// - Near-zero token count (`output_tokens <= 12`): canonical silent-death.
+/// - Unknown usage (`None`) with no publish and no text: separately
+///   diagnostic; does not assert near-zero since the count is unknown.
+///
+/// Extracted as a free function so the WARN seam can be exercised by a
+/// scoped tracing subscriber without standing up the full async run loop.
+fn warn_if_silent_turn(
+    buzz_reply_call_seen: bool,
+    text_is_empty: bool,
+    output_tokens: Option<u64>,
+    stop: ProviderStop,
+) {
+    if buzz_reply_call_seen || !text_is_empty {
+        return;
+    }
+    match output_tokens {
+        Some(t) if is_silent_turn(t) => {
+            tracing::warn!(
+                stop = ?stop,
+                output_tokens = t,
+                "agent: turn ended with no tool calls and near-zero output tokens — possible silent model/gateway early-stop"
+            );
+        }
+        None => {
+            tracing::warn!(
+                stop = ?stop,
+                "agent: turn ended with no tool calls and no usage reported — cannot confirm output size"
+            );
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tracing_subscriber::layer::SubscriberExt;
 
     /// `truncate_history` cannot serve as the context-window fallback: it is
     /// measured in BYTES (`max_history_bytes`, default 16 MiB, a request-body
@@ -1693,11 +1730,59 @@ mod tests {
         );
     }
 
-    // ---- is_silent_turn -----------------------------------------------------
+    // ── is_silent_turn (pure predicate) ─────────────────────────────────────
 
-    /// Values within the observed failure range (2–12) must return `true`.
-    /// The pair (0, 12) covers the low end and the exact threshold, catching
-    /// an always-false mutation and an off-by-one that would miss 12.
+    /// Counts WARN events emitted by `warn_if_silent_turn` calls inside `f`.
+    ///
+    /// Identifies silent-turn WARNs by target (`buzz_agent::agent`) + WARN
+    /// level + presence of the `stop` field, which is unique to these two
+    /// WARNs in this module.  Using the target avoids parsing message strings,
+    /// which are routed through `record_debug` as `Display`-formatted values
+    /// and are not reliably interceptable via `record_str` across tracing
+    /// versions.
+    fn count_silent_turn_warnings(f: impl FnOnce()) -> usize {
+        struct Capture {
+            count: Arc<AtomicUsize>,
+        }
+        struct Visitor {
+            saw_stop: bool,
+        }
+        impl tracing::field::Visit for Visitor {
+            fn record_debug(&mut self, field: &tracing::field::Field, _: &dyn std::fmt::Debug) {
+                if field.name() == "stop" {
+                    self.saw_stop = true;
+                }
+            }
+        }
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() != tracing::Level::WARN {
+                    return;
+                }
+                if event.metadata().target() != "buzz_agent::agent" {
+                    return;
+                }
+                let mut v = Visitor { saw_stop: false };
+                event.record(&mut v);
+                if v.saw_stop {
+                    self.count.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+        let count = Arc::new(AtomicUsize::new(0));
+        let sub = tracing_subscriber::registry().with(Capture {
+            count: count.clone(),
+        });
+        tracing::subscriber::with_default(sub, f);
+        count.load(Ordering::SeqCst)
+    }
+
+    /// Predicate: values within the observed failure range (2–12) fire.
+    /// Pair (0, 12) catches an always-false mutation and an off-by-one at 12.
     #[test]
     fn is_silent_turn_fires_at_and_below_threshold() {
         assert!(
@@ -1710,40 +1795,80 @@ mod tests {
         );
     }
 
-    /// One above the threshold must NOT fire.  Paired with the at-threshold
-    /// case to pin both sides of the boundary: a `<` vs `<=` mistake is caught
-    /// by the first test; a `>=` / always-true mutation is caught here.
+    /// One above the threshold must NOT fire, catching `<` vs `<=` and
+    /// always-true mutations.
     #[test]
     fn is_silent_turn_silent_above_threshold() {
         assert!(
             !is_silent_turn(SILENT_TURN_TOKEN_THRESHOLD + 1),
             "one above threshold (13) must not be a silent turn"
         );
-        assert!(
-            !is_silent_turn(SILENT_TURN_TOKEN_THRESHOLD + 100),
-            "well above threshold must not be a silent turn"
-        );
     }
 
-    /// A turn that ran tool calls in a prior round (any_tool_call_seen = true)
-    /// followed by a short final no-tool-call completion must NOT produce a
-    /// silent-turn warning.  This is the normal publish-then-wrap pattern.
-    ///
-    /// The predicate itself is `is_silent_turn`, but the turn-level gate is
-    /// `!any_tool_call_seen && is_silent_turn(t)`.  This test verifies the
-    /// combined logic by confirming that when any_tool_call_seen is true,
-    /// even a zero-token final response must not be classified as silent death.
+    // ── warn_if_silent_turn (WARN seam) ───────────────────────────────────
+
+    /// The canonical silent-death signature — no publish, no text, ≤12 tokens
+    /// — must emit exactly one WARN.  Deleting the WARN call, weakening the
+    /// token check, or hardcoding `buzz_reply_call_seen = true` are all caught.
     #[test]
-    fn is_silent_turn_not_fired_after_prior_tool_call() {
-        // Simulate: a tool call ran (any_tool_call_seen = true), final round
-        // has 0 output tokens.  The combined guard must stay silent.
-        let any_tool_call_seen = true;
-        let output_tokens: u64 = 0;
-        // The WARN only fires when BOTH conditions hold:
-        let would_warn = !any_tool_call_seen && is_silent_turn(output_tokens);
-        assert!(
-            !would_warn,
-            "a turn where tool calls ran must not trigger the silent-death WARN even if the final round has near-zero output tokens"
-        );
+    fn warn_if_silent_turn_fires_for_canonical_signature() {
+        let n = count_silent_turn_warnings(|| {
+            warn_if_silent_turn(
+                false,   // no publish seen
+                true,    // no text
+                Some(4), // 4 tokens — in the 2–12 range
+                ProviderStop::EndTurn,
+            );
+        });
+        assert_eq!(n, 1, "canonical silent-death must emit exactly one WARN");
+    }
+
+    /// A turn that ends with non-empty assistant text is NOT a silent death
+    /// even if token count is low — a terse reply like "OK" is legitimate.
+    /// Deleting the `text_is_empty` gate would cause this to fail.
+    #[test]
+    fn warn_if_silent_turn_silent_for_nonempty_text() {
+        let n = count_silent_turn_warnings(|| {
+            warn_if_silent_turn(
+                false,   // no publish
+                false,   // text IS present
+                Some(3), // low tokens — would fire without the text gate
+                ProviderStop::EndTurn,
+            );
+        });
+        assert_eq!(n, 0, "a turn with non-empty assistant text must not WARN");
+    }
+
+    /// A turn that published (buzz_reply_call_seen = true) then ended with a
+    /// short final completion must not trigger the WARN.  This is the normal
+    /// publish-then-wrap pattern.  Deleting the `buzz_reply_call_seen` gate
+    /// would cause this to fail.
+    #[test]
+    fn warn_if_silent_turn_silent_after_publish() {
+        let n = count_silent_turn_warnings(|| {
+            warn_if_silent_turn(
+                true,    // publish seen
+                true,    // no text in final round
+                Some(0), // zero tokens — would fire without the publish gate
+                ProviderStop::EndTurn,
+            );
+        });
+        assert_eq!(n, 0, "a turn where a publish ran must not WARN");
+    }
+
+    /// Unknown usage (None) with no publish and no text emits the distinct
+    /// "no usage reported" WARN.  Mutating the None arm to fall through to
+    /// `_ => {}` would cause this.
+    #[test]
+    fn warn_if_silent_turn_fires_distinct_warn_for_none_usage() {
+        let n = count_silent_turn_warnings(|| {
+            warn_if_silent_turn(
+                false, // no publish
+                true,  // no text
+                None,  // provider omitted usage
+                ProviderStop::EndTurn,
+            );
+        });
+        assert_eq!(n, 1, "unknown-usage silent turn must emit exactly one WARN");
     }
 }
