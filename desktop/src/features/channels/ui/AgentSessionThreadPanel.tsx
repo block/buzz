@@ -17,6 +17,8 @@ import {
 } from "@/features/agents/ui/agentSessionPanelLayout";
 import { deriveTranscriptBlockIds } from "@/features/agents/ui/agentSessionTranscriptGrouping";
 import type { ObserverEvent } from "@/features/agents/ui/agentSessionTypes";
+import { AgentMediaSurface } from "@/features/agents/ui/AgentMediaSurface";
+import { useAgentMediaSession } from "@/features/agents/lib/useAgentMediaSessions";
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
 import {
   useArchivedChannelEvents,
@@ -101,6 +103,13 @@ export function AgentSessionThreadPanel({
   const isLive = isManagedAgentActive(agent);
   const isOverlay = useIsThreadPanelOverlay();
   const sessionChannelId = channelId ?? channel?.id ?? null;
+
+  // A live media session for *this* agent in *this* channel, if one is running.
+  // Null the rest of the time, which is the common case. The hook still holds a
+  // narrow 48200/48201 subscription while the panel is open — that is how a
+  // session that starts later shows up — but it joins no room until there is
+  // one, so nothing is negotiated and nothing is metered.
+  const mediaSession = useAgentMediaSession(sessionChannelId, agent.pubkey);
   // Unified working signal, scoped to this panel's channel (or all channels
   // when the panel is unscoped) — observer turns primary, typing fallback.
   const { working: isWorking } = useAgentWorking(
@@ -514,6 +523,13 @@ export function AgentSessionThreadPanel({
         className="overflow-y-auto px-3 pb-4"
         panelPadding
       >
+        {mediaSession ? (
+          <AgentMediaSurface
+            agentLabel={agentLabel}
+            className="pb-3 pt-2"
+            session={mediaSession}
+          />
+        ) : null}
         <div ref={topSentinelRef} aria-hidden className="h-px" />
         <div ref={contentRef}>
           <ManagedAgentSessionPanel

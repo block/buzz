@@ -1,9 +1,6 @@
 import { relayHttpFromWs } from "@/shared/api/inviteHelpers";
-import {
-  getRelayHttpUrl,
-  invokeTauri,
-  signRelayEvent,
-} from "@/shared/api/tauri";
+import { nip98PostHeader } from "@/shared/api/nip98";
+import { getRelayHttpUrl, invokeTauri } from "@/shared/api/tauri";
 
 // Relay invite data layer. Both endpoints are NIP-98-authed HTTP POSTs
 // (mirrors the read path in moderation.ts, plus the payload tag the relay
@@ -13,8 +10,6 @@ import {
 // - POST /api/invites/claim  — claim a code, signed by the *joining* key.
 //   This one targets an arbitrary relay (the invite's relay, not necessarily
 //   the active community), so the claim helper takes an explicit ws URL.
-
-const NIP98_KIND = 27235;
 
 // Bound invite requests so an unreachable relay surfaces as an error in the
 // invite-loading UI within seconds instead of hanging for the OS-level
@@ -42,38 +37,6 @@ export type ClaimResult = {
   host: string;
   role: string;
 };
-
-async function sha256Hex(text: string): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(text),
-  );
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-/**
- * Build the NIP-98 `Authorization` header for a POST with a body.
- *
- * The relay requires a `payload` tag carrying sha256(body) for signed POSTs
- * (api/invites.rs passes `require_payload: true`), and verifies the `u` tag
- * against the exact request URL — so the caller finalizes both before signing.
- */
-async function nip98PostHeader(url: string, body: string): Promise<string> {
-  const authEvent = await signRelayEvent({
-    kind: NIP98_KIND,
-    content: "",
-    tags: [
-      ["u", url],
-      ["method", "POST"],
-      ["payload", await sha256Hex(body)],
-      ["nonce", crypto.randomUUID()],
-    ],
-  });
-  // NIP-98 events carry empty content and ASCII-only tags, so btoa is safe here.
-  return `Nostr ${btoa(JSON.stringify(authEvent))}`;
-}
 
 async function invitePost<T>(
   httpBase: string,

@@ -27,7 +27,6 @@ import {
   KIND_JOB_REQUEST,
   KIND_JOB_RESULT,
   KIND_HUDDLE_STARTED,
-  KIND_AGENT_MEDIA_SESSION_STARTED,
   KIND_DELETION,
   KIND_NIP29_DELETE_EVENT,
   KIND_REACTION,
@@ -62,8 +61,7 @@ export function isTimelineContentEvent(event: RelayEvent) {
     event.kind === KIND_JOB_RESULT ||
     event.kind === KIND_JOB_CANCEL ||
     event.kind === KIND_JOB_ERROR ||
-    event.kind === KIND_HUDDLE_STARTED ||
-    event.kind === KIND_AGENT_MEDIA_SESSION_STARTED
+    event.kind === KIND_HUDDLE_STARTED
   );
 }
 

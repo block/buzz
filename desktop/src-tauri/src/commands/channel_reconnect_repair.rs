@@ -3,8 +3,9 @@ use tauri::State;
 use crate::{app_state::AppState, relay::query_relay};
 
 const MAX_REPAIR_PAGE_LIMIT: u32 = 500;
-const CHANNEL_REPAIR_KINDS: [u32; 15] = [
+const CHANNEL_REPAIR_KINDS: [u32; 17] = [
     5, 7, 9, 9005, 40001, 40002, 40003, 40008, 40099, 45001, 45003, 48100, 48101, 48102, 48103,
+    48200, 48201,
 ];
 
 fn build_channel_reconnect_repair_filter(

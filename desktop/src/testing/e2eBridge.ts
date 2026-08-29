@@ -5704,7 +5704,7 @@ async function handleGetChannelReconnectRepair(
 ): Promise<RelayEvent[]> {
   const kinds = new Set([
     5, 7, 9, 9005, 40001, 40002, 40003, 40008, 40099, 45001, 45003, 48100,
-    48101, 48102, 48103,
+    48101, 48102, 48103, 48200, 48201,
   ]);
   const filter: Record<string, unknown> = {
     "#h": [args.channelId],
