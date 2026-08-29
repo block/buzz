@@ -41,6 +41,10 @@ export const KIND_HUDDLE_STARTED = 48100;
 export const KIND_HUDDLE_PARTICIPANT_JOINED = 48101;
 export const KIND_HUDDLE_PARTICIPANT_LEFT = 48102;
 export const KIND_HUDDLE_ENDED = 48103;
+// Agent media sessions: realtime audio/video carried by an external
+// provider and announced into the channel. The relay never carries the media.
+export const KIND_AGENT_MEDIA_SESSION_STARTED = 48200;
+export const KIND_AGENT_MEDIA_SESSION_ENDED = 48201;
 // NIP-78 application-specific data. All use kind 30078; the relay
 // differentiates them by d-tag ("read-state:<slotId>", "channel-sections",
 // "channel-mutes", "channel-stars", "channel-sort", "project-sidebar-membership").
@@ -110,6 +114,8 @@ export const CHANNEL_EVENT_KINDS = [
   KIND_HUDDLE_PARTICIPANT_JOINED, // 48101 — huddle lifecycle overlay
   KIND_HUDDLE_PARTICIPANT_LEFT, // 48102 — huddle lifecycle overlay
   KIND_HUDDLE_ENDED, // 48103 — huddle lifecycle overlay
+  KIND_AGENT_MEDIA_SESSION_STARTED, // 48200 — visible agent media session card
+  KIND_AGENT_MEDIA_SESSION_ENDED, // 48201 — media session lifecycle overlay
 ] as const;
 
 // Auxiliary (non-row) timeline kinds: events that overlay onto or hide an
@@ -146,6 +152,7 @@ export const CHANNEL_TIMELINE_CONTENT_KINDS = [
   KIND_JOB_CANCEL, // 43005
   KIND_JOB_ERROR, // 43006
   KIND_HUDDLE_STARTED, // 48100 — huddle session card
+  KIND_AGENT_MEDIA_SESSION_STARTED, // 48200 — agent media session card
 ] as const;
 
 // Timeline kinds that are NOT conversational: relay-signed system rows
@@ -165,6 +172,8 @@ const NON_CONVERSATIONAL_UNREAD_KINDS: ReadonlySet<number> = new Set([
   KIND_HUDDLE_PARTICIPANT_JOINED, // 48101
   KIND_HUDDLE_PARTICIPANT_LEFT, // 48102
   KIND_HUDDLE_ENDED, // 48103
+  KIND_AGENT_MEDIA_SESSION_STARTED, // 48200 — visible but non-conversational
+  KIND_AGENT_MEDIA_SESSION_ENDED, // 48201
 ]);
 
 // Whether a timeline message kind should count toward unread tallies. An

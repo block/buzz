@@ -597,6 +597,46 @@ pub const KIND_HUDDLE_ENDED: u32 = 48103;
 /// Huddle channel guidelines/rules document.
 pub const KIND_HUDDLE_GUIDELINES: u32 = 48106;
 
+/// An agent media session hosted by an external provider was started.
+///
+/// Announces that an agent has opened a realtime audio/video session for a
+/// channel — the counterpart to [`KIND_HUDDLE_STARTED`] for sessions the relay
+/// does not itself carry. The relay stores and fans out the announcement; the
+/// media itself never transits the relay.
+///
+/// Channel-scoped via `h`. Only a registered agent may announce one, and
+/// ownership is the signature rather than a tag — an agent does not `p`-tag
+/// itself. An `e` tag references the message that triggered the session, so
+/// clients can anchor the session to it.
+///
+/// Content is a versioned JSON body naming the provider, its connection
+/// parameters, a token endpoint, the participant list, the track kinds a viewer
+/// may subscribe to or publish, and `expires_at`.
+///
+/// `expires_at` is a unix timestamp after which clients stop rendering the
+/// session. It is a **presentation expiry, not a lease**: it reaps nothing on
+/// the provider. It is required because the closing
+/// [`KIND_AGENT_MEDIA_SESSION_ENDED`] may never arrive — an agent that crashes
+/// publishes no end event — and a card with no stated end would advertise a
+/// dead room indefinitely. The relay bounds it by a maximum session duration,
+/// and additionally by the channel's own deadline when the channel is
+/// ephemeral.
+///
+/// Deliberately not ephemeral: a member who opens the channel after the
+/// announcement must still be able to discover and join a live session.
+pub const KIND_AGENT_MEDIA_SESSION_STARTED: u32 = 48200;
+/// An agent media session ended.
+///
+/// Mirrors [`KIND_HUDDLE_ENDED`]. Channel-scoped via `h`, and carries exactly
+/// one `e` tag referencing the [`KIND_AGENT_MEDIA_SESSION_STARTED`] it closes —
+/// exactly one, because the relay checks the ender's standing against that
+/// start's signer, a question two starts have no single answer to.
+///
+/// Two signers may end a session: the agent that owns it, or the relay closing
+/// one on the owner's behalf. A relay-signed end carries exactly one `p` tag
+/// naming that owner, since signer and subject differ there.
+pub const KIND_AGENT_MEDIA_SESSION_ENDED: u32 = 48201;
+
 // Media (49000–49999)
 /// Internal kind for media upload audit entries. Not a relay event kind.
 pub const KIND_MEDIA_UPLOAD: u32 = 49001;
@@ -751,6 +791,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_HUDDLE_PARTICIPANT_LEFT,
     KIND_HUDDLE_ENDED,
     KIND_HUDDLE_GUIDELINES,
+    KIND_AGENT_MEDIA_SESSION_STARTED,
+    KIND_AGENT_MEDIA_SESSION_ENDED,
     KIND_MEDIA_UPLOAD,
     KIND_GIT_REPO_ANNOUNCEMENT,
     KIND_GIT_REPO_STATE,
@@ -879,6 +921,16 @@ const _: () = assert!(
 const _: () = assert!(KIND_AUTH <= u16::MAX as u32);
 const _: () = assert!(KIND_CANVAS <= u16::MAX as u32);
 const _: () = assert!(KIND_HUDDLE_GUIDELINES <= u16::MAX as u32);
+const _: () = assert!(KIND_AGENT_MEDIA_SESSION_ENDED <= u16::MAX as u32);
+// Compile-time: agent media session events are regular stored kinds — a late
+// joiner must be able to query a live session, so they must not be ephemeral,
+// and there is one event per session start/end, so they must not be replaceable.
+const _: () = assert!(!is_ephemeral(KIND_AGENT_MEDIA_SESSION_STARTED));
+const _: () = assert!(!is_replaceable(KIND_AGENT_MEDIA_SESSION_STARTED));
+const _: () = assert!(!is_parameterized_replaceable(
+    KIND_AGENT_MEDIA_SESSION_STARTED
+));
+const _: () = assert!(!is_ephemeral(KIND_AGENT_MEDIA_SESSION_ENDED));
 const _: () = assert!(EPHEMERAL_KIND_MIN < EPHEMERAL_KIND_MAX);
 // Compile-time: KIND_AGENT_TURN_METRIC is a regular stored kind (not ephemeral, not replaceable).
 const _: () = assert!(!is_ephemeral(KIND_AGENT_TURN_METRIC));

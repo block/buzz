@@ -48,6 +48,12 @@ abstract final class EventKind {
   static const huddleParticipantLeft = 48102;
   static const huddleEnded = 48103;
 
+  /// Agent media sessions: realtime audio/video carried by an external
+  /// provider and announced into the channel. The relay never carries the
+  /// media itself.
+  static const agentMediaSessionStarted = 48200;
+  static const agentMediaSessionEnded = 48201;
+
   /// Event kinds that represent user-visible channel messages.
   static const channelMessageEventKinds = [
     streamMessage, // 9
@@ -71,6 +77,8 @@ abstract final class EventKind {
     huddleParticipantJoined, // 48101 — huddle lifecycle metadata
     huddleParticipantLeft, // 48102 — huddle lifecycle metadata
     huddleEnded, // 48103 — visible huddle ended row
+    agentMediaSessionStarted, // 48200 — visible agent media session card
+    agentMediaSessionEnded, // 48201 — visible media session ended row
   ];
 
   /// Auxiliary timeline kinds that overlay or hide existing rows.
@@ -95,6 +103,8 @@ abstract final class EventKind {
     jobError,
     huddleStarted,
     huddleEnded,
+    agentMediaSessionStarted,
+    agentMediaSessionEnded,
   ];
 }
 

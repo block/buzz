@@ -12,7 +12,8 @@ use uuid::Uuid;
 use buzz_auth::Scope;
 use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
-    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
+    is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_MEDIA_SESSION_ENDED,
+    KIND_AGENT_MEDIA_SESSION_STARTED, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
     KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
     KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
     KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
@@ -76,6 +77,407 @@ fn map_huddle_backing_channel_error(error: buzz_db::DbError) -> IngestError {
 
 fn expected_huddle_backing_ttl(ephemeral_ttl_override: Option<i32>) -> i32 {
     ephemeral_ttl_override.unwrap_or(3600)
+}
+
+/// Maximum `content` length for an agent media session announcement.
+///
+/// The body names a provider, its connection parameters, a token endpoint and a
+/// participant list — kilobytes, not megabytes. A tight bound keeps a
+/// world-readable channel event from becoming a blob store.
+const MAX_MEDIA_SESSION_CONTENT_BYTES: usize = 8 * 1024;
+
+/// Providers this relay will admit in a media session announcement.
+///
+/// An allowlist rather than a free-form string: clients act on `provider` to
+/// choose a transport, so an unknown value is a client-side dispatch failure at
+/// best. New providers are added here deliberately.
+const KNOWN_MEDIA_PROVIDERS: &[&str] = &["livekit"];
+
+/// Collect the pubkeys named by `p` tags.
+fn p_tag_pubkeys(event: &Event) -> Vec<String> {
+    event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind().to_string() == "p")
+        .filter_map(|tag| tag.content().map(str::to_ascii_lowercase))
+        .collect()
+}
+
+/// Whether any `e` tag is present and every one is a 64-char hex event id.
+fn e_tags_well_formed(event: &Event) -> bool {
+    event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind().to_string() == "e")
+        .all(|tag| {
+            tag.content()
+                .is_some_and(|v| v.len() == 64 && v.chars().all(|c| c.is_ascii_hexdigit()))
+        })
+}
+
+/// Maximum lifetime an agent media session announcement may claim.
+///
+/// `expires_at` is a presentation expiry, not a lease: it stops clients
+/// rendering a card for a room nobody is in, and reaps nothing. A generous
+/// bound therefore buys only a longer window in which a dead session still
+/// looks live. One hour matches [`expected_huddle_backing_ttl`], the longest a
+/// Huddle survives without traffic.
+const MAX_MEDIA_SESSION_DURATION_SECS: i64 = 3600;
+
+/// What the shape pass recovered, handed to the pass that needs the database.
+///
+/// The split keeps every rule decidable from the event alone inside
+/// [`validate_agent_media_session_shape`], which is pure and unit tested as
+/// such, and confines Postgres to [`validate_agent_media_session_links`].
+enum MediaSessionShape {
+    /// Not a 48200 / 48201 event — nothing to check.
+    Other,
+    /// A well-formed start, claiming to stop being worth rendering at this
+    /// unix timestamp.
+    Start { expires_at: i64 },
+    /// A well-formed end, naming the one start it closes.
+    End { start_event_id: Vec<u8> },
+}
+
+/// Validate everything about an agent media session event (48200 / 48201) that
+/// is decidable from the event itself.
+///
+/// The relay does not carry this media — it only vouches for the announcement.
+/// So the guarantees it can offer are exactly: the session belongs to the agent
+/// that signed for it, the body is well-formed, the provider is one clients
+/// know how to dispatch on, and the announcement says when it stops being worth
+/// rendering. Channel scope and membership are enforced upstream by
+/// [`requires_h_channel_scope`] and the membership check.
+///
+/// Ownership comes from the signature, not from a `p` tag: an agent announcing
+/// its own session does not tag itself (nostr strips a self-referential `p` tag
+/// on signing, so it could not even if it wanted to). A `p` tag is meaningful
+/// only when signer and subject differ — the relay closing a session it did not
+/// open.
+fn validate_agent_media_session_shape(
+    relay_pubkey: &[u8; 32],
+    event: &Event,
+    kind: u32,
+) -> Result<MediaSessionShape, IngestError> {
+    if kind != KIND_AGENT_MEDIA_SESSION_STARTED && kind != KIND_AGENT_MEDIA_SESSION_ENDED {
+        return Ok(MediaSessionShape::Other);
+    }
+
+    let signer = hex::encode(event.pubkey.to_bytes());
+    let relay_is_signer = signer == hex::encode(relay_pubkey);
+    let p_tags = p_tag_pubkeys(event);
+
+    for tagged in &p_tags {
+        if tagged.len() != 64 || !tagged.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(IngestError::Rejected(
+                "invalid: agent media session p tag must be a 64-char hex pubkey".into(),
+            ));
+        }
+    }
+
+    if relay_is_signer {
+        // Janitorial parity with huddles: the relay may close a session it did
+        // not open, but must never announce one — and it has to say whose it was.
+        if kind != KIND_AGENT_MEDIA_SESSION_STARTED {
+            if p_tags.len() != 1 {
+                return Err(IngestError::Rejected(
+                    "invalid: relay-signed media session end must name the agent \
+                     via exactly one p tag"
+                        .into(),
+                ));
+            }
+        } else {
+            return Err(IngestError::Rejected(
+                "invalid: only an agent may announce its own media session".into(),
+            ));
+        }
+    } else if p_tags.iter().any(|tagged| tagged != &signer) {
+        // A session card is clickable and names a token endpoint of the signer's
+        // choosing. Attributing one to an identity you do not hold is the
+        // impersonation this guard exists to stop.
+        return Err(IngestError::Rejected(
+            "invalid: agent media session may not be attributed to another identity".into(),
+        ));
+    }
+
+    if !e_tags_well_formed(event) {
+        return Err(IngestError::Rejected(
+            "invalid: agent media session e tags must be 64-char hex event ids".into(),
+        ));
+    }
+
+    if event.content.len() > MAX_MEDIA_SESSION_CONTENT_BYTES {
+        return Err(IngestError::Rejected(
+            "invalid: agent media session content exceeds the size limit".into(),
+        ));
+    }
+
+    if kind == KIND_AGENT_MEDIA_SESSION_ENDED {
+        // An end event is meaningless without the start it closes, and
+        // ambiguous with more than one: the relay resolves that reference to
+        // check ownership against the start's signer, a question two starts
+        // have no single answer to.
+        let mut e_tags = event
+            .tags
+            .iter()
+            .filter(|tag| tag.kind().to_string() == "e")
+            .filter_map(|tag| tag.content());
+        let referenced = e_tags.next().ok_or_else(|| {
+            IngestError::Rejected(
+                "invalid: agent media session end must reference its start via an e tag".into(),
+            )
+        })?;
+        if e_tags.next().is_some() {
+            return Err(IngestError::Rejected(
+                "invalid: agent media session end must reference exactly one start".into(),
+            ));
+        }
+        let start_event_id = hex::decode(referenced).map_err(|_| {
+            IngestError::Rejected(
+                "invalid: agent media session e tags must be 64-char hex event ids".into(),
+            )
+        })?;
+        return Ok(MediaSessionShape::End { start_event_id });
+    }
+
+    let body: serde_json::Value = serde_json::from_str(&event.content).map_err(|_| {
+        IngestError::Rejected("invalid: agent media session content must be JSON".into())
+    })?;
+    let provider = body
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            IngestError::Rejected("invalid: agent media session must name a provider".into())
+        })?;
+    if !KNOWN_MEDIA_PROVIDERS.contains(&provider) {
+        return Err(IngestError::Rejected(
+            "invalid: unknown agent media session provider".into(),
+        ));
+    }
+    if !body.get("connect").is_some_and(|v| v.is_object()) {
+        return Err(IngestError::Rejected(
+            "invalid: agent media session must carry a connect object".into(),
+        ));
+    }
+    // Viewers fetch a short-lived credential from `token_endpoint`, so a scheme
+    // other than http(s) is never legitimate -- it would make a world-readable
+    // channel event a vector for whatever the client's URL handler does with
+    // `file:`, `data:` or `javascript:`. https is expected in production; plain
+    // http stays admissible so a self-hosted gateway can be reached on a LAN.
+    if let Some(endpoint) = body.get("token_endpoint") {
+        let endpoint = endpoint.as_str().ok_or_else(|| {
+            IngestError::Rejected(
+                "invalid: agent media session token_endpoint must be a string".into(),
+            )
+        })?;
+        if !endpoint.starts_with("https://") && !endpoint.starts_with("http://") {
+            return Err(IngestError::Rejected(
+                "invalid: agent media session token_endpoint must be http(s)".into(),
+            ));
+        }
+    }
+
+    // A card with no stated end renders until something contradicts it, and the
+    // only thing that can is a 48201 that may never arrive — a crashed agent
+    // publishes nothing. Requiring the expiry up front means a session that
+    // dies badly still stops rendering.
+    let expires_at = body
+        .get("expires_at")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| {
+            IngestError::Rejected(
+                "invalid: agent media session must carry an integer expires_at".into(),
+            )
+        })?;
+    // Measured against `created_at` rather than the relay's clock: the same
+    // event must decide the same way on every relay and in every replay, and
+    // `created_at` is already bounded for skew upstream.
+    let created_at = event.created_at.as_secs() as i64;
+    if expires_at <= created_at {
+        return Err(IngestError::Rejected(
+            "invalid: agent media session expires_at must be after its created_at".into(),
+        ));
+    }
+    if expires_at - created_at > MAX_MEDIA_SESSION_DURATION_SECS {
+        return Err(IngestError::Rejected(
+            "invalid: agent media session expires_at exceeds the maximum session duration".into(),
+        ));
+    }
+
+    Ok(MediaSessionShape::Start { expires_at })
+}
+
+/// Whether an end event may close the start it references.
+///
+/// Two shapes and no others: the owner closes its own session, or the relay
+/// closes one on the owner's behalf and names the owner it closed it for.
+/// Anyone else ending someone's session is a denial of service against a live
+/// call, so this defaults closed.
+///
+/// Split from the database fetch because the rule is decidable from identities
+/// alone, and a rule that needs Postgres to test is a rule that goes untested.
+fn media_session_end_is_authorized(
+    end_signer: &str,
+    end_p_tags: &[String],
+    start_signer: &str,
+    relay_pubkey_hex: &str,
+) -> bool {
+    if end_signer == start_signer {
+        return true;
+    }
+    end_signer == relay_pubkey_hex && end_p_tags.len() == 1 && end_p_tags[0] == start_signer
+}
+
+/// Whether a claimed expiry fits inside the channel it is announced into.
+///
+/// An ephemeral channel — a Huddle's backing stream — carries its own deadline.
+/// A session card that outlives the channel holding it can only mislead, so the
+/// announcement may not claim past that deadline. A permanent channel imposes
+/// no cap: 48200 is a generic agent media session kind, not a Huddle-only one,
+/// so the Huddle rule is conditional rather than general.
+///
+/// `ttl_deadline` is the whole test because the store sets it exactly when
+/// `ttl_seconds` is set — at creation and on every update — so its presence is
+/// what "ephemeral" means here.
+fn media_session_expiry_fits_channel(
+    expires_at: i64,
+    channel_ttl_deadline: Option<chrono::DateTime<Utc>>,
+) -> bool {
+    channel_ttl_deadline.is_none_or(|deadline| expires_at <= deadline.timestamp())
+}
+
+/// Validate the parts of an agent media session event that reference stored
+/// state: who may announce one, and which start an end actually closes.
+async fn validate_agent_media_session_links(
+    tenant: &TenantContext,
+    state: &AppState,
+    event: &Event,
+    shape: MediaSessionShape,
+) -> Result<(), IngestError> {
+    match shape {
+        MediaSessionShape::Other => Ok(()),
+        MediaSessionShape::Start { expires_at } => {
+            let channel_id = media_session_channel_id(event)?;
+            // The kind is named for agent media sessions and clients render the
+            // card under an agent's identity, so the announcer has to be one.
+            // Without this the contract is "any member may announce a session",
+            // which is a different feature wearing this one's name.
+            let announcer = event.pubkey.to_bytes();
+            let policy = state
+                .db
+                .get_agent_channel_policy(tenant.community(), &announcer)
+                .await
+                .map_err(|error| {
+                    IngestError::Internal(format!(
+                        "error: resolving agent media session announcer: {error}"
+                    ))
+                })?;
+            if !matches!(policy, Some((_, Some(_)))) {
+                return Err(IngestError::Rejected(
+                    "invalid: only a registered agent may announce a media session".into(),
+                ));
+            }
+
+            let channel = state
+                .db
+                .get_channel(tenant.community(), channel_id)
+                .await
+                .map_err(map_media_session_channel_error)?;
+            if !media_session_expiry_fits_channel(expires_at, channel.ttl_deadline) {
+                return Err(IngestError::Rejected(
+                    "invalid: agent media session expires_at outlives its ephemeral channel".into(),
+                ));
+            }
+            Ok(())
+        }
+        MediaSessionShape::End { start_event_id } => {
+            let channel_id = media_session_channel_id(event)?;
+            let start = state
+                .db
+                .get_event_by_id(tenant.community(), &start_event_id)
+                .await
+                .map_err(|error| {
+                    IngestError::Internal(format!(
+                        "error: loading agent media session start: {error}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    IngestError::Rejected(
+                        "invalid: agent media session end references an unknown start".into(),
+                    )
+                })?;
+
+            if event_kind_u32(&start.event) != KIND_AGENT_MEDIA_SESSION_STARTED {
+                return Err(IngestError::Rejected(
+                    "invalid: agent media session end must reference a session start".into(),
+                ));
+            }
+            // The lookup is community-scoped, so this is the remaining half of
+            // "same community and channel". An end published elsewhere would
+            // retire a card its own readers never saw.
+            if start.channel_id != Some(channel_id) {
+                return Err(IngestError::Rejected(
+                    "invalid: agent media session end must be published in the start's channel"
+                        .into(),
+                ));
+            }
+
+            let relay_hex = hex::encode(state.relay_keypair.public_key().to_bytes());
+            let start_signer = hex::encode(start.event.pubkey.to_bytes());
+            if !media_session_end_is_authorized(
+                &hex::encode(event.pubkey.to_bytes()),
+                &p_tag_pubkeys(event),
+                &start_signer,
+                &relay_hex,
+            ) {
+                return Err(IngestError::Rejected(
+                    "invalid: only the session owner or the relay may end an agent media session"
+                        .into(),
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// The channel an agent media session event is scoped to.
+///
+/// Cannot fail while [`requires_h_channel_scope`] covers both kinds. Checked
+/// anyway so a future removal fails closed, rather than silently comparing
+/// `None` against `None` when matching an end to its start.
+fn media_session_channel_id(event: &Event) -> Result<Uuid, IngestError> {
+    extract_channel_id(event).ok_or_else(|| {
+        IngestError::Rejected("invalid: agent media session must name a channel".into())
+    })
+}
+
+fn map_media_session_channel_error(error: buzz_db::DbError) -> IngestError {
+    match error {
+        buzz_db::DbError::ChannelNotFound(_) => {
+            IngestError::Rejected("invalid: agent media session channel not found".into())
+        }
+        error => IngestError::Internal(format!(
+            "error: loading agent media session channel: {error}"
+        )),
+    }
+}
+
+/// Validate an agent media session lifecycle event (48200 / 48201).
+///
+/// Two passes: everything the event decides about itself, then the references
+/// that need stored state.
+async fn validate_agent_media_session_event(
+    tenant: &TenantContext,
+    state: &AppState,
+    event: &Event,
+    kind: u32,
+) -> Result<(), IngestError> {
+    let shape = validate_agent_media_session_shape(
+        &state.relay_keypair.public_key().to_bytes(),
+        event,
+        kind,
+    )?;
+    validate_agent_media_session_links(tenant, state, event, shape).await
 }
 
 async fn validate_huddle_lifecycle_event(
@@ -525,6 +927,11 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_HUDDLE_PARTICIPANT_LEFT
         | KIND_HUDDLE_ENDED
         | KIND_HUDDLE_GUIDELINES => Ok(Scope::ChannelsWrite),
+        // Agent media session lifecycle: same shape as the huddle lifecycle
+        // events above, for sessions carried by an external provider.
+        KIND_AGENT_MEDIA_SESSION_STARTED | KIND_AGENT_MEDIA_SESSION_ENDED => {
+            Ok(Scope::ChannelsWrite)
+        }
         // NIP-34: Git repository events
         KIND_GIT_REPO_ANNOUNCEMENT | KIND_GIT_REPO_STATE => Ok(Scope::ReposWrite),
         // NIP-MP: a project is repository metadata — grouping repositories needs
@@ -729,6 +1136,9 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_HUDDLE_PARTICIPANT_LEFT
             | KIND_HUDDLE_ENDED
             | KIND_HUDDLE_GUIDELINES
+            // Agent media sessions are announced into the channel they serve
+            | KIND_AGENT_MEDIA_SESSION_STARTED
+            | KIND_AGENT_MEDIA_SESSION_ENDED
     )
 }
 
@@ -2653,6 +3063,7 @@ async fn ingest_event_inner(
     }
 
     validate_huddle_lifecycle_event(tenant, state, &event, kind_u32).await?;
+    validate_agent_media_session_event(tenant, state, &event, kind_u32).await?;
 
     if crate::handlers::side_effects::is_admin_kind(kind_u32) {
         crate::handlers::side_effects::validate_admin_event(tenant, kind_u32, &event, state)
@@ -5521,6 +5932,593 @@ mod postgres_tests {
         assert_eq!(
             counts.get(&("ws".to_owned(), "invalid".to_owned())),
             Some(&1)
+        );
+    }
+
+    // --- Agent media sessions (48200 / 48201) -------------------------------
+
+    /// Build a media session event signed by `keys`.
+    ///
+    /// Note: nostr strips a `p` tag equal to the signer's own pubkey, so a
+    /// self-attributed session simply has no `p` tag — which is exactly the
+    /// shape the validator expects.
+    fn media_session_event(
+        keys: &nostr::Keys,
+        kind: u32,
+        content: &str,
+        extra_tags: Vec<nostr::Tag>,
+    ) -> Event {
+        let mut tags = vec![nostr::Tag::parse(["h", &Uuid::new_v4().to_string()]).expect("h tag")];
+        tags.extend(extra_tags);
+        EventBuilder::new(Kind::Custom(kind as u16), content)
+            .tags(tags)
+            .sign_with_keys(keys)
+            .expect("sign media session event")
+    }
+
+    fn e_tag(seed: char) -> nostr::Tag {
+        nostr::Tag::parse(["e", &seed.to_string().repeat(64)]).expect("e tag")
+    }
+
+    /// A valid start body expiring ten minutes out.
+    ///
+    /// Built rather than a constant because the validator measures `expires_at`
+    /// against the event's own `created_at`, which `sign_with_keys` stamps at
+    /// signing time — a fixed timestamp would age into a failure.
+    fn livekit_body() -> String {
+        livekit_body_expiring_in(600)
+    }
+
+    fn livekit_body_expiring_in(offset_secs: i64) -> String {
+        let expires_at = nostr::Timestamp::now().as_secs() as i64 + offset_secs;
+        format!(
+            r#"{{"v":1,"provider":"livekit","connect":{{"url":"wss://x","room":"r"}},"expires_at":{expires_at}}}"#
+        )
+    }
+
+    const RELAY_KEY: [u8; 32] = [7u8; 32];
+
+    #[test]
+    fn media_session_start_accepts_the_agents_own_announcement() {
+        let keys = nostr::Keys::generate();
+        let event = media_session_event(
+            &keys,
+            KIND_AGENT_MEDIA_SESSION_STARTED,
+            &livekit_body(),
+            vec![],
+        );
+
+        assert!(validate_agent_media_session_shape(
+            &RELAY_KEY,
+            &event,
+            KIND_AGENT_MEDIA_SESSION_STARTED
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn media_session_start_rejects_attribution_to_another_identity() {
+        // The card is clickable and names a token endpoint of the signer's
+        // choosing, so a session attributed to an identity you do not hold is
+        // the impersonation the guard exists to stop.
+        let keys = nostr::Keys::generate();
+        let someone_else = hex::encode(nostr::Keys::generate().public_key().to_bytes());
+        let event = media_session_event(
+            &keys,
+            KIND_AGENT_MEDIA_SESSION_STARTED,
+            &livekit_body(),
+            vec![nostr::Tag::parse(["p", someone_else.as_str()]).expect("p tag")],
+        );
+
+        assert!(validate_agent_media_session_shape(
+            &RELAY_KEY,
+            &event,
+            KIND_AGENT_MEDIA_SESSION_STARTED
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn media_session_start_rejects_a_relay_signed_announcement() {
+        let relay_keys = nostr::Keys::generate();
+        let relay_pubkey = relay_keys.public_key().to_bytes();
+        let event = media_session_event(
+            &relay_keys,
+            KIND_AGENT_MEDIA_SESSION_STARTED,
+            &livekit_body(),
+            vec![],
+        );
+
+        assert!(validate_agent_media_session_shape(
+            &relay_pubkey,
+            &event,
+            KIND_AGENT_MEDIA_SESSION_STARTED
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn media_session_start_rejects_unknown_provider() {
+        let keys = nostr::Keys::generate();
+        let event = media_session_event(
+            &keys,
+            KIND_AGENT_MEDIA_SESSION_STARTED,
+            r#"{"provider":"not-a-provider","connect":{}}"#,
+            vec![],
+        );
+
+        assert!(validate_agent_media_session_shape(
+            &RELAY_KEY,
+            &event,
+            KIND_AGENT_MEDIA_SESSION_STARTED
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn media_session_start_requires_a_connect_object() {
+        let keys = nostr::Keys::generate();
+        let event = media_session_event(
+            &keys,
+            KIND_AGENT_MEDIA_SESSION_STARTED,
+            r#"{"provider":"livekit"}"#,
+            vec![],
+        );
+
+        assert!(validate_agent_media_session_shape(
+            &RELAY_KEY,
+            &event,
+            KIND_AGENT_MEDIA_SESSION_STARTED
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn media_session_start_rejects_non_json_content() {
+        let keys = nostr::Keys::generate();
+        let event =
+            media_session_event(&keys, KIND_AGENT_MEDIA_SESSION_STARTED, "not json", vec![]);
+
+        assert!(validate_agent_media_session_shape(
+            &RELAY_KEY,
+            &event,
+            KIND_AGENT_MEDIA_SESSION_STARTED
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn media_session_start_rejects_non_http_token_endpoint() {
+        let keys = nostr::Keys::generate();
+        for endpoint in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "data:text/html,x",
+        ] {
+            let event = media_session_event(
+                &keys,
+                KIND_AGENT_MEDIA_SESSION_STARTED,
+                &format!(
+                    r#"{{"provider":"livekit","connect":{{}},"token_endpoint":"{endpoint}"}}"#
+                ),
+                vec![],
+            );
+            assert!(
+                validate_agent_media_session_shape(
+                    &RELAY_KEY,
+                    &event,
+                    KIND_AGENT_MEDIA_SESSION_STARTED
+                )
+                .is_err(),
+                "expected {endpoint} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn media_session_content_is_size_capped_for_both_kinds() {
+        let keys = nostr::Keys::generate();
+        // One past the cap: the check is `>`, so exactly-at-limit is admissible.
+        let padding = "x".repeat(MAX_MEDIA_SESSION_CONTENT_BYTES + 1);
+
+        let start = media_session_event(
+            &keys,
+            KIND_AGENT_MEDIA_SESSION_STARTED,
+            &format!(r#"{{"provider":"livekit","connect":{{}},"pad":"{padding}"}}"#),
+            vec![],
+        );
+        assert!(validate_agent_media_session_shape(
+            &RELAY_KEY,
+            &start,
+            KIND_AGENT_MEDIA_SESSION_STARTED
+        )
+        .is_err());
+
+        // The end event once took an early return before the size check.
+        let end = media_session_event(
+            &keys,
+            KIND_AGENT_MEDIA_SESSION_ENDED,
+            &padding,
+            vec![e_tag('c')],
+        );
+        assert!(validate_agent_media_session_shape(
+            &RELAY_KEY,
+            &end,
+            KIND_AGENT_MEDIA_SESSION_ENDED
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn media_session_content_exactly_at_the_cap_is_admissible() {
+        let keys = nostr::Keys::generate();
+        let expires_at = nostr::Timestamp::now().as_secs() as i64 + 600;
+        let prefix =
+            format!(r#"{{"provider":"livekit","connect":{{}},"expires_at":{expires_at},"pad":""#);
+        let suffix = r#""}"#;
+        let pad = "x".repeat(MAX_MEDIA_SESSION_CONTENT_BYTES - prefix.len() - suffix.len());
+        let body = format!("{prefix}{pad}{suffix}");
+        assert_eq!(body.len(), MAX_MEDIA_SESSION_CONTENT_BYTES);
+
+        let event = media_session_event(&keys, KIND_AGENT_MEDIA_SESSION_STARTED, &body, vec![]);
+        assert!(validate_agent_media_session_shape(
+            &RELAY_KEY,
+            &event,
+            KIND_AGENT_MEDIA_SESSION_STARTED
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn media_session_end_requires_an_e_tag_to_its_start() {
+        let keys = nostr::Keys::generate();
+
+        let dangling = media_session_event(&keys, KIND_AGENT_MEDIA_SESSION_ENDED, "", vec![]);
+        assert!(validate_agent_media_session_shape(
+            &RELAY_KEY,
+            &dangling,
+            KIND_AGENT_MEDIA_SESSION_ENDED
+        )
+        .is_err());
+
+        let linked =
+            media_session_event(&keys, KIND_AGENT_MEDIA_SESSION_ENDED, "", vec![e_tag('a')]);
+        assert!(validate_agent_media_session_shape(
+            &RELAY_KEY,
+            &linked,
+            KIND_AGENT_MEDIA_SESSION_ENDED
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn media_session_end_rejects_a_malformed_e_tag() {
+        let keys = nostr::Keys::generate();
+        let event = media_session_event(
+            &keys,
+            KIND_AGENT_MEDIA_SESSION_ENDED,
+            "",
+            vec![nostr::Tag::parse(["e", "not-hex"]).expect("e tag")],
+        );
+
+        assert!(validate_agent_media_session_shape(
+            &RELAY_KEY,
+            &event,
+            KIND_AGENT_MEDIA_SESSION_ENDED
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn media_session_end_lets_the_relay_close_a_session_it_names() {
+        let relay_keys = nostr::Keys::generate();
+        let relay_pubkey = relay_keys.public_key().to_bytes();
+        let agent = hex::encode(nostr::Keys::generate().public_key().to_bytes());
+
+        let named = media_session_event(
+            &relay_keys,
+            KIND_AGENT_MEDIA_SESSION_ENDED,
+            "",
+            vec![
+                nostr::Tag::parse(["p", agent.as_str()]).expect("p tag"),
+                e_tag('b'),
+            ],
+        );
+        assert!(validate_agent_media_session_shape(
+            &relay_pubkey,
+            &named,
+            KIND_AGENT_MEDIA_SESSION_ENDED
+        )
+        .is_ok());
+
+        // Without a p tag the relay has not said whose session it closed.
+        let anonymous = media_session_event(
+            &relay_keys,
+            KIND_AGENT_MEDIA_SESSION_ENDED,
+            "",
+            vec![e_tag('b')],
+        );
+        assert!(validate_agent_media_session_shape(
+            &relay_pubkey,
+            &anonymous,
+            KIND_AGENT_MEDIA_SESSION_ENDED
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn media_session_rejects_a_malformed_p_tag() {
+        let keys = nostr::Keys::generate();
+        let event = media_session_event(
+            &keys,
+            KIND_AGENT_MEDIA_SESSION_STARTED,
+            &livekit_body(),
+            vec![nostr::Tag::parse(["p", "beef"]).expect("p tag")],
+        );
+
+        assert!(validate_agent_media_session_shape(
+            &RELAY_KEY,
+            &event,
+            KIND_AGENT_MEDIA_SESSION_STARTED
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn media_session_kinds_are_channel_scoped() {
+        // Without an `h` tag a session announcement would be a workspace-global
+        // event naming a channel it cannot be authorized against.
+        assert!(requires_h_channel_scope(KIND_AGENT_MEDIA_SESSION_STARTED));
+        assert!(requires_h_channel_scope(KIND_AGENT_MEDIA_SESSION_ENDED));
+    }
+
+    #[test]
+    fn media_session_start_requires_an_expires_at() {
+        // A card with no stated end renders until a 48201 contradicts it, and a
+        // crashed agent publishes nothing.
+        let keys = nostr::Keys::generate();
+        let event = media_session_event(
+            &keys,
+            KIND_AGENT_MEDIA_SESSION_STARTED,
+            r#"{"provider":"livekit","connect":{"url":"wss://x","room":"r"}}"#,
+            vec![],
+        );
+
+        assert!(validate_agent_media_session_shape(
+            &RELAY_KEY,
+            &event,
+            KIND_AGENT_MEDIA_SESSION_STARTED
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn media_session_start_rejects_a_non_integer_expires_at() {
+        // A float, a formatted string or a null is a client that did something
+        // other than read its clock; none of them has a defined comparison here.
+        let keys = nostr::Keys::generate();
+        for value in ["1.5", r#""later""#, "null", "true"] {
+            let event = media_session_event(
+                &keys,
+                KIND_AGENT_MEDIA_SESSION_STARTED,
+                &format!(r#"{{"provider":"livekit","connect":{{}},"expires_at":{value}}}"#),
+                vec![],
+            );
+            assert!(
+                validate_agent_media_session_shape(
+                    &RELAY_KEY,
+                    &event,
+                    KIND_AGENT_MEDIA_SESSION_STARTED
+                )
+                .is_err(),
+                "expected expires_at {value} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn media_session_start_rejects_an_expiry_that_is_not_in_the_future() {
+        let keys = nostr::Keys::generate();
+        for offset in [0, -1, -3600] {
+            let event = media_session_event(
+                &keys,
+                KIND_AGENT_MEDIA_SESSION_STARTED,
+                &livekit_body_expiring_in(offset),
+                vec![],
+            );
+            assert!(
+                validate_agent_media_session_shape(
+                    &RELAY_KEY,
+                    &event,
+                    KIND_AGENT_MEDIA_SESSION_STARTED
+                )
+                .is_err(),
+                "expected an expiry {offset}s from created_at to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn media_session_start_caps_the_claimed_duration() {
+        let keys = nostr::Keys::generate();
+
+        // The check is `>`, so exactly-at-the-cap is admissible.
+        let at_cap = media_session_event(
+            &keys,
+            KIND_AGENT_MEDIA_SESSION_STARTED,
+            &livekit_body_expiring_in(MAX_MEDIA_SESSION_DURATION_SECS),
+            vec![],
+        );
+        assert!(validate_agent_media_session_shape(
+            &RELAY_KEY,
+            &at_cap,
+            KIND_AGENT_MEDIA_SESSION_STARTED
+        )
+        .is_ok());
+
+        let past_cap = media_session_event(
+            &keys,
+            KIND_AGENT_MEDIA_SESSION_STARTED,
+            &livekit_body_expiring_in(MAX_MEDIA_SESSION_DURATION_SECS + 60),
+            vec![],
+        );
+        assert!(validate_agent_media_session_shape(
+            &RELAY_KEY,
+            &past_cap,
+            KIND_AGENT_MEDIA_SESSION_STARTED
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn media_session_start_shape_carries_the_expiry_forward() {
+        // The links pass caps this against an ephemeral channel's deadline, so
+        // the shape pass has to hand it over rather than merely approve it.
+        let keys = nostr::Keys::generate();
+        let event = media_session_event(
+            &keys,
+            KIND_AGENT_MEDIA_SESSION_STARTED,
+            &livekit_body(),
+            vec![],
+        );
+
+        let shape = validate_agent_media_session_shape(
+            &RELAY_KEY,
+            &event,
+            KIND_AGENT_MEDIA_SESSION_STARTED,
+        )
+        .expect("valid start");
+        let MediaSessionShape::Start { expires_at } = shape else {
+            panic!("expected a start shape");
+        };
+        assert!(expires_at > event.created_at.as_secs() as i64);
+    }
+
+    #[test]
+    fn media_session_end_rejects_more_than_one_start_reference() {
+        // Ownership is checked against the referenced start's signer. Two
+        // starts are two answers, so the relay refuses to pick one.
+        let keys = nostr::Keys::generate();
+        let event = media_session_event(
+            &keys,
+            KIND_AGENT_MEDIA_SESSION_ENDED,
+            "",
+            vec![e_tag('a'), e_tag('b')],
+        );
+
+        assert!(validate_agent_media_session_shape(
+            &RELAY_KEY,
+            &event,
+            KIND_AGENT_MEDIA_SESSION_ENDED
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn media_session_end_shape_carries_the_referenced_start_forward() {
+        let keys = nostr::Keys::generate();
+        let event =
+            media_session_event(&keys, KIND_AGENT_MEDIA_SESSION_ENDED, "", vec![e_tag('a')]);
+
+        let shape =
+            validate_agent_media_session_shape(&RELAY_KEY, &event, KIND_AGENT_MEDIA_SESSION_ENDED)
+                .expect("valid end");
+        let MediaSessionShape::End { start_event_id } = shape else {
+            panic!("expected an end shape");
+        };
+        assert_eq!(start_event_id, hex::decode("a".repeat(64)).expect("hex"));
+    }
+
+    #[test]
+    fn media_session_end_authorizes_the_session_owner() {
+        let agent = "aa".repeat(32);
+        let relay = "bb".repeat(32);
+
+        assert!(media_session_end_is_authorized(&agent, &[], &agent, &relay));
+    }
+
+    #[test]
+    fn media_session_end_authorizes_the_relay_when_it_names_the_owner() {
+        let agent = "aa".repeat(32);
+        let relay = "bb".repeat(32);
+        let other = "cc".repeat(32);
+
+        assert!(media_session_end_is_authorized(
+            &relay,
+            std::slice::from_ref(&agent),
+            &agent,
+            &relay
+        ));
+
+        // Naming somebody else, nobody, or several people is not naming the owner.
+        assert!(!media_session_end_is_authorized(
+            &relay,
+            std::slice::from_ref(&other),
+            &agent,
+            &relay
+        ));
+        assert!(!media_session_end_is_authorized(
+            &relay,
+            &[],
+            &agent,
+            &relay
+        ));
+        assert!(!media_session_end_is_authorized(
+            &relay,
+            &[agent.clone(), other],
+            &agent,
+            &relay
+        ));
+    }
+
+    #[test]
+    fn media_session_end_refuses_a_third_party() {
+        // Ending a stranger's live call is a denial of service, and the p-tag
+        // form belongs to the relay alone.
+        let agent = "aa".repeat(32);
+        let relay = "bb".repeat(32);
+        let stranger = "cc".repeat(32);
+
+        assert!(!media_session_end_is_authorized(
+            &stranger,
+            &[],
+            &agent,
+            &relay
+        ));
+        assert!(!media_session_end_is_authorized(
+            &stranger,
+            std::slice::from_ref(&agent),
+            &agent,
+            &relay
+        ));
+    }
+
+    #[test]
+    fn media_session_expiry_is_capped_by_an_ephemeral_channels_deadline() {
+        let deadline = chrono::DateTime::from_timestamp(2_000, 0).expect("timestamp");
+
+        assert!(media_session_expiry_fits_channel(1_999, Some(deadline)));
+        assert!(media_session_expiry_fits_channel(2_000, Some(deadline)));
+        assert!(!media_session_expiry_fits_channel(2_001, Some(deadline)));
+    }
+
+    #[test]
+    fn media_session_expiry_is_uncapped_in_a_permanent_channel() {
+        // 48200 is a generic agent media session kind, not a Huddle-only one, so
+        // a channel with no deadline imposes none. The duration cap in the shape
+        // pass is what bounds the claim there.
+        assert!(media_session_expiry_fits_channel(i64::MAX, None));
+    }
+
+    #[test]
+    fn media_session_validator_ignores_unrelated_kinds() {
+        let keys = nostr::Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "hi")
+            .sign_with_keys(&keys)
+            .expect("sign message");
+
+        assert!(
+            validate_agent_media_session_shape(&RELAY_KEY, &event, KIND_STREAM_MESSAGE).is_ok()
         );
     }
 }
