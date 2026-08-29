@@ -26,6 +26,17 @@ use crate::validate::{splice_append_sections, validate_output};
 /// Hard character budget for one run's model input (prior digest + transcript).
 pub const MAX_CONTEXT_CHARS: usize = 120_000;
 
+/// Most signals one run may show (and therefore seal). Bounds `shown_ids` so
+/// an artifact payload cannot outgrow its encrypted relay event; the rest of
+/// an oversized backlog stays pending for the next run.
+pub const MAX_SHOWN_PER_RUN: usize = 250;
+
+/// Largest prior artifact document a run will build on. The artifact JSON
+/// must fit one NIP-44-encrypted relay event (65,535-byte plaintext cap);
+/// stalling here keeps that failure priced-before-spend instead of a model
+/// call whose output can never be published.
+pub const MAX_PRIOR_OUTPUT_BYTES: usize = 40_000;
+
 /// The outcome of planning a run.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Plan {
@@ -80,10 +91,28 @@ pub fn plan_run(
         .filter(|s| !covered.contains(&s.id))
         .collect();
     let config_matches = prior.is_some_and(|p| {
-        p.model == spec.model && p.schema == spec.schema && p.prompt_sha256 == spec.prompt_sha256()
+        p.model == spec.model
+            && p.schema == spec.schema
+            && p.prompt_sha256 == spec.prompt_sha256()
+            && p.selection == spec.selection
     });
     if config_matches && new.is_empty() {
         return Ok(Plan::Cached);
+    }
+    if prior.is_none() && new.is_empty() {
+        return Ok(Plan::Stalled {
+            reason: "selection matched no signals in the window; nothing to fold yet".to_string(),
+            pending: 0,
+        });
+    }
+    if prior.is_some_and(|p| p.output.len() > MAX_PRIOR_OUTPUT_BYTES) {
+        return Ok(Plan::Stalled {
+            reason: format!(
+                "standing artifact is over the {MAX_PRIOR_OUTPUT_BYTES}-byte publish ceiling; \
+                 compact it (tighter instructions, or start a fresh fold) before retrying"
+            ),
+            pending: new.len(),
+        });
     }
     let parent = match prior {
         Some(p) => format!(
@@ -92,18 +121,10 @@ pub fn plan_run(
         ),
         None => String::new(),
     };
+    // A prior under the publish ceiling always leaves ample transcript budget
+    // (40k bytes of parent against a 120k-char context).
     let raw_budget = MAX_CONTEXT_CHARS.saturating_sub(parent.chars().count() + 2);
-    if !new.is_empty() && raw_budget == 0 {
-        // The standing summary alone fills the context. Calling the model
-        // could not cover any pending signal and would persist an
-        // empty-coverage version forever.
-        return Ok(Plan::Stalled {
-            reason: "standing summary exhausts the context budget; compact it before retrying"
-                .to_string(),
-            pending: new.len(),
-        });
-    }
-    let render = render_transcript(&new, names, raw_budget);
+    let render = render_transcript(&new, names, raw_budget, MAX_SHOWN_PER_RUN);
     if !new.is_empty() && render.shown.is_empty() {
         return Ok(Plan::Stalled {
             reason: "no pending event fits the remaining context budget".to_string(),
@@ -153,12 +174,22 @@ pub fn complete_run(
     let shown_ids: Vec<String> = plan.shown.iter().map(|s| s.id.clone()).collect();
     validate_output(sch, output, prior.map(|p| p.output.as_str()), &shown_ids)?;
     let spliced = splice_append_sections(sch, prior.map(|p| p.output.as_str()), output);
+    // Taint travels with the chain: once a channel's events fold in, every
+    // later version keeps carrying that channel, even after a selection edit.
+    let channels: BTreeSet<String> = prior
+        .map(|p| p.channels.iter().cloned().collect::<BTreeSet<_>>())
+        .unwrap_or_default()
+        .union(&spec.selection.channels.iter().cloned().collect())
+        .cloned()
+        .collect();
     Ok(ArtifactPayload {
         fold: spec.name.clone(),
         version: prior.map_or(1, |p| p.version + 1),
         output: spliced,
         coverage_since: plan.shown.iter().map(|s| s.created_at).min(),
         coverage_until: plan.shown.iter().map(|s| s.created_at).max().map(|t| t + 1),
+        selection: spec.selection.clone(),
+        channels: channels.into_iter().collect(),
         shown_ids,
         model: spec.model.clone(),
         schema: spec.schema.clone(),
@@ -214,6 +245,8 @@ mod tests {
             shown_ids: shown.iter().map(|(id, _)| id.to_string()).collect(),
             coverage_since: shown.iter().map(|(_, ts)| *ts).min(),
             coverage_until: shown.iter().map(|(_, ts)| *ts).max().map(|t| t + 1),
+            selection: spec.selection.clone(),
+            channels: spec.selection.channels.clone(),
             model: spec.model.clone(),
             schema: spec.schema.clone(),
             prompt_sha256: spec.prompt_sha256(),
@@ -273,10 +306,10 @@ mod tests {
     }
 
     #[test]
-    fn stalled_when_standing_summary_exhausts_budget() {
+    fn stalled_when_standing_artifact_exceeds_publish_ceiling() {
         let spec = spec();
         let mut prior = artifact_v1(&spec, &[]);
-        prior.output = "x".repeat(MAX_CONTEXT_CHARS);
+        prior.output = "x".repeat(MAX_PRIOR_OUTPUT_BYTES + 1);
         let plan = plan_run(
             &spec,
             Some(&prior),
@@ -288,8 +321,58 @@ mod tests {
         let Plan::Stalled { reason, pending } = plan else {
             panic!("expected Stalled, got Ready/Cached");
         };
-        assert!(reason.contains("standing summary exhausts"));
+        assert!(reason.contains("publish ceiling"));
         assert_eq!(pending, 1);
+    }
+
+    #[test]
+    fn selection_change_is_not_cached() {
+        let mut spec = spec();
+        let a = hex_id('a');
+        let prior = artifact_v1(&spec, &[(&a, 100)]);
+        spec.selection.channels.push("ch2".to_string());
+        let covered = BTreeSet::from([a]);
+        let plan = plan_run(&spec, Some(&prior), &covered, vec![], &BTreeMap::new()).expect("plan");
+        assert!(matches!(plan, Plan::Ready(_)), "got {plan:?}");
+    }
+
+    #[test]
+    fn no_prior_and_no_signals_stalls_instead_of_folding_nothing() {
+        let spec = spec();
+        let plan = plan_run(&spec, None, &BTreeSet::new(), vec![], &BTreeMap::new()).expect("plan");
+        let Plan::Stalled { reason, pending } = plan else {
+            panic!("expected Stalled, got {plan:?}");
+        };
+        assert!(reason.contains("nothing to fold"));
+        assert_eq!(pending, 0);
+    }
+
+    #[test]
+    fn channels_union_survives_a_selection_change() {
+        let mut spec = spec();
+        let a = hex_id('a');
+        let b = hex_id('b');
+        let prior = artifact_v1(&spec, &[(&a, 100)]);
+        // The fold once read ch1; the selection now reads only ch2.
+        spec.selection.channels = vec!["ch2".to_string()];
+        let covered = BTreeSet::from([a]);
+        let mut new_sig = sig(&b, 200, "from ch2");
+        new_sig.channel = Some("ch2".to_string());
+        let plan = plan_run(
+            &spec,
+            Some(&prior),
+            &covered,
+            vec![new_sig],
+            &BTreeMap::new(),
+        )
+        .expect("plan");
+        let Plan::Ready(run) = plan else {
+            panic!("expected Ready");
+        };
+        let out = digest(&format!("- new entry [event:{b}]"));
+        let v2 = complete_run(&spec, Some(&prior), &run, &out, 1_700_000_500).expect("v2");
+        assert_eq!(v2.channels, vec!["ch1".to_string(), "ch2".to_string()]);
+        assert_eq!(v2.selection, spec.selection);
     }
 
     #[test]

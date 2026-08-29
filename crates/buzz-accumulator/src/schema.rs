@@ -8,8 +8,7 @@
 pub struct ArtifactSchema {
     /// Versioned schema name, e.g. `channel-digest@v1`.
     pub name: &'static str,
-    /// Required H1 sections, in order. Empty means freeform (no structural or
-    /// citation contract; the only dishonest freeform output is an empty one).
+    /// Required H1 sections, in order.
     pub sections: &'static [&'static str],
     /// Sections that accumulate: prior content is preserved by construction
     /// and new entries must carry signal citations.
@@ -24,15 +23,8 @@ pub const CHANNEL_DIGEST_V1: ArtifactSchema = ArtifactSchema {
     append_sections: &["Log"],
 };
 
-/// No structural contract; output must merely be non-empty.
-pub const FREEFORM_V1: ArtifactSchema = ArtifactSchema {
-    name: "freeform@v1",
-    sections: &[],
-    append_sections: &[],
-};
-
 /// All built-in schemas.
-pub const BUILTIN_SCHEMAS: &[&ArtifactSchema] = &[&CHANNEL_DIGEST_V1, &FREEFORM_V1];
+pub const BUILTIN_SCHEMAS: &[&ArtifactSchema] = &[&CHANNEL_DIGEST_V1];
 
 /// Look up a built-in schema by name.
 pub fn builtin(name: &str) -> Option<&'static ArtifactSchema> {
@@ -64,7 +56,6 @@ mod tests {
             builtin("channel-digest@v1").map(|s| s.name),
             Some("channel-digest@v1")
         );
-        assert_eq!(builtin("freeform@v1").map(|s| s.sections.len()), Some(0));
         assert!(builtin("nope@v9").is_none());
     }
 }

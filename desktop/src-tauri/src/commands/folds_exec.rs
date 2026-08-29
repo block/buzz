@@ -28,9 +28,11 @@ const MAX_ARGS: usize = 64;
 const MAX_ARG_LEN: usize = 16 * 1024;
 
 /// `folds run` invokes a model subprocess (the fold runner's own timeout is
-/// 600s); every other verb is relay I/O only.
-const RUN_TIMEOUT: Duration = Duration::from_secs(660);
-const QUERY_TIMEOUT: Duration = Duration::from_secs(60);
+/// 600s, plus relay reads and the publish); every other verb is relay I/O
+/// only. Both leave generous headroom over the inner timeouts so the CLI's
+/// own error reporting wins the race against this outer kill.
+const RUN_TIMEOUT: Duration = Duration::from_secs(900);
+const QUERY_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,6 +77,18 @@ fn resolve_buzz_cli() -> Result<std::path::PathBuf, String> {
         .ok_or_else(|| "buzz CLI not found".to_string())
 }
 
+/// Kill the child — on unix the entire process group it leads, so the model
+/// subprocess a `folds run` spawned dies with it.
+fn kill_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    // SAFETY: plain syscall; a negative pid signals the process group.
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn read_pipe_lossy(pipe: Option<impl Read>) -> String {
     let Some(mut pipe) = pipe else {
         return String::new();
@@ -101,14 +115,30 @@ fn run_folds_cli_blocking(
     command.arg("folds").args(&args);
     command.env("BUZZ_PRIVATE_KEY", &nsec);
     command.env("BUZZ_RELAY_URL", &relay_url);
+    // Scrub ambient credentials the desktop process may carry: an inherited
+    // BUZZ_AUTH_TAG would be silently injected into every event this CLI
+    // signs (folds are personal, never membership-delegated).
+    command.env_remove("BUZZ_AUTH_TAG");
+    command.env_remove("BUZZ_API_TOKEN");
+    command.env_remove("NOSTR_PRIVATE_KEY");
     // The fold runner shells out to the user's model CLI (`claude` by
     // default); the augmented PATH makes that resolvable from a DMG launch.
     if let Some(path) = crate::managed_agents::readiness::cli_probe::augmented_path() {
         command.env("PATH", path);
     }
+    if let Some(home) = dirs::home_dir() {
+        command.current_dir(home);
+    }
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
+    // Lead a fresh process group so a timeout kill reaches the model CLI the
+    // fold runner spawned, not just the `buzz` wrapper.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     crate::util::configure_no_window(&mut command);
 
     let mut child = command
@@ -128,8 +158,7 @@ fn run_folds_cli_blocking(
             Ok(Some(status)) => break status,
             Ok(None) => {
                 if started.elapsed() > timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_group(&mut child);
                     let _ = stdout_thread.join();
                     let _ = stderr_thread.join();
                     return Err(format!("buzz folds timed out after {}s", timeout.as_secs()));
@@ -137,8 +166,7 @@ fn run_folds_cli_blocking(
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_group(&mut child);
                 return Err(format!("failed to wait for buzz folds: {error}"));
             }
         }

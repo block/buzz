@@ -49,10 +49,8 @@ pub mod validate;
 
 pub use artifact::ArtifactPayload;
 pub use error::Error;
-pub use estimate::Estimate;
-pub use run::{complete_run, plan_run, Plan, RunPlan, MAX_CONTEXT_CHARS};
+pub use run::{complete_run, plan_run, Plan, RunPlan};
 pub use runner::{FoldRunner, SubprocessRunner};
-pub use schema::ArtifactSchema;
 pub use selection::Selection;
 pub use signal::Signal;
 pub use spec::FoldSpec;

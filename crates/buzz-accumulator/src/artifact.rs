@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::selection::Selection;
+
 /// One artifact version — the JSON a caller NIP-44-encrypts into the content
 /// of an immutable relay event.
 ///
@@ -26,7 +28,21 @@ pub struct ArtifactPayload {
     pub coverage_since: Option<i64>,
     /// Half-open end of the covered window: latest shown timestamp + 1;
     /// `None` when the run showed no signals.
+    ///
+    /// The window is advisory provenance: coverage *truth* is `shown_ids`.
+    /// Signals timestamped inside the window that were dropped to fit the
+    /// budget stay pending — the next plan filters by id, not by window.
     pub coverage_until: Option<i64>,
+    /// The exact selection this version was planned from. A later selection
+    /// change makes the cached-run shortcut miss, so edits always re-fold.
+    #[serde(default)]
+    pub selection: Selection,
+    /// Every channel any version in this chain has ever read (sorted union
+    /// over the chain). Sharing is taint-checked against this, not the live
+    /// spec: an artifact that ever folded another channel's events never
+    /// leaks them into a single-channel share.
+    #[serde(default)]
+    pub channels: Vec<String>,
     /// Model that produced this version.
     pub model: String,
     /// Schema the output conforms to.

@@ -40,10 +40,30 @@ const SENTINELS: &[&str] = &["not logged in", "please run /login", "invalid api 
 ///   essentially just an auth sentinel ("Not logged in"), is refused —
 ///   a real digest may legitimately *discuss* login issues, so the sentinel
 ///   check applies only to outputs ≤ 80 chars;
-/// - a hard timeout kills the child rather than waiting forever.
+/// - a hard timeout kills the child rather than waiting forever — on unix the
+///   whole process group, so a wrapper script cannot leave a billed model
+///   call running as an orphan;
+/// - pipe drains are joined with a deadline, so a grandchild inheriting the
+///   pipes cannot wedge the run after the child exits (the group is killed
+///   in that case too).
 pub struct SubprocessRunner {
     binary: String,
     timeout: Duration,
+}
+
+/// How long after child exit the pipe drains may take to finish.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Kill the child — on unix the entire process group it leads (see
+/// `process_group(0)` below), elsewhere the direct child only.
+fn kill_group(child: &mut Child) {
+    #[cfg(unix)]
+    // SAFETY: plain syscall; a negative pid signals the process group.
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 impl Default for SubprocessRunner {
@@ -90,6 +110,13 @@ impl SubprocessRunner {
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Lead a fresh process group so a timeout kill reaches every
+        // descendant (the model CLI may itself be a wrapper script).
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
         cmd
     }
 
@@ -100,8 +127,7 @@ impl SubprocessRunner {
                 Ok(Some(status)) => return Ok(status),
                 Ok(None) => {
                     if start.elapsed() > self.timeout {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        kill_group(child);
                         return Err(Error::Runner(format!(
                             "fold runner timed out after {}s",
                             self.timeout.as_secs()
@@ -121,21 +147,26 @@ fn snip(s: &str) -> String {
 }
 
 /// Drain a child pipe to a string on a background thread (avoids pipe-buffer
-/// deadlock against the concurrent stdin write).
+/// deadlock against the concurrent stdin write). The result arrives on a
+/// channel so the caller can bound how long it waits: a grandchild holding
+/// the pipe open must not wedge the run after the child exits.
 fn drain<R: Read + Send + 'static>(
     reader: Option<R>,
     label: &'static str,
-) -> std::thread::JoinHandle<Result<String, Error>> {
+) -> std::sync::mpsc::Receiver<Result<String, Error>> {
+    let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut text = String::new();
-        match reader {
+        let result = match reader {
             Some(mut r) => r
                 .read_to_string(&mut text)
                 .map(|_| text)
                 .map_err(|e| Error::Runner(format!("failed reading runner {label}: {e}"))),
             None => Ok(text),
-        }
-    })
+        };
+        let _ = tx.send(result);
+    });
+    rx
 }
 
 impl FoldRunner for SubprocessRunner {
@@ -157,12 +188,22 @@ impl FoldRunner for SubprocessRunner {
         let stderr = drain(child.stderr.take(), "stderr");
         let status = self.wait_with_deadline(&mut child)?;
         let _ = writer.join();
-        let out = stdout
-            .join()
-            .map_err(|_| Error::Runner("runner stdout reader panicked".to_string()))??;
-        let err = stderr
-            .join()
-            .map_err(|_| Error::Runner("runner stderr reader panicked".to_string()))??;
+        let mut recv = |rx: std::sync::mpsc::Receiver<Result<String, Error>>,
+                        label: &str|
+         -> Result<String, Error> {
+            rx.recv_timeout(DRAIN_TIMEOUT).map_err(|_| {
+                // Something (a grandchild) is still holding the pipe open
+                // after exit — kill the group so nothing billed lives on.
+                kill_group(&mut child);
+                Error::Runner(format!(
+                    "runner {label} still open {}s after exit (orphaned descendant?); killed \
+                     the process group and treated the run as failed",
+                    DRAIN_TIMEOUT.as_secs()
+                ))
+            })?
+        };
+        let out = recv(stdout, "stdout")?;
+        let err = recv(stderr, "stderr")?;
         let out = out.trim().to_string();
         if !status.success() {
             return Err(Error::Runner(format!(
@@ -257,5 +298,26 @@ mod tests {
         let path = stub("silent-runner.sh", "exit 0");
         let err = runner(&path).run("input", "haiku");
         assert!(matches!(err, Err(Error::Runner(msg)) if msg.contains("no usable output")));
+    }
+
+    #[test]
+    fn grandchild_holding_the_pipe_cannot_wedge_the_run() {
+        // The child exits immediately but leaves a background grandchild
+        // holding stdout open. The drain must give up on a deadline and kill
+        // the group instead of blocking until the grandchild finishes.
+        let path = stub(
+            "orphan-runner.sh",
+            "(sleep 30; echo late) & echo now; exit 0",
+        );
+        let started = Instant::now();
+        let err = runner(&path).run("input", "haiku");
+        assert!(
+            matches!(err, Err(Error::Runner(msg)) if msg.contains("still open")),
+            "expected drain-deadline error"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "run should fail on the drain deadline, not the grandchild's sleep"
+        );
     }
 }

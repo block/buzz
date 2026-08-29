@@ -36,6 +36,10 @@ type FoldPlan = {
   next_version?: number;
   shown_signals?: number;
   coverage_until?: number | null;
+  // Ready plans carry the exact half-open window the estimate priced, so Run
+  // can replay the same fetch instead of racing new arrivals.
+  since?: number;
+  until_exclusive?: number;
 };
 
 const foldsListQueryKey = ["accumulator", "folds"] as const;
@@ -85,7 +89,20 @@ function FoldRow({ fold }: { fold: FoldSummary }) {
   });
 
   const runMutation = useMutation({
-    mutationFn: () => runFoldsCliJson<FoldPlan>(["run", fold.fold]),
+    // Replay exactly the window the preflight priced — arrivals since then
+    // stay pending for the next preflight instead of silently joining a run
+    // priced without them.
+    mutationFn: (priced: FoldPlan) =>
+      runFoldsCliJson<FoldPlan>([
+        "run",
+        fold.fold,
+        ...(priced.since !== undefined
+          ? ["--since", String(priced.since)]
+          : []),
+        ...(priced.until_exclusive !== undefined
+          ? ["--until", String(priced.until_exclusive)]
+          : []),
+      ]),
     onSuccess: async (result) => {
       setPlan(result);
       setError(null);
@@ -96,7 +113,12 @@ function FoldRow({ fold }: { fold: FoldSummary }) {
         }),
       ]);
     },
-    onError: (mutationError: Error) => setError(mutationError.message),
+    onError: (mutationError: Error) => {
+      // A failed run invalidates the priced plan: Run re-locks until the
+      // next preflight rather than offering a stale "ready".
+      setPlan(null);
+      setError(mutationError.message);
+    },
   });
 
   const busy = estimateMutation.isPending || runMutation.isPending;
@@ -160,7 +182,7 @@ function FoldRow({ fold }: { fold: FoldSummary }) {
         <Button
           data-testid={`accumulator-run-${fold.fold}`}
           disabled={!runReady}
-          onClick={() => runMutation.mutate()}
+          onClick={() => plan && runMutation.mutate(plan)}
           size="sm"
         >
           {runMutation.isPending
@@ -232,19 +254,6 @@ export function AccumulatorSettingsCard() {
               <FoldRow fold={fold} key={fold.fold} />
             ))
           )}
-        </SettingsOptionGroup>
-        <SettingsOptionGroup title="Automation">
-          <SettingsOptionRow>
-            <p
-              className="text-sm font-normal text-muted-foreground/70"
-              data-settings-subcopy
-            >
-              Everything here is also available to agents and scripts as the
-              `buzz folds` CLI (set, list, get, delete, estimate, run, artifact,
-              share). Scheduled runs are a workflow concern — folds deliberately
-              carry no cadence of their own.
-            </p>
-          </SettingsOptionRow>
         </SettingsOptionGroup>
       </SettingsOptionGroupList>
     </section>
