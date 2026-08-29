@@ -354,6 +354,7 @@ function AppReady({
     >
       <KnownAgentPubkeysProvider>
         <RouterProvider router={router} />
+        <StartupChangelogDialog />
       </KnownAgentPubkeysProvider>
     </EncryptedBackupProvider>
   );
@@ -659,12 +660,6 @@ function CommunityApp({
   return (
     <>
       {appContent}
-      {activeCommunity &&
-      communityApplied &&
-      !community.needsSetup &&
-      !transaction ? (
-        <StartupChangelogDialog />
-      ) : null}
       {transaction ? (
         <div
           className={isEnteringCurtain ? "fixed inset-0 z-50" : undefined}
