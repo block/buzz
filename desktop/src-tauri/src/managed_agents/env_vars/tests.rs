@@ -146,6 +146,20 @@ fn reserved_keys_include_agent_owner_for_legacy_records() {
 }
 
 #[test]
+fn reserved_keys_include_context_engine_identity_pins() {
+    for key in [
+        "BUZZ_GABE_AGENT_PUBKEY",
+        "BUZZ_GABE_OWNER_PUBKEY",
+        "BUZZ_STACY_AGENT_PUBKEY",
+        "BUZZ_STACY_OWNER_PUBKEY",
+    ] {
+        assert!(is_reserved_env_key(key), "{key} should be reserved");
+        let agent = map(&[(key, "imposter")]);
+        assert!(merged_user_env(&BTreeMap::new(), &agent).is_empty());
+    }
+}
+
+#[test]
 fn reserved_keys_include_respond_to_gate() {
     // Respond-to mode + allowlist control who the agent answers.
     // Overriding via env_vars would let the running agent answer

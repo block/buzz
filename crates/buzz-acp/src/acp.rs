@@ -29,6 +29,8 @@ pub(crate) const CHILD_CREDENTIAL_ENV_TO_SCRUB: &[&str] = &[
     "BUZZ_ACP_PRIVATE_KEY",
     "BUZZ_ACP_API_TOKEN",
     "BUZZ_ACP_CREDENTIAL_STDIN",
+    "BUZZ_ACP_CHILD_WORKSPACE",
+    "BUZZ_ACP_CHILD_SCRATCH",
     "BUZZ_RELAY_URL",
     "BUZZ_AGENT_PUBKEY",
     "BUZZ_ACP_AGENT_OWNER",
@@ -269,6 +271,9 @@ pub struct AcpClient {
     /// Per-child private scratch root authorized by the ordinary Seatbelt
     /// profile. Trusted adapters do not use one.
     ordinary_scratch: Option<std::path::PathBuf>,
+    /// Only harness-created temporary scratches are deleted on drop. A
+    /// Desktop-managed persistent scratch belongs to Desktop/Nest lifecycle.
+    remove_ordinary_scratch_on_drop: bool,
     /// Write end of the agent's stdin pipe.
     stdin: ChildStdin,
     /// Framed reader over the agent's stdout pipe (line-oriented, bounded).
@@ -351,41 +356,54 @@ pub struct AcpClient {
 
 const ORDINARY_CHILD_SANDBOX_PROFILE: &str = r#"(version 1)
 (allow default)
-(deny file-read*
-  (subpath "/Users/gabriel/.buzz/runtime/trusted-node")
-  (subpath "/Users/gabriel/.buzz/runtime/context-engine")
-  (subpath "/Users/gabriel/.buzz/runtime/stacy-context-engine")
-  (subpath "/Users/gabriel/.openclaw/credentials")
-  (subpath "/Users/gabriel/.openclaw/state/context-engine-buzz/prepared")
-  (literal "/Users/gabriel/.openclaw/openclaw.json")
-  (literal "/Users/gabriel/.openclaw/dashboard-token")
-  (subpath "/Users/gabriel/.codex")
-  (subpath "/Users/gabriel/.claude")
-  (subpath "/Users/gabriel/.hermes")
-  (subpath "/Users/gabriel/.config/gh")
-  (subpath "/Users/gabriel/.ssh")
-  (subpath "/Users/gabriel/.aws")
-  (subpath "/Users/gabriel/.gnupg")
-  (subpath "/Users/gabriel/Library/Keychains")
-  (subpath "/Users/gabriel/Library/Application Support/Claude")
-  (subpath "/Users/gabriel/.docker")
-  (subpath "/Users/gabriel/.cargo")
-  (subpath "/Users/gabriel/.config/git")
-  (literal "/Users/gabriel/.gitconfig")
-  (literal "/Users/gabriel/.netrc")
-  (literal "/Users/gabriel/.npmrc")
-  (literal "/Users/gabriel/.zsh_history")
-  (subpath "/Applications/Docker.app")
-  (literal "/var/run/docker.sock"))
+; Reads fail closed globally. The only user-controlled trees visible to an
+; ordinary child are its exact runtime, its own scratch directory, and a
+; positively authenticated registered worktree. In particular, never grant
+; the whole Buzz RUNTIME tree: it also contains Stacy credentials and state.
+(deny file-read-data
+  (require-all
+    (vnode-type REGULAR-FILE)
+    (require-not
+      (require-any
+      (literal "/dev/null")
+      (subpath "/dev")
+      (subpath "/System")
+      (subpath "/usr")
+      (subpath "/bin")
+      (subpath "/sbin")
+      (subpath "/Library/Apple/usr/lib")
+      (subpath "/Library/Developer/CommandLineTools/usr/lib")
+      (subpath "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework")
+      (subpath "/Applications/Buzz.app/Contents/MacOS")
+      (subpath "/Applications/Buzz.app/Contents/Frameworks")
+      (subpath "/Applications/Buzz.app/Contents/Resources")
+      (literal "/private/etc/hosts")
+      (literal "/private/etc/resolv.conf")
+      (subpath "/private/etc/ssl")
+      (literal "/private/var/run/resolv.conf")
+      (subpath "/private/var/db/timezone")
+      __BUZZ_CHILD_SCRATCH_RULES__
+      __BUZZ_CHILD_WORKSPACE_RULE__
+        __BUZZ_CHILD_COMMAND_RULES__))))
+; Immutable Context Engine runtimes are never part of an ordinary agent's
+; workspace, even though the Buzz Nest itself is the managed working directory.
+(deny file-read-data
+  (require-any
+    (literal "/Users/gabriel/.buzz/RUNTIME")
+    (subpath "/Users/gabriel/.buzz/RUNTIME")))
 (deny file-write*
   (require-not
     (require-any
       (literal "/dev/null")
-      (subpath "__BUZZ_CHILD_SCRATCH__")
+      __BUZZ_CHILD_SCRATCH_RULES__
       __BUZZ_CHILD_WORKSPACE_RULE__)))
+(deny file-write*
+  (require-any
+    (literal "/Users/gabriel/.buzz/RUNTIME")
+    (subpath "/Users/gabriel/.buzz/RUNTIME")))
 (deny file-write-unlink
   (literal "/Users/gabriel/.buzz")
-  (literal "/Users/gabriel/.buzz/runtime")
+  (literal "/Users/gabriel/.buzz/RUNTIME")
   (literal "/Users/gabriel/.buzz/REPOS")
   (literal "/Users/gabriel/.buzz/REPOS/buzz")
   (literal "/Users/gabriel/.openclaw")
@@ -399,6 +417,8 @@ const ORDINARY_CHILD_SANDBOX_PROFILE: &str = r#"(version 1)
   (literal "/Users/gabriel/.config")
   (literal "/Users/gabriel/.config/git"))
 (deny process-exec
+  __BUZZ_CHILD_SCRATCH_RULES__
+  __BUZZ_CHILD_WORKSPACE_RULE__
   (literal "/usr/bin/security")
   (literal "/bin/launchctl")
   (literal "/usr/bin/crontab")
@@ -414,7 +434,10 @@ const ORDINARY_CHILD_SANDBOX_PROFILE: &str = r#"(version 1)
 ; initialize; credential containment is provided by env_clear and path denies.
 (deny mach-lookup
   (global-name "com.apple.securityd")
-  (global-name "com.apple.SecurityServer"))"#;
+  (global-name "com.apple.SecurityServer")
+  (global-name-regex #"^com\.apple\.xpc\.launchd(\.|$)")
+  (global-name-regex #"^com\.apple\.(coreservices\.launchservicesd|lsd)(\.|$)")
+  (global-name-regex #"^com\.apple\.(backgroundtaskmanagement|servicemanagement)"))"#;
 
 fn sandbox_literal(path: &std::path::Path) -> String {
     path.to_string_lossy()
@@ -422,19 +445,180 @@ fn sandbox_literal(path: &std::path::Path) -> String {
         .replace('"', "\\\"")
 }
 
-fn ordinary_child_sandbox_profile(scratch: &std::path::Path) -> String {
-    let workspace_rule = std::env::current_dir()
+fn registered_worktree_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut candidate = start.canonicalize().ok()?;
+    loop {
+        let dot_git = candidate.join(".git");
+        if let Ok(metadata) = std::fs::symlink_metadata(&dot_git) {
+            if metadata.file_type().is_symlink() || !owned_git_metadata(&metadata) {
+                return None;
+            }
+            if metadata.is_dir() {
+                let head = dot_git.join("HEAD");
+                let head_metadata = std::fs::symlink_metadata(&head).ok()?;
+                if !head_metadata.is_file()
+                    || head_metadata.file_type().is_symlink()
+                    || !owned_git_metadata(&head_metadata)
+                    || dot_git.canonicalize().ok()? != dot_git
+                {
+                    return None;
+                }
+                return Some(candidate);
+            }
+            if !metadata.is_file() {
+                return None;
+            }
+            let marker = std::fs::read_to_string(&dot_git).ok()?;
+            if marker.len() > 4096 {
+                return None;
+            }
+            let git_dir = marker.strip_prefix("gitdir: ")?.trim();
+            let git_dir = std::path::Path::new(git_dir).canonicalize().ok()?;
+            let git_dir_metadata = std::fs::symlink_metadata(&git_dir).ok()?;
+            if !git_dir_metadata.is_dir()
+                || git_dir_metadata.file_type().is_symlink()
+                || !owned_git_metadata(&git_dir_metadata)
+                || git_dir.parent()?.file_name()? != std::ffi::OsStr::new("worktrees")
+                || git_dir.parent()?.parent()?.file_name()? != std::ffi::OsStr::new(".git")
+            {
+                return None;
+            }
+            let registered_marker = std::fs::read_to_string(git_dir.join("gitdir")).ok()?;
+            let registered = std::path::Path::new(registered_marker.trim())
+                .canonicalize()
+                .ok()?;
+            return (registered == dot_git.canonicalize().ok()?).then_some(candidate);
+        }
+        if !candidate.pop() {
+            return None;
+        }
+    }
+}
+
+#[cfg(unix)]
+fn owned_git_metadata(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let owner = std::env::current_exe()
         .ok()
-        .and_then(|path| path.canonicalize().ok())
-        .filter(|path| {
-            let value = path.to_string_lossy();
-            value.contains("/.worktrees/") || value.contains("/.claude/worktrees/")
-        })
-        .map(|path| format!("(subpath \"{}\")", sandbox_literal(&path)))
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|metadata| metadata.uid());
+    owner == Some(metadata.uid()) && metadata.mode() & 0o022 == 0
+}
+
+#[cfg(not(unix))]
+fn owned_git_metadata(_metadata: &std::fs::Metadata) -> bool {
+    true
+}
+
+fn validated_managed_scratch_at(
+    current: &std::path::Path,
+    explicit: &std::path::Path,
+) -> Result<std::path::PathBuf, AcpError> {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if !explicit.is_absolute() {
+        return Err(AcpError::Protocol(
+            "ordinary child scratch is not absolute".to_string(),
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(explicit).map_err(AcpError::Io)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AcpError::Protocol(
+            "ordinary child scratch is not a real directory".to_string(),
+        ));
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o7777 != 0o700 {
+        return Err(AcpError::Protocol(
+            "ordinary child scratch must have mode 0700".to_string(),
+        ));
+    }
+    let explicit = explicit.canonicalize().map_err(AcpError::Io)?;
+    let current = current.canonicalize().map_err(AcpError::Io)?;
+    if explicit != current {
+        return Err(AcpError::Protocol(
+            "ordinary child scratch does not match the outer harness directory".to_string(),
+        ));
+    }
+    let parent = explicit.parent();
+    let scratch_root = parent.and_then(std::path::Path::parent);
+    let nest_root = scratch_root.and_then(std::path::Path::parent);
+    if parent.and_then(std::path::Path::file_name) != Some(std::ffi::OsStr::new("managed-agents"))
+        || scratch_root.and_then(std::path::Path::file_name)
+            != Some(std::ffi::OsStr::new(".scratch"))
+        || !matches!(
+            nest_root.and_then(std::path::Path::file_name),
+            Some(name) if name == ".buzz" || name == ".buzz-dev"
+        )
+    {
+        return Err(AcpError::Protocol(
+            "ordinary child scratch is outside the managed Buzz scratch root".to_string(),
+        ));
+    }
+    Ok(explicit)
+}
+
+fn resolve_command_path(command: &str) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(command);
+    if path.components().count() > 1 {
+        return path.canonicalize().ok();
+    }
+    std::env::var_os("PATH").and_then(|value| {
+        std::env::split_paths(&value)
+            .map(|directory| directory.join(command))
+            .find(|candidate| candidate.is_file())
+            .and_then(|candidate| candidate.canonicalize().ok())
+    })
+}
+
+fn sandbox_path_rules(path: &std::path::Path, include_subpath: bool) -> String {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut rules = vec![format!("(literal \"{}\")", sandbox_literal(&canonical))];
+    if include_subpath {
+        rules.push(format!("(subpath \"{}\")", sandbox_literal(&canonical)));
+    }
+    rules.join("\n      ")
+}
+
+fn command_read_rules(command: &str) -> String {
+    let Some(path) = resolve_command_path(command) else {
+        return "(literal \"/dev/null\")".to_string();
+    };
+    let text = path.to_string_lossy();
+    let runtime_root =
+        if let Some(suffix) = text.strip_prefix("/Users/gabriel/.nvm/versions/node/") {
+            suffix.split('/').next().map(|version| {
+                std::path::PathBuf::from("/Users/gabriel/.nvm/versions/node").join(version)
+            })
+        } else if let Some(suffix) = text.strip_prefix("/Users/gabriel/.local/share/uv/tools/") {
+            suffix.split('/').next().map(|tool| {
+                std::path::PathBuf::from("/Users/gabriel/.local/share/uv/tools").join(tool)
+            })
+        } else {
+            None
+        };
+    let mut rules = vec![sandbox_path_rules(&path, false)];
+    if let Some(root) = runtime_root {
+        rules.push(sandbox_path_rules(&root, true));
+    }
+    rules.join("\n      ")
+}
+
+fn ordinary_child_sandbox_profile(
+    scratch: &std::path::Path,
+    workspace: Option<&std::path::Path>,
+    command: &str,
+) -> String {
+    let scratch_rules = sandbox_path_rules(scratch, true);
+    let workspace_rule = workspace
+        .map(|path| sandbox_path_rules(path, true))
         .unwrap_or_else(|| "(literal \"/dev/null\")".to_string());
     ORDINARY_CHILD_SANDBOX_PROFILE
-        .replace("__BUZZ_CHILD_SCRATCH__", &sandbox_literal(scratch))
+        .replace("__BUZZ_CHILD_SCRATCH_RULES__", &scratch_rules)
         .replace("__BUZZ_CHILD_WORKSPACE_RULE__", &workspace_rule)
+        .replace("__BUZZ_CHILD_COMMAND_RULES__", &command_read_rules(command))
 }
 
 fn create_ordinary_child_scratch() -> std::io::Result<std::path::PathBuf> {
@@ -453,18 +637,22 @@ fn child_command_spec(
     args: &[String],
     trusted: bool,
     ordinary_scratch: Option<&std::path::Path>,
-) -> (String, Vec<String>) {
+    ordinary_workspace: Option<&std::path::Path>,
+) -> Result<(String, Vec<String>), AcpError> {
     #[cfg(target_os = "macos")]
     if !trusted {
-        let profile = ordinary_child_sandbox_profile(
-            ordinary_scratch.expect("ordinary child scratch must exist before spawn"),
-        );
+        let scratch = ordinary_scratch.ok_or_else(|| {
+            AcpError::Protocol("ordinary child scratch was unavailable before spawn".to_string())
+        })?;
+        let profile = ordinary_child_sandbox_profile(scratch, ordinary_workspace, command);
         let mut wrapped = vec!["-p".to_string(), profile, command.to_string()];
         wrapped.extend(args.iter().cloned());
-        return ("/usr/bin/sandbox-exec".to_string(), wrapped);
+        return Ok(("/usr/bin/sandbox-exec".to_string(), wrapped));
     }
     let _ = trusted;
-    (command.to_string(), args.to_vec())
+    let _ = ordinary_scratch;
+    let _ = ordinary_workspace;
+    Ok((command.to_string(), args.to_vec()))
 }
 
 fn uses_isolated_process_group(trusted: bool) -> bool {
@@ -729,34 +917,107 @@ impl AcpClient {
     ) -> Result<Self, AcpError> {
         use std::process::Stdio;
 
-        struct ScratchGuard(Option<std::path::PathBuf>);
+        struct ScratchGuard {
+            path: Option<std::path::PathBuf>,
+            remove_on_drop: bool,
+        }
         impl Drop for ScratchGuard {
             fn drop(&mut self) {
-                if let Some(path) = self.0.take() {
+                if self.remove_on_drop {
+                    let Some(path) = self.path.take() else {
+                        return;
+                    };
                     let _ = std::fs::remove_dir_all(path);
                 }
             }
         }
 
-        let validated_trusted_env = if trusted_child_env.is_empty() {
-            Vec::new()
-        } else {
-            crate::config::revalidate_trusted_child_env(command, args, trusted_child_env).map_err(
-                |reason| {
-                    AcpError::Protocol(format!("trusted harness revalidation failed: {reason}"))
-                },
-            )?
-        };
-        let trusted_spawn = !validated_trusted_env.is_empty();
-
-        let mut ordinary_scratch = ScratchGuard(if trusted_spawn {
+        let trusted_validation = if trusted_child_env.is_empty() {
             None
         } else {
-            Some(create_ordinary_child_scratch().map_err(AcpError::Io)?)
-        });
-        let (spawn_command, spawn_args) =
-            child_command_spec(command, args, trusted_spawn, ordinary_scratch.0.as_deref());
+            Some(
+                crate::config::revalidate_trusted_child_env(command, args, trusted_child_env)
+                    .map_err(|reason| {
+                        AcpError::Protocol(format!("trusted harness revalidation failed: {reason}"))
+                    })?,
+            )
+        };
+        let validated_trusted_env = trusted_validation
+            .as_ref()
+            .map(|validation| validation.env.as_slice())
+            .unwrap_or_default();
+        let trusted_spawn = trusted_validation.is_some();
+
+        let current = std::env::current_dir().map_err(AcpError::Io)?;
+        let explicit_scratch = std::env::var_os("BUZZ_ACP_CHILD_SCRATCH");
+        let explicit_workspace = std::env::var_os("BUZZ_ACP_CHILD_WORKSPACE");
+        let ordinary_workspace = if trusted_spawn || explicit_scratch.is_some() {
+            None
+        } else {
+            let registered = registered_worktree_root(&current);
+            if let Some(explicit) = explicit_workspace.as_deref() {
+                let explicit = std::path::Path::new(explicit)
+                    .canonicalize()
+                    .map_err(AcpError::Io)?;
+                if registered.as_deref() != Some(explicit.as_path()) {
+                    return Err(AcpError::Protocol(
+                        "ordinary child workspace is not the registered outer worktree".to_string(),
+                    ));
+                }
+            }
+            registered
+        };
+        if !trusted_spawn && explicit_scratch.is_none() && ordinary_workspace.is_none() {
+            return Err(AcpError::Protocol(
+                "ordinary child requires a managed scratch or approved registered worktree"
+                    .to_string(),
+            ));
+        }
+        let (scratch_path, remove_on_drop) = if trusted_spawn {
+            (None, false)
+        } else if let Some(path) = explicit_scratch.as_deref() {
+            (
+                Some(validated_managed_scratch_at(
+                    &current,
+                    std::path::Path::new(path),
+                )?),
+                false,
+            )
+        } else {
+            (
+                Some(create_ordinary_child_scratch().map_err(AcpError::Io)?),
+                true,
+            )
+        };
+        let mut ordinary_scratch = ScratchGuard {
+            path: scratch_path,
+            remove_on_drop,
+        };
+        let ordinary_workdir = if trusted_spawn {
+            None
+        } else {
+            Some(
+                ordinary_workspace
+                    .as_deref()
+                    .or(ordinary_scratch.path.as_deref())
+                    .ok_or_else(|| {
+                        AcpError::Protocol(
+                            "ordinary child has no bounded working directory".to_string(),
+                        )
+                    })?,
+            )
+        };
+        let (spawn_command, spawn_args) = child_command_spec(
+            command,
+            args,
+            trusted_spawn,
+            ordinary_scratch.path.as_deref(),
+            ordinary_workspace.as_deref(),
+        )?;
         let mut cmd = tokio::process::Command::new(spawn_command);
+        if let Some(directory) = ordinary_workdir {
+            cmd.current_dir(directory);
+        }
         // The effective executable includes its loader/interpreter environment.
         // Rebuild every launch from an empty environment so unrelated ambient
         // provider, GitHub, cloud, loader, and Docker credentials cannot reach
@@ -769,7 +1030,7 @@ impl AcpClient {
                     cmd.env(key, value);
                 }
             }
-            if let Some(path) = &ordinary_scratch.0 {
+            if let Some(path) = &ordinary_scratch.path {
                 cmd.env("TMPDIR", path);
             }
         }
@@ -844,7 +1105,7 @@ impl AcpClient {
                 cmd.env("CODEX_CONFIG", merged);
             }
         }
-        for (key, value) in &validated_trusted_env {
+        for (key, value) in validated_trusted_env {
             if TRUSTED_CHILD_ENV_KEYS
                 .iter()
                 .any(|reserved| reserved.eq_ignore_ascii_case(key))
@@ -876,6 +1137,20 @@ impl AcpClient {
                 "codex" | "codex-acp" => Some(StandardAdapterKind::Codex),
                 _ => None,
             };
+        if let Some(initial) = &trusted_validation {
+            let final_validation =
+                crate::config::revalidate_trusted_child_env(command, args, trusted_child_env)
+                    .map_err(|reason| {
+                        AcpError::Protocol(format!(
+                            "trusted harness final revalidation failed: {reason}"
+                        ))
+                    })?;
+            if &final_validation != initial {
+                return Err(AcpError::Protocol(
+                    "trusted harness artifact identity changed before spawn".to_string(),
+                ));
+            }
+        }
         let mut child = cmd.spawn()?;
 
         let stdin = child
@@ -936,7 +1211,8 @@ impl AcpClient {
         Ok(Self {
             child,
             isolated_process_group,
-            ordinary_scratch: ordinary_scratch.0.take(),
+            ordinary_scratch: ordinary_scratch.path.take(),
+            remove_ordinary_scratch_on_drop: ordinary_scratch.remove_on_drop,
             stdin,
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
             stderr_task: Some(stderr_task),
@@ -2816,8 +3092,10 @@ impl Drop for AcpClient {
         // Non-blocking reap attempt — prevents zombie accumulation in the
         // common case where SIGKILL takes effect before Drop returns.
         let _ = self.child.try_wait();
-        if let Some(path) = self.ordinary_scratch.take() {
-            let _ = std::fs::remove_dir_all(path);
+        if self.remove_ordinary_scratch_on_drop {
+            if let Some(path) = self.ordinary_scratch.take() {
+                let _ = std::fs::remove_dir_all(path);
+            }
         }
     }
 }
@@ -3603,31 +3881,13 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_child_sandbox_denies_trusted_paths_and_tool_configuration() {
-        for denied in [
-            "/Users/gabriel/.buzz/runtime/trusted-node",
-            "/Users/gabriel/.buzz/runtime/context-engine",
-            "/Users/gabriel/.buzz/runtime/stacy-context-engine",
-            "/Users/gabriel/.openclaw/credentials",
-            "/Users/gabriel/.openclaw/state/context-engine-buzz/prepared",
-            "/Users/gabriel/.openclaw/openclaw.json",
-            "/Users/gabriel/.codex",
-            "/Users/gabriel/.claude",
-            "/Users/gabriel/.hermes",
-            "/Users/gabriel/.config/gh",
-            "/Users/gabriel/.ssh",
-            "/Users/gabriel/.aws",
-            "/Users/gabriel/Library/Keychains",
-            "/Users/gabriel/Library/Application Support/Claude",
-            "/Users/gabriel/stacy",
-            "/Users/gabriel/.docker",
-            "/Users/gabriel/.cargo",
-            "/Users/gabriel/.config/git",
-            "/Users/gabriel/.gitconfig",
-            "/Applications/Docker.app",
-            "/Users/gabriel/.buzz/REPOS/buzz",
-            "/Users/gabriel/.openclaw/.git",
-            "/var/run/docker.sock",
+    fn ordinary_child_sandbox_is_global_read_deny_with_bounded_grants() {
+        for required in [
+            "(deny file-read-data",
+            "(require-not",
+            "__BUZZ_CHILD_SCRATCH_RULES__",
+            "__BUZZ_CHILD_WORKSPACE_RULE__",
+            "__BUZZ_CHILD_COMMAND_RULES__",
             "/usr/bin/security",
             "/bin/launchctl",
             "/usr/bin/crontab",
@@ -3636,26 +3896,247 @@ mod tests {
             "com.apple.securityd",
             "com.apple.SecurityServer",
         ] {
-            assert!(ORDINARY_CHILD_SANDBOX_PROFILE.contains(denied));
+            assert!(ORDINARY_CHILD_SANDBOX_PROFILE.contains(required));
         }
+        assert!(ORDINARY_CHILD_SANDBOX_PROFILE.contains(
+            "(deny file-read-data\n  (require-any\n    (literal \"/Users/gabriel/.buzz/RUNTIME\")"
+        ));
         #[cfg(target_os = "macos")]
         {
             let scratch = std::path::Path::new("/private/tmp/buzz-acp-profile-test");
-            let (program, args) = child_command_spec("/usr/bin/true", &[], false, Some(scratch));
+            let (program, args) =
+                child_command_spec("/usr/bin/true", &[], false, Some(scratch), None)
+                    .expect("ordinary command spec");
             assert_eq!(program, "/usr/bin/sandbox-exec");
             assert_eq!(args.first().map(String::as_str), Some("-p"));
-            let (program, args) = child_command_spec("/usr/bin/true", &[], true, None);
+            let (program, args) = child_command_spec("/usr/bin/true", &[], true, None, None)
+                .expect("trusted command spec");
             assert_eq!(program, "/usr/bin/true");
             assert!(args.is_empty());
         }
     }
 
+    #[test]
+    fn managed_scratch_must_be_private_and_match_the_outer_harness_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "buzz-acp-managed-scratch-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let current = root
+            .join(".buzz")
+            .join(".scratch")
+            .join("managed-agents")
+            .join("ab".repeat(32));
+        let other = current.with_file_name("cd".repeat(32));
+        std::fs::create_dir_all(&current).expect("create current scratch fixture");
+        std::fs::create_dir(&other).expect("create other scratch fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o700))
+                .expect("secure current scratch fixture");
+            std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o700))
+                .expect("secure other scratch fixture");
+        }
+        assert_eq!(
+            validated_managed_scratch_at(&current, &current).expect("matching Desktop scratch"),
+            current.canonicalize().expect("canonical current fixture")
+        );
+        assert!(validated_managed_scratch_at(&current, &other).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755))
+                .expect("weaken scratch fixture");
+            assert!(validated_managed_scratch_at(&current, &current).is_err());
+        }
+        std::fs::remove_dir_all(root).expect("remove scratch fixture");
+    }
+
+    #[test]
+    fn ordinary_workspace_authenticates_standard_and_linked_git_worktrees() {
+        let root = std::env::temp_dir().join(format!(
+            "buzz-acp-git-workspaces-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir(&root).expect("create git workspace root");
+        let root = root.canonicalize().expect("canonical git workspace root");
+        let main = root.join("main");
+        std::fs::create_dir_all(main.join(".git/worktrees/linked"))
+            .expect("create standard checkout metadata");
+        std::fs::write(main.join(".git/HEAD"), b"ref: refs/heads/main\n")
+            .expect("write standard checkout HEAD");
+        assert_eq!(registered_worktree_root(&main), Some(main.clone()));
+
+        let linked = root.join("linked");
+        std::fs::create_dir(&linked).expect("create linked worktree");
+        let linked_marker = linked.join(".git");
+        let git_dir = main.join(".git/worktrees/linked");
+        std::fs::write(&linked_marker, format!("gitdir: {}\n", git_dir.display()))
+            .expect("write linked worktree marker");
+        std::fs::write(
+            git_dir.join("gitdir"),
+            format!("{}\n", linked_marker.display()),
+        )
+        .expect("write linked worktree backlink");
+        assert_eq!(registered_worktree_root(&linked), Some(linked.clone()));
+
+        std::fs::write(git_dir.join("gitdir"), b"/unregistered/.git\n")
+            .expect("forge linked worktree backlink");
+        assert!(registered_worktree_root(&linked).is_none());
+        std::fs::remove_dir_all(root).expect("remove git workspace fixture");
+    }
+
+    #[test]
+    fn ordinary_profile_does_not_grant_broad_user_mutable_dependency_trees() {
+        let profile = ordinary_child_sandbox_profile(
+            std::path::Path::new("/private/tmp/buzz-acp-profile-test"),
+            None,
+            "/usr/bin/python3",
+        );
+        for forbidden in [
+            "(subpath \"/Library\")",
+            "(subpath \"/private/etc\")",
+            "(subpath \"/opt/homebrew\")",
+            "(subpath \"/Applications/Buzz.app\")",
+        ] {
+            assert!(
+                !profile.contains(forbidden),
+                "broad grant survived: {forbidden}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_child_sandbox_denies_sibling_temp_secret_and_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let parent = std::env::temp_dir().join(format!(
+            "buzz-acp-read-boundary-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let scratch = parent.join("scratch");
+        let secret = parent.join("sibling-secret");
+        let link = scratch.join("escape");
+        std::fs::create_dir_all(&scratch).expect("create scratch");
+        std::fs::write(&secret, b"ORDINARY_CHILD_SECRET_CANARY").expect("write sibling secret");
+        symlink(&secret, &link).expect("create escape symlink");
+        let profile = ordinary_child_sandbox_profile(&scratch, None, "/bin/cat");
+
+        for target in [&secret, &link] {
+            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", &profile, "/bin/cat"])
+                .arg(target)
+                .output()
+                .expect("run sandboxed read probe");
+            assert!(!output.status.success());
+            assert!(
+                !String::from_utf8_lossy(&output.stdout).contains("ORDINARY_CHILD_SECRET_CANARY")
+            );
+        }
+        std::fs::remove_dir_all(parent).expect("remove read-boundary fixture");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_child_sandbox_denies_unreviewed_private_etc_sibling() {
+        let excluded = std::path::Path::new("/private/etc/shells");
+        if !excluded.is_file() {
+            return;
+        }
+        let baseline = std::fs::read(excluded).expect("baseline can read excluded sibling");
+        assert!(!baseline.is_empty());
+        let scratch = std::env::temp_dir().join(format!(
+            "buzz-acp-private-etc-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir(&scratch).expect("create private-etc scratch");
+        let profile = ordinary_child_sandbox_profile(&scratch, None, "/bin/cat");
+        let output = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile, "/bin/cat"])
+            .arg(excluded)
+            .output()
+            .expect("run excluded private-etc read probe");
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        std::fs::remove_dir_all(scratch).expect("remove private-etc scratch");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_child_sandbox_cannot_execute_a_copied_binary_from_scratch() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let parent = std::env::temp_dir().join(format!(
+            "buzz-acp-exec-boundary-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let scratch = parent.join("scratch");
+        let copied_shell = scratch.join("copied-shell");
+        let sentinel = scratch.join("copied-binary-ran");
+        std::fs::create_dir_all(&scratch).expect("create exec-boundary scratch");
+        std::fs::copy("/bin/sh", &copied_shell).expect("copy executable into scratch");
+        std::fs::set_permissions(&copied_shell, std::fs::Permissions::from_mode(0o700))
+            .expect("make copied executable runnable");
+        let profile = ordinary_child_sandbox_profile(&scratch, None, "/bin/sh");
+        let output = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile])
+            .arg(&copied_shell)
+            .args(["-c", &format!("/usr/bin/touch {}", sentinel.display())])
+            .output()
+            .expect("run copied-binary probe");
+        assert!(!output.status.success());
+        assert!(!sentinel.exists());
+        std::fs::remove_dir_all(parent).expect("remove exec-boundary fixture");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_child_sandbox_starts_representative_runtimes() {
+        let scratch = std::env::temp_dir().join(format!(
+            "buzz-acp-runtime-start-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir(&scratch).expect("create runtime scratch");
+        for command in [
+            "/usr/bin/python3",
+            "/Users/gabriel/.nvm/versions/node/v24.13.1/bin/node",
+        ] {
+            if !std::path::Path::new(command).is_file() {
+                continue;
+            }
+            let profile = ordinary_child_sandbox_profile(&scratch, None, command);
+            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", &profile, command, "--version"])
+                .current_dir(&scratch)
+                .output()
+                .expect("run sandboxed runtime startup");
+            assert!(
+                output.status.success(),
+                "sandboxed runtime {command} failed: status={} stdout={} stderr={} profile={profile}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::fs::remove_dir_all(scratch).expect("remove runtime scratch");
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn ordinary_child_sandbox_cannot_execute_keychain_client() {
-        let profile = ordinary_child_sandbox_profile(std::path::Path::new(
-            "/private/tmp/buzz-acp-keychain-test",
-        ));
+        let profile = ordinary_child_sandbox_profile(
+            std::path::Path::new("/private/tmp/buzz-acp-keychain-test"),
+            None,
+            "/usr/bin/security",
+        );
         let output = std::process::Command::new("/usr/bin/sandbox-exec")
             .args([
                 "-p",
@@ -3682,9 +4163,11 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn ordinary_child_sandbox_cannot_escape_via_launchctl() {
-        let profile = ordinary_child_sandbox_profile(std::path::Path::new(
-            "/private/tmp/buzz-acp-launchctl-test",
-        ));
+        let profile = ordinary_child_sandbox_profile(
+            std::path::Path::new("/private/tmp/buzz-acp-launchctl-test"),
+            None,
+            "/bin/launchctl",
+        );
         let uid = std::process::Command::new("/usr/bin/id")
             .arg("-u")
             .output()
@@ -3701,6 +4184,42 @@ mod tests {
             stderr.contains("not permitted") || stderr.contains("deny"),
             "sandbox must deny launchctl execution before it can reuse bootstrap rights"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_child_sandbox_cannot_reach_launchservices_over_mach() {
+        const PROBE: &str = "import ctypes,sys\nlib=ctypes.CDLL(None)\nport=ctypes.c_uint()\nbootstrap=ctypes.c_uint.in_dll(lib,'bootstrap_port').value\nstatus=lib.bootstrap_look_up(bootstrap,b'com.apple.coreservices.launchservicesd',ctypes.byref(port))\nprint(status)\nsys.exit(0 if status == int(sys.argv[1]) else 1)";
+        let baseline = std::process::Command::new("/usr/bin/python3")
+            .args(["-c", PROBE, "0"])
+            .output()
+            .expect("run baseline LaunchServices lookup");
+        assert!(
+            baseline.status.success(),
+            "LaunchServices baseline must be reachable: stdout={} stderr={}",
+            String::from_utf8_lossy(&baseline.stdout),
+            String::from_utf8_lossy(&baseline.stderr)
+        );
+
+        let scratch = std::env::temp_dir().join(format!(
+            "buzz-acp-mach-deny-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir(&scratch).expect("create Mach lookup scratch");
+        let profile = ordinary_child_sandbox_profile(&scratch, None, "/usr/bin/python3");
+        let sandboxed = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile, "/usr/bin/python3", "-c", PROBE, "1100"])
+            .current_dir(&scratch)
+            .output()
+            .expect("run sandboxed LaunchServices lookup");
+        assert!(
+            sandboxed.status.success(),
+            "sandbox must return BOOTSTRAP_NOT_PRIVILEGED: stdout={} stderr={}",
+            String::from_utf8_lossy(&sandboxed.stdout),
+            String::from_utf8_lossy(&sandboxed.stderr)
+        );
+        std::fs::remove_dir_all(scratch).expect("remove Mach lookup scratch");
     }
 
     #[cfg(target_os = "macos")]
@@ -3724,7 +4243,7 @@ mod tests {
         let _listener = UnixListener::bind(&socket).expect("bind fixture Unix socket");
         let scratch = directory.0.join("scratch");
         std::fs::create_dir(&scratch).expect("create child scratch");
-        let profile = ordinary_child_sandbox_profile(&scratch);
+        let profile = ordinary_child_sandbox_profile(&scratch, None, "/usr/bin/python3");
         let output = std::process::Command::new("/usr/bin/sandbox-exec")
             .args([
                 "-p",
@@ -3745,9 +4264,11 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn ordinary_child_sandbox_cannot_open_installer_for_write() {
-        let profile = ordinary_child_sandbox_profile(std::path::Path::new(
-            "/private/tmp/buzz-acp-installer-test",
-        ));
+        let profile = ordinary_child_sandbox_profile(
+            std::path::Path::new("/private/tmp/buzz-acp-installer-test"),
+            None,
+            "/usr/bin/ruby",
+        );
         let installer =
             "/Users/gabriel/.buzz/REPOS/buzz/scripts/install-context-engine-runtimes.sh";
         if std::path::Path::new(installer).exists() {
@@ -3782,7 +4303,7 @@ mod tests {
         let moved = root.join("moved");
         std::fs::create_dir_all(intermediate.join("protected")).expect("create rename fixture");
         std::fs::create_dir(&scratch).expect("create rename scratch");
-        let profile = ordinary_child_sandbox_profile(&scratch);
+        let profile = ordinary_child_sandbox_profile(&scratch, None, "/bin/mv");
         let output = std::process::Command::new("/usr/bin/sandbox-exec")
             .args([
                 "-p",
@@ -3811,7 +4332,7 @@ mod tests {
         std::fs::create_dir(&sibling).expect("create sibling scratch probe");
         let path = scratch.join("allowed");
         let sibling_path = sibling.join("denied");
-        let profile = ordinary_child_sandbox_profile(&scratch);
+        let profile = ordinary_child_sandbox_profile(&scratch, None, "/usr/bin/touch");
         let output = std::process::Command::new("/usr/bin/sandbox-exec")
             .args([
                 "-p",
@@ -3823,7 +4344,10 @@ mod tests {
             .expect("run reviewed scratch write probe");
         assert!(
             output.status.success(),
-            "reviewed scratch root must remain writable"
+            "reviewed scratch root must remain writable: status={} stdout={} stderr={} profile={profile}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
         let sibling_output = std::process::Command::new("/usr/bin/sandbox-exec")
             .args([
@@ -3840,6 +4364,39 @@ mod tests {
         );
         std::fs::remove_dir_all(scratch).expect("remove scratch probe");
         std::fs::remove_dir_all(sibling).expect("remove sibling scratch probe");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_child_sandbox_cannot_chmod_a_scratch_ancestor() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let parent = std::env::temp_dir().join(format!(
+            "buzz-acp-parent-mode-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let scratch = parent.join("scratch");
+        std::fs::create_dir_all(&scratch).expect("create ancestor mode fixture");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))
+            .expect("secure ancestor fixture");
+        let profile = ordinary_child_sandbox_profile(&scratch, None, "/bin/chmod");
+        let output = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile, "/bin/chmod", "777"])
+            .arg(&parent)
+            .output()
+            .expect("run sandboxed ancestor chmod probe");
+        assert!(!output.status.success());
+        assert_eq!(
+            parent
+                .metadata()
+                .expect("ancestor metadata")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o700
+        );
+        std::fs::remove_dir_all(parent).expect("remove ancestor mode fixture");
     }
 
     #[cfg(unix)]

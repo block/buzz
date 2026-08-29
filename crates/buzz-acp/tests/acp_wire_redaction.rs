@@ -419,7 +419,7 @@ async fn real_binary_trace_logs_never_expose_content_or_credentials() {
 
     // Fake ACP agent stub on disk. Embed the child-output canaries so the
     // hardened empty child environment remains part of the real test path.
-    let stub_dir = std::env::temp_dir().join(format!(
+    let fixture_root = std::env::temp_dir().join(format!(
         "buzz-acp-redaction-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
@@ -427,6 +427,11 @@ async fn real_binary_trace_logs_never_expose_content_or_credentials() {
             .expect("system clock")
             .as_nanos(),
     ));
+    let stub_dir = fixture_root
+        .join(".buzz")
+        .join(".scratch")
+        .join("managed-agents")
+        .join("ab".repeat(32));
     std::fs::create_dir_all(&stub_dir).expect("create stub dir");
     let stub_path = stub_dir.join("fake-acp-agent.py");
     let canaries_json = serde_json::to_string(
@@ -443,6 +448,8 @@ async fn real_binary_trace_logs_never_expose_content_or_credentials() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755))
             .expect("chmod agent stub");
+        std::fs::set_permissions(&stub_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("secure managed scratch fixture");
     }
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_buzz-acp"));
@@ -460,6 +467,7 @@ async fn real_binary_trace_logs_never_expose_content_or_credentials() {
         // itself is the sandbox-exec command.
         .env("BUZZ_ACP_AGENT_COMMAND", "/usr/bin/python3")
         .env("BUZZ_ACP_AGENT_ARGS", stub_path.as_os_str())
+        .env("BUZZ_ACP_CHILD_SCRATCH", &stub_dir)
         // Hostile system prompt canary flows through session/new params.
         .env("BUZZ_ACP_SYSTEM_PROMPT", SYSTEM_PROMPT_CANARY)
         // Non-empty MCP command makes the harness build MCP server config in
@@ -473,6 +481,7 @@ async fn real_binary_trace_logs_never_expose_content_or_credentials() {
         .env("BUZZ_ACP_NO_PRESENCE", "true")
         .env("BUZZ_ACP_NO_TYPING", "true")
         .env("BUZZ_ACP_IDLE_TIMEOUT", "20")
+        .current_dir(&stub_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -568,5 +577,5 @@ async fn real_binary_trace_logs_never_expose_content_or_credentials() {
         );
     }
 
-    let _ = std::fs::remove_dir_all(&stub_dir);
+    let _ = std::fs::remove_dir_all(&fixture_root);
 }

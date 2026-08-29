@@ -34,7 +34,15 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     "BUZZ_ACP_PRIVATE_KEY",
     "BUZZ_ACP_API_TOKEN",
     "BUZZ_ACP_CREDENTIAL_STDIN",
+    // Desktop-verified outer/child working-directory binding. Allowing saved
+    // env to replace it would widen an ordinary child's filesystem sandbox.
+    "BUZZ_ACP_CHILD_WORKSPACE",
+    "BUZZ_ACP_CHILD_SCRATCH",
     "BUZZ_AGENT_PUBKEY",
+    "BUZZ_GABE_AGENT_PUBKEY",
+    "BUZZ_GABE_OWNER_PUBKEY",
+    "BUZZ_STACY_AGENT_PUBKEY",
+    "BUZZ_STACY_OWNER_PUBKEY",
     "BUZZ_CONTEXT_ENGINE_ADAPTER_CAPABILITY",
     "BUZZ_CONTEXT_ENGINE_ADAPTER_CAPABILITY_FIFO",
     "BUZZ_CONTEXT_ENGINE_ADAPTER_CAPABILITY_FIFO_OWNER_UID",

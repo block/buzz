@@ -4,7 +4,7 @@ pub(crate) mod agent_events;
 pub(crate) mod agent_snapshot;
 pub(crate) mod agent_snapshot_envelope;
 pub(crate) mod team_snapshot;
-pub(crate) use access_policy::{owner_only, owner_only_access_build, projected_access_with_policy};
+pub(crate) use access_policy::{owner_only_access_build, projected_access_with_policy};
 pub(crate) use agent_env::{
     baked_build_env, build_buzz_agent_provider_defaults, discovery_env_with_baked_floor,
 };

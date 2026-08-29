@@ -812,6 +812,22 @@ struct TrustedArtifactSpec {
     immutable: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrustedArtifactIdentity {
+    path: &'static str,
+    len: u64,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrustedChildValidation {
+    pub(crate) env: Vec<(String, String)>,
+    pub(crate) artifacts: Vec<TrustedArtifactIdentity>,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct TrustedDeploymentSpec {
     receipt_path: &'static str,
@@ -839,12 +855,12 @@ struct TrustedHarnessSpec {
     deployment: Option<TrustedDeploymentSpec>,
 }
 
-const GABE_NODE_PATH: &str = "/Users/gabriel/.buzz/runtime/trusted-node/d36b3d980963d44bd2c5e844fac4cfeee26a167b744287a4e74a9575af9d0559/node";
+const GABE_NODE_PATH: &str = "/Users/gabriel/.buzz/RUNTIME/trusted-node/d36b3d980963d44bd2c5e844fac4cfeee26a167b744287a4e74a9575af9d0559/node";
 const GABE_NODE_SHA256: &str = "d36b3d980963d44bd2c5e844fac4cfeee26a167b744287a4e74a9575af9d0559";
 const GABE_ADAPTER_SHA256: &str =
     "96a8efaf20cbc1cb92fb2ae2eca5a0bdefabba42f9cd6e2ca21299c724bd7c5c";
-const GABE_ADAPTER_PATH: &str = "/Users/gabriel/.buzz/runtime/context-engine/96a8efaf20cbc1cb92fb2ae2eca5a0bdefabba42f9cd6e2ca21299c724bd7c5c/scripts/gabe-acp.mjs";
-const STACY_ADAPTER_PATH: &str = "/Users/gabriel/.buzz/runtime/stacy-context-engine/96a8efaf20cbc1cb92fb2ae2eca5a0bdefabba42f9cd6e2ca21299c724bd7c5c/scripts/gabe-acp.mjs";
+const GABE_ADAPTER_PATH: &str = "/Users/gabriel/.buzz/RUNTIME/context-engine/96a8efaf20cbc1cb92fb2ae2eca5a0bdefabba42f9cd6e2ca21299c724bd7c5c/scripts/gabe-acp.mjs";
+const STACY_ADAPTER_PATH: &str = "/Users/gabriel/.buzz/RUNTIME/stacy-context-engine/96a8efaf20cbc1cb92fb2ae2eca5a0bdefabba42f9cd6e2ca21299c724bd7c5c/scripts/gabe-acp.mjs";
 
 const GABE_ARGS: &[&str] = &[GABE_ADAPTER_PATH];
 const STACY_ARGS: &[&str] = &[STACY_ADAPTER_PATH];
@@ -885,9 +901,9 @@ const STACY_RUNTIME_ENV: &[(&str, &str)] = &[
     ("BUZZ_ACP_SESSION_PREFIX", "stacy"),
 ];
 const STACY_DEPLOYMENT: TrustedDeploymentSpec = TrustedDeploymentSpec {
-    receipt_path: "/Users/gabriel/.buzz/runtime/stacy-context-engine/home/deployment-receipt.json",
+    receipt_path: "/Users/gabriel/.buzz/RUNTIME/stacy-context-engine/home/deployment-receipt.json",
     lifecycle_state_path:
-        "/Users/gabriel/.buzz/runtime/stacy-context-engine/home/deployment-control/lifecycle-state",
+        "/Users/gabriel/.buzz/RUNTIME/stacy-context-engine/home/deployment-control/lifecycle-state",
     docker_socket: "/Users/gabriel/.docker/run/docker.sock",
     project: "stacy",
     agent_container: "stacy-agent",
@@ -895,7 +911,7 @@ const STACY_DEPLOYMENT: TrustedDeploymentSpec = TrustedDeploymentSpec {
     dashboard_container: "stacy-dashboard",
     dashboard_service: "stacy-dashboard",
 };
-const INSTALL_RECEIPTS_ROOT: &str = "/Users/gabriel/.buzz/runtime/deployment-receipts";
+const INSTALL_RECEIPTS_ROOT: &str = "/Users/gabriel/.buzz/RUNTIME/deployment-receipts";
 const GABE_HARNESS_SPEC: TrustedHarnessSpec = TrustedHarnessSpec {
     harness: TrustedOutboxHarness::Gabe,
     command: GABE_NODE_PATH,
@@ -917,9 +933,9 @@ const STACY_HARNESS_SPEC: TrustedHarnessSpec = TrustedHarnessSpec {
     agent_pin_env: "BUZZ_STACY_AGENT_PUBKEY",
     owner_pin_env: "BUZZ_STACY_OWNER_PUBKEY",
     runtime_env: STACY_RUNTIME_ENV,
-    capability_home: Some("/Users/gabriel/.buzz/runtime/stacy-context-engine/home"),
+    capability_home: Some("/Users/gabriel/.buzz/RUNTIME/stacy-context-engine/home"),
     outbox_dir:
-        "/Users/gabriel/.buzz/runtime/stacy-context-engine/home/state/context-engine-buzz/prepared",
+        "/Users/gabriel/.buzz/RUNTIME/stacy-context-engine/home/state/context-engine-buzz/prepared",
     health_addr: Some("127.0.0.1:18803"),
     deployment: Some(STACY_DEPLOYMENT),
 };
@@ -939,7 +955,14 @@ fn configured_trusted_harness(
     })
 }
 
-fn validate_trusted_artifact(spec: TrustedArtifactSpec) -> Result<(), String> {
+fn validate_trusted_artifact(spec: TrustedArtifactSpec) -> Result<TrustedArtifactIdentity, String> {
+    validate_trusted_artifact_at(spec, Path::new("/Users/gabriel/.buzz/RUNTIME"))
+}
+
+fn validate_trusted_artifact_at(
+    spec: TrustedArtifactSpec,
+    runtime_root: &Path,
+) -> Result<TrustedArtifactIdentity, String> {
     use std::io::Read;
 
     let path = Path::new(spec.path);
@@ -955,19 +978,37 @@ fn validate_trusted_artifact(spec: TrustedArtifactSpec) -> Result<(), String> {
         return Err("artifact path is not canonical".into());
     }
 
-    let parent = path
+    let mut parent = path
         .parent()
         .ok_or_else(|| "artifact has no parent directory".to_string())?;
-    let parent_metadata = std::fs::symlink_metadata(parent)
-        .map_err(|error| format!("cannot inspect artifact parent: {error}"))?;
-    if !parent_metadata.is_dir() || parent_metadata.file_type().is_symlink() {
-        return Err("artifact parent is not a regular directory".into());
-    }
-    let canonical_parent = parent
-        .canonicalize()
-        .map_err(|error| format!("cannot canonicalize artifact parent: {error}"))?;
-    if canonical_parent != parent {
-        return Err("artifact parent path is not canonical".into());
+    let ancestor_stop = if spec.immutable {
+        runtime_root
+    } else {
+        parent
+            .parent()
+            .ok_or_else(|| "artifact test parent chain is incomplete".to_string())?
+    };
+    let mut parents = Vec::new();
+    while parent != ancestor_stop {
+        if spec.immutable && !parent.starts_with(runtime_root) {
+            return Err("artifact escaped the trusted runtime root".into());
+        }
+        let metadata = std::fs::symlink_metadata(parent)
+            .map_err(|error| format!("cannot inspect artifact ancestor: {error}"))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("artifact ancestor is not a regular directory".into());
+        }
+        if parent
+            .canonicalize()
+            .map_err(|error| format!("cannot canonicalize artifact ancestor: {error}"))?
+            != parent
+        {
+            return Err("artifact ancestor path is not canonical".into());
+        }
+        parents.push(metadata);
+        parent = parent
+            .parent()
+            .ok_or_else(|| "artifact ancestor chain is incomplete".to_string())?;
     }
 
     #[cfg(unix)]
@@ -978,15 +1019,22 @@ fn validate_trusted_artifact(spec: TrustedArtifactSpec) -> Result<(), String> {
             .and_then(std::fs::metadata)
             .map_err(|error| format!("cannot inspect current executable: {error}"))?
             .uid();
-        if before.uid() != executable_owner || parent_metadata.uid() != executable_owner {
+        if before.uid() != executable_owner
+            || parents
+                .iter()
+                .any(|metadata| metadata.uid() != executable_owner)
+        {
             return Err("artifact owner does not match the harness executable owner".into());
         }
         let expected_mode = if spec.executable { 0o555 } else { 0o444 };
         if before.mode() & 0o777 != expected_mode {
             return Err("artifact mode does not match the frozen read-only mode".into());
         }
-        if parent_metadata.mode() & 0o777 != 0o555 {
-            return Err("artifact parent directory is not read-only".into());
+        if parents
+            .iter()
+            .any(|metadata| metadata.mode() & 0o7777 != 0o555)
+        {
+            return Err("artifact ancestor directory is not read-only".into());
         }
     }
 
@@ -995,7 +1043,9 @@ fn validate_trusted_artifact(spec: TrustedArtifactSpec) -> Result<(), String> {
         use std::os::macos::fs::MetadataExt;
         const USER_IMMUTABLE: u32 = 0x0000_0002;
         if before.st_flags() & USER_IMMUTABLE == 0
-            || parent_metadata.st_flags() & USER_IMMUTABLE == 0
+            || parents
+                .iter()
+                .any(|metadata| metadata.st_flags() & USER_IMMUTABLE == 0)
         {
             return Err("artifact is not protected by the macOS uchg flag".into());
         }
@@ -1046,7 +1096,20 @@ fn validate_trusted_artifact(spec: TrustedArtifactSpec) -> Result<(), String> {
     if actual_hash != spec.sha256 {
         return Err("artifact digest does not match the frozen digest".into());
     }
-    Ok(())
+    Ok(TrustedArtifactIdentity {
+        path: spec.path,
+        len: after.len(),
+        #[cfg(unix)]
+        dev: {
+            use std::os::unix::fs::MetadataExt as _;
+            after.dev()
+        },
+        #[cfg(unix)]
+        ino: {
+            use std::os::unix::fs::MetadataExt as _;
+            after.ino()
+        },
+    })
 }
 
 fn normalize_pubkey_pin(value: Option<&str>) -> Option<String> {
@@ -2036,7 +2099,7 @@ pub(crate) fn revalidate_trusted_child_env(
     command: &str,
     args: &[String],
     child_env: &[(String, String)],
-) -> Result<Vec<(String, String)>, String> {
+) -> Result<TrustedChildValidation, String> {
     let spec = configured_trusted_harness(command, args)
         .ok_or_else(|| "trusted credentials do not match a frozen harness".to_string())?;
     let value = |name: &str| -> Result<&str, String> {
@@ -2086,11 +2149,16 @@ pub(crate) fn revalidate_trusted_child_env(
     {
         return Err("managed identity pins changed after startup".into());
     }
-    for artifact in spec.artifacts {
-        validate_trusted_artifact(*artifact)?;
-    }
+    let artifacts = spec
+        .artifacts
+        .iter()
+        .map(|artifact| validate_trusted_artifact(*artifact))
+        .collect::<Result<Vec<_>, _>>()?;
     validate_runtime_preflight(spec)?;
-    Ok(child_env.to_vec())
+    Ok(TrustedChildValidation {
+        env: child_env.to_vec(),
+        artifacts,
+    })
 }
 
 /// Revalidate the live host/runtime boundary at both trusted-delivery seams.
@@ -2104,7 +2172,7 @@ pub(crate) fn revalidate_trusted_publish_runtime(
         .find(|spec| spec.harness == harness)
         .ok_or_else(|| "trusted publish harness is not frozen".to_string())?;
     for artifact in spec.artifacts {
-        validate_trusted_artifact(*artifact)?;
+        let _ = validate_trusted_artifact(*artifact)?;
     }
     Ok(validate_runtime_preflight(spec)?.deployment_fingerprint)
 }
@@ -4644,6 +4712,75 @@ channels = "ALL"
         std::fs::set_permissions(&directory, directory_permissions)
             .expect("unlock fixture directory for cleanup");
         std::fs::remove_dir_all(directory).expect("remove trusted harness fixture");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn trusted_artifact_namespace_blocks_ancestor_swap() {
+        use sha2::{Digest as _, Sha256};
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = std::env::temp_dir().join(format!(
+            "buzz-trusted-ancestor-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir(&root).expect("create trusted ancestor root");
+        let root = root
+            .canonicalize()
+            .expect("canonical trusted ancestor root");
+        let runtime_root = root.join("RUNTIME");
+        let namespace = runtime_root.join("context-engine");
+        let version = namespace.join("digest");
+        let scripts = version.join("scripts");
+        let artifact = scripts.join("gabe-acp.mjs");
+        std::fs::create_dir_all(&scripts).expect("create trusted ancestor fixture");
+        std::fs::write(&artifact, b"reviewed adapter").expect("write trusted artifact fixture");
+        std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o444))
+            .expect("freeze trusted artifact mode");
+        for directory in [&scripts, &version, &namespace] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o555))
+                .expect("freeze trusted ancestor mode");
+        }
+        let status = std::process::Command::new("/usr/bin/chflags")
+            .args(["-R", "uchg"])
+            .arg(&namespace)
+            .status()
+            .expect("freeze trusted ancestor fixture");
+        assert!(status.success());
+        let path: &'static str =
+            Box::leak(artifact.to_string_lossy().into_owned().into_boxed_str());
+        let digest: &'static str =
+            Box::leak(hex::encode(Sha256::digest(b"reviewed adapter")).into_boxed_str());
+        let spec = TrustedArtifactSpec {
+            path,
+            sha256: digest,
+            executable: false,
+            immutable: true,
+        };
+        validate_trusted_artifact_at(spec, &runtime_root)
+            .expect("fully frozen ancestor chain is trusted");
+
+        let displaced = runtime_root.join("displaced-context-engine");
+        assert!(
+            std::fs::rename(&namespace, &displaced).is_err(),
+            "uchg namespace must block an ancestor swap"
+        );
+        std::process::Command::new("/usr/bin/chflags")
+            .args(["-R", "nouchg"])
+            .arg(&namespace)
+            .status()
+            .expect("unfreeze trusted ancestor fixture");
+        std::fs::set_permissions(&namespace, std::fs::Permissions::from_mode(0o755))
+            .expect("open namespace for swap probe");
+        std::fs::rename(&namespace, &displaced).expect("unfrozen namespace can be displaced");
+        assert!(validate_trusted_artifact_at(spec, &runtime_root).is_err());
+        std::process::Command::new("/bin/chmod")
+            .args(["-R", "u+w"])
+            .arg(&displaced)
+            .status()
+            .expect("open displaced fixture for cleanup");
+        std::fs::remove_dir_all(root).expect("remove trusted ancestor fixture");
     }
 
     #[test]

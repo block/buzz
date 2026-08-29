@@ -112,6 +112,14 @@ pub(crate) fn build_respond_to_env_with_policy(
     Ok((set, remove))
 }
 
+/// Build the local spawn policy using this Desktop build's owner-only gate.
+pub(crate) fn build_respond_to_env(
+    record: &ManagedAgentRecord,
+    owner_hex: Option<&str>,
+) -> Result<RespondToEnv, String> {
+    build_respond_to_env_with_policy(record, owner_hex, owner_only())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

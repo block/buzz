@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::Write;
 
 use tauri::AppHandle;
 
@@ -20,7 +19,9 @@ mod path;
 pub(in crate::managed_agents) use path::build_augmented_path;
 pub(crate) use path::{compose_path_entries, should_skip_claude_executable, should_use_inherited};
 
-pub(crate) use super::access_policy::{build_respond_to_env_with_policy, RespondToEnv};
+pub(crate) use super::access_policy::build_respond_to_env;
+#[cfg(test)]
+use super::access_policy::build_respond_to_env_with_policy;
 
 mod metadata;
 pub(crate) use metadata::{
@@ -72,119 +73,21 @@ pub use lifecycle::{kill_stale_tracked_processes, sync_managed_agent_processes};
 mod spawn_key; // production spawn-key derivation + its regressions
 pub(crate) use spawn_key::bound_runtime_key;
 
-const TRUSTED_CONTEXT_ENGINE_NODE: &str = "/Users/gabriel/.buzz/runtime/trusted-node/d36b3d980963d44bd2c5e844fac4cfeee26a167b744287a4e74a9575af9d0559/node";
-const TRUSTED_CONTEXT_ENGINE_ADAPTERS: [&str; 2] = [
-    "/Users/gabriel/.buzz/runtime/context-engine/96a8efaf20cbc1cb92fb2ae2eca5a0bdefabba42f9cd6e2ca21299c724bd7c5c/scripts/gabe-acp.mjs",
-    "/Users/gabriel/.buzz/runtime/stacy-context-engine/96a8efaf20cbc1cb92fb2ae2eca5a0bdefabba42f9cd6e2ca21299c724bd7c5c/scripts/gabe-acp.mjs",
-];
+mod context_engine;
+use context_engine::{
+    apply_context_engine_identity, child_rust_log_filter, classify_context_engine_harness,
+    deliver_acp_credentials, install_acp_credential_stdin, revalidate_trusted_buzz_acp,
+    validate_trusted_buzz_acp, ContextEngineHarnessClass,
+};
 
-fn is_trusted_context_engine_harness(command: &str, args: &[String]) -> bool {
-    command == TRUSTED_CONTEXT_ENGINE_NODE
-        && args.len() == 1
-        && TRUSTED_CONTEXT_ENGINE_ADAPTERS.contains(&args[0].as_str())
-}
+mod ordinary_workspace;
+use ordinary_workspace::configure_outer_workdir;
 
-fn install_acp_credential_stdin(
-    command: &mut std::process::Command,
-    private_key: &str,
-    auth_tag: Option<&str>,
-) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
-    #[derive(serde::Serialize)]
-    struct CredentialEnvelope<'a> {
-        private_key: &'a str,
-        auth_tag: Option<&'a str>,
-    }
-
-    let payload = serde_json::to_vec(&CredentialEnvelope {
-        private_key,
-        auth_tag,
-    })
-    .map(zeroize::Zeroizing::new)
-    .map_err(|error| format!("failed to encode ACP credential envelope: {error}"))?;
-    // The mode flag is not secret. Remove every legacy credential carrier
-    // immediately before spawn so neither argv nor the macOS launch-time
-    // environment snapshot contains signing material.
-    command
-        .env_remove("BUZZ_PRIVATE_KEY")
-        .env_remove("NOSTR_PRIVATE_KEY")
-        .env_remove("BUZZ_AUTH_TAG")
-        .env("BUZZ_ACP_CREDENTIAL_STDIN", "true")
-        .stdin(std::process::Stdio::piped());
-    Ok(payload)
-}
-
-fn deliver_acp_credentials(
-    child: &mut std::process::Child,
-    payload: &[u8],
-) -> std::io::Result<()> {
-    let mut stdin = child.stdin.take().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "ACP credential stdin was not piped",
-        )
-    })?;
-    stdin.write_all(payload)
-}
-
-/// Classify an agent's persona against the live catalog for the Agents-menu
-/// drift indicator. Returns `(out_of_date, orphaned)`.
-///
-/// Drift basis is the RECORD's `persona_source_version`, never the engram:
-/// - persona_id set + persona present: out_of_date when the snapshot hash
-///   differs from the persona's current content hash.
-/// - persona_id set + persona gone: orphaned (no current hash to respawn into,
-///   so never out_of_date — we must not tell the user to respawn into nothing).
-/// - no persona_id: neither — a hand-built agent has no persona to drift from.
-fn persona_drift_state(
-    record: &ManagedAgentRecord,
-    personas: &[crate::managed_agents::types::AgentDefinition],
-) -> (bool, bool) {
-    let Some(persona_id) = record.persona_id.as_deref() else {
-        return (false, false);
-    };
-    let Some(persona) = personas.iter().find(|p| p.id == persona_id) else {
-        return (false, true);
-    };
-    let current = crate::managed_agents::persona_events::persona_content_hash(
-        &crate::managed_agents::persona_events::persona_event_content(persona),
-    );
-    let out_of_date = record
-        .persona_source_version
-        .as_deref()
-        .is_some_and(|pinned| pinned != current);
-    (out_of_date, false)
-}
-
-/// Resolve the runtime-pair key this record maps to for the active
-/// workspace: always the active workspace relay (the legacy per-record relay
-/// pin is ignored — see `effective_agent_relay_url`). Returns `None` for
-/// records that cannot form a valid pair key yet (e.g. key-less agents that
-/// mint keys on first start).
-pub(crate) fn workspace_pair_key(
-    app: &AppHandle,
-    record: &ManagedAgentRecord,
-) -> Option<ManagedAgentRuntimeKey> {
-    use tauri::Manager;
-    let state = app.state::<crate::app_state::AppState>();
-    resolve_workspace_pair_key(
-        &record.pubkey,
-        &record.relay_url,
-        &crate::relay::relay_ws_url_with_override(&state),
-    )
-}
-
-/// Pure core of [`workspace_pair_key`]: workspace-relay resolution (legacy
-/// record pins ignored) plus canonical key construction, kept `AppHandle`-free
-/// so summary/stop scoping semantics are unit-testable.
-pub(crate) fn resolve_workspace_pair_key(
-    pubkey: &str,
-    record_relay_url: &str,
-    workspace_relay_url: &str,
-) -> Option<ManagedAgentRuntimeKey> {
-    let effective_relay =
-        crate::relay::effective_agent_relay_url(record_relay_url, workspace_relay_url);
-    ManagedAgentRuntimeKey::new(pubkey.to_string(), &effective_relay).ok()
-}
+mod summary_helpers;
+use summary_helpers::persona_drift_state;
+#[cfg(test)]
+use summary_helpers::resolve_workspace_pair_key;
+pub(crate) use summary_helpers::workspace_pair_key;
 
 pub fn build_managed_agent_summary(
     app: &AppHandle,
@@ -408,26 +311,6 @@ pub fn find_managed_agent_mut<'a>(
         .ok_or_else(|| format!("agent {pubkey} not found"))
 }
 
-/// Pure decision function for the inbound author gate env vars.
-///
-/// Returns the env vars to **set** and the env vars to **remove**. Removal is
-/// belt-and-suspenders: an inherited parent env var must not leak into a
-/// child agent and silently change its security posture.
-///
-/// The `owner_hex` argument is the current workspace owner pubkey. It's used
-/// as a fallback for legacy records (`auth_tag.is_none()`) — without it, the
-/// harness's owner cache stays empty and `owner-only` / `allowlist` modes
-/// drop everything.
-///
-/// Returns `Err(...)` if the record's allowlist fails validation. The harness
-/// validates too, but doing it here means we never spawn a doomed process.
-pub(crate) fn build_respond_to_env(
-    record: &ManagedAgentRecord,
-    owner_hex: Option<&str>,
-) -> Result<RespondToEnv, String> {
-    build_respond_to_env_with_policy(record, owner_hex, super::owner_only())
-}
-
 pub(crate) fn configure_runtime_cli(
     command: &mut std::process::Command,
     runtime: Option<&KnownAcpRuntime>,
@@ -552,8 +435,21 @@ pub fn spawn_agent_child(
     let resolved_agent_command = resolve_command(effective_command)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
-    let secure_context_engine_credentials =
-        is_trusted_context_engine_harness(&resolved_agent_command, agent_args);
+    let (trusted_context_engine, trusted_buzz_acp_identity) =
+        match classify_context_engine_harness(&resolved_agent_command, agent_args) {
+            ContextEngineHarnessClass::Exact(harness) => (
+                Some(harness),
+                Some(validate_trusted_buzz_acp(&resolved_acp_command)?),
+            ),
+            ContextEngineHarnessClass::ReservedInvalid => {
+                return Err(
+                    "reserved Context Engine runtime path does not match the reviewed harness tuple"
+                        .to_string(),
+                );
+            }
+            ContextEngineHarnessClass::Ordinary => (None, None),
+        };
+    let secure_context_engine_credentials = trusted_context_engine.is_some();
 
     // The caller supplies the explicit canonical pair relay. This is the only
     // relay this child may connect to, regardless of the record/workspace default.
@@ -577,9 +473,7 @@ pub fn spawn_agent_child(
     );
 
     let mut command = std::process::Command::new(&resolved_acp_command);
-    if let Some(home) = super::default_agent_workdir() {
-        command.current_dir(home);
-    }
+    configure_outer_workdir(&mut command, secure_context_engine_credentials, &record.pubkey)?;
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::from(stdout));
     command.stderr(std::process::Stdio::from(stderr));
@@ -884,6 +778,16 @@ pub fn spawn_agent_child(
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
+    // These four identity pins are Desktop-owned. Remove every ambient or
+    // persisted value, then inject only the pair that matches the validated
+    // trusted adapter. This makes the first Save self-bootstrapping without
+    // allowing a Gabe record to impersonate Stacy (or vice versa).
+    apply_context_engine_identity(
+        &mut command,
+        trusted_context_engine,
+        &record.pubkey,
+        owner_hex,
+    )?;
 
     // B5: carry persisted effort; harness resolves thought_level configId at first session.
     // Written AFTER descriptor.env so the canonical persisted value wins over any
@@ -966,6 +870,9 @@ pub fn spawn_agent_child(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
+    if let Some(identity) = trusted_buzz_acp_identity {
+        revalidate_trusted_buzz_acp(&resolved_acp_command, identity)?;
+    }
     let mut child = command.spawn().map_err(|error| {
         format!(
             "failed to spawn `{}` for agent {}: {error}",
@@ -1022,14 +929,6 @@ pub fn spawn_agent_child(
         adapter_availability: spawned_adapter_availability,
         start_nonce,
     })
-}
-
-fn child_rust_log_filter() -> String {
-    match std::env::var("RUST_LOG") {
-        Ok(existing) if existing.contains("buzz_acp") => existing,
-        Ok(existing) if !existing.trim().is_empty() => format!("{existing},buzz_acp=info"),
-        _ => "buzz_acp=info".to_string(),
-    }
 }
 
 /// Spawn (or adopt) the runtime pair for `record` on the caller's bound
