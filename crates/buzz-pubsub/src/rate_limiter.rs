@@ -7,7 +7,7 @@
 //! ⚠️ Fixed windows allow up to 2× burst at boundaries. Upgrade to sliding
 //! window or token bucket for strict limiting.
 
-use std::net::IpAddr;
+use std::{net::IpAddr, time::Duration};
 
 use buzz_auth::{
     error::AuthError,
@@ -16,6 +16,14 @@ use buzz_auth::{
 use buzz_core::TenantContext;
 use nostr::PublicKey;
 use redis::Script;
+
+/// Bound for one Redis admission operation.
+///
+/// redis-rs defaults async commands to 500 ms. AOF-backed Redis can exceed
+/// that briefly during an fsync on a busy host; failing admission at 500 ms
+/// turns a bounded durability stall into a dropped relay request. Three
+/// seconds remains fail-closed while covering observed sub-1.5 s fsync stalls.
+const ADMISSION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Atomically INCR the key, set EXPIRE on first call, and return (count, ttl).
 ///
@@ -46,6 +54,7 @@ async fn run_rate_limit(
         .get()
         .await
         .map_err(|e| AuthError::Internal(format!("Redis pool: {e}")))?;
+    conn.set_response_timeout(ADMISSION_RESPONSE_TIMEOUT);
 
     let script = Script::new(RATE_LIMIT_SCRIPT);
     let (count, ttl): (u64, i64) = script
@@ -117,5 +126,17 @@ impl RateLimiter for RedisRateLimiter {
     ) -> Result<RateLimitResult, AuthError> {
         let key = buzz_auth::rate_limit::ip_rate_limit_key(ip);
         run_rate_limit(&self.pool, &key, window_secs, limit).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ADMISSION_RESPONSE_TIMEOUT;
+    use std::time::Duration;
+
+    #[test]
+    fn admission_response_timeout_covers_bounded_aof_stalls() {
+        assert_eq!(ADMISSION_RESPONSE_TIMEOUT, Duration::from_secs(3));
+        assert!(ADMISSION_RESPONSE_TIMEOUT > Duration::from_millis(500));
     }
 }
