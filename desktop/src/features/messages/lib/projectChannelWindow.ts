@@ -47,7 +47,7 @@ export async function refreshChannelWindowMessages(
   }
   await queryClient.invalidateQueries(
     { queryKey, exact: true, refetchType: "active" },
-    { cancelRefetch: !seeded },
+    { cancelRefetch: !seeded, throwOnError: true },
   );
   projectChannelWindowMessages(queryClient, channelId);
 }

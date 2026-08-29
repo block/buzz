@@ -50,6 +50,7 @@ export function resolveTimelineLoadingLatch(
   settledChannelId: string | null,
   activeChannelId: string | null,
   loadingNow: boolean,
+  canSettle = true,
 ): { settledChannelId: string | null; isLoading: boolean } {
   if (activeChannelId === null) {
     return { settledChannelId, isLoading: loadingNow };
@@ -58,9 +59,9 @@ export function resolveTimelineLoadingLatch(
     // Already settled for this channel — stay loaded through refetch blips.
     return { settledChannelId, isLoading: false };
   }
-  if (!loadingNow) {
+  if (!loadingNow && canSettle) {
     // First settle for this channel; latch it.
     return { settledChannelId: activeChannelId, isLoading: false };
   }
-  return { settledChannelId, isLoading: true };
+  return { settledChannelId, isLoading: loadingNow };
 }

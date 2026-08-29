@@ -636,7 +636,7 @@ export function ChannelScreen({
     resolveTimelineLoadingLatch(
       settledChannelIdRef.current,
       activeChannelId,
-      timelineLoadingNow,
+      timelineLoadingNow, !messagesQuery.isError,
     );
   settledChannelIdRef.current = settledChannelId;
   const { welcomeKickoffStage, welcomeKickoffSettingUp } =
