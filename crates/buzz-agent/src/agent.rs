@@ -1364,13 +1364,13 @@ fn warn_if_silent_turn(
             tracing::warn!(
                 stop = ?stop,
                 output_tokens = t,
-                "agent: turn ended with no tool calls and near-zero output tokens — possible silent model/gateway early-stop"
+                "agent: turn ended with no publish attempt and near-zero output tokens — possible silent model/gateway early-stop"
             );
         }
         None => {
             tracing::warn!(
                 stop = ?stop,
-                "agent: turn ended with no tool calls and no usage reported — cannot confirm output size"
+                "agent: turn ended with no publish attempt and no usage reported — cannot confirm output size"
             );
         }
         _ => {}
