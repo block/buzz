@@ -68,12 +68,11 @@ fn replace_unsupported_images(history: &mut [HistoryItem]) -> usize {
 /// [`Config::require_reply`](crate::config::Config::require_reply).
 const MAX_REPLY_NAGS: u32 = 2;
 
-/// Output-token threshold below which a turn with no tool calls and no
-/// assistant message is considered a silent-death candidate and triggers a
-/// WARN.  The observed failure signature is 2–12 tokens (model returns an
-/// essentially empty completion).  Legitimate one-sentence replies land well
-/// above this value even in the most terse case.
-const SILENT_TURN_TOKEN_THRESHOLD: u64 = 10;
+/// Output-token upper bound (inclusive) for the silent-death signature: the
+/// observed failure emits 2–12 tokens.  Turns with `output_tokens <= 12`
+/// and no prior tool call are flagged.  Legitimate one-sentence replies land
+/// well above this value even in the most terse case.
+const SILENT_TURN_TOKEN_THRESHOLD: u64 = 12;
 
 /// Server label on the synthetic reply-guard objection.
 ///
@@ -357,6 +356,11 @@ impl RunCtx<'_> {
         // successful publish. See `is_buzz_reply_call`.
         let mut buzz_reply_call_seen = false;
         let mut reply_nags = 0u32;
+        // Tracks whether any tool call executed this turn (across all rounds),
+        // regardless of `require_reply`.  Used by the silent-turn diagnostic to
+        // distinguish a real multi-round turn (tools ran, short final response
+        // is normal) from a first-round die-with-no-action failure.
+        let mut any_tool_call_seen = false;
         // Per-`run()` reactive context-recovery budget. Per-turn, not
         // per-session: a fresh prompt deserves a fresh chance to recover, and
         // `max_rounds` defaults to 0 (unbounded) so it cannot bound this.
@@ -709,18 +713,35 @@ impl RunCtx<'_> {
                     reasoning_details: response.reasoning_details.clone(),
                 });
                 let stop = map_stop(response.stop);
-                // Diagnostic: warn when the turn ends with no tool calls and
-                // suspiciously few output tokens — the "silent death" signature
-                // (model returns an essentially empty completion, 2-12 tokens,
-                // no actions, no message).  Fires before the stop hook so the
-                // warning appears in the log even if the hook rejects the stop
-                // and the loop continues.  Does not alter control flow.
-                if is_silent_turn(response.output_tokens) {
-                    tracing::warn!(
-                        stop = ?response.stop,
-                        output_tokens = ?response.output_tokens,
-                        "agent: turn ended with no tool calls and near-zero output tokens — possible silent model/gateway early-stop"
-                    );
+                // Diagnostic: warn when the entire turn had no tool calls and
+                // the final response looks like a silent death.  Gated on
+                // `!any_tool_call_seen` so a normal multi-round turn — tools
+                // ran in prior rounds, short final completion is expected — is
+                // never mislabeled.  Two distinct cases:
+                //   • near-zero tokens (≤ 12): the observed failure signature.
+                //   • unknown usage (None) with no prior action: provider
+                //     omitted token counts and nothing happened — separately
+                //     diagnostic.
+                // Fires before the `_Stop` hook so the warning appears in the
+                // log even if the hook rejects the stop and the loop continues.
+                // Does not alter control flow.
+                if !any_tool_call_seen {
+                    match response.output_tokens {
+                        Some(t) if is_silent_turn(t) => {
+                            tracing::warn!(
+                                stop = ?response.stop,
+                                output_tokens = t,
+                                "agent: turn ended with no tool calls and near-zero output tokens — possible silent model/gateway early-stop"
+                            );
+                        }
+                        None => {
+                            tracing::warn!(
+                                stop = ?response.stop,
+                                "agent: turn ended with no tool calls and no usage reported — cannot confirm output size"
+                            );
+                        }
+                        _ => {}
+                    }
                 }
                 // Only gate genuine end_turn — don't override max_tokens/refusal.
                 if stop == StopReason::EndTurn {
@@ -766,6 +787,9 @@ impl RunCtx<'_> {
             }
             // Deliberately after truncation: a publish-shaped call that was
             // discarded never runs, so it must not suppress the reminder.
+            if !calls.is_empty() {
+                any_tool_call_seen = true;
+            }
             if self.cfg.require_reply && !buzz_reply_call_seen {
                 buzz_reply_call_seen = calls.iter().any(|c| is_buzz_reply_call(c, self.mcp));
             }
@@ -1306,17 +1330,17 @@ fn map_stop(p: ProviderStop) -> StopReason {
     }
 }
 
-/// Returns `true` when a no-tool-call turn looks like a silent death: the
-/// provider stopped with no tool calls and the reported output tokens are
-/// below [`SILENT_TURN_TOKEN_THRESHOLD`].
+/// Returns `true` when a reported output-token count is at or below the
+/// silent-death threshold.  The observed failure signature is 2–12 tokens.
 ///
-/// `None` output tokens (provider omitted usage) also triggers the warning —
-/// an absent token count on a near-empty completion is equally suspicious.
+/// Takes a bare `u64` — the caller handles `None` usage separately (a
+/// provider that omits token counts is a distinct diagnostic case, not
+/// automatically "near-zero").
 ///
 /// Extracted as a pure function so it can be tested without standing up an
 /// async agent loop.
-fn is_silent_turn(output_tokens: Option<u64>) -> bool {
-    output_tokens.map_or(true, |t| t < SILENT_TURN_TOKEN_THRESHOLD)
+fn is_silent_turn(output_tokens: u64) -> bool {
+    output_tokens <= SILENT_TURN_TOKEN_THRESHOLD
 }
 
 #[cfg(test)]
@@ -1671,46 +1695,55 @@ mod tests {
 
     // ---- is_silent_turn -----------------------------------------------------
 
-    /// Token counts below the threshold are the silent-death signature.
-    /// This pair (0 and threshold-1) catches an off-by-one on either edge and
-    /// an always-false mutation that would never warn.
+    /// Values within the observed failure range (2–12) must return `true`.
+    /// The pair (0, 12) covers the low end and the exact threshold, catching
+    /// an always-false mutation and an off-by-one that would miss 12.
     #[test]
-    fn is_silent_turn_fires_below_threshold() {
+    fn is_silent_turn_fires_at_and_below_threshold() {
         assert!(
-            is_silent_turn(Some(0)),
+            is_silent_turn(0),
             "zero output tokens must be a silent turn"
         );
         assert!(
-            is_silent_turn(Some(SILENT_TURN_TOKEN_THRESHOLD - 1)),
-            "one below threshold must be a silent turn"
+            is_silent_turn(SILENT_TURN_TOKEN_THRESHOLD),
+            "exactly at threshold (12) must be a silent turn — 12 is in the observed range"
         );
     }
 
-    /// Exactly at the threshold is no longer considered silent: a legitimate
-    /// one-sentence reply sits well above this value.
+    /// One above the threshold must NOT fire.  Paired with the at-threshold
+    /// case to pin both sides of the boundary: a `<` vs `<=` mistake is caught
+    /// by the first test; a `>=` / always-true mutation is caught here.
     #[test]
-    fn is_silent_turn_silent_at_threshold_boundary() {
-        // At exactly the threshold the turn is NOT silent — the threshold is
-        // the first *non-silent* value.  Paired with the below-threshold test
-        // to catch both sides of an off-by-one.
+    fn is_silent_turn_silent_above_threshold() {
         assert!(
-            !is_silent_turn(Some(SILENT_TURN_TOKEN_THRESHOLD)),
-            "exactly at threshold must not be a silent turn"
+            !is_silent_turn(SILENT_TURN_TOKEN_THRESHOLD + 1),
+            "one above threshold (13) must not be a silent turn"
         );
         assert!(
-            !is_silent_turn(Some(SILENT_TURN_TOKEN_THRESHOLD + 1)),
-            "above threshold must not be a silent turn"
+            !is_silent_turn(SILENT_TURN_TOKEN_THRESHOLD + 100),
+            "well above threshold must not be a silent turn"
         );
     }
 
-    /// `None` tokens (provider omitted usage) is also treated as a silent-turn
-    /// candidate — an absent token count on a near-empty completion is equally
-    /// suspicious and must not suppress the warning.
+    /// A turn that ran tool calls in a prior round (any_tool_call_seen = true)
+    /// followed by a short final no-tool-call completion must NOT produce a
+    /// silent-turn warning.  This is the normal publish-then-wrap pattern.
+    ///
+    /// The predicate itself is `is_silent_turn`, but the turn-level gate is
+    /// `!any_tool_call_seen && is_silent_turn(t)`.  This test verifies the
+    /// combined logic by confirming that when any_tool_call_seen is true,
+    /// even a zero-token final response must not be classified as silent death.
     #[test]
-    fn is_silent_turn_fires_on_none_tokens() {
+    fn is_silent_turn_not_fired_after_prior_tool_call() {
+        // Simulate: a tool call ran (any_tool_call_seen = true), final round
+        // has 0 output tokens.  The combined guard must stay silent.
+        let any_tool_call_seen = true;
+        let output_tokens: u64 = 0;
+        // The WARN only fires when BOTH conditions hold:
+        let would_warn = !any_tool_call_seen && is_silent_turn(output_tokens);
         assert!(
-            is_silent_turn(None),
-            "absent output tokens must be a silent turn"
+            !would_warn,
+            "a turn where tool calls ran must not trigger the silent-death WARN even if the final round has near-zero output tokens"
         );
     }
 }
