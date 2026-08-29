@@ -300,14 +300,17 @@ test("keeps a queued-attachment send locked through upload and send settlement",
 });
 
 async function seedAvailableSkills(page: Page) {
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_SEED_OBSERVER_EVENTS__ === "function",
+  );
   await page.evaluate(
-    ({ agentPubkey, channelId }) => {
+    ({ agentPubkey, channelId, seq, timestamp }) => {
       window.__BUZZ_E2E_SEED_OBSERVER_EVENTS__?.({
         agentPubkey,
         events: [
           {
-            seq: 1,
-            timestamp: "2026-08-22T12:00:00.000Z",
+            seq,
+            timestamp,
             kind: "acp_read",
             agentIndex: 0,
             channelId,
@@ -316,6 +319,7 @@ async function seedAvailableSkills(page: Page) {
             payload: {
               method: "session/update",
               params: {
+                sessionId: "skill-picker-session",
                 update: {
                   sessionUpdate: "available_commands_update",
                   availableCommands: [
@@ -335,7 +339,12 @@ async function seedAvailableSkills(page: Page) {
         ],
       });
     },
-    { agentPubkey: AGENT_A, channelId: CHANNEL_ID },
+    {
+      agentPubkey: AGENT_A,
+      channelId: CHANNEL_ID,
+      seq: Date.now(),
+      timestamp: new Date().toISOString(),
+    },
   );
 }
 
@@ -354,7 +363,9 @@ test("inserts a selected agent skill into the composer", async ({ page }) => {
 
   const input = composer.getByTestId("message-input");
   await input.fill("Start ");
-  await composer.getByTestId("composer-skill-picker").click();
+  const skillPicker = composer.getByTestId("composer-skill-picker");
+  await expect(skillPicker).toBeVisible();
+  await skillPicker.click();
 
   const search = page.getByRole("textbox", { name: "Search skills" });
   await expect(search).toBeFocused();
