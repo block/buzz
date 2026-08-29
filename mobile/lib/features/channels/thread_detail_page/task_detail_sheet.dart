@@ -1,4 +1,4 @@
-/// The read-only task detail sheet (HW-005).
+/// The task detail sheet (HW-005 read surface, HW-007 status write surface).
 ///
 /// HW-004 made "this thread produced a task" visible as a chip, but left the
 /// task write-once and invisible: `getTask()` had zero production callers and
@@ -6,9 +6,19 @@
 /// task-VIEWING surface on mobile — chip tap → one `GET /api/tasks/{id}` →
 /// render `TaskDetail` (task + full event history).
 ///
-/// READ-ONLY BY DESIGN. No PATCH, no POST, no status transition, no comment
-/// composer — the write surface is HW-007 and deliberately out of scope here.
-/// The sheet issues exactly one request per open (plus one per explicit retry);
+/// HW-007 made the STATUS — and only the status — writable. Tapping it opens
+/// [showTaskStatusPicker]; a different selection issues exactly one
+/// `PATCH /api/tasks/{id}` carrying only `status`, then RE-FETCHES so the new
+/// status and the relay-appended `status_changed` row both render from relay
+/// truth. There is no optimistic local mutation: a failed write can never leave
+/// a phantom success on screen. Title, priority, assignee and the comment
+/// composer remain deliberately out of scope.
+///
+/// AUTHORIZATION IS INHERITED, NEVER INVENTED. The relay's PATCH path is
+/// channel-membership scoped with no per-user ownership check, so the control
+/// is never hidden on a guessed ownership rule — doing so would misrepresent
+/// the real invariant. The sheet issues one request per open (plus one per
+/// explicit retry, plus one PATCH + one re-fetch per accepted transition);
 /// there is no polling and no live subscription.
 ///
 /// Untrusted-text rules match HW-003/HW-004: title, bodies and actors are
@@ -28,6 +38,7 @@ import '../../../shared/utils/string_utils.dart';
 import '../../../shared/widgets/buzz_loading_indicator.dart';
 import '../../../shared/widgets/modal_presentation.dart';
 import '../../../shared/widgets/sheet_divider.dart';
+import 'task_status_picker.dart';
 import 'thread_task_chip.dart';
 
 /// Longest task-event body rendered inside the sheet.
@@ -112,7 +123,10 @@ class _TaskDetailSheet extends HookConsumerWidget {
         ),
       );
     }
-    return _TaskDetailView(detail: detail);
+    return _TaskDetailView(
+      detail: detail,
+      onChanged: () => retryTick.value++,
+    );
   }
 }
 
@@ -169,13 +183,16 @@ class _TaskDetailError extends StatelessWidget {
   }
 }
 
-class _TaskDetailView extends StatelessWidget {
-  const _TaskDetailView({required this.detail});
+class _TaskDetailView extends HookConsumerWidget {
+  const _TaskDetailView({required this.detail, required this.onChanged});
 
   final TaskDetail detail;
 
+  /// Invoked after an accepted transition to force the sheet's single re-fetch.
+  final VoidCallback onChanged;
+
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final summaryBody = detail.summary?.body?.trim();
     // The summary event is promoted to its own card above; rendering it again
     // as a history row would show the same text twice. Every OTHER event
@@ -216,11 +233,16 @@ class _TaskDetailView extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: Grid.xxs),
-                Text(
-                  threadTaskStatusLabel(detail.task.status),
-                  key: const ValueKey('task-detail-status'),
-                  style: context.textTheme.labelMedium?.copyWith(
-                    color: context.colors.onSurfaceVariant,
+                // Bounded so a long status or a hostile relay error message
+                // cannot push the row past its width. The header Row gives no
+                // width constraint of its own, so an unbounded Column here
+                // overflows on a 10k-char error (caught by the write-error
+                // clamp test, which measured a 6434px overflow).
+                Flexible(
+                  child: _TaskStatusControl(
+                    taskId: detail.task.id,
+                    status: detail.task.status,
+                    onChanged: onChanged,
                   ),
                 ),
               ],
@@ -273,6 +295,120 @@ class _TaskDetailView extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// The interactive status control and the PATCH lifecycle behind it.
+///
+/// Owns the entire write path so the picker stays a pure selection widget.
+/// The sequence is deliberately pessimistic: PATCH, and only on a relay ACK
+/// re-fetch via [onChanged]. Nothing is mutated locally, so a rejected write
+/// leaves the last relay-known status on screen rather than a phantom success.
+class _TaskStatusControl extends HookConsumerWidget {
+  const _TaskStatusControl({
+    required this.taskId,
+    required this.status,
+    required this.onChanged,
+  });
+
+  final String taskId;
+  final TaskStatus status;
+  final VoidCallback onChanged;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final isSending = useState(false);
+    final writeError = useState<String?>(null);
+
+    Future<void> pick() async {
+      // One in-flight transition at a time: a double-tap must not produce two
+      // PATCHes and two competing re-fetches.
+      if (isSending.value) return;
+      final selected = await showTaskStatusPicker(
+        context: context,
+        current: status,
+      );
+      // Dismissed without choosing, OR chose the status it already has. The
+      // relay rejects an empty patch with 400 "patch must change at least one
+      // field", so the no-op is declined HERE rather than sent and failed.
+      if (selected == null || selected == status) return;
+
+      isSending.value = true;
+      writeError.value = null;
+      try {
+        // Exactly one field crosses the wire. No actor, role or ownership
+        // claim is ever sent: the relay authorizes on channel membership.
+        await ref.read(tasksApiProvider).updateTask(taskId, status: selected);
+        onChanged();
+      } on Object catch (error) {
+        // Relay-supplied message: untrusted, clamped, plain text. The status
+        // shown stays the last relay value because nothing was mutated.
+        writeError.value = clampTaskDetailBody(error.toString());
+      } finally {
+        if (context.mounted) isSending.value = false;
+      }
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        InkWell(
+          key: const ValueKey('task-detail-status'),
+          // Disabled only while a write is in flight — never on a guessed
+          // ownership rule, which would misrepresent the relay's real gate.
+          onTap: isSending.value ? null : pick,
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              vertical: Grid.half,
+              horizontal: Grid.half,
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  threadTaskStatusLabel(status),
+                  key: const ValueKey('task-detail-status-label'),
+                  style: context.textTheme.labelMedium?.copyWith(
+                    color: context.colors.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(width: Grid.quarter),
+                if (isSending.value)
+                  const SizedBox(
+                    key: ValueKey('task-detail-status-pending'),
+                    width: 12,
+                    height: 12,
+                    child: BuzzLoadingIndicator(size: 12),
+                  )
+                else
+                  Icon(
+                    LucideIcons.chevronDown,
+                    key: const ValueKey('task-detail-status-caret'),
+                    size: 14,
+                    color: context.colors.onSurfaceVariant,
+                  ),
+              ],
+            ),
+          ),
+        ),
+        if (writeError.value case final message?)
+          Padding(
+            padding: const EdgeInsets.only(top: Grid.quarter),
+            child: Text(
+              message,
+              key: const ValueKey('task-detail-status-error'),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.end,
+              style: context.textTheme.bodySmall?.copyWith(
+                color: context.colors.error,
+              ),
+            ),
+          ),
+      ],
     );
   }
 }
