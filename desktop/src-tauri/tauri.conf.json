@@ -58,6 +58,7 @@
       "binaries/buzz-backend-kubernetes",
       "binaries/buzz-dev-mcp",
       "binaries/git-credential-nostr",
+      "binaries/buzz-read",
       "binaries/buzz"
     ],
     "icon": [

@@ -5,21 +5,22 @@ SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
 HOST=$(rustc -vV | sed -n 's|host: ||p')
 TARGET=${1:-$HOST}
 if [[ "$TARGET" != *windows* ]]; then
-    SIDECARS+=(buzz-backend-kubernetes)
-    BUILD_HINT="cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli"
+    SIDECARS+=(buzz-backend-kubernetes buzz-read)
+    BUILD_HINT="cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli && cargo build --manifest-path desktop/src-tauri/Cargo.toml --target-dir target --release --bin buzz-read"
 else
     BUILD_HINT="cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli"
 fi
-BINARIES_DIR="desktop/src-tauri/binaries"
+TARGET_DIR=${BUZZ_SIDECAR_TARGET_DIR:-target}
+BINARIES_DIR=${BUZZ_SIDECAR_BINARIES_DIR:-desktop/src-tauri/binaries}
 
 # When --target is passed explicitly to cargo (even if it matches the host),
 # binaries land in target/<triple>/release/. Without --target, they land in
 # target/release/. The script receives the target as $1 only when cargo was
 # invoked with --target, so use the qualified path whenever $1 is set.
 if [[ -n "${1:-}" ]]; then
-    SRC_DIR="target/${TARGET}/release"
+    SRC_DIR="${TARGET_DIR}/${TARGET}/release"
 else
-    SRC_DIR="target/release"
+    SRC_DIR="${TARGET_DIR}/release"
 fi
 
 # MSVC emits <name>.exe; Tauri's externalBin then expects binaries/<name>-<triple>.exe.
