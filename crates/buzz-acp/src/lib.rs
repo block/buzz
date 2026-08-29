@@ -33,7 +33,7 @@ use buzz_core::observer::{
 use clap::Parser;
 use config::{
     AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, ModelsArgs,
-    MultipleEventHandling, RespondTo, SubscribeMode,
+    MultipleEventHandling, RespondTo, SessionRouteKey, SubscribeMode,
 };
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
@@ -1087,6 +1087,7 @@ fn handle_relay_observer_control_event(
     keys: &nostr::Keys,
     event: nostr::Event,
     pool: &mut AgentPool,
+    ctx: &PromptContext,
     observer: Option<&observer::ObserverHandle>,
     owner_pubkey_hex: &str,
     event_publisher: RelayEventPublisher,
@@ -1133,7 +1134,7 @@ fn handle_relay_observer_control_event(
             handle_cancel_turn_control(&payload, pool, observer);
         }
         Some("switch_model") => {
-            handle_switch_model_control(&payload, pool, observer);
+            handle_switch_model_control(&payload, pool, ctx, observer);
         }
         Some("publish_project_owner_announcements") => {
             handle_publish_project_owner_announcements_control(
@@ -1340,6 +1341,7 @@ fn handle_cancel_turn_control(
 fn handle_switch_model_control(
     payload: &serde_json::Value,
     pool: &mut AgentPool,
+    ctx: &PromptContext,
     observer: Option<&observer::ObserverHandle>,
 ) {
     let Some(channel_id) = payload
@@ -1388,7 +1390,8 @@ fn handle_switch_model_control(
         }
     } else {
         // Idle path: validate against the cached catalog before invalidating.
-        match pool.switch_idle_agent_model(channel_id, model_id, request_id.clone()) {
+        let route_key = ctx.session_route_key(channel_id);
+        match pool.switch_idle_agent_model(&route_key, model_id, request_id.clone()) {
             IdleSwitchResult::Switched => "switched",
             IdleSwitchResult::UnsupportedModel => "unsupported_model",
             IdleSwitchResult::NoIdleAgent => "no_active_turn",
@@ -2114,6 +2117,8 @@ async fn tokio_main() -> Result<()> {
                 }),
                 require_mention: !config.no_mention_filter,
                 filter: None,
+                session_route: None,
+                role_authority: None,
                 compiled_filter: None,
                 consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 prompt_tag: Some("@mention".into()),
@@ -2126,6 +2131,8 @@ async fn tokio_main() -> Result<()> {
                 kinds: config.kinds_override.clone().unwrap_or_default(),
                 require_mention: false,
                 filter: None,
+                session_route: None,
+                role_authority: None,
                 compiled_filter: None,
                 consecutive_timeouts: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
                 prompt_tag: Some("all".into()),
@@ -2138,6 +2145,12 @@ async fn tokio_main() -> Result<()> {
     };
 
     let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let session_routes = config::resolve_session_route_keys(&channel_ids, &rules)?;
+    let channel_routes = config::resolve_channel_routes(&channel_ids, &rules)?;
+    let role_authorities: HashMap<Uuid, String> = channel_routes
+        .into_iter()
+        .filter_map(|(channel_id, route)| route.role_authority.map(|value| (channel_id, value)))
+        .collect();
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
@@ -2214,6 +2227,8 @@ async fn tokio_main() -> Result<()> {
         cwd,
         rest_client: relay.rest_client(),
         channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
+        session_routes,
+        role_authorities,
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
         permission_mode: config.permission_mode,
@@ -2366,6 +2381,9 @@ async fn tokio_main() -> Result<()> {
     // returned to the pool, its sessions for these channels are stripped, and
     // failed/panicked batches for these channels are dropped instead of requeued.
     //
+    // Session invalidation is tracked separately by route so configured shared
+    // session routes are also stripped when any routed channel loses membership.
+    //
     // Cleared on re-add (KIND_MEMBER_ADDED_NOTIFICATION) so re-joined channels
     // regain session affinity.
     //
@@ -2379,6 +2397,7 @@ async fn tokio_main() -> Result<()> {
     // causal invalidation is needed, add a monotonic epoch counter per channel
     // and capture it in TaskMeta at dispatch time.
     let mut removed_channels: HashSet<Uuid> = HashSet::new();
+    let mut removed_session_routes: HashSet<SessionRouteKey> = HashSet::new();
 
     //
     // One SlotCircuit per agent slot. crash_times entries are pruned to the last
@@ -2611,6 +2630,7 @@ async fn tokio_main() -> Result<()> {
                                     &config.keys,
                                     event,
                                     &mut pool,
+                                    &ctx,
                                     observer.as_ref(),
                                     owner_hex,
                                     relay.event_publisher(),
@@ -2689,6 +2709,7 @@ async fn tokio_main() -> Result<()> {
                                     // Clear removal tracking so sessions are not
                                     // stripped for a legitimately re-added channel.
                                     removed_channels.remove(&ch);
+                                    removed_session_routes.remove(&ctx.session_route_key(ch));
 
                                     if subscribed_channel_ids.contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
@@ -2712,15 +2733,17 @@ async fn tokio_main() -> Result<()> {
                                     // removed channel. Events already in-flight will
                                     // complete normally (the relay may reject actions if
                                     // the agent lost access).
+                                    let route_key = ctx.session_route_key(ch);
                                     let drained_ids = queue.drain_channel(ch);
                                     let invalidated = if pool_ready {
-                                        pool.invalidate_channel_sessions(ch)
+                                        pool.invalidate_route_sessions(&route_key)
                                     } else {
                                         0
                                     };
                                     // Track removed channels so checked-out agents get
-                                    // their sessions stripped when they return to the pool.
+                                    // their routed sessions stripped when they return to the pool.
                                     removed_channels.insert(ch);
+                                    removed_session_routes.insert(route_key.clone());
                                     typing_channels.remove(&ch);
                                     // Best-effort: clean up 👀 on drained events.
                                     // Note: the relay revokes membership before
@@ -2844,9 +2867,13 @@ async fn tokio_main() -> Result<()> {
                                                 "!rotate received — cancelling in-flight turn and rotating session"
                                             );
                                         } else {
-                                            let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
+                                            let route_key =
+                                                ctx.session_route_key(buzz_event.channel_id);
+                                            let invalidated =
+                                                pool.invalidate_route_sessions(&route_key);
                                             tracing::info!(
                                                 channel_id = %buzz_event.channel_id,
+                                                route = %route_key.label(),
                                                 invalidated,
                                                 "!rotate received — invalidated idle channel session(s)"
                                             );
@@ -3158,6 +3185,8 @@ async fn tokio_main() -> Result<()> {
                     *result,
                     &mut heartbeat_in_flight,
                     &removed_channels,
+                    &removed_session_routes,
+                    &ctx.session_routes,
                     &mut crash_history,
                     &respawn_tx,
                     &mut respawn_tasks,
@@ -3329,8 +3358,10 @@ async fn tokio_main() -> Result<()> {
                 );
                 if let Ok(pool::SteerAck::Success { session_id }) = &ack {
                     queue.extend_in_flight_deadline(channel_id, config.max_turn_duration_secs);
+                    let route_key = ctx.session_route_key(channel_id);
                     if !pool.record_successful_steer(
                         channel_id,
+                        &route_key,
                         event_id.clone(),
                         session_id.clone(),
                     ) {
@@ -3740,13 +3771,14 @@ fn dispatch_pending(
             None => break,
         };
         let channel_id = batch.channel_id;
+        let route_key = ctx.session_route_key(channel_id);
         let typing_scope = batch
             .events
             .last()
             .map(|event| queue::parse_thread_tags(&event.event))
             .unwrap_or_default();
-        let affinity_hit = pool.has_session_for(channel_id);
-        let mut agent = match pool.try_claim(Some(channel_id)) {
+        let affinity_hit = pool.has_session_for(&route_key);
+        let mut agent = match pool.try_claim(Some(&route_key)) {
             Some(a) => a,
             None => {
                 let pending = queue.pending_channels();
@@ -3756,7 +3788,13 @@ fn dispatch_pending(
                 break;
             }
         };
-        tracing::debug!(agent = agent.index, channel = %channel_id, affinity_hit, "agent_claimed");
+        tracing::debug!(
+            agent = agent.index,
+            channel = %channel_id,
+            route = %route_key.label(),
+            affinity_hit,
+            "agent_claimed"
+        );
 
         let recoverable_batch = match ctx.dedup_mode {
             DedupMode::Queue => Some(batch.clone()),
@@ -3882,6 +3920,8 @@ fn handle_prompt_result(
     mut result: PromptResult,
     heartbeat_in_flight: &mut bool,
     removed_channels: &HashSet<Uuid>,
+    removed_session_routes: &HashSet<SessionRouteKey>,
+    session_routes: &HashMap<Uuid, SessionRouteKey>,
     crash_history: &mut [SlotCircuit],
     respawn_tx: &mpsc::Sender<RespawnResult>,
     respawn_tasks: &mut tokio::task::JoinSet<()>,
@@ -3900,10 +3940,14 @@ fn handle_prompt_result(
         .retain(|_, meta| meta.agent_index != agent_index);
     debug_assert_eq!(before, pool.task_map().len() + 1);
     if let PromptSource::Channel(channel_id) = &result.source {
+        let route_key = session_routes
+            .get(channel_id)
+            .cloned()
+            .unwrap_or_else(|| SessionRouteKey::for_channel(*channel_id));
         // The task may have invalidated this session before returning. Never
         // resurrect delivery state for a dead session; its replacement must
         // receive fresh standing context and history.
-        if let Some(live_session_id) = result.agent.state.sessions.get(channel_id).cloned() {
+        if let Some(live_session_id) = result.agent.state.sessions.get(&route_key).cloned() {
             let event_ids = successful_steer_deliveries
                 .into_iter()
                 .filter(|delivery| delivery.session_id == live_session_id)
@@ -4038,11 +4082,11 @@ fn handle_prompt_result(
         PromptSource::Heartbeat => *heartbeat_in_flight = false,
     }
 
-    // Strip sessions for channels the agent was removed from while this
-    // agent was checked out. This covers the gap where invalidate_channel_sessions
-    // only touches idle agents.
-    for ch in removed_channels {
-        result.agent.state.invalidate_channel(ch);
+    // Strip sessions for routes the agent was removed from while this agent
+    // was checked out. This covers the gap where idle invalidation only
+    // touches agents currently in the pool.
+    for route_key in removed_session_routes {
+        result.agent.state.invalidate_route(route_key);
     }
 
     let outcome_label = match &result.outcome {
@@ -7107,12 +7151,13 @@ mod error_outcome_emission_tests {
     #[tokio::test]
     async fn successful_native_steer_is_transferred_to_live_session_delivery_state() {
         let channel_id = Uuid::new_v4();
+        let route_key = SessionRouteKey::for_channel(channel_id);
         let steer_event_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let mut agent = dummy_agent(0).await;
         agent
             .state
             .sessions
-            .insert(channel_id, "live-session".into());
+            .insert(route_key, "live-session".into());
         agent
             .state
             .deliveries
@@ -7164,6 +7209,8 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashSet::new(),
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -7180,11 +7227,12 @@ mod error_outcome_emission_tests {
     #[tokio::test]
     async fn in_flight_stale_native_steer_ack_cannot_update_replacement_session() {
         let channel_id = Uuid::new_v4();
+        let route_key = SessionRouteKey::for_channel(channel_id);
         let mut agent = dummy_agent(0).await;
         agent
             .state
             .sessions
-            .insert(channel_id, "replacement-session".into());
+            .insert(route_key, "replacement-session".into());
         agent
             .state
             .deliveries
@@ -7236,6 +7284,8 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashSet::new(),
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -7252,12 +7302,13 @@ mod error_outcome_emission_tests {
     #[tokio::test]
     async fn successful_native_steer_ack_after_task_return_updates_matching_live_session() {
         let channel_id = Uuid::new_v4();
+        let route_key = SessionRouteKey::for_channel(channel_id);
         let steer_event_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let mut agent = dummy_agent(0).await;
         agent
             .state
             .sessions
-            .insert(channel_id, "live-session".into());
+            .insert(route_key.clone(), "live-session".into());
         agent
             .state
             .deliveries
@@ -7266,6 +7317,7 @@ mod error_outcome_emission_tests {
 
         assert!(pool.record_successful_steer(
             channel_id,
+            &route_key,
             steer_event_id.into(),
             "live-session".into(),
         ));
@@ -7278,11 +7330,12 @@ mod error_outcome_emission_tests {
     #[tokio::test]
     async fn late_native_steer_ack_cannot_update_replacement_session() {
         let channel_id = Uuid::new_v4();
+        let route_key = SessionRouteKey::for_channel(channel_id);
         let mut agent = dummy_agent(0).await;
         agent
             .state
             .sessions
-            .insert(channel_id, "replacement-session".into());
+            .insert(route_key.clone(), "replacement-session".into());
         agent
             .state
             .deliveries
@@ -7291,6 +7344,7 @@ mod error_outcome_emission_tests {
 
         assert!(!pool.record_successful_steer(
             channel_id,
+            &route_key,
             "stale-event".into(),
             "old-session".into(),
         ));
@@ -7350,6 +7404,8 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashSet::new(),
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -7413,6 +7469,8 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashSet::new(),
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -7580,6 +7638,8 @@ mod error_outcome_emission_tests {
                 result,
                 &mut heartbeat_in_flight,
                 &removed_channels,
+                &HashSet::new(),
+                &HashMap::new(),
                 &mut crash_history,
                 &respawn_tx,
                 &mut respawn_tasks,
@@ -7671,6 +7731,8 @@ mod error_outcome_emission_tests {
                 result,
                 &mut heartbeat_in_flight,
                 &removed_channels,
+                &HashSet::new(),
+                &HashMap::new(),
                 &mut crash_history,
                 &respawn_tx,
                 &mut respawn_tasks,
@@ -7777,6 +7839,8 @@ mod error_outcome_emission_tests {
                 result,
                 &mut heartbeat_in_flight,
                 &removed_channels,
+                &HashSet::new(),
+                &HashMap::new(),
                 &mut crash_history,
                 &respawn_tx,
                 &mut respawn_tasks,
@@ -7869,6 +7933,8 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashSet::new(),
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -7963,6 +8029,8 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashSet::new(),
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -8079,6 +8147,8 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashSet::new(),
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -8212,6 +8282,8 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashSet::new(),
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -8291,10 +8363,11 @@ mod error_outcome_emission_tests {
         };
 
         let mut agent = dummy_agent(0).await;
+        let route_key = SessionRouteKey::for_channel(channel_id);
         agent
             .state
             .sessions
-            .insert(channel_id, "healthy-session".into());
+            .insert(route_key.clone(), "healthy-session".into());
         let mut pool = AgentPool::from_slots(vec![None]);
         let task_id = pool.join_set.spawn(async {}).id();
         pool.task_map_mut().insert(
@@ -8338,6 +8411,8 @@ mod error_outcome_emission_tests {
                 result,
                 &mut heartbeat_in_flight,
                 &removed_channels,
+                &HashSet::new(),
+                &HashMap::new(),
                 &mut crash_history,
                 &respawn_tx,
                 &mut respawn_tasks,
@@ -8351,7 +8426,7 @@ mod error_outcome_emission_tests {
             .as_ref()
             .expect("healthy agent returns to its slot");
         assert_eq!(
-            returned.state.sessions.get(&channel_id).map(String::as_str),
+            returned.state.sessions.get(&route_key).map(String::as_str),
             Some("healthy-session")
         );
         assert_eq!(queue.queued_event_count(&channel_id), 1);
@@ -8483,6 +8558,8 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashSet::new(),
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,
@@ -8569,6 +8646,8 @@ mod error_outcome_emission_tests {
             result,
             &mut heartbeat_in_flight,
             &removed_channels,
+            &HashSet::new(),
+            &HashMap::new(),
             &mut crash_history,
             &respawn_tx,
             &mut respawn_tasks,

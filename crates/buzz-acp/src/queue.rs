@@ -1647,6 +1647,9 @@ pub struct FormatPromptArgs<'a> {
     pub agent_core: Option<&'a str>,
     /// Owner-signed instructions for an active huddle channel.
     pub huddle_instructions: Option<&'a str>,
+    /// Operator-owned role authority for this channel/Forum. Rendered every
+    /// turn because a shared ACP session may serve multiple Forums.
+    pub role_authority: Option<&'a str>,
     pub channel_info: Option<&'a PromptChannelInfo>,
     pub conversation_context: Option<&'a ConversationContext>,
     /// True when delivery-delta filtering removed at least one event that this
@@ -1756,6 +1759,18 @@ pub(crate) fn base_section(base_prompt: &str) -> String {
     crate::prompt_framing::semantic_section("base", base_prompt.trim_end())
 }
 
+fn role_authority_section(role_authority: &str) -> Option<String> {
+    let trimmed = role_authority.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(crate::prompt_framing::semantic_section(
+            "role-authority",
+            trimmed,
+        ))
+    }
+}
+
 /// Format a [`FlushBatch`] into the per-section prompt blocks for the agent.
 ///
 /// Produces a stable prompt with these sections (in order):
@@ -1813,6 +1828,10 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
             }
             .sections(),
         );
+    }
+
+    if let Some(section) = args.role_authority.and_then(role_authority_section) {
+        sections.push(section);
     }
 
     // 2. Context hints (with a human-aware reply anchor).
@@ -5370,6 +5389,35 @@ mod tests {
             !prompt.contains("[Channel Canvas]"),
             "no canvas section expected when agent_canvas is None; got: {prompt}"
         );
+    }
+
+    #[test]
+    fn test_format_prompt_includes_role_authority_every_turn() {
+        let ch = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: make_event("hi"),
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                role_authority: Some("You are Down acting as Platform Circle Lead."),
+                has_system_prompt_support: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains("<role-authority>\nYou are Down acting as Platform Circle Lead.\n</role-authority>"),
+            "role authority must be repeated in each user prompt for shared sessions; got: {prompt}"
+        );
+        assert!(prompt.contains("<context>"));
     }
 
     #[test]
