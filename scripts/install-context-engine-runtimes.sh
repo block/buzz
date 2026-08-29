@@ -217,7 +217,9 @@ run_git "$gabe_root" diff --quiet --no-ext-diff "$stacy_upstream_pin" "$gabe_com
   printf 'FATAL: landed Gabe or Stacy shared runtime bytes diverge from Stacy UPSTREAM_PIN\n' >&2
   exit 1
 }
-readonly receipt_root="$runtime_root/deployment-receipts/$buzz_commit-$gabe_commit-$stacy_commit"
+# The pin is the exact provenance of the shared runtime bytes. A later approved
+# Gabe HEAD may differ only outside the guarded shared-runtime pathspecs above.
+readonly receipt_root="$runtime_root/deployment-receipts/$buzz_commit-$stacy_upstream_pin-$stacy_commit"
 readonly deployment_control_root="$runtime_root/deployment-control"
 readonly install_lock="$deployment_control_root/install.lock"
 readonly -a code_namespaces=(
@@ -530,7 +532,7 @@ verify_sha256 "$stage/buzz-acp/buzz-acp" "$buzz_acp_sha256"
 
 /bin/mkdir -p "$stage/receipt"
 /usr/bin/printf '%s\n' \
-  "{\"buzzCommit\":\"$buzz_commit\",\"gabeCommit\":\"$gabe_commit\",\"stacyCommit\":\"$stacy_commit\",\"stacyUpstreamPin\":\"$stacy_upstream_pin\",\"nodeSha256\":\"$node_sha256\",\"buzzAcpSha256\":\"$buzz_acp_sha256\",\"adapterSha256\":\"$adapter_sha256\"}" \
+  "{\"buzzCommit\":\"$buzz_commit\",\"gabeCommit\":\"$stacy_upstream_pin\",\"stacyCommit\":\"$stacy_commit\",\"nodeSha256\":\"$node_sha256\",\"buzzAcpSha256\":\"$buzz_acp_sha256\",\"adapterSha256\":\"$adapter_sha256\"}" \
   >"$stage/receipt/context-engine-runtimes.json"
 
 require_context_engine_quiescence
