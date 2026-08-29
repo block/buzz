@@ -732,6 +732,18 @@ impl RunCtx<'_> {
                         push_hook_outputs_as_tool_results(self.history, "_Stop", &objections);
                         continue;
                     }
+                    // end_turn is accepted — the turn is ending. Close the steer
+                    // channel first so the steer handler rejects any steer that
+                    // races this decision (its `steer_tx.send` fails), instead of
+                    // acknowledging it and then silently dropping it when the turn
+                    // ends. Then fold in any steer that WAS accepted before the
+                    // close: if one arrived, run one more round to act on it
+                    // rather than losing it, so a successful steer response
+                    // guarantees the run consumes the steer.
+                    self.steer.close();
+                    if self.drain_steers() {
+                        continue;
+                    }
                 }
                 return Ok(stop);
             }
@@ -766,11 +778,14 @@ impl RunCtx<'_> {
     /// steer whose blocks all fail to render (e.g. unsupported content) is
     /// skipped rather than aborting the turn — steering is best-effort
     /// augmentation, not a hard input contract like the initial prompt.
-    fn drain_steers(&mut self) {
+    /// Returns `true` if at least one non-empty steer was folded into history.
+    fn drain_steers(&mut self) -> bool {
+        let mut folded = false;
         while let Ok(blocks) = self.steer.try_recv() {
             match prompt_to_text(blocks) {
                 Ok(text) if !text.trim().is_empty() => {
                     self.history.push(HistoryItem::User(text));
+                    folded = true;
                 }
                 Ok(_) => {
                     tracing::debug!("dropping empty steer message");
@@ -780,6 +795,7 @@ impl RunCtx<'_> {
                 }
             }
         }
+        folded
     }
 
     /// Unified tool-call execution. Three phases:

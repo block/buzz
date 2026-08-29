@@ -780,6 +780,12 @@ async fn steer_folds_into_active_turn_without_cancelling() {
     let (url, captures) = spawn_capturing_fake_llm(vec![
         openai_tool_call("call_steer", "fake__noop", json!({})),
         openai_text("acknowledged the steer"),
+        // Third response is consumed only in the rare timing where the steer
+        // lands after round 2's request was already dispatched: the run folds
+        // the steer in at end_turn and runs one more round to act on it (so an
+        // accepted steer is never dropped), which needs a response. In the
+        // common timing the steer folds into round 2 and this stays unused.
+        openai_text("acknowledged the steer"),
     ])
     .await;
     let mut h = Harness::spawn(&url).await;
