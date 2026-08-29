@@ -51,6 +51,51 @@ export function ChannelTaskList({ channelId }: { channelId: string | null }) {
     return [...seen.values()];
   }, [tasks.data]);
 
+  /**
+   * REG-16 hardening: the ranker's `recentParticipantPubkeys` and
+   * `openTaskCountByPubkey` signals shipped implemented + unit-tested but with
+   * NO caller, so they could never influence a real suggestion. Both are now
+   * derived here from the SAME already-fetched task list — still no new fetch,
+   * no new authority, and no new failure mode.
+   *
+   * `recent`: pubkeys ordered by the most recent task they touched
+   * (`updatedAt` desc, author and assignee both count as touching). The ranker
+   * treats index 0 as most recent.
+   *
+   * `openTaskCount`: how many still-open tasks each pubkey is already the
+   * assignee of, so the ranker can prefer someone who is not already loaded.
+   * Only assignees count — authoring a task is not holding it.
+   */
+  const { recentParticipantPubkeys, openTaskCountByPubkey } =
+    React.useMemo(() => {
+      const recent: string[] = [];
+      const seenRecent = new Set<string>();
+      const openCounts = new Map<string, number>();
+      // Copy before sorting: `tasks.data` is react-query cache state and must
+      // never be mutated in place.
+      const byRecency = [...(tasks.data ?? [])].sort(
+        (a, b) => b.updatedAt - a.updatedAt,
+      );
+      for (const task of byRecency) {
+        for (const pubkey of [task.createdBy, task.assignee]) {
+          if (pubkey && !seenRecent.has(pubkey)) {
+            seenRecent.add(pubkey);
+            recent.push(pubkey);
+          }
+        }
+        if (task.assignee && !isTaskDone(task)) {
+          openCounts.set(
+            task.assignee,
+            (openCounts.get(task.assignee) ?? 0) + 1,
+          );
+        }
+      }
+      return {
+        recentParticipantPubkeys: recent,
+        openTaskCountByPubkey: openCounts,
+      };
+    }, [tasks.data]);
+
   const onToggle = (task: ChannelTask) => {
     setStatus.mutate(
       { taskId: task.id, status: isTaskDone(task) ? "open" : "done" },
@@ -147,7 +192,12 @@ export function ChannelTaskList({ channelId }: { channelId: string | null }) {
                     <span className="min-w-0 break-words">{task.title}</span>
                   </button>
                   {task.assignee === null ? (
-                    <SuggestedOwners candidates={ownerCandidates} task={task} />
+                    <SuggestedOwners
+                      candidates={ownerCandidates}
+                      openTaskCountByPubkey={openTaskCountByPubkey}
+                      recentParticipantPubkeys={recentParticipantPubkeys}
+                      task={task}
+                    />
                   ) : null}
                 </li>
               );
