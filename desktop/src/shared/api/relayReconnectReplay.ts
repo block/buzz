@@ -213,12 +213,8 @@ export async function replayLiveSubscriptions({
    */
   isActive?: () => boolean;
 }) {
-  // If the relay has signalled back-pressure, wait for the gate to clear
-  // before blasting a full set of REQs that would immediately be rate-limited.
-  if (isRateLimited()) await waitForRateLimit();
-
-  // A newer connection may have replayed while this one was suspended at the
-  // gate — abort silently to avoid double-sending every REQ on the live socket.
+  // Snapshot before any admission wait. Subscriptions created on this already
+  // authenticated connection send their own REQ and must not join its replay.
   if (!isActive()) return;
 
   const replayRequests = Array.from(subscriptions.entries())

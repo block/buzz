@@ -26,7 +26,6 @@ import {
   buildChannelAuxDeletionFilter,
   buildChannelFilter,
   buildChannelHistoryFilter,
-  buildChannelMentionFilter,
   buildGlobalStreamFilter,
 } from "@/shared/api/relayChannelFilters";
 import {
@@ -414,16 +413,6 @@ export class RelayClient {
   ) {
     return this.subscribe(filter, onEvent, onReady, readinessTimeoutMs);
   }
-  async subscribeToChannelMentionEvents(
-    channelId: string,
-    pubkey: string,
-    onEvent: (event: RelayEvent) => void,
-  ) {
-    return this.subscribe(
-      buildChannelMentionFilter(channelId, pubkey, 50),
-      onEvent,
-    );
-  }
   async preconnect() {
     // Explicit re-engagement (reconnect card / community switch): clears the
     // terminal latch and AUTH rejection streak, and bypasses backoff once.
@@ -580,8 +569,10 @@ export class RelayClient {
       }, BACKOFF_RESET_STABLE_MS);
 
       this.connectionStateEmitter.set("connected");
-      await this.replayLiveSubscriptions();
       this.stallWatchdog.start();
+      // Authenticated is writable. Replay/repair runs in the background and
+      // owns its generation-fenced failure recovery; it must not park sends.
+      void this.replayLiveSubscriptions();
       this.emitReconnectIfNeeded();
     } catch (error) {
       const connectionError = this.normalizeRelayError(
@@ -602,6 +593,12 @@ export class RelayClient {
     readinessTimeoutMs = 250,
   ) {
     await this.ensureConnected();
+    const generation = this.connectionGeneration;
+    // AUTH-ready is not admission-ready. Wait before starting the REQ timer.
+    await waitForRateLimit();
+    if (generation !== this.connectionGeneration) {
+      throw new Error("Relay subscription was superseded while waiting.");
+    }
 
     const subId = `live-${crypto.randomUUID()}`;
     let resolveReady = (_readiness: LiveSubscriptionReadiness) => {};
@@ -942,12 +939,13 @@ export class RelayClient {
         isActive: () => this.connectionGeneration === generation,
       });
     } catch (error) {
-      const reconnectError =
-        error instanceof Error
-          ? error
-          : new Error("Failed to restore relay subscriptions.");
-      this.resetConnection(reconnectError);
-      throw reconnectError;
+      if (generation !== this.connectionGeneration) return;
+      this.resetConnection(
+        this.normalizeRelayError(
+          error,
+          "Failed to restore relay subscriptions.",
+        ),
+      );
     }
   }
 
