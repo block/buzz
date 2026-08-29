@@ -333,7 +333,13 @@ export function classifyMeetingError(
         return pick("subscription_expired");
       return pick("membership_required");
     case 404:
-      return pick("not_configured");
+      // The relay 404s every `/meetings/*` route when the community relay has
+      // no HiveTalk config. Any other 404 came from HiveTalk itself —
+      // `/api/room-info` answers a name that is not in the registry with a
+      // plain-text `404 Room not found`, which the relay forwards verbatim.
+      if (reason === "meetings is not configured")
+        return pick("not_configured");
+      return pick("room_not_registered");
     case 409:
       return pick("pending_invoice");
     case 429: {

@@ -104,6 +104,9 @@ test("classifyMeetingError maps every documented status/reason", () => {
     ],
     [403, { error: "relay_membership_required" }, "membership_required"],
     [404, { error: "meetings is not configured" }, "not_configured"],
+    // Forwarded from HiveTalk now that the relay preserves the upstream status
+    // on a plain-text error body instead of rewriting it to a 502.
+    [404, { error: "Room not found" }, "room_not_registered"],
     [409, { reason: "pending_invoice" }, "pending_invoice"],
     [429, { error: "rate-limited: retry in 12s" }, "rate_limited"],
     [502, { error: "meeting provider is unavailable" }, "provider_unavailable"],

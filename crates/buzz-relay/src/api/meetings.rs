@@ -628,7 +628,7 @@ async fn forward(
         ));
     }
 
-    let upstream = limited_json(response).await?;
+    let upstream = limited_json(status.as_u16(), response).await?;
     let filtered = filter_body(route.filter, upstream);
     // Preserve the upstream status so the client can branch on 402/403/409.
     let mapped = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -681,7 +681,37 @@ fn pick_fields(value: &Value, fields: &[&str]) -> Value {
     Value::Object(out)
 }
 
-async fn limited_json(response: reqwest::Response) -> Result<Value, (StatusCode, Json<Value>)> {
+/// Longest plain-text upstream error forwarded to the client. Long enough for
+/// HiveTalk's short messages, short enough that an HTML error page or a stack
+/// trace cannot ride along.
+const MAX_PLAIN_TEXT_ERROR_CHARS: usize = 200;
+
+/// Render a non-JSON upstream error body as an `error` string.
+///
+/// Refuses anything that looks like markup and anything empty, so a provider
+/// error page degrades to a generic message rather than leaking a document.
+fn plain_text_error(body: &[u8]) -> String {
+    let text = String::from_utf8_lossy(body);
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.starts_with('<') {
+        return "meeting provider returned an error".to_string();
+    }
+    trimmed.chars().take(MAX_PLAIN_TEXT_ERROR_CHARS).collect()
+}
+
+/// Read the upstream body as JSON.
+///
+/// HiveTalk does not answer exclusively in JSON: `/api/room-info` reports an
+/// unknown room as plain-text `404 Room not found`, and `/api/get-token`
+/// documents several plain-text `400`s. Rewriting those to a `502` discarded
+/// the real status and told the user the provider was down when it was working
+/// correctly. A non-JSON body on an **error** status is wrapped as
+/// `{"error": "<text>"}` so the caller keeps the status; a non-JSON body on a
+/// **success** status is still a broken response and stays a `502`.
+async fn limited_json(
+    status: u16,
+    response: reqwest::Response,
+) -> Result<Value, (StatusCode, Json<Value>)> {
     if response
         .content_length()
         .is_some_and(|length| length > MAX_UPSTREAM_RESPONSE_BYTES as u64)
@@ -715,12 +745,24 @@ async fn limited_json(response: reqwest::Response) -> Result<Value, (StatusCode,
         return Ok(Value::Object(Map::new()));
     }
 
-    serde_json::from_slice(&body).map_err(|_| {
-        api_error(
+    match serde_json::from_slice(&body) {
+        Ok(value) => Ok(value),
+        Err(_) if (400..600).contains(&status) => {
+            let message = plain_text_error(&body);
+            tracing::debug!(
+                status,
+                "HiveTalk upstream returned a non-JSON error body; forwarding it"
+            );
+            Ok(Value::Object(Map::from_iter([(
+                "error".to_string(),
+                Value::String(message),
+            )])))
+        }
+        Err(_) => Err(api_error(
             StatusCode::BAD_GATEWAY,
             "meeting provider returned an invalid response",
-        )
-    })
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -869,6 +911,72 @@ mod tests {
         assert_eq!(
             filtered.as_array().expect("array").len(),
             MAX_ARRAY_ELEMENTS
+        );
+    }
+
+    fn upstream_response(status: u16, body: &'static str) -> reqwest::Response {
+        reqwest::Response::from(
+            axum::http::Response::builder()
+                .status(status)
+                .body(body)
+                .expect("test upstream response"),
+        )
+    }
+
+    #[test]
+    fn plain_text_error_keeps_a_short_provider_message() {
+        assert_eq!(plain_text_error(b"Room not found"), "Room not found");
+        assert_eq!(plain_text_error(b"  pubkey is required
+"), "pubkey is required");
+    }
+
+    #[test]
+    fn plain_text_error_refuses_markup_and_empty_bodies() {
+        let generic = "meeting provider returned an error";
+        assert_eq!(plain_text_error(b"<html><body>oops</body></html>"), generic);
+        assert_eq!(plain_text_error(b"   "), generic);
+        assert_eq!(plain_text_error(b""), generic);
+    }
+
+    #[test]
+    fn plain_text_error_caps_a_long_body() {
+        let long = "x".repeat(MAX_PLAIN_TEXT_ERROR_CHARS + 50);
+        assert_eq!(
+            plain_text_error(long.as_bytes()).chars().count(),
+            MAX_PLAIN_TEXT_ERROR_CHARS
+        );
+    }
+
+    #[tokio::test]
+    async fn limited_json_forwards_a_plain_text_error_body() {
+        // HiveTalk answers `/api/room-info` for an unknown room with a
+        // plain-text 404. Rewriting it to a 502 told the user the provider was
+        // down; the caller needs the real status to say "no such room".
+        let value = limited_json(404, upstream_response(404, "Room not found"))
+            .await
+            .expect("a non-JSON error body is forwarded, not rejected");
+        assert_eq!(value["error"], Value::String("Room not found".to_string()));
+    }
+
+    #[tokio::test]
+    async fn limited_json_still_rejects_a_non_json_success_body() {
+        let error = limited_json(200, upstream_response(200, "not json"))
+            .await
+            .expect_err("a non-JSON success body is a broken response");
+        assert_eq!(error.0, StatusCode::BAD_GATEWAY);
+    }
+
+    #[tokio::test]
+    async fn limited_json_prefers_a_real_json_error_envelope() {
+        let value = limited_json(
+            402,
+            upstream_response(402, r#"{"reason":"subscription_required"}"#),
+        )
+        .await
+        .expect("valid JSON parses");
+        assert_eq!(
+            value["reason"],
+            Value::String("subscription_required".to_string())
         );
     }
 
