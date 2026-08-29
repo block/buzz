@@ -7,9 +7,8 @@ use super::agent_env::{build_buzz_agent_provider_defaults, idle_pool_sleep_env};
 use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
-        missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentSummary,
+        normalize_agent_args, open_log_file, resolve_command, spawn_key_refusal, KnownAcpRuntime,
+        ManagedAgentPairRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -75,9 +74,8 @@ pub(crate) use spawn_key::bound_runtime_key;
 
 mod context_engine;
 use context_engine::{
-    apply_context_engine_identity, child_rust_log_filter, classify_context_engine_harness,
-    deliver_acp_credentials, install_acp_credential_stdin, revalidate_trusted_buzz_acp,
-    validate_trusted_buzz_acp, ContextEngineHarnessClass,
+    apply_context_engine_identity, child_rust_log_filter, deliver_acp_credentials,
+    install_acp_credential_stdin, prepare_context_engine_launch, revalidate_trusted_buzz_acp,
 };
 
 mod ordinary_workspace;
@@ -413,8 +411,6 @@ pub fn spawn_agent_child(
     let stderr = stdout
         .try_clone()
         .map_err(|error| format!("failed to clone log handle: {error}"))?;
-    let resolved_acp_command = resolve_command(&record.acp_command)
-        .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
     let effective_mcp_command = known_acp_runtime(effective_command)
         .and_then(|r| r.mcp_command)
         .unwrap_or("");
@@ -435,20 +431,13 @@ pub fn spawn_agent_child(
     let resolved_agent_command = resolve_command(effective_command)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
-    let (trusted_context_engine, trusted_buzz_acp_identity) =
-        match classify_context_engine_harness(&resolved_agent_command, agent_args) {
-            ContextEngineHarnessClass::Exact(harness) => (
-                Some(harness),
-                Some(validate_trusted_buzz_acp(&resolved_acp_command)?),
-            ),
-            ContextEngineHarnessClass::ReservedInvalid => {
-                return Err(
-                    "reserved Context Engine runtime path does not match the reviewed harness tuple"
-                        .to_string(),
-                );
-            }
-            ContextEngineHarnessClass::Ordinary => (None, None),
-        };
+    let (trusted_context_engine, resolved_acp_command, trusted_buzz_acp_identity) =
+        prepare_context_engine_launch(
+            &resolved_agent_command,
+            agent_args,
+            &record.acp_command,
+            resolve_command,
+        )?;
     let secure_context_engine_credentials = trusted_context_engine.is_some();
 
     // The caller supplies the explicit canonical pair relay. This is the only
@@ -473,7 +462,11 @@ pub fn spawn_agent_child(
     );
 
     let mut command = std::process::Command::new(&resolved_acp_command);
-    configure_outer_workdir(&mut command, secure_context_engine_credentials, &record.pubkey)?;
+    configure_outer_workdir(
+        &mut command,
+        secure_context_engine_credentials,
+        &record.pubkey,
+    )?;
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::from(stdout));
     command.stderr(std::process::Stdio::from(stderr));

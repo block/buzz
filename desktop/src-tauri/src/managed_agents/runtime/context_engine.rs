@@ -75,6 +75,56 @@ pub(super) fn classify_context_engine_harness(
     }
 }
 
+pub(super) fn resolve_outer_acp_command(
+    class: ContextEngineHarnessClass,
+    requested_command: &str,
+    resolve_requested: impl FnOnce(&str) -> Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    match class {
+        ContextEngineHarnessClass::Exact(_) => Some(std::path::PathBuf::from(TRUSTED_BUZZ_ACP)),
+        ContextEngineHarnessClass::ReservedInvalid | ContextEngineHarnessClass::Ordinary => {
+            resolve_requested(requested_command)
+        }
+    }
+}
+
+pub(super) fn prepare_context_engine_launch(
+    resolved_agent_command: &str,
+    agent_args: &[String],
+    requested_acp_command: &str,
+    resolve_requested: impl FnOnce(&str) -> Option<std::path::PathBuf>,
+) -> Result<
+    (
+        Option<TrustedContextEngineHarness>,
+        std::path::PathBuf,
+        Option<TrustedBuzzAcpIdentity>,
+    ),
+    String,
+> {
+    let class = classify_context_engine_harness(resolved_agent_command, agent_args);
+    let harness = match class {
+        ContextEngineHarnessClass::Exact(harness) => Some(harness),
+        ContextEngineHarnessClass::ReservedInvalid => {
+            return Err(
+                "reserved Context Engine runtime path does not match the reviewed harness tuple"
+                    .to_string(),
+            );
+        }
+        ContextEngineHarnessClass::Ordinary => None,
+    };
+    let outer_acp = resolve_outer_acp_command(class, requested_acp_command, resolve_requested)
+        .ok_or_else(|| {
+            crate::managed_agents::missing_command_message(
+                requested_acp_command,
+                "ACP harness command",
+            )
+        })?;
+    let identity = harness
+        .map(|_| validate_trusted_buzz_acp(&outer_acp))
+        .transpose()?;
+    Ok((harness, outer_acp, identity))
+}
+
 fn sha256_reader(reader: &mut std::fs::File) -> Result<String, String> {
     use sha2::{Digest as _, Sha256};
 
@@ -633,6 +683,11 @@ mod tests {
         let ContextEngineHarnessClass::Exact(harness) = class else {
             panic!("reviewed Stacy tuple must classify as exact");
         };
+        let outer_acp = resolve_outer_acp_command(class, "buzz-acp", |_| {
+            panic!("the Add Agent default must not resolve through PATH for a trusted tuple")
+        })
+        .expect("trusted Stacy tuple selects the frozen outer ACP binary");
+        assert_eq!(outer_acp, std::path::Path::new(TRUSTED_BUZZ_ACP));
         let mut command = std::process::Command::new("/usr/bin/true");
         for key in CONTEXT_ENGINE_IDENTITY_KEYS {
             command.env(key, "ambient-imposter");
@@ -655,8 +710,14 @@ mod tests {
                 )
             })
             .collect::<std::collections::BTreeMap<_, _>>();
-        assert_eq!(env["BUZZ_STACY_AGENT_PUBKEY"].as_deref(), Some(agent.as_str()));
-        assert_eq!(env["BUZZ_STACY_OWNER_PUBKEY"].as_deref(), Some(owner.as_str()));
+        assert_eq!(
+            env["BUZZ_STACY_AGENT_PUBKEY"].as_deref(),
+            Some(agent.as_str())
+        );
+        assert_eq!(
+            env["BUZZ_STACY_OWNER_PUBKEY"].as_deref(),
+            Some(owner.as_str())
+        );
         assert_eq!(env["BUZZ_GABE_AGENT_PUBKEY"], None);
         assert_eq!(env["BUZZ_GABE_OWNER_PUBKEY"], None);
         for secret_key in ["BUZZ_PRIVATE_KEY", "NOSTR_PRIVATE_KEY", "BUZZ_AUTH_TAG"] {

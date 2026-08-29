@@ -51,7 +51,10 @@ fn require_real_directory(path: &Path, label: &str) -> Result<(), String> {
         .symlink_metadata()
         .map_err(|error| format!("inspect {label} {}: {error}", path.display()))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(format!("{label} is not a real directory: {}", path.display()));
+        return Err(format!(
+            "{label} is not a real directory: {}",
+            path.display()
+        ));
     }
     Ok(())
 }
@@ -66,8 +69,9 @@ fn ensure_private_directory(path: &Path) -> Result<(), String> {
         }
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir(path)
-                .map_err(|error| format!("create ordinary agent scratch {}: {error}", path.display()))?;
+            std::fs::create_dir(path).map_err(|error| {
+                format!("create ordinary agent scratch {}: {error}", path.display())
+            })?;
         }
         Err(error) => {
             return Err(format!(
@@ -79,8 +83,9 @@ fn ensure_private_directory(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| format!("secure ordinary agent scratch {}: {error}", path.display()))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| format!("secure ordinary agent scratch {}: {error}", path.display()),
+        )?;
     }
     Ok(())
 }
@@ -102,7 +107,10 @@ mod tests {
         let pubkey = "ab".repeat(32);
         let scratch = prepare_ordinary_agent_scratch_at(&nest, &pubkey)
             .expect("create private agent scratch");
-        assert_eq!(scratch.file_name().and_then(|name| name.to_str()), Some(pubkey.as_str()));
+        assert_eq!(
+            scratch.file_name().and_then(|name| name.to_str()),
+            Some(pubkey.as_str())
+        );
         assert!(!scratch.join("sibling-secret").exists());
         #[cfg(unix)]
         {
