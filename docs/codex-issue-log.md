@@ -61,3 +61,10 @@
 - 处理：Thread 上下文改用事件字段作为稳定依赖，避免 feed 刷新重复启动请求；增加 15 秒总超时，超时后结束 loading 并显示上下文加载错误。
 - 验证：`pnpm typecheck`、Biome 检查和启动日志单元测试通过；Thread 上下文回归测试待补充。
 - 版本/提交：待提交。
+
+## 2026-08-29：旧安装配置下 Thread 仍卡在加载
+
+- 现象：使用旧安装配置打开 Inbox Thread 仍停在 `Loading surrounding context...`，而清空配置后的新环境正常。
+- 定位：启动迁移只清理了 `buzz-channels.v1` 等目录索引缓存，却遗漏真正保存频道消息窗口的 `buzz-channel-messages.v1`；旧安装还会保留已经写入的 `buzz-storage-repair-v1` 标记，导致后续版本不会再次清理。
+- 处理：增加 `buzz-storage-repair-v2` 迁移标记，并将频道消息快照纳入一次性清理范围。清理仅删除可重建的社区/频道缓存，保留 Community、身份、Agent 配置和服务端聊天记录。
+- 验证：待运行桌面类型检查、Biome 和社区存储回归测试。

@@ -4,9 +4,13 @@ import { migrateLegacyCommunityStorage } from "./communityStorage";
 
 const BUZZ_COMMUNITIES_KEY = "buzz-communities";
 const BUZZ_ACTIVE_COMMUNITY_KEY = "buzz-active-community-id";
-const BUZZ_STORAGE_REPAIR_KEY = "buzz-storage-repair-v1";
+// Bump this marker whenever the disposable community cache set changes. A
+// marker bump is required because older installs may already have recorded a
+// successful repair while retaining a cache that later proved unsafe.
+const BUZZ_STORAGE_REPAIR_KEY = "buzz-storage-repair-v2";
 const COMMUNITY_CACHE_PREFIXES = [
   "buzz-channels.v1:",
+  "buzz-channel-messages.v1:",
   "buzz-home-feed-",
   "buzz-observed-",
   "buzz-active-agent-turns:",
