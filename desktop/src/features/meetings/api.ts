@@ -87,6 +87,56 @@ export type MeetingPlan = {
   [key: string]: unknown;
 };
 
+/**
+ * Raw `GET /api/plans` body. HiveTalk wraps the list in an envelope and names
+ * its fields `id` / `price_sats`, not `plan` / `amount_sats`; `normalizePlans`
+ * is the single place that reconciles the two.
+ */
+export type PlansResponse = {
+  free_quota?: number;
+  plans?: unknown;
+};
+
+function planPeriod(days: unknown): string | undefined {
+  if (typeof days !== "number" || !Number.isFinite(days)) return undefined;
+  if (days === 365) return "year";
+  if (days === 730) return "2 years";
+  return `${days} days`;
+}
+
+/**
+ * Map the HiveTalk `/api/plans` envelope onto `MeetingPlan[]`.
+ *
+ * Accepts a bare array too: the endpoint is passed through the relay
+ * unfiltered, so a future HiveTalk that drops the envelope must not blank the
+ * plan grid. Entries missing an id or a price are dropped rather than rendered
+ * as `undefined sats`.
+ */
+export function normalizePlans(body: unknown): MeetingPlan[] {
+  const raw = Array.isArray(body)
+    ? body
+    : Array.isArray((body as PlansResponse | null)?.plans)
+      ? ((body as PlansResponse).plans as unknown[])
+      : [];
+
+  return raw.flatMap((entry) => {
+    if (typeof entry !== "object" || entry === null) return [];
+    const record = entry as Record<string, unknown>;
+    const plan = record.plan ?? record.id;
+    const amount = record.amount_sats ?? record.price_sats;
+    if (typeof plan !== "string" || typeof amount !== "number") return [];
+    const period = record.period ?? record.interval ?? planPeriod(record.days);
+    return [
+      {
+        ...record,
+        plan,
+        amount_sats: amount,
+        ...(period === undefined ? {} : { period }),
+      } satisfies MeetingPlan,
+    ];
+  });
+}
+
 export type SubscriptionStatus = {
   status: string;
   entitled: boolean;
@@ -107,7 +157,8 @@ export type SubscribeIntent = {
   amount_sats: number;
   bolt11: string;
   payment_hash: string;
-  expires_at: string;
+  /** Unix seconds from HiveTalk; ISO 8601 tolerated. See `expiryMs`. */
+  expires_at: string | number;
   status: string;
 };
 
@@ -116,7 +167,8 @@ export type PaymentStatus = {
   status: string;
   plan?: string;
   settled_msat?: number;
-  expires_at?: string;
+  /** Unix seconds from HiveTalk; ISO 8601 tolerated. See `expiryMs`. */
+  expires_at?: string | number;
   subscription?: SubscriptionStatus;
 };
 
@@ -150,6 +202,36 @@ export type ActiveRoom = {
   lobby_enabled?: boolean;
   room_kind?: string;
 };
+
+/**
+ * Map a room list onto `ActiveRoom[]`.
+ *
+ * Two upstream endpoints feed this type and they do **not** agree:
+ * `/api/list-rooms` reports live LiveKit rooms (`name`, `numParticipants`),
+ * while `/api/rooms-by-pubkey` reports registered rooms (`room_name`,
+ * `room_id`, no participant count). Reading only `name` left every "My rooms"
+ * entry blank with an undefined join target. Entries with no usable name are
+ * dropped rather than rendered as an unjoinable blank row.
+ */
+export function normalizeRooms(body: unknown): ActiveRoom[] {
+  if (!Array.isArray(body)) return [];
+  return body.flatMap((entry) => {
+    if (typeof entry !== "object" || entry === null) return [];
+    const record = entry as Record<string, unknown>;
+    const name = record.name ?? record.room_name;
+    if (typeof name !== "string" || name.trim().length === 0) return [];
+    const participants = record.numParticipants ?? record.num_participants;
+    return [
+      {
+        ...record,
+        name,
+        ...(typeof participants === "number"
+          ? { numParticipants: participants }
+          : {}),
+      } satisfies ActiveRoom,
+    ];
+  });
+}
 
 export type MeetingToken = { token: string; url: string };
 

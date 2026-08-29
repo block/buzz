@@ -78,8 +78,7 @@ export function shouldStopPollingPayment(
     return true;
   }
   return (
-    typeof payment.expires_at === "string" &&
-    payment.expires_at.length > 0 &&
+    !Number.isNaN(expiryMs(payment.expires_at)) &&
     secondsUntilExpiry(payment.expires_at, now) <= 0
   );
 }
@@ -94,9 +93,37 @@ export function buildLightningUri(bolt11: string): string {
   return `lightning:${bolt11.trim().toUpperCase()}`;
 }
 
-/** Seconds until `expiresAt` (ISO 8601), clamped at 0. `NaN` timestamp → 0. */
-export function secondsUntilExpiry(expiresAt: string, now: number): number {
-  const deadline = Date.parse(expiresAt);
+/**
+ * Epoch milliseconds for a HiveTalk expiry field, or `NaN` when absent or
+ * unparseable.
+ *
+ * HiveTalk sends `expires_at` as a **Unix seconds number** (e.g.
+ * `1787974540`), not the ISO 8601 string the type once claimed. `Date.parse`
+ * stringifies a number and returns `NaN`, which made every invoice read as
+ * already expired. Accepts ISO strings, numeric strings, seconds, and
+ * milliseconds so either side can change without breaking the countdown.
+ */
+export function expiryMs(
+  expiresAt: string | number | null | undefined,
+): number {
+  if (typeof expiresAt === "number") {
+    if (!Number.isFinite(expiresAt)) return Number.NaN;
+    // Anything below ~2001 in ms is really a seconds timestamp.
+    return expiresAt < 1e12 ? expiresAt * 1000 : expiresAt;
+  }
+  if (typeof expiresAt !== "string") return Number.NaN;
+  const trimmed = expiresAt.trim();
+  if (trimmed.length === 0) return Number.NaN;
+  if (/^\d+$/.test(trimmed)) return expiryMs(Number(trimmed));
+  return Date.parse(trimmed);
+}
+
+/** Seconds until `expiresAt`, clamped at 0. Unparseable timestamp → 0. */
+export function secondsUntilExpiry(
+  expiresAt: string | number | null | undefined,
+  now: number,
+): number {
+  const deadline = expiryMs(expiresAt);
   if (Number.isNaN(deadline)) return 0;
   return Math.max(0, Math.floor((deadline - now) / 1000));
 }

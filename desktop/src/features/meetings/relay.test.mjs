@@ -5,7 +5,9 @@ import {
   getMeetingToken,
   getPaymentStatus,
   listRooms,
+  listRoomsByPubkey,
   moderateRoom,
+  registerRoom,
   subscribe,
 } from "./relay.ts";
 
@@ -274,6 +276,49 @@ test("moderateRoom forwards a Bearer LiveKit JWT and no challenge header", async
       captured.init.body,
       JSON.stringify({ room: "r", identity: "bob" }),
     );
+  } finally {
+    teardown();
+  }
+});
+
+test("registerRoom sends HiveTalk's snake_case room_name", async () => {
+  setupSigner();
+  await withChallengeAndCapture(
+    new Response(
+      JSON.stringify({
+        room_id: "r1",
+        room_name: "team-standup",
+        pubkey: "a".repeat(64),
+      }),
+      { status: 201 },
+    ),
+    async (captured) => {
+      const room = await registerRoom(RELAY_WS, CAP, "team-standup");
+      assert.equal(room.room_name, "team-standup");
+      // `{ roomName }` is what the integration notes said; the live API and
+      // openapi.yaml both require `room_name` and 400 on anything else.
+      assert.deepEqual(JSON.parse(captured.call.init.body), {
+        room_name: "team-standup",
+      });
+    },
+  );
+});
+
+test("listRoomsByPubkey normalizes registered rooms onto `name`", async () => {
+  setupSigner();
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify([
+        { room_name: "Celestial  Solace", room_id: "r1", locked: true },
+        { room_id: "no-name" },
+      ]),
+      { status: 200 },
+    );
+  try {
+    const rooms = await listRoomsByPubkey(RELAY_WS, "f".repeat(64));
+    assert.equal(rooms.length, 1, "the nameless entry is dropped");
+    assert.equal(rooms[0].name, "Celestial  Solace");
+    assert.equal(rooms[0].locked, true);
   } finally {
     teardown();
   }

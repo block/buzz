@@ -32,6 +32,8 @@ import {
   type RoomInfo,
   type SubscribeIntent,
   type SubscriptionStatus,
+  normalizePlans,
+  normalizeRooms,
   relayMeetingsCapability,
 } from "@/features/meetings/api";
 import { relayHttpFromWs } from "@/shared/api/inviteHelpers";
@@ -278,11 +280,15 @@ export async function fetchMeetingsCapability(
 
 // --- public API (unauthenticated-to-HiveTalk, buzz-membership-gated) ---
 
-export function getPlans(
+export async function getPlans(
   relayWsUrl: string,
   signal?: AbortSignal,
 ): Promise<MeetingPlan[]> {
-  return meetingsRequest(relayWsUrl, "GET", "/plans", { signal });
+  // HiveTalk answers with `{ free_quota, plans: [...] }`, not a bare array.
+  const body = await meetingsRequest<unknown>(relayWsUrl, "GET", "/plans", {
+    signal,
+  });
+  return normalizePlans(body);
 }
 
 export function getRoomInfo(
@@ -296,22 +302,35 @@ export function getRoomInfo(
   });
 }
 
-export function listRooms(
+export async function listRooms(
   relayWsUrl: string,
   signal?: AbortSignal,
 ): Promise<ActiveRoom[]> {
-  return meetingsRequest(relayWsUrl, "GET", "/list-rooms", { signal });
+  const body = await meetingsRequest<unknown>(
+    relayWsUrl,
+    "GET",
+    "/list-rooms",
+    {
+      signal,
+    },
+  );
+  return normalizeRooms(body);
 }
 
-export function listRoomsByPubkey(
+export async function listRoomsByPubkey(
   relayWsUrl: string,
   pubkeyHex: string,
   signal?: AbortSignal,
 ): Promise<ActiveRoom[]> {
-  return meetingsRequest(relayWsUrl, "GET", "/rooms-by-pubkey", {
-    query: `pubkey=${encodeURIComponent(pubkeyHex)}`,
-    signal,
-  });
+  // `/rooms-by-pubkey` returns registered rooms keyed `room_name`, not the
+  // LiveKit `name` that `/list-rooms` uses. See `normalizeRooms`.
+  const body = await meetingsRequest<unknown>(
+    relayWsUrl,
+    "GET",
+    "/rooms-by-pubkey",
+    { query: `pubkey=${encodeURIComponent(pubkeyHex)}`, signal },
+  );
+  return normalizeRooms(body);
 }
 
 // --- public API (HiveTalk challenge flow) ---
@@ -370,7 +389,9 @@ export function registerRoom(
   roomName: string,
   signal?: AbortSignal,
 ): Promise<RegisteredRoom> {
-  const body = JSON.stringify({ roomName });
+  // HiveTalk's `/api/register-room` requires `room_name` (snake_case) and
+  // answers `400 room_name is required` to anything else.
+  const body = JSON.stringify({ room_name: roomName });
   return challengeFlow(relayWsUrl, cap, {
     action: "create-room",
     method: "POST",
@@ -384,10 +405,17 @@ export function registerRoom(
 export function editRoom(
   relayWsUrl: string,
   cap: Pick<RelayMeetingsCapability, "apiBase">,
-  args: { roomName: string; newName?: string; isPrivate?: boolean },
+  args: { roomName: string; newName: string; roomId?: string },
   signal?: AbortSignal,
 ): Promise<RegisteredRoom> {
-  const body = JSON.stringify(args);
+  // `/api/room/edit` takes snake_case and requires `new_name`; the room is
+  // keyed by `room_id` when given, else by its current `room_name`. There is
+  // no privacy field here — that comes from the kind-30312 `status`.
+  const body = JSON.stringify({
+    new_name: args.newName,
+    room_name: args.roomName,
+    ...(args.roomId === undefined ? {} : { room_id: args.roomId }),
+  });
   return challengeFlow(relayWsUrl, cap, {
     action: "edit-room",
     method: "POST",

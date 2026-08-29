@@ -5,6 +5,7 @@ import { MeetingError } from "../api.ts";
 import {
   buildLightningUri,
   classifyPaymentStatus,
+  expiryMs,
   formatCountdown,
   isInvoiceExpired,
   isTerminalPaymentOutcome,
@@ -209,4 +210,74 @@ test("subscriptionBadgeModel: expired paid_until reads 'Expired'", () => {
   const model = subscriptionBadgeModel(subscription({ paid_until: past }), T0);
   assert.equal(model.expiryText, "Expired 2026-08-27");
   assert.equal(model.tone, "warning");
+});
+
+// HiveTalk sends `expires_at` as Unix *seconds*, captured live from
+// `POST /meetings/subscribe` -> 409 pending_invoice.
+const HIVETALK_EXPIRES_AT = 1787974540;
+
+test("expiryMs reads HiveTalk's Unix-seconds expires_at", () => {
+  assert.equal(expiryMs(HIVETALK_EXPIRES_AT), HIVETALK_EXPIRES_AT * 1000);
+  assert.equal(expiryMs(`${HIVETALK_EXPIRES_AT}`), HIVETALK_EXPIRES_AT * 1000);
+});
+
+test("expiryMs still reads ISO 8601 and millisecond epochs", () => {
+  assert.equal(expiryMs("2026-08-28T00:00:00.000Z"), T0);
+  assert.equal(expiryMs(T0), T0);
+});
+
+test("expiryMs returns NaN for absent or unparseable values", () => {
+  for (const bad of [
+    null,
+    undefined,
+    "",
+    "   ",
+    "not-a-date",
+    Number.NaN,
+    Infinity,
+  ]) {
+    assert.ok(Number.isNaN(expiryMs(bad)), `expected NaN for ${String(bad)}`);
+  }
+});
+
+test("a live HiveTalk invoice is not reported as already expired", () => {
+  const now = (HIVETALK_EXPIRES_AT - 300) * 1000;
+  const live = intent({ expires_at: HIVETALK_EXPIRES_AT });
+  assert.equal(isInvoiceExpired(live, now), false);
+  assert.equal(secondsUntilExpiry(HIVETALK_EXPIRES_AT, now), 300);
+  assert.equal(
+    formatCountdown(secondsUntilExpiry(HIVETALK_EXPIRES_AT, now)),
+    "5:00",
+  );
+});
+
+test("a numeric expires_at still expires once it passes", () => {
+  const now = (HIVETALK_EXPIRES_AT + 1) * 1000;
+  assert.equal(
+    isInvoiceExpired(intent({ expires_at: HIVETALK_EXPIRES_AT }), now),
+    true,
+  );
+});
+
+test("shouldStopPollingPayment honours a numeric expires_at", () => {
+  const pending = {
+    intent_id: "i",
+    status: "pending",
+    expires_at: HIVETALK_EXPIRES_AT,
+  };
+  assert.equal(
+    shouldStopPollingPayment(pending, (HIVETALK_EXPIRES_AT - 60) * 1000),
+    false,
+  );
+  assert.equal(
+    shouldStopPollingPayment(pending, (HIVETALK_EXPIRES_AT + 60) * 1000),
+    true,
+  );
+});
+
+test("shouldStopPollingPayment keeps polling when expires_at is absent", () => {
+  assert.equal(
+    shouldStopPollingPayment({ intent_id: "i", status: "pending" }, T0),
+    false,
+  );
 });
