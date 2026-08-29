@@ -914,10 +914,15 @@ pub async fn dispatch(
             content,
             kind,
             reply_to,
+            channel_root,
             broadcast,
             files,
             mentions,
         } => {
+            // Resolve BEFORE sending: an agent that omitted `--reply-to` inside
+            // a thread inherits that thread's anchor here, which is what keeps
+            // in-thread work from leaking to the channel root.
+            let reply_to = crate::reply_anchor::resolve_reply_to(&channel, reply_to, channel_root)?;
             cmd_send_message(
                 client,
                 SendMessageParams {

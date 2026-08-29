@@ -2483,23 +2483,28 @@ pub async fn run_prompt_task(
             );
         }
 
-        crate::queue::format_prompt(
-            b,
-            &crate::queue::FormatPromptArgs {
-                agent_core: standing.agent_core,
-                huddle_instructions: standing.huddle_instructions,
-                channel_info: channel_info.as_ref(),
-                conversation_context: conversation_context.as_ref(),
-                conversation_context_had_delivered_events,
-                profile_lookup: profile_lookup.as_ref(),
-                has_system_prompt_support: agent.has_system_prompt_support(),
-                base_prompt: standing.base_prompt,
-                system_prompt: standing.system_prompt,
-                team_instructions: standing.team_instructions,
-                agent_canvas: standing.agent_canvas,
-                standing_context_sent,
-            },
-        )
+        let prompt_args = crate::queue::FormatPromptArgs {
+            agent_core: standing.agent_core,
+            huddle_instructions: standing.huddle_instructions,
+            channel_info: channel_info.as_ref(),
+            conversation_context: conversation_context.as_ref(),
+            conversation_context_had_delivered_events,
+            profile_lookup: profile_lookup.as_ref(),
+            has_system_prompt_support: agent.has_system_prompt_support(),
+            base_prompt: standing.base_prompt,
+            system_prompt: standing.system_prompt,
+            team_instructions: standing.team_instructions,
+            agent_canvas: standing.agent_canvas,
+            standing_context_sent,
+        };
+        // Publish the anchor BEFORE the prompt is handed to the agent: the CLI
+        // reads it when the agent omits `--reply-to`, so it has to be on disk
+        // before the turn can run its first send.
+        crate::publish_reply_anchor(
+            b.channel_id,
+            crate::queue::turn_reply_anchor(b, &prompt_args).as_deref(),
+        );
+        crate::queue::format_prompt(b, &prompt_args)
     } else {
         // Should not happen — batch is None only for heartbeats which have prompt_text.
         // Return the agent to the pool to prevent a permanent slot leak.

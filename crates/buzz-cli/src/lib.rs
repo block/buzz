@@ -3,6 +3,7 @@ mod client;
 mod commands;
 mod error;
 mod links;
+mod reply_anchor;
 mod validate;
 
 use clap::{Parser, Subcommand};
@@ -383,9 +384,13 @@ pub enum MessagesCmd {
         /// Nostr event kind (default: channel default)
         #[arg(long)]
         kind: Option<u16>,
-        /// Event ID to reply to (creates a thread)
+        /// Event ID to reply to (creates a thread). Inside an agent turn this
+        /// defaults to the thread the turn is working in.
         #[arg(long)]
         reply_to: Option<String>,
+        /// Post at the channel root, opting out of the turn's thread anchor
+        #[arg(long, default_value_t = false, conflicts_with = "reply_to")]
+        channel_root: bool,
         /// Also publish to the Nostr network
         #[arg(long, default_value_t = false)]
         broadcast: bool,

@@ -5066,6 +5066,46 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     Ok(())
 }
 
+/// Env var naming the directory where the harness publishes each channel's
+/// current reply anchor, one file per channel UUID.
+///
+/// The `buzz` CLI reads `<dir>/<channel-uuid>` and applies its contents as the
+/// default `--reply-to` for `messages send`. Keyed by channel rather than a
+/// single file because `build_mcp_servers` runs once per process while turns in
+/// different channels can be in flight at the same time; a shared file would let
+/// one channel's anchor land on another's message.
+pub(crate) const REPLY_ANCHOR_DIR_ENV: &str = "BUZZ_REPLY_ANCHOR_DIR";
+
+/// Per-process directory backing [`REPLY_ANCHOR_DIR_ENV`].
+pub(crate) fn reply_anchor_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("buzz-reply-anchor-{}", std::process::id()))
+}
+
+/// Publish (or clear) the reply anchor the `buzz` CLI must default to for
+/// `channel_id`'s next send.
+///
+/// Best-effort: a failure here costs the hard guarantee for one turn and falls
+/// back to the prompt instruction, which is strictly better than failing the
+/// turn. `None` removes the file so a channel that legitimately moved back to
+/// the root does not inherit a stale anchor.
+pub(crate) fn publish_reply_anchor(channel_id: uuid::Uuid, anchor: Option<&str>) {
+    let dir = reply_anchor_dir();
+    let path = dir.join(channel_id.to_string());
+    let result = match anchor {
+        Some(id) => std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, id)),
+        None => match std::fs::remove_file(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        },
+    };
+    if let Err(e) = result {
+        tracing::warn!(
+            channel = %channel_id,
+            "failed to publish reply anchor ({e}); falling back to the prompt instruction"
+        );
+    }
+}
+
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
     if config.mcp_command.is_empty() {
         return vec![];
@@ -5096,6 +5136,13 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
                         .expect("secret key bech32 encoding should never fail"),
                 },
             ];
+            // Tell the CLI where to read this channel's reply anchor, so an
+            // agent that omits `--reply-to` still replies in-thread instead of
+            // leaking the turn out to the channel root.
+            env.push(EnvVar {
+                name: REPLY_ANCHOR_DIR_ENV.into(),
+                value: reply_anchor_dir().to_string_lossy().into_owned(),
+            });
             // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
             // so the MCP server can attach it to every signed event.
             if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {

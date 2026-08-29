@@ -1189,9 +1189,9 @@ pub(crate) fn format_event_block(
 fn append_reply_instruction(s: &mut String, event_id: &str) {
     s.push_str(&format!(
         "\nIMPORTANT: For ordinary replies in this turn, use `--reply-to {event_id}` \
-         on `buzz messages send` so the conversation stays threaded. \
+         on `buzz messages send` so the conversation stays threaded. The anchor is applied automatically when you omit the flag. \
          If the human explicitly asks for a channel-root, top-level, \
-         or broadcast post, send that message without `--reply-to`. \
+         or broadcast post, pass `--channel-root` to opt out. \
          If the requested destination is ambiguous, ask before sending."
     ));
 }
@@ -1205,9 +1205,9 @@ fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
     s.push_str(&format!(
         "\nIMPORTANT: This is a new top-level message. For ordinary replies in \
          this turn, use `--reply-to {event_id}` on `buzz messages send` — the \
-         triggering message is the thread root. Do NOT reply into any other \
+         triggering message is the thread root, and is applied automatically when you omit the flag. Do NOT reply into any other \
          (older) thread. If the human explicitly asks for a channel-root, \
-         top-level, or broadcast post, send that message without `--reply-to`."
+         top-level, or broadcast post, pass `--channel-root` to opt out."
     ));
 }
 
@@ -1721,6 +1721,39 @@ pub(crate) fn base_section(base_prompt: &str) -> String {
 ///
 /// For agents with `protocol_version >= 2`, base_prompt and system_prompt are
 /// delivered via the system role in `session/new` and omitted from this message.
+/// The `--reply-to` target this turn must use, or `None` when the turn is free
+/// to post at the channel root.
+///
+/// This is the same value [`format_prompt`] writes into the reply instruction.
+/// It is public because the instruction alone is a soft guard: an agent that
+/// simply omits `--reply-to` posts to the channel root, which is how in-thread
+/// work leaks out into the channel. The dispatcher publishes this value to the
+/// `buzz` CLI (see `BUZZ_REPLY_ANCHOR_DIR`) so the flag is applied by default
+/// instead of being copied by the model.
+pub fn turn_reply_anchor(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Option<String> {
+    let last_event = batch.events.last()?;
+    let thread_tags = parse_thread_tags(&last_event.event);
+    let is_dm = args
+        .channel_info
+        .map(|ci| ci.channel_type == "dm")
+        .unwrap_or(false);
+    if is_dm {
+        // A DM is always 1:1 with a human, so it anchors whenever the turn is
+        // already inside a thread.
+        thread_tags
+            .root_event_id
+            .is_some()
+            .then(|| last_event.event.id.to_hex())
+    } else {
+        resolve_reply_anchor(
+            &last_event.event.pubkey.to_hex(),
+            &thread_tags,
+            &last_event.event.id.to_hex(),
+            args.profile_lookup,
+        )
+    }
+}
+
 pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<String> {
     // Scope is always derived from the LAST event in the batch — that's the
     // one the agent is responding to. Thread/DM context is supplementary info
@@ -1767,20 +1800,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     //   - top-level     → anchor to the triggering event (it becomes the root)
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
     // there. DMs are always 1:1 with a human, so they always anchor.
-    let sender_pubkey = last_event.event.pubkey.to_hex();
-    let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
-    } else {
-        resolve_reply_anchor(
-            &sender_pubkey,
-            &thread_tags,
-            &last_event.event.id.to_hex(),
-            args.profile_lookup,
-        )
-    };
+    let reply_anchor = turn_reply_anchor(batch, args);
     sections.push(format_context_hints(
         batch.channel_id,
         args.channel_info,
@@ -4681,7 +4701,7 @@ mod tests {
             "channel thread reply should describe reply-to as the default"
         );
         assert!(
-            prompt.contains("send that message without `--reply-to`"),
+            prompt.contains("pass `--channel-root` to opt out"),
             "channel thread reply should allow explicit channel-root/top-level requests"
         );
         assert!(
