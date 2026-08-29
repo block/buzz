@@ -49,7 +49,7 @@ export function StartupChangelogDialog() {
       className="pointer-events-none fixed inset-0 z-40 flex items-center justify-center p-4"
       role="dialog"
     >
-      <section className="pointer-events-auto relative grid max-h-[85vh] w-[calc(100vw-2rem)] max-w-lg gap-4 overflow-y-auto rounded-2xl bg-background p-6 shadow-2xl">
+      <section className="pointer-events-auto relative grid max-h-[85vh] w-[calc(100vw-2rem)] max-w-lg grid-rows-[auto_minmax(0,1fr)_auto] overflow-hidden rounded-2xl bg-background p-6 shadow-2xl">
         <button
           aria-label="关闭更新日志"
           className="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
@@ -66,19 +66,21 @@ export function StartupChangelogDialog() {
             最近 10 日的 Buzz 修改记录
           </p>
         </header>
-        <div className="grid gap-5 py-2">
-          {RECENT_STARTUP_CHANGELOG.map((section) => (
-            <section className="grid gap-2" key={section.date}>
-              <h3 className="text-sm font-semibold">{section.date}</h3>
-              <ul className="grid list-disc gap-1.5 pl-5 text-sm text-muted-foreground">
-                {section.items.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-            </section>
-          ))}
+        <div className="min-h-0 overflow-y-auto py-2 pr-2">
+          <div className="grid gap-5">
+            {RECENT_STARTUP_CHANGELOG.map((section) => (
+              <section className="grid gap-2" key={section.date}>
+                <h3 className="text-sm font-semibold">{section.date}</h3>
+                <ul className="grid list-disc gap-1.5 pl-5 text-sm text-muted-foreground">
+                  {section.items.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              </section>
+            ))}
+          </div>
         </div>
-        <div className="flex justify-end">
+        <div className="flex justify-end border-t border-border/60 pt-4">
           <Button onClick={dismiss} type="button">
             知道了
           </Button>
