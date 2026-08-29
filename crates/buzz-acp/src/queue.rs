@@ -630,7 +630,7 @@ impl EventQueue {
         self.queues.len()
     }
 
-    /// Number of queued events for a specific channel. Test-only.
+    /// Number of queued (not-yet-dispatched) events for a specific channel. Test-only.
     #[cfg(test)]
     pub fn queued_event_count(&self, channel_id: &Uuid) -> usize {
         self.queues.get(channel_id).map_or(0, |q| q.len())

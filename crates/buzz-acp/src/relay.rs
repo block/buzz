@@ -609,6 +609,11 @@ enum RelayCommand {
     PublishEvent { event: Box<Event> },
     /// Floor `since` for membership notification replay; events before startup are never re-delivered.
     SetStartupWatermark { ts: u64 },
+    /// Pre-seed `BgState::seen_ids` with event ids the caller has already
+    /// consumed out-of-band (wake-ticket boot replay) — so the 5s
+    /// subscribe-window dedup treats them as already-delivered instead of
+    /// handing them to the agent a second time.
+    SeedSeenIds { ids: Vec<String> },
 }
 
 type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -966,6 +971,21 @@ impl HarnessRelay {
     pub async fn set_startup_watermark(&self, ts: u64) -> Result<(), RelayError> {
         self.cmd_tx
             .send(RelayCommand::SetStartupWatermark { ts })
+            .await
+            .map_err(|_| RelayError::ConnectionClosed)
+    }
+
+    /// Seed `seen_ids` with event ids already consumed via wake-ticket boot
+    /// replay, before subscribing to any channel. Call before
+    /// `subscribe_channel` / `subscribe_membership_notifications` — the 5s
+    /// subscribe window otherwise cannot tell a replayed ticket apart from a
+    /// genuine live re-delivery of the same event.
+    pub async fn seed_seen_ids(&self, ids: Vec<String>) -> Result<(), RelayError> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.cmd_tx
+            .send(RelayCommand::SeedSeenIds { ids })
             .await
             .map_err(|_| RelayError::ConnectionClosed)
     }
@@ -1366,6 +1386,11 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
                 state.membership_last_seen = Some(ts);
             }
         }
+        RelayCommand::SeedSeenIds { ids } => {
+            for id in ids {
+                state.seen_ids.insert(id);
+            }
+        }
         // Observer telemetry frames are durable: park them (bounded, visible
         // overflow) so they are delivered by the post-reconnect drain. Other
         // ephemeral publishes (typing indicators) are meaningless while
@@ -1602,6 +1627,14 @@ async fn execute_connected_command(
                 state.membership_last_seen = Some(ts);
             }
             debug!("startup watermark set to {ts}");
+            true
+        }
+        RelayCommand::SeedSeenIds { ids } => {
+            let count = ids.len();
+            for id in ids {
+                state.seen_ids.insert(id);
+            }
+            debug!(count, "seeded seen_ids from wake-ticket replay");
             true
         }
         // Control-flow commands — callers handle these before dispatching.

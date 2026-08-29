@@ -503,6 +503,13 @@ pub struct CliArgs {
     /// Requires `--lazy-pool`; ignored otherwise. 0 disables idle re-sleep.
     #[arg(long, env = "BUZZ_ACP_IDLE_POOL_SLEEP", default_value_t = 0)]
     pub idle_pool_sleep: u64,
+
+    /// Directory for wake-ticket persistence (durable record of unconsumed
+    /// mentions, so a bounced process can resume them). Default off — when
+    /// unset, no ticket store is created and behavior is unchanged from
+    /// today. Side-binary / canary use only; see `PLANS/WAKE_TICKET_SPEC.md`.
+    #[arg(long, env = "BUZZ_ACP_WAKE_TICKET_DIR")]
+    pub wake_ticket_dir: Option<PathBuf>,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -599,6 +606,10 @@ pub struct Config {
     /// `from_cli()`. `None` when using the compiled-in default or when
     /// `--no-base-prompt` is set.
     pub base_prompt_content: Option<String>,
+    /// Directory for wake-ticket persistence. `None` (the default) disables
+    /// the feature entirely — no ticket store is opened, no boot replay
+    /// runs, and the hot path is unchanged from pre-wake-ticket behavior.
+    pub wake_ticket_dir: Option<PathBuf>,
 }
 
 /// Maximum length, in characters, of a session title sent to the adapter.
@@ -1143,6 +1154,7 @@ impl Config {
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
+            wake_ticket_dir: args.wake_ticket_dir,
         };
 
         Ok(config)
@@ -1516,6 +1528,7 @@ mod tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            wake_ticket_dir: None,
         }
     }
 
