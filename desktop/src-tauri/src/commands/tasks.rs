@@ -92,14 +92,14 @@ async fn tasks_request(
 ) -> Result<serde_json::Value, String> {
     crate::relay_admission::wait_for_rate_limit().await;
     let keys = state.signing_keys()?;
-    let url = format!("{}{}", relay_api_base_url_with_override(state), path_and_query);
+    let url = format!(
+        "{}{}",
+        relay_api_base_url_with_override(state),
+        path_and_query
+    );
     let body_bytes = body.as_deref().map(str::as_bytes);
-    let auth = build_nip98_auth_header_for_keys(
-        &keys,
-        &method,
-        &url,
-        body_bytes.unwrap_or_default(),
-    )?;
+    let auth =
+        build_nip98_auth_header_for_keys(&keys, &method, &url, body_bytes.unwrap_or_default())?;
     let mut request = state
         .http_client
         .request(method, &url)
@@ -134,16 +134,43 @@ pub async fn tasks_list(
     status: Option<String>,
     limit: Option<i64>,
 ) -> Result<Vec<ChannelTask>, String> {
-    let limit = limit.unwrap_or(DEFAULT_TASK_LIMIT).clamp(1, MAX_TASK_LIMIT);
-    let mut query: Vec<String> = vec![format!("limit={limit}")];
-    if let Some(channel_id) = channel_id.as_deref() {
-        query.push(format!("channel={channel_id}"));
+    let path_and_query = list_path_and_query(channel_id.as_deref(), status.as_deref(), limit);
+    let value = tasks_request(state.inner(), reqwest::Method::GET, &path_and_query, None).await?;
+    parse_task_list(&value)
+}
+
+/// Clamp a caller-supplied page size into the relay's accepted window.
+/// `None`/absent uses the relay default; out-of-range values are clamped rather
+/// than sent (the relay rejects them as a protocol error, so a clamp turns a
+/// hard 4xx into a sane page). Zero and negatives clamp UP to 1.
+fn clamp_limit(limit: Option<i64>) -> i64 {
+    limit.unwrap_or(DEFAULT_TASK_LIMIT).clamp(1, MAX_TASK_LIMIT)
+}
+
+/// Build the signed request target for `tasks_list`. Extracted as a pure
+/// function so the query-composition edge cases (absent filters, injection via
+/// the status filter, limit clamping) are testable without a live relay — the
+/// signed NIP-98 `u` tag must equal this string verbatim.
+fn list_path_and_query(
+    channel_id: Option<&str>,
+    status: Option<&str>,
+    limit: Option<i64>,
+) -> String {
+    let mut query: Vec<String> = vec![format!("limit={}", clamp_limit(limit))];
+    if let Some(channel_id) = channel_id {
+        query.push(format!("channel={}", urlencode(channel_id)));
     }
-    if let Some(status) = status.as_deref() {
+    if let Some(status) = status {
         query.push(format!("status={}", urlencode(status)));
     }
-    let path_and_query = format!("{}?{}", TASKS_PATH, query.join("&"));
-    let value = tasks_request(state.inner(), reqwest::Method::GET, &path_and_query, None).await?;
+    format!("{}?{}", TASKS_PATH, query.join("&"))
+}
+
+/// Project a relay list response into tasks. A missing/!array `tasks` key is an
+/// ERROR (the caller asked for a list and did not get one), while individual
+/// malformed rows degrade to defaults via [`ChannelTask::from_json`] — one bad
+/// row must never blank the whole list.
+fn parse_task_list(value: &serde_json::Value) -> Result<Vec<ChannelTask>, String> {
     let tasks = value["tasks"]
         .as_array()
         .ok_or_else(|| "task API: malformed list response".to_string())?;
@@ -215,9 +242,15 @@ pub async fn tasks_my_workspaces(
         // resolves the ACTIVE workspace relay — a per-source override is
         // needed to target each community's relay. Route through the same
         // helper with an explicit base.
-        let result =
-            tasks_request_at(state.inner(), reqwest::Method::GET, trimmed, TASKS_PATH, "?limit=50", None)
-                .await;
+        let result = tasks_request_at(
+            state.inner(),
+            reqwest::Method::GET,
+            trimmed,
+            TASKS_PATH,
+            "?limit=50",
+            None,
+        )
+        .await;
         sources.push(match result {
             Ok(value) => {
                 let tasks = value["tasks"]
@@ -255,12 +288,8 @@ async fn tasks_request_at(
     let keys = state.signing_keys()?;
     let url = format!("{base}{path}{query}");
     let body_bytes = body.as_deref().map(str::as_bytes);
-    let auth = build_nip98_auth_header_for_keys(
-        &keys,
-        &method,
-        &url,
-        body_bytes.unwrap_or_default(),
-    )?;
+    let auth =
+        build_nip98_auth_header_for_keys(&keys, &method, &url, body_bytes.unwrap_or_default())?;
     let mut request = state
         .http_client
         .request(method, &url)
@@ -348,5 +377,173 @@ mod tests {
         assert_eq!(bound.len(), 10);
         assert_eq!(bound[0], "https://r0.example");
         assert_eq!(bound[9], "https://r9.example");
+    }
+
+    // ---------------------------------------------------------------------
+    // REG-15 hardening (fire #47): edge cases enumerated in
+    // work/REG-15/hardening.md §"Edge case matrix". Each row below maps to one
+    // enumerated class. Negative/adversarial cases are marked NEGATIVE.
+    // ---------------------------------------------------------------------
+
+    /// E1 — EMPTY INPUT: an empty `tasks` array is a valid, successful empty
+    /// list, NOT an error. Regression guard: treating empty as malformed would
+    /// show an error state on every brand-new channel.
+    #[test]
+    fn empty_task_array_is_an_empty_list_not_an_error() {
+        let value = serde_json::json!({ "tasks": [] });
+        let tasks = parse_task_list(&value).expect("empty array must parse as Ok");
+        assert!(tasks.is_empty());
+    }
+
+    /// E2 — NEGATIVE, MALFORMED ENVELOPE: `tasks` missing entirely, or present
+    /// but not an array, must be a hard error. The caller asked for a list and
+    /// did not receive one; silently returning `[]` would render "no tasks"
+    /// over a broken relay response and hide the fault.
+    #[test]
+    fn malformed_list_envelope_is_an_error_never_an_empty_list() {
+        // absent key
+        assert!(parse_task_list(&serde_json::json!({})).is_err());
+        // present but wrong type — each must error, not degrade
+        for wrong in [
+            serde_json::json!({ "tasks": null }),
+            serde_json::json!({ "tasks": "nope" }),
+            serde_json::json!({ "tasks": 7 }),
+            serde_json::json!({ "tasks": { "0": "obj-not-array" } }),
+        ] {
+            assert!(
+                parse_task_list(&wrong).is_err(),
+                "non-array tasks must error: {wrong}"
+            );
+        }
+    }
+
+    /// E3 — MALFORMED ROW ISOLATION: one bad row inside a good envelope must
+    /// degrade to defaults and STILL yield the sibling rows. A single corrupt
+    /// task must never blank the whole list.
+    #[test]
+    fn one_malformed_row_does_not_drop_its_siblings() {
+        let value = serde_json::json!({
+            "tasks": [
+                { "id": "a", "title": "good", "status": "open", "updated_at": 2 },
+                "not-an-object",
+                { "id": "c", "title": "also good", "status": "done", "updated_at": 1 },
+            ]
+        });
+        let tasks = parse_task_list(&value).expect("envelope is well formed");
+        assert_eq!(tasks.len(), 3, "row count preserved, bad row degraded");
+        assert_eq!(tasks[0].title, "good");
+        assert_eq!(tasks[1].title, "", "malformed row degrades to defaults");
+        assert_eq!(tasks[1].id, "");
+        assert_eq!(tasks[2].title, "also good");
+    }
+
+    /// E4 — BOUNDARY: limit clamping at both ends and the absent case. The
+    /// relay rejects out-of-window limits as a protocol error, so a client-side
+    /// clamp is what keeps a slider at 0 or 10_000 from producing a hard 4xx.
+    #[test]
+    fn limit_is_clamped_into_the_relay_window() {
+        assert_eq!(clamp_limit(None), DEFAULT_TASK_LIMIT, "absent = default");
+        assert_eq!(clamp_limit(Some(0)), 1, "zero clamps up to 1");
+        assert_eq!(clamp_limit(Some(-5)), 1, "negative clamps up to 1");
+        assert_eq!(clamp_limit(Some(1)), 1);
+        assert_eq!(clamp_limit(Some(MAX_TASK_LIMIT)), MAX_TASK_LIMIT);
+        assert_eq!(
+            clamp_limit(Some(MAX_TASK_LIMIT + 1)),
+            MAX_TASK_LIMIT,
+            "above window clamps down"
+        );
+        assert_eq!(clamp_limit(Some(i64::MAX)), MAX_TASK_LIMIT);
+        assert_eq!(clamp_limit(Some(i64::MIN)), 1);
+    }
+
+    /// E5 — QUERY COMPOSITION: absent filters must be OMITTED from the query,
+    /// not sent as the literal string "None"/"null". The signed NIP-98 `u` tag
+    /// is this exact string, so a stray param is an auth mismatch as well as a
+    /// wrong filter.
+    #[test]
+    fn absent_filters_are_omitted_from_the_query() {
+        let q = list_path_and_query(None, None, None);
+        assert_eq!(q, format!("/api/tasks?limit={DEFAULT_TASK_LIMIT}"));
+        assert!(!q.contains("channel="), "no empty channel param");
+        assert!(!q.contains("status="), "no empty status param");
+        assert!(!q.to_lowercase().contains("none"));
+        assert!(!q.to_lowercase().contains("null"));
+    }
+
+    /// E6 — NEGATIVE, QUERY INJECTION: a hostile channel id or status must be
+    /// percent-encoded, so it cannot smuggle an extra query parameter. Before
+    /// this fire the channel id was interpolated RAW (`channel={channel_id}`),
+    /// so `x&limit=9999` would have overridden the clamped limit — this is the
+    /// regression test for that defect.
+    #[test]
+    fn hostile_filter_values_cannot_smuggle_extra_query_params() {
+        let q = list_path_and_query(Some("abc&limit=9999"), None, Some(10));
+        assert!(
+            q.contains("channel=abc%26limit%3D9999"),
+            "ampersand and equals must be encoded, got: {q}"
+        );
+        assert_eq!(q.matches("limit=").count(), 1, "no second limit param: {q}");
+        assert!(
+            q.starts_with("/api/tasks?limit=10&"),
+            "clamped limit wins: {q}"
+        );
+
+        // Same guarantee on the status filter.
+        let q = list_path_and_query(None, Some("open&channel=other"), None);
+        assert!(
+            !q.contains("&channel="),
+            "status cannot inject channel: {q}"
+        );
+    }
+
+    /// E7 — the full filter combination keeps a stable, signable ordering.
+    #[test]
+    fn full_query_has_stable_parameter_order() {
+        let q = list_path_and_query(Some("chan1"), Some("in progress"), Some(25));
+        assert_eq!(q, "/api/tasks?limit=25&channel=chan1&status=in%20progress");
+    }
+
+    /// E8 — UNKNOWN STATUS TOLERANCE: a status the desktop does not model must
+    /// round-trip as an opaque string rather than being coerced or dropped.
+    /// Mirrors the TS "unknown values degrade to a badge" rule so a relay-side
+    /// status addition never breaks an older desktop build.
+    #[test]
+    fn unknown_status_round_trips_opaquely() {
+        let task = ChannelTask::from_json(&serde_json::json!({
+            "id": "t1", "title": "x", "status": "blocked_on_legal", "updated_at": 5
+        }));
+        assert_eq!(task.status, "blocked_on_legal");
+    }
+
+    /// E9 — TYPE CONFUSION: correctly-named keys carrying the wrong JSON type
+    /// must degrade to defaults instead of panicking. `as_str`/`as_i64` return
+    /// None on mismatch; this pins that contract against a future refactor to
+    /// an unwrapping deserializer.
+    #[test]
+    fn wrongly_typed_fields_degrade_instead_of_panicking() {
+        let task = ChannelTask::from_json(&serde_json::json!({
+            "id": 12345,
+            "channel_id": ["array"],
+            "title": { "nested": true },
+            "status": false,
+            "assignee": 9,
+            "created_by": null,
+            "updated_at": "not-a-number",
+        }));
+        assert_eq!(task.id, "");
+        assert_eq!(task.channel_id, None);
+        assert_eq!(task.title, "");
+        assert_eq!(task.status, "");
+        assert_eq!(task.assignee, None, "numeric assignee is not a pubkey");
+        assert_eq!(task.created_by, None);
+        assert_eq!(task.updated_at, 0, "unparseable timestamp sorts last");
+    }
+
+    /// E10 — a float timestamp (JSON has no integer type) must not silently
+    /// become 0 ordering garbage without being noticed; pin current behaviour.
+    #[test]
+    fn float_timestamp_is_not_silently_reinterpreted() {
+        let task = ChannelTask::from_json(&serde_json::json!({ "updated_at": 1.5 }));
+        assert_eq!(task.updated_at, 0, "non-integral timestamp degrades to 0");
     }
 }
