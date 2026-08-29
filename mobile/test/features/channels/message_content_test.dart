@@ -35,7 +35,8 @@ Widget _testable(
           data: MediaQuery.of(
             context,
           ).copyWith(disableAnimations: disableAnimations),
-          child: Scaffold(body: child),
+          // The app states its code style here, above the navigator.
+          child: AppMarkdownTheme(child: Scaffold(body: child)),
         ),
       ),
     ),

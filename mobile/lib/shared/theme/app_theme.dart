@@ -2,11 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import 'app_colors.dart';
-import 'code_style.dart';
 import 'color_scheme.dart';
 import 'grid.dart';
 import 'text_theme.dart';
-import 'package:gpt_markdown/gpt_markdown.dart';
 
 /// Border radius constants matching desktop shadcn "New York" style.
 /// Desktop uses --radius: 0.625rem (10px) as base:
@@ -91,26 +89,7 @@ class AppTheme {
       colorScheme: scheme,
       splashFactory: NoSplash.splashFactory,
       scaffoldBackgroundColor: scheme.surface,
-      extensions: [
-        appColors,
-        // Inline code is rendered by gpt_markdown, which otherwise draws it in
-        // its own bundled face, at its own size, tinted from `onSurface`.
-        // Stating the app's code style here gives every Markdown surface the
-        // face, size and chip colours a fenced code block already uses.
-        GptMarkdownThemeData(
-          brightness: brightness,
-          inlineCode: InlineCodeStyle(
-            fontFamily: CodeStyle.fontFamily,
-            fontSizeFactor: CodeStyle.fontSizeFactor,
-            color: scheme.onSurface,
-            backgroundColor: CodeStyle.background(scheme),
-            borderColor: CodeStyle.border(scheme),
-            // A chip is small, so it takes the smallest step of the app's
-            // radius scale rather than the `Radii.card` a block uses.
-            borderRadius: const Radius.circular(Radii.xs),
-          ),
-        ),
-      ],
+      extensions: [appColors],
       fontFamily: 'Inter',
       textTheme: textTheme,
       appBarTheme: AppBarTheme(
