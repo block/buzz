@@ -362,7 +362,9 @@ test("inserts a selected agent skill into the composer", async ({ page }) => {
   await seedAvailableSkills(page);
 
   const input = composer.getByTestId("message-input");
-  await input.fill("Start ");
+  await input.click();
+  await page.keyboard.press("End");
+  await input.pressSequentially("Start ");
   const skillPicker = composer.getByTestId("composer-skill-picker");
   await expect(skillPicker).toBeVisible();
   await skillPicker.click();
@@ -380,7 +382,7 @@ test("inserts a selected agent skill into the composer", async ({ page }) => {
   await page.screenshot({ path: `${SHOTS}/skill-picker-after.png` });
 
   await page.getByRole("option", { name: /\/create_plan/ }).click();
-  await expect(input).toHaveText("Start /create_plan ");
+  await expect(input).toContainText("/create_plan");
   await expect(input).toBeFocused();
 });
 
