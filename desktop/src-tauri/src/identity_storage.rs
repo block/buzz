@@ -43,6 +43,8 @@ impl AppState {
     pub(crate) fn set_identity_storage(&self, storage: IdentityStorage) {
         self.identity_storage
             .store(storage as u8, std::sync::atomic::Ordering::Release);
+        self.identity_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
 
