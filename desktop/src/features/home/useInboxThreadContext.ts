@@ -28,6 +28,7 @@ type InboxThreadContextResult = {
 };
 
 const THREAD_CONTEXT_LIMIT = 100;
+const THREAD_CONTEXT_TIMEOUT_MS = 15_000;
 const MAX_ANCESTOR_HOPS = 50;
 const CHANNEL_CONTEXT_EVENT_KINDS = new Set<number>(
   CHANNEL_TIMELINE_CONTENT_KINDS,
@@ -46,6 +47,29 @@ function getThreadRootId(event: RelayEvent): string {
   return thread.rootId ?? thread.parentId ?? event.id;
 }
 
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeout = window.setTimeout(
+      () => reject(new Error(message)),
+      timeoutMs,
+    );
+    promise.then(
+      (value) => {
+        window.clearTimeout(timeout);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
+}
+
 export function useInboxThreadContext(
   item: FeedItem | null,
   channelMessages: RelayEvent[] | undefined,
@@ -59,10 +83,30 @@ export function useInboxThreadContext(
   const [hasLoadError, setHasLoadError] = React.useState(false);
   const [isLoading, setIsLoading] = React.useState(false);
 
-  const selectedEvent = React.useMemo(
-    () => (item ? relayEventFromFeedItem(item) : null),
-    [item],
-  );
+  // Feed polling replaces FeedItem objects even when the selected event has
+  // not changed. Depend on stable event content instead of the object
+  // reference so a refresh cannot continuously restart context hydration.
+  const selectedEventKey = item
+    ? JSON.stringify([
+        item.id,
+        item.kind,
+        item.pubkey,
+        item.createdAt,
+        item.content,
+        item.tags,
+      ])
+    : "";
+  const selectedEventCacheRef = React.useRef<{
+    key: string;
+    event: RelayEvent | null;
+  }>({ key: "", event: null });
+  if (selectedEventCacheRef.current.key !== selectedEventKey) {
+    selectedEventCacheRef.current = {
+      key: selectedEventKey,
+      event: item ? relayEventFromFeedItem(item) : null,
+    };
+  }
+  const selectedEvent = selectedEventCacheRef.current.event;
 
   const selectedThreadRootId = selectedEvent
     ? getThreadRootId(selectedEvent)
@@ -165,10 +209,11 @@ export function useInboxThreadContext(
                   return { events: [] as RelayEvent[], failed: true };
                 })
             : Promise.resolve({ events: [] as RelayEvent[], failed: false });
-        const [ancestorResult, descendantResult] = await Promise.all([
-          ancestorEventsPromise,
-          descendantEventsPromise,
-        ]);
+        const [ancestorResult, descendantResult] = await withTimeout(
+          Promise.all([ancestorEventsPromise, descendantEventsPromise]),
+          THREAD_CONTEXT_TIMEOUT_MS,
+          "Timed out while loading surrounding thread context.",
+        );
 
         if (isCancelled) {
           return;

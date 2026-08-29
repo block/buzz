@@ -53,3 +53,11 @@
 - 处理：将弹窗移动到 AppReady 完成后的渲染分支；Relay 未连接时使用非阻塞日志层，让底层重试/更换 Community 控件可操作；关闭按钮改为显式更新 Dialog 状态，并在进程级记录已关闭状态，覆盖按钮、右上角关闭和 Esc 关闭路径。
 - 验证：`pnpm typecheck`、Biome 检查和现有启动日志单元测试通过。
 - 版本/提交：`0.5.15-15` / `136a3cd1`；测试包已生成。
+
+## 2026-08-29：Inbox Thread 上下文加载后页面定格
+
+- 现象：打开 Inbox 中的 Thread 后一直显示 `Loading surrounding context...`，右侧页面像被定格。
+- 定位：feed 轮询会替换选中 `FeedItem` 的对象引用，导致上下文 hydration effect 重复启动；Relay 重连等待或本地 `get_event` 请求没有统一总超时，`isLoading` 可能长期保持为 `true`。
+- 处理：Thread 上下文改用事件字段作为稳定依赖，避免 feed 刷新重复启动请求；增加 15 秒总超时，超时后结束 loading 并显示上下文加载错误。
+- 验证：`pnpm typecheck`、Biome 检查和启动日志单元测试通过；Thread 上下文回归测试待补充。
+- 版本/提交：待提交。
