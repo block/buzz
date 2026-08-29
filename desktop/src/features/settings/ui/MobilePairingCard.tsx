@@ -6,6 +6,7 @@ import {
   RefreshCw,
   TriangleAlert,
 } from "lucide-react";
+import { isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { toast } from "sonner";
@@ -296,6 +297,13 @@ export function MobilePairingCard({
     setError(null);
 
     if (!currentPubkey) {
+      return;
+    }
+
+    // Mobile pairing is a native Tauri feature (QR/SAS handshake with a
+    // phone) — none of these events exist in a browser (web) runtime, and
+    // `listen()` throws without Tauri internals.
+    if (!isTauri()) {
       return;
     }
 

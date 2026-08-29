@@ -22,6 +22,10 @@ globalThis.window = {
   __TAURI_EVENT_PLUGIN_INTERNALS__: { unregisterListener: () => {} },
 };
 globalThis.__TAURI_INTERNALS__ = tauriInternals;
+// `isTauri()` reads `globalThis.isTauri`, which the native shell injects
+// alongside the IPC internals. The listeners under test are guarded on it,
+// so the fake runtime has to set it too.
+globalThis.isTauri = true;
 
 const { listenForNavigationDeepLinks, resetNavigationDeepLinkDrain } =
   await import("@/shared/deep-link.ts");
