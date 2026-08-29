@@ -92,6 +92,16 @@ build:
 build-release:
     cargo build --workspace --release
 
+# Build the security-pinned ACP harness without embedding the checkout path.
+trusted-buzz-acp-release:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root="{{justfile_directory()}}"
+    export CARGO_INCREMENTAL=0
+    export RUSTFLAGS="--remap-path-prefix=${repo_root}=/buzz-source"
+    cargo build --release -p buzz-acp
+    shasum -a 256 target/release/buzz-acp
+
 # Run repo lint, formatting, and repository policy checks
 check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check security-review-check file-size-check
 
