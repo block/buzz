@@ -196,8 +196,25 @@ stacy_upstream_pin="$(/usr/bin/env -i HOME=/var/empty PATH=/usr/bin:/bin /usr/bi
   printf 'FATAL: Stacy UPSTREAM_PIN is missing or malformed\n' >&2
   exit 1
 }
-[[ "$stacy_upstream_pin" == "$gabe_commit" ]] || {
-  printf 'FATAL: Stacy UPSTREAM_PIN does not equal the exact landed Gabe commit\n' >&2
+run_git "$gabe_root" cat-file -e "$stacy_upstream_pin^{commit}" 2>/dev/null && \
+  run_git "$stacy_root" cat-file -e "$stacy_upstream_pin^{commit}" 2>/dev/null || {
+  printf 'FATAL: Stacy UPSTREAM_PIN commit is unavailable in a canonical checkout\n' >&2
+  exit 1
+}
+run_git "$gabe_root" merge-base --is-ancestor "$stacy_upstream_pin" "$gabe_commit" || {
+  printf 'FATAL: Stacy UPSTREAM_PIN is not an ancestor of the landed Gabe commit\n' >&2
+  exit 1
+}
+readonly -a shared_runtime_pathspecs=(
+  extensions/context-engine
+  extensions/shared
+  package.json
+  package-lock.json
+  tsconfig.json
+)
+run_git "$gabe_root" diff --quiet --no-ext-diff "$stacy_upstream_pin" "$gabe_commit" -- "${shared_runtime_pathspecs[@]}" && \
+  run_git "$stacy_root" diff --quiet --no-ext-diff "$stacy_upstream_pin" "$stacy_commit" -- "${shared_runtime_pathspecs[@]}" || {
+  printf 'FATAL: landed Gabe or Stacy shared runtime bytes diverge from Stacy UPSTREAM_PIN\n' >&2
   exit 1
 }
 readonly receipt_root="$runtime_root/deployment-receipts/$buzz_commit-$gabe_commit-$stacy_commit"
@@ -513,7 +530,7 @@ verify_sha256 "$stage/buzz-acp/buzz-acp" "$buzz_acp_sha256"
 
 /bin/mkdir -p "$stage/receipt"
 /usr/bin/printf '%s\n' \
-  "{\"buzzCommit\":\"$buzz_commit\",\"gabeCommit\":\"$gabe_commit\",\"stacyCommit\":\"$stacy_commit\",\"nodeSha256\":\"$node_sha256\",\"buzzAcpSha256\":\"$buzz_acp_sha256\",\"adapterSha256\":\"$adapter_sha256\"}" \
+  "{\"buzzCommit\":\"$buzz_commit\",\"gabeCommit\":\"$gabe_commit\",\"stacyCommit\":\"$stacy_commit\",\"stacyUpstreamPin\":\"$stacy_upstream_pin\",\"nodeSha256\":\"$node_sha256\",\"buzzAcpSha256\":\"$buzz_acp_sha256\",\"adapterSha256\":\"$adapter_sha256\"}" \
   >"$stage/receipt/context-engine-runtimes.json"
 
 require_context_engine_quiescence
