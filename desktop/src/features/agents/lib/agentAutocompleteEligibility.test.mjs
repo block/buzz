@@ -538,3 +538,70 @@ test("coalesceAgentAutocompleteCandidates: leaves non-agents alone", () => {
 
   assert.deepEqual(coalesce([first, second]), [first, second]);
 });
+
+test("relayAgentCanRespondInChannel: the live roster beats a not-yet-polled channelIds", () => {
+  // The agent was invited to "fresh", but the relay-agents query last ran
+  // before that and still reports only "general". The roster is live.
+  const agent = {
+    pubkey: PUB_A,
+    respondTo: "anyone",
+    respondToAllowlist: [],
+    channelIds: ["general"],
+  };
+
+  assert.equal(
+    relayAgentCanRespondInChannel(agent, "fresh", CURRENT_PUBKEY),
+    false,
+  );
+  assert.equal(
+    relayAgentCanRespondInChannel(
+      agent,
+      "fresh",
+      CURRENT_PUBKEY,
+      new Set([PUB_A]),
+    ),
+    true,
+  );
+});
+
+test("relayAgentCanRespondInChannel: membership does not bypass an allowlist", () => {
+  const agent = {
+    pubkey: PUB_A,
+    respondTo: "allowlist",
+    respondToAllowlist: [OTHER_OWNER_PUBKEY],
+    channelIds: ["general"],
+  };
+
+  assert.equal(
+    relayAgentCanRespondInChannel(
+      agent,
+      "fresh",
+      CURRENT_PUBKEY,
+      new Set([PUB_A]),
+    ),
+    false,
+  );
+});
+
+test("getMentionableAgentPubkeys: channel scope accepts a member the agents poll has not caught up to", () => {
+  const agent = {
+    pubkey: PUB_A,
+    respondTo: "anyone",
+    respondToAllowlist: [],
+    channelIds: ["general"],
+  };
+
+  assert.deepEqual(
+    [
+      ...getMentionableAgentPubkeys({
+        channelMemberPubkeys: new Set([PUB_A]),
+        currentPubkey: CURRENT_PUBKEY,
+        eligibilityScope: { type: "channel", channelId: "fresh" },
+        managedAgentPubkeys: [],
+        relayAgents: [agent],
+        sharedChannelIds: new Set(["fresh"]),
+      }),
+    ],
+    [PUB_A],
+  );
+});

@@ -108,6 +108,478 @@ async fn publish_presence(
     Ok(())
 }
 
+/// Applies this harness's kind:10100 `channel_ids` changes one at a time.
+///
+/// Membership deltas must be applied strictly in order and strictly one at a
+/// time. kind:10100 is replaceable and read-modify-written, so two concurrent
+/// appliers would both start from the pre-change profile and the later write
+/// would drop the earlier channel; two out-of-order appliers for the *same*
+/// channel would settle on the wrong answer (an add landing after its own
+/// remove leaves the agent advertising a channel it left). A single worker
+/// draining an ordered queue gives both properties.
+struct ProfileChannelUpdater {
+    tx: tokio::sync::mpsc::UnboundedSender<(Uuid, bool)>,
+}
+
+impl ProfileChannelUpdater {
+    fn spawn(rest_client: relay::RestClient, keys: nostr::Keys) -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(Uuid, bool)>();
+        tokio::spawn(async move {
+            // The relay breaks a same-second replaceable tie by lowest event id
+            // and rolls the loser back while still reporting the write as
+            // accepted, so never sign two of these inside one second.
+            let mut last_published_secs = 0u64;
+            // Deltas from a publish that failed. The queue is the only copy, so
+            // they are carried into the next attempt rather than dropped: a
+            // peer's future timestamp or a backwards clock step would otherwise
+            // leave `channel_ids` wrong indefinitely behind a single warn line.
+            let mut deltas: Vec<(Uuid, bool)> = Vec::new();
+            // Set while `deltas` holds work from a failed publish. Waiting only
+            // on `rx` would mean the retry never happens until the *next*
+            // membership change arrives — and membership churn is rare enough
+            // that "next change" can be never for the life of the process,
+            // leaving the agent absent from every `@mention` picker behind a
+            // single warn line.
+            let mut retry_delay: Option<std::time::Duration> = None;
+            loop {
+                let received = match retry_delay {
+                    None => match rx.recv().await {
+                        Some(delta) => Some(delta),
+                        None => break,
+                    },
+                    Some(delay) => tokio::select! {
+                        queued = rx.recv() => match queued {
+                            Some(delta) => Some(delta),
+                            None => break,
+                        },
+                        _ = tokio::time::sleep(delay) => None,
+                    },
+                };
+                // Coalesce everything already queued into a single publish.
+                // Membership churn arrives in bursts — a bulk invite queues one
+                // delta per channel within a few milliseconds — and each write
+                // needs its own second, so publishing them one at a time would
+                // demand more distinct seconds than the burst spans. Applying
+                // them together needs exactly one.
+                if let Some(first) = received {
+                    deltas.push(first);
+                }
+                while let Ok(next) = rx.try_recv() {
+                    deltas.push(next);
+                }
+                if deltas.is_empty() {
+                    retry_delay = None;
+                    continue;
+                }
+                match apply_profile_channel_delta(&rest_client, &keys, &deltas, last_published_secs)
+                    .await
+                {
+                    Ok(Some(published_secs)) => {
+                        last_published_secs = published_secs;
+                        deltas.clear();
+                        retry_delay = None;
+                    }
+                    Ok(None) => {
+                        deltas.clear();
+                        retry_delay = None;
+                    }
+                    Err(e) => {
+                        let next = retry_delay
+                            .map(|delay| (delay * 2).min(MAX_PROFILE_RETRY_DELAY))
+                            .unwrap_or(BASE_PROFILE_RETRY_DELAY);
+                        retry_delay = Some(next);
+                        tracing::warn!(
+                            "failed to republish agent profile, retrying in {next:?}: {e}"
+                        );
+                    }
+                }
+            }
+        });
+        Self { tx }
+    }
+
+    /// Queue a membership change. Unbounded because dropping a delta would
+    /// leave the profile permanently stale, and membership churn is rare.
+    fn record(&self, channel_id: Uuid, joined: bool) {
+        if self.tx.send((channel_id, joined)).is_err() {
+            tracing::warn!("profile channel updater stopped; skipping republish");
+        }
+    }
+}
+
+/// How far ahead of local time a republish may stamp its `created_at`.
+///
+/// Matches the relay's own ingest window (`MAX_TIMESTAMP_DRIFT_SECS`, ±900s):
+/// a stamp inside it lands, so refusing one is pure loss — the worker would
+/// retry it forever at the backoff ceiling and leave `channel_ids` stale for
+/// the life of the process. Past the window the relay rejects the event
+/// outright, so a peer skewed further than this is unwinnable and failing
+/// loudly is the only honest outcome.
+const MAX_PROFILE_PUBLISH_SKEW_SECS: u64 = 900;
+
+/// Longest wall-clock wait before signing a republish.
+///
+/// Only this harness's own previous publish can require a wait, and it can only
+/// ever be the single second the distinct-`created_at` rule costs. A peer's
+/// future timestamp is out-bid by stamping past it, never by sleeping through
+/// it: sleeping would park the single worker — and grow its unbounded queue —
+/// for the whole skew, up to `MAX_PROFILE_PUBLISH_SKEW_SECS`.
+const MAX_PROFILE_PUBLISH_SLEEP: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// First retry delay after a failed profile republish.
+const BASE_PROFILE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Ceiling for the profile-republish retry backoff. A stale `channel_ids` keeps
+/// the agent out of `@mention` pickers, so this stays low enough to self-heal
+/// within a work session.
+const MAX_PROFILE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(300);
+
+fn unix_secs_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Apply queued membership deltas to a profile's `channel_ids`, in queue order.
+///
+/// Order matters: a join/leave/rejoin of one channel settles on the last
+/// observed state rather than on whichever delta happens to win. Returns
+/// whether the array actually ended up different — an add for a channel already
+/// listed, a remove for one never listed, or a burst that nets to nothing must
+/// not cost a replaceable write.
+///
+/// Adds append and removes delete in place; the array is never sorted.
+/// `channel_ids` is paired with the profile's human-readable `channels` array by
+/// index in at least one client, so a wholesale reorder relabels rows that were
+/// correct before.
+fn apply_channel_id_deltas(ids: &mut Vec<String>, deltas: &[(Uuid, bool)]) -> bool {
+    let before = ids.clone();
+    for (channel_id, joined) in deltas {
+        let target = channel_id.to_string();
+        let had = ids.iter().any(|id| id == &target);
+        if *joined == had {
+            tracing::debug!(channel_id = %channel_id, "profile channel_ids already current");
+            continue;
+        }
+        if *joined {
+            ids.push(target);
+        } else {
+            ids.retain(|id| id != &target);
+        }
+    }
+    // Duplicates can only arrive from the stored profile — the `had` check never
+    // adds one. Order-preserving, for the same reason the array is not sorted.
+    let mut seen = std::collections::HashSet::new();
+    ids.retain(|id| seen.insert(id.clone()));
+    *ids != before
+}
+
+/// `created_at` for the next republish, and how far ahead of `now` it lands.
+///
+/// Never stamps two of these in the same second: the relay breaks a same-second
+/// replaceable tie by lowest event id and rolls the loser back while still
+/// reporting the write as accepted. `floor` is the newest `created_at` known to
+/// be in play — this harness's last publish, or the stored profile's, whichever
+/// is later. Stamping past the floor wins the LWW compare without waiting for
+/// the wall clock to catch up to a peer's skew.
+fn profile_publish_stamp(now: u64, floor: u64) -> (u64, u64) {
+    let created_at = now.max(floor.saturating_add(1));
+    (created_at, created_at.saturating_sub(now))
+}
+
+/// Whether a `POST /events` response means the republish actually landed.
+///
+/// A 2xx does not mean the profile changed. Three distinct failures hide behind
+/// one:
+///
+/// - `accepted: false` — the relay refused the event outright.
+/// - `accepted: true` with a `duplicate` message — the write was stored and then
+///   rolled back because a peer's copy won the replaceable compare
+///   (`Db::replace_addressable_event` reports `was_inserted = false`, and the
+///   ingest path maps that to accepted-plus-duplicate).
+/// - no readable `accepted` field — an empty or unexpected body, which
+///   `RestClient::submit_event` surfaces as `Value::Null`.
+///
+/// All three fail closed. The queue is the worker's only copy of these deltas,
+/// so reading an unreadable response as success would drop them silently.
+fn profile_write_landed(response: &serde_json::Value) -> Result<(), String> {
+    let accepted = response
+        .get("accepted")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let message = response
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    // The relay emits both bare `duplicate` and `duplicate: <detail>`; the CLI's
+    // write path matches the same two forms.
+    let superseded = message == "duplicate" || message.starts_with("duplicate:");
+    if accepted && !superseded {
+        return Ok(());
+    }
+    Err(if message.is_empty() {
+        "relay did not accept the profile update".to_string()
+    } else {
+        message.to_string()
+    })
+}
+
+#[cfg(test)]
+mod profile_channel_tests {
+    use super::*;
+
+    fn channel(byte: u8) -> Uuid {
+        Uuid::from_bytes([byte; 16])
+    }
+
+    #[test]
+    fn add_appends_instead_of_sorting() {
+        let first = channel(0xaa).to_string();
+        let mut ids = vec![first.clone()];
+
+        assert!(apply_channel_id_deltas(&mut ids, &[(channel(0x11), true)]));
+
+        // 0x11… sorts before 0xaa… but must stay second: the profile's
+        // index-paired `channels` names still point at their own ids.
+        assert_eq!(ids, vec![first, channel(0x11).to_string()]);
+    }
+
+    #[test]
+    fn remove_drops_only_its_own_channel() {
+        let kept = channel(0xaa).to_string();
+        let mut ids = vec![kept.clone(), channel(0xbb).to_string()];
+
+        assert!(apply_channel_id_deltas(&mut ids, &[(channel(0xbb), false)]));
+
+        assert_eq!(ids, vec![kept]);
+    }
+
+    #[test]
+    fn already_current_deltas_cost_no_write() {
+        let mut ids = vec![channel(0xaa).to_string()];
+
+        // Add of a listed channel, remove of an unlisted one.
+        assert!(!apply_channel_id_deltas(
+            &mut ids,
+            &[(channel(0xaa), true), (channel(0xbb), false)]
+        ));
+        assert_eq!(ids, vec![channel(0xaa).to_string()]);
+    }
+
+    #[test]
+    fn a_burst_that_nets_to_nothing_costs_no_write() {
+        let mut ids = Vec::new();
+
+        // Retried deltas from a failed publish can carry an add and its own
+        // later remove. Applied in order they settle on "not a member", which
+        // is what the stored profile already says.
+        assert!(!apply_channel_id_deltas(
+            &mut ids,
+            &[(channel(0x22), true), (channel(0x22), false)]
+        ));
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn later_delta_wins_for_the_same_channel() {
+        let mut ids = Vec::new();
+
+        assert!(apply_channel_id_deltas(
+            &mut ids,
+            &[(channel(0x33), false), (channel(0x33), true)]
+        ));
+
+        assert_eq!(ids, vec![channel(0x33).to_string()]);
+    }
+
+    #[test]
+    fn stamp_never_reuses_the_floor_second() {
+        // Same second as the floor: step past it rather than tie and lose.
+        assert_eq!(profile_publish_stamp(100, 100), (101, 1));
+        // Nothing in play: stamp now, wait for nothing.
+        assert_eq!(profile_publish_stamp(100, 0), (100, 0));
+    }
+
+    #[test]
+    fn peer_skew_is_out_bid_not_slept_through() {
+        let (created_at, lead) = profile_publish_stamp(1_000, 1_800);
+
+        assert_eq!(created_at, 1_801);
+        assert_eq!(lead, 801);
+        // Inside the relay's ingest window, so this publishes; the worker waits
+        // at most MAX_PROFILE_PUBLISH_SLEEP regardless of the lead.
+        assert!(lead <= MAX_PROFILE_PUBLISH_SKEW_SECS);
+    }
+
+    #[test]
+    fn unwinnable_skew_is_reported_not_published() {
+        let (_, lead) = profile_publish_stamp(1_000, 1_000 + MAX_PROFILE_PUBLISH_SKEW_SECS);
+
+        assert!(lead > MAX_PROFILE_PUBLISH_SKEW_SECS);
+    }
+
+    #[test]
+    fn only_an_explicit_accept_counts_as_landed() {
+        assert!(profile_write_landed(&serde_json::json!({"accepted": true})).is_ok());
+        assert!(
+            profile_write_landed(&serde_json::json!({"accepted": true, "message": "ok"})).is_ok()
+        );
+    }
+
+    #[test]
+    fn a_lost_replaceable_compare_is_not_landed() {
+        // `accepted: true` plus a duplicate message: stored, then rolled back.
+        for message in ["duplicate", "duplicate:", "duplicate: superseded"] {
+            assert!(
+                profile_write_landed(&serde_json::json!({"accepted": true, "message": message}))
+                    .is_err(),
+                "{message} must not read as landed"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unreadable_response_fails_closed() {
+        // The queue is the only copy of the deltas, so anything we cannot read
+        // as an accept has to be retried rather than cleared.
+        assert!(profile_write_landed(&serde_json::Value::Null).is_err());
+        assert!(profile_write_landed(&serde_json::json!({})).is_err());
+        assert!(profile_write_landed(&serde_json::json!({"accepted": "yes"})).is_err());
+        assert!(profile_write_landed(&serde_json::json!({"accepted": false})).is_err());
+    }
+}
+
+/// Apply observed membership changes to this agent's self-declared `channel_ids`.
+///
+/// kind:10100's `channel_ids` is what mobile's mention picker consults to decide
+/// whether a *non-member* relay agent is mentionable
+/// (`agentIsSharedWithUser` in `mention_candidates.dart`), and nothing kept it
+/// in sync: `buzz-acp` only read channels, and the relay never authors a 10100.
+/// Desktop reads relay membership instead — its Tauri directory replaces this
+/// field before the frontend sees it (`relay_directory.rs`) — so desktop is not
+/// what this repairs.
+///
+/// The update is a delta, not a rewrite from this harness's subscription set.
+/// That set is narrowed by `channels_override`, by rule matching, and by any
+/// channel whose startup subscribe failed — publishing it wholesale would
+/// delete every channel this process happens not to serve, and two harnesses
+/// sharing a pubkey with different overrides would flap the field against each
+/// other.
+///
+/// The profile is read-modify-written so fields this harness does not own
+/// (`display_name`, `capabilities`, `channel_add_policy`) survive. A missing
+/// profile is left missing: creating one is the deploy tooling's job, and a
+/// partial profile invented here would read as a downgrade to clients. The
+/// human-readable `channels` array is left alone, because naming a just-joined
+/// channel would cost another round trip — which is also why `channel_ids`
+/// keeps its existing order instead of being sorted: clients that pair the two
+/// arrays by index would otherwise relabel rows that were correct before.
+///
+/// Returns the second the new profile was published in, or `None` when nothing
+/// needed publishing.
+async fn apply_profile_channel_delta(
+    rest_client: &relay::RestClient,
+    keys: &nostr::Keys,
+    deltas: &[(Uuid, bool)],
+    last_published_secs: u64,
+) -> Result<Option<u64>, relay::RelayError> {
+    use buzz_core::kind::KIND_AGENT_PROFILE;
+    use nostr::{EventBuilder, Kind};
+
+    let filter = nostr::Filter::new()
+        .kind(Kind::Custom(KIND_AGENT_PROFILE as u16))
+        .author(keys.public_key())
+        .limit(1);
+    let existing = rest_client.query(&[filter]).await?;
+    let existing_event = existing.as_array().and_then(|events| events.first());
+    // Anyone may have published this profile — deploy tooling, `buzz channels
+    // set-add-policy`, another harness. Treat its `created_at` as a floor so
+    // our write cannot collide with theirs in the same second either.
+    let last_published_secs = last_published_secs.max(
+        existing_event
+            .and_then(|event| event.get("created_at"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+    );
+    let content = existing_event
+        .and_then(|event| event.get("content"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let Ok(serde_json::Value::Object(mut profile)) =
+        serde_json::from_str::<serde_json::Value>(content)
+    else {
+        tracing::debug!("no kind:10100 profile to update — skipping republish");
+        return Ok(None);
+    };
+
+    let mut ids: Vec<String> = profile
+        .get("channel_ids")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if !apply_channel_id_deltas(&mut ids, deltas) {
+        return Ok(None);
+    }
+    profile.insert(
+        "channel_ids".to_string(),
+        serde_json::Value::Array(ids.into_iter().map(serde_json::Value::String).collect()),
+    );
+
+    // Never sign two of these inside one second — see `ProfileChannelUpdater`.
+    //
+    // The floor is seeded from the stored profile's `created_at`, which any
+    // peer can set: deploy tooling, `buzz channels set-add-policy`, or another
+    // harness on a skewed clock.
+    let now = unix_secs_now();
+    let (created_at, lead) = profile_publish_stamp(now, last_published_secs);
+    // Past the relay's ingest window the event cannot land at all, so a peer
+    // skewed further than this is unwinnable. Fail loudly: the worker logs it,
+    // keeps the deltas, and retries with backoff.
+    if lead > MAX_PROFILE_PUBLISH_SKEW_SECS {
+        return Err(relay::RelayError::Http(format!(
+            "stored agent profile is timestamped {lead}s ahead of local time; refusing to republish"
+        )));
+    }
+    // Two different leads land here and only one is worth waiting out:
+    //
+    // - Our own previous publish, one second back. Sleeping through it is what
+    //   keeps the one-per-second cap a rate limit instead of data loss — the
+    //   queue is the only copy of these deltas and the worker has no requeue
+    //   path — and it hands the second back before returning, so stamps never
+    //   ratchet away from the wall clock.
+    // - A peer's future timestamp, up to the whole ingest window. That one is
+    //   out-bid by the stamp above, not slept through: parking the single
+    //   worker for minutes would stall every later delta behind it.
+    if lead > 0 {
+        tokio::time::sleep(std::time::Duration::from_secs(lead).min(MAX_PROFILE_PUBLISH_SLEEP))
+            .await;
+    }
+
+    let event = EventBuilder::new(
+        Kind::Custom(KIND_AGENT_PROFILE as u16),
+        serde_json::Value::Object(profile).to_string(),
+    )
+    .tags([])
+    .custom_created_at(nostr::Timestamp::from_secs(created_at))
+    .sign_with_keys(keys)
+    .map_err(|e| relay::RelayError::Http(format!("profile sign error: {e}")))?;
+    // `submit_event` awaits the relay's response, unlike the socket publisher,
+    // which returns as soon as the command is queued. The next delta reads the
+    // profile back, so the write has to be durable before this returns.
+    let response = rest_client.submit_event(&event).await?;
+    profile_write_landed(&response).map_err(|detail| {
+        relay::RelayError::Http(format!("profile channel_ids update did not land: {detail}"))
+    })?;
+    Ok(Some(created_at))
+}
+
 fn emit_runtime_lifecycle(
     observer: Option<&observer::ObserverHandle>,
     start_nonce: &str,
@@ -2027,6 +2499,8 @@ async fn tokio_main() -> Result<()> {
 
     let presence_publisher = relay.event_publisher();
     let presence_keys = config.keys.clone();
+    let profile_channel_updater =
+        ProfileChannelUpdater::spawn(relay.rest_client(), config.keys.clone());
 
     // Priority: BUZZ_AUTH_TAG (NIP-OA attestation) → --agent-owner flag.
     let startup_owner: Option<String> = resolve_agent_owner(&config);
@@ -2684,6 +3158,10 @@ async fn tokio_main() -> Result<()> {
                                 }
                                 membership_newest_ts.insert(ch, ts);
 
+                                // `Some(joined)` once we know this agent's served
+                                // channel set includes/excludes `ch`; `None` when
+                                // the notification does not apply to us.
+                                let mut profile_channel_delta: Option<bool> = None;
                                 if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION {
                                     // Clear removal tracking so sessions are not
                                     // stripped for a legitimately re-added channel.
@@ -2691,18 +3169,21 @@ async fn tokio_main() -> Result<()> {
 
                                     if subscribed_channel_ids.contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
+                                        profile_channel_delta = Some(true);
                                     } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
                                         tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
                                         } else {
                                             subscribed_channel_ids.insert(ch);
+                                            profile_channel_delta = Some(true);
                                         }
                                     } else {
                                         tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
                                     }
                                 } else {
                                     subscribed_channel_ids.remove(&ch);
+                                    profile_channel_delta = Some(false);
                                     tracing::info!(channel_id = %ch, "membership notification: unsubscribing from channel");
                                     if let Err(e) = relay.unsubscribe_channel(ch).await {
                                         tracing::warn!("failed to unsubscribe from channel {ch}: {e}");
@@ -2744,6 +3225,16 @@ async fn tokio_main() -> Result<()> {
                                             "cleaned up after membership removal"
                                         );
                                     }
+                                }
+                                // The set of channels this agent serves just
+                                // changed. Refresh the self-declared copy in
+                                // kind:10100 so discovery surfaces track it
+                                // without an operator republishing by hand.
+                                // Queued rather than applied here: the update
+                                // is a relay round trip, and the deltas must
+                                // land in the order they were observed.
+                                if let Some(joined) = profile_channel_delta {
+                                    profile_channel_updater.record(ch, joined);
                                 }
                                 continue;
                             }
