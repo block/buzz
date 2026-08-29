@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 /// Errors that can occur during filter expression evaluation.
 #[derive(Debug, thiserror::Error)]
@@ -351,8 +351,21 @@ const MAX_CONSECUTIVE_TIMEOUTS: u32 = 5;
 /// 2. **kinds** — if non-empty, the event kind must be in the list.
 /// 3. **require_mention** — if `true`, a `p` tag matching `agent_pubkey_hex` must
 ///    exist. Tag kind is checked via `tag.as_slice()` for stable, library-independent
-///    access.
+///    access. Bypassed entirely when `dm_mention_exempt` is `true` (see below).
 /// 4. **filter** — if `Some`, the evalexpr expression must evaluate to `true`.
+///
+/// # DM mention exemption
+///
+/// `dm_mention_exempt` is decided by the caller, not by the rule, so this
+/// function stays agnostic about subscribe modes. The harness sets it only for
+/// events arriving in a **DM channel while running in mentions mode**: a DM is
+/// already addressed to the agent, so requiring an explicit `p` tag there would
+/// silently drop plain DM text. It deliberately does **not** apply to
+/// config-mode rules — an operator who writes `require_mention: true` in their
+/// config gets exactly that, in every channel.
+///
+/// The exemption affects only the `require_mention` check. Channel scope, kind
+/// filters, and evalexpr filters are unchanged.
 ///
 /// # Fail-closed filter error handling
 ///
@@ -370,6 +383,7 @@ pub async fn match_event(
     channel_id: uuid::Uuid,
     rules: &[SubscriptionRule],
     agent_pubkey_hex: &str,
+    dm_mention_exempt: bool,
 ) -> Option<MatchedRule> {
     let filter_ctx = FilterContext::from_event(event, channel_id);
 
@@ -394,7 +408,15 @@ pub async fn match_event(
                     && s.get(1).map(|v| v.as_str()) == Some(agent_pubkey_hex)
             });
             if !mentioned {
-                continue;
+                if !dm_mention_exempt {
+                    continue;
+                }
+                debug!(
+                    rule = %rule.name,
+                    rule_index = index,
+                    channel_id = %channel_id,
+                    "dm mention exemption: dispatching unmentioned DM event"
+                );
             }
         }
 
@@ -601,7 +623,9 @@ mod tests {
             ),
         ];
 
-        let matched = match_event(&event, channel_id, &rules, "").await.unwrap();
+        let matched = match_event(&event, channel_id, &rules, "", false)
+            .await
+            .unwrap();
         assert_eq!(matched.rule_index, 0);
         assert_eq!(matched.prompt_tag, "tag-first");
     }
@@ -630,7 +654,9 @@ mod tests {
             ),
         ];
 
-        let matched = match_event(&event, channel_id, &rules, "").await.unwrap();
+        let matched = match_event(&event, channel_id, &rules, "", false)
+            .await
+            .unwrap();
         assert_eq!(matched.rule_index, 1);
         assert_eq!(matched.prompt_tag, "matched");
     }
@@ -653,11 +679,11 @@ mod tests {
         )];
 
         // Without mention — no match.
-        let result = match_event(&event_no_mention, channel_id, &rules, agent_pubkey).await;
+        let result = match_event(&event_no_mention, channel_id, &rules, agent_pubkey, false).await;
         assert!(result.is_none());
 
         // With mention — matches.
-        let matched = match_event(&event_with_mention, channel_id, &rules, agent_pubkey)
+        let matched = match_event(&event_with_mention, channel_id, &rules, agent_pubkey, false)
             .await
             .unwrap();
         assert_eq!(matched.prompt_tag, "mentioned");
@@ -677,7 +703,7 @@ mod tests {
             None,
         )];
 
-        let result = match_event(&event, channel_id, &rules, "").await;
+        let result = match_event(&event, channel_id, &rules, "", false).await;
         assert!(result.is_none());
     }
 
@@ -725,7 +751,9 @@ mod tests {
             None, // no explicit tag
         )];
 
-        let matched = match_event(&event, channel_id, &rules, "").await.unwrap();
+        let matched = match_event(&event, channel_id, &rules, "", false)
+            .await
+            .unwrap();
         assert_eq!(matched.prompt_tag, "my-rule");
     }
 
@@ -755,7 +783,7 @@ mod tests {
         ];
 
         // Must return None — not "catch-all".
-        let result = match_event(&event, channel_id, &rules, "").await;
+        let result = match_event(&event, channel_id, &rules, "", false).await;
         assert!(
             result.is_none(),
             "filter error must fail closed, not fall through to next rule"
@@ -781,7 +809,187 @@ mod tests {
             .store(MAX_CONSECUTIVE_TIMEOUTS, Ordering::Relaxed);
 
         let rules = vec![rule];
-        let result = match_event(&event, channel_id, &rules, "").await;
+        let result = match_event(&event, channel_id, &rules, "", false).await;
         assert!(result.is_none(), "disabled rule must return None");
+    }
+
+    // --- DM mention exemption -------------------------------------------
+    //
+    // `dm_mention_exempt` is decided by the caller (mentions mode + DM
+    // channel) and relaxes ONLY the `require_mention` check. These tests pin
+    // both halves of that contract: the exemption fires, and it does not leak
+    // into any other gate.
+
+    const AGENT_PUBKEY: &str = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
+    /// A `require_mention: true` rule scoped to every channel, all kinds.
+    fn mention_rule() -> SubscriptionRule {
+        make_rule(
+            "mention-only",
+            ChannelScope::All("all".into()),
+            vec![],
+            true,
+            None,
+            Some("mentioned"),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_match_event_dm_exempt_dispatches_unmentioned_event() {
+        // Plain DM text carries no `p` tag. With the exemption on, the
+        // require_mention rule must still match.
+        let event = make_event(9, "hey, status?");
+        let channel_id = any_channel();
+        let rules = vec![mention_rule()];
+
+        let matched = match_event(&event, channel_id, &rules, AGENT_PUBKEY, true)
+            .await
+            .expect("dm exemption must dispatch an unmentioned event");
+        assert_eq!(matched.rule_index, 0);
+        assert_eq!(matched.prompt_tag, "mentioned");
+    }
+
+    #[tokio::test]
+    async fn test_match_event_dm_exempt_off_filters_unmentioned_event() {
+        // Same event, exemption off — the pre-existing behavior: filtered.
+        let event = make_event(9, "hey, status?");
+        let channel_id = any_channel();
+        let rules = vec![mention_rule()];
+
+        let result = match_event(&event, channel_id, &rules, AGENT_PUBKEY, false).await;
+        assert!(
+            result.is_none(),
+            "without the exemption an unmentioned event must stay filtered"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_match_event_dm_exempt_still_matches_mentioned_event() {
+        // No regression for the mentioned case: exemption on must not change
+        // the outcome for an event that does carry the agent's `p` tag.
+        let event = make_event_with_p_tag(9, "hey @agent", AGENT_PUBKEY);
+        let channel_id = any_channel();
+        let rules = vec![mention_rule()];
+
+        let matched = match_event(&event, channel_id, &rules, AGENT_PUBKEY, true)
+            .await
+            .expect("mentioned event must match with the exemption on");
+        assert_eq!(matched.prompt_tag, "mentioned");
+    }
+
+    #[tokio::test]
+    async fn test_match_event_dm_exempt_does_not_bypass_kind_filter() {
+        // The exemption relaxes require_mention only — a kind mismatch must
+        // still filter the event out.
+        let event = make_event(1, "hey, status?");
+        let channel_id = any_channel();
+
+        let rules = vec![make_rule(
+            "kind-9-mention-only",
+            ChannelScope::All("all".into()),
+            vec![9],
+            true,
+            None,
+            Some("should-not-match"),
+        )];
+
+        let result = match_event(&event, channel_id, &rules, AGENT_PUBKEY, true).await;
+        assert!(
+            result.is_none(),
+            "dm exemption must not bypass the kind filter"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_match_event_dm_exempt_does_not_bypass_evalexpr_filter() {
+        // An evalexpr filter evaluating to false must still filter, even for
+        // an unmentioned event with the exemption on.
+        let event = make_event(9, "just chatter");
+        let channel_id = any_channel();
+
+        let rules = vec![make_rule(
+            "p1-mention-only",
+            ChannelScope::All("all".into()),
+            vec![],
+            true,
+            Some(r#"str_contains(content, "P1")"#),
+            Some("should-not-match"),
+        )];
+
+        let result = match_event(&event, channel_id, &rules, AGENT_PUBKEY, true).await;
+        assert!(
+            result.is_none(),
+            "dm exemption must not bypass the evalexpr filter"
+        );
+
+        // Control: same rule + exemption, content that satisfies the filter.
+        let hit = make_event(9, "P1 incident");
+        let matched = match_event(&hit, channel_id, &rules, AGENT_PUBKEY, true)
+            .await
+            .expect("filter-true unmentioned event must match under the exemption");
+        assert_eq!(matched.prompt_tag, "should-not-match");
+    }
+
+    #[tokio::test]
+    async fn test_match_event_dm_exempt_does_not_bypass_channel_scope() {
+        // Channel scope is checked before require_mention and is untouched by
+        // the exemption.
+        let event = make_event(9, "hey, status?");
+        let in_scope = any_channel();
+        let out_of_scope = any_channel();
+
+        let rules = vec![make_rule(
+            "scoped-mention-only",
+            ChannelScope::List(vec![in_scope.to_string()]),
+            vec![],
+            true,
+            None,
+            Some("scoped"),
+        )];
+
+        let result = match_event(&event, out_of_scope, &rules, AGENT_PUBKEY, true).await;
+        assert!(
+            result.is_none(),
+            "dm exemption must not bypass channel scope"
+        );
+
+        let matched = match_event(&event, in_scope, &rules, AGENT_PUBKEY, true)
+            .await
+            .expect("in-scope unmentioned event must match under the exemption");
+        assert_eq!(matched.prompt_tag, "scoped");
+    }
+
+    #[tokio::test]
+    async fn test_match_event_dm_exempt_skips_to_later_matching_rule() {
+        // The exemption must not short-circuit rule ordering: a rule rejected
+        // on kind still falls through to the next rule, which then benefits
+        // from the exemption.
+        let event = make_event(9, "hey, status?");
+        let channel_id = any_channel();
+
+        let rules = vec![
+            make_rule(
+                "wrong-kind",
+                ChannelScope::All("all".into()),
+                vec![1],
+                true,
+                None,
+                Some("wrong"),
+            ),
+            make_rule(
+                "right-kind",
+                ChannelScope::All("all".into()),
+                vec![9],
+                true,
+                None,
+                Some("right"),
+            ),
+        ];
+
+        let matched = match_event(&event, channel_id, &rules, AGENT_PUBKEY, true)
+            .await
+            .expect("second rule must match under the exemption");
+        assert_eq!(matched.rule_index, 1);
+        assert_eq!(matched.prompt_tag, "right");
     }
 }
