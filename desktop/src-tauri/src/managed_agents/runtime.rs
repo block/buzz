@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 
 use tauri::AppHandle;
 
@@ -70,6 +71,60 @@ use lifecycle::kill_stale_tracked_processes_with;
 pub use lifecycle::{kill_stale_tracked_processes, sync_managed_agent_processes};
 mod spawn_key; // production spawn-key derivation + its regressions
 pub(crate) use spawn_key::bound_runtime_key;
+
+const TRUSTED_CONTEXT_ENGINE_NODE: &str = "/Users/gabriel/.buzz/runtime/trusted-node/d36b3d980963d44bd2c5e844fac4cfeee26a167b744287a4e74a9575af9d0559/node";
+const TRUSTED_CONTEXT_ENGINE_ADAPTERS: [&str; 2] = [
+    "/Users/gabriel/.buzz/runtime/context-engine/96a8efaf20cbc1cb92fb2ae2eca5a0bdefabba42f9cd6e2ca21299c724bd7c5c/scripts/gabe-acp.mjs",
+    "/Users/gabriel/.buzz/runtime/stacy-context-engine/96a8efaf20cbc1cb92fb2ae2eca5a0bdefabba42f9cd6e2ca21299c724bd7c5c/scripts/gabe-acp.mjs",
+];
+
+fn is_trusted_context_engine_harness(command: &str, args: &[String]) -> bool {
+    command == TRUSTED_CONTEXT_ENGINE_NODE
+        && args.len() == 1
+        && TRUSTED_CONTEXT_ENGINE_ADAPTERS.contains(&args[0].as_str())
+}
+
+fn install_acp_credential_stdin(
+    command: &mut std::process::Command,
+    private_key: &str,
+    auth_tag: Option<&str>,
+) -> Result<zeroize::Zeroizing<Vec<u8>>, String> {
+    #[derive(serde::Serialize)]
+    struct CredentialEnvelope<'a> {
+        private_key: &'a str,
+        auth_tag: Option<&'a str>,
+    }
+
+    let payload = serde_json::to_vec(&CredentialEnvelope {
+        private_key,
+        auth_tag,
+    })
+    .map(zeroize::Zeroizing::new)
+    .map_err(|error| format!("failed to encode ACP credential envelope: {error}"))?;
+    // The mode flag is not secret. Remove every legacy credential carrier
+    // immediately before spawn so neither argv nor the macOS launch-time
+    // environment snapshot contains signing material.
+    command
+        .env_remove("BUZZ_PRIVATE_KEY")
+        .env_remove("NOSTR_PRIVATE_KEY")
+        .env_remove("BUZZ_AUTH_TAG")
+        .env("BUZZ_ACP_CREDENTIAL_STDIN", "true")
+        .stdin(std::process::Stdio::piped());
+    Ok(payload)
+}
+
+fn deliver_acp_credentials(
+    child: &mut std::process::Child,
+    payload: &[u8],
+) -> std::io::Result<()> {
+    let mut stdin = child.stdin.take().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "ACP credential stdin was not piped",
+        )
+    })?;
+    stdin.write_all(payload)
+}
 
 /// Classify an agent's persona against the live catalog for the Agents-menu
 /// drift indicator. Returns `(out_of_date, orphaned)`.
@@ -497,6 +552,8 @@ pub fn spawn_agent_child(
     let resolved_agent_command = resolve_command(effective_command)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
+    let secure_context_engine_credentials =
+        is_trusted_context_engine_harness(&resolved_agent_command, agent_args);
 
     // The caller supplies the explicit canonical pair relay. This is the only
     // relay this child may connect to, regardless of the record/workspace default.
@@ -530,7 +587,9 @@ pub fn spawn_agent_child(
         command.env("PATH", path);
     }
     command.env("RUST_LOG", child_rust_log_filter());
-    command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
+    if !secure_context_engine_credentials {
+        command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
+    }
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_IDLE_POOL_SLEEP", idle_pool_sleep_env(lazy));
@@ -679,7 +738,14 @@ pub fn spawn_agent_child(
     }
     let acp_n = super::acp_agents_value(effective_command, record.parallelism);
     command.env("BUZZ_ACP_AGENTS", acp_n);
-    command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "steer");
+    command.env(
+        "BUZZ_ACP_MULTIPLE_EVENT_HANDLING",
+        if secure_context_engine_credentials {
+            "queue"
+        } else {
+            "steer"
+        },
+    );
     command.env("BUZZ_ACP_DEDUP", "queue");
     if let Some(meta) = runtime_meta {
         for (key, value) in meta.default_env {
@@ -757,10 +823,17 @@ pub fn spawn_agent_child(
     command.env_remove("BUZZ_ACP_PRIVATE_KEY");
     command.env_remove("BUZZ_ACP_API_TOKEN");
     command.env_remove("BUZZ_API_TOKEN");
+    command.env_remove("BUZZ_ACP_CREDENTIAL_STDIN");
 
-    if let Some(ref auth_tag) = record.auth_tag {
-        command.env("BUZZ_AUTH_TAG", auth_tag);
+    if !secure_context_engine_credentials {
+        if let Some(ref auth_tag) = record.auth_tag {
+            command.env("BUZZ_AUTH_TAG", auth_tag);
+        } else {
+            command.env_remove("BUZZ_AUTH_TAG");
+        }
     } else {
+        // The one-shot inherited socket is installed immediately before spawn.
+        // Clear ambient values here as defense in depth until then.
         command.env_remove("BUZZ_AUTH_TAG");
     }
 
@@ -783,7 +856,9 @@ pub fn spawn_agent_child(
     if let Some(cred_helper) = resolve_command("git-credential-nostr") {
         let relay_http_url = crate::relay::relay_http_base_url(&effective_relay_url);
 
-        command.env("NOSTR_PRIVATE_KEY", &record.private_key_nsec);
+        if !secure_context_engine_credentials {
+            command.env("NOSTR_PRIVATE_KEY", &record.private_key_nsec);
+        }
         command.env("GIT_TERMINAL_PROMPT", "0");
         command.env("GIT_CONFIG_COUNT", "2");
         command.env(
@@ -864,6 +939,16 @@ pub fn spawn_agent_child(
         },
     );
 
+    let credential_payload = if secure_context_engine_credentials {
+        Some(install_acp_credential_stdin(
+            &mut command,
+            &record.private_key_nsec,
+            record.auth_tag.as_deref(),
+        )?)
+    } else {
+        None
+    };
+
     // Spawn the harness in its own process group so we can kill the entire
     // tree (harness + MCP servers + agent subprocesses) on shutdown.
     #[cfg(unix)]
@@ -881,13 +966,24 @@ pub fn spawn_agent_child(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let child = command.spawn().map_err(|error| {
+    let mut child = command.spawn().map_err(|error| {
         format!(
             "failed to spawn `{}` for agent {}: {error}",
             resolved_acp_command.display(),
             record.name
         )
     })?;
+
+    if let Some(payload) = credential_payload {
+        if let Err(error) = deliver_acp_credentials(&mut child, &payload) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "failed to deliver protected credentials to ACP harness for agent {}: {error}",
+                record.name
+            ));
+        }
+    }
 
     // Stamp the adapter availability for runtimes with a version gate (codex
     // only). The summary builder compares this against the current cached value

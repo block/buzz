@@ -86,6 +86,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # Random number generation — full jitter for exponential backoff in with_retry
 rand = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+# Effective-uid ownership check for durable outbox directories.
+nix = { version = "0.31", default-features = false, features = ["user"] }
+
 [dev-dependencies]
 # Scratch files for channel-templates.json fixtures in tests
 tempfile = "3"

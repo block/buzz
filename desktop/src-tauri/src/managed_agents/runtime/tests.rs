@@ -995,6 +995,117 @@ fn workspace_pair_key_is_canonical() {
 }
 
 #[test]
+fn trusted_context_engine_harnesses_force_queue_mode_classification() {
+    let node = super::TRUSTED_CONTEXT_ENGINE_NODE;
+    for adapter in super::TRUSTED_CONTEXT_ENGINE_ADAPTERS {
+        assert!(super::is_trusted_context_engine_harness(
+            node,
+            &[adapter.to_string()]
+        ));
+    }
+    assert!(!super::is_trusted_context_engine_harness(
+        "node",
+        &[super::TRUSTED_CONTEXT_ENGINE_ADAPTERS[0].to_string()]
+    ));
+    assert!(!super::is_trusted_context_engine_harness(
+        node,
+        &["/tmp/gabe-acp.mjs".to_string()]
+    ));
+    assert!(!super::is_trusted_context_engine_harness(node, &[]));
+}
+
+#[test]
+fn protected_credential_stdin_removes_all_launch_environment_secret_carriers() {
+    let mut command = std::process::Command::new("/usr/bin/true");
+    command
+        .env("BUZZ_PRIVATE_KEY", "private-canary")
+        .env("NOSTR_PRIVATE_KEY", "nostr-canary")
+        .env("BUZZ_AUTH_TAG", "auth-canary");
+    let payload = super::install_acp_credential_stdin(
+        &mut command,
+        "private-canary",
+        Some("auth-canary"),
+    )
+    .expect("install protected credential stdin");
+
+    let effective_env = command
+        .get_envs()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.map(|value| value.to_string_lossy().into_owned()),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for secret_key in ["BUZZ_PRIVATE_KEY", "NOSTR_PRIVATE_KEY", "BUZZ_AUTH_TAG"] {
+        assert_eq!(
+            effective_env.get(secret_key),
+            Some(&None),
+            "{secret_key} must be explicitly removed from the launch environment"
+        );
+    }
+    assert_eq!(
+        effective_env
+            .get("BUZZ_ACP_CREDENTIAL_STDIN")
+            .and_then(|value| value.as_deref()),
+        Some("true")
+    );
+
+    let decoded: serde_json::Value =
+        serde_json::from_slice(&payload).expect("decode protected credential payload");
+    assert_eq!(decoded["private_key"], "private-canary");
+    assert_eq!(decoded["auth_tag"], "auth-canary");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn protected_credential_stdin_is_absent_from_macos_process_inspection() {
+    use sha2::{Digest as _, Sha256};
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    const PRIVATE_CANARY: &str = "STACY_STDIN_PRIVATE_CANARY_6f7c30";
+    const AUTH_CANARY: &str = "STACY_STDIN_AUTH_CANARY_4d093e";
+    let expected_private_hash = hex::encode(Sha256::digest(PRIVATE_CANARY.as_bytes()));
+    let expected_auth_hash = hex::encode(Sha256::digest(AUTH_CANARY.as_bytes()));
+    let script = r#"import hashlib,json,sys,time
+payload=json.load(sys.stdin)
+assert hashlib.sha256(payload['private_key'].encode()).hexdigest() == sys.argv[1]
+assert hashlib.sha256(payload['auth_tag'].encode()).hexdigest() == sys.argv[2]
+time.sleep(2)
+"#;
+    let mut command = std::process::Command::new("/usr/bin/python3");
+    command
+        .args(["-c", script, &expected_private_hash, &expected_auth_hash])
+        .env("BUZZ_PRIVATE_KEY", PRIVATE_CANARY)
+        .env("NOSTR_PRIVATE_KEY", PRIVATE_CANARY)
+        .env("BUZZ_AUTH_TAG", AUTH_CANARY)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let payload =
+        super::install_acp_credential_stdin(&mut command, PRIVATE_CANARY, Some(AUTH_CANARY))
+            .expect("install protected credential stdin");
+    let mut child = command.spawn().expect("spawn credential inspection probe");
+    super::deliver_acp_credentials(&mut child, &payload).expect("deliver protected credentials");
+
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        child.try_wait().expect("probe child status").is_none(),
+        "probe child exited before process inspection"
+    );
+    let inspected = std::process::Command::new("/bin/ps")
+        .args(["eww", "-p", &child.id().to_string()])
+        .output()
+        .expect("inspect probe argv and environment");
+    let surface = String::from_utf8_lossy(&inspected.stdout);
+    assert!(!surface.contains(PRIVATE_CANARY));
+    assert!(!surface.contains(AUTH_CANARY));
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
 fn invalid_pubkey_resolves_no_pair_key() {
     // Key-less records (keys minted on first start) cannot form a pair key;
     // the summary must fall back to the stopped/legacy-pid path, not panic.

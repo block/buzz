@@ -20,6 +20,7 @@ path = "src/main.rs"
 buzz-core = { workspace = true }
 buzz-sdk = { workspace = true }
 buzz-persona = { path = "../buzz-persona" }
+buzz-cli = { path = "../buzz-cli" }
 
 # Nostr
 nostr = { workspace = true }
@@ -51,6 +52,8 @@ url = { workspace = true }
 
 # NIP-98 HTTP auth signing
 sha2 = { workspace = true }
+hmac = { workspace = true }
+rand = { workspace = true }
 base64 = "0.22"
 hex = { workspace = true }
 

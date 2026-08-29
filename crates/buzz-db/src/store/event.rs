@@ -1348,6 +1348,37 @@ pub async fn insert_event_with_thread_metadata(
     Ok(result)
 }
 
+/// Atomically compare a prepared message's membership revision and insert the
+/// event/thread rows while holding the same advisory transaction lock used by
+/// membership mutations.
+pub async fn insert_prepared_event_with_thread_metadata(
+    pool: &PgPool,
+    community_id: CommunityId,
+    event: &Event,
+    channel_id: Uuid,
+    thread_meta: Option<ThreadMetadataParams<'_>>,
+    expected_membership_revision: &str,
+) -> Result<(StoredEvent, bool)> {
+    let mut tx = pool.begin().await?;
+    crate::channel::acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
+    let current = crate::channel::membership_revision_tx(&mut tx, community_id, channel_id).await?;
+    if current != expected_membership_revision {
+        return Err(DbError::AccessDenied(
+            "channel membership revision mismatch".into(),
+        ));
+    }
+    let result = insert_event_with_thread_metadata_tx(
+        &mut tx,
+        community_id,
+        event,
+        Some(channel_id),
+        thread_meta,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
 impl Db {
     /// Inserts an event. Returns `(StoredEvent, was_inserted)` — `false` on duplicate.
     #[datastore_span(name = "insert_event", system = "postgresql")]
@@ -1364,6 +1395,35 @@ impl Db {
                 crate::insert_mentions(&self.pool, community_id, event, channel_id).await
             {
                 tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+            }
+        }
+        Ok(result)
+    }
+
+    /// Atomically enforce a prepared message membership revision and insert
+    /// the event plus thread metadata.
+    pub async fn insert_prepared_event_with_thread_metadata(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Uuid,
+        thread_meta: Option<ThreadMetadataParams<'_>>,
+        expected_membership_revision: &str,
+    ) -> Result<(StoredEvent, bool)> {
+        let result = crate::event::insert_prepared_event_with_thread_metadata(
+            &self.pool,
+            community_id,
+            event,
+            channel_id,
+            thread_meta,
+            expected_membership_revision,
+        )
+        .await?;
+        if result.1 {
+            if let Err(error) =
+                crate::insert_mentions(&self.pool, community_id, event, Some(channel_id)).await
+            {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {error}");
             }
         }
         Ok(result)

@@ -3,6 +3,7 @@ mod client;
 mod commands;
 mod error;
 mod links;
+mod prepared_event;
 mod validate;
 
 use clap::{Parser, Subcommand};
@@ -10,6 +11,206 @@ use client::BuzzClient;
 use error::CliError;
 use nostr::Keys;
 use uuid::Uuid;
+
+/// Inputs for one crash-safe, idempotent managed-agent reply.
+pub struct DurableReplyRequest<'a> {
+    /// Relay HTTP base URL.
+    pub relay_url: &'a str,
+    /// Managed-agent signing identity, retained by the caller process.
+    pub keys: &'a Keys,
+    /// Verified NIP-OA owner authorization tag JSON.
+    pub auth_tag: &'a str,
+    /// Exact DM channel UUID.
+    pub channel: &'a str,
+    /// UTF-8 reply text.
+    pub content: &'a str,
+    /// Immediate parent event ID.
+    pub reply_to: &'a str,
+    /// Authoritative thread root event ID.
+    pub thread_root: &'a str,
+    /// Stable 64-hex delivery/execution identifier.
+    pub execution_id: &'a str,
+    /// Explicit mentioned pubkeys.
+    pub mentions: &'a [String],
+    /// Absolute no-clobber path for the durable prepared record.
+    pub out: &'a std::path::Path,
+}
+
+/// Inputs for startup reconciliation of a managed agent's durable reply outbox.
+pub struct ReplayPreparedRequest<'a> {
+    pub relay_url: &'a str,
+    pub keys: &'a Keys,
+    pub auth_tag: &'a str,
+    pub outbox_dir: &'a std::path::Path,
+}
+
+/// Receipt for a prepared reply accepted by the relay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DurableReplyReceipt {
+    /// Signed Nostr event ID.
+    pub event_id: String,
+    /// Whether the exact event was already present at the relay.
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayPreparedReceipt {
+    pub reconciled: usize,
+}
+
+/// Failure returned by the narrow durable-reply facade.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct DurableReplyError {
+    message: String,
+    retryable: bool,
+}
+
+impl DurableReplyError {
+    /// Whether replaying the same durable request may succeed later.
+    pub fn retryable(&self) -> bool {
+        self.retryable
+    }
+}
+
+/// Prepare, fsync, and publish one exact managed-agent reply in-process.
+///
+/// The signed record is installed with no-clobber semantics before any publish
+/// attempt. Reusing the same request adopts and replays the exact event.
+pub async fn prepare_and_publish_reply(
+    request: DurableReplyRequest<'_>,
+) -> Result<DurableReplyReceipt, DurableReplyError> {
+    if request.content.is_empty() {
+        return Err(DurableReplyError {
+            message: "durable reply content is empty".into(),
+            retryable: false,
+        });
+    }
+    if request.content.len() > 64 * 1024 {
+        return Err(DurableReplyError {
+            message: "durable reply content exceeds 64 KiB".into(),
+            retryable: false,
+        });
+    }
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let relay_url = client::normalize_relay_url(request.relay_url);
+    let auth_json = normalize_auth_tag_input(request.auth_tag);
+    let auth_tag = buzz_sdk::nip_oa::parse_auth_tag(&auth_json).map_err(|_| DurableReplyError {
+        message: "owner authorization tag is malformed".into(),
+        retryable: false,
+    })?;
+    buzz_sdk::nip_oa::verify_auth_tag(&auth_json, &request.keys.public_key()).map_err(|_| {
+        DurableReplyError {
+            message: "owner authorization tag verification failed".into(),
+            retryable: false,
+        }
+    })?;
+    let canonical_auth =
+        serde_json::to_string(auth_tag.as_slice()).map_err(|_| DurableReplyError {
+            message: "owner authorization tag serialization failed".into(),
+            retryable: false,
+        })?;
+    let client = BuzzClient::new(
+        relay_url,
+        request.keys.clone(),
+        Some(auth_tag),
+        Some(canonical_auth),
+    )
+    .map_err(|_| DurableReplyError {
+        message: "durable reply client initialization failed".into(),
+        retryable: false,
+    })?;
+    let input = prepared_event::DurableReplyInput {
+        channel: request.channel,
+        content: request.content,
+        reply_to: request.reply_to,
+        thread_root: request.thread_root,
+        execution_id: request.execution_id,
+        mentions: request.mentions,
+        out: request.out,
+    };
+    // Install the full non-secret response intent before the first await. If
+    // this future is cancelled or the process shuts down, startup can prepare
+    // and publish the exact response instead of losing the triggering event.
+    let intent = prepared_event::DurableReplyIntentGuard::begin(&client, &input)
+        .map_err(durable_reply_error)?;
+    let output = prepared_event::prepare_and_publish(&client, input)
+        .await
+        .map_err(durable_reply_error)?;
+    let event_id = output["event_id"]
+        .as_str()
+        .ok_or_else(|| DurableReplyError {
+            message: "durable reply receipt is malformed".into(),
+            retryable: false,
+        })?
+        .to_string();
+    let duplicate = output["duplicate"].as_bool().unwrap_or(false);
+    intent.complete().map_err(durable_reply_error)?;
+    Ok(DurableReplyReceipt {
+        event_id,
+        duplicate,
+    })
+}
+
+fn durable_reply_error(failure: prepared_event::PreparedFailure) -> DurableReplyError {
+    let output = failure.output();
+    let value = output.stderr.unwrap_or_else(|| serde_json::json!({}));
+    DurableReplyError {
+        message: value["error"]
+            .as_str()
+            .unwrap_or("durable_reply_failed")
+            .to_string(),
+        retryable: value["retryable"].as_bool().unwrap_or(false),
+    }
+}
+
+/// Conclusively reconcile every prepared record before accepting new events.
+pub async fn replay_prepared_replies(
+    request: ReplayPreparedRequest<'_>,
+) -> Result<ReplayPreparedReceipt, DurableReplyError> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let relay_url = client::normalize_relay_url(request.relay_url);
+    let auth_json = normalize_auth_tag_input(request.auth_tag);
+    let auth_tag = buzz_sdk::nip_oa::parse_auth_tag(&auth_json).map_err(|_| DurableReplyError {
+        message: "owner authorization tag is malformed".into(),
+        retryable: false,
+    })?;
+    buzz_sdk::nip_oa::verify_auth_tag(&auth_json, &request.keys.public_key()).map_err(|_| {
+        DurableReplyError {
+            message: "owner authorization tag verification failed".into(),
+            retryable: false,
+        }
+    })?;
+    let canonical_auth =
+        serde_json::to_string(auth_tag.as_slice()).map_err(|_| DurableReplyError {
+            message: "owner authorization tag serialization failed".into(),
+            retryable: false,
+        })?;
+    let client = BuzzClient::new(
+        relay_url,
+        request.keys.clone(),
+        Some(auth_tag),
+        Some(canonical_auth),
+    )
+    .map_err(|_| DurableReplyError {
+        message: "durable reply client initialization failed".into(),
+        retryable: false,
+    })?;
+    let reconciled = prepared_event::replay_directory(&client, request.outbox_dir)
+        .await
+        .map_err(|failure| {
+            let output = failure.output();
+            let value = output.stderr.unwrap_or_else(|| serde_json::json!({}));
+            DurableReplyError {
+                message: value["error"]
+                    .as_str()
+                    .unwrap_or("prepared_replay_failed")
+                    .to_string(),
+                retryable: value["retryable"].as_bool().unwrap_or(false),
+            }
+        })?;
+    Ok(ReplayPreparedReceipt { reconciled })
+}
 
 /// Run the Buzz CLI from raw arguments (including `argv[0]`).
 ///
@@ -51,6 +252,21 @@ where
             }
         }
     };
+    if prepared_command(&cli).is_some() {
+        let mut input = Vec::new();
+        if let Err(error) = std::io::Read::read_to_end(&mut std::io::stdin(), &mut input) {
+            error::print_error(&CliError::Other(format!("failed to read stdin: {error}")));
+            return 4;
+        }
+        let output = execute_prepared_cli(&cli, &input).await;
+        if let Some(value) = output.stdout {
+            println!("{value}");
+        }
+        if let Some(value) = output.stderr {
+            eprintln!("{value}");
+        }
+        return output.exit_code;
+    }
     match run(cli).await {
         Ok(()) => 0,
         Err(e) => {
@@ -58,6 +274,53 @@ where
             error::exit_code(&e)
         }
     }
+}
+
+/// Run a prepared-event CLI command with explicit byte streams.
+///
+/// This keeps private reply content off argv and gives adapter recovery code a
+/// deterministic JSON-only interface without replacing process-global stdio.
+pub async fn run_from_args_with_io<I, S, O, E>(
+    args: I,
+    input: &[u8],
+    stdout: &mut O,
+    stderr: &mut E,
+) -> i32
+where
+    I: IntoIterator<Item = S>,
+    S: Into<std::ffi::OsString> + Clone,
+    O: std::io::Write,
+    E: std::io::Write,
+{
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let cli = match Cli::try_parse_from(args) {
+        Ok(cli) => cli,
+        Err(error) => {
+            let target: &mut dyn std::io::Write = if error.use_stderr() { stderr } else { stdout };
+            let _ = writeln!(target, "{}", error.render());
+            return if error.use_stderr() { 1 } else { 0 };
+        }
+    };
+    if prepared_command(&cli).is_none() {
+        let _ = writeln!(
+            stderr,
+            "{}",
+            serde_json::json!({
+                "error": "user_error",
+                "retryable": false,
+                "message": "explicit IO is supported only for messages prepare and publish-prepared"
+            })
+        );
+        return 1;
+    }
+    let output = execute_prepared_cli(&cli, input).await;
+    if let Some(value) = output.stdout {
+        let _ = writeln!(stdout, "{value}");
+    }
+    if let Some(value) = output.stderr {
+        let _ = writeln!(stderr, "{value}");
+    }
+    output.exit_code
 }
 
 #[derive(Parser)]
@@ -369,6 +632,36 @@ buzz agents archived"
 
 #[derive(Subcommand)]
 pub enum MessagesCmd {
+    /// Prepare and fsync one fully signed message without publishing it
+    Prepare {
+        /// Channel UUID for the owner DM
+        #[arg(long)]
+        channel: String,
+        /// Must be '-' so private reply text is read from stdin
+        #[arg(long)]
+        content: String,
+        /// Immediate parent event ID
+        #[arg(long)]
+        reply_to: Option<String>,
+        /// Authoritative thread root event ID
+        #[arg(long)]
+        thread_root: Option<String>,
+        /// Durable Context Engine execution ID (64 hexadecimal characters)
+        #[arg(long)]
+        execution_id: String,
+        /// Explicit mentioned pubkey; repeatable
+        #[arg(long = "mention")]
+        mentions: Vec<String>,
+        /// Absolute no-clobber path for the prepared record
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
+    /// Publish or replay a previously prepared exact signed event
+    PublishPrepared {
+        /// Absolute path to the prepared record
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
     /// Send a message to a channel
     #[command(
         after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
@@ -2025,6 +2318,86 @@ fn normalize_auth_tag_input(input: &str) -> String {
     trimmed.to_owned()
 }
 
+fn build_client(cli: &Cli, relay_url: String) -> Result<BuzzClient, CliError> {
+    let private_key_str = cli.private_key.as_ref().ok_or_else(|| {
+        CliError::Auth("BUZZ_PRIVATE_KEY is required (use --private-key or set env var)".into())
+    })?;
+    let keys = Keys::parse(private_key_str)
+        .map_err(|error| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {error}")))?;
+    let (auth_tag, auth_tag_json) = match cli.auth_tag.as_deref() {
+        Some(input) if !input.is_empty() => {
+            let json = normalize_auth_tag_input(input);
+            let tag = buzz_sdk::nip_oa::parse_auth_tag(&json)
+                .map_err(|error| CliError::Auth(format!("BUZZ_AUTH_TAG is malformed: {error}")))?;
+            buzz_sdk::nip_oa::verify_auth_tag(&json, &keys.public_key()).map_err(|error| {
+                CliError::Auth(format!(
+                    "BUZZ_AUTH_TAG verification failed for pubkey {}: {error}",
+                    keys.public_key().to_hex()
+                ))
+            })?;
+            let canonical = serde_json::to_string(tag.as_slice()).map_err(|error| {
+                CliError::Auth(format!("BUZZ_AUTH_TAG serialization failed: {error}"))
+            })?;
+            (Some(tag), Some(canonical))
+        }
+        _ => (None, None),
+    };
+    BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)
+}
+
+fn prepared_command(cli: &Cli) -> Option<prepared_event::PreparedCommand<'_>> {
+    match &cli.command {
+        Cmd::Messages(MessagesCmd::Prepare {
+            channel,
+            content,
+            reply_to,
+            thread_root,
+            execution_id,
+            mentions,
+            out,
+        }) => Some(prepared_event::PreparedCommand::Prepare {
+            channel,
+            content_flag: content,
+            reply_to: reply_to.as_deref(),
+            thread_root: thread_root.as_deref(),
+            execution_id,
+            mentions,
+            out,
+        }),
+        Cmd::Messages(MessagesCmd::PublishPrepared { file }) => {
+            Some(prepared_event::PreparedCommand::Publish { file })
+        }
+        _ => None,
+    }
+}
+
+async fn execute_prepared_cli(cli: &Cli, input: &[u8]) -> prepared_event::PreparedCommandOutput {
+    let Some(command) = prepared_command(cli) else {
+        return prepared_event::PreparedCommandOutput {
+            exit_code: 1,
+            stdout: None,
+            stderr: Some(serde_json::json!({
+                "error": "user_error",
+                "retryable": false,
+                "message": "not a prepared-event command"
+            })),
+        };
+    };
+    let relay_url = client::normalize_relay_url(&cli.relay);
+    match build_client(cli, relay_url) {
+        Ok(client) => prepared_event::execute(&client, command, input).await,
+        Err(error) => prepared_event::PreparedCommandOutput {
+            exit_code: error::exit_code(&error),
+            stdout: None,
+            stderr: Some(serde_json::json!({
+                "error": "auth_error",
+                "retryable": false,
+                "message": error.to_string(),
+            })),
+        },
+    }
+}
+
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
@@ -2036,45 +2409,13 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         };
     }
 
-    // Auth: private key is required for all relay operations.
-    // The keypair IS the identity — no tokens, no other auth.
-    let private_key_str = cli.private_key.ok_or_else(|| {
-        CliError::Auth("BUZZ_PRIVATE_KEY is required (use --private-key or set env var)".into())
-    })?;
-    let keys = Keys::parse(&private_key_str)
-        .map_err(|e| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {e}")))?;
-
-    // NIP-OA: parse and verify the auth tag if provided.
-    //
-    // `BUZZ_AUTH_TAG` is hand-authored configuration, so the unquoted raw
-    // shorthand `[auth,hex,,hex]` is normalized to JSON here — at this input
-    // edge only. The SDK grammar and the `x-auth-tag` wire format stay strict
-    // JSON; all validation and signature verification happen on the strict
-    // path below, unchanged.
-    let (auth_tag, auth_tag_json) = match cli.auth_tag {
-        Some(ref input) if !input.is_empty() => {
-            let json = normalize_auth_tag_input(input);
-            let tag = buzz_sdk::nip_oa::parse_auth_tag(&json)
-                .map_err(|e| CliError::Auth(format!("BUZZ_AUTH_TAG is malformed: {e}")))?;
-            buzz_sdk::nip_oa::verify_auth_tag(&json, &keys.public_key()).map_err(|e| {
-                CliError::Auth(format!(
-                    "BUZZ_AUTH_TAG verification failed for pubkey {}: {e}",
-                    keys.public_key().to_hex()
-                ))
-            })?;
-            // Canonical wire form derives from the parsed-and-verified tag
-            // (same shape as buzz-acp's RestClient), never from raw input.
-            let canonical = serde_json::to_string(tag.as_slice())
-                .map_err(|e| CliError::Auth(format!("BUZZ_AUTH_TAG serialization failed: {e}")))?;
-            (Some(tag), Some(canonical))
-        }
-        _ => (None, None),
-    };
-
-    let client = BuzzClient::new(relay_url, keys, auth_tag, auth_tag_json)?;
+    let client = build_client(&cli, relay_url)?;
 
     match cli.command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
+        Cmd::Messages(MessagesCmd::Prepare { .. } | MessagesCmd::PublishPrepared { .. }) => {
+            unreachable!("prepared commands are dispatched before the ordinary CLI path")
+        }
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
@@ -2103,6 +2444,20 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    fn durable_test_out(execution_id: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let directory = tempfile::tempdir().expect("create durable reply test directory");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .expect("set durable reply test directory mode");
+        }
+        let out = directory
+            .path()
+            .join(format!("buzz-outbox-{execution_id}.json"));
+        (directory, out)
+    }
 
     /// Raw shorthand `[auth,hex,,hex]` normalizes to strict JSON; the empty
     /// conditions field becomes `""`.
@@ -2147,6 +2502,149 @@ mod tests {
         ] {
             assert_eq!(normalize_auth_tag_input(garbage), garbage.trim());
         }
+    }
+
+    #[tokio::test]
+    async fn durable_reply_facade_rejects_malformed_auth_before_network_or_disk() {
+        let keys = Keys::generate();
+        let reply_to = "a".repeat(64);
+        let thread_root = "b".repeat(64);
+        let execution_id = "c".repeat(64);
+        let (_directory, out) = durable_test_out(&execution_id);
+        let error = prepare_and_publish_reply(DurableReplyRequest {
+            relay_url: "http://127.0.0.1:1",
+            keys: &keys,
+            auth_tag: "not-an-auth-tag",
+            channel: "123e4567-e89b-12d3-a456-426614174000",
+            content: "must not publish",
+            reply_to: &reply_to,
+            thread_root: &thread_root,
+            execution_id: &execution_id,
+            mentions: &[],
+            out: &out,
+        })
+        .await
+        .expect_err("malformed owner authorization must fail closed");
+        assert!(!error.retryable());
+        assert_eq!(error.to_string(), "owner authorization tag is malformed");
+        assert!(!out.exists(), "invalid authority must not prepare an event");
+    }
+
+    #[tokio::test]
+    async fn durable_reply_facade_enforces_reply_size_before_network_or_disk() {
+        let keys = Keys::generate();
+        let content = "x".repeat(64 * 1024 + 1);
+        let reply_to = "a".repeat(64);
+        let thread_root = "b".repeat(64);
+        let execution_id = "c".repeat(64);
+        let (_directory, out) = durable_test_out(&execution_id);
+        let error = prepare_and_publish_reply(DurableReplyRequest {
+            relay_url: "http://127.0.0.1:1",
+            keys: &keys,
+            auth_tag: "not-an-auth-tag",
+            channel: "123e4567-e89b-12d3-a456-426614174000",
+            content: &content,
+            reply_to: &reply_to,
+            thread_root: &thread_root,
+            execution_id: &execution_id,
+            mentions: &[],
+            out: &out,
+        })
+        .await
+        .expect_err("oversized reply must fail closed");
+        assert!(!error.retryable());
+        assert_eq!(error.to_string(), "durable reply content exceeds 64 KiB");
+        assert!(!out.exists(), "oversized reply must not prepare an event");
+    }
+
+    #[tokio::test]
+    async fn durable_reply_facade_rejects_empty_content_before_network_or_disk() {
+        let keys = Keys::generate();
+        let reply_to = "a".repeat(64);
+        let thread_root = "b".repeat(64);
+        let execution_id = "c".repeat(64);
+        let (_directory, out) = durable_test_out(&execution_id);
+        let error = prepare_and_publish_reply(DurableReplyRequest {
+            relay_url: "http://127.0.0.1:1",
+            keys: &keys,
+            auth_tag: "not-an-auth-tag",
+            channel: "123e4567-e89b-12d3-a456-426614174000",
+            content: "",
+            reply_to: &reply_to,
+            thread_root: &thread_root,
+            execution_id: &execution_id,
+            mentions: &[],
+            out: &out,
+        })
+        .await
+        .expect_err("empty reply must fail closed");
+        assert!(!error.retryable());
+        assert_eq!(error.to_string(), "durable reply content is empty");
+        assert!(!out.exists(), "empty reply must not prepare an event");
+    }
+
+    #[tokio::test]
+    async fn cancelling_durable_reply_future_leaves_replayable_intent() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind hanging relay fixture");
+        let relay_url = format!(
+            "http://{}",
+            listener.local_addr().expect("relay fixture address")
+        );
+        let server = tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.expect("accept relay request");
+            std::future::pending::<()>().await;
+        });
+        let keys = Keys::generate();
+        let owner = Keys::generate();
+        let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &keys.public_key(), "")
+            .expect("owner authorization fixture");
+        let execution_id = "d".repeat(64);
+        let (directory, out) = durable_test_out(&execution_id);
+        let intent = directory
+            .path()
+            .join(format!("buzz-intent-{execution_id}.json"));
+        let task_out = out.clone();
+        let task_execution_id = execution_id.clone();
+        let task = tokio::spawn(async move {
+            let reply_to = "a".repeat(64);
+            prepare_and_publish_reply(DurableReplyRequest {
+                relay_url: &relay_url,
+                keys: &keys,
+                auth_tag: &auth_tag,
+                channel: "123e4567-e89b-12d3-a456-426614174000",
+                content: "reply whose network preflight is cancelled",
+                reply_to: &reply_to,
+                thread_root: &reply_to,
+                execution_id: &task_execution_id,
+                mentions: &[],
+                out: &task_out,
+            })
+            .await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !intent.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("durable reply intent was not installed");
+        task.abort();
+        assert!(task
+            .await
+            .expect_err("task must be cancelled")
+            .is_cancelled());
+        let durable: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&intent).expect("read durable reply intent"))
+                .expect("parse durable reply intent");
+        assert_eq!(durable["executionId"], execution_id);
+        assert_eq!(
+            durable["content"],
+            "reply whose network preflight is cancelled"
+        );
+        server.abort();
     }
 
     /// Smoke test: CLI definition is valid and parseable.
@@ -2302,6 +2800,8 @@ mod tests {
                 "delete",
                 "edit",
                 "get",
+                "prepare",
+                "publish-prepared",
                 "search",
                 "send",
                 "send-diff",
@@ -2440,7 +2940,7 @@ mod tests {
             ("feed", 1),
             ("issues", 6),
             ("media", 1),
-            ("messages", 8),
+            ("messages", 10),
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),

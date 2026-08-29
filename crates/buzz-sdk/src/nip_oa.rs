@@ -235,6 +235,41 @@ pub fn verify_auth_tag(
     Ok(owner_pubkey)
 }
 
+/// Verify a NIP-OA tag and evaluate every signed condition for one concrete
+/// event. Conditions are conjunctive; an empty condition string authorizes all
+/// otherwise valid events.
+pub fn verify_auth_tag_for_event(
+    auth_tag_json: &str,
+    agent_pubkey: &PublicKey,
+    kind: u16,
+    created_at: u64,
+) -> Result<PublicKey, SdkError> {
+    let owner = verify_auth_tag(auth_tag_json, agent_pubkey)?;
+    let arr = parse_json_array(auth_tag_json)?;
+    let conditions = arr[2]
+        .as_str()
+        .ok_or_else(|| SdkError::InvalidInput("element 2 (conditions) must be a string".into()))?;
+
+    for clause in conditions.split('&').filter(|clause| !clause.is_empty()) {
+        let authorized = if let Some(value) = clause.strip_prefix("kind=") {
+            value.parse::<u16>().ok() == Some(kind)
+        } else if let Some(value) = clause.strip_prefix("created_at<") {
+            value.parse::<u64>().is_ok_and(|bound| created_at < bound)
+        } else if let Some(value) = clause.strip_prefix("created_at>") {
+            value.parse::<u64>().is_ok_and(|bound| created_at > bound)
+        } else {
+            false
+        };
+        if !authorized {
+            return Err(SdkError::InvalidInput(
+                "auth tag conditions do not authorize this event".into(),
+            ));
+        }
+    }
+
+    Ok(owner)
+}
+
 /// Parse a NIP-OA `auth` tag JSON string into a [`Tag`] without verifying the
 /// signature.
 ///
@@ -361,6 +396,30 @@ mod tests {
             .expect("verify with empty conditions must succeed");
 
         assert_eq!(recovered, owner_keys.public_key());
+    }
+
+    #[test]
+    fn test_verify_for_event_enforces_kind_and_time_bounds() {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let tag = compute_auth_tag(
+            &owner,
+            &agent.public_key(),
+            "kind=9&created_at>100&created_at<200",
+        )
+        .expect("compute conditioned tag");
+
+        assert_eq!(
+            verify_auth_tag_for_event(&tag, &agent.public_key(), 9, 150)
+                .expect("matching event is authorized"),
+            owner.public_key()
+        );
+        for (kind, created_at) in [(1, 150), (9, 100), (9, 200), (9, 250)] {
+            assert!(
+                verify_auth_tag_for_event(&tag, &agent.public_key(), kind, created_at).is_err(),
+                "kind={kind} created_at={created_at} must be denied"
+            );
+        }
     }
 
     /// Self-attestation (owner == agent) must be rejected at both sign and verify.
