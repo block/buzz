@@ -3813,6 +3813,21 @@ fn dispatch_pending(
         dispatched_channels.push((channel_id, typing_scope));
         *last_activity = tokio::time::Instant::now();
     }
+    // Best-effort: clean up 👀 on events orphaned by queue auto-expiry (a
+    // stuck prompt task that never called mark_complete — see the "BUG:
+    // in-flight channel expired" log in `EventQueue`). The task's own
+    // `ReactionGuard` never got to run, so nothing else removes this
+    // reaction; without this, the message looks like an agent is still
+    // working on it long after the task was abandoned.
+    let expired_reaction_ids = queue.take_expired_reaction_ids();
+    if !expired_reaction_ids.is_empty() {
+        let rc = ctx.rest_client.clone();
+        tokio::spawn(async move {
+            for eid in &expired_reaction_ids {
+                pool::reaction_remove(&rc, eid, "👀").await;
+            }
+        });
+    }
     tracing::debug!(
         dispatched = dispatched_channels.len(),
         queue_depth = queue.pending_channels(),

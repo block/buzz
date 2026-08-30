@@ -141,8 +141,19 @@ pub struct EventQueue {
     in_flight_channels: HashSet<Uuid>,
     /// Per-channel deadline for auto-expiring stuck in-flight entries.
     in_flight_deadlines: HashMap<Uuid, Instant>,
-    /// Number of events in each in-flight batch (for expiry logging).
-    in_flight_batch_sizes: HashMap<Uuid, usize>,
+    /// Event IDs in each in-flight batch — used for expiry logging and, on
+    /// auto-expiry, to clean up the orphaned 👀 reaction (see
+    /// `expired_reaction_ids`).
+    in_flight_batch_event_ids: HashMap<Uuid, Vec<String>>,
+    /// Event IDs orphaned by auto-expiry (see `flush_next`/`has_flushable_work`),
+    /// accumulated here for the caller to drain via `take_expired_reaction_ids`.
+    ///
+    /// Auto-expiry recovers a stuck in-flight channel so new work isn't
+    /// blocked forever, but the original prompt task's `ReactionGuard` never
+    /// got to run its cleanup — its 👀 reaction would otherwise be orphaned
+    /// on the message permanently, looking like the agent is still working
+    /// on a task it silently abandoned.
+    expired_reaction_ids: Vec<String>,
     retry_after: HashMap<Uuid, Instant>,
     /// Per-channel retry attempt counter for exponential backoff / dead-lettering.
     retry_counts: HashMap<Uuid, u32>,
@@ -183,7 +194,8 @@ impl EventQueue {
             queues: HashMap::new(),
             in_flight_channels: HashSet::new(),
             in_flight_deadlines: HashMap::new(),
-            in_flight_batch_sizes: HashMap::new(),
+            in_flight_batch_event_ids: HashMap::new(),
+            expired_reaction_ids: Vec::new(),
             retry_after: HashMap::new(),
             retry_counts: HashMap::new(),
             dedup_mode,
@@ -270,7 +282,11 @@ impl EventQueue {
             .map(|(id, _)| *id)
             .collect();
         for id in expired {
-            let lost_events = self.in_flight_batch_sizes.remove(&id).unwrap_or(0);
+            let lost_event_ids = self
+                .in_flight_batch_event_ids
+                .remove(&id)
+                .unwrap_or_default();
+            let lost_events = lost_event_ids.len();
             tracing::error!(
                 channel_id = %id,
                 lost_events,
@@ -280,6 +296,10 @@ impl EventQueue {
             );
             self.in_flight_channels.remove(&id);
             self.in_flight_deadlines.remove(&id);
+            // The stuck prompt task's ReactionGuard never got to run its
+            // cleanup — surface these IDs so the caller can remove the
+            // orphaned 👀 the same way `drain_channel` does.
+            self.expired_reaction_ids.extend(lost_event_ids);
             // Recover any withheld goose-native steer events for the expired
             // channel back to the queue front so normal dispatch delivers
             // them. Unlike the in-flight batch above (already delivered to a
@@ -321,7 +341,10 @@ impl EventQueue {
                         self.in_flight_channels.insert(id);
                         self.in_flight_deadlines
                             .insert(id, now + self.in_flight_deadline);
-                        self.in_flight_batch_sizes.insert(id, cancelled.len());
+                        self.in_flight_batch_event_ids.insert(
+                            id,
+                            cancelled.iter().map(|be| be.event.id.to_hex()).collect(),
+                        );
                         return Some(FlushBatch {
                             channel_id: id,
                             events: cancelled,
@@ -359,7 +382,10 @@ impl EventQueue {
         self.in_flight_channels.insert(channel_id);
         self.in_flight_deadlines
             .insert(channel_id, now + self.in_flight_deadline);
-        self.in_flight_batch_sizes.insert(channel_id, events.len());
+        self.in_flight_batch_event_ids.insert(
+            channel_id,
+            events.iter().map(|be| be.event.id.to_hex()).collect(),
+        );
 
         // Merge any cancelled events stored by requeue_as_cancelled().
         let cancelled_events = self
@@ -394,7 +420,7 @@ impl EventQueue {
     pub fn mark_complete(&mut self, channel_id: Uuid) {
         self.in_flight_channels.remove(&channel_id);
         self.in_flight_deadlines.remove(&channel_id);
-        self.in_flight_batch_sizes.remove(&channel_id);
+        self.in_flight_batch_event_ids.remove(&channel_id);
         let now = Instant::now();
         match self.retry_after.get(&channel_id) {
             // Active throttle → channel was requeued; keep retry_counts intact.
@@ -409,6 +435,17 @@ impl EventQueue {
                 self.retry_counts.remove(&channel_id);
             }
         }
+    }
+
+    /// Drain and return event IDs orphaned by auto-expiry since the last call.
+    ///
+    /// `flush_next`/`has_flushable_work` auto-expire a stuck in-flight channel
+    /// so new work isn't blocked forever, but the original prompt task's
+    /// `ReactionGuard` never got to run its cleanup — its 👀 reaction is
+    /// otherwise orphaned on the message permanently. The caller should spawn
+    /// best-effort removal for each returned ID, mirroring `drain_channel`.
+    pub fn take_expired_reaction_ids(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.expired_reaction_ids)
     }
 
     /// Re-queue a batch of events that failed to process.
@@ -566,7 +603,11 @@ impl EventQueue {
             .map(|(id, _)| *id)
             .collect();
         for id in expired {
-            let lost_events = self.in_flight_batch_sizes.remove(&id).unwrap_or(0);
+            let lost_event_ids = self
+                .in_flight_batch_event_ids
+                .remove(&id)
+                .unwrap_or_default();
+            let lost_events = lost_event_ids.len();
             tracing::error!(
                 channel_id = %id,
                 lost_events,
@@ -576,9 +617,11 @@ impl EventQueue {
             );
             self.in_flight_channels.remove(&id);
             self.in_flight_deadlines.remove(&id);
-            // Symmetric with the flush_next expiry block: recover withheld
+            // Symmetric with the flush_next expiry block: surface the
+            // orphaned event IDs for 👀 cleanup, and recover withheld
             // goose-native steer events for the expired channel so they are
             // not permanently orphaned in the side table.
+            self.expired_reaction_ids.extend(lost_event_ids);
             self.recover_withheld_for_expired_channel(id);
         }
 
@@ -5210,7 +5253,8 @@ mod tests {
         // event for an in-flight goose-native steer.
         q.in_flight_channels.insert(ch);
         q.in_flight_deadlines.insert(ch, Instant::now());
-        q.in_flight_batch_sizes.insert(ch, 1);
+        q.in_flight_batch_event_ids
+            .insert(ch, vec!["dummy-1".to_string()]);
         assert!(q.mark_native_steer_pending(ch, &event_id));
 
         // Force the in-flight deadline to be in the past, simulating the
@@ -5276,8 +5320,29 @@ mod tests {
         q.in_flight_channels.insert(ch);
         q.in_flight_deadlines
             .insert(ch, Instant::now() - Duration::from_secs(1));
-        q.in_flight_batch_sizes.insert(ch, 3);
+        q.in_flight_batch_event_ids.insert(
+            ch,
+            vec![
+                "dummy-1".to_string(),
+                "dummy-2".to_string(),
+                "dummy-3".to_string(),
+            ],
+        );
         assert!(q.has_flushable_work());
+
+        // The stuck batch's event IDs must surface for 👀 cleanup — this is
+        // the fix for the "stale eyes reaction" bug: auto-expiry recovering
+        // the channel must not silently orphan the reaction too.
+        let mut expired_ids = q.take_expired_reaction_ids();
+        expired_ids.sort();
+        assert_eq!(
+            expired_ids,
+            vec![
+                "dummy-1".to_string(),
+                "dummy-2".to_string(),
+                "dummy-3".to_string()
+            ]
+        );
 
         // After recovery, the queue front-to-back order must match the
         // original FIFO: e1, e2, e3.
@@ -5436,7 +5501,8 @@ mod tests {
         q.in_flight_channels.insert(ch);
         q.in_flight_deadlines
             .insert(ch, Instant::now() + Duration::from_secs(100));
-        q.in_flight_batch_sizes.insert(ch, 1);
+        q.in_flight_batch_event_ids
+            .insert(ch, vec!["dummy-1".to_string()]);
 
         q.mark_complete(ch);
         assert!(!q.in_flight_deadlines.contains_key(&ch));
@@ -5484,7 +5550,8 @@ mod tests {
         // (Instant::now() — by the time flush_next runs, now >= deadline).
         q.in_flight_channels.insert(ch);
         q.in_flight_deadlines.insert(ch, Instant::now());
-        q.in_flight_batch_sizes.insert(ch, 1);
+        q.in_flight_batch_event_ids
+            .insert(ch, vec!["dummy-1".to_string()]);
 
         // Also push an event so flush_next has something to do after expiry.
         q.push(make_queued(ch, "after-expiry"));
@@ -5496,6 +5563,15 @@ mod tests {
             .expect("channel should be dispatchable after auto-expiry");
         assert_eq!(batch.channel_id, ch);
         assert_eq!(batch.events[0].event.content, "after-expiry");
+
+        // The stuck batch's event ID must surface for 👀 cleanup — this is
+        // the fix for the "stale eyes reaction" bug: auto-expiry recovering
+        // the channel must not silently orphan the reaction too.
+        assert_eq!(
+            q.take_expired_reaction_ids(),
+            vec!["dummy-1".to_string()],
+            "auto-expiry must surface the orphaned event ID for reaction cleanup"
+        );
     }
 
     /// F2 case 2.2 — `flush_next` path.
@@ -5513,7 +5589,8 @@ mod tests {
         q.in_flight_channels.insert(ch);
         q.in_flight_deadlines
             .insert(ch, Instant::now() + Duration::from_secs(9999));
-        q.in_flight_batch_sizes.insert(ch, 1);
+        q.in_flight_batch_event_ids
+            .insert(ch, vec!["dummy-1".to_string()]);
 
         // Push an event for another channel so flush_next has work to do.
         let ch2 = Uuid::new_v4();
@@ -5551,7 +5628,8 @@ mod tests {
         q.in_flight_channels.insert(ch);
         q.in_flight_deadlines
             .insert(ch, Instant::now() + Duration::from_secs(9999));
-        q.in_flight_batch_sizes.insert(ch, 1);
+        q.in_flight_batch_event_ids
+            .insert(ch, vec!["dummy-1".to_string()]);
 
         // No other channels — nothing flushable.
         assert!(
