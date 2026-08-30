@@ -67,17 +67,12 @@ impl Fixture {
             .expect("set request mode");
     }
 
-    fn preview(&self) -> OwnerAttestationPreview {
-        inspect_request(&self.request_path, &self.owner_keys.public_key()).expect("inspect request")
+    fn prepared(&self) -> PreparedOwnerAttestation {
+        prepare_request(&self.request_path, &self.owner_keys.public_key()).expect("prepare request")
     }
 
-    fn sign(&self, preview: &OwnerAttestationPreview) -> Result<(), String> {
-        sign_request(
-            &self.request_path,
-            &preview.request_sha256,
-            &preview.owner_pubkey,
-            &self.owner_keys,
-        )
+    fn sign(&self, prepared: &PreparedOwnerAttestation) -> Result<(), String> {
+        sign_prepared_request(prepared, &self.owner_keys)
     }
 }
 
@@ -86,9 +81,10 @@ fn nonempty_conditions_sign_and_verify_with_atomic_owner_only_custody() {
     let fixture = Fixture::new();
     let request_before = std::fs::read(&fixture.request_path).expect("request bytes");
     let request_meta_before = std::fs::metadata(&fixture.request_path).expect("request metadata");
-    let preview = fixture.preview();
+    let prepared = fixture.prepared();
+    let preview = prepared.preview();
 
-    fixture.sign(&preview).expect("sign request");
+    fixture.sign(&prepared).expect("sign request");
     assert_ne!(
         fixture.owner_keys.public_key(),
         fixture.agent_keys.public_key()
@@ -133,14 +129,80 @@ fn nonempty_conditions_sign_and_verify_with_atomic_owner_only_custody() {
 }
 
 #[test]
+fn rejects_malformed_conditions_before_preview() {
+    for conditions in [
+        "kind=01",
+        "kind=1%",
+        "kind=1\n",
+        "kind=1\0",
+        "kind=1\u{202e}",
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.conditions = conditions.to_string();
+        fixture.write_request(None);
+
+        let error = inspect_request(&fixture.request_path, &fixture.owner_keys.public_key())
+            .expect_err("non-canonical conditions must fail inspection");
+
+        assert!(error.contains("condition"), "unexpected error: {error}");
+        assert!(!fixture.target_path.exists());
+    }
+
+    let mut fixture = Fixture::new();
+    fixture.conditions = std::iter::repeat_n("kind=1", 80)
+        .collect::<Vec<_>>()
+        .join("&");
+    fixture.write_request(None);
+    let error = inspect_request(&fixture.request_path, &fixture.owner_keys.public_key())
+        .expect_err("oversized valid conditions must fail before preview");
+    assert!(error.contains("too long"), "unexpected error: {error}");
+}
+
+#[test]
+fn confirmation_fields_are_bounded_and_printf_safe() {
+    assert_eq!(
+        escape_confirmation_field("kind=1&created_at<100", "conditions", 128).unwrap(),
+        "kind=1&created_at<100"
+    );
+    assert_eq!(
+        escape_confirmation_field("/tmp/100%/line\npath", "path", 128).unwrap(),
+        r"/tmp/100\u{25}/line\u{A}\u{1B}path"
+    );
+    let error = escape_confirmation_field(&"a".repeat(129), "path", 128)
+        .expect_err("oversized confirmation field must fail");
+    assert!(error.contains("too long"), "unexpected error: {error}");
+}
+
+#[test]
+fn cancellation_prevents_the_execution_step() {
+    let fixture = Fixture::new();
+    let prepared = fixture.prepared();
+    let executed = Cell::new(false);
+
+    let error = confirm_and_execute_prepared(
+        &prepared,
+        |_| false,
+        |_| {
+            executed.set(true);
+            Ok(())
+        },
+    )
+    .expect_err("cancellation must abort");
+
+    assert!(error.contains("cancelled"), "unexpected error: {error}");
+    assert!(!executed.get(), "execution must not run after cancellation");
+    assert!(!fixture.target_path.exists());
+}
+
+#[test]
 fn existing_target_is_rejected_without_modification() {
     let fixture = Fixture::new();
-    let preview = fixture.preview();
+    let prepared = fixture.prepared();
     std::fs::write(&fixture.target_path, b"preserve-me").unwrap();
     std::fs::set_permissions(&fixture.target_path, std::fs::Permissions::from_mode(0o600)).unwrap();
 
     let error = fixture
-        .sign(&preview)
+        .sign(&prepared)
         .expect_err("existing target must fail");
 
     assert!(error.contains("already exists"));
@@ -250,13 +312,124 @@ fn invalid_conditions_and_owner_fail_without_output() {
 #[test]
 fn stale_preview_fails_without_output() {
     let fixture = Fixture::new();
-    let preview = fixture.preview();
+    let prepared = fixture.prepared();
     let mut request = fixture.request();
     request.result_tag_shape[1] = "OWNER_PUBLIC_KEY_HEX_CHANGED".to_string();
     fixture.write_request(Some(request));
-    let error = fixture.sign(&preview).expect_err("stale preview must fail");
+    let error = fixture
+        .sign(&prepared)
+        .expect_err("stale preview must fail");
     assert!(error.contains("changed after inspection") || error.contains("result_tag_shape"));
     assert!(!fixture.target_path.exists());
+}
+
+#[test]
+fn preview_binds_request_and_parent_identity_across_ipc_round_trip() {
+    let fixture = Fixture::new();
+    let prepared = fixture.prepared();
+    let request_bytes = std::fs::read(&fixture.request_path).unwrap();
+    let original = fixture.request_path.parent().unwrap().to_path_buf();
+    let moved = original.with_extension("moved-after-preview");
+
+    std::fs::rename(&original, &moved).unwrap();
+    std::fs::create_dir(&original).unwrap();
+    std::fs::set_permissions(&original, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(original.join(REQUEST_FILE_NAME), request_bytes).unwrap();
+    std::fs::set_permissions(
+        original.join(REQUEST_FILE_NAME),
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+
+    let error = fixture
+        .sign(&prepared)
+        .expect_err("byte-identical replacement must be rejected");
+    assert!(error.contains("preview") || error.contains("renamed or replaced"));
+    assert!(!original.join(TARGET_FILE_NAME).exists());
+    assert!(!moved.join(TARGET_FILE_NAME).exists());
+
+    std::fs::remove_dir_all(&original).unwrap();
+    std::fs::rename(&moved, &original).unwrap();
+}
+
+#[test]
+fn preview_store_consumes_the_exact_preview_once() {
+    let fixture = Fixture::new();
+    let prepared = fixture.prepared();
+    let preview = prepared.preview();
+    let mut store = OwnerAttestationPreviewStore::default();
+    store.replace(prepared);
+
+    assert!(store.take("wrong-preview-id").is_err());
+    let consumed = store.take(&preview.preview_id).expect("exact preview id");
+    assert_eq!(consumed.preview_id, preview.preview_id);
+    assert!(store.take(&preview.preview_id).is_err());
+}
+
+#[test]
+fn non_utf8_custody_path_is_rejected_before_preview() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let fixture = Fixture::new();
+    let original = fixture.request_path.parent().unwrap().to_path_buf();
+    let mut invalid_name = format!("cust-{}", uuid::Uuid::new_v4()).into_bytes();
+    invalid_name.push(0x80);
+    let moved = original
+        .parent()
+        .unwrap()
+        .join(std::ffi::OsString::from_vec(invalid_name));
+    std::fs::rename(&original, &moved).unwrap();
+    let moved_request = moved.join(REQUEST_FILE_NAME);
+
+    let error = inspect_request(&moved_request, &fixture.owner_keys.public_key())
+        .expect_err("native confirmation must be able to display the exact path");
+    assert!(error.contains("valid UTF-8"));
+
+    std::fs::rename(&moved, &original).unwrap();
+}
+
+#[test]
+fn fifo_named_like_request_is_rejected_without_blocking() {
+    use std::process::Command;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let fixture = Fixture::new();
+    std::fs::remove_file(&fixture.request_path).unwrap();
+    let status = Command::new("mkfifo")
+        .arg(&fixture.request_path)
+        .status()
+        .expect("mkfifo command");
+    assert!(status.success());
+    std::fs::set_permissions(
+        &fixture.request_path,
+        std::fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+
+    let request_path = fixture.request_path.clone();
+    let owner_pubkey = fixture.owner_keys.public_key();
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(inspect_request(&request_path, &owner_pubkey));
+    });
+    let error = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("FIFO inspection must return instead of blocking")
+        .expect_err("FIFO must be rejected");
+    assert!(error.contains("regular non-symlink file"));
+}
+
+#[test]
+fn bounded_read_rejects_growth_beyond_inspected_length() {
+    let fixture = Fixture::new();
+    let path = fixture.request_path.parent().unwrap().join("growing-file");
+    std::fs::write(&path, b"four").unwrap();
+    let file = File::open(path).unwrap();
+
+    let error = read_exact_file(file, 3, "growing file", false)
+        .expect_err("one extra byte must be detected without reading to EOF");
+    assert!(error.contains("grew while it was read"));
 }
 
 #[test]

@@ -2,15 +2,6 @@ import { useState } from "react";
 import { FileKey2, Loader2 } from "lucide-react";
 
 import { invokeTauri } from "@/shared/api/tauri";
-import {
-  AlertDialog,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/shared/ui/alert-dialog";
 import { Button } from "@/shared/ui/button";
 import {
   SettingsOptionGroup,
@@ -20,8 +11,7 @@ import {
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
 type OwnerAttestationPreview = {
-  requestPath: string;
-  requestSha256: string;
+  previewId: string;
   agentPubkey: string;
   ownerPubkey: string;
   conditions: string;
@@ -41,12 +31,12 @@ export function OwnerAttestationSettingsCard() {
   const [completedPath, setCompletedPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [confirmOpen, setConfirmOpen] = useState(false);
 
   async function chooseRequest() {
     setBusy(true);
     setError(null);
     setCompletedPath(null);
+    setPreview(null);
     try {
       const selected = await invokeTauri<OwnerAttestationPreview | null>(
         "select_owner_attestation_request",
@@ -68,22 +58,21 @@ export function OwnerAttestationSettingsCard() {
     if (!preview) return;
     setBusy(true);
     setError(null);
+    // The backend consumes this authorization exactly once, including on
+    // cancellation or validation failure. Never leave a stale retry surface.
+    setPreview(null);
     try {
       await invokeTauri<void>("sign_owner_attestation_request", {
-        requestPath: preview.requestPath,
-        expectedRequestSha256: preview.requestSha256,
-        expectedOwnerPubkey: preview.ownerPubkey,
+        previewId: preview.previewId,
       });
       setCompletedPath(preview.resultPath);
       setPreview(null);
-      setConfirmOpen(false);
     } catch (cause) {
       setError(
         cause instanceof Error
           ? cause.message
           : "The owner attestation was not written.",
       );
-      setConfirmOpen(false);
     } finally {
       setBusy(false);
     }
@@ -168,8 +157,9 @@ export function OwnerAttestationSettingsCard() {
                 The owner private key stays inside Desktop. Nothing is published
                 and no agent is created.
               </p>
-              <Button disabled={busy} onClick={() => setConfirmOpen(true)}>
-                Review and sign
+              <Button disabled={busy} onClick={() => void signRequest()}>
+                {busy ? <Loader2 className="animate-spin" /> : null}
+                Confirm in Desktop
               </Button>
             </SettingsOptionRow>
           </SettingsOptionGroup>
@@ -202,28 +192,6 @@ export function OwnerAttestationSettingsCard() {
           {error}
         </p>
       ) : null}
-
-      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              Sign this exact owner attestation?
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              Buzz will re-read the request, verify its byte hash, current owner
-              identity and file custody, then create BUZZ_AUTH_TAG exactly once
-              with mode 0600. An existing file or symlink is never replaced.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
-            <Button disabled={busy} onClick={() => void signRequest()}>
-              {busy ? <Loader2 className="animate-spin" /> : null}
-              Sign once
-            </Button>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </section>
   );
 }

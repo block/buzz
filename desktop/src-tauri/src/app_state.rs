@@ -11,6 +11,7 @@ use nostr::{Keys, ToBech32};
 use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex as AsyncMutex;
 
+use crate::commands::OwnerAttestationPreviewStore;
 use crate::huddle::HuddleState;
 pub(crate) use crate::identity_storage::{IdentityStorage, RecoveryState, ResolvedIdentity};
 use crate::managed_agents::config_bridge::SessionConfigCache;
@@ -90,6 +91,9 @@ pub struct AppState {
     /// `keys` so readers (signing, get_identity, etc.) are not blocked during
     /// keyring I/O.
     pub identity_mutation: Mutex<()>,
+    /// One-use, backend-owned owner-attestation preview. Renderer-supplied
+    /// paths and hashes are never treated as signing authorization.
+    pub(crate) owner_attestation_previews: Mutex<OwnerAttestationPreviewStore>,
     /// Set when the boot-time Phase 2 reset attempted a wipe but verification
     /// failed. The sentinel is preserved so the next relaunch retries. All
     /// identity-dependent setup is skipped; the frontend shows a reset-failed
@@ -211,6 +215,7 @@ pub fn build_app_state() -> AppState {
         shutdown_started: AtomicBool::new(false),
         managed_agent_runtime_transition: Mutex::new(()),
         identity_mutation: Mutex::new(()),
+        owner_attestation_previews: Mutex::new(OwnerAttestationPreviewStore::default()),
         managed_agents_store_lock: Mutex::new(()),
         channel_templates_store_lock: Mutex::new(()),
         managed_agent_processes: Mutex::new(HashMap::new()),

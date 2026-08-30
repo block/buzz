@@ -11,7 +11,7 @@ use nostr::{
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 #[cfg(unix)]
 use rustix::{
@@ -25,6 +25,8 @@ const REQUEST_SCHEMA: &str = "buzz.nip-oa-owner-attestation-request.v1";
 const REQUEST_FILE_NAME: &str = "OWNER_ATTESTATION_REQUEST.json";
 const TARGET_FILE_NAME: &str = "BUZZ_AUTH_TAG";
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
+const MAX_CONFIRMATION_CONDITIONS_BYTES: usize = 512;
+const MAX_CONFIRMATION_PATH_BYTES: usize = 1024;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -43,8 +45,7 @@ struct OwnerAttestationRequest {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OwnerAttestationPreview {
-    request_path: String,
-    request_sha256: String,
+    preview_id: String,
     agent_pubkey: String,
     owner_pubkey: String,
     conditions: String,
@@ -113,6 +114,61 @@ struct ValidatedRequest {
 }
 
 #[cfg(unix)]
+pub(crate) struct PreparedOwnerAttestation {
+    preview_id: String,
+    validated: ValidatedRequest,
+    owner_pubkey: PublicKey,
+}
+
+#[cfg(unix)]
+impl PreparedOwnerAttestation {
+    fn preview(&self) -> OwnerAttestationPreview {
+        OwnerAttestationPreview {
+            preview_id: self.preview_id.clone(),
+            agent_pubkey: self.validated.request.agent_pubkey.clone(),
+            owner_pubkey: self.owner_pubkey.to_hex(),
+            conditions: self.validated.request.conditions.clone(),
+            result_path: self.validated.target_path.display().to_string(),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+pub(crate) struct OwnerAttestationPreviewStore {
+    current: Option<PreparedOwnerAttestation>,
+}
+
+#[cfg(unix)]
+impl OwnerAttestationPreviewStore {
+    fn clear(&mut self) {
+        self.current = None;
+    }
+
+    fn replace(&mut self, prepared: PreparedOwnerAttestation) -> OwnerAttestationPreview {
+        let preview = prepared.preview();
+        self.current = Some(prepared);
+        preview
+    }
+
+    fn take(&mut self, preview_id: &str) -> Result<PreparedOwnerAttestation, String> {
+        let Some(current) = self.current.as_ref() else {
+            return Err("owner attestation preview is missing or already consumed; select the request again".into());
+        };
+        if current.preview_id != preview_id {
+            return Err("owner attestation preview is stale; select the request again".into());
+        }
+        self.current
+            .take()
+            .ok_or_else(|| "owner attestation preview was already consumed".to_string())
+    }
+}
+
+#[cfg(not(unix))]
+#[derive(Default)]
+pub(crate) struct OwnerAttestationPreviewStore;
+
+#[cfg(unix)]
 struct PinnedDirectory {
     root: File,
     directory: File,
@@ -140,55 +196,106 @@ enum TempLinkState {
 pub async fn select_owner_attestation_request(
     app_handle: AppHandle,
 ) -> Result<Option<OwnerAttestationPreview>, String> {
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    app_handle
-        .dialog()
-        .file()
-        .add_filter("Owner attestation request", &["json"])
-        .pick_file(move |path| {
-            let _ = tx.send(path);
-        });
+    #[cfg(not(unix))]
+    {
+        let _ = app_handle;
+        return Err("owner attestation requires Unix owner and mode enforcement".to_string());
+    }
 
-    let selected = rx
-        .await
-        .map_err(|_| "request dialog cancelled".to_string())?;
-    let Some(file_path) = selected else {
-        return Ok(None);
-    };
-    let request_path = file_path
-        .as_path()
-        .ok_or_else(|| "request dialog returned an invalid path".to_string())?
-        .to_path_buf();
+    #[cfg(unix)]
+    {
+        app_handle
+            .state::<AppState>()
+            .owner_attestation_previews
+            .lock()
+            .map_err(|error| error.to_string())?
+            .clear();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        app_handle
+            .dialog()
+            .file()
+            .add_filter("Owner attestation request", &["json"])
+            .pick_file(move |path| {
+                let _ = tx.send(path);
+            });
 
-    let owner_pubkey = app_handle.state::<AppState>().signing_keys()?.public_key();
-    tokio::task::spawn_blocking(move || inspect_request(&request_path, &owner_pubkey))
-        .await
-        .map_err(|error| format!("request inspection task failed: {error}"))?
-        .map(Some)
+        let selected = rx
+            .await
+            .map_err(|_| "request dialog cancelled".to_string())?;
+        let Some(file_path) = selected else {
+            return Ok(None);
+        };
+        let request_path = file_path
+            .as_path()
+            .ok_or_else(|| "request dialog returned an invalid path".to_string())?
+            .to_path_buf();
+
+        let owner_pubkey = app_handle.state::<AppState>().signing_keys()?.public_key();
+        let prepared =
+            tokio::task::spawn_blocking(move || prepare_request(&request_path, &owner_pubkey))
+                .await
+                .map_err(|error| format!("request inspection task failed: {error}"))??;
+        let preview = app_handle
+            .state::<AppState>()
+            .owner_attestation_previews
+            .lock()
+            .map_err(|error| error.to_string())?
+            .replace(prepared);
+        Ok(Some(preview))
+    }
 }
 
 /// Sign one previously inspected request and atomically create its protected
 /// result file. The auth tag and signature never cross the Rust IPC boundary.
 #[tauri::command]
 pub async fn sign_owner_attestation_request(
-    request_path: String,
-    expected_request_sha256: String,
-    expected_owner_pubkey: String,
+    preview_id: String,
     app_handle: AppHandle,
 ) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        let state = app_handle.state::<AppState>();
-        let _identity_guard = state.identity_mutation.lock().map_err(|e| e.to_string())?;
-        let owner_keys = state.signing_keys()?;
-        sign_request(
-            Path::new(&request_path),
-            &expected_request_sha256,
-            &expected_owner_pubkey,
-            &owner_keys,
-        )
-    })
-    .await
-    .map_err(|error| format!("owner attestation task failed: {error}"))?
+    #[cfg(not(unix))]
+    {
+        let _ = (preview_id, app_handle);
+        return Err("owner attestation requires Unix owner and mode enforcement".to_string());
+    }
+
+    #[cfg(unix)]
+    {
+        tokio::task::spawn_blocking(move || {
+            let state = app_handle.state::<AppState>();
+            let prepared = state
+                .owner_attestation_previews
+                .lock()
+                .map_err(|error| error.to_string())?
+                .take(&preview_id)?;
+            let confirmation = confirmation_message(&prepared)?;
+            confirm_and_execute_prepared(
+                &prepared,
+                |_| {
+                    app_handle
+                        .dialog()
+                        .message(confirmation)
+                        .title("Sign this exact owner attestation?")
+                        .kind(MessageDialogKind::Warning)
+                        .buttons(MessageDialogButtons::OkCancelCustom(
+                            "Sign once".to_string(),
+                            "Cancel".to_string(),
+                        ))
+                        .blocking_show()
+                },
+                |prepared| {
+                    // Never hold the identity mutation lock while waiting for
+                    // an unbounded native-dialog interaction. Re-acquire it
+                    // only after confirmation and revalidate under the lock.
+                    let _identity_guard =
+                        state.identity_mutation.lock().map_err(|e| e.to_string())?;
+                    let owner_keys = state.signing_keys()?;
+                    sign_prepared_request(prepared, &owner_keys)
+                },
+            )
+        })
+        .await
+        .map_err(|error| format!("owner attestation task failed: {error}"))?
+    }
 }
 
 #[cfg(not(unix))]
@@ -204,53 +311,155 @@ fn inspect_request(
     request_path: &Path,
     owner_pubkey: &PublicKey,
 ) -> Result<OwnerAttestationPreview, String> {
+    prepare_request(request_path, owner_pubkey).map(|prepared| prepared.preview())
+}
+
+#[cfg(unix)]
+fn prepare_request(
+    request_path: &Path,
+    owner_pubkey: &PublicKey,
+) -> Result<PreparedOwnerAttestation, String> {
     let validated = load_and_validate_request(request_path)?;
     if *owner_pubkey == validated.agent_pubkey {
         return Err("owner and agent pubkeys must differ".to_string());
     }
 
-    Ok(OwnerAttestationPreview {
-        request_path: validated.request_path.display().to_string(),
-        request_sha256: validated.request_sha256,
-        agent_pubkey: validated.request.agent_pubkey,
-        owner_pubkey: owner_pubkey.to_hex(),
-        conditions: validated.request.conditions,
-        result_path: validated.target_path.display().to_string(),
-    })
-}
-
-#[cfg(not(unix))]
-fn sign_request(
-    _request_path: &Path,
-    _expected_request_sha256: &str,
-    _expected_owner_pubkey: &str,
-    _owner_keys: &Keys,
-) -> Result<(), String> {
-    Err("owner attestation requires Unix owner and mode enforcement".to_string())
+    let prepared = PreparedOwnerAttestation {
+        preview_id: uuid::Uuid::new_v4().to_string(),
+        validated,
+        owner_pubkey: *owner_pubkey,
+    };
+    // Fail inspection if the exact confirmation cannot be rendered as a
+    // bounded, unambiguous, printf-safe ASCII representation.
+    confirmation_message(&prepared)?;
+    Ok(prepared)
 }
 
 #[cfg(unix)]
-fn sign_request(
-    request_path: &Path,
-    expected_request_sha256: &str,
-    expected_owner_pubkey: &str,
-    owner_keys: &Keys,
-) -> Result<(), String> {
-    let custody = open_pinned_directory(request_path)?;
-    let first = load_and_validate_request_in(&custody, request_path)?;
-    if first.request_sha256 != expected_request_sha256 {
-        return Err("request bytes changed after inspection; select it again".to_string());
+fn confirmation_message(prepared: &PreparedOwnerAttestation) -> Result<String, String> {
+    let conditions = escape_confirmation_field(
+        &prepared.validated.request.conditions,
+        "conditions",
+        MAX_CONFIRMATION_CONDITIONS_BYTES,
+    )?;
+    let target_path = prepared
+        .validated
+        .target_path
+        .to_str()
+        .ok_or_else(|| "authorized result path must be valid UTF-8".to_string())?;
+    let target_path = escape_confirmation_field(
+        target_path,
+        "authorized result path",
+        MAX_CONFIRMATION_PATH_BYTES,
+    )?;
+    Ok(format!(
+        "Buzz Desktop will sign exactly this authorization and create BUZZ_AUTH_TAG once.\n\nAgent public key:\n{}\n\nDesktop owner public key:\n{}\n\nConditions (escaped ASCII):\n{}\n\nAuthorized result path (escaped ASCII):\n{}\n\nThe private key and signature stay inside Desktop. Nothing is published and no agent is created.",
+        prepared.validated.request.agent_pubkey,
+        prepared.owner_pubkey.to_hex(),
+        conditions,
+        target_path,
+    ))
+}
+
+#[cfg(unix)]
+fn escape_confirmation_field(value: &str, label: &str, max_bytes: usize) -> Result<String, String> {
+    if value.len() > max_bytes {
+        return Err(format!(
+            "{label} is too long for native confirmation (maximum {max_bytes} UTF-8 bytes)"
+        ));
     }
 
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric()
+            || matches!(
+                character,
+                '/' | '.' | '_' | '-' | ':' | '=' | '<' | '>' | '&' | ' '
+            )
+        {
+            escaped.push(character);
+        } else {
+            escaped.push_str(&format!(r"\u{{{:X}}}", character as u32));
+        }
+    }
+    debug_assert!(!escaped.contains('%') && !escaped.contains('\0'));
+    Ok(escaped)
+}
+
+#[cfg(unix)]
+fn confirm_and_execute_prepared<C, E>(
+    prepared: &PreparedOwnerAttestation,
+    confirm: C,
+    execute: E,
+) -> Result<(), String>
+where
+    C: FnOnce(&PreparedOwnerAttestation) -> bool,
+    E: FnOnce(&PreparedOwnerAttestation) -> Result<(), String>,
+{
+    validate_prepared_filesystem(prepared)?;
+    if !confirm(prepared) {
+        return Err(
+            "owner cancelled the native signing confirmation; select the request again".into(),
+        );
+    }
+    execute(prepared)
+}
+
+#[cfg(unix)]
+fn validate_prepared_request(
+    prepared: &PreparedOwnerAttestation,
+    owner_keys: &Keys,
+) -> Result<(), String> {
     let owner_pubkey = owner_keys.public_key();
-    if owner_pubkey.to_hex() != expected_owner_pubkey {
+    if owner_pubkey != prepared.owner_pubkey {
         return Err(
             "Desktop owner identity changed after inspection; select the request again".into(),
         );
     }
-    if owner_pubkey == first.agent_pubkey {
+    validate_prepared_filesystem(prepared)
+}
+
+#[cfg(unix)]
+fn validate_prepared_filesystem(prepared: &PreparedOwnerAttestation) -> Result<(), String> {
+    let custody = open_pinned_directory(&prepared.validated.request_path)?;
+    let current = load_and_validate_request_in(&custody, &prepared.validated.request_path)?;
+    if current.request_sha256 != prepared.validated.request_sha256
+        || current.request_identity != prepared.validated.request_identity
+        || current.parent_identity != prepared.validated.parent_identity
+        || current.request != prepared.validated.request
+        || current.request_path != prepared.validated.request_path
+        || current.target_path != prepared.validated.target_path
+    {
+        return Err(
+            "request or custody directory no longer matches the inspected preview; select it again"
+                .into(),
+        );
+    }
+    if prepared.owner_pubkey == current.agent_pubkey {
         return Err("owner and agent pubkeys must differ".to_string());
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sign_prepared_request(
+    prepared: &PreparedOwnerAttestation,
+    owner_keys: &Keys,
+) -> Result<(), String> {
+    validate_prepared_request(prepared, owner_keys)?;
+    let custody = open_pinned_directory(&prepared.validated.request_path)?;
+    let first = load_and_validate_request_in(&custody, &prepared.validated.request_path)?;
+    if first.request_sha256 != prepared.validated.request_sha256
+        || first.request_identity != prepared.validated.request_identity
+        || first.parent_identity != prepared.validated.parent_identity
+        || first.request != prepared.validated.request
+    {
+        return Err(
+            "request or custody directory no longer matches the inspected preview; select it again"
+                .into(),
+        );
+    }
+    let owner_pubkey = owner_keys.public_key();
 
     // Reuse the canonical NIP-OA primitive. The request conditions are passed
     // verbatim; the primitive hashes the exact specified preimage and produces
@@ -267,7 +476,7 @@ fn sign_request(
     // Re-open and re-validate immediately before the only external effect.
     // Exact bytes, inode metadata, parent directory identity, owner identity,
     // target absence must all remain bound to the preview.
-    let second = load_and_validate_request_in(&custody, request_path)?;
+    let second = load_and_validate_request_in(&custody, &prepared.validated.request_path)?;
     if second.request_sha256 != first.request_sha256
         || second.request_identity != first.request_identity
         || second.parent_identity != first.parent_identity
@@ -383,11 +592,11 @@ fn load_and_validate_request_in(
     }
     verify_current_path_binding(custody)?;
 
-    let mut file = File::from(
+    let file = File::from(
         rustix::fs::openat(
             &custody.directory,
             REQUEST_FILE_NAME,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         )
         .map_err(|error| format!("open regular non-symlink owner attestation request: {error}"))?,
@@ -418,12 +627,12 @@ fn load_and_validate_request_in(
         ));
     }
 
-    let mut raw = Vec::with_capacity(request_identity.len as usize);
-    file.read_to_end(&mut raw)
-        .map_err(|error| format!("read owner attestation request: {error}"))?;
-    if raw.len() as u64 != request_identity.len {
-        return Err("request length changed while it was read".into());
-    }
+    let raw = read_exact_file(
+        file,
+        request_identity.len,
+        "owner attestation request",
+        false,
+    )?;
     let request_sha256 = Sha256Hash::hash(&raw).to_string();
     let request: OwnerAttestationRequest = serde_json::from_slice(&raw)
         .map_err(|error| format!("invalid owner attestation request JSON: {error}"))?;
@@ -443,6 +652,8 @@ fn load_and_validate_request_in(
     if request.conditions.is_empty() {
         return Err("owner attestation conditions must be non-empty".into());
     }
+    buzz_sdk_pkg::nip_oa::validate_conditions(&request.conditions)
+        .map_err(|error| format!("invalid owner attestation conditions: {error}"))?;
     if request.signing_hash_algorithm != "SHA256" {
         return Err("signing_hash_algorithm must be SHA256".into());
     }
@@ -490,6 +701,11 @@ fn load_and_validate_request_in(
 fn validate_normal_absolute_path(path: &Path, expected_name: &str) -> Result<(), String> {
     if !path.is_absolute() {
         return Err("path must be absolute".into());
+    }
+    if path.to_str().is_none() {
+        return Err(
+            "path must be valid UTF-8 so native confirmation can display it exactly".into(),
+        );
     }
     if path.file_name().and_then(|value| value.to_str()) != Some(expected_name) {
         return Err(format!("path must end in {expected_name}"));
@@ -648,7 +864,12 @@ fn atomic_create_secret_with_ops<O: AtomicFileOps>(
                 "protected temporary attestation file length mismatched before commit".into(),
             );
         }
-        let persisted = read_open_file(persisted_file, "temporary attestation file")?;
+        let persisted = read_exact_file(
+            persisted_file,
+            bytes.len() as u64,
+            "temporary attestation file",
+            true,
+        )?;
         if persisted.as_slice() != bytes {
             return Err("protected temporary attestation file reread mismatch".into());
         }
@@ -703,7 +924,7 @@ fn atomic_create_secret_with_ops<O: AtomicFileOps>(
                     .into(),
             );
         }
-        let target_bytes = read_open_file(target, "BUZZ_AUTH_TAG")?;
+        let target_bytes = read_exact_file(target, bytes.len() as u64, "BUZZ_AUTH_TAG", true)?;
         if target_bytes.as_slice() != bytes {
             return Err(
                 "BUZZ_AUTH_TAG was committed but reread mismatched; STOP and do not retry".into(),
@@ -739,7 +960,7 @@ fn open_relative_file(custody: &PinnedDirectory, name: &str, label: &str) -> Res
     rustix::fs::openat(
         &custody.directory,
         name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map(File::from)
@@ -747,11 +968,28 @@ fn open_relative_file(custody: &PinnedDirectory, name: &str, label: &str) -> Res
 }
 
 #[cfg(unix)]
-fn read_open_file(mut file: File, label: &str) -> Result<Vec<u8>, String> {
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|error| format!("reread protected {label}: {error}; STOP and do not retry"))?;
-    Ok(bytes)
+fn read_exact_file(
+    mut file: File,
+    expected_len: u64,
+    label: &str,
+    stop_on_error: bool,
+) -> Result<Vec<u8>, String> {
+    let stop = if stop_on_error {
+        "; STOP and do not retry"
+    } else {
+        ""
+    };
+    let expected_len = usize::try_from(expected_len)
+        .map_err(|_| format!("{label} length does not fit memory limits{stop}"))?;
+    let mut bytes = vec![0; expected_len];
+    file.read_exact(&mut bytes)
+        .map_err(|error| format!("read {label} at its inspected length: {error}{stop}"))?;
+    let mut extra = [0_u8; 1];
+    match file.read(&mut extra) {
+        Ok(0) => Ok(bytes),
+        Ok(_) => Err(format!("{label} grew while it was read{stop}")),
+        Err(error) => Err(format!("check {label} length after read: {error}{stop}")),
+    }
 }
 
 #[cfg(all(test, unix))]
