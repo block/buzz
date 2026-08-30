@@ -544,6 +544,46 @@ pub fn spawn_agent_child(
             command.env("BUZZ_ACP_MCP_COMMAND", "");
         }
     }
+    // Codex's Chrome extension broker is owned by the Codex host and is not
+    // exposed through ACP. Give Buzz-managed Codex sessions an independent,
+    // isolated browser boundary via the official Playwright MCP server instead.
+    // Pin the package version so agent startup cannot silently change behavior.
+    if known_acp_runtime(effective_command).is_some_and(|runtime| runtime.id == "codex") {
+        if let Some(npx) = resolve_command("npx") {
+            // Do not inherit npm's default ~/.npm cache. It may be unusable
+            // (for example after an older sudo npm invocation left root-owned
+            // files behind), which prevents the browser MCP process from ever
+            // reaching its protocol handshake. Buzz owns this cache and can
+            // therefore guarantee that managed agents may write to it.
+            let browser_npm_cache = super::default_agent_workdir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(".npm-browser-cache");
+            std::fs::create_dir_all(&browser_npm_cache).map_err(|error| {
+                format!(
+                    "Failed to prepare managed browser npm cache at {}: {error}",
+                    browser_npm_cache.display()
+                )
+            })?;
+            let browser_args = serde_json::to_string(&vec![
+                "--cache".to_string(),
+                browser_npm_cache.to_string_lossy().into_owned(),
+                "--yes".to_string(),
+                "@playwright/mcp@0.0.78".to_string(),
+                "--browser".to_string(),
+                "chrome".to_string(),
+                "--isolated".to_string(),
+            ])
+            .map_err(|error| format!("Failed to encode managed browser arguments: {error}"))?;
+            command.env("BUZZ_ACP_BROWSER_MCP_COMMAND", npx);
+            command.env("BUZZ_ACP_BROWSER_MCP_ARGS", browser_args);
+        } else {
+            command.env("BUZZ_ACP_BROWSER_MCP_COMMAND", "");
+            command.env("BUZZ_ACP_BROWSER_MCP_ARGS", "[]");
+        }
+    } else {
+        command.env("BUZZ_ACP_BROWSER_MCP_COMMAND", "");
+        command.env("BUZZ_ACP_BROWSER_MCP_ARGS", "[]");
+    }
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
     // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
     let runtime_meta = known_acp_runtime(effective_command);
