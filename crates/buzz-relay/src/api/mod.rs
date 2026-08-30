@@ -50,10 +50,28 @@ pub mod relay_members {
         OpenRelay,
         /// Caller is directly present in `relay_members`.
         Member,
+        /// Caller is a relay guest restricted to these channel IDs.
+        Guest(Vec<uuid::Uuid>),
         /// Caller is admitted through a NIP-OA owner that is a relay member.
         ViaOwner(nostr::PublicKey),
         /// Caller is not admitted.
         Denied,
+    }
+
+    /// Authority derived from relay membership for one authenticated request.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct MembershipAccess {
+        /// NIP-OA owner when access was delegated by a full relay member.
+        pub nip_oa_owner: Option<nostr::PublicKey>,
+        /// Guest channel restriction. `None` means full relay access.
+        pub channel_ids: Option<Vec<uuid::Uuid>>,
+    }
+
+    impl MembershipAccess {
+        /// Whether this caller has only channel-scoped guest authority.
+        pub fn is_guest(&self) -> bool {
+            self.channel_ids.is_some()
+        }
     }
 
     /// Check relay membership without committing to an HTTP response shape.
@@ -71,12 +89,24 @@ pub mod relay_members {
         }
 
         let pubkey_hex = hex::encode(pubkey_bytes);
-        let is_member = state
+        let member = state
             .db
-            .is_relay_member(community, &pubkey_hex)
+            .get_relay_member(community, &pubkey_hex)
             .await
             .map_err(|e| format!("relay membership check failed: {e}"))?;
-        if is_member {
+        if let Some(member) = member {
+            if member.role == "guest" {
+                let channel_ids = state
+                    .db
+                    .get_guest_channel_ids(community, &pubkey_hex)
+                    .await
+                    .map_err(|e| format!("guest channel lookup failed: {e}"))?;
+                return if channel_ids.is_empty() {
+                    Ok(MembershipDecision::Denied)
+                } else {
+                    Ok(MembershipDecision::Guest(channel_ids))
+                };
+            }
             return Ok(MembershipDecision::Member);
         }
 
@@ -88,12 +118,14 @@ pub mod relay_members {
                 match buzz_sdk::nip_oa::verify_auth_tag(tag_json, &agent_pubkey) {
                     Ok(owner_pubkey) => {
                         let owner_hex = owner_pubkey.to_hex();
-                        let owner_is_member = state
+                        let owner_member = state
                             .db
-                            .is_relay_member(community, &owner_hex)
+                            .get_relay_member(community, &owner_hex)
                             .await
-                            .map_err(|e| format!("relay membership check (owner) failed: {e}"))?;
-                        if owner_is_member {
+                            .map_err(|e| {
+                            format!("relay membership check (owner) failed: {e}")
+                        })?;
+                        if owner_member.is_some_and(|member| member.role != "guest") {
                             debug!(
                                 agent = %pubkey_hex,
                                 owner = %owner_hex,
@@ -114,24 +146,31 @@ pub mod relay_members {
 
     /// Enforce relay membership for a pubkey, with NIP-OA agent delegation fallback.
     ///
-    /// Returns `Ok(Some(owner_pubkey))` when the agent is not a direct member but
-    /// its NIP-OA owner *is* — access is granted via delegation.
+    /// Returns full access for ordinary members and NIP-OA agents whose owner is
+    /// an ordinary member. Direct guests receive their explicit channel grants.
     ///
-    /// On open relays (`require_relay_membership = false`), returns `Ok(None)`
+    /// On open relays (`require_relay_membership = false`), returns unrestricted
     /// immediately — no membership check is performed. Callers that need NIP-OA
     /// owner extraction on open relays should call [`extract_nip_oa_owner`] directly.
     ///
-    /// Returns `Ok(None)` when the caller is a direct member (closed relay) or when
-    /// no NIP-OA tag is present/applicable (open relay without auth tag).
     pub async fn enforce_relay_membership(
         state: &AppState,
         community: CommunityId,
         pubkey_bytes: &[u8],
         auth_tag_header: Option<&str>,
-    ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
+    ) -> Result<MembershipAccess, (StatusCode, Json<serde_json::Value>)> {
         match check_relay_membership(state, community, pubkey_bytes, auth_tag_header).await {
-            Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => Ok(None),
-            Ok(MembershipDecision::ViaOwner(owner)) => Ok(Some(owner)),
+            Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => {
+                Ok(MembershipAccess::default())
+            }
+            Ok(MembershipDecision::Guest(channel_ids)) => Ok(MembershipAccess {
+                nip_oa_owner: None,
+                channel_ids: Some(channel_ids),
+            }),
+            Ok(MembershipDecision::ViaOwner(owner)) => Ok(MembershipAccess {
+                nip_oa_owner: Some(owner),
+                channel_ids: None,
+            }),
             Ok(MembershipDecision::Denied) => Err((
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({

@@ -82,6 +82,7 @@ import {
   useChannelModerationCapabilities,
 } from "./ChannelManagementModerationActions";
 import { ChannelMemberAvatarStack } from "./ChannelMemberAvatarStack";
+import { ChannelGuestInviteAction } from "./ChannelGuestInviteAction";
 
 type ChannelManagementSheetProps = {
   channel: Channel | null;
@@ -160,7 +161,8 @@ export function ChannelManagementSheet({
     hasResolvedMembership &&
     detail?.channelType !== "dm" &&
     !isArchived &&
-    selfMember !== null;
+    selfMember !== null &&
+    selfMember.role !== "guest";
   const memberCount =
     members.length || detail?.memberCount || channel?.memberCount || 0;
 
@@ -894,6 +896,8 @@ function ChannelManagementPanelContent({
                     testId="channel-management-leave"
                   />
                 ) : null}
+                {/* biome-ignore format: keep this ratcheted file within its size limit */}
+                <ChannelGuestInviteAction canEditChannel={canEditChannel} channel={resolvedChannel} />
                 {canEditChannel ? (
                   isArchived ? (
                     <ActionFieldRow

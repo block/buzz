@@ -107,6 +107,7 @@ struct ConnEntry {
     backpressure_count: Arc<AtomicU8>,
     subscriptions: ConnectionSubscriptions,
     authenticated_pubkey: Arc<std::sync::RwLock<Option<Vec<u8>>>>,
+    authenticated_channel_ids: Arc<std::sync::RwLock<Option<Vec<Uuid>>>>,
     grace_limit: u8,
 }
 
@@ -282,6 +283,7 @@ impl ConnectionManager {
                 backpressure_count,
                 subscriptions,
                 authenticated_pubkey: Arc::new(std::sync::RwLock::new(None)),
+                authenticated_channel_ids: Arc::new(std::sync::RwLock::new(None)),
                 grace_limit,
             },
         );
@@ -309,6 +311,18 @@ impl ConnectionManager {
         if let Some(entry) = self.connections.get(&conn_id) {
             if let Ok(mut slot) = entry.authenticated_pubkey.write() {
                 *slot = Some(pubkey_bytes);
+            }
+        }
+    }
+
+    /// Record a connection's exact channel scope after NIP-42 authentication.
+    ///
+    /// `None` means a normal relay member. `Some` identifies a scoped guest and
+    /// is used by the fan-out chokepoint to revalidate global profile events.
+    pub fn set_authenticated_channel_ids(&self, conn_id: Uuid, channel_ids: Option<Vec<Uuid>>) {
+        if let Some(entry) = self.connections.get(&conn_id) {
+            if let Ok(mut slot) = entry.authenticated_channel_ids.write() {
+                *slot = channel_ids;
             }
         }
     }
@@ -348,6 +362,21 @@ impl ConnectionManager {
         self.connections
             .get(&conn_id)
             .and_then(|entry| entry.authenticated_pubkey.read().ok()?.clone())
+    }
+
+    /// Return the scoped guest channel IDs recorded for a connection.
+    ///
+    /// Normal members and unauthenticated connections both return `None`;
+    /// callers that need to distinguish them also check [`Self::pubkey_for_conn`].
+    pub fn channel_ids_for_conn(&self, conn_id: Uuid) -> Option<Vec<Uuid>> {
+        self.connections.get(&conn_id).and_then(|entry| {
+            entry
+                .authenticated_channel_ids
+                .read()
+                .ok()?
+                .as_ref()
+                .cloned()
+        })
     }
 
     /// Disconnect every live connection authenticated as `pubkey` **in
@@ -1623,9 +1652,13 @@ mod tests {
         );
 
         assert_eq!(mgr.pubkey_for_conn(conn_id), None);
+        assert_eq!(mgr.channel_ids_for_conn(conn_id), None);
         let pubkey = vec![9u8; 32];
+        let channel_ids = vec![Uuid::new_v4()];
         mgr.set_authenticated_pubkey(conn_id, pubkey.clone());
+        mgr.set_authenticated_channel_ids(conn_id, Some(channel_ids.clone()));
         assert_eq!(mgr.pubkey_for_conn(conn_id), Some(pubkey));
+        assert_eq!(mgr.channel_ids_for_conn(conn_id), Some(channel_ids));
         assert_eq!(mgr.pubkey_for_conn(Uuid::new_v4()), None);
     }
 

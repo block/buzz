@@ -246,14 +246,16 @@ async fn handle_active_audio_connection(
     let pubkey_bytes = pubkey.to_bytes().to_vec();
     let parent_channel_id = auth_msg.parent_channel_id;
 
-    if crate::api::relay_members::enforce_relay_membership(
+    let membership_access = crate::api::relay_members::enforce_relay_membership(
         &state,
         tenant.community(),
         pubkey.as_bytes(),
         auth_tag_json.as_deref(),
     )
-    .await
-    .is_err()
+    .await;
+    if membership_access
+        .as_ref()
+        .map_or(true, crate::api::relay_members::MembershipAccess::is_guest)
     {
         warn!(channel_id = %channel_id, pubkey = %pubkey_hex, "audio: relay membership denied");
         let _ = ws_send
@@ -930,7 +932,19 @@ async fn handle_active_audio_connection(
                 room.clear_ended();
                 room_emptied = false;
             }
-            Ok(()) => {
+            Ok(revoked_guest_pubkeys) => {
+                crate::handlers::side_effects::evict_all_channel_subscriptions(
+                    &tenant, &state, channel_id,
+                )
+                .await;
+                crate::handlers::side_effects::disconnect_revoked_channel_guests(
+                    &tenant,
+                    &state,
+                    channel_id,
+                    revoked_guest_pubkeys,
+                    &format!("audio-channel-auto-archived:{channel_id}"),
+                    "restricted: guest channel was archived",
+                );
                 room_emptied = state
                     .audio_rooms
                     .cleanup_if_empty(tenant.community(), channel_id);

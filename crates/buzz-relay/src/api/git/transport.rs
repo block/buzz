@@ -211,14 +211,16 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             .get("x-auth-tag")
             .and_then(|value| value.to_str().ok());
         let auth_tag = event_auth_tag.as_deref().or(header_auth_tag);
-        if crate::api::relay_members::enforce_relay_membership(
+        let membership_access = crate::api::relay_members::enforce_relay_membership(
             state,
             tenant.community(),
             pubkey.as_bytes(),
             auth_tag,
         )
-        .await
-        .is_err()
+        .await;
+        if membership_access
+            .as_ref()
+            .map_or(true, crate::api::relay_members::MembershipAccess::is_guest)
         {
             warn!(pubkey = %pubkey.to_hex(), "git: relay membership denied");
             return Err((StatusCode::FORBIDDEN, "restricted: not a relay member").into_response());

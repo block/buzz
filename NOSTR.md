@@ -217,6 +217,11 @@ When `BUZZ_REQUIRE_RELAY_MEMBERSHIP=true`, every authenticated connection is che
 `relay_members` table. In today's single-community deployment this is the relay-wide member list; in multi-community mode the same rule is scoped to the host-derived community. Only pubkeys with a row for that community may use that community. The relay owner
 is bootstrapped automatically from `RELAY_OWNER_PUBKEY` on startup.
 
+Channel-scoped guests also require this setting. A guest row is admitted only
+to its explicit private-channel grants. Changing
+`BUZZ_REQUIRE_RELAY_MEMBERSHIP` to `false` opens the relay to every key,
+including keys previously stored as guests.
+
 ### CLI: Managing Members
 
 Use `buzz-admin` — the operator CLI shipped in the relay image — to manage relay membership.

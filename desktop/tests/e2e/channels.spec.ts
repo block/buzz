@@ -3069,6 +3069,114 @@ test("manage channel updates visibility and ephemeral lifecycle independently", 
   await expect(page.getByTestId("channel-management-ttl")).toHaveCount(0);
 });
 
+test("channel owners can open a channel-scoped guest invite only for private channels", async ({
+  page,
+}) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await installMockBridge(page, {
+    relayRequiresMembership: true,
+    relayRole: "owner",
+  });
+  let invitePayload: Record<string, unknown> | null = null;
+  let revokedInviteId: string | null = null;
+  await page.route("**/api/invites/list", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      json: { invites: [] },
+      status: 200,
+    });
+  });
+  await page.route("**/api/invites/revoke", async (route) => {
+    const payload = route.request().postDataJSON() as {
+      invite_id?: string;
+    };
+    revokedInviteId = payload.invite_id ?? null;
+    await route.fulfill({
+      contentType: "application/json",
+      json: { status: "revoked" },
+      status: 200,
+    });
+  });
+  await page.route("**/api/invites", async (route) => {
+    const payload = route.request().postDataJSON() as Record<string, unknown>;
+    invitePayload = payload;
+    await route.fulfill({
+      contentType: "application/json",
+      json: {
+        invite_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        channel_id: payload.channel_id,
+        code: "v2.channel-guest",
+        expires_at: Math.floor(Date.now() / 1000) + 86_400,
+        max_uses: 1,
+        role: "guest",
+        url: "buzz://join?relay=wss%3A%2F%2Frelay.example.com&code=v2.channel-guest",
+        uses_remaining: 1,
+      },
+      status: 200,
+    });
+  });
+  await page.goto("/");
+  await openChannelManagement(page, "general");
+  await expect(page.getByTestId("channel-management-invite-guest")).toHaveCount(
+    0,
+  );
+
+  await openChannelEditDialog(page);
+  await page.getByTestId("channel-management-permissions").click();
+  await page
+    .getByTestId("channel-management-permissions-option-private")
+    .click();
+  await expect(
+    page.getByRole("dialog", { name: "Edit private channel" }),
+  ).toBeVisible();
+  await page.getByTestId("channel-management-save-changes").click();
+  await expect(
+    page.getByRole("dialog", { name: "Edit private channel" }),
+  ).toHaveCount(0);
+
+  const inviteGuest = page.getByTestId("channel-management-invite-guest");
+  await expect(inviteGuest).toBeVisible();
+  await inviteGuest.click();
+
+  const dialog = page.getByRole("dialog", {
+    name: "Invite a guest to #general",
+  });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText(
+    "Guests can read and post in this channel.",
+  );
+  await expect(dialog).toContainText("They cannot browse other channels");
+  await expect(dialog).toContainText("upload file attachments");
+  await expect(dialog).toContainText(
+    "Existing file links may remain readable when your relay serves media publicly.",
+  );
+  await expect(
+    dialog.getByTestId("channel-guest-invite-link-section"),
+  ).toBeVisible();
+  await expect(dialog).toContainText("Number of uses");
+  await expect(dialog).toContainText("1 use");
+  await expect(dialog.getByTestId("invite-link-max-uses-trigger")).toHaveCount(
+    0,
+  );
+  await expect(dialog.getByTestId("active-guest-invites")).toContainText(
+    "No active guest links.",
+  );
+  await dialog.getByTestId("copy-invite-link").click();
+  await expect(dialog.getByTestId("copy-invite-link")).toContainText("Copied");
+  const activeInvite = dialog.getByTestId(
+    "active-guest-invite-eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+  );
+  await expect(activeInvite).toBeVisible();
+  await activeInvite.getByRole("button", { name: "Revoke guest link" }).click();
+  await expect(activeInvite).toHaveCount(0);
+  expect(revokedInviteId).toBe("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee");
+  expect(invitePayload).toMatchObject({
+    channel_id: expect.any(String),
+    max_uses: 1,
+    ttl_secs: 3 * 24 * 60 * 60,
+  });
+});
+
 test("manage channel places canvas between channel info and actions", async ({
   page,
 }) => {

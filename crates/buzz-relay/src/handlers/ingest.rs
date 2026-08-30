@@ -220,6 +220,8 @@ pub enum IngestAuth {
         pubkey: nostr::PublicKey,
         /// Permission scopes granted to this request.
         scopes: Vec<Scope>,
+        /// Relay guest channel restriction, if applicable.
+        channel_ids: Option<Vec<Uuid>>,
         /// How the HTTP request was authenticated.
         auth_method: HttpAuthMethod,
     },
@@ -259,6 +261,10 @@ impl IngestAuth {
     pub fn channel_ids(&self) -> Option<&[Uuid]> {
         match self {
             Self::Nip42 {
+                channel_ids: Some(ids),
+                ..
+            }
+            | Self::Http {
                 channel_ids: Some(ids),
                 ..
             } => Some(ids),
@@ -544,6 +550,16 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_APPROVAL_GRANT | KIND_APPROVAL_DENY => Ok(Scope::MessagesWrite),
         _ => Err("restricted: unknown event kind"),
     }
+}
+
+fn channel_scoped_write_kind_allowed(kind: u32) -> bool {
+    !buzz_core::kind::is_command_kind(kind)
+        && !is_relay_admin_kind(kind)
+        && !buzz_core::kind::is_moderation_command_kind(kind)
+        && kind != KIND_NIP43_LEAVE_REQUEST
+        && kind != KIND_PROFILE
+        && kind != KIND_PRODUCT_FEEDBACK
+        && kind != KIND_REPORT
 }
 
 /// Extract a channel UUID from the `"h"` NIP-29 group tag.
@@ -2250,6 +2266,14 @@ async fn ingest_event_inner(
         Ok(scope) => scope,
         Err(msg) => return Err(IngestError::Rejected(msg.into())),
     };
+    // Guest tokens are channel-scoped. Command and sidecar handlers run before
+    // ordinary event channel derivation, so reject them here rather than
+    // allowing those early dispatch paths to bypass the token's channel bound.
+    if auth.channel_ids().is_some() && !channel_scoped_write_kind_allowed(kind_u32) {
+        return Err(IngestError::AuthFailed(
+            "restricted: channel guests cannot use community commands or tools".into(),
+        ));
+    }
     // NIP-43: relay admin commands are global — channel-scoped tokens cannot
     // issue them even if the event has no `h` tag (is_global_only_kind strips
     // channel_id, but we still need to reject the token itself).
@@ -2462,17 +2486,51 @@ async fn ingest_event_inner(
             "invalid: channel-scoped events must include an h tag".into(),
         ));
     }
+    if auth.channel_ids().is_some()
+        && requires_h_channel_scope(kind_u32)
+        && event
+            .tags
+            .iter()
+            .filter(|tag| tag.kind().to_string() == "h")
+            .count()
+            != 1
+    {
+        return Err(IngestError::Rejected(
+            "invalid: channel guest events require exactly one h tag".into(),
+        ));
+    }
 
     if let Some(ch_id) = channel_id {
         check_token_channel_access(&auth, ch_id).map_err(IngestError::AuthFailed)?;
     } else if auth.channel_ids().is_some() {
         // Channel-scoped tokens cannot publish global events — that would bypass
-        // the token's channel restriction. This covers kind:1 (global text notes),
-        // kind:3 (contact lists), kind:0 (profiles), and kind:9007 (create-group
-        // without an h-tag, which would auto-assign a server UUID).
+        // the token's channel restriction. Guest onboarding uses the existing
+        // local identity and does not write a tenant-global profile.
         return Err(IngestError::AuthFailed(
             "restricted: channel-scoped tokens cannot publish global events".into(),
         ));
+    }
+    if auth.channel_ids().is_some() {
+        // The channel list in a WebSocket auth context is a snapshot. Re-check
+        // the durable guest grant on every write so a missed cross-pod
+        // disconnect cannot preserve authority after removal, archive, delete,
+        // or a visibility change.
+        let live_channels = state
+            .db
+            .get_guest_channel_ids(tenant.community(), &auth.pubkey().to_hex())
+            .await
+            .map_err(|error| {
+                IngestError::Internal(format!(
+                    "error: internal error checking guest channel access: {error}"
+                ))
+            })?;
+        let still_authorized =
+            channel_id.is_some_and(|channel_id| live_channels.contains(&channel_id));
+        if !still_authorized {
+            return Err(IngestError::AuthFailed(
+                "restricted: guest channel access was revoked".into(),
+            ));
+        }
     }
 
     let pubkey_bytes = auth.pubkey().to_bytes().to_vec();
@@ -3618,6 +3676,7 @@ mod tests {
         let auth = IngestAuth::Http {
             pubkey: keys.public_key(),
             scopes: vec![Scope::MessagesWrite],
+            channel_ids: None,
             auth_method: HttpAuthMethod::Nip98,
         };
         let tracer = Arc::new(VecTracer::default());
@@ -3791,6 +3850,26 @@ mod tests {
                 "kind {kind} must not require an h tag"
             );
         }
+    }
+
+    #[test]
+    fn channel_guests_cannot_reach_early_command_or_sidecar_dispatch() {
+        for kind in [
+            KIND_DM_OPEN,
+            KIND_WORKFLOW_DEF,
+            KIND_WORKFLOW_TRIGGER,
+            KIND_APPROVAL_GRANT,
+            KIND_MODERATION_BAN,
+            KIND_REPORT,
+            KIND_PRODUCT_FEEDBACK,
+            KIND_PROFILE,
+        ] {
+            assert!(
+                !channel_scoped_write_kind_allowed(kind),
+                "kind {kind} must be denied before early dispatch"
+            );
+        }
+        assert!(channel_scoped_write_kind_allowed(KIND_STREAM_MESSAGE));
     }
 
     #[test]
@@ -4049,6 +4128,7 @@ mod tests {
         let http_auth = IngestAuth::Http {
             pubkey: keys.public_key(),
             scopes: vec![],
+            channel_ids: None,
             auth_method: HttpAuthMethod::Nip98,
         };
         assert!(

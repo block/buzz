@@ -209,7 +209,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
         // media). On open relays (membership disabled) any valid Blossom signer
         // may upload, matching the WS door's admission policy.
         let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
-        crate::api::relay_members::enforce_relay_membership(
+        let membership_access = crate::api::relay_members::enforce_relay_membership(
             state,
             tenant.community(),
             auth_event.pubkey.as_bytes(),
@@ -217,6 +217,9 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
         )
         .await
         .map_err(|_| MediaError::RelayMembershipRequired)?;
+        if membership_access.is_guest() {
+            return Err(MediaError::RelayMembershipRequired);
+        }
 
         if upload_rate_limited(state, tenant.community(), &auth_event.pubkey) {
             metrics::counter!("buzz_media_upload_rejections_total", "reason" => "rate_limit")
@@ -535,7 +538,7 @@ async fn authenticate_media_read(
     buzz_media::auth::verify_blossom_get_auth(&auth_event, sha256, Some(tenant.host()), 3600)?;
 
     let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
-    crate::api::relay_members::enforce_relay_membership(
+    let membership_access = crate::api::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
         auth_event.pubkey.as_bytes(),
@@ -543,6 +546,9 @@ async fn authenticate_media_read(
     )
     .await
     .map_err(|_| MediaError::RelayMembershipRequired)?;
+    if membership_access.is_guest() {
+        return Err(MediaError::RelayMembershipRequired);
+    }
 
     Ok(MediaReadAuth { tenant })
 }

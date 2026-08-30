@@ -887,11 +887,33 @@ jobs:
       - name: Relay E2E tests
         run: |
           cargo test -p buzz-test-client --test e2e_persona --test e2e_team_catalog --test e2e_nostr_interop --test e2e_project -- --ignored --nocapture
-          cargo test -p buzz-test-client --test e2e_relay invite -- --ignored --nocapture
+          cargo test -p buzz-test-client --test e2e_relay invite -- --ignored --nocapture --skip invite_guest_
           cargo test -p buzz-test-client --test e2e_relay nip43_membership_snapshots_are_rejected -- --ignored --nocapture
         env:
           RELAY_URL: ws://localhost:3000
           GIT_CREDENTIAL_NOSTR_BIN: ${{ github.workspace }}/target/ci/git-credential-nostr
+      - name: Restart relay with guest membership enforcement
+        run: |
+          relay_pid="$(cat /tmp/buzz-relay.pid)"
+          kill "${relay_pid}"
+          for attempt in $(seq 1 30); do
+            if ! kill -0 "${relay_pid}" 2>/dev/null; then
+              break
+            fi
+            if [ "${attempt}" -eq 30 ]; then
+              echo "Relay did not stop within 30 seconds" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          BUZZ_REQUIRE_RELAY_MEMBERSHIP=true \
+          BUZZ_REAPER_INTERVAL_SECS=1 \
+            ./scripts/start-relay-for-tests.sh --no-build
+      - name: Guest invite relay E2E
+        run: |
+          cargo test -p buzz-test-client --test e2e_relay invite_guest_ -- --ignored --nocapture
+        env:
+          RELAY_URL: ws://localhost:3000
       - name: Media read-auth e2e
         # Reads require kind:24242 `t=get` auth, so these binaries are the only
         # coverage that a real relay rejects bare reads and honours host- and

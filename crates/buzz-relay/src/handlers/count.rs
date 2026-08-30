@@ -17,7 +17,7 @@ use crate::state::AppState;
 /// and return the aggregate count.
 pub async fn handle_count(
     sub_id: String,
-    filters: Vec<Filter>,
+    mut filters: Vec<Filter>,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
 ) {
@@ -36,6 +36,59 @@ pub async fn handle_count(
                 return;
             }
         }
+    };
+
+    let live_guest_channels = if let Some(token_channels) = token_channel_ids.as_deref() {
+        let channel_ids = match state
+            .db
+            .get_guest_channel_ids(conn.tenant.community(), &hex::encode(&pubkey_bytes))
+            .await
+        {
+            Ok(channel_ids)
+                if channel_ids.len() == 1
+                    && channel_ids
+                        .iter()
+                        .all(|channel_id| token_channels.contains(channel_id)) =>
+            {
+                channel_ids
+            }
+            Ok(_) => {
+                conn.send(RelayMessage::closed(
+                    &sub_id,
+                    "restricted: guest channel access was revoked",
+                ));
+                return;
+            }
+            Err(error) => {
+                warn!(%sub_id, %error, "guest COUNT authority lookup failed");
+                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                return;
+            }
+        };
+        let visible_pubkeys = match state
+            .db
+            .get_guest_visible_pubkeys(conn.tenant.community(), &channel_ids)
+            .await
+        {
+            Ok(pubkeys) => pubkeys,
+            Err(error) => {
+                warn!(%sub_id, %error, "guest COUNT profile visibility lookup failed");
+                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                return;
+            }
+        };
+        if let Err(reason) = super::req::restrict_guest_filters(
+            &mut filters,
+            &channel_ids,
+            &visible_pubkeys,
+            &pubkey_bytes,
+        ) {
+            conn.send(RelayMessage::closed(&sub_id, reason));
+            return;
+        }
+        Some(channel_ids)
+    } else {
+        None
     };
 
     // P-gated kinds (gift wraps, member notifications, observer frames) require
@@ -81,15 +134,19 @@ pub async fn handle_count(
         };
 
     // Get channels this user can access — same enforcement as WS REQ handler.
-    let mut accessible_channels = match state
-        .get_accessible_channel_ids_cached(conn.tenant.community(), &pubkey_bytes)
-        .await
-    {
-        Ok(ids) => ids,
-        Err(e) => {
-            warn!(sub_id = %sub_id, "Failed to get accessible channels: {e}");
-            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
-            return;
+    let mut accessible_channels = if let Some(channel_ids) = live_guest_channels.as_ref() {
+        channel_ids.clone()
+    } else {
+        match state
+            .get_accessible_channel_ids_cached(conn.tenant.community(), &pubkey_bytes)
+            .await
+        {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!(sub_id = %sub_id, "Failed to get accessible channels: {e}");
+                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                return;
+            }
         }
     };
     // Narrow to the token's channel scope, mirroring the WS REQ handler. Without

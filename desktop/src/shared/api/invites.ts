@@ -5,11 +5,13 @@ import {
   signRelayEvent,
 } from "@/shared/api/tauri";
 
-// Relay invite data layer. Both endpoints are NIP-98-authed HTTP POSTs
+// Relay invite data layer. Administrative endpoints are NIP-98-authed HTTP POSTs
 // (mirrors the read path in moderation.ts, plus the payload tag the relay
 // requires for signed POST bodies):
 //
 // - POST /api/invites        — mint a code (relay checks owner/admin role)
+// - POST /api/invites/list   — list active guest-link metadata for a channel
+// - POST /api/invites/revoke — revoke an invite by its mint-time ID
 // - POST /api/invites/claim  — claim a code, signed by the *joining* key.
 //   This one targets an arbitrary relay (the invite's relay, not necessarily
 //   the active community), so the claim helper takes an explicit ws URL.
@@ -22,11 +24,20 @@ const NIP98_KIND = 27235;
 const INVITE_REQUEST_TIMEOUT_MS = 15_000;
 
 export type MintedInvite = {
+  inviteId: string;
   code: string;
   expiresAt: number;
   url: string;
   maxUses: number | null;
   usesRemaining: number | null;
+  role: "member" | "guest";
+  channelId: string | null;
+};
+
+export type ActiveGuestInvite = {
+  inviteId: string;
+  expiresAt: number;
+  createdAt: number;
 };
 
 export type JoinPolicy = {
@@ -41,6 +52,7 @@ export type ClaimResult = {
   communityId: string;
   host: string;
   role: string;
+  channelId: string | null;
 };
 
 async function sha256Hex(text: string): Promise<string> {
@@ -194,26 +206,65 @@ export async function acceptJoinPolicy(
 export async function mintInvite(options?: {
   ttlSecs?: number;
   maxUses?: number | null;
+  channelId?: string;
 }): Promise<MintedInvite> {
   const base = await getRelayHttpUrl();
   const payload: Record<string, unknown> = {};
   if (options?.ttlSecs != null) payload.ttl_secs = options.ttlSecs;
-  if (options?.maxUses != null) payload.max_uses = options.maxUses;
+  if (options?.channelId != null) {
+    payload.channel_id = options.channelId;
+    payload.max_uses = 1;
+  } else if (options?.maxUses != null) {
+    payload.max_uses = options.maxUses;
+  }
   const body = JSON.stringify(payload);
   const raw = await invitePost<{
+    invite_id: string;
     code: string;
     expires_at: number;
     url: string;
     max_uses: number | null;
     uses_remaining: number | null;
+    role: "member" | "guest";
+    channel_id: string | null;
   }>(base, "/api/invites", body);
   return {
+    inviteId: raw.invite_id,
     code: raw.code,
     expiresAt: raw.expires_at,
     url: raw.url,
     maxUses: raw.max_uses,
     usesRemaining: raw.uses_remaining,
+    role: raw.role,
+    channelId: raw.channel_id,
   };
+}
+
+/** List active, unclaimed guest links for one channel (owner/admin only). */
+export async function listActiveGuestInvites(
+  channelId: string,
+): Promise<ActiveGuestInvite[]> {
+  const base = await getRelayHttpUrl();
+  const body = JSON.stringify({ channel_id: channelId });
+  const raw = await invitePost<{
+    invites: Array<{
+      invite_id: string;
+      expires_at: number;
+      created_at: number;
+    }>;
+  }>(base, "/api/invites/list", body);
+  return raw.invites.map((invite) => ({
+    inviteId: invite.invite_id,
+    expiresAt: invite.expires_at,
+    createdAt: invite.created_at,
+  }));
+}
+
+/** Revoke an invite by its mint-time identifier (owner/admin only). */
+export async function revokeInvite(inviteId: string): Promise<void> {
+  const base = await getRelayHttpUrl();
+  const body = JSON.stringify({ invite_id: inviteId });
+  await invitePost<{ status: "revoked" }>(base, "/api/invites/revoke", body);
 }
 
 /**
@@ -232,11 +283,13 @@ export async function claimInvite(
     community_id: string;
     host: string;
     role: string;
+    channel_id: string | null;
   }>(base, "/api/invites/claim", body);
   return {
     status: raw.status,
     communityId: raw.community_id,
     host: raw.host,
     role: raw.role,
+    channelId: raw.channel_id,
   };
 }

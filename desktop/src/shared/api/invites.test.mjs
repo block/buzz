@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { getJoinPolicy, mintInvite } from "./invites.ts";
+import {
+  getJoinPolicy,
+  listActiveGuestInvites,
+  mintInvite,
+  revokeInvite,
+} from "./invites.ts";
 
 function withFetch(response, run) {
   const originalFetch = globalThis.fetch;
@@ -125,6 +130,7 @@ test("mintInvite serializes bounded max_uses in the request body", async () => {
       capturedBody = JSON.parse(init.body);
       return new Response(
         JSON.stringify({
+          invite_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
           code: "v2.abc123",
           expires_at: 1785100000,
           url: "https://relay.example/invite/v2.abc123",
@@ -138,10 +144,51 @@ test("mintInvite serializes bounded max_uses in the request body", async () => {
       assert.equal(capturedBody.ttl_secs, 259200);
       assert.equal(capturedBody.max_uses, 10);
       assert.equal(result.code, "v2.abc123");
+      assert.equal(result.inviteId, "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
       assert.equal(result.maxUses, 10);
       assert.equal(result.usesRemaining, 10);
       assert.equal(result.expiresAt, 1785100000);
       assert.equal(result.url, "https://relay.example/invite/v2.abc123");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  } finally {
+    teardownTauriStubs();
+  }
+});
+
+test("mintInvite binds guest links to the requested channel", async () => {
+  setupTauriStubs("https://relay.example");
+  try {
+    const originalFetch = globalThis.fetch;
+    let capturedBody;
+    globalThis.fetch = async (_url, init) => {
+      capturedBody = JSON.parse(init.body);
+      return new Response(
+        JSON.stringify({
+          invite_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+          channel_id: "11111111-1111-4111-8111-111111111111",
+          code: "v2.guest",
+          expires_at: 1785100000,
+          max_uses: 1,
+          role: "guest",
+          url: "https://relay.example/invite/v2.guest",
+          uses_remaining: 1,
+        }),
+      );
+    };
+    try {
+      const result = await mintInvite({
+        channelId: "11111111-1111-4111-8111-111111111111",
+        ttlSecs: 259200,
+      });
+      assert.equal(
+        capturedBody.channel_id,
+        "11111111-1111-4111-8111-111111111111",
+      );
+      assert.equal(capturedBody.max_uses, 1);
+      assert.equal(result.role, "guest");
+      assert.equal(result.channelId, capturedBody.channel_id);
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -159,6 +206,7 @@ test("mintInvite omits max_uses when null (unlimited)", async () => {
       capturedBody = JSON.parse(init.body);
       return new Response(
         JSON.stringify({
+          invite_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
           code: "v2.abc123",
           expires_at: 1785100000,
           url: "https://relay.example/invite/v2.abc123",
@@ -190,6 +238,7 @@ test("mintInvite omits max_uses when not provided (unlimited default)", async ()
       capturedBody = JSON.parse(init.body);
       return new Response(
         JSON.stringify({
+          invite_id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
           code: "v2.abc123",
           expires_at: 1785100000,
           url: "https://relay.example/invite/v2.abc123",
@@ -202,6 +251,75 @@ test("mintInvite omits max_uses when not provided (unlimited default)", async ()
       await mintInvite({ ttlSecs: 86400 });
       assert.equal(capturedBody.ttl_secs, 86400);
       assert.equal(Object.hasOwn(capturedBody, "max_uses"), false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  } finally {
+    teardownTauriStubs();
+  }
+});
+
+test("listActiveGuestInvites maps active guest-link metadata", async () => {
+  setupTauriStubs("https://relay.example");
+  try {
+    const originalFetch = globalThis.fetch;
+    let capturedUrl;
+    let capturedBody;
+    globalThis.fetch = async (url, init) => {
+      capturedUrl = url;
+      capturedBody = JSON.parse(init.body);
+      return new Response(
+        JSON.stringify({
+          invites: [
+            {
+              invite_id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+              expires_at: 1785100000,
+              created_at: 1785000000,
+            },
+          ],
+        }),
+      );
+    };
+    try {
+      assert.deepEqual(
+        await listActiveGuestInvites("11111111-1111-4111-8111-111111111111"),
+        [
+          {
+            inviteId: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            expiresAt: 1785100000,
+            createdAt: 1785000000,
+          },
+        ],
+      );
+      assert.equal(capturedUrl, "https://relay.example/api/invites/list");
+      assert.deepEqual(capturedBody, {
+        channel_id: "11111111-1111-4111-8111-111111111111",
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  } finally {
+    teardownTauriStubs();
+  }
+});
+
+test("revokeInvite sends the mint-time invite ID", async () => {
+  setupTauriStubs("https://relay.example");
+  try {
+    const originalFetch = globalThis.fetch;
+    let capturedUrl;
+    let capturedBody;
+    globalThis.fetch = async (url, init) => {
+      capturedUrl = url;
+      capturedBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({ status: "revoked" }));
+    };
+    try {
+      await revokeInvite("ffffffff-ffff-4fff-8fff-ffffffffffff");
+      assert.equal(capturedUrl, "https://relay.example/api/invites/revoke");
+      assert.deepEqual(capturedBody, {
+        invite_id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }

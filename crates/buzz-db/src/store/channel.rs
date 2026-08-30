@@ -387,6 +387,8 @@ pub struct ReapedEphemeralChannel {
     pub host: String,
     /// Archived channel UUID.
     pub channel_id: Uuid,
+    /// Guest identities whose durable channel grants were revoked.
+    pub revoked_guest_pubkeys: Vec<Vec<u8>>,
 }
 
 pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
@@ -487,6 +489,9 @@ pub async fn update_channel(
     }
     if updates.visibility.is_some() {
         set_parts.push(format!("visibility = ${param_idx}::channel_visibility"));
+        if updates.visibility.as_deref() == Some("open") {
+            set_parts.push("guest_invite_generation = guest_invite_generation + 1".to_string());
+        }
         param_idx += 1;
     }
     if let Some(ref ttl) = updates.ttl_seconds {
@@ -523,25 +528,36 @@ pub async fn update_channel(
     q = q.bind(community_id.as_uuid());
     q = q.bind(channel_id);
 
-    // T1a repair: a TTL change can flip this channel's event-trigger fast
-    // path (migration 0024 reads ttl_seconds under a SHARED per-channel
-    // advisory lock). Take the same key EXCLUSIVE before the UPDATE so a
-    // concurrent event either sees the committed TTL or strictly precedes
-    // this transition — whose own deadline reset is then the latest word.
-    // Non-TTL updates don't touch the fast path and skip the lock.
-    if updates.ttl_seconds.is_some() {
+    // Visibility changes serialize with guest claims and membership writes.
+    // TTL changes also take the event-trigger lock used by migration 0024.
+    // When both fields change, keep the stable membership-then-TTL lock order.
+    if updates.visibility.is_some() || updates.ttl_seconds.is_some() {
         let mut tx = pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!(
-                "buzz_channel_ttl:{}:{}",
-                community_id.as_uuid(),
-                channel_id
-            ))
-            .execute(&mut *tx)
+        if updates.visibility.is_some() {
+            crate::channel_members::acquire_channel_membership_lock(
+                &mut tx,
+                community_id,
+                channel_id,
+            )
             .await?;
+        }
+        if updates.ttl_seconds.is_some() {
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(format!(
+                    "buzz_channel_ttl:{}:{}",
+                    community_id.as_uuid(),
+                    channel_id
+                ))
+                .execute(&mut *tx)
+                .await?;
+        }
         let result = q.execute(&mut *tx).await?;
         if result.rows_affected() == 0 {
             return Err(DbError::ChannelNotFound(channel_id));
+        }
+        if updates.visibility.as_deref() == Some("open") {
+            crate::relay_members::revoke_channel_guests_locked(&mut tx, community_id, channel_id)
+                .await?;
         }
         tx.commit().await?;
     } else {
@@ -602,7 +618,8 @@ pub async fn set_purpose(
     Ok(())
 }
 
-/// Archives a channel.
+/// Archives a channel and returns the relay guest pubkeys whose channel grants
+/// were revoked.
 ///
 /// Returns `AccessDenied` if the channel is already archived.
 /// Returns `ChannelNotFound` if the channel does not exist or is deleted.
@@ -610,21 +627,29 @@ pub async fn archive_channel(
     pool: &PgPool,
     community_id: CommunityId,
     channel_id: Uuid,
-) -> Result<()> {
+) -> Result<Vec<Vec<u8>>> {
+    let mut tx = pool.begin().await?;
+    crate::channel_members::acquire_channel_membership_lock(&mut tx, community_id, channel_id)
+        .await?;
+
     // First check: does the channel exist and what is its state?
     let row = sqlx::query(
         "SELECT archived_at FROM channels WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
         .bind(community_id.as_uuid())
         .bind(channel_id)
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
     match row {
-        None => return Err(DbError::ChannelNotFound(channel_id)),
+        None => {
+            tx.rollback().await?;
+            return Err(DbError::ChannelNotFound(channel_id));
+        }
         Some(r) => {
             let archived_at: Option<DateTime<Utc>> = r.try_get("archived_at")?;
             if archived_at.is_some() {
+                tx.rollback().await?;
                 return Err(DbError::AccessDenied(
                     "channel is already archived".to_string(),
                 ));
@@ -633,15 +658,20 @@ pub async fn archive_channel(
     }
 
     sqlx::query(
-        "UPDATE channels SET archived_at = NOW() \
+        "UPDATE channels SET archived_at = NOW(), \
+             guest_invite_generation = guest_invite_generation + 1 \
          WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL AND archived_at IS NULL",
     )
     .bind(community_id.as_uuid())
     .bind(channel_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
-    Ok(())
+    let revoked_guest_pubkeys =
+        crate::relay_members::revoke_channel_guests_locked(&mut tx, community_id, channel_id)
+            .await?;
+    tx.commit().await?;
+    Ok(revoked_guest_pubkeys)
 }
 
 /// Unarchives a channel.
@@ -690,22 +720,35 @@ pub async fn unarchive_channel(
 
 /// Soft-delete a channel by setting `deleted_at = NOW()`.
 ///
-/// Returns `Ok(true)` if the channel was deleted, `Ok(false)` if already
-/// deleted or not found.
+/// Returns whether the channel was deleted and the relay guest pubkeys whose
+/// channel grants were revoked.
 pub async fn soft_delete_channel(
     pool: &PgPool,
     community_id: CommunityId,
     channel_id: Uuid,
-) -> Result<bool> {
+) -> Result<(bool, Vec<Vec<u8>>)> {
+    let mut tx = pool.begin().await?;
+    crate::channel_members::acquire_channel_membership_lock(&mut tx, community_id, channel_id)
+        .await?;
     let result = sqlx::query(
-        "UPDATE channels SET deleted_at = NOW() WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
+        "UPDATE channels SET deleted_at = NOW(), \
+             guest_invite_generation = guest_invite_generation + 1 \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
-            .bind(community_id.as_uuid())
-            .bind(channel_id)
-            .execute(pool)
-            .await?;
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .execute(&mut *tx)
+    .await?;
 
-    Ok(result.rows_affected() > 0)
+    let deleted = result.rows_affected() > 0;
+    let revoked_guest_pubkeys = if deleted {
+        crate::relay_members::revoke_channel_guests_locked(&mut tx, community_id, channel_id)
+            .await?
+    } else {
+        Vec::new()
+    };
+    tx.commit().await?;
+    Ok((deleted, revoked_guest_pubkeys))
 }
 
 /// Archive ephemeral channels whose TTL deadline has passed.
@@ -714,33 +757,62 @@ pub async fn soft_delete_channel(
 /// `archived_at IS NULL` guard prevents double-archiving even if called
 /// concurrently from multiple relay pods.
 pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<ReapedEphemeralChannel>> {
-    let rows = sqlx::query(
-        "UPDATE channels AS ch SET archived_at = NOW() \
-         FROM communities AS c \
-         WHERE ch.community_id = c.id \
-           AND ch.ttl_seconds IS NOT NULL \
+    let candidates = sqlx::query(
+        "SELECT ch.community_id, c.host, ch.id \
+         FROM channels ch \
+         JOIN communities c ON c.id = ch.community_id \
+         WHERE ch.ttl_seconds IS NOT NULL \
            AND ch.ttl_deadline < NOW() \
            AND ch.archived_at IS NULL \
            AND ch.deleted_at IS NULL \
            AND c.archived_at IS NULL \
-           AND community_write_allowed(ch.community_id) \
-         RETURNING ch.community_id, c.host, ch.id",
+           AND community_write_allowed(ch.community_id)",
     )
     .fetch_all(pool)
     .await?;
 
-    rows.into_iter()
-        .map(|row| {
-            let community_id: Uuid = row.try_get("community_id")?;
-            let host: String = row.try_get("host")?;
-            let channel_id: Uuid = row.try_get("id")?;
-            Ok(ReapedEphemeralChannel {
-                community_id: CommunityId::from_uuid(community_id),
-                host,
-                channel_id,
-            })
-        })
-        .collect()
+    let mut reaped = Vec::with_capacity(candidates.len());
+    for row in candidates {
+        let community_id = CommunityId::from_uuid(row.try_get("community_id")?);
+        let host: String = row.try_get("host")?;
+        let channel_id: Uuid = row.try_get("id")?;
+        let mut tx = pool.begin().await?;
+        crate::channel_members::acquire_channel_membership_lock(&mut tx, community_id, channel_id)
+            .await?;
+        let updated = sqlx::query(
+            "UPDATE channels ch SET archived_at = NOW(), \
+                 guest_invite_generation = ch.guest_invite_generation + 1 \
+             WHERE ch.community_id = $1 AND ch.id = $2 \
+           AND ch.ttl_seconds IS NOT NULL \
+           AND ch.ttl_deadline < NOW() \
+           AND ch.archived_at IS NULL \
+           AND ch.deleted_at IS NULL \
+               AND community_write_allowed(ch.community_id) \
+               AND EXISTS ( \
+                   SELECT 1 FROM communities c \
+                   WHERE c.id = ch.community_id AND c.archived_at IS NULL \
+               )",
+        )
+        .bind(community_id.as_uuid())
+        .bind(channel_id)
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() == 0 {
+            tx.rollback().await?;
+            continue;
+        }
+        let revoked_guest_pubkeys =
+            crate::relay_members::revoke_channel_guests_locked(&mut tx, community_id, channel_id)
+                .await?;
+        tx.commit().await?;
+        reaped.push(ReapedEphemeralChannel {
+            community_id,
+            host,
+            channel_id,
+            revoked_guest_pubkeys,
+        });
+    }
+    Ok(reaped)
 }
 
 impl Db {
@@ -876,9 +948,13 @@ impl Db {
         set_purpose(&self.pool, community_id, channel_id, purpose, set_by).await
     }
 
-    /// Archives a channel.
+    /// Archives a channel and returns revoked relay guest pubkeys.
     #[datastore_span(name = "archive_channel", system = "postgresql")]
-    pub async fn archive_channel(&self, community_id: CommunityId, channel_id: Uuid) -> Result<()> {
+    pub async fn archive_channel(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+    ) -> Result<Vec<Vec<u8>>> {
         archive_channel(&self.pool, community_id, channel_id).await
     }
 
@@ -892,13 +968,13 @@ impl Db {
         unarchive_channel(&self.pool, community_id, channel_id).await
     }
 
-    /// Soft-delete a channel.
+    /// Soft-delete a channel and return its deletion result and revoked guests.
     #[datastore_span(name = "soft_delete_channel", system = "postgresql")]
     pub async fn soft_delete_channel(
         &self,
         community_id: CommunityId,
         channel_id: Uuid,
-    ) -> Result<bool> {
+    ) -> Result<(bool, Vec<Vec<u8>>)> {
         soft_delete_channel(&self.pool, community_id, channel_id).await
     }
 

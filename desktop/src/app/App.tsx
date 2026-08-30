@@ -67,6 +67,7 @@ import { createBuzzQueryClient } from "@/shared/api/queryClient";
 import { hydrateChannelHeads } from "@/features/messages/lib/channelHeadCache";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
+import { getIdentity } from "@/shared/api/tauriIdentity";
 import { getProfile } from "@/shared/api/tauriProfiles";
 import {
   type AddCommunityDeepLinkPayload,
@@ -540,6 +541,22 @@ function CommunityApp({
     if (profileCheckTransactionRef.current === transactionId) return;
     profileCheckTransactionRef.current = transactionId;
 
+    if (transaction.guestChannelId) {
+      window.location.hash = `/channels/${transaction.guestChannelId}`;
+      void getIdentity()
+        .then((identity) => {
+          markCommunityOnboardingComplete(identity.pubkey, relayUrl);
+        })
+        .finally(() => {
+          if (
+            isTransactionStillConnecting(transactionRef.current, transactionId)
+          ) {
+            communityOnboarding.clear();
+          }
+        });
+      return;
+    }
+
     // resolveProfileCheckAction resolves exactly once (Promise.race + timer
     // cleared on settle), so no settled flag is needed here.
     void resolveProfileCheckAction(getProfile, 10_000).then((result) => {
@@ -566,6 +583,7 @@ function CommunityApp({
     transaction?.stage,
     transaction?.id,
     transaction?.relayUrl,
+    transaction?.guestChannelId,
   ]);
   // During "entering" the transaction stays alive as a curtain: the app mounts
   // underneath (already pointed at the Welcome channel route) while the

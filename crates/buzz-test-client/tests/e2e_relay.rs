@@ -167,6 +167,113 @@ async fn invite_post_with_host(
         .unwrap_or_else(|e| panic!("POST {path} failed: {e}"))
 }
 
+async fn mint_and_claim_channel_guest(owner: &Keys, guest: &Keys, channel_id: &str) -> uuid::Uuid {
+    let mint_body = serde_json::json!({
+        "channel_id": channel_id,
+        "ttl_secs": 3600,
+        "max_uses": 1,
+    })
+    .to_string();
+    let mint_response = invite_post(owner, "/api/invites", &mint_body).await;
+    assert_eq!(
+        mint_response.status(),
+        reqwest::StatusCode::OK,
+        "guest invite mint failed"
+    );
+    let mint_json: serde_json::Value = mint_response.json().await.expect("guest mint JSON");
+    let invite_id = Uuid::parse_str(
+        mint_json
+            .get("invite_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("guest mint includes invite_id"),
+    )
+    .expect("valid invite_id");
+    let code = mint_json
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .expect("guest mint includes code");
+    assert_eq!(
+        mint_json
+            .get("channel_id")
+            .and_then(serde_json::Value::as_str),
+        Some(channel_id)
+    );
+    assert_eq!(
+        mint_json.get("role").and_then(serde_json::Value::as_str),
+        Some("guest")
+    );
+
+    let claim_body = serde_json::json!({ "code": code }).to_string();
+    let claim_response = invite_post(guest, "/api/invites/claim", &claim_body).await;
+    assert_eq!(
+        claim_response.status(),
+        reqwest::StatusCode::OK,
+        "guest invite claim failed"
+    );
+    let claim_json: serde_json::Value = claim_response.json().await.expect("guest claim JSON");
+    assert_eq!(
+        claim_json.get("status").and_then(serde_json::Value::as_str),
+        Some("joined")
+    );
+    assert_eq!(
+        claim_json.get("role").and_then(serde_json::Value::as_str),
+        Some("guest")
+    );
+    assert_eq!(
+        claim_json
+            .get("channel_id")
+            .and_then(serde_json::Value::as_str),
+        Some(channel_id)
+    );
+    invite_id
+}
+
+async fn expect_subscription_closed(
+    client: &mut BuzzTestClient,
+    expected_subscription_id: &str,
+) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .expect("subscription was not closed before timeout");
+        match client
+            .recv_event(remaining)
+            .await
+            .expect("receive subscription close")
+        {
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if subscription_id == expected_subscription_id => return message,
+            _ => {}
+        }
+    }
+}
+
+async fn expect_guest_connection_revoked(client: &mut BuzzTestClient, reason_fragment: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut saw_denial = false;
+    loop {
+        let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now()) else {
+            panic!("guest connection was not closed before timeout");
+        };
+        match client.recv_event(remaining).await {
+            Ok(RelayMessage::Ok(ok)) if !ok.accepted => {
+                assert!(
+                    ok.message.contains(reason_fragment),
+                    "unexpected guest disconnect reason: {}",
+                    ok.message
+                );
+                saw_denial = true;
+            }
+            Ok(_) => {}
+            Err(_) if saw_denial => return,
+            Err(error) => panic!("guest socket closed without a denial reason: {error}"),
+        }
+    }
+}
+
 /// Create a real channel via a signed kind:9007 event submitted to POST /events.
 async fn create_test_channel(keys: &Keys) -> String {
     let client = reqwest::Client::new();
@@ -353,6 +460,395 @@ async fn test_invite_code_minted_for_one_host_fails_on_another() {
     let claim_response =
         invite_post_with_host(&joiner, Some(&host_b), "/api/invites/claim", &claim_body).await;
     assert_eq!(claim_response.status(), reqwest::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_invite_guest_list_and_revoke_unused_link() {
+    let owner = test_owner_keys();
+    seed_relay_owner(&owner).await;
+    let mut owner_client = BuzzTestClient::connect(&relay_url(), &owner)
+        .await
+        .expect("owner connect");
+    let channel_id = create_private_channel_ws(&mut owner_client, &owner).await;
+
+    let mint_body = serde_json::json!({
+        "channel_id": channel_id,
+        "ttl_secs": 3600,
+        "max_uses": 1,
+    })
+    .to_string();
+    let mint_response = invite_post(&owner, "/api/invites", &mint_body).await;
+    assert_eq!(mint_response.status(), reqwest::StatusCode::OK);
+    let mint_json: serde_json::Value = mint_response.json().await.expect("mint JSON");
+    let invite_id = mint_json
+        .get("invite_id")
+        .and_then(serde_json::Value::as_str)
+        .expect("mint response includes invite_id");
+    let code = mint_json
+        .get("code")
+        .and_then(serde_json::Value::as_str)
+        .expect("mint response includes code");
+
+    let list_body = serde_json::json!({ "channel_id": channel_id }).to_string();
+    let list_response = invite_post(&owner, "/api/invites/list", &list_body).await;
+    assert_eq!(list_response.status(), reqwest::StatusCode::OK);
+    let list_json: serde_json::Value = list_response.json().await.expect("list JSON");
+    assert_eq!(
+        list_json["invites"]
+            .as_array()
+            .expect("invite list")
+            .iter()
+            .filter(|invite| invite["invite_id"].as_str() == Some(invite_id))
+            .count(),
+        1
+    );
+
+    let revoke_body = serde_json::json!({ "invite_id": invite_id }).to_string();
+    let revoke_response = invite_post(&owner, "/api/invites/revoke", &revoke_body).await;
+    assert_eq!(revoke_response.status(), reqwest::StatusCode::OK);
+
+    let list_response = invite_post(&owner, "/api/invites/list", &list_body).await;
+    assert_eq!(list_response.status(), reqwest::StatusCode::OK);
+    let list_json: serde_json::Value = list_response.json().await.expect("list after revoke JSON");
+    assert!(list_json["invites"]
+        .as_array()
+        .expect("invite list after revoke")
+        .iter()
+        .all(|invite| invite["invite_id"].as_str() != Some(invite_id)));
+
+    let guest = Keys::generate();
+    let claim_body = serde_json::json!({ "code": code }).to_string();
+    let claim_response = invite_post(&guest, "/api/invites/claim", &claim_body).await;
+    assert_eq!(claim_response.status(), reqwest::StatusCode::FORBIDDEN);
+    let claim_json: serde_json::Value = claim_response.json().await.expect("revoked claim JSON");
+    assert_eq!(
+        claim_json.get("error").and_then(serde_json::Value::as_str),
+        Some("invite_revoked")
+    );
+
+    owner_client.disconnect().await.expect("owner disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_invite_guest_rejects_relay_removed_identity_and_revokes_bearer() {
+    let owner = test_owner_keys();
+    let removed_member = Keys::generate();
+    seed_relay_owner(&owner).await;
+    seed_relay_member("localhost:3000", &removed_member, "member").await;
+    let mut owner_client = BuzzTestClient::connect(&relay_url(), &owner)
+        .await
+        .expect("owner connect");
+    let channel_id = create_private_channel_ws(&mut owner_client, &owner).await;
+
+    let mint_body = serde_json::json!({
+        "channel_id": channel_id,
+        "ttl_secs": 3600,
+        "max_uses": 1,
+    })
+    .to_string();
+    let mint_response = invite_post(&owner, "/api/invites", &mint_body).await;
+    assert_eq!(mint_response.status(), reqwest::StatusCode::OK);
+    let mint_json: serde_json::Value = mint_response.json().await.expect("mint JSON");
+    let code = mint_json["code"].as_str().expect("mint code").to_owned();
+
+    let remove = EventBuilder::new(Kind::Custom(9031), "")
+        .tag(Tag::parse(["p", &removed_member.public_key().to_hex()]).expect("p tag"))
+        .sign_with_keys(&owner)
+        .expect("sign relay removal");
+    let removed = owner_client
+        .send_event(remove)
+        .await
+        .expect("remove relay member");
+    assert!(
+        removed.accepted,
+        "relay removal rejected: {}",
+        removed.message
+    );
+
+    let claim_body = serde_json::json!({ "code": code }).to_string();
+    let blocked = invite_post(&removed_member, "/api/invites/claim", &claim_body).await;
+    assert_eq!(blocked.status(), reqwest::StatusCode::FORBIDDEN);
+    let blocked_json: serde_json::Value = blocked.json().await.expect("blocked claim JSON");
+    assert_eq!(
+        blocked_json["error"].as_str(),
+        Some("invite_relay_access_removed")
+    );
+
+    let fresh_identity = Keys::generate();
+    let revoked = invite_post(&fresh_identity, "/api/invites/claim", &claim_body).await;
+    assert_eq!(revoked.status(), reqwest::StatusCode::FORBIDDEN);
+    let revoked_json: serde_json::Value = revoked.json().await.expect("revoked claim JSON");
+    assert_eq!(revoked_json["error"].as_str(), Some("invite_revoked"));
+
+    owner_client.disconnect().await.expect("owner disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_invite_guest_unused_links_do_not_revive_after_reversible_lifecycle() {
+    let owner = test_owner_keys();
+    seed_relay_owner(&owner).await;
+    let mut owner_client = BuzzTestClient::connect(&relay_url(), &owner)
+        .await
+        .expect("owner connect");
+
+    for transition in ["public", "archive"] {
+        let channel_id = create_private_channel_ws(&mut owner_client, &owner).await;
+        let mint_body = serde_json::json!({
+            "channel_id": channel_id,
+            "ttl_secs": 3600,
+            "max_uses": 1,
+        })
+        .to_string();
+        let mint_response = invite_post(&owner, "/api/invites", &mint_body).await;
+        assert_eq!(mint_response.status(), reqwest::StatusCode::OK);
+        let mint_json: serde_json::Value = mint_response.json().await.expect("mint JSON");
+        let code = mint_json["code"].as_str().expect("mint code").to_owned();
+
+        let transition_tag = if transition == "public" {
+            Tag::parse(["visibility", "open"]).expect("visibility tag")
+        } else {
+            Tag::parse(["archived", "true"]).expect("archive tag")
+        };
+        let transition_event = EventBuilder::new(Kind::Custom(9002), "")
+            .tags([
+                Tag::parse(["h", &channel_id]).expect("h tag"),
+                transition_tag,
+            ])
+            .sign_with_keys(&owner)
+            .expect("sign transition");
+        let transitioned = owner_client
+            .send_event(transition_event)
+            .await
+            .expect("apply lifecycle transition");
+        assert!(transitioned.accepted, "{transition} transition rejected");
+
+        let reverse_tag = if transition == "public" {
+            Tag::parse(["visibility", "private"]).expect("visibility tag")
+        } else {
+            Tag::parse(["archived", "false"]).expect("archive tag")
+        };
+        let reverse_event = EventBuilder::new(Kind::Custom(9002), "")
+            .tags([Tag::parse(["h", &channel_id]).expect("h tag"), reverse_tag])
+            .sign_with_keys(&owner)
+            .expect("sign reverse transition");
+        let reversed = owner_client
+            .send_event(reverse_event)
+            .await
+            .expect("reverse lifecycle transition");
+        assert!(reversed.accepted, "{transition} reversal rejected");
+
+        let claimant = Keys::generate();
+        let claim_body = serde_json::json!({ "code": code }).to_string();
+        let claim = invite_post(&claimant, "/api/invites/claim", &claim_body).await;
+        assert_eq!(claim.status(), reqwest::StatusCode::FORBIDDEN);
+        let claim_json: serde_json::Value = claim.json().await.expect("claim JSON");
+        assert_eq!(
+            claim_json["error"].as_str(),
+            Some("invite_revoked"),
+            "{transition} reversal revived an old link"
+        );
+    }
+
+    owner_client.disconnect().await.expect("owner disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_invite_guest_session_is_channel_scoped_and_disconnects_on_removal() {
+    let owner = test_owner_keys();
+    let guest = Keys::generate();
+    seed_relay_owner(&owner).await;
+
+    let mut owner_client = BuzzTestClient::connect(&relay_url(), &owner)
+        .await
+        .expect("owner connect");
+    let allowed_channel = create_private_channel_ws(&mut owner_client, &owner).await;
+    let denied_channel = create_private_channel_ws(&mut owner_client, &owner).await;
+    mint_and_claim_channel_guest(&owner, &guest, &allowed_channel).await;
+
+    let retained_content = format!("guest-readable-{}", Uuid::new_v4());
+    let stored = owner_client
+        .send_text_message(&owner, &allowed_channel, &retained_content, 9)
+        .await
+        .expect("store guest-readable message");
+    assert!(
+        stored.accepted,
+        "owner message rejected: {}",
+        stored.message
+    );
+
+    let mut guest_client = BuzzTestClient::connect(&relay_url(), &guest)
+        .await
+        .expect("guest connect");
+    let allowed_sid = sub_id("invite-guest-allowed");
+    let allowed_filter = Filter::new().kind(Kind::Custom(9)).custom_tags(
+        SingleLetterTag::lowercase(Alphabet::H),
+        [allowed_channel.as_str()],
+    );
+    guest_client
+        .subscribe(&allowed_sid, vec![allowed_filter])
+        .await
+        .expect("guest subscribe to granted channel");
+    let retained = guest_client
+        .collect_until_eose(&allowed_sid, Duration::from_secs(5))
+        .await
+        .expect("guest read granted channel");
+    assert!(
+        retained
+            .iter()
+            .any(|event| event.content == retained_content),
+        "guest did not receive stored content from the granted channel"
+    );
+
+    let guest_write = guest_client
+        .send_text_message(
+            &guest,
+            &allowed_channel,
+            &format!("guest-write-{}", Uuid::new_v4()),
+            9,
+        )
+        .await
+        .expect("guest write granted channel");
+    assert!(
+        guest_write.accepted,
+        "guest channel write rejected: {}",
+        guest_write.message
+    );
+
+    let global_profile = EventBuilder::new(
+        Kind::Metadata,
+        r#"{"display_name":"Guest should not publish globally"}"#,
+    )
+    .sign_with_keys(&guest)
+    .expect("sign guest profile");
+    let global_write = guest_client
+        .send_event(global_profile)
+        .await
+        .expect("submit guest global profile");
+    assert!(
+        !global_write.accepted,
+        "guest global profile write must be rejected"
+    );
+
+    let denied_sid = sub_id("invite-guest-denied");
+    let denied_filter = Filter::new().kind(Kind::Custom(9)).custom_tags(
+        SingleLetterTag::lowercase(Alphabet::H),
+        [denied_channel.as_str()],
+    );
+    guest_client
+        .subscribe(&denied_sid, vec![denied_filter])
+        .await
+        .expect("send denied guest subscription");
+    let denied_reason = expect_subscription_closed(&mut guest_client, &denied_sid).await;
+    assert!(
+        denied_reason.contains("restricted"),
+        "unexpected denied-channel reason: {denied_reason}"
+    );
+
+    let remove = EventBuilder::new(Kind::Custom(9001), "")
+        .tags([
+            Tag::parse(["h", &allowed_channel]).unwrap(),
+            Tag::parse(["p", &guest.public_key().to_hex()]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .expect("sign guest removal");
+    let removed = owner_client.send_event(remove).await.expect("remove guest");
+    assert!(
+        removed.accepted,
+        "guest removal rejected: {}",
+        removed.message
+    );
+    expect_guest_connection_revoked(&mut guest_client, "guest channel access was removed").await;
+
+    assert!(
+        matches!(
+            BuzzTestClient::connect(&relay_url(), &guest).await,
+            Err(TestClientError::AuthFailed(_))
+        ),
+        "removed guest must not be able to reconnect"
+    );
+    owner_client.disconnect().await.expect("owner disconnect");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_invite_guest_lifecycle_transitions_disconnect_live_sessions() {
+    let owner = test_owner_keys();
+    seed_relay_owner(&owner).await;
+    let mut owner_client = BuzzTestClient::connect(&relay_url(), &owner)
+        .await
+        .expect("owner connect");
+
+    for transition in ["public", "archive", "delete", "autoarchive"] {
+        let guest = Keys::generate();
+        let ttl = (transition == "autoarchive").then_some(5);
+        let channel_id = create_private_channel_ws_with_ttl(&mut owner_client, &owner, ttl).await;
+        mint_and_claim_channel_guest(&owner, &guest, &channel_id).await;
+        let mut guest_client = BuzzTestClient::connect(&relay_url(), &guest)
+            .await
+            .unwrap_or_else(|error| panic!("{transition} guest connect: {error}"));
+
+        let reason = match transition {
+            "public" => {
+                let event = EventBuilder::new(Kind::Custom(9002), "")
+                    .tags([
+                        Tag::parse(["h", &channel_id]).unwrap(),
+                        Tag::parse(["visibility", "open"]).unwrap(),
+                    ])
+                    .sign_with_keys(&owner)
+                    .expect("sign public transition");
+                let ok = owner_client
+                    .send_event(event)
+                    .await
+                    .expect("make channel public");
+                assert!(ok.accepted, "public transition rejected: {}", ok.message);
+                "guest channel is no longer private"
+            }
+            "archive" => {
+                let event = EventBuilder::new(Kind::Custom(9002), "")
+                    .tags([
+                        Tag::parse(["h", &channel_id]).unwrap(),
+                        Tag::parse(["archived", "true"]).unwrap(),
+                    ])
+                    .sign_with_keys(&owner)
+                    .expect("sign archive transition");
+                let ok = owner_client
+                    .send_event(event)
+                    .await
+                    .expect("archive channel");
+                assert!(ok.accepted, "archive transition rejected: {}", ok.message);
+                "guest channel was archived"
+            }
+            "delete" => {
+                let event = EventBuilder::new(Kind::Custom(9008), "")
+                    .tags([Tag::parse(["h", &channel_id]).unwrap()])
+                    .sign_with_keys(&owner)
+                    .expect("sign delete transition");
+                let ok = owner_client
+                    .send_event(event)
+                    .await
+                    .expect("delete channel");
+                assert!(ok.accepted, "delete transition rejected: {}", ok.message);
+                "guest channel was deleted"
+            }
+            "autoarchive" => "guest channel was archived",
+            other => panic!("unexpected transition {other}"),
+        };
+
+        expect_guest_connection_revoked(&mut guest_client, reason).await;
+        assert!(
+            matches!(
+                BuzzTestClient::connect(&relay_url(), &guest).await,
+                Err(TestClientError::AuthFailed(_))
+            ),
+            "{transition} guest must not be able to reconnect"
+        );
+    }
+
+    owner_client.disconnect().await.expect("owner disconnect");
 }
 
 #[tokio::test]
@@ -2271,16 +2767,29 @@ async fn test_membership_notification_mixed_filter_rejected() {
 
 /// Create a private channel over WebSocket and return the channel UUID.
 async fn create_private_channel_ws(client: &mut BuzzTestClient, keys: &Keys) -> String {
+    create_private_channel_ws_with_ttl(client, keys, None).await
+}
+
+/// Create a private channel with an optional ephemeral TTL.
+async fn create_private_channel_ws_with_ttl(
+    client: &mut BuzzTestClient,
+    keys: &Keys,
+    ttl_seconds: Option<i32>,
+) -> String {
     let channel_uuid = uuid::Uuid::new_v4().to_string();
     let channel_name = format!("relay-e2e-private-{}", channel_uuid);
 
+    let mut tags = vec![
+        Tag::parse(["h", &channel_uuid]).unwrap(),
+        Tag::parse(["name", &channel_name]).unwrap(),
+        Tag::parse(["channel_type", "stream"]).unwrap(),
+        Tag::parse(["visibility", "private"]).unwrap(),
+    ];
+    if let Some(ttl_seconds) = ttl_seconds {
+        tags.push(Tag::parse(["ttl", &ttl_seconds.to_string()]).unwrap());
+    }
     let event = EventBuilder::new(Kind::Custom(9007), "")
-        .tags(vec![
-            Tag::parse(["h", &channel_uuid]).unwrap(),
-            Tag::parse(["name", &channel_name]).unwrap(),
-            Tag::parse(["channel_type", "stream"]).unwrap(),
-            Tag::parse(["visibility", "private"]).unwrap(),
-        ])
+        .tags(tags)
         .sign_with_keys(keys)
         .unwrap();
 

@@ -340,6 +340,18 @@ pub async fn ban_member(
     reason: Option<&str>,
     expires_at: Option<DateTime<Utc>>,
 ) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let pubkey_hex = hex::encode(pubkey);
+    // Serialize with invite minting and relay-role changes for this identity.
+    // A ban that wins this lock must be visible to the authoritative mint
+    // transaction before it can create another invite.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "buzz_relay_invite_claim:{}:{pubkey_hex}",
+            community.as_uuid()
+        ))
+        .execute(&mut *tx)
+        .await?;
     sqlx::query(
         r#"
         INSERT INTO community_bans (
@@ -358,9 +370,10 @@ pub async fn ban_member(
     .bind(expires_at)
     .bind(reason)
     .bind(actor)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
+    tx.commit().await?;
     Ok(())
 }
 

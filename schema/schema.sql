@@ -101,6 +101,7 @@ CREATE TABLE channels (
     participant_hash BYTEA,
     ttl_seconds     INT,
     ttl_deadline    TIMESTAMPTZ,
+    guest_invite_generation BIGINT NOT NULL DEFAULT 0,
     PRIMARY KEY (community_id, id),
     CONSTRAINT chk_channels_id_not_nil CHECK (id <> '00000000-0000-0000-0000-000000000000'::uuid)
 );
@@ -576,7 +577,7 @@ CREATE TABLE pubkey_allowlist (
 CREATE TABLE relay_members (
     community_id UUID NOT NULL REFERENCES communities(id),
     pubkey      TEXT NOT NULL,
-    role        TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+    role        TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member', 'guest')),
     added_by    TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -609,18 +610,59 @@ CREATE TABLE relay_invites (
     community_id  UUID        NOT NULL REFERENCES communities(id),
     id           UUID        NOT NULL DEFAULT gen_random_uuid(),
     token_hash   BYTEA       NOT NULL CHECK (length(token_hash) = 32),
-    role         TEXT        NOT NULL DEFAULT 'member' CHECK (role = 'member'),
+    role         TEXT        NOT NULL DEFAULT 'member' CHECK (role IN ('member', 'guest')),
+    channel_id   UUID,
+    channel_generation BIGINT,
     max_uses     INTEGER     CHECK (max_uses BETWEEN 1 AND 10000),
     use_count    INTEGER     NOT NULL DEFAULT 0 CHECK (use_count >= 0),
     expires_at   TIMESTAMPTZ NOT NULL,
     created_by   TEXT        NOT NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    revoked_at   TIMESTAMPTZ,
+    revoked_by   TEXT,
     PRIMARY KEY (community_id, id),
     UNIQUE (community_id, token_hash),
+    FOREIGN KEY (community_id, channel_id)
+        REFERENCES channels (community_id, id) ON DELETE CASCADE,
+    CHECK (
+        (role = 'member' AND channel_id IS NULL AND channel_generation IS NULL)
+        OR (
+            role = 'guest'
+            AND channel_id IS NOT NULL
+            AND channel_generation IS NOT NULL
+            AND max_uses = 1
+        )
+    ),
     CHECK (max_uses IS NULL OR use_count <= max_uses)
 );
 
 CREATE INDEX relay_invites_expires_at_idx ON relay_invites (expires_at);
+
+CREATE TABLE relay_guest_channels (
+    community_id UUID        NOT NULL,
+    guest_pubkey TEXT        NOT NULL,
+    channel_id   UUID        NOT NULL,
+    granted_by   TEXT        NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (community_id, guest_pubkey),
+    FOREIGN KEY (community_id, guest_pubkey)
+        REFERENCES relay_members (community_id, pubkey) ON DELETE CASCADE,
+    FOREIGN KEY (community_id, channel_id)
+        REFERENCES channels (community_id, id) ON DELETE CASCADE
+);
+
+CREATE INDEX relay_guest_channels_channel_idx
+    ON relay_guest_channels (community_id, channel_id);
+
+CREATE TABLE relay_member_invite_blocks (
+    community_id UUID        NOT NULL,
+    pubkey        TEXT        NOT NULL,
+    removed_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (community_id, pubkey),
+    FOREIGN KEY (community_id)
+        REFERENCES communities (id) ON DELETE CASCADE,
+    CHECK (pubkey ~ '^[0-9a-f]{64}$')
+);
 
 -- ── Archived identities (NIP-IA) ──────────────────────────────────────────────
 -- Conformance: archive cannot hide a key in another community. PK scoped.

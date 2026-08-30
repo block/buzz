@@ -169,7 +169,7 @@ async fn run(cli: Cli) -> Result<i32> {
 }
 
 async fn cmd_add_member(pubkey_arg: String, role: String) -> Result<i32> {
-    if let Err(msg) = validate_role(&role) {
+    if let Err(msg) = validate_add_role(&role) {
         eprintln!("error: {msg}");
         return Ok(1);
     }
@@ -206,7 +206,7 @@ async fn cmd_add_member(pubkey_arg: String, role: String) -> Result<i32> {
 
 async fn cmd_remove_member(pubkey_arg: String, role_filter: Option<String>) -> Result<i32> {
     if let Some(ref role) = role_filter {
-        if let Err(msg) = validate_role(role) {
+        if let Err(msg) = validate_removal_role(role) {
             eprintln!("error: {msg}");
             return Ok(1);
         }
@@ -228,7 +228,7 @@ async fn cmd_remove_member(pubkey_arg: String, role_filter: Option<String>) -> R
         db.remove_relay_member_if_role(tenant.community(), &pubkey_hex, role)
             .await
     } else {
-        db.remove_relay_member(tenant.community(), &pubkey_hex)
+        db.remove_relay_member_and_block_invites(tenant.community(), &pubkey_hex)
             .await
     };
 
@@ -299,8 +299,8 @@ async fn cmd_list_members() -> Result<i32> {
     Ok(0)
 }
 
-/// Validate that `role` is `"member"` or `"admin"`. Rejects `"owner"`.
-fn validate_role(role: &str) -> std::result::Result<(), String> {
+/// Validate roles that can be created directly by the operator CLI.
+fn validate_add_role(role: &str) -> std::result::Result<(), String> {
     match role {
         "member" | "admin" => Ok(()),
         "owner" => {
@@ -310,6 +310,26 @@ fn validate_role(role: &str) -> std::result::Result<(), String> {
             "invalid role '{other}': must be 'member' or 'admin'"
         )),
     }
+}
+
+/// Validate a conditional removal role.
+///
+/// Guests cannot be created directly by this CLI because they require a
+/// channel-bound grant, but an operator may remove an existing guest.
+fn validate_removal_role(role: &str) -> std::result::Result<(), String> {
+    match role {
+        "member" | "admin" | "guest" => Ok(()),
+        "owner" => {
+            Err("role 'owner' cannot be removed — change RELAY_OWNER_PUBKEY config".to_string())
+        }
+        other => Err(format!(
+            "invalid role '{other}': must be 'member', 'admin', or 'guest'"
+        )),
+    }
+}
+
+fn is_public_relay_member(role: &str) -> bool {
+    role != "guest"
 }
 
 /// Parse a bech32 npub or 64-char hex pubkey into lowercase hex.
@@ -356,11 +376,20 @@ async fn publish_membership_list_with_bump(
     };
 
     let members = db.list_relay_members(tenant.community()).await?;
+    let public_member_count = members
+        .iter()
+        .filter(|member| is_public_relay_member(&member.role))
+        .count();
 
-    let mut tags: Vec<Tag> = Vec::with_capacity(members.len() + 1);
+    let mut tags: Vec<Tag> = Vec::with_capacity(public_member_count + 1);
     // NIP-70 protected-event marker — prevents re-broadcasting by third parties.
     tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
-    for member in &members {
+    // Channel guests are intentionally absent from the community-wide NIP-43
+    // roster. Their identity is visible only through their granted channel.
+    for member in members
+        .iter()
+        .filter(|member| is_public_relay_member(&member.role))
+    {
         tags.push(
             Tag::parse(["member", &member.pubkey, &member.role])
                 .map_err(|e| anyhow::anyhow!("failed to build member tag: {e}"))?,
@@ -389,7 +418,7 @@ async fn publish_membership_list_with_bump(
     }
 
     tracing::info!(
-        member_count = members.len(),
+        member_count = public_member_count,
         ts,
         "NIP-43 membership list published by buzz-admin"
     );
@@ -627,4 +656,29 @@ async fn reconcile_channels(
         channels.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_public_relay_member, validate_add_role, validate_removal_role};
+
+    #[test]
+    fn add_and_removal_roles_preserve_guest_admission_boundary() {
+        assert!(validate_add_role("member").is_ok());
+        assert!(validate_add_role("admin").is_ok());
+        assert!(validate_add_role("guest").is_err());
+
+        assert!(validate_removal_role("member").is_ok());
+        assert!(validate_removal_role("admin").is_ok());
+        assert!(validate_removal_role("guest").is_ok());
+        assert!(validate_removal_role("owner").is_err());
+    }
+
+    #[test]
+    fn public_membership_snapshot_excludes_channel_guests() {
+        assert!(is_public_relay_member("owner"));
+        assert!(is_public_relay_member("admin"));
+        assert!(is_public_relay_member("member"));
+        assert!(!is_public_relay_member("guest"));
+    }
 }

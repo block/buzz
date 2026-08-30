@@ -1,9 +1,12 @@
-//! Relay invite HTTP API — mint and claim stateless invite codes.
+//! Relay invite HTTP API — mint, inspect, revoke, and claim invite codes.
 //!
 //! Routes (both NIP-98 signed, outside the Nostr event data plane):
 //!
 //! - `POST /api/invites` — mint an invite code. Caller must hold the `owner`
 //!   or `admin` role in the tenant community (mirrors the kind:9030 authz).
+//! - `POST /api/invites/list` — list active guest-link metadata for one
+//!   channel. Bearer codes are never returned.
+//! - `POST /api/invites/revoke` — revoke one invite by its mint-time ID.
 //! - `POST /api/invites/claim` — claim an invite code. Deliberately **exempt
 //!   from the relay-membership gate**: the whole point is that the caller is
 //!   not a member yet. NIP-98 proves control of the joining pubkey; the HMAC
@@ -24,7 +27,9 @@ use axum::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::handlers::side_effects::{publish_nip43_member_added, publish_nip43_membership_list};
+use crate::handlers::side_effects::{
+    emit_group_discovery_events, publish_nip43_member_added, publish_nip43_membership_list,
+};
 use buzz_core::invite::{
     hash_v2_code, validate_v2_code, DEFAULT_INVITE_TTL_SECS, MAX_INVITE_TTL_SECS, MAX_INVITE_USES,
     MIN_INVITE_TTL_SECS, V2_PREFIX,
@@ -53,11 +58,30 @@ pub struct MintInviteRequest {
     /// [`invite_token::MAX_INVITE_TTL_SECS`]; defaults to 72 h.
     #[serde(default)]
     pub ttl_secs: Option<u64>,
-    /// Maximum number of uses before the invite is exhausted. `None` (omitted
-    /// or `null`) means unlimited — preserves current behavior. When present,
-    /// must be an integer from 1 through [`MAX_INVITE_USES`].
+    /// Maximum number of uses before the invite is exhausted. Community
+    /// invites may omit this for unlimited use. Channel guest invites must set
+    /// it to exactly 1.
     #[serde(default)]
     pub max_uses: Option<i32>,
+    /// Optional private channel UUID. When present, the invite grants a
+    /// channel-scoped relay guest role instead of ordinary community
+    /// membership.
+    #[serde(default)]
+    pub channel_id: Option<uuid::Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+/// Body for `POST /api/invites/revoke`.
+pub struct RevokeInviteRequest {
+    /// Community-scoped database identifier returned when the invite was minted.
+    pub invite_id: uuid::Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+/// Body for `POST /api/invites/list`.
+pub struct ListGuestInvitesRequest {
+    /// Private channel whose active guest links should be listed.
+    pub channel_id: uuid::Uuid,
 }
 
 fn validate_mint_request(
@@ -81,6 +105,12 @@ fn validate_mint_request(
                 &format!("max_uses must be between 1 and {MAX_INVITE_USES}"),
             ));
         }
+    }
+    if request.channel_id.is_some() && request.max_uses != Some(1) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "channel guest invites must allow exactly 1 use",
+        ));
     }
 
     Ok((ttl, request.max_uses))
@@ -298,6 +328,17 @@ pub async fn mint_invite(
             "only relay owners and admins can create invites",
         ));
     }
+    let restriction = state
+        .db
+        .moderation_restriction_state(tenant.community(), pubkey.as_bytes())
+        .await
+        .map_err(|error| internal_error(&format!("invite mint restriction lookup: {error}")))?;
+    if restriction.banned {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "blocked: you are banned from this community",
+        ));
+    }
 
     let request: MintInviteRequest = if body.is_empty() {
         MintInviteRequest::default()
@@ -311,11 +352,23 @@ pub async fn mint_invite(
     };
 
     let (ttl, max_uses) = validate_mint_request(&request)?;
+    if request.channel_id.is_some() && !state.config.require_relay_membership {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "channel guest invites require relay membership enforcement",
+        ));
+    }
 
     // Mint a v2 opaque, database-backed invite.
     let invite = state
         .db
-        .mint_relay_invite(tenant.community(), &sender_hex, ttl, max_uses)
+        .mint_relay_invite(
+            tenant.community(),
+            &sender_hex,
+            ttl,
+            max_uses,
+            request.channel_id,
+        )
         .await
         .map_err(map_mint_error)?;
 
@@ -333,19 +386,101 @@ pub async fn mint_invite(
         invite_id = %invite.invite_id,
         expires_at = %invite.expires_at,
         max_uses = ?invite.max_uses,
+        role = %invite.role,
+        channel_id = ?invite.channel_id,
         "relay invite minted"
     );
+    if invite.role == "guest" {
+        metrics::counter!("buzz_guest_invites_minted_total").increment(1);
+    }
 
     // expires_at as unix seconds for the response contract.
     let expires_at_unix = invite.expires_at.timestamp() as u64;
 
     Ok(Json(serde_json::json!({
+        "invite_id": invite.invite_id,
         "code": invite.code,
         "expires_at": expires_at_unix,
         "max_uses": invite.max_uses,
         "uses_remaining": invite.uses_remaining,
+        "role": invite.role,
+        "channel_id": invite.channel_id,
         "url": format!("{scheme}://{}/invite/{}", tenant.host(), invite.code),
     })))
+}
+
+/// List active guest links for one channel — `POST /api/invites/list`.
+///
+/// The response includes only administrative metadata and invite IDs. The
+/// database stores no recoverable bearer code, so this endpoint cannot recreate
+/// a link after its one-time mint response.
+pub async fn list_guest_invites(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (tenant, pubkey) = authenticate(&state, &headers, "/api/invites/list", &body).await?;
+    let request: ListGuestInvitesRequest = serde_json::from_slice(&body).map_err(|error| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid guest invite list JSON: {error}"),
+        )
+    })?;
+    let invites = state
+        .db
+        .list_active_guest_invites(tenant.community(), request.channel_id, &pubkey.to_hex())
+        .await
+        .map_err(|error| match error {
+            buzz_db::DbError::InvalidData(message) => api_error(StatusCode::BAD_REQUEST, &message),
+            buzz_db::DbError::AccessDenied(message) => api_error(StatusCode::FORBIDDEN, &message),
+            error => internal_error(&format!("guest invite list: {error}")),
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "invites": invites
+            .into_iter()
+            .map(|invite| serde_json::json!({
+                "invite_id": invite.invite_id,
+                "expires_at": invite.expires_at.timestamp(),
+                "created_at": invite.created_at.timestamp(),
+            }))
+            .collect::<Vec<_>>()
+    })))
+}
+
+/// Revoke an unexpired invite — `POST /api/invites/revoke`.
+///
+/// The database locks the same invite row as claim, so a concurrent claimant
+/// and administrator cannot both win.
+pub async fn revoke_invite(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (tenant, pubkey) = authenticate(&state, &headers, "/api/invites/revoke", &body).await?;
+    let request: RevokeInviteRequest = serde_json::from_slice(&body).map_err(|error| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid invite revocation JSON: {error}"),
+        )
+    })?;
+    let revoked_role = state
+        .db
+        .revoke_relay_invite(tenant.community(), request.invite_id, &pubkey.to_hex())
+        .await
+        .map_err(|error| match error {
+            buzz_db::DbError::InvalidData(message) => api_error(StatusCode::BAD_REQUEST, &message),
+            buzz_db::DbError::AccessDenied(message) => api_error(StatusCode::FORBIDDEN, &message),
+            error => internal_error(&format!("invite revoke: {error}")),
+        })?;
+    let Some(revoked_role) = revoked_role else {
+        return Err(api_error(StatusCode::NOT_FOUND, "invite_not_found"));
+    };
+    if revoked_role == "guest" {
+        metrics::counter!("buzz_guest_invites_revoked_total", "cause" => "administrator")
+            .increment(1);
+    }
+    Ok(Json(serde_json::json!({ "status": "revoked" })))
 }
 
 /// Claim an invite code — `POST /api/invites/claim`, NIP-98 signed by the
@@ -410,34 +545,79 @@ pub async fn claim_invite(
             .map_err(|e| internal_error(&format!("v2 invite claim: {e}")))?;
 
         return match outcome {
-            buzz_db::relay_invite::ClaimOutcome::Joined { .. } => {
+            buzz_db::relay_invite::ClaimOutcome::Joined {
+                role, channel_id, ..
+            } => {
+                if role == "guest" {
+                    metrics::counter!("buzz_guest_invite_claims_total", "outcome" => "joined")
+                        .increment(1);
+                }
                 tracing::info!(
                     community = %tenant.community(),
                     member = %claimer_hex,
+                    role,
+                    channel_id = ?channel_id,
                     "relay member added via v2 invite"
                 );
-                // NIP-43 side effects only on Joined, never on other outcomes.
-                if let Err(e) = publish_nip43_member_added(&tenant, &state, &claimer_hex).await {
-                    tracing::warn!(
-                        "failed to publish NIP-43 member-added delta after v2 claim: {e}"
+                if let Some(channel_id) = channel_id {
+                    if let Err(error) =
+                        emit_group_discovery_events(&tenant, &state, channel_id).await
+                    {
+                        tracing::warn!(
+                            "failed to refresh group discovery after channel invite claim: {error}"
+                        );
+                    }
+                } else {
+                    // NIP-43 side effects only expose full relay members.
+                    if let Err(e) = publish_nip43_member_added(&tenant, &state, &claimer_hex).await
+                    {
+                        tracing::warn!(
+                            "failed to publish NIP-43 member-added delta after v2 claim: {e}"
+                        );
+                    }
+                    if let Err(e) = publish_nip43_membership_list(&tenant, &state).await {
+                        tracing::warn!(
+                            "failed to publish NIP-43 membership list after v2 claim: {e}"
+                        );
+                    }
+
+                    // The claimer may already have a WebSocket authenticated
+                    // with guest (or non-member) access. The database promotion
+                    // is authoritative, but that socket's AuthContext is not.
+                    // Force every pod to reconnect the identity so the next
+                    // session is built from the new full-member role.
+                    state.invalidate_all_accessible_channels(&tenant);
+                    state.disconnect_pubkey_clusterwide(
+                        &tenant,
+                        &pubkey.to_bytes(),
+                        "0000000000000000000000000000000000000000000000000000000000000000",
+                        "restricted: relay membership changed; reconnect to refresh access",
                     );
-                }
-                if let Err(e) = publish_nip43_membership_list(&tenant, &state).await {
-                    tracing::warn!("failed to publish NIP-43 membership list after v2 claim: {e}");
                 }
                 Ok(Json(serde_json::json!({
                     "status": "joined",
                     "community_id": tenant.community().to_string(),
                     "host": tenant.host(),
-                    "role": "member",
+                    "role": role,
+                    "channel_id": channel_id,
                 })))
             }
-            buzz_db::relay_invite::ClaimOutcome::AlreadyMember { .. } => {
+            buzz_db::relay_invite::ClaimOutcome::AlreadyMember {
+                role, channel_id, ..
+            } => {
+                if role == "guest" {
+                    metrics::counter!(
+                        "buzz_guest_invite_claims_total",
+                        "outcome" => "already_member"
+                    )
+                    .increment(1);
+                }
                 Ok(Json(serde_json::json!({
                     "status": "already_member",
                     "community_id": tenant.community().to_string(),
                     "host": tenant.host(),
-                    "role": "member",
+                    "role": role,
+                    "channel_id": channel_id,
                 })))
             }
             buzz_db::relay_invite::ClaimOutcome::Expired => {
@@ -448,6 +628,58 @@ pub async fn claim_invite(
             }
             buzz_db::relay_invite::ClaimOutcome::Invalid => {
                 Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"))
+            }
+            buzz_db::relay_invite::ClaimOutcome::Revoked => {
+                Err(api_error(StatusCode::FORBIDDEN, "invite_revoked"))
+            }
+            buzz_db::relay_invite::ClaimOutcome::ChannelUnavailable => {
+                metrics::counter!(
+                    "buzz_guest_invite_claims_total",
+                    "outcome" => "channel_unavailable"
+                )
+                .increment(1);
+                Err(api_error(StatusCode::GONE, "invite_channel_unavailable"))
+            }
+            buzz_db::relay_invite::ClaimOutcome::ChannelRoleConflict => {
+                metrics::counter!(
+                    "buzz_guest_invite_claims_total",
+                    "outcome" => "channel_role_conflict"
+                )
+                .increment(1);
+                Err(api_error(
+                    StatusCode::CONFLICT,
+                    "invite_channel_role_conflict",
+                ))
+            }
+            buzz_db::relay_invite::ClaimOutcome::ChannelAccessRemoved => {
+                metrics::counter!(
+                    "buzz_guest_invite_claims_total",
+                    "outcome" => "channel_access_removed"
+                )
+                .increment(1);
+                Err(api_error(
+                    StatusCode::FORBIDDEN,
+                    "invite_channel_access_removed",
+                ))
+            }
+            buzz_db::relay_invite::ClaimOutcome::RelayAccessRemoved => {
+                metrics::counter!(
+                    "buzz_guest_invite_claims_total",
+                    "outcome" => "relay_access_removed"
+                )
+                .increment(1);
+                Err(api_error(
+                    StatusCode::FORBIDDEN,
+                    "invite_relay_access_removed",
+                ))
+            }
+            buzz_db::relay_invite::ClaimOutcome::GuestChannelConflict => {
+                metrics::counter!(
+                    "buzz_guest_invite_claims_total",
+                    "outcome" => "channel_conflict"
+                )
+                .increment(1);
+                Err(api_error(StatusCode::CONFLICT, "guest_already_has_channel"))
             }
         };
     }
@@ -486,7 +718,12 @@ pub async fn claim_invite(
                 .map(|policy| policy.version.as_str()),
         )
         .await
-        .map_err(|e| internal_error(&format!("invite claim insert: {e}")))?;
+        .map_err(|error| match error {
+            buzz_db::DbError::AccessDenied(_) => {
+                api_error(StatusCode::FORBIDDEN, "invite_relay_access_removed")
+            }
+            error => internal_error(&format!("invite claim insert: {error}")),
+        })?;
 
     if was_inserted {
         tracing::info!(
@@ -799,6 +1036,7 @@ mod tests {
                 super::MintInviteRequest {
                     ttl_secs: Some(MIN_INVITE_TTL_SECS),
                     max_uses: Some(1),
+                    channel_id: None,
                 },
                 (MIN_INVITE_TTL_SECS, Some(1)),
             ),
@@ -806,8 +1044,17 @@ mod tests {
                 super::MintInviteRequest {
                     ttl_secs: Some(MAX_INVITE_TTL_SECS),
                     max_uses: Some(MAX_INVITE_USES),
+                    channel_id: None,
                 },
                 (MAX_INVITE_TTL_SECS, Some(MAX_INVITE_USES)),
+            ),
+            (
+                super::MintInviteRequest {
+                    ttl_secs: None,
+                    max_uses: Some(1),
+                    channel_id: Some(Uuid::new_v4()),
+                },
+                (crate::invite_token::DEFAULT_INVITE_TTL_SECS, Some(1)),
             ),
         ] {
             assert_eq!(
@@ -820,22 +1067,37 @@ mod tests {
             super::MintInviteRequest {
                 ttl_secs: None,
                 max_uses: Some(0),
+                channel_id: None,
             },
             super::MintInviteRequest {
                 ttl_secs: None,
                 max_uses: Some(-1),
+                channel_id: None,
             },
             super::MintInviteRequest {
                 ttl_secs: None,
                 max_uses: Some(MAX_INVITE_USES + 1),
+                channel_id: None,
             },
             super::MintInviteRequest {
                 ttl_secs: Some(MIN_INVITE_TTL_SECS - 1),
                 max_uses: None,
+                channel_id: None,
             },
             super::MintInviteRequest {
                 ttl_secs: Some(MAX_INVITE_TTL_SECS + 1),
                 max_uses: None,
+                channel_id: None,
+            },
+            super::MintInviteRequest {
+                ttl_secs: None,
+                max_uses: None,
+                channel_id: Some(Uuid::new_v4()),
+            },
+            super::MintInviteRequest {
+                ttl_secs: None,
+                max_uses: Some(2),
+                channel_id: Some(Uuid::new_v4()),
             },
         ] {
             assert_eq!(
@@ -1167,6 +1429,54 @@ mod tests {
         assert_eq!(
             json.get("status").and_then(Value::as_str),
             Some("already_member")
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn banned_relay_admin_cannot_mint_invites() {
+        let host = format!("invites-banned-admin-{}.example", Uuid::new_v4().simple());
+        let owner = Keys::generate();
+        let admin = Keys::generate();
+        let Some(state) = invite_test_state(&host).await else {
+            return;
+        };
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(
+                community.id,
+                &admin.public_key().to_hex(),
+                "admin",
+                Some(&owner.public_key().to_hex()),
+            )
+            .await
+            .expect("seed admin");
+        state
+            .db
+            .ban_community_member(
+                community.id,
+                admin.public_key().as_bytes(),
+                owner.public_key().as_bytes(),
+                Some("test ban"),
+                None,
+            )
+            .await
+            .expect("ban admin");
+
+        let response = post_json(state, &host, "/api/invites", &admin, "{}".to_owned()).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
+            Some("blocked: you are banned from this community")
         );
     }
 

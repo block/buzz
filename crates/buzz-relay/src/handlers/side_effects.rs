@@ -188,6 +188,23 @@ pub async fn evict_all_channel_subscriptions(
     }
 }
 
+/// Disconnect identities whose guest grants were atomically revoked by a
+/// channel lifecycle transition.
+pub fn disconnect_revoked_channel_guests(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    guest_pubkeys: Vec<Vec<u8>>,
+    event_id: &str,
+    reason: &str,
+) {
+    metrics::counter!("buzz_guest_access_revocations_total").increment(guest_pubkeys.len() as u64);
+    for pubkey in guest_pubkeys {
+        state.invalidate_membership(tenant, channel_id, &pubkey);
+        state.disconnect_pubkey_clusterwide(tenant, &pubkey, event_id, reason);
+    }
+}
+
 /// Dispatch side effects for a stored event.
 pub async fn handle_side_effects(
     tenant: &TenantContext,
@@ -1443,6 +1460,12 @@ async fn handle_remove_user(
         extract_h_tag_channel(event).ok_or_else(|| anyhow::anyhow!("missing h tag"))?;
     let target_pubkey = extract_p_tag(event).ok_or_else(|| anyhow::anyhow!("missing p tag"))?;
     let actor_bytes = event.pubkey.to_bytes().to_vec();
+    let target_hex = hex::encode(&target_pubkey);
+    let target_is_relay_guest = state
+        .db
+        .get_relay_member(tenant.community(), &target_hex)
+        .await?
+        .is_some_and(|member| member.role == "guest");
 
     // Guard: prevent last-owner orphaning on self-removal (kind 9001).
     if target_pubkey == actor_bytes {
@@ -1466,8 +1489,19 @@ async fn handle_remove_user(
     evict_live_channel_subscriptions(tenant, state, channel_id, &target_pubkey).await;
     disable_departed_member_workflows(tenant, state, channel_id, &target_pubkey).await;
 
+    if target_is_relay_guest {
+        // remove_member revoked the guest grant and relay admission in the
+        // same transaction. Only the session side effect remains here; a
+        // second post-commit revocation could delete a freshly reclaimed grant.
+        state.disconnect_pubkey_clusterwide(
+            tenant,
+            &target_pubkey,
+            &event.id.to_hex(),
+            "restricted: guest channel access was removed",
+        );
+    }
+
     let actor_hex = hex::encode(&actor_bytes);
-    let target_hex = hex::encode(&target_pubkey);
     let msg_type = if target_pubkey == actor_bytes {
         "member_left"
     } else {
@@ -1585,17 +1619,25 @@ async fn handle_edit_metadata(
                         .await
                         .map(|c| c.visibility == "open")
                         .unwrap_or(false);
-                    state
-                        .db
-                        .update_channel(
-                            tenant.community(),
-                            channel_id,
-                            buzz_db::channel::ChannelUpdate {
-                                visibility: Some(val.to_string()),
-                                ..Default::default()
-                            },
-                        )
-                        .await?;
+                    let revoked_guest_pubkeys = if val == "open" {
+                        state
+                            .db
+                            .open_channel_and_revoke_guests(tenant.community(), channel_id)
+                            .await?
+                    } else {
+                        state
+                            .db
+                            .update_channel(
+                                tenant.community(),
+                                channel_id,
+                                buzz_db::channel::ChannelUpdate {
+                                    visibility: Some(val.to_string()),
+                                    ..Default::default()
+                                },
+                            )
+                            .await?;
+                        Vec::new()
+                    };
                     // A visibility flip changes who can see the channel, so the
                     // accessible-channels and visibility caches must be cleared
                     // before any later event for this channel fans out.
@@ -1606,6 +1648,16 @@ async fn handle_edit_metadata(
                     // filter is the cluster-wide correctness backstop.
                     if was_open && val == "private" {
                         evict_non_member_channel_subscriptions(tenant, state, channel_id).await?;
+                    }
+                    if val == "open" {
+                        disconnect_revoked_channel_guests(
+                            tenant,
+                            state,
+                            channel_id,
+                            revoked_guest_pubkeys,
+                            &event.id.to_hex(),
+                            "restricted: guest channel is no longer private",
+                        );
                     }
                     emit_system_message(
                         tenant,
@@ -1655,10 +1707,19 @@ async fn handle_edit_metadata(
                 "archived" => {
                     match val {
                         "true" => {
-                            state
+                            let revoked_guest_pubkeys = state
                                 .db
                                 .archive_channel(tenant.community(), channel_id)
                                 .await?;
+                            evict_all_channel_subscriptions(tenant, state, channel_id).await;
+                            disconnect_revoked_channel_guests(
+                                tenant,
+                                state,
+                                channel_id,
+                                revoked_guest_pubkeys,
+                                &event.id.to_hex(),
+                                "restricted: guest channel was archived",
+                            );
                             emit_system_message(
                                 tenant,
                                 state,
@@ -1971,7 +2032,7 @@ async fn handle_delete_group(
     let actor_bytes = event.pubkey.to_bytes().to_vec();
 
     // Soft-delete the channel.
-    let deleted = state
+    let (deleted, revoked_guest_pubkeys) = state
         .db
         .soft_delete_channel(tenant.community(), channel_id)
         .await
@@ -1997,6 +2058,15 @@ async fn handle_delete_group(
     // Deleted channel: clear both membership and accessible-channels caches.
     // Stale is_member=true entries would bypass the DB's deleted_at guard.
     state.invalidate_channel_deleted(tenant);
+    evict_all_channel_subscriptions(tenant, state, channel_id).await;
+    disconnect_revoked_channel_guests(
+        tenant,
+        state,
+        channel_id,
+        revoked_guest_pubkeys,
+        &event.id.to_hex(),
+        "restricted: guest channel was deleted",
+    );
 
     let actor_hex = hex::encode(&actor_bytes);
     emit_system_message(

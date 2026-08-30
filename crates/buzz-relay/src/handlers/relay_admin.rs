@@ -25,7 +25,8 @@ use buzz_core::tenant::TenantContext;
 use buzz_db::relay_members::RemoveResult;
 
 use crate::handlers::side_effects::{
-    publish_nip43_member_added, publish_nip43_member_removed, publish_nip43_membership_list,
+    emit_group_discovery_events, publish_nip43_member_added, publish_nip43_member_removed,
+    publish_nip43_membership_list,
 };
 use crate::state::AppState;
 
@@ -371,22 +372,47 @@ async fn execute_relay_admin_command(
                 return Err("cannot remove yourself".to_string());
             }
 
+            let target_member = state
+                .db
+                .get_relay_member(tenant.community(), &target_hex)
+                .await
+                .map_err(|e| format!("database error: {e}"))?;
+            let target_role = target_member
+                .as_ref()
+                .map(|member| member.role.as_str())
+                .unwrap_or("");
+            let guest_channels = if target_role == "guest" {
+                state
+                    .db
+                    .get_guest_channel_ids(tenant.community(), &target_hex)
+                    .await
+                    .map_err(|e| format!("database error: {e}"))?
+            } else {
+                Vec::new()
+            };
+
             // Dispatch removal by sender role:
-            // - Admins: atomic conditional delete, only removes 'member' targets.
+            // - Admins: atomic conditional delete, only removes 'member' or
+            //   'guest' targets.
             //   This eliminates the TOCTOU race where the target could be promoted
             //   between a prior role read and the delete.
             // - Owners: can remove admins and members, not other owners.
             let remove_result = if sender_role == "admin" {
+                let removable_role = if target_role == "guest" {
+                    "guest"
+                } else {
+                    "member"
+                };
                 state
                     .db
-                    .remove_relay_member_if_role(tenant.community(), &target_hex, "member")
+                    .remove_relay_member_if_role(tenant.community(), &target_hex, removable_role)
                     .await
                     .map_err(|e| format!("database error: {e}"))?
             } else {
                 // Owner path — atomic delete that refuses to remove other owners.
                 state
                     .db
-                    .remove_relay_member(tenant.community(), &target_hex)
+                    .remove_relay_member_and_block_invites(tenant.community(), &target_hex)
                     .await
                     .map_err(|e| format!("database error: {e}"))?
             };
@@ -400,7 +426,10 @@ async fn execute_relay_admin_command(
                     return Err(format!("member not found: {target_hex}"));
                 }
                 RemoveResult::RoleMismatch => {
-                    return Err("actor not authorized: admins can only remove members".to_string());
+                    return Err(
+                        "actor not authorized: admins can only remove members or guests"
+                            .to_string(),
+                    );
                 }
             }
 
@@ -410,11 +439,28 @@ async fn execute_relay_admin_command(
                 "relay member removed"
             );
 
-            if let Err(e) = publish_nip43_member_removed(tenant, state, &target_hex).await {
-                warn!(error = %e, "failed to publish NIP-43 member removed event");
-            }
-            if let Err(e) = publish_nip43_membership_list(tenant, state).await {
-                warn!(error = %e, "failed to publish NIP-43 membership list");
+            if target_role == "guest" {
+                if let Ok(target_pubkey) = hex::decode(&target_hex) {
+                    state.disconnect_pubkey_clusterwide(
+                        tenant,
+                        &target_pubkey,
+                        &event.id.to_hex(),
+                        "restricted: guest access was removed",
+                    );
+                }
+                for channel_id in guest_channels {
+                    if let Err(error) = emit_group_discovery_events(tenant, state, channel_id).await
+                    {
+                        warn!(%error, %channel_id, "failed to refresh group after guest removal");
+                    }
+                }
+            } else {
+                if let Err(e) = publish_nip43_member_removed(tenant, state, &target_hex).await {
+                    warn!(error = %e, "failed to publish NIP-43 member removed event");
+                }
+                if let Err(e) = publish_nip43_membership_list(tenant, state).await {
+                    warn!(error = %e, "failed to publish NIP-43 membership list");
+                }
             }
         }
 
@@ -442,6 +488,24 @@ async fn execute_relay_admin_command(
             if new_role != "admin" && new_role != "member" {
                 return Err(format!("invalid role: {new_role}"));
             }
+
+            let prior_member = state
+                .db
+                .get_relay_member(tenant.community(), &target_hex)
+                .await
+                .map_err(|e| format!("database error: {e}"))?;
+            let prior_guest_channels = if prior_member
+                .as_ref()
+                .is_some_and(|member| member.role == "guest")
+            {
+                state
+                    .db
+                    .get_guest_channel_ids(tenant.community(), &target_hex)
+                    .await
+                    .map_err(|e| format!("database error: {e}"))?
+            } else {
+                Vec::new()
+            };
 
             let updated = state
                 .db
@@ -472,6 +536,26 @@ async fn execute_relay_admin_command(
 
             if let Err(e) = publish_nip43_membership_list(tenant, state).await {
                 warn!(error = %e, "failed to publish NIP-43 membership list");
+            }
+            if prior_member
+                .as_ref()
+                .is_some_and(|member| member.role == "guest")
+            {
+                state.invalidate_all_accessible_channels(tenant);
+                if let Ok(target_pubkey) = hex::decode(&target_hex) {
+                    state.disconnect_pubkey_clusterwide(
+                        tenant,
+                        &target_pubkey,
+                        &event.id.to_hex(),
+                        "restricted: relay role changed; reconnect to refresh access",
+                    );
+                }
+                for channel_id in prior_guest_channels {
+                    if let Err(error) = emit_group_discovery_events(tenant, state, channel_id).await
+                    {
+                        warn!(%error, %channel_id, "failed to refresh group after guest promotion");
+                    }
+                }
             }
         }
 

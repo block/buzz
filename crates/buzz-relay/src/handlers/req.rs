@@ -14,7 +14,7 @@ use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
 use buzz_pubsub::EventTopic;
 use hex;
-use nostr::Filter;
+use nostr::{Alphabet, Filter, SingleLetterTag};
 
 use buzz_auth::Scope;
 
@@ -50,7 +50,7 @@ const _: () = assert!(FILTER_QUERY_CONCURRENCY >= 2 && FILTER_QUERY_CONCURRENCY 
 /// Handle a REQ message: register the subscription, deliver historical events, then send EOSE.
 pub async fn handle_req(
     sub_id: String,
-    filters: Vec<Filter>,
+    mut filters: Vec<Filter>,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
 ) {
@@ -105,7 +105,59 @@ pub async fn handle_req(
         }
     };
 
-    let mut accessible_channels = if filters_are_nip43_membership_only(&filters) {
+    let live_guest_channels = if let Some(token_channels) = token_channel_ids.as_deref() {
+        let channel_ids = match state
+            .db
+            .get_guest_channel_ids(conn.tenant.community(), &hex::encode(&pubkey_bytes))
+            .await
+        {
+            Ok(channel_ids)
+                if channel_ids.len() == 1
+                    && channel_ids
+                        .iter()
+                        .all(|channel_id| token_channels.contains(channel_id)) =>
+            {
+                channel_ids
+            }
+            Ok(_) => {
+                conn.send(RelayMessage::closed(
+                    &sub_id,
+                    "restricted: guest channel access was revoked",
+                ));
+                return;
+            }
+            Err(error) => {
+                warn!(conn_id = %conn_id, %error, "guest authority lookup failed");
+                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                return;
+            }
+        };
+        let visible_pubkeys = match state
+            .db
+            .get_guest_visible_pubkeys(conn.tenant.community(), &channel_ids)
+            .await
+        {
+            Ok(pubkeys) => pubkeys,
+            Err(error) => {
+                warn!(conn_id = %conn_id, %error, "guest profile visibility lookup failed");
+                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                return;
+            }
+        };
+        if let Err(reason) =
+            restrict_guest_filters(&mut filters, &channel_ids, &visible_pubkeys, &pubkey_bytes)
+        {
+            conn.send(RelayMessage::closed(&sub_id, reason));
+            return;
+        }
+        Some(channel_ids)
+    } else {
+        None
+    };
+
+    let mut accessible_channels = if let Some(channel_ids) = live_guest_channels.as_ref() {
+        channel_ids.clone()
+    } else if filters_are_nip43_membership_only(&filters) {
         metrics::counter!("buzz_req_global_access_resolution_skips_total", "kind" => "13534")
             .increment(1);
         Vec::new()
@@ -477,6 +529,132 @@ pub async fn handle_req(
         count = total_sent,
         "EOSE sent after historical delivery"
     );
+}
+
+/// Narrow guest filters to data that can be evaluated safely during both
+/// historical queries and live subscription fan-out.
+///
+/// The relay rewrites channel discovery filters to explicit `#d` channel IDs
+/// and profile filters to exact visible authors. Normal channel reads must use
+/// `#h` against a granted channel and cannot include kinds that are stored
+/// globally even when their signed event carries a stray `h` tag.
+///
+/// Timeline auxiliary backfills are the only exception to the `#h` rule:
+/// reactions and deletions identify their target with `#e`, and the query layer
+/// still constrains the stored rows to the guest's accessible channel IDs.
+pub(crate) fn restrict_guest_filters(
+    filters: &mut [Filter],
+    allowed_channels: &[uuid::Uuid],
+    visible_pubkeys: &[Vec<u8>],
+    guest_pubkey: &[u8],
+) -> Result<(), &'static str> {
+    if filters.is_empty() || allowed_channels.is_empty() {
+        return Err("restricted: guest filters require an authorized channel");
+    }
+
+    let d_tag = SingleLetterTag::lowercase(Alphabet::D);
+    let e_tag = SingleLetterTag::lowercase(Alphabet::E);
+    let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+    let allowed_d: std::collections::BTreeSet<String> =
+        allowed_channels.iter().map(ToString::to_string).collect();
+
+    let mut visible_authors: std::collections::BTreeSet<nostr::PublicKey> = visible_pubkeys
+        .iter()
+        .filter_map(|pubkey| nostr::PublicKey::from_slice(pubkey).ok())
+        .collect();
+    if let Ok(guest) = nostr::PublicKey::from_slice(guest_pubkey) {
+        visible_authors.insert(guest);
+    }
+
+    for filter in filters {
+        if filter.search.is_some() {
+            return Err("restricted: guest search is not available");
+        }
+        let Some(kinds) = filter.kinds.as_ref() else {
+            return Err("restricted: guest filters must specify event kinds");
+        };
+        if kinds.is_empty() {
+            return Err("restricted: guest filters must specify event kinds");
+        }
+
+        let kind_numbers: Vec<u32> = kinds.iter().map(|kind| kind.as_u16() as u32).collect();
+        let is_group_discovery = kind_numbers
+            .iter()
+            .all(|kind| (39000..=39003).contains(kind));
+        let is_profile = kind_numbers
+            .iter()
+            .all(|kind| *kind == buzz_core::kind::KIND_PROFILE);
+
+        if is_group_discovery {
+            let narrowed: std::collections::BTreeSet<String> = filter
+                .generic_tags
+                .get(&d_tag)
+                .map(|requested| requested.intersection(&allowed_d).cloned().collect())
+                .unwrap_or_else(|| allowed_d.clone());
+            if narrowed.is_empty() {
+                return Err("restricted: guest cannot access the requested channel");
+            }
+            filter.generic_tags.insert(d_tag, narrowed);
+            continue;
+        }
+
+        if is_profile {
+            let narrowed: std::collections::BTreeSet<nostr::PublicKey> = filter
+                .authors
+                .as_ref()
+                .map(|requested| {
+                    requested
+                        .iter()
+                        .filter(|author| visible_authors.contains(author))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_else(|| visible_authors.clone());
+            if narrowed.is_empty() {
+                return Err("restricted: guest cannot access the requested profile");
+            }
+            filter.authors = Some(narrowed);
+            continue;
+        }
+
+        if let Some(requested_channels) = filter.generic_tags.get(&h_tag) {
+            if requested_channels.len() != 1
+                || requested_channels.iter().any(|value| {
+                    value
+                        .parse::<uuid::Uuid>()
+                        .map_or(true, |channel_id| !allowed_channels.contains(&channel_id))
+                })
+            {
+                return Err("restricted: guest cannot access the requested channel");
+            }
+            if kind_numbers
+                .iter()
+                .any(|kind| crate::handlers::ingest::is_global_only_kind(*kind))
+            {
+                return Err("restricted: event kind is not available to channel guests");
+            }
+            continue;
+        }
+
+        let is_timeline_aux = kind_numbers.iter().all(|kind| {
+            matches!(
+                *kind,
+                buzz_core::kind::KIND_DELETION
+                    | buzz_core::kind::KIND_REACTION
+                    | buzz_core::kind::KIND_NIP29_DELETE_EVENT
+                    | buzz_core::kind::KIND_STREAM_MESSAGE_EDIT
+            )
+        });
+        let has_exact_references = filter
+            .generic_tags
+            .get(&e_tag)
+            .is_some_and(|references| !references.is_empty());
+        if !is_timeline_aux || !has_exact_references {
+            return Err("restricted: guest channel reads require an exact #h filter");
+        }
+    }
+
+    Ok(())
 }
 
 /// FTS candidate hits fetched per page. Pages are always full regardless of
@@ -1632,6 +1810,132 @@ mod tests {
             capacity - i64::from(SEARCH_PAGE_SIZE) < advertised,
             "scan budget has a spare page of slack — derive it from the ceiling"
         );
+    }
+
+    #[test]
+    fn guest_discovery_filters_are_rewritten_to_granted_channels() {
+        let allowed = uuid::Uuid::new_v4();
+        let denied = uuid::Uuid::new_v4();
+        let guest = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let mut filters = vec![Filter::new().kind(nostr::Kind::Custom(39000))];
+
+        restrict_guest_filters(&mut filters, &[allowed], &[], &guest)
+            .expect("granted discovery filter");
+
+        let d_tag = SingleLetterTag::lowercase(Alphabet::D);
+        assert_eq!(
+            filters[0].generic_tags.get(&d_tag),
+            Some(&std::collections::BTreeSet::from([allowed.to_string()]))
+        );
+
+        let mut denied_filter = vec![Filter::new()
+            .kind(nostr::Kind::Custom(39002))
+            .custom_tag(d_tag, denied.to_string())];
+        assert!(restrict_guest_filters(&mut denied_filter, &[allowed], &[], &guest).is_err());
+    }
+
+    #[test]
+    fn guest_profile_filters_are_rewritten_to_visible_authors() {
+        let guest = nostr::Keys::generate().public_key();
+        let visible = nostr::Keys::generate().public_key();
+        let hidden = nostr::Keys::generate().public_key();
+        let mut filters = vec![Filter::new().kind(nostr::Kind::Metadata)];
+
+        restrict_guest_filters(
+            &mut filters,
+            &[uuid::Uuid::new_v4()],
+            &[visible.to_bytes().to_vec()],
+            guest.as_bytes(),
+        )
+        .expect("profile filter");
+
+        let authors = filters[0].authors.as_ref().expect("exact authors");
+        assert!(authors.contains(&guest));
+        assert!(authors.contains(&visible));
+        assert!(!authors.contains(&hidden));
+    }
+
+    #[test]
+    fn guest_filters_deny_global_and_ungranted_channel_reads() {
+        let allowed = uuid::Uuid::new_v4();
+        let denied = uuid::Uuid::new_v4();
+        let guest = nostr::Keys::generate().public_key().to_bytes().to_vec();
+
+        let mut global = vec![Filter::new().kind(nostr::Kind::TextNote)];
+        assert!(restrict_guest_filters(&mut global, &[allowed], &[], &guest).is_err());
+
+        let mut ungranted = vec![Filter::new()
+            .kind(nostr::Kind::Custom(
+                buzz_core::kind::KIND_STREAM_MESSAGE as u16,
+            ))
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::H), denied.to_string())];
+        assert!(restrict_guest_filters(&mut ungranted, &[allowed], &[], &guest).is_err());
+
+        let mut granted = vec![Filter::new()
+            .kind(nostr::Kind::Custom(
+                buzz_core::kind::KIND_STREAM_MESSAGE as u16,
+            ))
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::H), allowed.to_string())];
+        restrict_guest_filters(&mut granted, &[allowed], &[], &guest)
+            .expect("granted channel read");
+
+        let second_allowed = uuid::Uuid::new_v4();
+        let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+        let mut multi_channel = vec![Filter::new()
+            .kind(nostr::Kind::Custom(
+                buzz_core::kind::KIND_STREAM_MESSAGE as u16,
+            ))
+            .custom_tags(h_tag, [allowed.to_string(), second_allowed.to_string()])];
+        assert!(restrict_guest_filters(
+            &mut multi_channel,
+            &[allowed, second_allowed],
+            &[],
+            &guest,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn guest_filters_allow_normal_mixed_channel_timeline_subscription() {
+        let allowed = uuid::Uuid::new_v4();
+        let guest = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let mut filters = vec![Filter::new()
+            .kinds([
+                nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+                nostr::Kind::Reaction,
+                nostr::Kind::EventDeletion,
+                nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE_EDIT as u16),
+            ])
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::H), allowed.to_string())];
+
+        restrict_guest_filters(&mut filters, &[allowed], &[], &guest)
+            .expect("channel-scoped mixed timeline filter");
+    }
+
+    #[test]
+    fn guest_filters_allow_only_exact_timeline_aux_backfills_without_h_tag() {
+        let allowed = uuid::Uuid::new_v4();
+        let guest = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let event_id = nostr::Keys::generate().public_key().to_hex();
+        let mut exact_aux = vec![Filter::new()
+            .kinds([nostr::Kind::Reaction, nostr::Kind::EventDeletion])
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::E), event_id)];
+        restrict_guest_filters(&mut exact_aux, &[allowed], &[], &guest)
+            .expect("exact timeline auxiliary backfill");
+
+        let mut unscoped_aux = vec![Filter::new().kind(nostr::Kind::Reaction)];
+        assert!(restrict_guest_filters(&mut unscoped_aux, &[allowed], &[], &guest).is_err());
+    }
+
+    #[test]
+    fn guest_filters_deny_global_kinds_even_with_allowed_h_tag() {
+        let allowed = uuid::Uuid::new_v4();
+        let guest = nostr::Keys::generate().public_key().to_bytes().to_vec();
+        let mut filter = vec![Filter::new()
+            .kind(nostr::Kind::TextNote)
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::H), allowed.to_string())];
+
+        assert!(restrict_guest_filters(&mut filter, &[allowed], &[], &guest).is_err());
     }
 
     #[test]

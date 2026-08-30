@@ -725,6 +725,14 @@ async fn main() -> anyhow::Result<()> {
                         channel_id,
                     )
                     .await;
+                    buzz_relay::handlers::side_effects::disconnect_revoked_channel_guests(
+                        &tenant,
+                        &reaper_state,
+                        channel_id,
+                        channel.revoked_guest_pubkeys.clone(),
+                        &format!("channel-auto-archived:{channel_id}"),
+                        "restricted: guest channel was archived",
+                    );
                 }
             }
         });
@@ -1850,9 +1858,9 @@ async fn emit_db_usage_metrics(
 
     // buzz_community_relay_members{community, role}
     // Zero-fill across all (community, role) pairs; relay_members.role is a
-    // CHECK constraint over {'owner', 'admin', 'member'}.
+    // CHECK constraint over {'owner', 'admin', 'member', 'guest'}.
     {
-        const RELAY_ROLES: &[&str] = &["owner", "admin", "member"];
+        const RELAY_ROLES: &[&str] = &["owner", "admin", "member", "guest"];
         let rows: HashMap<(Uuid, &str), i64> = relay_member_rows
             .into_iter()
             .filter_map(|r| {

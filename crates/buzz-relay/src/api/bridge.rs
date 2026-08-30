@@ -889,7 +889,7 @@ async fn submit_event_authed(
 
     // Enforce relay membership (with NIP-OA fallback via x-auth-tag header).
     let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
-    let nip_oa_owner = match super::relay_members::enforce_relay_membership(
+    let membership_access = match super::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
         &pubkey_bytes,
@@ -897,13 +897,7 @@ async fn submit_event_authed(
     )
     .await
     {
-        Ok(owner) => owner.or_else(|| {
-            if !state.config.require_relay_membership {
-                super::relay_members::extract_nip_oa_owner(&pubkey_bytes, auth_tag)
-            } else {
-                None
-            }
-        }),
+        Ok(access) => access,
         Err(e) => {
             return SubmitOutcome::Err {
                 status: e.0,
@@ -911,6 +905,13 @@ async fn submit_event_authed(
             };
         }
     };
+    let nip_oa_owner = membership_access.nip_oa_owner.or_else(|| {
+        if !state.config.require_relay_membership {
+            super::relay_members::extract_nip_oa_owner(&pubkey_bytes, auth_tag)
+        } else {
+            None
+        }
+    });
     if let Some(owner) = nip_oa_owner {
         super::relay_members::materialize_nip_oa_owner(state, tenant, &pubkey, &owner).await;
     }
@@ -918,7 +919,12 @@ async fn submit_event_authed(
     let kind_u32 = buzz_core::kind::event_kind_u32(&event);
     let auth = IngestAuth::Http {
         pubkey,
-        scopes: buzz_auth::Scope::all_known(), // Pure Nostr: full scopes, channel access via membership
+        scopes: if membership_access.is_guest() {
+            buzz_auth::Scope::channel_guest()
+        } else {
+            buzz_auth::Scope::all_known()
+        },
+        channel_ids: membership_access.channel_ids,
         auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
     };
 
@@ -1050,7 +1056,7 @@ async fn query_events_authed(
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
     let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
-    super::relay_members::enforce_relay_membership(
+    let membership_access = super::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
         &pubkey_bytes,
@@ -1062,13 +1068,28 @@ async fn query_events_authed(
     // depth_limit, feed_types) that nostr::Filter silently drops.
     let raw_filters: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
-    let filters: Vec<nostr::Filter> = raw_filters
+    let mut filters: Vec<nostr::Filter> = raw_filters
         .iter()
         .map(|v| serde_json::from_value(v.clone()))
         .collect::<Result<_, _>>()
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
     crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
         .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
+
+    if let Some(allowed_channels) = membership_access.channel_ids.as_deref() {
+        let visible_pubkeys = state
+            .db
+            .get_guest_visible_pubkeys(tenant.community(), allowed_channels)
+            .await
+            .map_err(|error| internal_error(&format!("guest profile lookup: {error}")))?;
+        crate::handlers::req::restrict_guest_filters(
+            &mut filters,
+            allowed_channels,
+            &visible_pubkeys,
+            &pubkey_bytes,
+        )
+        .map_err(|reason| api_error(StatusCode::FORBIDDEN, reason))?;
+    }
 
     // P-gated kinds (gift wraps, member notifications, observer frames) require
     // the caller's own pubkey in the #p tag — same enforcement as WS REQ handler.
@@ -1105,6 +1126,9 @@ async fn query_events_authed(
         &mut accessible_channels,
     )
     .await?;
+    if let Some(allowed_channels) = membership_access.channel_ids.as_deref() {
+        accessible_channels.retain(|channel_id| allowed_channels.contains(channel_id));
+    }
 
     if filters.iter().any(|f| f.search.is_some()) {
         if has_mixed_search_filters(&filters) {
@@ -1577,7 +1601,7 @@ async fn count_events_authed(
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
     let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
-    super::relay_members::enforce_relay_membership(
+    let membership_access = super::relay_members::enforce_relay_membership(
         state,
         tenant.community(),
         &pubkey_bytes,
@@ -1585,10 +1609,24 @@ async fn count_events_authed(
     )
     .await?;
 
-    let filters: Vec<nostr::Filter> = serde_json::from_slice(body)
+    let mut filters: Vec<nostr::Filter> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
     crate::handlers::req::extract_channel_ids_from_filters_limited(&filters)
         .map_err(|()| api_error(StatusCode::BAD_REQUEST, "too many explicit channels"))?;
+    if let Some(allowed_channels) = membership_access.channel_ids.as_deref() {
+        let visible_pubkeys = state
+            .db
+            .get_guest_visible_pubkeys(tenant.community(), allowed_channels)
+            .await
+            .map_err(|error| internal_error(&format!("guest profile lookup: {error}")))?;
+        crate::handlers::req::restrict_guest_filters(
+            &mut filters,
+            allowed_channels,
+            &visible_pubkeys,
+            &pubkey_bytes,
+        )
+        .map_err(|reason| api_error(StatusCode::FORBIDDEN, reason))?;
+    }
 
     // P-gated kinds enforcement — same as WS REQ and /query.
     let authed_pubkey_hex = pubkey.to_hex();
@@ -1624,6 +1662,9 @@ async fn count_events_authed(
         &mut accessible_channels,
     )
     .await?;
+    if let Some(allowed_channels) = membership_access.channel_ids.as_deref() {
+        accessible_channels.retain(|channel_id| allowed_channels.contains(channel_id));
+    }
 
     let mut total: u64 = 0;
     for filter in &filters {

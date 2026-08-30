@@ -8,7 +8,7 @@ use tracing::{debug, error, info, warn};
 use buzz_core::event::StoredEvent;
 use buzz_core::kind::{
     event_kind_u32, is_ephemeral, is_unshared_gated_event, AUTHOR_ONLY_KINDS,
-    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE,
+    KIND_AGENT_OBSERVER_FRAME, KIND_GIFT_WRAP, KIND_PRESENCE_UPDATE, KIND_TYPING_INDICATOR,
 };
 use buzz_core::observer::{
     content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -174,9 +174,83 @@ pub async fn filter_fanout_by_access(
         matches
     };
 
+    // Guest profile subscriptions are global-indexed after REQ rewrites their
+    // authors list. Revalidate those authors at delivery time: a member can
+    // leave the shared private channel after subscription registration, and a
+    // stale filter must not keep exposing that former member's profile.
+    let matches = if event_kind_u32(&stored_event.event) == buzz_core::kind::KIND_PROFILE {
+        let author = stored_event.event.pubkey.to_bytes().to_vec();
+        let mut visible = Vec::with_capacity(matches.len());
+        for (conn_id, sub_id) in matches {
+            let Some(_) = state.conn_manager.channel_ids_for_conn(conn_id) else {
+                visible.push((conn_id, sub_id));
+                continue;
+            };
+            let Some(guest_pubkey) = state.conn_manager.pubkey_for_conn(conn_id) else {
+                continue;
+            };
+            let live_channels = match state
+                .db
+                .get_guest_channel_ids(community_id, &hex::encode(&guest_pubkey))
+                .await
+            {
+                Ok(channel_ids) if channel_ids.len() == 1 => channel_ids,
+                Ok(_) => continue,
+                Err(error) => {
+                    warn!(%error, %conn_id, "guest profile authority lookup failed");
+                    continue;
+                }
+            };
+            if guest_pubkey == author {
+                visible.push((conn_id, sub_id));
+                continue;
+            }
+            match state
+                .db
+                .get_guest_visible_pubkeys(community_id, &live_channels)
+                .await
+            {
+                Ok(pubkeys) if pubkeys.iter().any(|pubkey| pubkey == &author) => {
+                    visible.push((conn_id, sub_id));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(%error, %conn_id, "guest profile fan-out visibility lookup failed");
+                }
+            }
+        }
+        visible
+    } else {
+        matches
+    };
+
     let Some(channel_id) = stored_event.channel_id else {
         return matches;
     };
+    let mut live_matches = Vec::with_capacity(matches.len());
+    for (conn_id, sub_id) in matches {
+        let Some(_) = state.conn_manager.channel_ids_for_conn(conn_id) else {
+            live_matches.push((conn_id, sub_id));
+            continue;
+        };
+        let Some(pubkey) = state.conn_manager.pubkey_for_conn(conn_id) else {
+            continue;
+        };
+        match state
+            .db
+            .get_guest_channel_ids(community_id, &hex::encode(&pubkey))
+            .await
+        {
+            Ok(channel_ids) if channel_ids.len() == 1 && channel_ids.contains(&channel_id) => {
+                live_matches.push((conn_id, sub_id));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(%error, %conn_id, %channel_id, "guest fan-out authority lookup failed");
+            }
+        }
+    }
+    let matches = live_matches;
     // Fence 3 (§4.8 phase-2): the threaded value is used only when it was
     // resolved under exactly this (community_id, channel_id); anything else
     // falls through to the fresh lookup. Fence 1: absence of a usable threaded
@@ -678,6 +752,15 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
     }
 
     if kind_u32 == KIND_AGENT_OBSERVER_FRAME {
+        if channel_ids.is_some() {
+            reject("scope");
+            conn.send(RelayMessage::ok(
+                &event_id_hex,
+                false,
+                "restricted: channel guests cannot use agent observer tools",
+            ));
+            return;
+        }
         if !scopes.is_empty() && !scopes.contains(&buzz_auth::Scope::MessagesWrite) {
             reject("scope");
             conn.send(RelayMessage::ok(
@@ -735,6 +818,7 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
             conn_id,
             pubkey_bytes,
             auth_pubkey,
+            channel_ids.as_deref(),
             Arc::clone(&conn),
             state,
         )
@@ -797,6 +881,7 @@ async fn handle_ephemeral_event(
     conn_id: uuid::Uuid,
     pubkey_bytes: Vec<u8>,
     auth_pubkey: nostr::PublicKey,
+    allowed_channels: Option<&[uuid::Uuid]>,
     conn: Arc<ConnectionState>,
     state: Arc<AppState>,
 ) -> Result<(), String> {
@@ -808,6 +893,25 @@ async fn handle_ephemeral_event(
         Ok(Ok(())) => {}
         Ok(Err(e)) => return Err(format!("invalid: {e}")),
         Err(_) => return Err("error: internal error".to_string()),
+    }
+
+    let channel_id = scoped_ephemeral_channel(&event, allowed_channels)
+        .map_err(std::string::ToString::to_string)?;
+    if allowed_channels.is_some() {
+        let live_channels = match state
+            .db
+            .get_guest_channel_ids(conn.tenant.community(), &hex::encode(&pubkey_bytes))
+            .await
+        {
+            Ok(channel_ids) => channel_ids,
+            Err(error) => {
+                warn!(%error, %conn_id, "guest ephemeral authority lookup failed");
+                return Err("error: internal error".to_string());
+            }
+        };
+        if channel_id.is_none_or(|channel_id| !live_channels.contains(&channel_id)) {
+            return Err("restricted: guest channel access was revoked".to_string());
+        }
     }
 
     // Special handling for presence events (kind:20001).
@@ -847,7 +951,7 @@ async fn handle_ephemeral_event(
     }
 
     // Check channel membership before publishing other ephemeral events.
-    if let Some(ch_id) = super::ingest::extract_channel_id(&event) {
+    if let Some(ch_id) = channel_id {
         super::ingest::check_channel_membership(&conn.tenant, &state, ch_id, &pubkey_bytes, None)
             .await?;
 
@@ -903,6 +1007,46 @@ async fn handle_ephemeral_event(
     }
 
     Ok(())
+}
+
+/// Resolve the routing channel for an ephemeral event, enforcing any channel
+/// scope copied into the authenticated connection.
+///
+/// Scoped guests cannot publish community-global ephemeral state (including
+/// presence or pairing), and a channel event must carry exactly one granted
+/// `h` tag. This mirrors the persistent ingest boundary instead of falling
+/// back to open-channel membership semantics.
+fn scoped_ephemeral_channel(
+    event: &Event,
+    allowed_channels: Option<&[uuid::Uuid]>,
+) -> Result<Option<uuid::Uuid>, &'static str> {
+    let channel_id = super::ingest::extract_channel_id(event);
+    let Some(allowed_channels) = allowed_channels else {
+        return Ok(channel_id);
+    };
+
+    if event_kind_u32(event) != KIND_TYPING_INDICATOR {
+        return Err("restricted: ephemeral event kind is not available to channel guests");
+    }
+
+    if event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind().to_string() == "h")
+        .count()
+        != 1
+    {
+        return Err("restricted: channel guest ephemeral events require exactly one h tag");
+    }
+
+    let Some(channel_id) = channel_id else {
+        return Err("restricted: channel guests cannot publish global ephemeral events");
+    };
+    if !allowed_channels.contains(&channel_id) {
+        return Err("restricted: token does not have access to this channel");
+    }
+
+    Ok(Some(channel_id))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1245,6 +1389,55 @@ mod tests {
             !super::super::ingest::requires_h_channel_scope(KIND_PRESENCE_UPDATE),
             "presence updates are global/ephemeral"
         );
+    }
+
+    #[test]
+    fn channel_guest_ephemeral_events_require_one_granted_channel() {
+        let keys = Keys::generate();
+        let allowed = Uuid::new_v4();
+        let denied = Uuid::new_v4();
+
+        let global = EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), "online")
+            .sign_with_keys(&keys)
+            .expect("sign global ephemeral event");
+        assert!(super::scoped_ephemeral_channel(&global, Some(&[allowed])).is_err());
+        assert_eq!(
+            super::scoped_ephemeral_channel(&global, None).expect("unscoped global event"),
+            None
+        );
+        let tagged_presence =
+            EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), "online")
+                .tag(Tag::parse(["h", &allowed.to_string()]).expect("presence h tag"))
+                .sign_with_keys(&keys)
+                .expect("sign tagged presence event");
+        assert!(
+            super::scoped_ephemeral_channel(&tagged_presence, Some(&[allowed])).is_err(),
+            "an h tag must not turn relay-global presence into a guest channel event"
+        );
+
+        let granted = EventBuilder::new(Kind::Custom(20002), "")
+            .tag(Tag::parse(["h", &allowed.to_string()]).expect("granted h tag"))
+            .sign_with_keys(&keys)
+            .expect("sign granted ephemeral event");
+        assert_eq!(
+            super::scoped_ephemeral_channel(&granted, Some(&[allowed])).expect("granted channel"),
+            Some(allowed)
+        );
+
+        let ungranted = EventBuilder::new(Kind::Custom(20002), "")
+            .tag(Tag::parse(["h", &denied.to_string()]).expect("ungranted h tag"))
+            .sign_with_keys(&keys)
+            .expect("sign ungranted ephemeral event");
+        assert!(super::scoped_ephemeral_channel(&ungranted, Some(&[allowed])).is_err());
+
+        let duplicate = EventBuilder::new(Kind::Custom(20002), "")
+            .tags([
+                Tag::parse(["h", &allowed.to_string()]).expect("first h tag"),
+                Tag::parse(["h", &allowed.to_string()]).expect("second h tag"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign duplicate-h ephemeral event");
+        assert!(super::scoped_ephemeral_channel(&duplicate, Some(&[allowed])).is_err());
     }
 
     #[test]
