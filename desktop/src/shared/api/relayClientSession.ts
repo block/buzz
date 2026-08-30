@@ -69,6 +69,7 @@ import {
   BACKOFF_RESET_STABLE_MS,
   EVENT_BATCH_MS,
   HISTORY_TIMEOUT_MS,
+  LAN_AUTH_TIMEOUT_MS,
   PUBLISH_TIMEOUT_MS,
   RECONNECT_BASE_DELAY_MS,
   RECONNECT_MAX_DELAY_MS,
@@ -76,7 +77,12 @@ import {
   STALL_IDLE_TIMEOUT_MS,
 } from "@/shared/api/relayClientTimings";
 import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
-import { AuthOkTracker } from "@/shared/api/relayAuthPolicy";
+import {
+  armRelayAuthentication,
+  AuthOkTracker,
+  type RelayAuthRequest,
+} from "@/shared/api/relayAuthPolicy";
+import { createRelayInboundBuffer } from "@/shared/api/relayInboundBuffer";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
 
 export class RelayClient {
@@ -87,12 +93,7 @@ export class RelayClient {
   private reconnectWaiters = new RelayReconnectWaiters();
   private reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
   private keepAliveRequested = false;
-  private authRequest: {
-    pendingEventId: string;
-    resolve: () => void;
-    reject: (error: Error) => void;
-    timeout: number;
-  } | null = null;
+  private authRequest: RelayAuthRequest | null = null;
   private subscriptions = new Map<string, RelaySubscription>();
   private pendingEvents = new Map<string, PendingEvent>();
   private eventBuffer: SubscriptionEventBufferItem[] = [];
@@ -105,6 +106,16 @@ export class RelayClient {
   private stabilityTimer: number | null = null;
   private visibleChannelId: string | null = null;
   private authOkTracker = new AuthOkTracker();
+  // A LAN socket can complete the WebSocket handshake while the endpoint is
+  // stale, pointed at another relay, or unable to complete NIP-42. Keep the
+  // fast path for healthy connections, but give the next dial a public
+  // fallback after a LAN attempt fails during startup/authentication.
+  private skipLanTransportOnce = false;
+  private transportPreference: "auto" | "lan" | "public" = "auto";
+  private activeTransport: "lan" | "public" | null = null;
+  private transportListeners = new Set<
+    (transport: "lan" | "public" | null) => void
+  >();
 
   private terminal = false;
 
@@ -142,6 +153,9 @@ export class RelayClient {
     this.terminal = false;
     this.visibleChannelId = null;
     this.authOkTracker.reset();
+    this.skipLanTransportOnce = false;
+    this.transportPreference = "auto";
+    this.setActiveTransport(null);
     this.connectionStateEmitter.set("idle");
 
     if (this.wsId !== null) {
@@ -429,7 +443,64 @@ export class RelayClient {
     this.terminal = false;
     this.authOkTracker.reset();
     this.keepAliveRequested = true;
+    this.transportPreference = "auto";
     await this.connectBypassingBackoff();
+  }
+
+  getActiveTransport(): "lan" | "public" | null {
+    return this.activeTransport;
+  }
+
+  subscribeToTransport(listener: (transport: "lan" | "public" | null) => void) {
+    this.transportListeners.add(listener);
+    listener(this.activeTransport);
+    return () => this.transportListeners.delete(listener);
+  }
+
+  private setActiveTransport(transport: "lan" | "public" | null) {
+    if (this.activeTransport === transport) return;
+    this.activeTransport = transport;
+    for (const listener of this.transportListeners) listener(transport);
+  }
+
+  /** Probe LAN through WebSocket + AUTH, then keep LAN or fall back publicly. */
+  async probeLanAndSwitch(): Promise<boolean> {
+    const lanRelayUrl = await getRelayLanWsUrl();
+    if (!lanRelayUrl) return false;
+
+    if (this.connectPromise) {
+      await this.connectPromise.catch(() => undefined);
+    }
+    if (this.wsId !== null) {
+      this.resetConnection(new Error("Testing LAN relay transport."), {
+        reconnect: false,
+      });
+    }
+
+    this.transportPreference = "lan";
+    this.skipLanTransportOnce = false;
+    this.terminal = false;
+    this.keepAliveRequested = true;
+    try {
+      await this.connectBypassingBackoff();
+      if (this.activeTransport === "lan") {
+        this.transportPreference = "auto";
+        return true;
+      }
+    } catch {
+      // Fall through to a canonical public reconnect.
+    }
+
+    this.transportPreference = "public";
+    this.skipLanTransportOnce = false;
+    this.terminal = false;
+    try {
+      await this.connectBypassingBackoff();
+    } catch {
+      // Keep the normal reconnect policy in charge of subsequent attempts.
+    }
+    this.transportPreference = "auto";
+    return false;
   }
 
   /**
@@ -531,46 +602,68 @@ export class RelayClient {
     );
 
     const generation = ++this.connectionGeneration;
-    this.onMessageChannel = new Channel<unknown>((message) => {
-      void this.handleWsMessage(message, generation).catch((error) => {
+    const inbound = createRelayInboundBuffer(
+      (message) => this.handleWsMessage(message, generation),
+      (error) => {
         if (generation !== this.connectionGeneration) return;
         this.resetConnection(
           this.normalizeRelayError(error, "Relay connection errored."),
         );
-      });
-    });
+      },
+    );
+    this.onMessageChannel = new Channel<unknown>((message) =>
+      inbound.receive(message),
+    );
 
+    let attemptedLanTransport = false;
     try {
       if (!this.relayUrl) {
         this.relayUrl = await getRelayWsUrl();
       }
-      const lanRelayUrl = await getRelayLanWsUrl();
+      const skipLanTransport = this.skipLanTransportOnce;
+      this.skipLanTransportOnce = false;
+      const lanRelayUrl = skipLanTransport ? null : await getRelayLanWsUrl();
+      const useLan =
+        this.transportPreference !== "public" && lanRelayUrl !== null;
+      attemptedLanTransport = useLan;
       const wsId = await invoke<number>("plugin:websocket|connect", {
         url: this.relayUrl,
         onMessage: this.onMessageChannel,
-        config: { transportUrl: lanRelayUrl },
+        config: {
+          transportUrl: useLan ? lanRelayUrl : null,
+          fallbackToCanonical: this.transportPreference !== "lan",
+        },
       });
       if (generation !== this.connectionGeneration) {
         void closeWebSocket(wsId, "stale connection attempt");
         throw new Error("Relay connection attempt was superseded.");
       }
       this.wsId = wsId;
+      this.setActiveTransport(
+        this.transportPreference === "lan"
+          ? "lan"
+          : this.transportPreference === "public"
+            ? "public"
+            : null,
+      );
 
-      await new Promise<void>((resolve, reject) => {
-        const timeout = window.setTimeout(() => {
-          const error = new Error("Relay authentication timed out.");
+      const authentication = armRelayAuthentication(
+        attemptedLanTransport
+          ? Math.min(AUTH_TIMEOUT_MS, LAN_AUTH_TIMEOUT_MS)
+          : AUTH_TIMEOUT_MS,
+        (request) => {
+          this.authRequest = request;
+        },
+        (error) => {
           this.authRequest = null;
           this.resetConnection(error);
-          reject(error);
-        }, AUTH_TIMEOUT_MS);
+        },
+      );
 
-        this.authRequest = {
-          pendingEventId: "",
-          resolve,
-          reject,
-          timeout,
-        };
-      });
+      const drain = inbound.drain();
+      await Promise.race([drain, authentication, inbound.overflow]);
+      await drain;
+      await authentication;
 
       this.stabilityTimer = window.setTimeout(() => {
         this.stabilityTimer = null;
@@ -578,15 +671,34 @@ export class RelayClient {
       }, BACKOFF_RESET_STABLE_MS);
 
       this.connectionStateEmitter.set("connected");
-      await this.replayLiveSubscriptions();
       this.stallWatchdog.start();
       this.emitReconnectIfNeeded();
+
+      // Authentication is the connection boundary. Do not keep
+      // `connectPromise` pending while replaying subscriptions that belonged
+      // to the previous socket: a rate-limit gate or a slow history repair
+      // would otherwise make every newly mounted Community query wait behind
+      // the replay and appear to freeze after startup. Replay is best-effort
+      // background work; live subscriptions created after this point send
+      // their own REQs, and a genuine socket write failure still resets the
+      // connection through replayLiveSubscriptions' existing error path.
+      void this.replayLiveSubscriptions().catch((error) => {
+        console.warn("Failed to replay relay subscriptions", error);
+      });
     } catch (error) {
+      if (attemptedLanTransport) {
+        // The next scheduled attempt must not immediately repeat a LAN path
+        // that just failed after the TCP/WebSocket handshake. This is a
+        // one-shot circuit breaker: once the public dial succeeds, future
+        // reconnects may use LAN again.
+        this.skipLanTransportOnce = true;
+      }
       const connectionError = this.normalizeRelayError(
         error,
         "Failed to connect to relay.",
       );
       if (generation === this.connectionGeneration) {
+        this.setActiveTransport(null);
         this.resetConnection(connectionError);
       }
       throw connectionError;
@@ -760,6 +872,18 @@ export class RelayClient {
   private async handleWsMessage(message: unknown, generation: number) {
     if (generation !== this.connectionGeneration) return;
     this.stallWatchdog.recordInbound();
+
+    if (
+      message &&
+      typeof message === "object" &&
+      (message as { type?: unknown }).type === "Transport"
+    ) {
+      const transport = (message as { data?: unknown }).data;
+      if (transport === "lan" || transport === "canonical") {
+        this.setActiveTransport(transport === "lan" ? "lan" : "public");
+      }
+      return;
+    }
 
     if (isWebSocketClose(message)) {
       if (isServiceRestartClose(message))
@@ -1015,6 +1139,7 @@ export class RelayClient {
     },
   ) {
     this.onMessageChannel = null;
+    this.setActiveTransport(null);
     this.stallWatchdog.stop();
     this.connectionGeneration++;
     if (this.stabilityTimer !== null) {

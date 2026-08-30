@@ -168,6 +168,52 @@ test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
 
+test("stalled early AUTH signing times out and starts a replacement dial", async ({
+  page,
+}) => {
+  test.setTimeout(40_000);
+  await installMockBridge(page, {
+    websocketAuthBeforeConnectResolves: true,
+    stallFirstAuthSigning: true,
+  });
+  await page.goto("/");
+
+  await expect
+    .poll(() => getMockWebsocketConnectAttempts(page), { timeout: 32_000 })
+    .toHaveLength(2);
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.()),
+      { timeout: 5_000 },
+    )
+    .toBe("connected");
+});
+
+test("AUTH arriving before connect resolves does not lose the first send", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    websocketAuthBeforeConnectResolves: true,
+  });
+  await page.goto("/");
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.()),
+      { timeout: 5_000 },
+    )
+    .toBe("connected");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const message = `first send after early auth ${Date.now()}`;
+  await page.getByTestId("message-input").fill(message);
+  await page.getByTestId("send-message").click();
+
+  await expect(page.getByTestId("message-timeline")).toContainText(message);
+});
+
 test("failed initial relay dial retries automatically", async ({ page }) => {
   await installMockBridge(page, {
     websocketConnectErrors: ["mock relay pod unavailable"],
@@ -319,6 +365,17 @@ test("rate-limited reconnect backfill does not tear down the authenticated socke
       window.__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?.(),
     ),
   ).toBe("connected");
+
+  // Replay/history repair is intentionally asynchronous. A newly mounted
+  // Community must remain usable while the old subscription window is being
+  // repaired; otherwise `connectPromise` still serializes the composer behind
+  // a slow or rate-limited backfill and the app looks frozen.
+  const message = `message during replay repair ${Date.now()}`;
+  await page.getByTestId("message-input").fill(message);
+  await page.getByTestId("send-message").click();
+  await expect(page.getByTestId("message-timeline")).toContainText(message, {
+    timeout: 5_000,
+  });
 });
 
 test("service restart close resets accumulated backoff", async ({ page }) => {

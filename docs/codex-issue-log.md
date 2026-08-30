@@ -91,3 +91,26 @@
 
 - 现象：更新日志可以上下滚动，但内容较长时“知道了”按钮位于滚动内容末尾，不在当前可视区域，用户感觉按钮点击无效。
 - 处理：改为三行布局，标题固定、日志列表独立滚动、底部关闭按钮固定显示。
+
+## 2026-08-29：LAN fast path 下更新日志可滚动但应用无法点击
+
+- 现象：同一个 `0.5.15-20` 安装包在其他电脑正常；故障机启动后更新日志可以滚动，但“知道了”和其他 React 控件无响应，WebView 渲染进程持续占满一个 CPU 核心。
+- 定位：两台电脑的 EXE SHA-256 完全一致。逐键 A/B 验证确认，仅当 active Community 同时保存公网 `relayUrl` 和 LAN `lanRelayUrl` 时复现。浏览器级 V8 trace 显示热点集中在 `subscribeLive -> subscribe -> ensureConnected` 和 presence subscription reconcile。提交拓扑确认 `Lin/develop` 从未包含上游 `6ea7a2b2`（#3320）的早到 Relay 帧缓冲修复；LAN fast path 并未删除该修复，而是让原有竞态更容易稳定触发。LAN 连接建立得更快，AUTH challenge 会在 `authRequest` 安装前到达并被丢弃，继而触发认证等待和订阅重试循环。公网连接较慢，所以问题具有机器和网络环境差异。
+- 处理：恢复连接期间的入站帧缓冲；先安装 AUTH waiter，再按顺序排空早到帧；保留 LAN transport 和 canonical Relay 身份；增加缓冲顺序及溢出回归测试。
+- 验证：Relay 单元测试 11/11、TypeScript typecheck、Biome、E2E build 均通过；两个确定性 early-AUTH E2E 均通过，覆盖首次认证/打开频道/首次发送，以及首轮 AUTH 签名挂起后超时重连；原有 initial-dial retry E2E 单独复跑通过；Tauri native WebSocket/LAN transport 测试 9/9 通过。仍需用保留原配置的安装包实机复测 CPU 与按钮交互。
+- 版本/提交：待提交。
+
+## 2026-08-30：点击“知道了”后进入 Community 卡死
+
+- 现象：更新日志中的“知道了”现在可以点击，但进入 Community 后页面仍像卡死，旧配置/旧连接状态下尤其明显。
+- 根因：Relay 认证成功后，`connect()` 仍等待旧连接的订阅回放和频道历史回补；回放会等待限流窗口、HTTP 修复请求或大量旧订阅。所有新挂载的 Community 查询共享同一个 `connectPromise`，因此会被旧回放串行阻塞，表现为进入后一直加载、消息框和页面交互不正常。
+- 处理：认证成功即标记连接可用、启动连接看门狗并释放 `connectPromise`；订阅回放改为后台 best-effort 任务。新订阅立即发送自己的 REQ，回放期间若真实写入失败仍沿用原有连接重置/重连路径。若 LAN WebSocket 已完成握手但认证失败/超时，下一次自动重连单次跳过 LAN，改用公网 Relay；LAN 认证采用 8 秒上限，避免坏的内网端点长期占住启动流程。
+- 验证：新增 E2E 回归场景，限流历史回补期间仍能发送新消息；待运行 Relay 重连用例、TypeScript 和 Biome 检查。
+- 版本/提交：待提交。
+
+## 2026-08-30：Community 需要 LAN/公网双地址探测与手动切换
+
+- 需求：加入 Community 时可同时填写公网 Relay 地址和内网 Relay 地址；启动连接先验证内网，内网不可用时自动回退公网。已连接公网后，用户回到内网时需要一个按钮重新检测并自动切换到内网。
+- 处理：保留公网地址作为 canonical Relay 身份和 AUTH 地址；native WebSocket 增加 LAN-only 探测配置与实际 transport 回报。Relay 客户端的探测会完成 WebSocket 握手和 NIP-42 AUTH，成功后保留现有 live subscriptions 切到 LAN，失败则立即改用公网并恢复正常 LAN-first/public-fallback 策略。Community 菜单新增“检测并切换到内网 Relay”按钮及检测中状态。
+- 验证：TypeScript 类型检查、Biome、Tauri native WebSocket/LAN 单元测试通过；待构建本地安装包进行双地址实机验证。
+- 版本/提交：待提交。

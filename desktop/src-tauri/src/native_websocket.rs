@@ -36,6 +36,12 @@ type NativeSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 #[serde(rename_all = "camelCase")]
 struct ConnectConfig {
     transport_url: Option<String>,
+    #[serde(default = "default_fallback_to_canonical")]
+    fallback_to_canonical: bool,
+}
+
+fn default_fallback_to_canonical() -> bool {
+    true
 }
 
 pub(crate) fn normalize_lan_relay_url(input: Option<&str>) -> Result<Option<String>, String> {
@@ -103,7 +109,8 @@ async fn connect_via_lan(canonical_url: &str, lan_url: &str) -> Result<NativeSoc
 async fn connect_with_fallback(
     canonical_url: &str,
     lan_url: Option<&str>,
-) -> Result<NativeSocket, String> {
+    fallback_to_canonical: bool,
+) -> Result<(NativeSocket, &'static str), String> {
     if let Some(lan_url) = lan_url {
         match tokio::time::timeout(LAN_CONNECT_TIMEOUT, connect_via_lan(canonical_url, lan_url))
             .await
@@ -112,7 +119,7 @@ async fn connect_with_fallback(
                 eprintln!(
                     "buzz-desktop: relay transport=campus-lan dial={lan_url} canonical={canonical_url}"
                 );
-                return Ok(socket);
+                return Ok((socket, "lan"));
             }
             Ok(Err(error)) => {
                 eprintln!(
@@ -127,11 +134,15 @@ async fn connect_with_fallback(
         }
     }
 
+    if !fallback_to_canonical && lan_url.is_some() {
+        return Err("Campus / LAN relay is unavailable".to_string());
+    }
+
     let (socket, _) = connect_async(canonical_url)
         .await
         .map_err(|error| error.to_string())?;
     eprintln!("buzz-desktop: relay transport=canonical url={canonical_url}");
-    Ok(socket)
+    Ok((socket, "canonical"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -240,11 +251,18 @@ async fn open_connection(
     config: Option<ConnectConfig>,
 ) -> Result<Id, String> {
     let connect_cancel = manager.connect_cancel.lock().await.clone();
-    let socket = tokio::select! {
+    let (socket, transport) = tokio::select! {
         _ = connect_cancel.cancelled() => return Err("WebSocket connection cancelled".to_string()),
         result = tokio::time::timeout(
             CONNECT_TIMEOUT,
-            connect_with_fallback(url, config.as_ref().and_then(|value| value.transport_url.as_deref())),
+            connect_with_fallback(
+                url,
+                config.as_ref().and_then(|value| value.transport_url.as_deref()),
+                config
+                    .as_ref()
+                    .map(|value| value.fallback_to_canonical)
+                    .unwrap_or(true),
+            ),
         ) => result
             .map_err(|_| "WebSocket connection timed out".to_string())?
             .map_err(|error| error.to_string())?,
@@ -274,6 +292,10 @@ async fn open_connection(
     manager.connections.lock().await.insert(id, handle.clone());
 
     let task_manager = manager.clone();
+    let _ = on_message.send(serde_json::json!({
+        "type": "Transport",
+        "data": transport,
+    }));
     let task = tauri::async_runtime::spawn(run_connection(
         id,
         socket,
@@ -578,6 +600,7 @@ mod tests {
             silent_channel(),
             Some(ConnectConfig {
                 transport_url: Some(format!("ws://{address}")),
+                fallback_to_canonical: true,
             }),
         )
         .await

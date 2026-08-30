@@ -7,6 +7,9 @@ export const EVENT_BATCH_MS = 16;
  * resolution can take several seconds.
  */
 export const AUTH_TIMEOUT_MS = 25_000;
+/** LAN handshakes should be local and quick; fall back to public transport
+ * instead of holding Community startup behind a stale/private endpoint. */
+export const LAN_AUTH_TIMEOUT_MS = 8_000;
 export const HISTORY_TIMEOUT_MS = 25_000;
 export const PUBLISH_TIMEOUT_MS = 25_000;
 

@@ -9,6 +9,7 @@ import {
   LogOut,
   Ticket,
   WifiOff,
+  RefreshCw,
 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
@@ -36,6 +37,7 @@ import {
   useRelayConnection,
 } from "@/shared/api/useRelayConnection";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
+import { relayClient } from "@/shared/api/relayClient";
 import { useActiveCommunityIcon } from "@/features/communities/useCommunityIcons";
 import { EditCommunityDialog } from "./EditCommunityDialog";
 
@@ -110,11 +112,44 @@ export function CommunitySwitcher({
   const [isLeaving, setIsLeaving] = React.useState(false);
   const profileMenuHoverTimer = React.useRef<number | null>(null);
   const connectionState = useRelayConnection();
+  const [activeTransport, setActiveTransport] = React.useState(() =>
+    relayClient.getActiveTransport(),
+  );
+  const [isProbingLan, setIsProbingLan] = React.useState(false);
   const degraded = isRelayConnectionDegraded(connectionState);
   const connectionLabel = CONNECTION_STATE_LABEL[connectionState];
   const activeIconQuery = useActiveCommunityIcon(activeCommunity?.relayUrl);
   const activeIcon = activeIconQuery.data ?? null;
   const isProfileVariant = variant === "profile";
+
+  React.useEffect(() => {
+    const unsubscribe = relayClient.subscribeToTransport(setActiveTransport);
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  const handleProbeLan = React.useCallback(async () => {
+    if (!activeCommunity?.lanRelayUrl || isProbingLan) return;
+    setIsProbingLan(true);
+    try {
+      const switched = await relayClient.probeLanAndSwitch();
+      toast(
+        switched ? "已切换到内网 Relay" : "内网不可用，继续使用公网 Relay",
+        {
+          description: switched
+            ? activeCommunity.lanRelayUrl
+            : activeCommunity.relayUrl,
+        },
+      );
+    } catch (error) {
+      toast.error("检测内网 Relay 失败", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setIsProbingLan(false);
+    }
+  }, [activeCommunity, isProbingLan]);
 
   function clearProfileMenuHoverTimer() {
     if (profileMenuHoverTimer.current !== null) {
@@ -313,6 +348,26 @@ export function CommunitySwitcher({
                   <Settings2 className="h-4 w-4" />
                   <span>Community settings</span>
                 </button>
+                {activeCommunity.lanRelayUrl ? (
+                  <button
+                    className="flex min-h-9 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm outline-hidden transition-colors hover:bg-muted/50 focus:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
+                    disabled={isProbingLan}
+                    onClick={() => void handleProbeLan()}
+                    role="menuitem"
+                    type="button"
+                  >
+                    <RefreshCw
+                      className={cn("h-4 w-4", isProbingLan && "animate-spin")}
+                    />
+                    <span>
+                      {isProbingLan
+                        ? "检测内网 Relay…"
+                        : activeTransport === "lan"
+                          ? "重新检测内网 Relay"
+                          : "检测并切换到内网 Relay"}
+                    </span>
+                  </button>
+                ) : null}
                 <button
                   className="flex min-h-9 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-destructive outline-hidden transition-colors hover:bg-destructive/10 focus:bg-destructive/10 focus:outline-none focus-visible:bg-destructive/10 focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50"
                   disabled={isLeaving}
@@ -422,6 +477,26 @@ export function CommunitySwitcher({
             </button>
           </DropdownMenuItem>
         ))}
+        {activeCommunity?.lanRelayUrl ? (
+          <DropdownMenuItem
+            disabled={isProbingLan}
+            onSelect={(event) => {
+              event.preventDefault();
+              void handleProbeLan();
+            }}
+          >
+            <RefreshCw
+              className={cn("h-4 w-4", isProbingLan && "animate-spin")}
+            />
+            <span>
+              {isProbingLan
+                ? "检测内网 Relay…"
+                : activeTransport === "lan"
+                  ? "重新检测内网 Relay"
+                  : "检测并切换到内网 Relay"}
+            </span>
+          </DropdownMenuItem>
+        ) : null}
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={onAddCommunity}>
           <Plus className="h-4 w-4" />
