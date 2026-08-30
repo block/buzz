@@ -2930,7 +2930,11 @@ async fn tokio_main() -> Result<()> {
                             // Fire-and-forget: on rare fast-failure paths the
                             // guard's cleanup may race with this add, leaving a
                             // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
-                            if accepted {
+                            // Only post the 👀 "seen" reaction for kind-9 chat
+                            // messages. Reacting to reactions (7), deletions (5),
+                            // presence, etc. makes co-located agents echo 👀
+                            // (and its cleanup deletions) in an infinite loop.
+                            if accepted && event_for_steer.kind.as_u16() == 9 {
                                 let rc = ctx.rest_client.clone();
                                 let eid = event_id_hex.clone();
                                 tokio::spawn(async move {
