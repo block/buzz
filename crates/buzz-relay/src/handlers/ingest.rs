@@ -33,7 +33,7 @@ use buzz_core::kind::{
     KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
     KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
     KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
-    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
+    KIND_WORK_REPORT, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
     RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
@@ -479,6 +479,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         | KIND_STREAM_MESSAGE_SCHEDULED
         | KIND_STREAM_REMINDER
         | KIND_STREAM_MESSAGE_DIFF
+        | KIND_WORK_REPORT
         | KIND_FORUM_POST
         | KIND_FORUM_VOTE
         | KIND_FORUM_COMMENT => Ok(Scope::MessagesWrite),
@@ -712,6 +713,7 @@ pub(crate) fn requires_h_channel_scope(kind: u32) -> bool {
             | KIND_STREAM_MESSAGE_SCHEDULED
             | KIND_STREAM_REMINDER
             | KIND_STREAM_MESSAGE_DIFF
+            | KIND_WORK_REPORT
             | KIND_CANVAS
             | KIND_FORUM_POST
             | KIND_FORUM_VOTE
@@ -1322,6 +1324,101 @@ fn validate_diff_event(event: &Event) -> Result<(), String> {
     }
     if !has_commit {
         return Err("diff event requires a commit tag".to_string());
+    }
+    Ok(())
+}
+
+/// Validate the signed envelope and structured JSON body of kind:40009.
+fn validate_work_report_event(event: &Event) -> Result<(), String> {
+    let is_hex64 = |value: &str| {
+        value.len() == 64 && value.chars().all(|character| character.is_ascii_hexdigit())
+    };
+    if event.content.len() > 32 * 1024 {
+        return Err("work report content exceeds 32KB limit".to_string());
+    }
+    let body: serde_json::Value = serde_json::from_str(&event.content)
+        .map_err(|_| "work report content must be a JSON object".to_string())?;
+    let object = body
+        .as_object()
+        .ok_or_else(|| "work report content must be a JSON object".to_string())?;
+    let status = object
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "work report requires a status".to_string())?;
+    if !matches!(
+        status,
+        "completed" | "in_review" | "needs_decision" | "blocked" | "failed"
+    ) {
+        return Err("work report status is invalid".to_string());
+    }
+    let outcome = object
+        .get("outcome")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 1_024)
+        .ok_or_else(|| "work report outcome must be 1..=1024 bytes".to_string())?;
+    let _ = outcome;
+    for field in [
+        "deliverables",
+        "decisions",
+        "verification",
+        "risks",
+        "next_actions",
+    ] {
+        let Some(value) = object.get(field) else {
+            continue;
+        };
+        let values = value
+            .as_array()
+            .ok_or_else(|| format!("work report {field} must be an array"))?;
+        if values.len() > 20
+            || values.iter().any(|value| {
+                value
+                    .as_str()
+                    .map(str::trim)
+                    .is_none_or(|value| value.is_empty() || value.len() > 2_048)
+            })
+        {
+            return Err(format!(
+                "work report {field} must contain at most 20 non-empty strings of at most 2048 bytes"
+            ));
+        }
+    }
+
+    let tags: Vec<Vec<String>> = event
+        .tags
+        .iter()
+        .map(|tag| tag.as_slice().to_vec())
+        .collect();
+    let values = |name: &str| {
+        tags.iter()
+            .filter(|tag| tag.first().map(String::as_str) == Some(name))
+            .collect::<Vec<_>>()
+    };
+    let roots = values("e");
+    if roots.len() != 1
+        || roots[0].len() < 4
+        || roots[0][2] != ""
+        || roots[0][3] != "root"
+        || !is_hex64(&roots[0][1])
+    {
+        return Err("work report requires exactly one root-marked e tag".to_string());
+    }
+    let type_tags = values("t");
+    if type_tags.len() != 1 || type_tags[0].get(1).map(String::as_str) != Some("work-report") {
+        return Err("work report requires t=work-report".to_string());
+    }
+    let status_tags = values("status");
+    if status_tags.len() != 1 || status_tags[0].get(1).map(String::as_str) != Some(status) {
+        return Err("work report status tag must match content".to_string());
+    }
+    let priors = values("prior");
+    if priors.len() > 1
+        || priors
+            .first()
+            .is_some_and(|tag| tag.get(1).is_none_or(|id| !is_hex64(id)))
+    {
+        return Err("work report prior must be a single 64-char event id".to_string());
     }
     Ok(())
 }
@@ -2725,6 +2822,11 @@ async fn ingest_event_inner(
         validate_diff_event(&event).map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    if kind_u32 == KIND_WORK_REPORT {
+        validate_work_report_event(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
     if kind_u32 == KIND_AGENT_ENGRAM {
         validate_engram_envelope(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
@@ -3283,7 +3385,7 @@ mod tests {
     use buzz_core::kind::{
         KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_LONG_FORM,
         KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE,
-        KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
+        KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS, KIND_WORK_REPORT,
     };
     use nostr::{EventBuilder, Kind};
 
@@ -4011,6 +4113,40 @@ mod tests {
     fn unknown_kind_rejected() {
         let dummy = make_dummy_event();
         assert!(required_scope_for_kind(99999, &dummy).is_err());
+    }
+
+    fn work_report_event(status_tag: &str, content: &str) -> Event {
+        let root = "ab".repeat(32);
+        let channel_id = Uuid::new_v4().to_string();
+        EventBuilder::new(Kind::Custom(KIND_WORK_REPORT as u16), content)
+            .tags([
+                nostr::Tag::parse(["h", channel_id.as_str()]).unwrap(),
+                nostr::Tag::parse(["e", root.as_str(), "", "root"]).unwrap(),
+                nostr::Tag::parse(["t", "work-report"]).unwrap(),
+                nostr::Tag::parse(["status", status_tag]).unwrap(),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap()
+    }
+
+    #[test]
+    fn work_report_is_channel_scoped_and_messages_write() {
+        let event = work_report_event("completed", r#"{"status":"completed","outcome":"Shipped"}"#);
+        assert!(requires_h_channel_scope(KIND_WORK_REPORT));
+        assert_eq!(
+            required_scope_for_kind(KIND_WORK_REPORT, &event).unwrap(),
+            Scope::MessagesWrite
+        );
+        assert!(validate_work_report_event(&event).is_ok());
+    }
+
+    #[test]
+    fn work_report_rejects_status_mismatch_and_empty_outcome() {
+        let mismatch =
+            work_report_event("completed", r#"{"status":"blocked","outcome":"Waiting"}"#);
+        assert!(validate_work_report_event(&mismatch).is_err());
+        let empty = work_report_event("completed", r#"{"status":"completed","outcome":"  "}"#);
+        assert!(validate_work_report_event(&empty).is_err());
     }
 
     #[test]

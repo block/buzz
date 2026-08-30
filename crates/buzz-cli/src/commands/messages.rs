@@ -729,6 +729,141 @@ pub async fn cmd_send_message(
     Ok(())
 }
 
+pub struct WorkReportParams {
+    pub channel_id: String,
+    pub thread_root: String,
+    pub status: crate::ReportStatus,
+    pub outcome: String,
+    pub deliverables: Vec<String>,
+    pub decisions: Vec<String>,
+    pub verification: Vec<String>,
+    pub risks: Vec<String>,
+    pub next_actions: Vec<String>,
+    pub prior: Option<String>,
+}
+
+pub async fn cmd_publish_work_report(
+    client: &BuzzClient,
+    params: WorkReportParams,
+) -> Result<(), CliError> {
+    let channel_id = parse_uuid(&params.channel_id)?;
+    let root_event = fetch_event(client, &params.thread_root).await?;
+    let root_channel = channel_id_from_event(&params.thread_root, &root_event)?;
+    if root_channel != channel_id {
+        return Err(CliError::Usage(format!(
+            "thread root {} does not belong to channel {}",
+            params.thread_root, params.channel_id
+        )));
+    }
+    let resolved_root = thread_ref_from_event(&params.thread_root, &root_event)?
+        .root_event_id
+        .to_hex();
+    if !resolved_root.eq_ignore_ascii_case(&params.thread_root) {
+        return Err(CliError::Usage(format!(
+            "--thread must reference the thread root (use {resolved_root})"
+        )));
+    }
+    let thread_root = parse_event_id(&params.thread_root)?;
+    let head_filter = serde_json::json!({
+        "kinds": [40009],
+        "#h": [params.channel_id.as_str()],
+        "#e": [params.thread_root.as_str()],
+        "limit": 100
+    });
+    let mut report_events = fetch_events(client, &head_filter)
+        .await
+        .ok_or_else(|| CliError::Other("could not load the current work-report head".into()))?;
+    report_events.retain(|event| {
+        event
+            .get("tags")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|tags| {
+                tags.iter().any(|tag| {
+                    let Some(parts) = tag.as_array() else {
+                        return false;
+                    };
+                    parts.first().and_then(serde_json::Value::as_str) == Some("e")
+                        && parts.get(1).and_then(serde_json::Value::as_str)
+                            == Some(params.thread_root.as_str())
+                        && parts.get(3).and_then(serde_json::Value::as_str) == Some("root")
+                })
+            })
+    });
+    report_events.sort_by(|left, right| {
+        left.get("created_at")
+            .and_then(serde_json::Value::as_u64)
+            .cmp(&right.get("created_at").and_then(serde_json::Value::as_u64))
+            .then_with(|| {
+                left.get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .cmp(&right.get("id").and_then(serde_json::Value::as_str))
+            })
+    });
+    let current_head = report_events
+        .last()
+        .and_then(|event| event.get("id"))
+        .and_then(serde_json::Value::as_str);
+    match (current_head, params.prior.as_deref()) {
+        (Some(head), Some(prior)) if head.eq_ignore_ascii_case(prior) => {}
+        (Some(head), _) => {
+            return Err(CliError::Conflict(format!(
+                "work report head changed; retry with --prior {head}"
+            )))
+        }
+        (None, Some(_)) => {
+            return Err(CliError::Conflict(
+                "cannot set --prior because this thread has no work report".into(),
+            ))
+        }
+        (None, None) => {}
+    }
+    let prior = match params.prior.as_deref() {
+        Some(prior_id) => {
+            let prior_event = fetch_event(client, prior_id).await?;
+            if prior_event.get("kind").and_then(serde_json::Value::as_u64) != Some(40009) {
+                return Err(CliError::Usage(
+                    "--prior must reference a work report".into(),
+                ));
+            }
+            let tags = prior_event
+                .get("tags")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| CliError::Usage("prior work report has no tags".into()))?;
+            let matches_root = tags.iter().any(|tag| {
+                let Some(parts) = tag.as_array() else {
+                    return false;
+                };
+                parts.first().and_then(serde_json::Value::as_str) == Some("e")
+                    && parts.get(1).and_then(serde_json::Value::as_str)
+                        == Some(params.thread_root.as_str())
+                    && parts.get(3).and_then(serde_json::Value::as_str) == Some("root")
+            });
+            if !matches_root || channel_id_from_event(prior_id, &prior_event)? != channel_id {
+                return Err(CliError::Usage(
+                    "--prior must reference a work report for the same thread".into(),
+                ));
+            }
+            Some(parse_event_id(prior_id)?)
+        }
+        None => None,
+    };
+    let report = buzz_sdk::WorkReport {
+        status: params.status.into(),
+        outcome: params.outcome,
+        deliverables: params.deliverables,
+        decisions: params.decisions,
+        verification: params.verification,
+        risks: params.risks,
+        next_actions: params.next_actions,
+    };
+    let builder = buzz_sdk::build_work_report(channel_id, thread_root, prior, &report)
+        .map_err(|error| CliError::Usage(error.to_string()))?;
+    let event = client.sign_event(builder)?;
+    let response = client.submit_event(event).await?;
+    println!("{}", normalize_write_response(&response));
+    Ok(())
+}
+
 pub struct SendDiffParams {
     pub channel_id: String,
     pub diff: String,
@@ -961,6 +1096,35 @@ pub async fn dispatch(
                     language: lang,
                     description,
                     reply_to,
+                },
+            )
+            .await
+        }
+        MessagesCmd::Report {
+            channel,
+            thread,
+            status,
+            outcome,
+            deliverables,
+            decisions,
+            verification,
+            risks,
+            next_actions,
+            prior,
+        } => {
+            cmd_publish_work_report(
+                client,
+                WorkReportParams {
+                    channel_id: channel,
+                    thread_root: thread,
+                    status,
+                    outcome,
+                    deliverables,
+                    decisions,
+                    verification,
+                    risks,
+                    next_actions,
+                    prior,
                 },
             )
             .await

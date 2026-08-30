@@ -142,6 +142,32 @@ pub enum PresenceStatus {
     Offline,
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum ReportStatus {
+    #[value(name = "completed")]
+    Completed,
+    #[value(name = "in-review")]
+    InReview,
+    #[value(name = "needs-decision")]
+    NeedsDecision,
+    #[value(name = "blocked")]
+    Blocked,
+    #[value(name = "failed")]
+    Failed,
+}
+
+impl From<ReportStatus> for buzz_sdk::WorkReportStatus {
+    fn from(value: ReportStatus) -> Self {
+        match value {
+            ReportStatus::Completed => Self::Completed,
+            ReportStatus::InReview => Self::InReview,
+            ReportStatus::NeedsDecision => Self::NeedsDecision,
+            ReportStatus::Blocked => Self::Blocked,
+            ReportStatus::Failed => Self::Failed,
+        }
+    }
+}
+
 #[derive(Clone, clap::ValueEnum)]
 pub enum EmojiScope {
     #[value(name = "own")]
@@ -434,6 +460,42 @@ pub enum MessagesCmd {
         /// Event ID to reply to (creates a thread)
         #[arg(long)]
         reply_to: Option<String>,
+    },
+    /// Publish or update the structured outcome report for a thread
+    #[command(
+        after_help = "Example:\n  buzz messages report --channel <UUID> --thread <EVENT_ID> --status completed --outcome \"Shipped the fix\" --deliverable <PR_URL> --verification \"CI passed\""
+    )]
+    Report {
+        /// Channel UUID containing the thread
+        #[arg(long)]
+        channel: String,
+        /// Thread root event ID
+        #[arg(long)]
+        thread: String,
+        /// Current report status
+        #[arg(long, value_enum)]
+        status: ReportStatus,
+        /// One-sentence result or required action
+        #[arg(long)]
+        outcome: String,
+        /// PR, file, document, or artifact reference (repeatable)
+        #[arg(long = "deliverable")]
+        deliverables: Vec<String>,
+        /// Material decision and rationale (repeatable)
+        #[arg(long = "decision")]
+        decisions: Vec<String>,
+        /// Test, CI, runtime check, or other evidence (repeatable)
+        #[arg(long = "verification")]
+        verification: Vec<String>,
+        /// Material risk or limitation (repeatable)
+        #[arg(long = "risk")]
+        risks: Vec<String>,
+        /// Next action with its owner (repeatable)
+        #[arg(long = "next-action")]
+        next_actions: Vec<String>,
+        /// Previous work-report event ID when updating
+        #[arg(long)]
+        prior: Option<String>,
     },
     /// Edit a previously sent message
     Edit {
@@ -2302,6 +2364,7 @@ mod tests {
                 "delete",
                 "edit",
                 "get",
+                "report",
                 "search",
                 "send",
                 "send-diff",
@@ -2430,6 +2493,46 @@ mod tests {
     }
 
     #[test]
+    fn work_report_command_accepts_structured_repeatable_fields() {
+        let channel = uuid::Uuid::new_v4().to_string();
+        let root = "ab".repeat(32);
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "report",
+            "--channel",
+            channel.as_str(),
+            "--thread",
+            root.as_str(),
+            "--status",
+            "in-review",
+            "--outcome",
+            "Ready for review",
+            "--deliverable",
+            "https://example.com/pr/1",
+            "--verification",
+            "CI passed",
+            "--next-action",
+            "Maintainer: review",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "report",
+            "--channel",
+            channel.as_str(),
+            "--thread",
+            root.as_str(),
+            "--status",
+            "done",
+            "--outcome",
+            "Invalid status",
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
@@ -2440,7 +2543,7 @@ mod tests {
             ("feed", 1),
             ("issues", 6),
             ("media", 1),
-            ("messages", 8),
+            ("messages", 9),
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),
