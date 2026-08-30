@@ -514,6 +514,17 @@ pub struct ChannelFilter {
     pub require_mention: bool,
 }
 
+impl ChannelFilter {
+    /// Treat every event in a conversational channel as implicitly addressed
+    /// to the agent by removing the relay-level `#p` filter.
+    pub fn with_implicit_mention(mut self, implicit_mention: bool) -> Self {
+        if implicit_mention {
+            self.require_mention = false;
+        }
+        self
+    }
+}
+
 #[derive(Debug)]
 pub struct Config {
     pub keys: Keys,
@@ -1576,6 +1587,19 @@ mod tests {
 
         let f = result.get(&channels[0]).unwrap();
         assert!(!f.require_mention);
+    }
+
+    #[test]
+    fn test_dm_channel_filter_receives_unmentioned_messages() {
+        let filter = ChannelFilter {
+            kinds: Some(vec![9]),
+            require_mention: true,
+        };
+
+        let adapted = filter.with_implicit_mention(true);
+
+        assert!(!adapted.require_mention);
+        assert_eq!(adapted.kinds.as_deref(), Some([9].as_slice()));
     }
 
     #[test]
