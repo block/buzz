@@ -608,6 +608,17 @@ pub struct SendMessageParams {
     pub mentions: Vec<String>,
 }
 
+fn validate_message_payload(content: &str, has_files: bool) -> Result<(), CliError> {
+    if content.trim().is_empty() && !has_files {
+        return Err(CliError::Usage(
+            "message content is empty; provide non-whitespace --content or attach a file \
+             (when using --content -, ensure stdin is connected)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn cmd_send_message(
     client: &BuzzClient,
     mut p: SendMessageParams,
@@ -617,6 +628,7 @@ pub async fn cmd_send_message(
     // quoting — the source of countless self-inflicted command-substitution
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
+    validate_message_payload(&p.content, !p.files.is_empty())?;
     validate_content_size(&p.content)?;
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
@@ -855,6 +867,7 @@ pub async fn cmd_edit_message(
     content: &str,
 ) -> Result<(), CliError> {
     validate_hex64(event_id)?;
+    validate_message_payload(content, false)?;
     validate_content_size(content)?;
 
     // Resolve channel_id from the event's h-tag
@@ -1059,8 +1072,8 @@ mod tests {
         channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
         format_events, match_profiles_by_name, merge_message_mentions, missing_members,
         normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
-        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
-        CliError, Uuid,
+        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags,
+        validate_message_payload, BuzzClient, CliError, Uuid,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1077,6 +1090,21 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    #[test]
+    fn empty_message_payload_is_rejected_without_files() {
+        for content in ["", "   ", "\n\t"] {
+            let error = validate_message_payload(content, false).unwrap_err();
+            assert!(matches!(error, CliError::Usage(_)));
+            assert!(error.to_string().contains("message content is empty"));
+        }
+    }
+
+    #[test]
+    fn attachment_only_and_non_empty_message_payloads_are_allowed() {
+        assert!(validate_message_payload("", true).is_ok());
+        assert!(validate_message_payload("hello", false).is_ok());
+    }
 
     #[test]
     fn compact_event_format_remains_the_three_key_contract() {

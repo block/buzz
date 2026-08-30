@@ -2867,13 +2867,13 @@ async fn tokio_main() -> Result<()> {
                             // launched by the same human). Allowlist adds the
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
+                            let is_dm =
+                                is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
                                 // exercised by non-owner authors inside DMs.
-                                let is_dm =
-                                    is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
@@ -2970,6 +2970,7 @@ async fn tokio_main() -> Result<()> {
                                             buzz_event.channel_id,
                                             event_for_steer,
                                             prompt_tag_for_steer,
+                                            is_dm,
                                             &steer_ack_tx,
                                         );
                                     if !native_attempted {
@@ -3640,6 +3641,7 @@ fn try_native_steer(
     channel_id: uuid::Uuid,
     event: nostr::Event,
     prompt_tag: String,
+    is_dm: bool,
     steer_ack_tx: &mpsc::UnboundedSender<SteerAckEvent>,
 ) -> bool {
     // Build the steer body: framing strings come from
@@ -3662,7 +3664,7 @@ fn try_native_steer(
         prompt_tag: prompt_tag.clone(),
         received_at: std::time::Instant::now(),
     };
-    let event_block = queue::format_event_block(channel_id, None, &be, None);
+    let event_block = queue::format_routed_event_block(channel_id, None, &be, None, is_dm);
     let new_message = prompt_framing::semantic_section(tag, "");
     let event_section = prompt_framing::semantic_section_with_attributes(
         "buzz-event",
