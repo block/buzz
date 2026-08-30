@@ -26,6 +26,8 @@ use buzz_core::pairing::{
 use clap::{Parser, Subcommand};
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, EventBuilder, Keys, RelayUrl, SecretKey, ToBech32};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use zeroize::Zeroizing;
@@ -53,6 +55,17 @@ enum Cmd {
         /// nsec (bech32) of the key to transfer. If omitted, generates a test key.
         #[arg(long)]
         nsec: Option<String>,
+
+        /// Optional local HTTP bind address for source-side SAS approval.
+        /// When set, the source waits for an explicit approval from the short-lived web page
+        /// instead of reading y/n from stdin.
+        #[arg(long, requires = "approval_public_url")]
+        approval_listen: Option<String>,
+
+        /// Public HTTPS base URL reverse-proxied to --approval-listen.
+        /// A random one-shot token is appended to this URL for each pairing session.
+        #[arg(long, requires = "approval_listen")]
+        approval_public_url: Option<String>,
     },
 
     /// Act as the target device (scans QR code, receives the secret).
@@ -105,13 +118,23 @@ async fn main() {
 
 async fn run(cmd: Cmd) -> Result<(), CliError> {
     match cmd {
-        Cmd::Source { relay, nsec } => cmd_source(relay, nsec).await,
+        Cmd::Source {
+            relay,
+            nsec,
+            approval_listen,
+            approval_public_url,
+        } => cmd_source(relay, nsec, approval_listen, approval_public_url).await,
         Cmd::Target { relay, show_secret } => cmd_target(relay, show_secret).await,
         Cmd::TestVectors => cmd_test_vectors(),
     }
 }
 
-async fn cmd_source(relay_url: String, nsec: Option<String>) -> Result<(), CliError> {
+async fn cmd_source(
+    relay_url: String,
+    nsec: Option<String>,
+    approval_listen: Option<String>,
+    approval_public_url: Option<String>,
+) -> Result<(), CliError> {
     // Resolve the payload to transfer.
     let (payload_str, payload_type) = resolve_payload(nsec)?;
 
@@ -155,10 +178,18 @@ async fn cmd_source(relay_url: String, nsec: Option<String>) -> Result<(), CliEr
     };
     println!("Offer received from target.");
     println!("SAS code: {sas}");
-    print!("Does your other device show {sas}? [y/n]: ");
-    io::stdout().flush()?;
 
-    let confirmed = read_yes_no()?;
+    let confirmed = match (approval_listen.as_deref(), approval_public_url.as_deref()) {
+        (Some(bind), Some(public_base)) => {
+            wait_for_web_sas_confirmation(bind, public_base, &sas, Duration::from_secs(120)).await?
+        }
+        (None, None) => {
+            print!("Does your other device show {sas}? [y/n]: ");
+            io::stdout().flush()?;
+            read_yes_no()?
+        }
+        _ => unreachable!("clap requires approval options together"),
+    };
     if !confirmed {
         // Send abort and exit.
         if let Some(abort_event) =
@@ -198,6 +229,93 @@ async fn cmd_source(relay_url: String, nsec: Option<String>) -> Result<(), CliEr
 
     println!("Transfer complete! ✓");
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalRequest {
+    Page,
+    Approve,
+    Deny,
+    NotFound,
+}
+
+fn classify_approval_request(method: &str, path: &str, token: &str) -> ApprovalRequest {
+    let path = path.split('?').next().unwrap_or_default();
+    let approve_suffix = format!("/{token}/approve");
+    let deny_suffix = format!("/{token}/deny");
+    let page_suffix = format!("/{token}");
+
+    match method {
+        "GET" if path.ends_with(&page_suffix) => ApprovalRequest::Page,
+        "POST" if path.ends_with(&approve_suffix) => ApprovalRequest::Approve,
+        "POST" if path.ends_with(&deny_suffix) => ApprovalRequest::Deny,
+        _ => ApprovalRequest::NotFound,
+    }
+}
+
+async fn wait_for_web_sas_confirmation(
+    bind: &str,
+    public_base: &str,
+    sas: &str,
+    ttl: Duration,
+) -> Result<bool, CliError> {
+    let listener = TcpListener::bind(bind).await?;
+    let token = Keys::generate().public_key().to_hex();
+    let approval_url = format!("{}/{}", public_base.trim_end_matches('/'), token);
+    println!("Open this source approval page and compare the SAS code:");
+    println!("{approval_url}");
+
+    timeout(ttl, async {
+        loop {
+            let (mut stream, _) = listener.accept().await?;
+            let mut buf = vec![0u8; 8192];
+            let n = stream.read(&mut buf).await?;
+            if n == 0 {
+                continue;
+            }
+            let request = String::from_utf8_lossy(&buf[..n]);
+            let request_line = request.lines().next().unwrap_or_default();
+            let mut parts = request_line.split_whitespace();
+            let method = parts.next().unwrap_or_default();
+            let path = parts.next().unwrap_or_default();
+
+            match classify_approval_request(method, path, &token) {
+                ApprovalRequest::Page => {
+                    let body = format!(
+                        "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'\"><title>Buzz pairing approval</title></head><body style=\"font-family:system-ui;max-width:36rem;margin:3rem auto;padding:0 1rem\"><h1>Buzz pairing</h1><p>iPhone Buzz에 표시된 코드와 아래 코드가 같은지 확인하세요.</p><div style=\"font-size:2.4rem;font-weight:700;letter-spacing:.18em;margin:2rem 0\">{sas}</div><form method=\"post\" action=\"{approval_url}/approve\"><button style=\"font-size:1.2rem;padding:.9rem 1.2rem;width:100%\">Codes match — 승인</button></form><form method=\"post\" action=\"{approval_url}/deny\" style=\"margin-top:1rem\"><button style=\"font-size:1rem;padding:.7rem 1rem;width:100%\">코드가 다름 — 취소</button></form></body></html>"
+                    );
+                    write_http_response(&mut stream, "200 OK", "text/html; charset=utf-8", &body).await?;
+                }
+                ApprovalRequest::Approve => {
+                    write_http_response(&mut stream, "200 OK", "text/html; charset=utf-8", "<p>승인되었습니다. Buzz로 돌아가세요.</p>").await?;
+                    return Ok(true);
+                }
+                ApprovalRequest::Deny => {
+                    write_http_response(&mut stream, "200 OK", "text/html; charset=utf-8", "<p>취소되었습니다.</p>").await?;
+                    return Ok(false);
+                }
+                ApprovalRequest::NotFound => {
+                    write_http_response(&mut stream, "404 Not Found", "text/plain; charset=utf-8", "not found").await?;
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| CliError::Timeout)?
+}
+
+async fn write_http_response(
+    stream: &mut tokio::net::TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &str,
+) -> Result<(), io::Error> {
+    let response = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(response.as_bytes()).await?;
+    stream.shutdown().await
 }
 
 async fn cmd_target(relay_override: Option<String>, show_secret: bool) -> Result<(), CliError> {
@@ -620,4 +738,47 @@ fn hex_to_32(s: &str) -> Result<[u8; 32], CliError> {
     bytes
         .try_into()
         .map_err(|_| CliError::Other(format!("expected 32 bytes, got wrong length for '{s}'")))
+}
+
+#[cfg(test)]
+mod approval_tests {
+    use super::*;
+
+    #[test]
+    fn approval_request_requires_exact_one_shot_token() {
+        let token = "abc123";
+        assert_eq!(
+            classify_approval_request("GET", "/pair-approve/abc123", token),
+            ApprovalRequest::Page
+        );
+        assert_eq!(
+            classify_approval_request("POST", "/pair-approve/abc123/approve", token),
+            ApprovalRequest::Approve
+        );
+        assert_eq!(
+            classify_approval_request("POST", "/pair-approve/abc123/deny", token),
+            ApprovalRequest::Deny
+        );
+        assert_eq!(
+            classify_approval_request("POST", "/pair-approve/wrong/approve", token),
+            ApprovalRequest::NotFound
+        );
+        assert_eq!(
+            classify_approval_request("GET", "/pair-approve/abc123?x=1", token),
+            ApprovalRequest::Page
+        );
+    }
+
+    #[test]
+    fn approval_request_is_method_sensitive() {
+        let token = "abc123";
+        assert_eq!(
+            classify_approval_request("GET", "/pair-approve/abc123/approve", token),
+            ApprovalRequest::NotFound
+        );
+        assert_eq!(
+            classify_approval_request("POST", "/pair-approve/abc123", token),
+            ApprovalRequest::NotFound
+        );
+    }
 }

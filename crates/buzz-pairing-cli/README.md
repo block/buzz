@@ -24,11 +24,31 @@ Both sides display a 6-digit SAS code. Confirm they match on each side, and the 
 Acts as the device holding the secret. Generates an ephemeral keypair and session secret, displays a `nostrpair://` QR URI, waits for a target to connect, performs SAS verification, and sends the payload.
 
 ```
-buzz-pair source --relay <RELAY_URL> [--nsec <BECH32_NSEC>]
+buzz-pair source --relay <RELAY_URL> [--nsec <BECH32_NSEC>] \
+  [--approval-listen <LOCAL_BIND> --approval-public-url <HTTPS_BASE>]
 ```
 
 - `--relay` — WebSocket relay URL (default: `wss://relay.damus.io`)
 - `--nsec` — bech32 nsec to transfer. If omitted, generates a throwaway test key.
+- `--approval-listen` — optional loopback HTTP bind for source-side SAS confirmation, for example `127.0.0.1:3097`.
+- `--approval-public-url` — HTTPS URL reverse-proxied to that listener, for example `https://buzz.example.com/pair-approve`. It must be supplied together with `--approval-listen`.
+
+When web approval is enabled, the CLI creates a random per-session URL and waits up to 120 seconds for the source user to open it, compare the displayed SAS with the target device, and explicitly approve or deny. The URL is one-shot because the listener exits after the decision, and the page is sent with no-store and restrictive content-security policy. This changes only the source confirmation UI: the NIP-AB `sas-confirm` event is still emitted only after explicit source-side user approval.
+
+Example reverse proxy:
+
+```caddy
+buzz.example.com {
+    handle /pair-approve* {
+        reverse_proxy 127.0.0.1:3097
+    }
+    handle /pair* {
+        reverse_proxy 127.0.0.1:3096
+    }
+}
+```
+
+Keep the approval listener bound to loopback and expose it only through HTTPS. Put the `/pair-approve*` handler before a broader `/pair*` handler.
 
 ### `target`
 
