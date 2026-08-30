@@ -3908,6 +3908,53 @@ where
     Err(last_err.unwrap_or(RelayError::ConnectionClosed))
 }
 
+/// Retry `op` with bounded jittered backoff, using the same
+/// [`STARTUP_CONNECT_BACKOFFS`] ladder and [`jittered_duration`] pacing as
+/// [`retry_initial_connect`], but with **no terminal-error short-circuit** —
+/// every attempt retries on any [`RelayError`]. Used by startup channel
+/// discovery (`HarnessRelay::discover_channels()`), which makes plain REST
+/// `POST /query` calls: a transient relay blip there surfaces as
+/// `RelayError::Http`, which `is_terminal_connect_error` classifies as
+/// terminal (correct for the WebSocket-connect call site it was written for,
+/// where a non-101 HTTP response usually means "wrong endpoint"). Reusing
+/// that classification here would retry nothing and defeat the point, so
+/// this function intentionally does not call `is_terminal_connect_error`.
+///
+/// Generic over the success type so the backoff logic can be exercised in
+/// tests without a real relay. Returns the last error if all attempts are
+/// exhausted.
+pub(crate) async fn retry_channel_discovery<F, Fut, T>(mut op: F) -> Result<T, RelayError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, RelayError>>,
+{
+    let mut last_err = None;
+
+    for (attempt, delay) in std::iter::once(None)
+        .chain(STARTUP_CONNECT_BACKOFFS.iter().map(|d| Some(*d)))
+        .enumerate()
+    {
+        if let Some(base) = delay {
+            let jittered = jittered_duration(base);
+            info!(
+                "retrying channel discovery (attempt {attempt}) in {:.1}s",
+                jittered.as_secs_f64()
+            );
+            tokio::time::sleep(jittered).await;
+        }
+
+        match op().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                warn!("channel discovery attempt {attempt} failed: {e}");
+                last_err = Some(e);
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or(RelayError::ConnectionClosed))
+}
+
 /// Perform a single WebSocket connect + NIP-42 auth handshake.
 ///
 /// Returns `(ws, buffer)` on success.
@@ -5782,6 +5829,59 @@ mod tests {
 
         assert!(
             matches!(result, Err(RelayError::Timeout)),
+            "must surface the last attempt's error, not a generic one"
+        );
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            STARTUP_CONNECT_BACKOFFS.len() + 1,
+            "must attempt exactly once plus one retry per backoff entry"
+        );
+    }
+
+    /// A transient channel-discovery failure — including `RelayError::Http`,
+    /// which `is_terminal_connect_error` would treat as terminal — must be
+    /// retried and can still succeed once the relay recovers.
+    #[tokio::test(start_paused = true)]
+    async fn retry_channel_discovery_retries_transient_failure_then_succeeds() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = AtomicUsize::new(0);
+        let result: Result<&'static str, RelayError> = retry_channel_discovery(|| {
+            let n = attempts.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n < 2 {
+                    Err(RelayError::Http("404 Not Found".into()))
+                } else {
+                    Ok("discovered")
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(result.unwrap(), "discovered");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            3,
+            "should succeed on the 3rd attempt (2 transient failures + 1 success)"
+        );
+    }
+
+    /// Once every attempt (1 initial + N backoff retries) is exhausted, the
+    /// last error is returned rather than retrying forever or panicking —
+    /// a dead relay must not hang agent startup indefinitely.
+    #[tokio::test(start_paused = true)]
+    async fn retry_channel_discovery_exhausts_and_returns_last_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = AtomicUsize::new(0);
+        let result: Result<(), RelayError> = retry_channel_discovery(|| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            async { Err(RelayError::Http("database error".into())) }
+        })
+        .await;
+
+        assert!(
+            matches!(result, Err(RelayError::Http(_))),
             "must surface the last attempt's error, not a generic one"
         );
         assert_eq!(
