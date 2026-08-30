@@ -116,7 +116,8 @@ impl std::fmt::Display for RespondTo {
 ///
 /// - `default` — agent's built-in behaviour (permission requests per tool call).
 /// - `acceptEdits` — auto-approve file edits, still ask for other tools.
-/// - `bypassPermissions` — skip the permission flow entirely.
+/// - `bypassPermissions` — skip the permission flow entirely (including via
+///   compatible full-access mode IDs advertised by an adapter).
 /// - `dontAsk` — never prompt; reject anything that would require permission.
 /// - `plan` — planning-only mode (no tool execution).
 #[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
