@@ -1398,7 +1398,7 @@ fn validate_work_report_event(event: &Event) -> Result<(), String> {
     let roots = values("e");
     if roots.len() != 1
         || roots[0].len() < 4
-        || roots[0][2] != ""
+        || !roots[0][2].is_empty()
         || roots[0][3] != "root"
         || !is_hex64(&roots[0][1])
     {
