@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 mod acp;
+mod backoff;
 mod config;
 mod engram_fetch;
 mod filter;
@@ -1499,13 +1500,7 @@ impl SlotCircuit {
         // Exponential backoff: 1s * 2^(recent-1), capped at 30s, with ±20% jitter.
         let base = RESPAWN_BASE_DELAY.saturating_mul(1u32 << (recent - 1).min(5));
         let capped = base.min(RESPAWN_MAX_DELAY);
-        let jitter = (std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos() as f64)
-            / 1_000_000_000.0; // 0.0..1.0
-        let factor = 0.8 + jitter * 0.4; // 0.8..1.2
-        CrashVerdict::Respawn(capped.mul_f64(factor))
+        CrashVerdict::Respawn(crate::backoff::jittered_duration(capped))
     }
 
     /// Mark a spawn failure — opens the circuit so the slot isn't retried
