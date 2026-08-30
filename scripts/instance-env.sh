@@ -82,9 +82,15 @@ if git rev-parse --is-inside-work-tree &>/dev/null; then
 
         ICON_DIR="$WORKTREE_ROOT/desktop/src-tauri/target/dev-icons"
         mkdir -p "$ICON_DIR"
-        DEV_ICON="$ICON_DIR/icon.icns"
         GENERATE_DEV_ICON="$WORKTREE_ROOT/scripts/generate-dev-icon.swift"
         BASE_ICON="$WORKTREE_ROOT/desktop/src-tauri/icons/icon.icns"
+        # Version the generated dev-icon filename by the base icon's size+mtime so a
+        # changed base icon writes to a NEW path. macOS caches rendered dock tiles by
+        # icon path and does not reliably refresh when a file's contents change under
+        # the same name, which strands the old icon. A fresh path sidesteps that.
+        ICON_VER=$(stat -f "%z-%m" "$BASE_ICON" 2>/dev/null | /sbin/md5 2>/dev/null | tr -cd '0-9a-f' | cut -c1-10)
+        [ -n "$ICON_VER" ] || ICON_VER="v"
+        DEV_ICON="$ICON_DIR/icon-${ICON_VER}.icns"
 
         if swift "$GENERATE_DEV_ICON" "$BASE_ICON" "$DEV_ICON" "$BUZZ_WORKTREE_LABEL"; then
             echo "🌳 Worktree: ${BUZZ_WORKTREE_LABEL}"
