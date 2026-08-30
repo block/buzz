@@ -715,8 +715,8 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         .expect("rsplit always yields at least one element");
     let lower = basename.to_ascii_lowercase();
     // Windows resolves commands through `.exe` binaries and npm's `.cmd`/`.bat`
-    // shims; all three name the same runtime identity.
-    let stem = [".exe", ".cmd", ".bat"]
+    // shims; Python/PEX artifacts use `.par` on Unix/macOS; all name the same runtime identity.
+    let stem = [".exe", ".cmd", ".bat", ".par"]
         .iter()
         .find_map(|extension| lower.strip_suffix(extension))
         .unwrap_or(&lower);
@@ -728,9 +728,10 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         .collect()
 }
 
-fn default_agent_args(command: &str) -> Option<Vec<String>> {
+pub(crate) fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        "antigravity" | "google-antigravity" | "agy" | "agy-acp-server" => Some(Vec::new()),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -825,9 +826,12 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
     }
 
     // Older callers relied on the Goose-specific default even for runtimes like
-    // Codex and Claude. Treat that legacy fallback as "no args" for zero-arg
-    // providers so desktop- and env-based launches behave the same way.
-    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") && default_args.is_empty()
+    // Codex, Claude, and Antigravity. Treat that legacy fallback as the runtime's
+    // default args for non-Goose providers so desktop- and env-based launches
+    // behave the same way.
+    if normalized.len() == 1
+        && normalized[0].eq_ignore_ascii_case("acp")
+        && normalize_agent_command_identity(command) != "goose"
     {
         return default_args;
     }
@@ -1666,6 +1670,28 @@ mod tests {
             normalize_agent_command_identity(r"C:\Tools\Hermes\HERMES-AGENT.BAT"),
             "hermes-agent"
         );
+        // Antigravity .par and .exe artifacts.
+        assert_eq!(
+            normalize_agent_command_identity("agy_acp_server.par"),
+            "agy-acp-server"
+        );
+        assert_eq!(
+            normalize_agent_command_identity("AGY_ACP_SERVER.PAR"),
+            "agy-acp-server"
+        );
+        assert_eq!(
+            normalize_agent_command_identity("/opt/google/bin/agy_acp_server.par"),
+            "agy-acp-server"
+        );
+        assert_eq!(
+            normalize_agent_command_identity("antigravity"),
+            "antigravity"
+        );
+        assert_eq!(
+            normalize_agent_command_identity("google-antigravity"),
+            "google-antigravity"
+        );
+        assert_eq!(normalize_agent_command_identity("agy"), "agy");
         // Non-ASCII must not panic.
         assert_eq!(normalize_agent_command_identity("my-agënt"), "my-agënt");
         // Edge cases: empty, whitespace-only, bare separators.
@@ -1673,6 +1699,43 @@ mod tests {
         assert_eq!(normalize_agent_command_identity("   "), "");
         assert_eq!(normalize_agent_command_identity("/"), "");
         assert_eq!(normalize_agent_command_identity("///"), "");
+    }
+
+    #[test]
+    fn default_agent_args_empty_for_antigravity_on_all_platforms() {
+        for cmd in [
+            "antigravity",
+            "agy",
+            "google-antigravity",
+            "agy_acp_server",
+            "agy_acp_server.par",
+            "agy_acp_server.exe",
+            "/usr/local/bin/agy_acp_server.par",
+            r"C:\Tools\agy_acp_server.exe",
+        ] {
+            assert_eq!(
+                default_agent_args(cmd),
+                Some(Vec::<String>::new()),
+                "expected empty args for {cmd}"
+            );
+            assert_eq!(normalize_agent_args(cmd, Vec::new()), Vec::<String>::new());
+            assert_eq!(
+                normalize_agent_args(cmd, vec!["acp".into()]),
+                Vec::<String>::new()
+            );
+        }
+    }
+
+    #[test]
+    fn normalize_agent_args_preserves_explicit_custom_antigravity_args() {
+        assert_eq!(
+            normalize_agent_args("antigravity", vec!["--flag".into(), "val".into()]),
+            vec!["--flag", "val"]
+        );
+        assert_eq!(
+            normalize_agent_args("agy", vec!["--model".into(), "gemini".into()]),
+            vec!["--model", "gemini"]
+        );
     }
 
     #[test]

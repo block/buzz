@@ -476,6 +476,13 @@ function getOnboardingAuthMethods(
     return supported.slice(0, 1);
   }
 
+  if (runtime.id === "antigravity") {
+    const preferred =
+      supported.find((method) => method.id === "oauth-personal") ??
+      supported[0];
+    return preferred ? [preferred] : [];
+  }
+
   return supported;
 }
 

@@ -7,7 +7,8 @@ use super::{
     effective_agent_command, find_nvm_default_bin, is_login_shell_path_uninit, is_safe_nvm_tag,
     managed_agent_avatar_url, normalize_agent_args, parse_semver_tag, probe_codex_acp_version,
     record_agent_command, refresh_login_shell_path, try_record_agent_command,
-    BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+    ANTIGRAVITY_AVATAR_URL, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
+    GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -679,6 +680,7 @@ fn probe_codex_acp_version_parses_full_semver_output() {
     );
 }
 
+mod challenger_m1_stress_tests;
 mod codex_version;
 
 #[cfg(unix)]
@@ -1815,5 +1817,141 @@ fn discovery_publish_path_drops_mid_flight_delete() {
     assert!(
         lookup_loaded_harness_by_id("mid-flight-delete").is_none(),
         "discovery's publish must not resurrect a harness deleted mid-discovery"
+    );
+}
+
+#[test]
+fn test_known_acp_runtime_exact_finds_antigravity() {
+    let rt = super::known_acp_runtime_exact("antigravity").expect("antigravity runtime must exist");
+    assert_eq!(rt.id, "antigravity");
+    assert_eq!(rt.label, "Antigravity");
+    assert!(rt.commands.contains(&"agy"));
+    assert!(rt.aliases.contains(&"google-antigravity"));
+    assert!(rt.aliases.contains(&"antigravity"));
+    assert_eq!(rt.skill_dir, Some(".antigravity/skills"));
+}
+
+#[test]
+fn test_known_acp_runtime_finds_antigravity_by_command_and_alias() {
+    assert_eq!(
+        super::known_acp_runtime("antigravity").map(|r| r.id),
+        Some("antigravity")
+    );
+    assert_eq!(
+        super::known_acp_runtime("agy").map(|r| r.id),
+        Some("antigravity")
+    );
+    assert_eq!(
+        super::known_acp_runtime("google-antigravity").map(|r| r.id),
+        Some("antigravity")
+    );
+    assert_eq!(
+        super::known_acp_runtime("/opt/bin/agy").map(|r| r.id),
+        Some("antigravity")
+    );
+}
+
+#[test]
+fn test_antigravity_avatar_url_resolution() {
+    assert_eq!(
+        super::managed_agent_avatar_url("antigravity"),
+        Some(ANTIGRAVITY_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        super::managed_agent_avatar_url("agy"),
+        Some(ANTIGRAVITY_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        super::managed_agent_avatar_url("google-antigravity"),
+        Some(ANTIGRAVITY_AVATAR_URL.to_string())
+    );
+}
+
+#[test]
+fn normalize_command_identity_handles_par_and_exe_suffixes() {
+    assert_eq!(
+        super::normalize_command_identity("agy_acp_server"),
+        "agy-acp-server"
+    );
+    assert_eq!(
+        super::normalize_command_identity("agy_acp_server.par"),
+        "agy-acp-server"
+    );
+    assert_eq!(
+        super::normalize_command_identity("AGY_ACP_SERVER.PAR"),
+        "agy-acp-server"
+    );
+    assert_eq!(
+        super::normalize_command_identity("/opt/google/bin/agy_acp_server.par"),
+        "agy-acp-server"
+    );
+    assert_eq!(
+        super::normalize_command_identity(r"C:\Program Files\Google\agy_acp_server.exe"),
+        "agy-acp-server"
+    );
+    assert_eq!(
+        super::normalize_command_identity("antigravity"),
+        "antigravity"
+    );
+    assert_eq!(
+        super::normalize_command_identity("google-antigravity"),
+        "google-antigravity"
+    );
+    assert_eq!(super::normalize_command_identity("agy"), "agy");
+}
+
+#[test]
+fn default_agent_args_empty_for_antigravity_on_all_platforms() {
+    for cmd in [
+        "antigravity",
+        "agy",
+        "google-antigravity",
+        "agy_acp_server",
+        "agy_acp_server.par",
+        "agy_acp_server.exe",
+        "/usr/local/bin/agy_acp_server.par",
+        r"C:\Google\agy_acp_server.exe",
+    ] {
+        assert_eq!(
+            super::default_agent_args(cmd),
+            Some(Vec::<String>::new()),
+            "expected empty args for {cmd}"
+        );
+        assert_eq!(
+            normalize_agent_args(cmd, Vec::new()),
+            Vec::<String>::new(),
+            "expected empty args on empty input for {cmd}"
+        );
+        assert_eq!(
+            normalize_agent_args(cmd, vec!["acp".into()]),
+            Vec::<String>::new(),
+            "expected legacy 'acp' to normalize to empty for {cmd}"
+        );
+    }
+}
+
+#[test]
+fn normalize_agent_args_preserves_explicit_custom_antigravity_args() {
+    assert_eq!(
+        normalize_agent_args("antigravity", vec!["--custom-flag".into(), "value".into()]),
+        vec!["--custom-flag", "value"]
+    );
+    assert_eq!(
+        normalize_agent_args("agy", vec!["--model".into(), "gemini".into()]),
+        vec!["--model", "gemini"]
+    );
+}
+
+#[test]
+fn test_antigravity_can_auto_install_matches_platform_support() {
+    let entries = super::discover_acp_runtimes_from(None, false);
+    let entry = entries
+        .iter()
+        .find(|e| e.id == "antigravity")
+        .expect("antigravity must be present in catalog");
+    // PATH-probed preset — no managed installer
+    assert!(
+        !entry.can_auto_install,
+        "antigravity can_auto_install must be false for PATH-probed preset"
     );
 }

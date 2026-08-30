@@ -15,6 +15,7 @@ license permits redistribution.
 | `omp.svg` | [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) | `667111575ebba136dadfd6989379e7f67e0d40d9` | MIT © 2025 Mario Zechner; © 2025–2026 Can Bölük | `assets/icon.svg` | None |
 | `kimi.png` | [MoonshotAI/kimi-cli](https://github.com/MoonshotAI/kimi-cli) | `4a550effdfcb29a25a5d325bf935296cc50cd417` | Apache-2.0; NOTICE: Kimi Code CLI © 2025 Moonshot AI | `web/public/logo.png` | None |
 | `grok.svg` | [SpaceXAI brand guidelines](https://x.ai/legal/brand-guidelines) | Retrieved 2026-07-25 | xAI Brand Guidelines: marks may be used to accurately refer to xAI or its services; logos must be used exactly as provided | `SpaceXAI_Grok_Assets.zip` → `Grok_Logomark_Dark.svg` | None |
+| `antigravity.svg` | Placeholder neutral mark for Antigravity harness | 2026-08-20 | Neutral geometric placeholder (not a Google brand asset); nominative use only | `desktop/src/features/onboarding/ui/HarnessMarks.tsx` four-point star path | Scaled to 24×24 viewBox, `currentColor` |
 
 ## Inline SVG marks (`RUNTIME_MARKS`)
 
@@ -26,6 +27,7 @@ Monochrome marks inlined as `currentColor` paths in
 |---|---|---|---|---|---|
 | Goose | [block/goose](https://github.com/block/goose) | `305849b71709b95b86ed9f11bd3bc939899c0aab` | Apache-2.0 © Block, Inc. | `documentation/static/img/goose.svg` | `fill="#101010"` → `currentColor`; dropped the redundant clipPath wrapper |
 | Cursor | [simple-icons](https://github.com/simple-icons/simple-icons) | `16.27.1` (slug `cursor`) | CC0-1.0 (path data); nominative use of the Cursor mark to identify Cursor's harness | `icons/cursor.svg` | `fill` → `currentColor` |
+| Antigravity | Neutral placeholder | 2026-08-20 | Neutral placeholder mark (not a Google brand asset) | `desktop/src/features/onboarding/ui/HarnessMarks.tsx` `AntigravityMark` | `fill` → `currentColor`; single four-point star path |
 
 Codex deliberately has **no** bundled mark: the OpenAI blossom was removed
 from simple-icons in v16 at the vendor's request, so we do not ship it —

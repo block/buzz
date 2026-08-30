@@ -123,4 +123,18 @@ mod tests {
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("Codex CLI"));
     }
+
+    #[test]
+    fn vendor_metadata_antigravity_contract() {
+        let agy = known_acp_runtime_exact("antigravity").unwrap();
+        assert_eq!(
+            agy.cli_install_instructions_url,
+            "https://antigravity.google.com"
+        );
+        assert!(agy.adapter_install_instructions_url.is_empty());
+        assert!(agy.cli_install_hint.contains("Google Antigravity"));
+        assert!(agy.cli_install_commands.is_empty());
+        assert!(agy.adapter_install_commands.is_empty());
+        assert_eq!(agy.skill_dir, Some(".antigravity/skills"));
+    }
 }
