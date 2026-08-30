@@ -480,8 +480,11 @@ function VirtualizedTimelineRows({
     (version: number) => version + 1,
     0,
   );
-  const { cancel: cancelBottomSettle, settle: settleAtBottom } =
-    useVirtualizedBottomSettle(hostRef, listRef, itemsLengthRef);
+  const {
+    cancel: cancelBottomSettle,
+    hasBottomIntent,
+    settle: settleAtBottom,
+  } = useVirtualizedBottomSettle(hostRef, listRef, itemsLengthRef);
   const { arm: armUpwardMomentum } = useUpwardPaginationWheel(
     hostRef,
     cancelBottomSettle,
@@ -716,7 +719,15 @@ function VirtualizedTimelineRows({
       // emit `onScroll` without any user input. Cancelling here strands the
       // channel above its newest message. The settle hook's wheel, pointer,
       // touch, and key listeners are the authoritative user-interaction gate.
-      onAtBottomStateChange?.(distanceFromBottom <= 32);
+      const atBottom = distanceFromBottom <= 32;
+      // Geometry remeasurement can emit an intermediate offset while the
+      // bottom-settle loop still owns the scroller. Reporting that transient as
+      // reader navigation freezes live arrivals until the user sends or jumps
+      // to the new-message pill. Only a real input transfer (which cancels
+      // bottom intent) may report a non-bottom state.
+      if (atBottom || !hasBottomIntent()) {
+        onAtBottomStateChange?.(atBottom);
+      }
       updatePinnedDayLabel(offset);
       if (offset <= 200) {
         // Layout scrolls near the top must not poison the reader's next input.
@@ -725,6 +736,7 @@ function VirtualizedTimelineRows({
     },
     [
       armUpwardMomentum,
+      hasBottomIntent,
       onAtBottomStateChange,
       onStartReached,
       onVirtualizerRangeChanged,

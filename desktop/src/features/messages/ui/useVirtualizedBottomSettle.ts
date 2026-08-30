@@ -125,6 +125,8 @@ export function useVirtualizedBottomSettle(
     pinToBottom();
   }, [cancelFrame, pinToBottom]);
 
+  const hasBottomIntent = React.useCallback(() => bottomIntentRef.current, []);
+
   React.useEffect(() => cancel, [cancel]);
-  return { cancel, settle };
+  return { cancel, hasBottomIntent, settle };
 }
