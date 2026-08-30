@@ -353,9 +353,7 @@ fn next_task_transition_created_at(now: u64, events: &[&AssignmentQueryEvent]) -
         .iter()
         .filter(|event| {
             event.kind == 1
-                && query_tag_values(event, "t")
-                    .iter()
-                    .any(|label| *label == TASK_TRANSITION_LABEL)
+                && query_tag_values(event, "t").contains(&TASK_TRANSITION_LABEL)
         })
         .map(|event| event.created_at)
         .max()
@@ -372,6 +370,7 @@ impl IssueAssignmentOperation {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_create_issue(
     client: &BuzzClient,
     repo_owner: &str,
