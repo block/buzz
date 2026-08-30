@@ -64,8 +64,15 @@ fn common_binary_paths() -> &'static [PathBuf] {
                 paths.push(PathBuf::from(appdata).join("npm"));
             }
             if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                let local = PathBuf::from(local);
+                // Codex Desktop unpacks its bundled CLI to
+                // %LOCALAPPDATA%\OpenAI\Codex\bin — no `Programs` segment. Its
+                // installer adds that dir to the user PATH in the registry, but
+                // an app launched before that write inherits a PATH without it,
+                // so probing is what makes those installs discoverable.
+                paths.push(local.join("OpenAI").join("Codex").join("bin"));
                 paths.push(
-                    PathBuf::from(local)
+                    local
                         .join("Programs")
                         .join("OpenAI")
                         .join("Codex")
