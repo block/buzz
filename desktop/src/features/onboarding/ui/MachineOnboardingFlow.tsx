@@ -64,6 +64,7 @@ export function MachineOnboardingFlow({
   complete,
   continueWithIdentity,
   continueWithRecoveredIdentity,
+  existingIdentityPubkey,
   identityLost,
   initialPage,
   queryClient,
@@ -72,6 +73,7 @@ export function MachineOnboardingFlow({
   complete: (pubkey?: string) => void;
   continueWithIdentity: (pubkey: string) => void;
   continueWithRecoveredIdentity: (pubkey: string) => void;
+  existingIdentityPubkey?: string | null;
   identityLost: boolean;
   initialPage?: MachineOnboardingPage;
   queryClient: QueryClient;
@@ -100,7 +102,7 @@ export function MachineOnboardingFlow({
   >(null);
   const [phoneRecoveryStep, setPhoneRecoveryStep] = React.useState("loading");
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
-    null,
+    existingIdentityPubkey ?? null,
   );
   const [identityStorage, setIdentityStorage] = React.useState<
     IdentityStorage | undefined
@@ -172,6 +174,27 @@ export function MachineOnboardingFlow({
     }
   }, [continueWithRecoveredIdentity, queryClient]);
 
+  const continueWithExistingIdentity = React.useCallback(async () => {
+    setIsPending(true);
+    setError(null);
+    try {
+      const identity = await getIdentity();
+      continueWithIdentity(identity.pubkey);
+      queryClient.setQueryData(["identity"], identity);
+      setIdentityWasImported(false);
+      setSelectedPubkey(identity.pubkey);
+      setIdentityStorage(identity.storage);
+      setTransitionDirection("forward");
+      setPage("setup");
+    } catch (cause) {
+      setError(
+        cause instanceof Error ? cause.message : "Failed to load identity",
+      );
+    } finally {
+      setIsPending(false);
+    }
+  }, [continueWithIdentity, queryClient]);
+
   const replaceLostIdentity = React.useCallback(async () => {
     const confirmed = window.confirm(
       "This will create a new identity and abandon your previous key. This cannot be undone. Continue?",
@@ -236,6 +259,15 @@ export function MachineOnboardingFlow({
   }, [backupSession]);
 
   const backFromSetup = React.useCallback(() => {
+    if (
+      existingIdentityPubkey &&
+      selectedPubkey === existingIdentityPubkey &&
+      !identityWasImported
+    ) {
+      setTransitionDirection("backward");
+      setPage("identity");
+      return;
+    }
     if (identityWasImported) {
       setKeyImportFormKey((current) => current + 1);
       setKeyImportStage("key-entry");
@@ -250,7 +282,13 @@ export function MachineOnboardingFlow({
     setTransitionDirection("backward");
     setReturningFromSecurity(false);
     setPage("backup");
-  }, [backupSession, backupSubview, identityWasImported]);
+  }, [
+    backupSession,
+    backupSubview,
+    existingIdentityPubkey,
+    identityWasImported,
+    selectedPubkey,
+  ]);
 
   const chromeBackAction =
     page === "key-import" &&
@@ -327,7 +365,11 @@ export function MachineOnboardingFlow({
                 <Button
                   className={ONBOARDING_LANDING_CTA_CLASS}
                   disabled={isPending}
-                  onClick={() => void loadFreshIdentity()}
+                  onClick={() =>
+                    void (selectedPubkey
+                      ? continueWithExistingIdentity()
+                      : loadFreshIdentity())
+                  }
                   type="button"
                 >
                   {isPending

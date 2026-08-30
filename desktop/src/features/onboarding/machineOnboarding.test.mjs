@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  existingMachineIdentityPubkey,
   migrateMachineOnboardingCompletion,
   readMachineOnboardingCompletion,
 } from "./machineOnboarding.ts";
@@ -45,6 +46,17 @@ const PUBKEY_B =
   "bbbbbb1111112222223333334444445555556666667777778888889999990000bb";
 const LEGACY_KEY = `buzz-onboarding-complete.v1:${PUBKEY_A}`;
 const V2_KEY = `buzz-machine-onboarding-complete.v2:${PUBKEY_A}`;
+
+test("existing community state presents the recovered identity as a continuation", () => {
+  assert.equal(existingMachineIdentityPubkey(PUBKEY_A, null), PUBKEY_A);
+  assert.equal(existingMachineIdentityPubkey(PUBKEY_A, PUBKEY_A), PUBKEY_A);
+  assert.equal(existingMachineIdentityPubkey(PUBKEY_A, PUBKEY_B), PUBKEY_A);
+});
+
+test("blank first launch does not present the generated identity as recovered", () => {
+  assert.equal(existingMachineIdentityPubkey(PUBKEY_A, undefined), null);
+  assert.equal(existingMachineIdentityPubkey(null, null), null);
+});
 
 // ── Fix A regression case ────────────────────────────────────────────────────
 
