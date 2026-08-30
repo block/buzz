@@ -3749,13 +3749,13 @@ fn dispatch_pending(
             Some(a) => a,
             None => {
                 let pending = queue.pending_channels();
-                tracing::debug!(pending_channels = pending, "pool_exhausted");
+                tracing::info!(pending_channels = pending, "pool_exhausted");
                 queue.requeue_preserve_timestamps(batch);
                 queue.mark_complete(channel_id);
                 break;
             }
         };
-        tracing::debug!(agent = agent.index, channel = %channel_id, affinity_hit, "agent_claimed");
+        tracing::info!(agent = agent.index, channel = %channel_id, affinity_hit, "agent_claimed");
 
         let recoverable_batch = match ctx.dedup_mode {
             DedupMode::Queue => Some(batch.clone()),
@@ -3813,7 +3813,7 @@ fn dispatch_pending(
         dispatched_channels.push((channel_id, typing_scope));
         *last_activity = tokio::time::Instant::now();
     }
-    tracing::debug!(
+    tracing::info!(
         dispatched = dispatched_channels.len(),
         queue_depth = queue.pending_channels(),
         "dispatch_pending"
