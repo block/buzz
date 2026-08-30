@@ -1021,15 +1021,23 @@ impl Config {
             }
         };
 
-        // idle_timeout must be strictly less than max_turn_duration. If idle_timeout
-        // >= max_turn_duration, the absolute wall-clock cap would fire before the idle
-        // timeout ever could, making idle_timeout a dead letter.
-        if idle_timeout_secs >= max_turn_duration_secs {
-            return Err(ConfigError::ConfigFile(format!(
-                "idle_timeout ({}s) must be less than max_turn_duration ({}s)",
-                idle_timeout_secs, max_turn_duration_secs
-            )));
-        }
+        // idle_timeout only bites if it fires before the absolute wall-clock cap. If it is
+        // >= max_turn_duration, the cap fires first and idle_timeout is a dead letter.
+        // Rather than reject the config outright — which turns an otherwise-valid setup into
+        // a crash-loop the instant a rolling image tightens this invariant — clamp
+        // idle_timeout down to the lesser of the requested value and max_turn_duration, and
+        // warn. A dead-letter idle_timeout is harmless; a hard config error takes the agent
+        // offline.
+        let idle_timeout_secs = if idle_timeout_secs >= max_turn_duration_secs {
+            tracing::warn!(
+                idle_timeout_secs,
+                max_turn_duration_secs,
+                "idle_timeout >= max_turn_duration; clamping idle_timeout down to max_turn_duration"
+            );
+            max_turn_duration_secs
+        } else {
+            idle_timeout_secs
+        };
 
         let respond_to_allowlist = if args.respond_to == RespondTo::Allowlist {
             let raw = args.respond_to_allowlist.unwrap_or_default();
@@ -2680,17 +2688,27 @@ channels = "ALL"
     }
 
     #[test]
-    fn idle_timeout_must_be_less_than_max_turn_duration() {
-        // The guard in Config::from_args rejects idle >= max_turn.
-        // Exercise the same logic: if idle >= max_turn, it's invalid.
-        let idle = 3600u64;
-        let max_turn = 3600u64;
-        assert!(
-            idle >= max_turn,
-            "test precondition: idle must be >= max_turn to trigger guard"
+    fn idle_timeout_clamped_to_max_turn_duration() {
+        // idle >= max is no longer a hard error: Config::from_args clamps idle_timeout down
+        // to max_turn_duration (the lesser of the two) and warns, instead of rejecting the
+        // whole config — which would take the agent offline / crash-loop it.
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--idle-timeout",
+            "900",
+            "--max-turn-duration",
+            "300",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("idle >= max should clamp, not error");
+        assert_eq!(
+            config.idle_timeout_secs, 300,
+            "idle_timeout should be clamped down to max_turn_duration"
         );
 
-        // And the valid case (const assertion so clippy doesn't flag it):
+        // The common case is untouched: the default idle stays below the default cap.
         const {
             assert!(DEFAULT_IDLE_TIMEOUT_SECS < DEFAULT_MAX_TURN_DURATION_SECS);
         }
