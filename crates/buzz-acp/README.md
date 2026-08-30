@@ -248,6 +248,19 @@ Forum event kinds:
 
 > **Note:** Without `--no-mention-filter` (or `require_mention = false`), the default `subscribe=mentions` mode filters events that don't @mention the agent — forum posts will be invisible.
 
+### Owner broadcast routing
+
+Use `owner-broadcast` when the owner's untagged messages should wake every agent,
+but explicit recipient tags should wake only the selected agents:
+
+```bash
+buzz-acp --subscribe owner-broadcast
+```
+
+This mode includes stream messages, forum posts, and forum comments by default.
+Messages from non-owner authors still require an explicit mention. Use `--kinds`
+to override the accepted event kinds.
+
 ## How It Works
 
 1. **Startup** — Spawns N agent subprocesses (default 1), sends ACP `initialize` to each, connects to the relay with NIP-42 auth.

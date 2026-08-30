@@ -51,7 +51,26 @@ pub enum ConfigError {
 pub enum SubscribeMode {
     Mentions,
     All,
+    /// Broadcast unmentioned owner messages to every agent, while explicit
+    /// agent mentions remain exclusive.
+    #[value(name = "owner-broadcast")]
+    OwnerBroadcast,
     Config,
+}
+
+pub(crate) fn default_owner_broadcast_kinds() -> Vec<u32> {
+    use buzz_core::kind::{
+        KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER,
+        KIND_WORKFLOW_APPROVAL_REQUESTED,
+    };
+
+    vec![
+        KIND_STREAM_MESSAGE,
+        KIND_FORUM_POST,
+        KIND_FORUM_COMMENT,
+        KIND_WORKFLOW_APPROVAL_REQUESTED,
+        KIND_STREAM_REMINDER,
+    ]
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -1323,6 +1342,21 @@ pub fn resolve_channel_filters(
                 );
             }
         }
+        SubscribeMode::OwnerBroadcast => {
+            let kinds = config
+                .kinds_override
+                .clone()
+                .unwrap_or_else(default_owner_broadcast_kinds);
+            for ch in &target_channels {
+                result.insert(
+                    *ch,
+                    ChannelFilter {
+                        kinds: Some(kinds.clone()),
+                        require_mention: false,
+                    },
+                );
+            }
+        }
         SubscribeMode::Config => {
             for ch in discovered_channels {
                 let mut merged_kinds: Option<Vec<u32>> = Some(vec![]);
@@ -1410,6 +1444,15 @@ pub fn resolve_dynamic_channel_filter(
         }),
         SubscribeMode::All => Some(ChannelFilter {
             kinds: config.kinds_override.clone(),
+            require_mention: false,
+        }),
+        SubscribeMode::OwnerBroadcast => Some(ChannelFilter {
+            kinds: Some(
+                config
+                    .kinds_override
+                    .clone()
+                    .unwrap_or_else(default_owner_broadcast_kinds),
+            ),
             require_mention: false,
         }),
         SubscribeMode::Config => {
@@ -1829,6 +1872,26 @@ mod tests {
 
         let f = result.get(&channels[0]).unwrap();
         assert_eq!(f.kinds.as_ref().unwrap(), &[9, 7]);
+    }
+
+    #[test]
+    fn test_owner_broadcast_subscribes_to_stream_and_forum_messages() {
+        let config = test_config(SubscribeMode::OwnerBroadcast);
+        let channel = Uuid::new_v4();
+        let result = resolve_channel_filters(&config, &[channel], &[]);
+        let filter = result.get(&channel).unwrap();
+        let kinds = filter.kinds.as_ref().unwrap();
+
+        assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE));
+        assert!(kinds.contains(&buzz_core::kind::KIND_FORUM_POST));
+        assert!(kinds.contains(&buzz_core::kind::KIND_FORUM_COMMENT));
+        assert!(!filter.require_mention);
+        assert_eq!(
+            resolve_dynamic_channel_filter(&config, channel, &[])
+                .unwrap()
+                .kinds,
+            filter.kinds
+        );
     }
 
     #[test]
