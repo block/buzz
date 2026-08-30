@@ -853,6 +853,22 @@ impl AcpClient {
         self.send_notification("session/cancel", params).await
     }
 
+    /// Send a `session/close` **request** and wait for the agent to acknowledge.
+    ///
+    /// Tells the agent it may release everything tied to the session. Agents that
+    /// back each session with its own child process (the Claude adapter spawns one
+    /// `claude` per session) only reap that child here — dropping our session ID
+    /// without closing leaks the process for the lifetime of the agent subprocess.
+    ///
+    /// `session/close` is a baseline method for agents reporting protocol version
+    /// 2, so callers should gate on that; a version-1 agent answers method-not-found.
+    pub async fn session_close(&mut self, session_id: &str) -> Result<(), AcpError> {
+        let params = serde_json::json!({
+            "sessionId": session_id,
+        });
+        self.send_request("session/close", params).await.map(|_| ())
+    }
+
     /// Returns `true` if a `session/prompt` request is currently in flight.
     pub fn has_in_flight_prompt(&self) -> bool {
         self.last_prompt_id.is_some()
