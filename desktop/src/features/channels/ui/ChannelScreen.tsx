@@ -35,7 +35,6 @@ import { useWelcomeAgentCreate } from "@/features/channels/useWelcomeAgentCreate
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
   useChannelMessagesQuery,
-  useChannelSubscription,
   useChannelWindowQuery,
   useDeleteMessageMutation,
   useEditMessageMutation,
@@ -206,7 +205,6 @@ export function ChannelScreen({
     activeChannel,
     effectiveOpenThreadHeadId,
   );
-  useChannelSubscription(activeChannel);
   const { fetchOlder, hasOlderMessages, historyExhausted, isFetchingOlder } =
     useFetchOlderMessages(activeChannel);
   const latestActiveMessage = React.useMemo(() => {
@@ -481,6 +479,12 @@ export function ChannelScreen({
     [editTargetId, threadPanelData.messages, timelineMessages],
   );
   const [emptyDeleteId, setEmptyDeleteId] = React.useState<string | null>(null);
+  const hasAuxiliaryPanel = Boolean(
+    effectiveOpenThreadHeadId ||
+      openAgentSessionPubkey ||
+      profilePanelPubkey ||
+      channelManagementOpen,
+  );
   const {
     handleCancelEdit,
     handleCancelThreadReply,
@@ -497,6 +501,8 @@ export function ChannelScreen({
     handleSelectThreadReplyTarget,
     handleToggleReaction,
   } = useChannelPaneHandlers({
+    agentReplyAutoOpen: [activeChannel, agentPubkeys, relaySelfPubkey],
+    hasActiveAuxiliaryPanel: hasAuxiliaryPanel,
     deleteMessageMutation,
     editMessageMutation,
     editTargetId,
@@ -673,12 +679,6 @@ export function ChannelScreen({
     threadReplyTargetId,
     threadReplyTargetMessage,
   });
-  const hasAuxiliaryPanel = Boolean(
-    effectiveOpenThreadHeadId ||
-      openAgentSessionPubkey ||
-      profilePanelPubkey ||
-      channelManagementOpen,
-  );
   const displayedThreadHeadMessage = threadPanelData.threadHead;
   const displayedThreadAllMessages = threadPanelData.messages;
   const displayedThreadMessages = threadPanelData.visibleReplies;
