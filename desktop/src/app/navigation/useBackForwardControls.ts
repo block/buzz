@@ -4,7 +4,11 @@ import {
   useRouter,
   useRouterState,
 } from "@tanstack/react-router";
+import { isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
+import { matchBackForwardChord } from "@/app/navigation/backForwardChords";
+import { traverseHistory } from "@/app/navigation/navigationGuard";
 import { isMacPlatform } from "@/shared/lib/platform";
 import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 
@@ -13,19 +17,6 @@ type RouterHistoryState = {
   __TSR_key?: string;
   key?: string;
 };
-
-function isEditableTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof HTMLElement)) {
-    return false;
-  }
-
-  return (
-    target.isContentEditable ||
-    target.closest(
-      'input, textarea, select, [contenteditable=""], [contenteditable="true"]',
-    ) !== null
-  );
-}
 
 export function useBackForwardControls() {
   const router = useRouter();
@@ -69,7 +60,7 @@ export function useBackForwardControls() {
       return;
     }
 
-    router.history.back();
+    traverseHistory(router.history, "back");
   }, [canGoBack, router.history]);
 
   const goForward = React.useCallback(() => {
@@ -77,46 +68,38 @@ export function useBackForwardControls() {
       return;
     }
 
-    router.history.forward();
+    traverseHistory(router.history, "forward");
   }, [canGoForward, router.history]);
 
   const handleKeyDown = React.useEffectEvent((event: KeyboardEvent) => {
-    if (isEditableTarget(event.target)) {
-      return;
-    }
+    // Note: the chords deliberately fire even when focus is inside an
+    // editable element. The composer autofocuses on every channel switch
+    // (`useComposerAutofocus`), so in steady state focus almost always
+    // lives in a contenteditable — an editable-target guard here made the
+    // shortcuts effectively dead (#3775). Safe because neither ⌘[ / ⌘]
+    // (macOS) nor Alt+←/→ (Windows/Linux) carry text-editing semantics,
+    // and the TipTap editor binds no conflicting shortcuts.
+    const direction = matchBackForwardChord(event, isMacPlatform());
 
-    const isMac = isMacPlatform();
-    const isBackShortcut = isMac
-      ? event.metaKey &&
-        !event.ctrlKey &&
-        !event.altKey &&
-        !event.shiftKey &&
-        (event.key === "[" || event.code === "BracketLeft")
-      : event.altKey &&
-        !event.metaKey &&
-        !event.ctrlKey &&
-        !event.shiftKey &&
-        event.key === "ArrowLeft";
-    const isForwardShortcut = isMac
-      ? event.metaKey &&
-        !event.ctrlKey &&
-        !event.altKey &&
-        !event.shiftKey &&
-        (event.key === "]" || event.code === "BracketRight")
-      : event.altKey &&
-        !event.metaKey &&
-        !event.ctrlKey &&
-        !event.shiftKey &&
-        event.key === "ArrowRight";
-
-    if (isBackShortcut) {
+    if (direction === "back") {
       event.preventDefault();
       goBack();
       return;
     }
 
-    if (isForwardShortcut) {
+    if (direction === "forward") {
       event.preventDefault();
+      goForward();
+    }
+  });
+
+  const handleMouseNav = React.useEffectEvent((direction: string) => {
+    if (direction === "back") {
+      goBack();
+      return;
+    }
+
+    if (direction === "forward") {
       goForward();
     }
   });
@@ -125,6 +108,23 @@ export function useBackForwardControls() {
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, []);
+
+  // macOS: WKWebView never delivers X1/X2 button events or horizontal
+  // swipe gestures to the DOM, so the native layer catches them
+  // (`mouse_nav.rs`) and forwards them as a Tauri event.
+  React.useEffect(() => {
+    if (!isTauri()) {
+      return;
+    }
+
+    const unlistenPromise = listen<string>("mouse-nav", (event) => {
+      handleMouseNav(event.payload);
+    });
+
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
     };
   }, []);
 

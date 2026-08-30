@@ -351,6 +351,12 @@ export type UseSnapshotSendControllerResult = {
   relaySelfPubkey: string | null;
   state: SnapshotSendState;
   /**
+   * Read the latest error synchronously — right after `beginSend` resolves the
+   * render-captured `state.error` is stale until the next commit, so callers
+   * that toast on failure must read through here.
+   */
+  getCurrentError: () => string | null;
+  /**
    * Execute destination creation plus prepare → encode → upload → send behind
    * one concurrency guard. A second call while the first is in flight returns
    * false before opening another DM or encoding another snapshot.
@@ -390,6 +396,15 @@ export function useSnapshotSendController(
     error: null,
   });
 
+  // Mirror `state` into a ref so callers can read the latest error
+  // synchronously right after `beginSend` resolves — the render-captured
+  // `state` in their closure is stale until the next render commits.
+  const stateRef = React.useRef(state);
+  const commitState = React.useCallback((next: SnapshotSendState) => {
+    stateRef.current = next;
+    setState(next);
+  }, []);
+
   // Single-concurrency guard covering the full encode → upload → send action.
   // Stored in a ref so it survives re-renders without triggering effects.
   const guardRef = React.useRef(createSendGuard());
@@ -417,7 +432,7 @@ export function useSnapshotSendController(
         checkEligibilityFn: () => checkSendEligibility(queryClient, channelId),
         uploadFn: (bytes, filename) => uploadMediaBytes(bytes, filename),
         sendFn: (args) => sendMutation.mutateAsync(args),
-        setStateFn: setState,
+        setStateFn: commitState,
         buildMessageFn: (descriptor) => {
           const message = buildOutgoingMessage("", [descriptor]);
           return attachmentLabel?.trim()
@@ -430,15 +445,15 @@ export function useSnapshotSendController(
             : message;
         },
       }),
-      setState,
+      commitState,
     );
   }
 
   const reset = React.useCallback(() => {
     if (!guardRef.current.inFlight) {
-      setState({ phase: "idle", error: null });
+      commitState({ phase: "idle", error: null });
     }
-  }, []);
+  }, [commitState]);
 
   return {
     isDmSafetyReady:
@@ -447,6 +462,7 @@ export function useSnapshotSendController(
         relaySelfQuery.status === "success"),
     relaySelfPubkey: relaySelfQuery.data ?? null,
     state,
+    getCurrentError: () => stateRef.current.error,
     beginSend,
     reset,
   };

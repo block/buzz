@@ -5,6 +5,14 @@ analyzer:
     - custom_lint
   errors:
     invalid_use_of_visible_for_overriding_member: ignore
+  exclude:
+    - build/**
+    - android/**
+    - ios/**
+    - web/**
+    - windows/**
+    - macos/**
+    - linux/**
 
 linter:
   rules:

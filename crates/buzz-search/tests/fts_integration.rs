@@ -28,6 +28,8 @@ const MIGRATION_0007_SQL: &str = include_str!("../../../migrations/0007_nip_rs_r
 const MIGRATION_0008_SQL: &str =
     include_str!("../../../migrations/0008_fresh_install_search_allowlist.sql");
 const MIGRATION_0014_SQL: &str = include_str!("../../../migrations/0014_push_lease_fts.sql");
+const MIGRATION_0033_SQL: &str =
+    include_str!("../../../migrations/0033_private_managed_agent_fts.sql");
 
 async fn setup() -> (PgPool, String) {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
@@ -81,6 +83,9 @@ async fn setup() -> (PgPool, String) {
     pool.execute(MIGRATION_0014_SQL)
         .await
         .expect("apply 0014 migration");
+    pool.execute(MIGRATION_0033_SQL)
+        .await
+        .expect("apply 0033 migration");
     (pool, schema)
 }
 
@@ -299,6 +304,67 @@ async fn kind0_search_by_display_name_works_without_flattening() {
             .unwrap();
         assert_eq!(r.hits.len(), 1, "kind:0 query {q:?} should find Alice");
     }
+
+    teardown(pool, &schema).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn short_kind0_prefix_prioritizes_exact_lexeme_on_a_noisy_page() {
+    let (pool, schema) = setup().await;
+
+    let c = mk_community(&pool, "short-profile-prefix.example").await;
+    let exact_id = rand_bytes32();
+    insert_event(
+        &pool,
+        c,
+        exact_id,
+        rand_bytes32(),
+        0,
+        r#"{"display_name":"jm"}"#,
+        None,
+        1_700_000_000,
+    )
+    .await;
+
+    // These profiles all match jm:* and are newer than the exact name. Without
+    // exact-lexeme priority they consume the entire bounded first page.
+    for (i, display_name) in ["jma", "jmbravo", "jmcharlie", "jmdelta"]
+        .iter()
+        .enumerate()
+    {
+        insert_event(
+            &pool,
+            c,
+            rand_bytes32(),
+            rand_bytes32(),
+            0,
+            &format!(r#"{{"display_name":"{display_name}"}}"#),
+            None,
+            1_700_000_100 + i as i64,
+        )
+        .await;
+    }
+
+    let svc = SearchService::new(pool.clone());
+    let first_page = svc
+        .search(&SearchQuery {
+            community: c,
+            q: "jm".into(),
+            channel_scope: ChannelScope::Any,
+            kinds: Some(vec![0]),
+            authors: None,
+            since: None,
+            until: None,
+            page: 1,
+            per_page: 3,
+            mode: buzz_search::SearchMode::Prefix,
+        })
+        .await
+        .expect("short profile prefix search ok");
+
+    assert_eq!(first_page.hits.len(), 3);
+    assert_eq!(first_page.hits[0].event_id, exact_id);
 
     teardown(pool, &schema).await;
 }

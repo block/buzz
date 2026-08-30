@@ -1249,4 +1249,65 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
+
+    /// Regression for the RELAY_OPERATOR_API_ORIGIN decoupling: with the
+    /// operator allowlist set but no origin configured (the shape an
+    /// admin-console-only operator boots in), the provisioning endpoints must
+    /// fail closed with a clean 500 — never a panic, and never a silent
+    /// success. This exercises the request-time guard that replaced the boot
+    /// hard-error. It uses a lazy pool and needs no Postgres, because the
+    /// origin check in `authorize_operator_request` runs before any DB access.
+    #[tokio::test]
+    async fn provisioning_fails_closed_when_origin_unset_but_pubkeys_set() {
+        let operator = Keys::generate();
+
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.relay_operator_pubkeys = vec![operator.public_key().to_hex()];
+        config.relay_operator_api_origin = None;
+
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            Keys::generate(),
+            media_storage,
+        );
+        let state = Arc::new(state);
+
+        let response =
+            provision_community(state, &operator, "acme.example", &Keys::generate()).await;
+
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "provisioning must reject fail-closed when the operator API origin is unset"
+        );
+        let body = read_json(response).await;
+        assert_eq!(body["error"], "internal server error");
+    }
 }

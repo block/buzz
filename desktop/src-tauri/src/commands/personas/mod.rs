@@ -28,6 +28,8 @@ fn trim_optional(value: Option<String>) -> Option<String> {
 
 mod pending;
 pub(in crate::commands) use pending::retain_persona_pending;
+pub(in crate::commands) use pending::retain_persona_pending_at;
+pub(crate) use pending::tombstone_persona_at;
 pub(super) use pending::tombstone_persona_pending;
 mod create;
 pub use create::create_persona;
@@ -38,6 +40,8 @@ mod update;
 pub use update::update_persona;
 mod inbound;
 pub use inbound::reconcile_inbound_persona_event;
+#[cfg(test)]
+pub(crate) use inbound::retain_inbound_catalog_witness;
 
 #[tauri::command]
 pub async fn list_personas(app: AppHandle) -> Result<Vec<AgentDefinition>, String> {
@@ -236,8 +240,9 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                 state.clear_agent_session_caches(pk);
                 // Remove nsec from keyring after the record is gone.
                 delete_agent_key(pk);
+                // Tombstone + NIP-IA kind:9035 archive enqueue atomically; the
+                // archive's `persona_id` is derived from the retained 30177 head.
                 super::agents::tombstone_managed_agent_pending(&app, &state, pk);
-                super::agents::archive_managed_agent_pending(&app, &state, pk);
             }
             tombstone_persona_pending(&app, &state, &d_tag);
 
@@ -306,11 +311,14 @@ pub async fn set_persona_active(
 }
 
 pub(crate) const PNG_MAGIC: [u8; 4] = [0x89, 0x50, 0x4E, 0x47];
+mod card;
 mod snapshot;
-pub use snapshot::encode_agent_snapshot_for_send;
-pub use snapshot::export_agent_snapshot;
+pub use card::*;
+#[cfg(test)]
+pub(crate) use snapshot::import::decode_snapshot_from_bytes;
 pub(crate) use snapshot::import::{
-    decode_snapshot_from_bytes, resolve_snapshot_import_behavior, MAX_SNAPSHOT_JSON_BYTES,
+    parse_snapshot_payload_from_bytes, resolve_snapshot_import_behavior, MAX_SNAPSHOT_JSON_BYTES,
     MAX_SNAPSHOT_PNG_BYTES,
 };
 pub use snapshot::{confirm_agent_snapshot_import, preview_agent_snapshot_import};
+pub use snapshot::{encode_agent_snapshot_for_send, export_agent_snapshot};

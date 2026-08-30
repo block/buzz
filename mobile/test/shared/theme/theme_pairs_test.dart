@@ -62,11 +62,15 @@ void main() {
       }
     });
 
-    test('groups are sorted by display name', () {
+    test('Buzz is first and remaining themes are sorted by display name', () {
       final groups = themeGroups();
 
+      expect(groups.paired.first.name, buzzThemeName);
+      expect(groups.light.first.name, buzzThemeName);
+      expect(groups.dark.first.name, buzzDarkThemeName);
+
       for (final list in [groups.paired, groups.light, groups.dark]) {
-        final names = list.map((t) => t.displayName).toList();
+        final names = list.skip(1).map((t) => t.displayName).toList();
         expect(names, orderedEquals(List.of(names)..sort()));
       }
     });

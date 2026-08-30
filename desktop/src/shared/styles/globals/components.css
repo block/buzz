@@ -1,4 +1,13 @@
 @layer components {
+  /* Primary navigation rows share one inactive hierarchy, including preview
+   * features that can appear between the permanent destinations. Keeping the
+   * treatment on the menu prevents newly gated rows from silently rendering
+   * at stronger emphasis than Inbox and Agents. */
+  .sidebar-primary-menu [data-sidebar="menu-button"]:not([data-active="true"])
+    > :is(svg, [data-sidebar="menu-label"]) {
+    opacity: 0.8;
+  }
+
   .buzz-side-panel-enter {
     animation: buzz-side-panel-enter 260ms cubic-bezier(0.32, 0.72, 0, 1) both;
     transform-origin: right center;
@@ -7,9 +16,12 @@
 
   .buzz-huddle-shell {
     --buzz-huddle-drawer-height: 5rem;
+    --buzz-huddle-drawer-inset: 8px;
     --buzz-huddle-drawer-radius: 24px;
     --buzz-huddle-drawer-ease: cubic-bezier(0.32, 0.72, 0, 1);
     --buzz-huddle-drawer-surface: var(--huddle-drawer-surface, 0 0% 0%);
+    /* Keep the drawer surface behind the lifted app so the dark background
+     * remains visible through its rounded lower corners. */
     background: hsl(var(--buzz-huddle-drawer-surface));
   }
 
@@ -56,6 +68,32 @@
 
   .buzz-huddle-app-surface-open::after {
     opacity: 1;
+  }
+
+  .buzz-huddle-drawer-backdrop {
+    background: hsl(var(--buzz-huddle-drawer-surface));
+    bottom: 0;
+    height: calc(
+      var(--buzz-huddle-drawer-height) +
+      var(--buzz-huddle-drawer-radius)
+    );
+    left: 0;
+    opacity: 0;
+    pointer-events: none;
+    position: absolute;
+    right: 0;
+    transition: opacity 260ms var(--buzz-huddle-drawer-ease);
+    z-index: 1;
+  }
+
+  .buzz-huddle-drawer-backdrop-open {
+    opacity: 1;
+  }
+
+  /* The dedicated companion keeps room for the controls without making the
+   * transcript look like a raised card. */
+  .buzz-huddle-app-surface-room-open {
+    bottom: var(--buzz-huddle-drawer-height);
   }
 
   .buzz-huddle-drawer {
@@ -141,6 +179,45 @@
     width: 0.25rem;
   }
 
+  .buzz-huddle-speaking-avatar {
+    isolation: isolate;
+  }
+
+  .buzz-huddle-speaking-avatar::after {
+    border: 2px solid hsl(142 71% 45%);
+    border-radius: inherit;
+    content: "";
+    inset: -2px;
+    opacity: var(--buzz-huddle-speaker-opacity, 0);
+    pointer-events: none;
+    position: absolute;
+    transform: scale(var(--buzz-huddle-speaker-scale, 1.02));
+    transition:
+      opacity 80ms linear,
+      transform 90ms cubic-bezier(0.2, 0, 0, 1);
+    will-change: opacity, transform;
+    z-index: 1;
+  }
+
+  @keyframes buzz-huddle-participant-tile-enter {
+    from {
+      opacity: 0;
+      transform: scale(0.95);
+    }
+
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+
+  .buzz-huddle-participant-tile {
+    animation: buzz-huddle-participant-tile-enter 180ms
+      cubic-bezier(0.23, 1, 0.32, 1) both;
+    transform-origin: center;
+    will-change: opacity, transform;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .buzz-side-panel-enter {
       animation: none;
@@ -151,8 +228,27 @@
       transition: none;
     }
 
+    .buzz-huddle-drawer-backdrop {
+      transition: none;
+    }
+
     .buzz-huddle-mic-meter-bar {
       transition: none;
+    }
+
+    .buzz-huddle-speaking-avatar {
+      isolation: auto;
+    }
+
+    .buzz-huddle-speaking-avatar::after {
+      transform: scale(1.04);
+      transition: none;
+      will-change: auto;
+    }
+
+    .buzz-huddle-participant-tile {
+      animation: none;
+      will-change: auto;
     }
   }
 
@@ -462,7 +558,7 @@
   .buzz-onboarding-runtime-pill {
     animation: buzz-onboarding-runtime-pill-in 180ms
       cubic-bezier(0.22, 1, 0.36, 1) both;
-    font-size: 0.625rem;
+    font-size: calc(var(--buzz-type-rem) * 0.625);
     letter-spacing: 0;
     line-height: 1;
     text-transform: uppercase;
@@ -687,4 +783,30 @@
       animation: none;
     }
   }
+}
+
+/*
+ * Project context (repository detail and the projects overview rail) is a
+ * sibling pod, not a column inside the app's standard content card. This
+ * deliberately sits outside the cascade layers so it can unframe the
+ * utility-styled content surface. Closing the panel or opening chat removes
+ * the marker and restores the normal framed surface.
+ */
+[data-buzz-content-surface]:has([data-project-detail-screen]),
+:root[data-buzz-sidebar]:not(.dark)
+  [data-buzz-content-surface]:has([data-project-detail-screen]),
+:root[data-buzz-sidebar].dark
+  [data-buzz-content-surface]:has([data-project-detail-screen]) {
+  box-shadow: none;
+}
+
+[data-buzz-content-surface]:has([data-project-context-detached="true"]),
+:root[data-buzz-sidebar]:not(.dark)
+  [data-buzz-content-surface]:has([data-project-context-detached="true"]),
+:root[data-buzz-sidebar].dark
+  [data-buzz-content-surface]:has([data-project-context-detached="true"]) {
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
+  margin: 0;
 }

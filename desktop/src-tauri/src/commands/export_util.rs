@@ -35,8 +35,8 @@ pub async fn pick_save_path(
 /// user cancelled the dialog.
 ///
 /// NOT for secrets: the write is plain `std::fs::write` (no atomic commit, no
-/// 0o600). Secret exports go through `pick_save_path` +
-/// `key_backup::write_backup_file`.
+/// 0o600). Secret exports go through `pick_save_path` and a dedicated
+/// secret-file writer such as `key_backup::write_portable_backup_file`.
 pub async fn save_bytes_with_dialog(
     app: &AppHandle,
     suggested_filename: &str,

@@ -23,7 +23,6 @@ use nostr::{
     Event, JsonUtil, Timestamp,
 };
 use std::{
-    collections::HashSet,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -34,18 +33,24 @@ use tower::limit::ConcurrencyLimitLayer;
 use tower_http::{limit::RequestBodyLimitLayer, timeout::TimeoutLayer};
 
 #[derive(Clone)]
+pub struct ProfileRuntime {
+    pub app_attest: Arc<AppAttestVerifier>,
+    pub transport: Arc<dyn PushTransport>,
+}
+
+#[derive(Clone)]
 pub struct AppState {
     pub grant_keyring: Arc<GrantKeyring>,
-    pub app_attest: Arc<AppAttestVerifier>,
     pub authority: Arc<dyn AuthorityStore>,
     pub token_keyring: Arc<TokenKeyring>,
-    pub transport: Arc<dyn PushTransport>,
+    /// Server-owned dogfood application identity and APNs transport. The wire
+    /// profile selector is fixed and App Attest verifies the configured app ID.
+    pub profile: Arc<ProfileRuntime>,
     pub delivery_url: url::Url,
     pub max_grant_lifetime_seconds: i64,
     pub max_installation_lifetime_seconds: i64,
     pub endpoint_quota_window_seconds: i64,
     pub endpoint_quota_max_deliveries: i64,
-    pub enabled_profiles: HashSet<AppProfile>,
     pub now: fn() -> i64,
     pub accepting: Arc<AtomicBool>,
 }
@@ -83,6 +88,7 @@ fn decode_challenge(value: &str) -> Option<[u8; 32]> {
 fn authority_error(e: AuthorityError) -> Response {
     match e {
         AuthorityError::Rejected => error(StatusCode::NOT_FOUND, "not_authorized"),
+        AuthorityError::RateLimited => error(StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
         AuthorityError::Unavailable => {
             error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable")
         }
@@ -125,6 +131,7 @@ async fn challenge(State(s): State<AppState>, body: Bytes) -> Response {
     let c = Challenge {
         id: uuid::Uuid::new_v4(),
         value,
+        created_at: now,
         expires_at,
     };
     if let Err(e) = s.authority.put_challenge(c.clone()).await {
@@ -163,11 +170,13 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         Some(v) => v,
         None => return error(StatusCode::BAD_REQUEST, "invalid_request"),
     };
+    if r.app_profile != AppProfile::BuzzIosDogfood {
+        return error(StatusCode::BAD_REQUEST, "invalid_request");
+    }
     if r.v != WIRE_VERSION
         || r.endpoint_epoch != 1
         || r.expires_at <= now
         || r.expires_at > now.saturating_add(s.max_installation_lifetime_seconds)
-        || !s.enabled_profiles.contains(&r.app_profile)
     {
         return error(StatusCode::BAD_REQUEST, "invalid_request");
     }
@@ -192,12 +201,41 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
     };
     let verified =
         match s
+            .profile
             .app_attest
             .verify_attestation(&r.attestation, &r.key_id, signed.as_bytes())
         {
-            Ok(v) => v,
+            Ok(value) => value,
             Err(_) => return error(StatusCode::UNAUTHORIZED, "invalid_attestation"),
         };
+    let fingerprint = endpoint_fingerprint(r.app_profile, &token);
+    match s
+        .authority
+        .matching_installation(
+            &verified.key_id,
+            r.app_profile,
+            fingerprint,
+            r.endpoint_epoch,
+            r.expires_at,
+            now,
+        )
+        .await
+    {
+        Ok(Some(existing)) if existing.app_attest_public_key == verified.public_key => {
+            return (
+                StatusCode::CREATED,
+                Json(InstallationEnrollResponse {
+                    installation_handle: existing.id,
+                    endpoint_epoch: existing.endpoint_epoch,
+                    expires_at: existing.expires_at,
+                }),
+            )
+                .into_response();
+        }
+        Ok(Some(_)) => return error(StatusCode::NOT_FOUND, "not_authorized"),
+        Ok(None) => {}
+        Err(e) => return authority_error(e),
+    }
     if let Err(e) = s
         .authority
         .consume_challenge(r.challenge_id, challenge, now)
@@ -217,11 +255,11 @@ async fn enroll(State(s): State<AppState>, body: Bytes) -> Response {
         assertion_counter: 0,
         profile: r.app_profile,
         token_ciphertext: ciphertext,
-        token_fingerprint: endpoint_fingerprint(r.app_profile, &token),
+        token_fingerprint: fingerprint,
         endpoint_epoch: 1,
         expires_at: r.expires_at,
     };
-    if let Err(e) = s.authority.create_installation(n).await {
+    if let Err(e) = s.authority.create_installation(n, now).await {
         return authority_error(e);
     }
     (
@@ -252,9 +290,13 @@ async fn verify_installation_assertion<T: serde::Serialize>(
         .installation(installation_id, now)
         .await
         .map_err(authority_error)?;
+    if installation.profile != AppProfile::BuzzIosDogfood {
+        return Err(error(StatusCode::NOT_FOUND, "not_authorized"));
+    }
     let transcript = transcript(domain, signed)
         .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_request"))?;
     let verified = s
+        .profile
         .app_attest
         .verify_assertion(
             assertion,
@@ -620,6 +662,11 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
             crate::metrics::record_delivery_error("invalid_grant");
             return error(StatusCode::NOT_FOUND, "invalid_grant");
         }
+        Err(AuthorityError::RateLimited) => {
+            crate::metrics::record_admission(crate::metrics::Admission::Rejected);
+            crate::metrics::record_delivery_error("rate_limited");
+            return error(StatusCode::TOO_MANY_REQUESTS, "rate_limited");
+        }
         Err(AuthorityError::Unavailable) => {
             crate::metrics::record_admission(crate::metrics::Admission::Unavailable);
             crate::metrics::record_delivery_error("temporarily_unavailable");
@@ -634,7 +681,15 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
             .await;
         return error(StatusCode::NOT_FOUND, "invalid_grant");
     }
-    let profile = permit.authority.profile;
+    if permit.authority.profile != AppProfile::BuzzIosDogfood {
+        crate::metrics::record_delivery_error("profile_disabled");
+        let _ = s
+            .authority
+            .finish_delivery(permit, DeliveryDisposition::Retryable)
+            .await;
+        return error(StatusCode::SERVICE_UNAVAILABLE, "configuration_fault");
+    }
+    let transport = Arc::clone(&s.profile.transport);
     let endpoint = match s.token_keyring.open(&permit.authority.token_ciphertext) {
         Ok(token) => hex::encode(token),
         Err(_) => {
@@ -650,23 +705,17 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
         request_id: r.request_id,
         expires_at: r.expires_at,
     };
-    let transport = Arc::clone(&s.transport);
     let authority_store = Arc::clone(&s.authority);
     // Admission already committed, so cancellation cannot undo either replay
     // fence. The detached task completes disposition bookkeeping.
     let delivery = tokio::spawn(async move {
         let started = std::time::Instant::now();
-        let mut outcome = transport.send(attempt, profile, &endpoint).await;
-        if outcome == DeliveryOutcome::RefreshCredential {
-            crate::metrics::record_credential_refresh();
-            transport.refresh_credential();
-            outcome = transport.send(attempt, profile, &endpoint).await;
-        }
+        let outcome = transport.send(attempt, &endpoint).await;
         crate::metrics::record_apns_delivery(outcome, started.elapsed().as_secs_f64());
         let disposition = match outcome {
-            DeliveryOutcome::Retry { .. }
-            | DeliveryOutcome::ConfigurationFault
-            | DeliveryOutcome::RefreshCredential => DeliveryDisposition::Retryable,
+            DeliveryOutcome::Retry { .. } | DeliveryOutcome::ConfigurationFault => {
+                DeliveryDisposition::Retryable
+            }
             DeliveryOutcome::Accepted
             | DeliveryOutcome::InvalidEndpoint { .. }
             | DeliveryOutcome::PermanentRequestFault => DeliveryDisposition::Terminal,
@@ -683,6 +732,10 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
             return error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable");
         }
     };
+    delivery_outcome_response(outcome, grant.generation)
+}
+
+fn delivery_outcome_response(outcome: DeliveryOutcome, generation: i64) -> Response {
     match outcome {
         DeliveryOutcome::Accepted => {
             (StatusCode::OK, Json(DeliveryResponse::Accepted)).into_response()
@@ -690,7 +743,7 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
         DeliveryOutcome::InvalidEndpoint { unregistered_at } => (
             StatusCode::GONE,
             Json(DeliveryResponse::InvalidEndpoint {
-                generation: grant.generation,
+                generation,
                 invalid_at: unregistered_at,
             }),
         )
@@ -704,7 +757,7 @@ async fn deliver(State(s): State<AppState>, headers: HeaderMap, body: Bytes) -> 
             }),
         )
             .into_response(),
-        DeliveryOutcome::ConfigurationFault | DeliveryOutcome::RefreshCredential => {
+        DeliveryOutcome::ConfigurationFault => {
             error(StatusCode::SERVICE_UNAVAILABLE, "configuration_fault")
         }
         DeliveryOutcome::PermanentRequestFault => error(StatusCode::BAD_REQUEST, "invalid_request"),
@@ -735,16 +788,21 @@ pub fn router_with_metrics(
     state: AppState,
     metrics_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
 ) -> (Router, Router) {
-    let public = Router::new()
-        .route("/v1/installations/challenges", post(challenge))
+    let enrollment = Router::new()
         .route("/v1/installations", post(enroll))
+        .layer(RequestBodyLimitLayer::new(MAX_ENROLL_REQUEST_BYTES));
+    let standard_requests = Router::new()
+        .route("/v1/installations/challenges", post(challenge))
         .route("/v1/delegations", post(delegate))
         .route("/v1/delegations/revoke", post(revoke_delegation))
         .route("/v1/installations/endpoint", post(rotate_endpoint))
         .route("/v1/installations/revoke", post(revoke_installation))
         .route("/v1/deliveries/apns", post(deliver))
+        .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BYTES));
+    let public = Router::new()
+        .merge(enrollment)
+        .merge(standard_requests)
         .with_state(state.clone())
-        .layer(RequestBodyLimitLayer::new(MAX_REQUEST_BYTES))
         .layer(ConcurrencyLimitLayer::new(256))
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
@@ -773,4 +831,267 @@ pub fn router_with_metrics(
         );
     }
     (public, health)
+}
+
+#[cfg(test)]
+mod request_limit_tests {
+    use super::*;
+    use crate::{
+        authority::MemoryAuthorityStore,
+        grant::{GrantKey, GrantKeyring},
+        token::{TokenKey, TokenKeyring},
+    };
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    struct NeverTransport;
+
+    #[async_trait::async_trait]
+    impl PushTransport for NeverTransport {
+        async fn send(&self, _: DeliveryAttempt, _: &str) -> DeliveryOutcome {
+            panic!("request-size tests never send to APNs")
+        }
+    }
+
+    fn fixed_now() -> i64 {
+        1_750_000_000
+    }
+
+    fn state() -> AppState {
+        let app_attest = AppAttestVerifier::new(
+            "TEAMID.xyz.block.buzz.dogfood.mobile".to_owned(),
+            include_bytes!("../tests/fixtures/apple-app-attestation-root.pem").to_vec(),
+        )
+        .expect("pinned Apple root fixture");
+        AppState {
+            grant_keyring: Arc::new(
+                GrantKeyring::new(vec![GrantKey::new("test", &[1; 32]).unwrap()]).unwrap(),
+            ),
+            authority: Arc::new(MemoryAuthorityStore::default()),
+            token_keyring: Arc::new(
+                TokenKeyring::new(vec![TokenKey::new("test", &[2; 32]).unwrap()]).unwrap(),
+            ),
+            profile: Arc::new(ProfileRuntime {
+                app_attest: Arc::new(app_attest),
+                transport: Arc::new(NeverTransport),
+            }),
+            delivery_url: "https://push.buzz.xyz/v1/deliveries/apns".parse().unwrap(),
+            max_grant_lifetime_seconds: 86_400,
+            max_installation_lifetime_seconds: 86_400,
+            endpoint_quota_window_seconds: 60,
+            endpoint_quota_max_deliveries: 10,
+            now: fixed_now,
+            accepting: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    fn maximum_enrollment_body() -> Vec<u8> {
+        serde_json::to_vec(&InstallationEnrollRequest {
+            v: WIRE_VERSION,
+            challenge_id: uuid::Uuid::nil(),
+            challenge: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0; 32]),
+            key_id: STANDARD.encode([0; 32]),
+            attestation: STANDARD.encode(vec![0; MAX_APP_ATTESTATION_BYTES]),
+            app_profile: AppProfile::BuzzIosDogfood,
+            endpoint: "ab".repeat(MAX_ENDPOINT_HEX_BYTES),
+            endpoint_epoch: 1,
+            expires_at: fixed_now() + 60,
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn maximum_valid_enrollment_envelope_reaches_the_handler() {
+        let body = maximum_enrollment_body();
+        assert_eq!(MAX_ENROLL_REQUEST_BYTES, 23_896);
+        assert!(body.len() > MAX_REQUEST_BYTES);
+        assert!(body.len() <= MAX_ENROLL_REQUEST_BYTES);
+        let (public, _) = router(state());
+        let response = public
+            .oneshot(
+                Request::post("/v1/installations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn enrollment_envelope_stays_bounded() {
+        let (public, _) = router(state());
+        let response = public
+            .oneshot(
+                Request::post("/v1/installations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(vec![b' '; MAX_ENROLL_REQUEST_BYTES + 1]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn ambiguous_apns_profile_failures_remain_retryable_at_the_relay_boundary() {
+        for reason in ["BadDeviceToken", "DeviceTokenNotForTopic"] {
+            let outcome = crate::apns::classify(400, Some(reason), None);
+            assert_eq!(outcome, DeliveryOutcome::ConfigurationFault);
+            assert_eq!(
+                delivery_outcome_response(outcome, 7).status(),
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+        }
+
+        let outcome = crate::apns::classify(410, Some("Unregistered"), Some(42));
+        assert_eq!(
+            delivery_outcome_response(outcome, 7).status(),
+            StatusCode::GONE
+        );
+    }
+}
+
+/// Known-answer vectors for the exact App Attest transcript bytes defined by
+/// NIP-PL ("Exact App Attest transcript construction"). The fixture file is
+/// shared ground truth with client-side canonical encoders (the Swift NIP-PL
+/// iOS client): a client encoder that fails to reproduce these bytes exactly
+/// fails every enroll/delegate/rotate/revoke call with `invalid_attestation`.
+#[cfg(test)]
+mod transcript_vector_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    const VECTORS_JSON: &str = include_str!("../tests/vectors/app_attest_transcripts.json");
+
+    // Deterministic fixture inputs mirrored in the vector file's `inputs`.
+    const CHALLENGE_ID: uuid::Uuid =
+        uuid::Uuid::from_u128(0x1111_1111_1111_4111_8111_1111_1111_1111);
+    const INSTALLATION: uuid::Uuid =
+        uuid::Uuid::from_u128(0x2222_2222_2222_4222_8222_2222_2222_2222);
+    // base64url-no-pad of bytes 0x00..=0x1f.
+    const CHALLENGE: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8";
+    // Standard base64 (padded) of 32 bytes of 0xAA.
+    const KEY_ID: &str = "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqo=";
+    // 32-byte APNs token, lowercase hex.
+    const ENDPOINT: &str = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+    const RELAY_PUBKEY: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn assert_vector(name: &str, actual: &str) {
+        let file: serde_json::Value = serde_json::from_str(VECTORS_JSON).unwrap();
+        let vector = file["vectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["name"] == name)
+            .unwrap_or_else(|| panic!("vector {name} missing from fixture"));
+        assert_eq!(
+            actual,
+            vector["transcript"].as_str().unwrap(),
+            "{name} bytes"
+        );
+        assert_eq!(
+            hex::encode(Sha256::digest(actual.as_bytes())),
+            vector["sha256"].as_str().unwrap(),
+            "{name} sha256"
+        );
+    }
+
+    #[test]
+    fn fixture_encodings_match_their_raw_bytes() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let challenge_bytes: Vec<u8> = (0u8..32).collect();
+        assert_eq!(URL_SAFE_NO_PAD.encode(&challenge_bytes), CHALLENGE);
+        assert_eq!(STANDARD.encode([0xAAu8; 32]), KEY_ID);
+        assert_eq!(hex::decode(ENDPOINT).unwrap().len(), 32);
+    }
+
+    #[test]
+    fn enroll_transcript_vector() {
+        let t = EnrollTranscript {
+            v: 1,
+            audience: "https://push.buzz.xyz/v1/installations",
+            challenge_id: CHALLENGE_ID,
+            challenge: CHALLENGE,
+            key_id: KEY_ID,
+            app_profile: AppProfile::BuzzIosDogfood,
+            endpoint: ENDPOINT,
+            endpoint_epoch: 1,
+            expires_at: 1_752_624_000,
+        };
+        assert_vector("enroll", &transcript("buzz.push.enroll.v1", &t).unwrap());
+    }
+
+    #[test]
+    fn delegate_transcript_vector() {
+        let t = DelegateTranscript {
+            v: 1,
+            audience: "https://push.buzz.xyz/v1/delegations",
+            challenge_id: CHALLENGE_ID,
+            challenge: CHALLENGE,
+            installation_handle: INSTALLATION,
+            endpoint_epoch: 1,
+            generation: 1,
+            relay_pubkey: RELAY_PUBKEY,
+            not_before: 1_752_620_000,
+            expires_at: 1_752_624_000,
+        };
+        assert_vector(
+            "delegate",
+            &transcript("buzz.push.delegate.v1", &t).unwrap(),
+        );
+    }
+
+    #[test]
+    fn rotate_endpoint_transcript_vector() {
+        let t = RotateTranscript {
+            v: 1,
+            audience: "https://push.buzz.xyz/v1/installations/endpoint",
+            challenge_id: CHALLENGE_ID,
+            challenge: CHALLENGE,
+            installation_handle: INSTALLATION,
+            endpoint_epoch: 1,
+            new_endpoint_epoch: 2,
+            endpoint: ENDPOINT,
+        };
+        assert_vector(
+            "rotate_endpoint",
+            &transcript("buzz.push.rotate-endpoint.v1", &t).unwrap(),
+        );
+    }
+
+    #[test]
+    fn revoke_delegation_transcript_vector() {
+        let t = RevokeDelegationTranscript {
+            v: 1,
+            audience: "https://push.buzz.xyz/v1/delegations/revoke",
+            challenge_id: CHALLENGE_ID,
+            challenge: CHALLENGE,
+            installation_handle: INSTALLATION,
+            relay_pubkey: RELAY_PUBKEY,
+            generation: 2,
+        };
+        assert_vector(
+            "revoke_delegation",
+            &transcript("buzz.push.revoke-delegation.v1", &t).unwrap(),
+        );
+    }
+
+    #[test]
+    fn revoke_installation_transcript_vector() {
+        let t = RevokeInstallationTranscript {
+            v: 1,
+            audience: "https://push.buzz.xyz/v1/installations/revoke",
+            challenge_id: CHALLENGE_ID,
+            challenge: CHALLENGE,
+            installation_handle: INSTALLATION,
+            endpoint_epoch: 1,
+            new_endpoint_epoch: 2,
+        };
+        assert_vector(
+            "revoke_installation",
+            &transcript("buzz.push.revoke-installation.v1", &t).unwrap(),
+        );
+    }
 }

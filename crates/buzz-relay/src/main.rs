@@ -17,7 +17,7 @@ use buzz_db::{Db, DbConfig};
 use buzz_pubsub::PubSubManager;
 use buzz_search::SearchService;
 
-use buzz_relay::config::Config;
+use buzz_relay::config::{Config, MAX_DRAIN_JITTER_MS};
 use buzz_relay::metrics as relay_metrics;
 use buzz_relay::router::{build_health_router, build_router};
 use buzz_relay::state::AppState;
@@ -33,6 +33,16 @@ fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
             "true" | "1" | "yes" | "on"
         )
     })
+}
+
+fn relay_keypair_from_config(relay_private_key: Option<&str>) -> anyhow::Result<nostr::Keys> {
+    let hex = relay_private_key.ok_or_else(|| {
+        anyhow::anyhow!(
+            "BUZZ_RELAY_PRIVATE_KEY must be set. Run `just bootstrap` for local \
+             development or configure a stable 32-byte hex private key."
+        )
+    })?;
+    nostr::Keys::parse(hex).map_err(|e| anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY: {e}"))
 }
 
 /// Controls how many per-community gauge series the usage poller emits.
@@ -143,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
         error!("Invalid configuration: {e}");
         anyhow::anyhow!("Configuration error: {e}")
     })?;
+    let relay_keypair = relay_keypair_from_config(config.relay_private_key.as_deref())?;
     info!(
         bind_addr = %config.bind_addr,
         relay_url = %config.relay_url,
@@ -150,6 +161,7 @@ async fn main() -> anyhow::Result<()> {
         metrics_port = config.metrics_port,
         max_frame_bytes = config.max_frame_bytes,
         audit_enabled = config.audit_enabled,
+        push_enabled = config.push_enabled,
         "Config loaded"
     );
 
@@ -157,6 +169,7 @@ async fn main() -> anyhow::Result<()> {
     let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(usage_interval_secs);
     relay_metrics::install(config.metrics_port, usage_idle_timeout_secs);
     metrics::gauge!("buzz_audit_enabled").set(if config.audit_enabled { 1.0 } else { 0.0 });
+    metrics::gauge!("buzz_push_enabled").set(if config.push_enabled { 1.0 } else { 0.0 });
     info!(
         port = config.metrics_port,
         idle_timeout_secs = usage_idle_timeout_secs,
@@ -200,6 +213,12 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = db.ensure_future_partitions(3).await {
         error!("Failed to ensure partitions: {e}");
     }
+
+    db.validate_deletion_serving_catalog().await.map_err(|e| {
+        error!("Community deletion serving-fence validation failed: {e}");
+        anyhow::anyhow!("Community deletion serving fence is unsafe: {e}")
+    })?;
+    info!("Community deletion serving fences verified");
 
     // Freshness fence probe: cursor pages route to the replica only for
     // history the probe has verified as fully replayed. Deliberately AFTER
@@ -416,29 +435,6 @@ async fn main() -> anyhow::Result<()> {
     let workflow_config = buzz_workflow::WorkflowConfig::default();
     let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), workflow_config));
 
-    let relay_keypair = if let Some(hex) = &config.relay_private_key {
-        nostr::Keys::parse(hex)
-            .map_err(|e| anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY: {e}"))?
-    } else if !config.require_auth_token {
-        // Dev mode: use a deterministic keypair so addressable events (kind:39000/39001/39002)
-        // replace correctly across restarts. Without this, each restart generates a new pubkey
-        // and replace_addressable_event inserts duplicates instead of replacing.
-        const DEV_RELAY_PRIVKEY: &str =
-            "0000000000000000000000000000000000000000000000000000000000000001";
-        let keys = nostr::Keys::parse(DEV_RELAY_PRIVKEY).expect("hardcoded dev key is valid");
-        tracing::warn!(
-            pubkey = %keys.public_key().to_hex(),
-            "Using hardcoded dev relay keypair (BUZZ_REQUIRE_AUTH_TOKEN=false). \
-             Set BUZZ_RELAY_PRIVATE_KEY for production."
-        );
-        keys
-    } else {
-        panic!(
-            "BUZZ_RELAY_PRIVATE_KEY must be set when BUZZ_REQUIRE_AUTH_TOKEN=true. \
-             A stable relay identity is required for production."
-        );
-    };
-
     config
         .media
         .validate()
@@ -469,6 +465,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(handle) = buzz_relay::mesh_boot::boot_mesh(
         &state.config,
         state.redis_pool.clone(),
+        state.db.clone(),
         &state.relay_keypair,
         Arc::clone(&state.shutting_down),
     )
@@ -525,6 +522,31 @@ async fn main() -> anyhow::Result<()> {
             transport_drops = report.transport_drops,
             "git object-store backend admitted: A3 conformance probe passed"
         );
+    }
+
+    match state.db.verify_channel_roster_fence().await {
+        Ok(()) => {
+            info!("Channel roster fence verified");
+        }
+        Err(error) => {
+            error!(%error, "Channel roster fence validation failed");
+            return Err(anyhow::anyhow!(
+                "Channel roster fence is unsafe; apply or repair migration 0032 before starting this relay: {error}"
+            ));
+        }
+    }
+
+    // Repair legacy NIP-29 channel rosters that were persisted while the
+    // canonical member query still truncated at 1,000 rows. Validation above
+    // makes migration 0032 a code/schema compatibility gate before the new
+    // replacement protocol or listener can serve traffic.
+    match buzz_relay::handlers::side_effects::reconcile_large_channel_member_snapshots(&state).await
+    {
+        Ok(count) if count > 0 => info!(count, "large channel member snapshots repaired"),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, "large channel member snapshot startup reconciliation failed")
+        }
     }
 
     // NIP-43: reconcile the event-backed roster for every provisioned
@@ -675,6 +697,7 @@ async fn main() -> anyhow::Result<()> {
                         &reaper_state,
                         channel_id,
                         serde_json::json!({ "type": "channel_auto_archived" }),
+                        chrono::Utc::now(),
                     )
                     .await
                     {
@@ -715,15 +738,40 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // NIP-PL matcher and worker are enabled as one unit. Lease acceptance is
-    // already disabled without the exact gateway URL, so discovery and runtime
-    // cannot advertise or accumulate work for an undeliverable configuration.
-    if state.config.push_gateway_delivery_url.is_some() {
+    // NIP-PL matcher and worker are enabled as one unit behind the explicit
+    // deployment opt-in. The gateway URL alone never enables push.
+    if state.config.push_enabled {
         tokio::spawn(buzz_relay::push_runtime::run_matcher(Arc::clone(&state)));
         tokio::spawn(buzz_relay::push_runtime::run_delivery_worker(Arc::clone(
             &state,
         )));
         info!("NIP-PL push matcher and delivery worker started");
+    } else {
+        info!("NIP-PL push disabled by BUZZ_PUSH_ENABLED");
+    }
+
+    // Admin outbox delivery worker — drives `relay_admin_outbox` rows.
+    // Uses DB-level leases (held_by / lease_expires_at) so multiple pods can
+    // run the worker concurrently without double-delivery.
+    {
+        let outbox_state = Arc::clone(&state);
+        tokio::spawn(
+            async move { buzz_relay::handlers::admin_outbox_worker::run(outbox_state).await },
+        );
+        info!("Admin outbox delivery worker started");
+    }
+
+    // Action recovery worker: re-drives stranded relay_admin_actions rows whose
+    // action lease expired before the enforcement state machine completed.
+    // Crash safety: a process that died between claim and finalization leaves
+    // an action in pending/enforcing; this worker resumes from the persisted
+    // step_marker state without re-running the mutation.
+    {
+        let action_state = Arc::clone(&state);
+        tokio::spawn(
+            async move { buzz_relay::handlers::admin_action_worker::run(action_state).await },
+        );
+        info!("Admin action recovery worker started");
     }
 
     // NIP-ER reminder scheduler — polls for due reminders and publishes them
@@ -1026,6 +1074,24 @@ async fn main() -> anyhow::Result<()> {
                 metrics::gauge!("buzz_redis_pool_size").set(rs.size as f64);
                 metrics::gauge!("buzz_redis_pool_max").set(rs.max_size as f64);
                 metrics::gauge!("buzz_redis_pool_waiting").set(rs.waiting as f64);
+
+                let deletion_store = pool_state.db.deletion_store();
+                match deletion_store.reap_expired_serving_write_leases(1000).await {
+                    Ok(reaped) => metrics::counter!("buzz_deletion_serving_leases_reaped_total")
+                        .increment(reaped),
+                    Err(error) => tracing::warn!(%error, "serving-lease reaper failed"),
+                }
+                match deletion_store.serving_lease_stats().await {
+                    Ok(stats) => {
+                        metrics::gauge!("buzz_deletion_serving_leases_active")
+                            .set(stats.active as f64);
+                        metrics::gauge!("buzz_deletion_serving_leases_expired")
+                            .set(stats.expired as f64);
+                        metrics::gauge!("buzz_deletion_serving_leases_dead_tuples")
+                            .set(stats.dead_tuples as f64);
+                    }
+                    Err(error) => tracing::warn!(%error, "serving-lease metrics failed"),
+                }
             }
         });
     }
@@ -1197,6 +1263,37 @@ async fn run_periodic_until_cancelled<Tick, TickFuture>(
 /// │         → graceful drain (30s) → exit                   │
 /// └─────────────────────────────────────────────────────────┘
 /// ```
+///
+/// ## Shutdown budget
+///
+/// The full teardown, measured from SIGTERM, is bounded as follows:
+///
+/// 1. `5s` grace. Readiness returns 503 immediately, then the process
+///    sleeps 5 seconds so Kubernetes stops routing new traffic before any
+///    listener closes.
+/// 2. `GRACEFUL_DRAIN_TIMEOUT` (`30s`) hard drain. Started at the end of the
+///    grace, this backstops the whole drain and force-exits the process if
+///    exceeded. It bounds everything after the grace, not the grace itself.
+///
+/// A single WebSocket can therefore stay open, from SIGTERM, for up to:
+///
+/// ```text
+///   5s grace  +  up to 20s jitter  +  up to 5s close-frame ack  =  30s
+///   (fixed)      (MAX_DRAIN_JITTER_MS)  (RESTART_CLOSE_ACK_TIMEOUT)
+/// ```
+///
+/// The 5s grace runs before the 30s hard-drain clock starts, so the jitter
+/// (capped at [`buzz_relay::config::MAX_DRAIN_JITTER_MS`] = 20s) plus the
+/// per-connection close-frame ack wait (`RESTART_CLOSE_ACK_TIMEOUT` = 5s in
+/// `state.rs`) sum to 25s and stay inside the 30s hard drain. Total worst
+/// case from SIGTERM to forced exit is 5s + 30s = 35s. Both fit inside the
+/// chart's `terminationGracePeriodSeconds: 60` (`deploy/charts/buzz/values.yaml`),
+/// which leaves headroom but assumes no `preStop` hook adds further delay.
+/// With jitter off (`BUZZ_DRAIN_JITTER_MS=0`, the default) sockets close
+/// all-at-once right after the grace, so the per-socket delay collapses to
+/// roughly the 5s grace plus the ack wait.
+const GRACEFUL_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn serve(
     router: axum::Router,
     health_router: axum::Router,
@@ -1215,8 +1312,36 @@ async fn serve(
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
     let shutdown_flag = Arc::clone(&state.shutting_down);
     let drain_conn_manager = Arc::clone(&state.conn_manager);
+    let drain_jitter_ms = state.config.drain_jitter_ms;
     let tx = shutdown_tx.clone();
-    tokio::spawn(async move {
+    // TODO(coverage): `serve`'s shutdown wiring has no automated test. The
+    // jittered drain helper (`ConnectionManager::drain_all_jittered`) is
+    // covered in `state.rs`, but coverage of the helper is not coverage of
+    // its use here: the three wiring facts below are currently unguarded, and
+    // mutating any one of them leaves the suite green.
+    //   1. Jitter dispatch: `drain_jitter_ms == 0` must pick `drain_all`, and
+    //      a non-zero value must pick `drain_all_jittered(drain_jitter_ms)`.
+    //      A mutant that inverts this condition ships jitter-off in prod.
+    //   2. The shutdown handle must be awaited before the abort. Dropping the
+    //      `shutdown_handle.await` (both the UDS and TCP-only return paths) is
+    //      the exact shape of the previously shipped detached-timer bug,
+    //      relocated from the helper to the call site: the runtime can exit
+    //      before delayed closes flush, so no client sees a 1012.
+    //   3. `shutdown_tx.send(true)` must reach every listener's
+    //      `with_graceful_shutdown` future, on both the UDS and TCP-only paths.
+    //
+    // A focused test would refactor the drain/dispatch decision and the
+    // listener-shutdown fan-out into a small seam that does not need a bound
+    // socket or a real SIGTERM. One shape: extract the body of this spawned
+    // task into a `run_graceful_shutdown(state, shutdown_tx)` fn parameterised
+    // over a signal future and a clock, inject a fake `ConnectionManager`
+    // (or a trait over `drain_all` / `drain_all_jittered`) that records which
+    // path ran, drive it with `tokio::time` paused, and assert: (a) the right
+    // drain path ran for jitter 0 vs non-zero, (b) the drain future completed
+    // before the abort fired, and (c) each subscribed `watch` receiver
+    // observed `true`. This keeps the test off real ports and off wall-clock
+    // sleeps. Not implemented here. This comment records the plan only.
+    let shutdown_handle = tokio::spawn(async move {
         shutdown_signal().await;
         shutdown_flag.store(true, Ordering::Relaxed);
         info!("Shutdown signal received — readiness now returns 503");
@@ -1224,20 +1349,31 @@ async fn serve(
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         info!("Starting graceful drain (30s timeout)");
         let _ = tx.send(true);
-        // Tell every connected client to reconnect NOW. Without this, upgraded
-        // WebSocket connections outlive the listener drain: clients ride the
-        // dying pod until the forced exit below and only learn about the
-        // restart from a TCP reset. The 1012 close frame turns a 35s silent
-        // death into an immediate, well-attributed reconnect.
-        let closed = drain_conn_manager.drain_all();
+        // Keep the original process-level backstop alive while listener and
+        // upgraded-socket shutdown proceeds. The caller aborts it only after
+        // Axum and the owned jitter drain have both completed.
+        let hard_shutdown = tokio::spawn(async {
+            tokio::time::sleep(GRACEFUL_DRAIN_TIMEOUT).await;
+            tracing::error!("Drain timeout exceeded — forcing exit");
+            std::process::exit(1);
+        });
+        let hard_shutdown_abort = hard_shutdown.abort_handle();
+        // Stop accepting first, then close every live socket. Jitter off (the
+        // default) uses the original synchronous all-at-once drain; jitter on
+        // retains ownership of every delayed close until its 1012 frame has
+        // been flushed and acknowledged (or its send loop cancelled).
+        let closed = if drain_jitter_ms == 0 {
+            drain_conn_manager.drain_all()
+        } else {
+            drain_conn_manager.drain_all_jittered(drain_jitter_ms).await
+        };
         info!(
             connections = closed,
-            "Sent restart close frame to all live WebSocket connections"
+            jitter_ms = drain_jitter_ms,
+            max_jitter_ms = MAX_DRAIN_JITTER_MS,
+            "Signalled restart close to all live WebSocket connections"
         );
-        // Hard timeout: force exit if connections don't drain within 30s.
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        tracing::error!("Drain timeout exceeded — forcing exit");
-        std::process::exit(1);
+        hard_shutdown_abort
     });
 
     let tcp_listener = tokio::net::TcpListener::bind(&config.bind_addr)
@@ -1285,7 +1421,11 @@ async fn serve(
         .await
         .map_err(|e| anyhow::anyhow!("TCP server error: {e}"))?;
 
+        let hard_shutdown = shutdown_handle
+            .await
+            .map_err(|e| anyhow::anyhow!("Shutdown task failed: {e}"))?;
         uds_handle.abort();
+        hard_shutdown.abort();
         return Ok(());
     }
 
@@ -1306,6 +1446,10 @@ async fn serve(
     .await
     .map_err(|e| anyhow::anyhow!("Server error: {e}"))?;
 
+    let hard_shutdown = shutdown_handle
+        .await
+        .map_err(|e| anyhow::anyhow!("Shutdown task failed: {e}"))?;
+    hard_shutdown.abort();
     Ok(())
 }
 
@@ -1917,8 +2061,8 @@ mod tests {
 
     use super::{
         buzz_auto_migrate_enabled, dropped_in_memory_keys, idle_timeout_secs,
-        refresh_legacy_active_gauge_recency, run_periodic_until_cancelled, EmissionScope,
-        InMemoryMetricKey,
+        refresh_legacy_active_gauge_recency, relay_keypair_from_config,
+        run_periodic_until_cancelled, EmissionScope, InMemoryMetricKey,
     };
     use metrics::GaugeFn;
     use metrics_util::{
@@ -1964,6 +2108,23 @@ mod tests {
         assert!(buzz_auto_migrate_enabled(Some(" 1 ")));
         assert!(buzz_auto_migrate_enabled(Some("yes")));
         assert!(buzz_auto_migrate_enabled(Some("on")));
+    }
+
+    #[test]
+    fn configured_relay_identity_is_preserved() {
+        let configured = nostr::Keys::generate();
+        let secret = configured.secret_key().to_secret_hex();
+
+        let selected = relay_keypair_from_config(Some(&secret)).expect("configured key");
+
+        assert_eq!(selected.public_key(), configured.public_key());
+    }
+
+    #[test]
+    fn missing_relay_identity_is_rejected() {
+        let result = relay_keypair_from_config(None);
+
+        assert!(result.is_err());
     }
 
     #[test]

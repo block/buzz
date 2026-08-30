@@ -56,7 +56,7 @@ Remote agents solve it from the inside. Because the desktop retains no substrate
 
 **The body's state is mortal.** Files, checkouts, half-finished working trees — gone with the body unless the substrate persists them. The agent survives; its scratch space doesn't. Durable knowledge belongs on the relay, and agents are built to put it there.
 
-**Presence can lag the truth, but not for long.** If the substrate kills a body without ceremony, the presence dot can outlive the agent — by seconds if the connection drops cleanly, by at most about ninety if it doesn't. Presence is a lease the agent renews, not a flag it sets: a dead agent stops renewing and the relay forgets it. Ninety seconds of a wrong dot, never an indefinite one.
+**Presence can lag the truth, but not for long.** If the substrate kills a body without ceremony, the presence dot can outlive the agent — by seconds if the connection drops cleanly, by at most about three minutes if it doesn't. Presence is a lease the agent renews, not a flag it sets: a dead agent stops renewing and the relay forgets it. A bounded wrong dot, never an indefinite one.
 
 **A running agent finishes on the configuration it started with.** New keys, new models, new settings take effect on the next body. And an instance that never got far enough to run — a body that failed to start — is the substrate operator's residue to clear, with the substrate's own tools. Editing an agent mid-sentence was never on the menu.
 

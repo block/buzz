@@ -8,7 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../shared/crypto/nip44.dart';
 import '../../../shared/relay/relay.dart';
-import '../read_state/read_state_time.dart';
+import '../../../shared/read_state/read_state_time.dart';
 import 'channel_stars_storage.dart';
 
 class ChannelStarsCrypto {
@@ -100,6 +100,7 @@ class ChannelStarsManager {
     );
     _store = ChannelStarStore(channels: {..._store.channels, channelId: entry});
     _persist();
+    _onChanged();
     markDirty();
   }
 
@@ -111,6 +112,7 @@ class ChannelStarsManager {
     );
     _store = ChannelStarStore(channels: {..._store.channels, channelId: entry});
     _persist();
+    _onChanged();
     markDirty();
   }
 

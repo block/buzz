@@ -5,6 +5,7 @@ import type { RelayEvent } from "@/shared/api/types";
 import {
   getTextPayload,
   sortEvents,
+  toRelayFrames,
   type RelaySubscriptionFilter,
 } from "@/shared/api/relayClientShared";
 import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
@@ -132,8 +133,10 @@ export class ReadOnlyRelayClient {
 
   private async openConnection(): Promise<void> {
     const generation = ++this.generation;
-    this.onMessageChannel = new Channel<unknown>((message) => {
-      void this.handleWsMessage(message, generation);
+    this.onMessageChannel = new Channel<unknown>((delivery) => {
+      for (const message of toRelayFrames(delivery)) {
+        void this.handleWsMessage(message, generation);
+      }
     });
 
     this.wsId = await invoke<number>("plugin:websocket|connect", {
