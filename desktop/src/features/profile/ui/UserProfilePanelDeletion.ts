@@ -141,10 +141,26 @@ export async function deleteProfileManagedAgent(
   return result;
 }
 
+/**
+ * Delete every managed-agent instance backed by `persona`, removing each one
+ * from its channels as it goes.
+ *
+ * Contract, shared with `deleteManagedAgentsForPersonaWithRules` in
+ * `features/agents/lib/managedAgentControlActions.ts`: stop the cascade at the
+ * first cancelled or failed instance delete, so the persona is not deleted on
+ * top of a partial teardown. Aborting stops *further* deletes; it cannot undo
+ * instances already destroyed, since only provider-deployed instances prompt
+ * and any local instance visited earlier is already gone. `deletedCount`
+ * reports how many were destroyed so the caller can tell the user about that
+ * partial state instead of silently keeping the persona.
+ *
+ * This variant exists separately because its channel cleanup is interleaved per
+ * instance — keep both in step.
+ */
 export async function deleteProfileManagedAgentsForPersona(
   persona: AgentPersona,
   context: DeleteProfileManagedAgentsForPersonaContext,
-): Promise<ManagedAgentActionResult> {
+): Promise<ManagedAgentActionResult & { deletedCount: number }> {
   const { managedAgents, selectedAgent, ...deleteContext } = context;
   const agentsByPubkey = new Map<string, ManagedAgent>();
 
@@ -158,10 +174,12 @@ export async function deleteProfileManagedAgentsForPersona(
     agentsByPubkey.set(selectedAgent.pubkey, selectedAgent);
   }
 
+  let deletedCount = 0;
   for (const agent of agentsByPubkey.values()) {
     const result = await deleteProfileManagedAgent(agent, deleteContext);
-    if (result.cancelled) return result;
+    if (result.cancelled) return { ...result, deletedCount };
+    deletedCount += 1;
   }
 
-  return {};
+  return { deletedCount };
 }
