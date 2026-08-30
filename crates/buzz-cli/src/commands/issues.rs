@@ -1217,7 +1217,7 @@ mod tests {
         let second = "2".repeat(64);
         let stale = "3".repeat(64);
         let unauthorized = "4".repeat(64);
-        let events = vec![
+        let events = [
             transition_event(&first, AUTHOR, 10, "requirements", "implementation", None),
             transition_event(
                 &unauthorized,
