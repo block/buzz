@@ -363,6 +363,22 @@ pub async fn cmd_get_messages(
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
+    // Fail closed: verify the channel exists (kind:39000 by #d) before
+    // returning an empty message list that is indistinguishable from a
+    // wrong UUID.
+    let probe_filter = serde_json::json!({
+        "kinds": [39000],
+        "#d": [channel_id],
+        "limit": 1
+    });
+    let probe_raw = client.query(&probe_filter).await?;
+    let probe_events: Vec<serde_json::Value> = serde_json::from_str(&probe_raw)
+        .map_err(|e| CliError::Other(format!("failed to parse query response: {e}")))?;
+    if probe_events.is_empty() {
+        return Err(CliError::NotFound(format!(
+            "channel '{channel_id}' not found"
+        )));
+    }
     let limit = limit.unwrap_or(50).min(200);
 
     let mut filter = serde_json::json!({
@@ -1569,5 +1585,99 @@ mod tests {
             profile_event(PK_VALID_A, Some("Aaron"), None),
         ];
         assert_eq!(match_profiles_by_name(&events, "Aaron").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cmd_get_messages_fails_when_channel_not_found() {
+        use axum::body::Body;
+        use axum::http::{Response, StatusCode};
+        use axum::routing::post;
+        use axum::Router;
+        use tokio::net::TcpListener;
+
+        let app = Router::new().route(
+            "/query",
+            post(|_body: String| async move {
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Body::from("[]"))
+                    .unwrap()
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = crate::client::BuzzClient::new(
+            format!("http://{addr}"),
+            nostr::Keys::generate(),
+            None,
+            None,
+        )
+        .unwrap();
+        let channel_id = "00000000-0000-4000-8000-000000000000";
+        let result = super::cmd_get_messages(
+            &client,
+            channel_id,
+            None,
+            None,
+            None,
+            None,
+            &crate::OutputFormat::Json,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(crate::error::CliError::NotFound(_))),
+            "expected NotFound, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_get_messages_succeeds_when_channel_exists() {
+        use axum::body::Body;
+        use axum::http::{Response, StatusCode};
+        use axum::routing::post;
+        use axum::Router;
+        use tokio::net::TcpListener;
+
+        let app = Router::new().route(
+            "/query",
+            post(|body: String| async move {
+                if body.contains("39000") {
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from(r#"[{"id":"abc","kind":39000}]"#))
+                        .unwrap()
+                } else {
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::from(
+                            r#"[{"id":"msg1","content":"hi","created_at":1}]"#,
+                        ))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = crate::client::BuzzClient::new(
+            format!("http://{addr}"),
+            nostr::Keys::generate(),
+            None,
+            None,
+        )
+        .unwrap();
+        let channel_id = "00000000-0000-4000-8000-000000000000";
+        let result = super::cmd_get_messages(
+            &client,
+            channel_id,
+            None,
+            None,
+            None,
+            None,
+            &crate::OutputFormat::Json,
+        )
+        .await;
+        assert!(result.is_ok(), "expected Ok, got {result:?}");
     }
 }
