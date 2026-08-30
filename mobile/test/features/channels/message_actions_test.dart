@@ -11,6 +11,7 @@ import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -112,6 +113,7 @@ Future<void> _pumpSheet(
   bool canManageMessage = false,
   List<TimelineMessage>? allMessages,
   ReminderService? reminderService,
+  VoidCallback? onSelectText,
 }) async {
   await tester.pumpWidget(
     ProviderScope(
@@ -142,6 +144,7 @@ Future<void> _pumpSheet(
                 allMessages: allMessages,
                 currentPubkey: 'self',
                 isMember: true,
+                onSelectText: onSelectText,
               ),
               child: const Text('open'),
             ),
@@ -1112,6 +1115,7 @@ void main() {
       await _pumpSheet(tester, message: _message(), prefs: prefs);
 
       expect(find.text('Copy text'), findsOneWidget);
+      expect(find.text('Select text'), findsOneWidget);
       expect(find.text('Copy link'), findsOneWidget);
       expect(find.text('Mark unread'), findsOneWidget);
       expect(find.text('Follow thread'), findsOneWidget);
@@ -1139,6 +1143,54 @@ void main() {
       );
     });
 
+    testWidgets('Copy text copies the full message content', (tester) async {
+      String? clipboardText;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.setData') {
+            final args = call.arguments;
+            if (args is Map) {
+              clipboardText = args['text'] as String?;
+            }
+          }
+          return null;
+        },
+      );
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+
+      final prefs = await _mockPrefs();
+      await _pumpSheet(tester, message: _message(), prefs: prefs);
+      await tester.tap(find.text('Copy text'));
+      await tester.pumpAndSettle();
+
+      expect(clipboardText, 'hello world');
+    });
+
+    testWidgets('Select text pops the sheet and invokes onSelectText', (
+      tester,
+    ) async {
+      var selected = false;
+      final prefs = await _mockPrefs();
+      await _pumpSheet(
+        tester,
+        message: _message(),
+        prefs: prefs,
+        onSelectText: () => selected = true,
+      );
+
+      await tester.tap(find.text('Select text'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Select text'), findsNothing);
+      expect(selected, isTrue);
+    });
+
     testWidgets('promotes Reply, Copy link, and Remind me to the fast-actions '
         'row', (tester) async {
       final prefs = await _mockPrefs();
@@ -1163,6 +1215,7 @@ void main() {
       await _pumpSheet(tester, message: _message(isSystem: true), prefs: prefs);
 
       expect(find.text('Copy text'), findsNothing);
+      expect(find.text('Select text'), findsNothing);
       expect(find.text('Copy link'), findsNothing);
       expect(find.text('Mark unread'), findsNothing);
       expect(find.text('Follow thread'), findsNothing);

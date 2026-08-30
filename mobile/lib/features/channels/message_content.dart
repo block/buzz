@@ -133,6 +133,10 @@ class MessageContent extends HookConsumerWidget {
   /// gutter while keeping its first image and count aligned with the body.
   final double mediaCarouselTrailingOverflow;
 
+  /// When true, wrap the markdown body in a [SelectionArea] so the user can
+  /// highlight a substring and use the platform copy menu.
+  final bool selectable;
+
   const MessageContent({
     super.key,
     required this.content,
@@ -150,6 +154,7 @@ class MessageContent extends HookConsumerWidget {
     this.scaleEmojiOnly = false,
     this.mediaCarouselLeadingOverflow = 0,
     this.mediaCarouselTrailingOverflow = 0,
+    this.selectable = false,
   });
 
   @override
@@ -300,13 +305,19 @@ class MessageContent extends HookConsumerWidget {
         ],
       ),
     );
-    if (trailingGallery == null) return markdown;
+    final body = selectable
+        ? SelectionArea(
+            key: const ValueKey('message-content-selection-area'),
+            child: markdown,
+          )
+        : markdown;
+    if (trailingGallery == null) return body;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (trailingGallery.content.trim().isNotEmpty) markdown,
+        if (trailingGallery.content.trim().isNotEmpty) body,
         _MessageImageCarousel(
           key: ValueKey(
             trailingGallery.items.map((item) => item.url).join('\u0000'),
