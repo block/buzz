@@ -1369,6 +1369,7 @@ mod tests {
         router(state).oneshot(request).await.expect("response")
     }
 
+    #[ignore = "requires Postgres"]
     #[tokio::test]
     async fn every_route_rejects_a_missing_credential_before_database_access() {
         let state = test_state().await;
@@ -1502,6 +1503,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
+    #[ignore = "requires Postgres"]
     #[tokio::test]
     #[ignore = "requires Postgres — DB lookup returns 500 without a database"]
     async fn feedback_attachment_rejects_unknown_feedback() {
