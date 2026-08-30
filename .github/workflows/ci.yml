@@ -27,6 +27,7 @@ jobs:
       desktop-rust: ${{ steps.filter.outputs.desktop-rust }}
       web: ${{ steps.filter.outputs.web }}
       mobile: ${{ steps.filter.outputs.mobile }}
+      spec: ${{ steps.filter.outputs.spec }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -72,6 +73,10 @@ jobs:
               - 'scripts/test-mobile-release-candidate-publisher.sh'
               - 'scripts/test-mobile-worktree-overrides.sh'
               - '.github/workflows/mobile-release-candidate.yml'
+              - '.github/workflows/ci.yml'
+            spec:
+              - 'docs/spec/**'
+              - 'scripts/check-tla-specs.sh'
               - '.github/workflows/ci.yml'
       - name: Release workflow source contract
         run: scripts/test-release-ref-contract.sh
@@ -1055,6 +1060,23 @@ jobs:
             exit 1
           fi
           echo "No dead token references found."
+
+  tla-specs:
+    name: TLA+ Spec Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.spec == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Model-check TLA+ specs
+        run: scripts/check-tla-specs.sh
 
   server-cross-compile:
     name: Server Cross-Compile
