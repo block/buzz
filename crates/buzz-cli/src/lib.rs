@@ -365,6 +365,38 @@ Examples:\n  \
 buzz agents archived"
     )]
     Archived,
+    /// Publish this identity's relay agent profile (kind:10100) — makes a headless
+    /// (non-managed) agent discoverable and @mentionable by Buzz Desktop clients.
+    #[command(
+        after_help = "kind:10100 is a replaceable event: this fully overwrites any \
+previous agent profile for the signing identity.\n\n\
+Examples:\n  \
+buzz agents publish-profile --name Coder --channel-ids <UUID> --respond-to allowlist \
+--respond-to-allowlist <PUBKEY1>,<PUBKEY2> --channel-add-policy owner_only"
+    )]
+    PublishProfile {
+        /// Display name shown in Buzz Desktop
+        #[arg(long)]
+        name: String,
+        /// Free-form agent type label (default: "agent")
+        #[arg(long, default_value = "agent")]
+        agent_type: String,
+        /// Channel UUIDs this agent should be considered mentionable in (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        channel_ids: Vec<String>,
+        /// Presence status to report
+        #[arg(long, default_value = "online")]
+        status: String,
+        /// Who this agent responds to: owner-only, allowlist, or anyone
+        #[arg(long, default_value = "allowlist")]
+        respond_to: String,
+        /// Pubkeys allowed to trigger this agent when --respond-to=allowlist (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        respond_to_allowlist: Vec<String>,
+        /// Who may add this agent to new channels: anyone, owner_only, or nobody
+        #[arg(long, default_value = "owner_only")]
+        channel_add_policy: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2293,6 +2325,7 @@ mod tests {
                 "archived",
                 "draft-create",
                 "draft-update",
+                "publish-profile",
                 "unarchive"
             ]
         );
@@ -2432,7 +2465,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 5),
+            ("agents", 6),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),
