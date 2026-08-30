@@ -229,6 +229,61 @@ impl IssueAssignmentOperation {
     }
 }
 
+/// Lane 2dd046aa seam: repository resolution gates event construction.
+/// `resolver` answers whether an exact kind-30617 repository announcement
+/// exists for the owner/id pair (the same filter shape as
+/// `fetch_own_repo_announcement`); `build_and_sign` performs event
+/// construction + signing only when resolution succeeded. Refusal names the
+/// exact owner and repo id. Production `cmd_create_issue` routes through
+/// this seam — the frozen `owner_resolution_order` tests count build/sign
+/// calls through it.
+pub(crate) async fn cmd_create_issue_gated<R, F>(
+    resolver: R,
+    build_and_sign: F,
+    repo_owner: &str,
+    repo_id: &str,
+) -> Result<(), CliError>
+where
+    R: Fn(&str, &str) -> Result<bool, CliError>,
+    F: FnOnce() -> Result<(), CliError>,
+{
+    match resolver(repo_owner, repo_id)? {
+        true => build_and_sign(),
+        false => Err(CliError::Usage(format!(
+            "no repository announcement resolves for owner {repo_owner} and repo id {repo_id} — refusing before signing"
+        ))),
+    }
+}
+
+/// Does the relay's raw query response contain an announcement that is
+/// exactly kind 30617, authored by `owner`, with `d == repo_id`? A malformed
+/// or non-matching response counts as no announcement — the guard refuses
+/// rather than trusting shape it cannot verify.
+fn exact_announcement_in(raw: &str, owner: &str, repo_id: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return false;
+    };
+    let Some(events) = value.as_array() else {
+        return false;
+    };
+    events.iter().any(|event| {
+        event.get("kind").and_then(|kind| kind.as_u64()) == Some(30617)
+            && event.get("pubkey").and_then(|pubkey| pubkey.as_str()) == Some(owner)
+            && event
+                .get("tags")
+                .and_then(|tags| tags.as_array())
+                .is_some_and(|tags| {
+                    tags.iter().any(|tag| {
+                        tag.as_array().is_some_and(|pair| {
+                            pair.len() == 2
+                                && pair[0].as_str() == Some("d")
+                                && pair[1].as_str() == Some(repo_id)
+                        })
+                    })
+                })
+    })
+}
+
 pub async fn cmd_create_issue(
     client: &BuzzClient,
     repo_owner: &str,
@@ -252,10 +307,34 @@ pub async fn cmd_create_issue(
         id: repo_id.to_string(),
     };
 
-    let builder = with_git_provenance(
-        buzz_sdk::build_git_issue(&repo, subject, &body, &meta).map_err(sdk_err)?,
-    )?;
-    let event = client.sign_event(builder)?;
+    // Resolve the exact repository announcement BEFORE any construction or
+    // signing (lane 2dd046aa); a resolver error (unreadable relay) fails
+    // closed, an unresolvable pair refuses with the pair named.
+    let resolver = |owner: &str, repo: &str| -> Result<bool, CliError> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                let filter = serde_json::json!({
+                    "kinds": [30617],
+                    "authors": [owner],
+                    "#d": [repo],
+                    "limit": 1
+                });
+                let raw = client.query(&filter).await?;
+                Ok(exact_announcement_in(&raw, owner, repo))
+            })
+        })
+    };
+    let mut signed: Option<nostr::Event> = None;
+    let signer = || -> Result<(), CliError> {
+        let builder = with_git_provenance(
+            buzz_sdk::build_git_issue(&repo, subject, &body, &meta).map_err(sdk_err)?,
+        )?;
+        signed = Some(client.sign_event(builder)?);
+        Ok(())
+    };
+    cmd_create_issue_gated(resolver, signer, repo_owner, repo_id).await?;
+    let event =
+        signed.ok_or_else(|| CliError::Other("gated signer produced no event".to_string()))?;
     let event_id = event.id.to_hex();
     let resp = client.submit_event(event).await?;
     // `link` renders as a rich preview card in Buzz Desktop when included in
@@ -841,5 +920,71 @@ mod tests {
 
         assert!(!state.assignees.contains(VOLUNTEER));
         assert_eq!(state.heads.get(VOLUNTEER), Some(&owner_unassign));
+    }
+}
+
+#[cfg(test)]
+mod owner_resolution_order {
+    //! Lane 2dd046aa frozen control: repository resolution must return BEFORE
+    //! event construction/signing. The production seam (`cmd_create_issue_gated`)
+    //! is added by the implementation; these tests are frozen and may not be
+    //! edited — the implementation makes this unchanged module compile.
+
+    use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    const OWNER: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const REPO: &str = "fixture-repo";
+
+    fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Runtime::new().unwrap().block_on(fut)
+    }
+
+    #[test]
+    fn invalid_owner_returns_before_signing() {
+        let count = Rc::new(Cell::new(0u32));
+        let signer_count = count.clone();
+        let result = block_on(cmd_create_issue_gated(
+            |_owner, _id| Ok(false),
+            move || {
+                signer_count.set(signer_count.get() + 1);
+                Ok(())
+            },
+            OWNER,
+            REPO,
+        ));
+        let err = result.expect_err("unresolved owner/id must refuse");
+        let text = err.to_string();
+        assert!(
+            text.contains(OWNER),
+            "error must name the exact owner: {text}"
+        );
+        assert!(
+            text.contains(REPO),
+            "error must name the exact repo id: {text}"
+        );
+        assert_eq!(
+            count.get(),
+            0,
+            "build/sign must not run for an unresolved repo"
+        );
+    }
+
+    #[test]
+    fn valid_owner_signs_exactly_once() {
+        let count = Rc::new(Cell::new(0u32));
+        let signer_count = count.clone();
+        let result = block_on(cmd_create_issue_gated(
+            |_owner, _id| Ok(true),
+            move || {
+                signer_count.set(signer_count.get() + 1);
+                Ok(())
+            },
+            "2222222222222222222222222222222222222222222222222222222222222222",
+            "repoA",
+        ));
+        result.expect("valid announced pair must proceed to build/sign");
+        assert_eq!(count.get(), 1, "build/sign must run exactly once");
     }
 }
