@@ -275,6 +275,35 @@ async fn author_allowed(
     }
 }
 
+/// Apply the optional raw-owner-pubkey security override before the standard
+/// owner/sibling policy. This lets deployments that require a human-only
+/// instruction boundary reject managed sibling identities even when their
+/// NIP-OA attestations prove the same owner.
+async fn author_allowed_with_strict_owner(
+    strict_owner_pubkey: bool,
+    respond_to: &RespondTo,
+    allowlist: &HashSet<String>,
+    author: &str,
+    is_dm: bool,
+    owner_cache: &OwnerCache,
+    rest_client: &relay::RestClient,
+) -> bool {
+    if strict_owner_pubkey {
+        return !matches!(respond_to, RespondTo::Nobody)
+            && owner_cache.get().is_some_and(|owner| owner == author);
+    }
+
+    author_allowed(
+        respond_to,
+        allowlist,
+        author,
+        is_dm,
+        owner_cache,
+        rest_client,
+    )
+    .await
+}
+
 /// Resolve whether `channel_id` is a DM, for the inbound author gate.
 ///
 /// Resolution order:
@@ -2874,7 +2903,8 @@ async fn tokio_main() -> Result<()> {
                                 // exercised by non-owner authors inside DMs.
                                 let is_dm =
                                     is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
-                                let allowed = author_allowed(
+                                let allowed = author_allowed_with_strict_owner(
+                                    config.strict_owner_pubkey,
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
                                     &author,
@@ -5508,6 +5538,37 @@ mod author_gate_tests {
         }
     }
 
+    #[tokio::test]
+    async fn strict_owner_pubkey_accepts_owner_but_rejects_same_owner_sibling() {
+        let cache = cache_with_sibling();
+
+        assert!(
+            author_allowed_with_strict_owner(
+                true,
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                OWNER,
+                false,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await
+        );
+        assert!(
+            !author_allowed_with_strict_owner(
+                true,
+                &RespondTo::OwnerOnly,
+                &HashSet::new(),
+                SIBLING,
+                false,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "strict owner mode must compare the raw event author pubkey and reject NIP-OA siblings"
+        );
+    }
+
     // ── DM hardening ──────────────────────────────────────────────────────
     //
     // In a DM, clients auto-p-tag every participant, and an agent can be
@@ -6823,6 +6884,7 @@ mod build_mcp_servers_tests {
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
+            strict_owner_pubkey: false,
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
@@ -7047,6 +7109,7 @@ mod error_outcome_emission_tests {
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
+            strict_owner_pubkey: false,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],

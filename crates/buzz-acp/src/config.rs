@@ -467,6 +467,17 @@ pub struct CliArgs {
     )]
     pub respond_to: RespondTo,
 
+    /// Require the raw event author pubkey to equal the configured owner pubkey.
+    /// This security override excludes NIP-OA same-owner sibling agents from
+    /// every responding mode. `nobody` still rejects all authors.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_STRICT_OWNER_PUBKEY",
+        default_value_t = false,
+        hide_env_values = true
+    )]
+    pub strict_owner_pubkey: bool,
+
     /// Comma-separated 64-char hex pubkeys for allowlist mode.
     /// Owner pubkey is always implicitly included.
     #[arg(long, env = "BUZZ_ACP_RESPOND_TO_ALLOWLIST", value_delimiter = ',')]
@@ -567,6 +578,9 @@ pub struct Config {
     pub permission_mode: PermissionMode,
     /// Inbound author gate mode.
     pub respond_to: RespondTo,
+    /// When true, accept only events authored by the owner's raw pubkey and do
+    /// not trust NIP-OA same-owner sibling agents as instruction senders.
+    pub strict_owner_pubkey: bool,
     /// Validated allowlist of pubkey hex strings (used when respond_to == Allowlist).
     pub respond_to_allowlist: HashSet<String>,
     /// Allowed `respond_to` modes. Empty = all modes allowed.
@@ -1132,6 +1146,7 @@ impl Config {
                 .and_then(sanitize_session_title),
             permission_mode: args.permission_mode,
             respond_to: args.respond_to,
+            strict_owner_pubkey: args.strict_owner_pubkey,
             respond_to_allowlist,
             allowed_respond_to,
             persona_env_vars,
@@ -1164,7 +1179,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {} strict_owner_pubkey={}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1186,6 +1201,7 @@ impl Config {
             self.model.as_deref().unwrap_or("(agent default)"),
             self.permission_mode,
             respond_to_detail,
+            self.strict_owner_pubkey,
             allowed_respond_to_detail,
         )
     }
@@ -1505,6 +1521,7 @@ mod tests {
             session_title: None,
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
+            strict_owner_pubkey: false,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
             persona_env_vars: vec![],
