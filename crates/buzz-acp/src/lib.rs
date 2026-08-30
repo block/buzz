@@ -2769,6 +2769,15 @@ async fn tokio_main() -> Result<()> {
                                             sender = %buzz_event.event.pubkey.to_hex(),
                                             "shutdown command from owner — exiting gracefully"
                                         );
+                                        let thread_tags =
+                                            queue::parse_thread_tags(&buzz_event.event);
+                                        pool::post_notice(
+                                            &ctx.rest_client,
+                                            buzz_event.channel_id,
+                                            &thread_tags,
+                                            SHUTDOWN_NOTICE,
+                                        )
+                                        .await;
                                         let _ = shutdown_tx.send(());
                                         continue;
                                     }
@@ -2799,12 +2808,19 @@ async fn tokio_main() -> Result<()> {
                                             buzz_event.channel_id,
                                             ControlSignal::Cancel,
                                         );
+                                        let notice = cancel_notice(fired);
                                         if !fired {
                                             tracing::warn!(
                                                 channel_id = %buzz_event.channel_id,
                                                 "!cancel received but no in-flight task — no-op"
                                             );
                                         }
+                                        spawn_notice(
+                                            Some(&ctx.rest_client),
+                                            buzz_event.channel_id,
+                                            queue::parse_thread_tags(&buzz_event.event),
+                                            notice.to_string(),
+                                        );
                                         continue; // consume event — do NOT push to queue
                                     }
                                 }
@@ -2837,11 +2853,12 @@ async fn tokio_main() -> Result<()> {
                                             buzz_event.channel_id,
                                             ControlSignal::Rotate,
                                         );
-                                        if fired {
+                                        let invalidated = if fired {
                                             tracing::info!(
                                                 channel_id = %buzz_event.channel_id,
                                                 "!rotate received — cancelling in-flight turn and rotating session"
                                             );
+                                            0
                                         } else {
                                             let invalidated = pool.invalidate_channel_sessions(buzz_event.channel_id);
                                             tracing::info!(
@@ -2849,7 +2866,14 @@ async fn tokio_main() -> Result<()> {
                                                 invalidated,
                                                 "!rotate received — invalidated idle channel session(s)"
                                             );
-                                        }
+                                            invalidated
+                                        };
+                                        spawn_notice(
+                                            Some(&ctx.rest_client),
+                                            buzz_event.channel_id,
+                                            queue::parse_thread_tags(&buzz_event.event),
+                                            rotate_notice(fired, invalidated).to_string(),
+                                        );
                                         continue; // consume event — do NOT push to queue
                                     }
                                 }
@@ -3850,10 +3874,45 @@ fn is_auth_error(error: &acp::AcpError) -> bool {
     message.contains("Re-authenticate") || message.contains("API Error: 401")
 }
 
+const SHUTDOWN_NOTICE: &str = "Shutting down.";
+
+fn cancel_notice(turn_active: bool) -> &'static str {
+    if turn_active {
+        "Cancelled the current turn."
+    } else {
+        "Nothing to cancel — no turn in flight."
+    }
+}
+
+fn rotate_notice(turn_active: bool, invalidated_sessions: usize) -> &'static str {
+    if turn_active {
+        "Cancelled the current turn — the next one starts from a fresh session."
+    } else if invalidated_sessions > 0 {
+        "Session rotated — the next turn starts fresh."
+    } else {
+        "No session to rotate — the next turn already starts fresh."
+    }
+}
+
+/// Spawn a task that posts a user-visible notice to the relay.
+fn spawn_notice(
+    rest_client: Option<&relay::RestClient>,
+    channel_id: Uuid,
+    thread_tags: ThreadTags,
+    content: String,
+) {
+    if let Some(rest) = rest_client {
+        let rest = rest.clone();
+        tokio::spawn(async move {
+            pool::post_notice(&rest, channel_id, &thread_tags, &content).await;
+        });
+    }
+}
+
 /// Spawn a task that posts a user-visible failure notice to the relay.
 ///
 /// Shared by the hard-cap immediate dead-letter path and the retries-exhausted
-/// dead-letter path so neither duplicates the tokio::spawn block.
+/// dead-letter path so neither duplicates the thread-tag extraction.
 fn spawn_failure_notice(
     rest_client: Option<&relay::RestClient>,
     batch: &FlushBatch,
@@ -3865,11 +3924,7 @@ fn spawn_failure_notice(
             .last()
             .map(|be| queue::parse_thread_tags(&be.event))
             .unwrap_or_default();
-        let rest = rest.clone();
-        let channel_id = batch.channel_id;
-        tokio::spawn(async move {
-            pool::post_failure_notice(&rest, channel_id, &thread_tags, &content).await;
-        });
+        spawn_notice(Some(rest), batch.channel_id, thread_tags, content);
     }
 }
 
@@ -5208,6 +5263,36 @@ mod owner_control_command_tests {
             "!rotate",
             &agent
         ));
+    }
+
+    #[test]
+    fn cancel_notices_distinguish_active_and_idle_turns() {
+        assert_eq!(cancel_notice(true), "Cancelled the current turn.");
+        assert_eq!(
+            cancel_notice(false),
+            "Nothing to cancel — no turn in flight."
+        );
+    }
+
+    #[test]
+    fn rotate_notices_distinguish_active_cached_and_empty_sessions() {
+        assert_eq!(
+            rotate_notice(true, 0),
+            "Cancelled the current turn — the next one starts from a fresh session."
+        );
+        assert_eq!(
+            rotate_notice(false, 1),
+            "Session rotated — the next turn starts fresh."
+        );
+        assert_eq!(
+            rotate_notice(false, 0),
+            "No session to rotate — the next turn already starts fresh."
+        );
+    }
+
+    #[test]
+    fn shutdown_notice_is_concise() {
+        assert_eq!(SHUTDOWN_NOTICE, "Shutting down.");
     }
 
     #[test]
