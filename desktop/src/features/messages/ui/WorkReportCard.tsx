@@ -6,6 +6,7 @@ import type {
 } from "@/features/messages/lib/workReport";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
+import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 const STATUS_PRESENTATION: Record<
   WorkReportStatus,
@@ -39,10 +40,14 @@ function ReportList({ label, values }: { label: string; values: string[] }) {
 
 export function WorkReportCard({
   report,
+  authorAvatarUrl,
+  authorLabel,
   conversationVisible,
   onToggleConversation,
 }: {
   report: WorkReport;
+  authorAvatarUrl: string | null;
+  authorLabel: string;
   conversationVisible: boolean;
   onToggleConversation: () => void;
 }) {
@@ -64,6 +69,15 @@ export function WorkReportCard({
         </Badge>
       </div>
       <p className="mt-3 text-sm leading-6 text-foreground">{report.outcome}</p>
+      <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+        <UserAvatar
+          avatarUrl={authorAvatarUrl}
+          displayName={authorLabel}
+          size="xs"
+          testId="work-report-author-avatar"
+        />
+        <span>Reported by {authorLabel}</span>
+      </div>
       <div className="mt-4 space-y-3">
         <ReportList label="Deliverables" values={report.deliverables} />
         <ReportList label="Decisions" values={report.decisions} />

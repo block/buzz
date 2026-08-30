@@ -118,7 +118,8 @@ export function reduceWorkReports(
       .filter((report): report is WorkReport => report !== null)
       .sort(
         (a, b) =>
-          a.createdAt - b.createdAt || a.eventId.localeCompare(b.eventId),
+          a.createdAt - b.createdAt ||
+          (a.eventId < b.eventId ? -1 : a.eventId > b.eventId ? 1 : 0),
       )
       .at(-1) ?? null
   );
