@@ -2689,6 +2689,15 @@ async fn tokio_main() -> Result<()> {
                                     // stripped for a legitimately re-added channel.
                                     removed_channels.remove(&ch);
 
+                                    // Converge with the relay layer before the
+                                    // "already subscribed" guard runs: a channel
+                                    // the relay dropped is not subscribed, no
+                                    // matter what our intent-only set says.
+                                    clear_dropped_channels(
+                                        &mut subscribed_channel_ids,
+                                        relay.take_dropped_channels(),
+                                    );
+
                                     if subscribed_channel_ids.contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
                                     } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
@@ -4460,6 +4469,112 @@ fn dispatch_heartbeat(
     );
     *heartbeat_in_flight = true;
     tracing::info!(agent = agent_index, "heartbeat_fired");
+}
+
+/// Drop relay-dropped channels from the harness's subscription view.
+///
+/// `subscribed_channel_ids` records the *intent* to subscribe, not a confirmed
+/// subscription: `subscribe_channel*` only queues a REQ, and the relay layer can
+/// tear a channel down afterwards (access denied, missing filter state) without
+/// the main loop hearing about it. Left uncleared, the "already subscribed"
+/// guard on the member-added path turns every later membership notification for
+/// that channel into a no-op and the channel stays dead until restart.
+///
+/// Returns the channels that were actually cleared.
+fn clear_dropped_channels(
+    subscribed_channel_ids: &mut HashSet<Uuid>,
+    dropped: impl IntoIterator<Item = Uuid>,
+) -> Vec<Uuid> {
+    let mut cleared = Vec::new();
+    for ch in dropped {
+        if subscribed_channel_ids.remove(&ch) {
+            tracing::warn!(
+                channel_id = %ch,
+                "relay dropped this channel's subscription — cleared local subscribe state so a membership notification can re-subscribe"
+            );
+            cleared.push(ch);
+        }
+    }
+    cleared
+}
+
+#[cfg(test)]
+mod dropped_channel_resubscribe_tests {
+    use super::clear_dropped_channels;
+    use std::collections::HashSet;
+    use uuid::Uuid;
+
+    /// The member-added guard from the main loop: a channel already in the set
+    /// is treated as live and no subscribe is issued.
+    fn would_subscribe(subscribed: &HashSet<Uuid>, ch: Uuid) -> bool {
+        !subscribed.contains(&ch)
+    }
+
+    #[test]
+    fn dropped_channel_is_resubscribed_on_next_membership_notification() {
+        let ch = Uuid::new_v4();
+        let mut subscribed = HashSet::from([ch]);
+
+        // Before the relay drops it, a membership notification is a correct no-op.
+        assert!(
+            !would_subscribe(&subscribed, ch),
+            "a live channel must not be resubscribed on every membership event"
+        );
+
+        // Relay layer drops the channel (access denied / missing filter) and
+        // reports it back through take_dropped_channels().
+        let cleared = clear_dropped_channels(&mut subscribed, [ch]);
+
+        assert_eq!(
+            cleared,
+            vec![ch],
+            "the drop must clear local subscribe state"
+        );
+        assert!(
+            would_subscribe(&subscribed, ch),
+            "after a drop, the next membership notification must re-subscribe, not no-op"
+        );
+    }
+
+    #[test]
+    fn channels_that_were_not_dropped_are_untouched() {
+        let dropped_ch = Uuid::new_v4();
+        let live_ch = Uuid::new_v4();
+        let mut subscribed = HashSet::from([dropped_ch, live_ch]);
+
+        clear_dropped_channels(&mut subscribed, [dropped_ch]);
+
+        assert!(!subscribed.contains(&dropped_ch));
+        assert!(
+            subscribed.contains(&live_ch),
+            "an unrelated channel must keep its subscription state"
+        );
+    }
+
+    #[test]
+    fn drop_report_for_an_unknown_channel_is_a_no_op() {
+        let mut subscribed = HashSet::new();
+        let cleared = clear_dropped_channels(&mut subscribed, [Uuid::new_v4()]);
+        assert!(
+            cleared.is_empty(),
+            "a drop for a channel we never tracked must clear nothing"
+        );
+    }
+
+    #[test]
+    fn resubscribe_then_second_drop_clears_again() {
+        let ch = Uuid::new_v4();
+        let mut subscribed = HashSet::from([ch]);
+
+        clear_dropped_channels(&mut subscribed, [ch]);
+        // Membership notification re-subscribes.
+        subscribed.insert(ch);
+        assert!(!would_subscribe(&subscribed, ch));
+
+        // A second drop must clear it again — the fix is not one-shot.
+        clear_dropped_channels(&mut subscribed, [ch]);
+        assert!(would_subscribe(&subscribed, ch));
+    }
 }
 
 #[cfg(test)]

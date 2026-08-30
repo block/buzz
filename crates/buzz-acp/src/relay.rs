@@ -22,7 +22,18 @@
 //! channel. `next_event()` reads from the event receiver.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// Channels the relay layer has permanently dropped, shared between the
+/// background task (writer) and [`HarnessRelay`] (draining reader).
+///
+/// The background task tears a channel subscription down in several places and
+/// never restores it (access denied by the relay, missing filter state). The
+/// harness main loop keeps its own `subscribed_channel_ids` view; without this
+/// hand-off that view never converges and every later membership notification
+/// for the channel is a silent no-op until the process restarts.
+pub(crate) type DroppedChannels = Arc<Mutex<HashSet<Uuid>>>;
 
 /// Default capacity of the event channel from background task to harness.
 /// Override with `BUZZ_ACP_EVENT_BUFFER` env var at startup.
@@ -627,6 +638,8 @@ pub struct HarnessRelay {
     observer_control_rx: Option<mpsc::Receiver<Event>>,
     /// Sender for commands to the background task.
     cmd_tx: mpsc::Sender<RelayCommand>,
+    /// Channels the background task has dropped, drained by the harness.
+    dropped_channels: DroppedChannels,
     /// HTTP client for HTTP bridge calls.
     http: reqwest::Client,
     /// WebSocket URL of the relay.
@@ -701,6 +714,8 @@ impl HarnessRelay {
             mpsc::channel::<Event>(event_channel_capacity());
         let (cmd_tx, cmd_rx) = mpsc::channel::<RelayCommand>(CMD_CHANNEL_CAPACITY);
 
+        let dropped_channels: DroppedChannels = DroppedChannels::default();
+        let bg_dropped_channels = dropped_channels.clone();
         let bg_keys = keys.clone();
         let bg_relay_url = relay_url.to_string();
         let bg_agent_pubkey_hex = agent_pubkey_hex.to_string();
@@ -717,6 +732,7 @@ impl HarnessRelay {
                 bg_relay_url,
                 bg_agent_pubkey_hex,
                 bg_auth_tag,
+                bg_dropped_channels,
             )
             .await;
         });
@@ -725,6 +741,7 @@ impl HarnessRelay {
             event_rx,
             observer_control_rx: Some(observer_control_rx),
             cmd_tx,
+            dropped_channels,
             http: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .connect_timeout(std::time::Duration::from_secs(5))
@@ -891,6 +908,22 @@ impl HarnessRelay {
             .map_err(|_| RelayError::ConnectionClosed)?;
         debug!("queued unsubscribe for channel {channel_id}");
         Ok(())
+    }
+
+    /// Drain the channels the relay layer has dropped since the last call.
+    ///
+    /// Each dropped channel is returned exactly once. The harness clears these
+    /// from its own subscription bookkeeping so a later membership notification
+    /// re-subscribes the channel instead of short-circuiting as "already
+    /// subscribed".
+    pub fn take_dropped_channels(&self) -> Vec<Uuid> {
+        match self.dropped_channels.lock() {
+            Ok(mut dropped) => dropped.drain().collect(),
+            // A poisoned lock means a writer panicked mid-insert. Reporting no
+            // drops is the safe direction: the harness keeps its current view
+            // rather than spuriously re-subscribing.
+            Err(_) => Vec::new(),
+        }
     }
 
     /// Wait for the next event from any subscribed channel.
@@ -1140,6 +1173,9 @@ struct BgState {
     /// A single failed channel REQ is parked here instead of aborting the whole
     /// reconnect. Drained by the main loop. Flushed on each reconnect attempt.
     resubscribe_retry: HashSet<Uuid>,
+    /// Channels dropped by this task, handed back to the harness main loop so
+    /// its `subscribed_channel_ids` view converges with relay reality.
+    dropped_channels: DroppedChannels,
     /// Current position in the exponential backoff ladder.
     ///
     /// Persisted across calls to `wait_for_reconnect` so a flapping link stays at
@@ -1151,6 +1187,7 @@ struct BgState {
 impl BgState {
     fn new() -> Self {
         Self {
+            dropped_channels: DroppedChannels::default(),
             active_subscriptions: HashMap::new(),
             last_seen: HashMap::new(),
             seen_ids: TwoGenDedup::new(SEEN_ID_LIMIT),
@@ -1219,6 +1256,34 @@ impl BgState {
     /// Clear all per-channel state for a channel that is being unsubscribed.
     /// Prevents stale replay on re-subscribe and avoids unbounded state growth
     /// for channels that are removed and never re-added.
+    /// Build a state that reports its channel drops through `dropped_channels`.
+    fn with_dropped_channels(dropped_channels: DroppedChannels) -> Self {
+        Self {
+            dropped_channels,
+            ..Self::new()
+        }
+    }
+
+    /// Record a channel this task has given up on.
+    ///
+    /// The relay layer never restores these on its own, so the harness must be
+    /// told: it clears its local subscribe state and re-subscribes on the next
+    /// membership notification. Logged at warn so the failure mode is visible
+    /// in agent logs instead of presenting as a silently dead channel.
+    fn record_channel_drop(&mut self, channel_id: Uuid, reason: &str) {
+        warn!(
+            "channel {channel_id} dropped by relay layer ({reason}) - harness will re-subscribe on the next membership notification"
+        );
+        match self.dropped_channels.lock() {
+            Ok(mut dropped) => {
+                dropped.insert(channel_id);
+            }
+            Err(_) => {
+                warn!("dropped-channel set poisoned - channel {channel_id} drop not reported")
+            }
+        }
+    }
+
     fn clear_channel_state(&mut self, channel_id: &Uuid) {
         self.last_seen.remove(channel_id);
         self.subscribe_since.remove(channel_id);
@@ -1337,6 +1402,12 @@ fn apply_command_to_state(state: &mut BgState, cmd: RelayCommand) {
             filter,
             replay_since,
         } => {
+            // A fresh subscribe supersedes any earlier drop of this channel;
+            // clearing the mark keeps the harness from re-clearing state it has
+            // already rebuilt.
+            if let Ok(mut dropped) = state.dropped_channels.lock() {
+                dropped.remove(&channel_id);
+            }
             state
                 .active_subscriptions
                 .insert(channel_id, channel_sub_id(channel_id));
@@ -1630,8 +1701,9 @@ async fn run_background_task(
     relay_url: String,
     agent_pubkey_hex: String,
     auth_tag: Option<nostr::Tag>,
+    dropped_channels: DroppedChannels,
 ) {
-    let mut state = BgState::new();
+    let mut state = BgState::with_dropped_channels(dropped_channels);
 
     let handshake_ok = process_handshake_buffer(
         &mut ws,
@@ -2787,6 +2859,7 @@ async fn drain_rate_limited_pending(
             None => {
                 warn!("missing filter for channel {channel_id} in rate_limited_pending — dropping");
                 state.rate_limited_pending.remove(&channel_id);
+                state.record_channel_drop(channel_id, "missing filter in rate_limited_pending");
                 continue;
             }
         };
@@ -2844,6 +2917,7 @@ async fn drain_resubscribe_retry(
             None => {
                 warn!("missing filter for channel {channel_id} in resubscribe_retry — dropping");
                 state.resubscribe_retry.remove(&channel_id);
+                state.record_channel_drop(channel_id, "missing filter in resubscribe_retry");
                 continue;
             }
         };
@@ -3613,6 +3687,7 @@ fn drop_channel_on_access_denied(state: &mut BgState, sub_id: &str, message: &st
     );
     state.active_subscriptions.remove(&channel_id);
     state.clear_channel_state(&channel_id);
+    state.record_channel_drop(channel_id, "access denied");
     true
 }
 
@@ -5166,6 +5241,82 @@ mod tests {
         assert!(
             !state.active_subscriptions.contains_key(&channel_id),
             "no-op: nothing to remove and nothing resurrected"
+        );
+    }
+
+    #[test]
+    fn access_denied_drop_is_reported_to_the_harness() {
+        let sink: DroppedChannels = DroppedChannels::default();
+        let mut state = BgState::with_dropped_channels(sink.clone());
+        let channel_id = Uuid::new_v4();
+        subscribe_channel(&mut state, channel_id);
+
+        drop_channel_on_access_denied(
+            &mut state,
+            &channel_sub_id(channel_id),
+            "restricted: not a channel member",
+        );
+
+        assert!(
+            sink.lock().unwrap().contains(&channel_id),
+            "a dropped channel must be reported so the harness can re-subscribe it"
+        );
+    }
+
+    #[test]
+    fn a_kept_channel_is_never_reported_as_dropped() {
+        let sink: DroppedChannels = DroppedChannels::default();
+        let mut state = BgState::with_dropped_channels(sink.clone());
+        let channel_id = Uuid::new_v4();
+        subscribe_channel(&mut state, channel_id);
+
+        // Connection-level denial: reconnect handles it, the channel survives.
+        drop_channel_on_access_denied(
+            &mut state,
+            &channel_sub_id(channel_id),
+            "restricted: insufficient scope",
+        );
+
+        assert!(
+            sink.lock().unwrap().is_empty(),
+            "only permanent per-channel drops may be reported"
+        );
+    }
+
+    #[test]
+    fn resubscribing_a_channel_clears_its_drop_report() {
+        let sink: DroppedChannels = DroppedChannels::default();
+        let mut state = BgState::with_dropped_channels(sink.clone());
+        let channel_id = Uuid::new_v4();
+        subscribe_channel(&mut state, channel_id);
+        drop_channel_on_access_denied(
+            &mut state,
+            &channel_sub_id(channel_id),
+            "restricted: channel access revoked",
+        );
+        assert!(sink.lock().unwrap().contains(&channel_id));
+
+        // The harness re-subscribes after the membership notification.
+        subscribe_channel(&mut state, channel_id);
+
+        assert!(
+            sink.lock().unwrap().is_empty(),
+            "a fresh subscribe supersedes the stale drop report"
+        );
+        assert!(state.active_filters.contains_key(&channel_id));
+    }
+
+    #[test]
+    fn missing_filter_drop_paths_report_the_channel() {
+        let sink: DroppedChannels = DroppedChannels::default();
+        let mut state = BgState::with_dropped_channels(sink.clone());
+        let channel_id = Uuid::new_v4();
+
+        state.record_channel_drop(channel_id, "missing filter in resubscribe_retry");
+
+        assert!(
+            sink.lock().unwrap().contains(&channel_id),
+            "the missing-filter drop paths must also reach the harness"
         );
     }
 
