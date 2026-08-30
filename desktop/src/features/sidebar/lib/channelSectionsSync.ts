@@ -162,7 +162,10 @@ export class ChannelSectionSyncManager {
         last.id !== current.id ||
         last.name !== current.name ||
         last.icon !== current.icon ||
-        last.order !== current.order
+        last.order !== current.order ||
+        last.smartRule?.pattern !== current.smartRule?.pattern ||
+        last.smartRule?.isRegex !== current.smartRule?.isRegex ||
+        last.smartRule?.caseSensitive !== current.smartRule?.caseSensitive
       )
         return false;
     }
@@ -172,6 +175,13 @@ export class ChannelSectionSyncManager {
     for (const key of currentAssignKeys) {
       if (this.lastPublishedStore.assignments[key] !== store.assignments[key])
         return false;
+    }
+    const lastManual =
+      this.lastPublishedStore.manuallyUnassignedChannelIds ?? [];
+    const currentManual = store.manuallyUnassignedChannelIds ?? [];
+    if (lastManual.length !== currentManual.length) return false;
+    for (let i = 0; i < currentManual.length; i++) {
+      if (lastManual[i] !== currentManual[i]) return false;
     }
     return true;
   }
@@ -191,6 +201,11 @@ export class ChannelSectionSyncManager {
         version: 1,
         sections: merged.sections,
         assignments: merged.assignments,
+        ...(merged.manuallyUnassignedChannelIds
+          ? {
+              manuallyUnassignedChannelIds: merged.manuallyUnassignedChannelIds,
+            }
+          : {}),
       };
       const ciphertext = await nip44EncryptToSelf(JSON.stringify(payload));
       const createdAt = Math.max(

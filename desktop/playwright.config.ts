@@ -46,6 +46,7 @@ export default defineConfig({
         "**/custom-emoji-ui.spec.ts",
         "**/channel-mute.spec.ts",
         "**/channel-star.spec.ts",
+        "**/smart-channel-sections.spec.ts",
         "**/channel-controls.spec.ts",
         "**/channel-activity-popover.spec.ts",
         "**/active-turn-resilience.spec.ts",

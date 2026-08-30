@@ -280,3 +280,46 @@ test("revert-fix: undecryptable live event advances watermark before decrypt att
     mock.reset();
   }
 });
+
+test("publishes Smart Section rules and manual placement overrides", async () => {
+  mock.method(relayClient, "fetchEvents", () => Promise.resolve([]));
+  mock.method(relayClient, "publishEvent", () => Promise.resolve());
+  const fw = makeFakeWindow();
+  const restore = installFakeWindow(fw);
+  const tauri = installTauriMock("");
+  try {
+    const manager = new ChannelSectionSyncManager("pk-smart", RELAY);
+    manager.publishSections(
+      makeStore({
+        sections: [
+          {
+            id: "smart",
+            name: "Engineering",
+            order: 0,
+            smartRule: {
+              pattern: "^eng-",
+              isRegex: true,
+              caseSensitive: false,
+            },
+          },
+        ],
+        manuallyUnassignedChannelIds: ["channel-1"],
+      }),
+    );
+    fw._fireTimer();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const plaintext = tauri.capturedPlaintext();
+    assert.ok(plaintext, "Smart Section payload should be encrypted");
+    const payload = JSON.parse(plaintext);
+    assert.deepEqual(payload.sections[0].smartRule, {
+      pattern: "^eng-",
+      isRegex: true,
+      caseSensitive: false,
+    });
+    assert.deepEqual(payload.manuallyUnassignedChannelIds, ["channel-1"]);
+  } finally {
+    tauri.restore();
+    restore();
+    mock.reset();
+  }
+});

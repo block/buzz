@@ -7,6 +7,7 @@ import {
   EllipsisVertical,
   Pencil,
   Plus,
+  Search,
   Trash2,
 } from "lucide-react";
 
@@ -128,9 +129,11 @@ export function SectionActionsMenu({
   browseLabel,
   onCreate,
   createLabel,
+  onCreateSmartSection,
   onNewMessage,
   newMessageLabel,
   onRenameSection,
+  onRunSmartSection,
   onMoveSectionUp,
   onMoveSectionDown,
   onDeleteSection,
@@ -149,9 +152,11 @@ export function SectionActionsMenu({
   browseLabel?: string;
   onCreate?: () => void;
   createLabel?: string;
+  onCreateSmartSection?: () => void;
   onNewMessage?: () => void;
   newMessageLabel?: string;
   onRenameSection?: () => void;
+  onRunSmartSection?: () => void;
   onMoveSectionUp?: () => void;
   onMoveSectionDown?: () => void;
   onDeleteSection?: () => void;
@@ -213,6 +218,14 @@ export function SectionActionsMenu({
             <span>{createLabel ?? "Create channel"}</span>
           </DropdownMenuItem>
         ) : null}
+        {onCreateSmartSection ? (
+          <DropdownMenuItem
+            onSelect={() => deferMenuAction(onCreateSmartSection)}
+          >
+            <Search className="h-4 w-4" />
+            <span>New smart section</span>
+          </DropdownMenuItem>
+        ) : null}
         {showSectionManagement ? (
           <>
             {onRenameSection ? (
@@ -220,7 +233,17 @@ export function SectionActionsMenu({
                 onSelect={() => deferMenuAction(onRenameSection)}
               >
                 <Pencil className="h-4 w-4" />
-                <span>Rename section</span>
+                <span>
+                  {onRunSmartSection ? "Edit smart section" : "Rename section"}
+                </span>
+              </DropdownMenuItem>
+            ) : null}
+            {onRunSmartSection ? (
+              <DropdownMenuItem
+                onSelect={() => deferMenuAction(onRunSmartSection)}
+              >
+                <Search className="h-4 w-4" />
+                <span>Find matching channels</span>
               </DropdownMenuItem>
             ) : null}
             {onMoveSectionUp ? (
@@ -345,6 +368,7 @@ export function ChannelGroupSection({
   listTestId,
   onBrowseClick,
   onCreateClick,
+  onCreateSmartSection,
   onQuickCreateClick,
   quickCreateLabel,
   showQuickCreate,
@@ -385,6 +409,7 @@ export function ChannelGroupSection({
   listTestId: string;
   onBrowseClick?: () => void;
   onCreateClick?: () => void;
+  onCreateSmartSection?: () => void;
   /**
    * Overrides the quick-create (`+`) button's click handler. Defaults to
    * `onCreateClick`. Used to point the sidebar `+` at the unified
@@ -521,6 +546,7 @@ export function ChannelGroupSection({
               browseLabel={browseLabel}
               onCreate={onCreateClick}
               createLabel={createLabel}
+              onCreateSmartSection={onCreateSmartSection}
               sortMode={sortMode}
               onSortModeChange={onSortModeChange}
             />
@@ -566,6 +592,8 @@ export function CustomChannelSection({
   onCreateSectionForChannel,
   onCreateChannel,
   onRenameSection,
+  onEditSmartSection,
+  onFindMatchingChannels,
   onDeleteSection,
   onMoveSectionUp,
   onMoveSectionDown,
@@ -606,6 +634,8 @@ export function CustomChannelSection({
   onCreateSectionForChannel: (channelId: string) => void;
   onCreateChannel: () => void;
   onRenameSection: () => void;
+  onEditSmartSection: (section: ChannelSection) => void;
+  onFindMatchingChannels: (section: ChannelSection) => void;
   onDeleteSection: () => void;
   onMoveSectionUp: () => void;
   onMoveSectionDown: () => void;
@@ -620,6 +650,12 @@ export function CustomChannelSection({
 }) {
   const contentId = `sidebar-section-${section.id}`;
   const [actionsMenuOpen, setActionsMenuOpen] = useState(false);
+  const onEditSection = section.smartRule
+    ? () => onEditSmartSection(section)
+    : onRenameSection;
+  const onRunSmartSection = section.smartRule
+    ? () => onFindMatchingChannels(section)
+    : undefined;
 
   return (
     <SortableSectionShell sectionId={section.id}>
@@ -638,14 +674,16 @@ export function CustomChannelSection({
                 <div className="relative" {...dragHandleProps}>
                   <SidebarGroupLabel
                     asChild
-                    className={section.icon ? undefined : "pl-8"}
+                    className={
+                      section.icon || section.smartRule ? undefined : "pl-8"
+                    }
                   >
                     <button
                       aria-controls={contentId}
                       aria-expanded={!isCollapsed}
                       className={cn(
                         SECTION_LABEL_BUTTON_CLASS,
-                        section.icon && "gap-2",
+                        (section.icon || section.smartRule) && "gap-2",
                       )}
                       onClick={onToggleCollapsed}
                       type="button"
@@ -660,6 +698,15 @@ export function CustomChannelSection({
                             className="h-4 w-4"
                             value={section.icon}
                           />
+                        </span>
+                      ) : section.smartRule ? (
+                        <span
+                          aria-label="Smart section"
+                          className="flex h-4 w-4 shrink-0 items-center justify-center text-sidebar-foreground/60"
+                          role="img"
+                          title="Smart section"
+                        >
+                          <Search className="h-3.5 w-3.5" />
                         </span>
                       ) : null}
                       <span
@@ -694,7 +741,8 @@ export function CustomChannelSection({
                       onOpenChange={setActionsMenuOpen}
                       hasUnread={hasUnread}
                       onMarkAllRead={onMarkSectionRead}
-                      onRenameSection={onRenameSection}
+                      onRenameSection={onEditSection}
+                      onRunSmartSection={onRunSmartSection}
                       onMoveSectionUp={onMoveSectionUp}
                       onMoveSectionDown={onMoveSectionDown}
                       onDeleteSection={onDeleteSection}
@@ -707,10 +755,16 @@ export function CustomChannelSection({
                 </div>
               </ContextMenuTrigger>
               <ContextMenuContent>
-                <ContextMenuItem onClick={onRenameSection}>
+                <ContextMenuItem onClick={onEditSection}>
                   <Pencil className="h-4 w-4" />
-                  Rename section
+                  {section.smartRule ? "Edit smart section" : "Rename section"}
                 </ContextMenuItem>
+                {onRunSmartSection ? (
+                  <ContextMenuItem onClick={onRunSmartSection}>
+                    <Search className="h-4 w-4" />
+                    Find matching channels
+                  </ContextMenuItem>
+                ) : null}
                 <ContextMenuItem disabled={isFirst} onClick={onMoveSectionUp}>
                   <ArrowUp className="h-4 w-4" />
                   Move up
