@@ -216,6 +216,43 @@ pub struct AcpClient {
     standard_adapter: Option<StandardAdapterKind>,
 }
 
+/// Build the Buzz routing environment aliases understood by Hermes' sandbox.
+///
+/// Hermes intentionally strips messaging credentials from model-authored shell
+/// commands. Its `_HERMES_FORCE_` host bridge restores an explicitly supplied
+/// variable after that scrub, keeping terminal tools on the relay and identity
+/// resolved by the harness that received the turn.
+pub(crate) fn forced_buzz_env_for_hermes(
+    command: &str,
+    relay_url: &str,
+    private_key: &str,
+    mut get_env: impl FnMut(&str) -> Option<String>,
+) -> Vec<(String, String)> {
+    if !matches!(
+        crate::config::normalize_agent_command_identity(command).as_str(),
+        "hermes" | "hermes-agent" | "hermes-acp"
+    ) {
+        return Vec::new();
+    }
+
+    let mut env = vec![
+        (
+            "_HERMES_FORCE_BUZZ_RELAY_URL".to_string(),
+            relay_url.to_string(),
+        ),
+        (
+            "_HERMES_FORCE_BUZZ_PRIVATE_KEY".to_string(),
+            private_key.to_string(),
+        ),
+    ];
+    env.extend(["BUZZ_AUTH_TAG"].into_iter().filter_map(|name| {
+        get_env(name)
+            .filter(|value| !value.is_empty())
+            .map(|value| (format!("_HERMES_FORCE_{name}"), value))
+    }));
+    env
+}
+
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
 /// collisions.  When both sides have an object for the same key, the merge recurses so
 /// unrelated nested keys from `base` are preserved.
@@ -455,6 +492,7 @@ impl AcpClient {
         command: &str,
         args: &[String],
         extra_env: &[(String, String)],
+        forced_env: &[(String, String)],
         has_generated_codex_config: bool,
     ) -> Result<Self, AcpError> {
         use std::process::Stdio;
@@ -514,6 +552,13 @@ impl AcpClient {
         }
         if let Some(merged) = codex_config_value {
             cmd.env("CODEX_CONFIG", merged);
+        }
+
+        // Harness-owned routing aliases must beat both inherited and persona env.
+        // Keep this separate from `extra_env` so persona values cannot opt into
+        // forced precedence by choosing the same `_HERMES_FORCE_BUZZ_` prefix.
+        for (key, value) in forced_env {
+            cmd.env(key, value);
         }
 
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
@@ -3024,7 +3069,7 @@ mod tests {
     }
 
     async fn spawn_script(script: &str) -> AcpClient {
-        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], &[], false)
             .await
             .expect("failed to spawn test script")
     }
@@ -3061,6 +3106,7 @@ mod tests {
         file_name: &str,
         var: &str,
         extra_env: &[(String, String)],
+        forced_env: &[(String, String)],
     ) -> String {
         use std::os::unix::fs::PermissionsExt;
 
@@ -3080,6 +3126,7 @@ mod tests {
             path.to_str().expect("probe path is UTF-8"),
             &[],
             extra_env,
+            forced_env,
             false,
         )
         .await
@@ -3109,19 +3156,77 @@ mod tests {
         }
 
         assert_eq!(
-            spawn_named_and_read_child_env("hermes-acp", VAR, &[]).await,
+            spawn_named_and_read_child_env("hermes-acp", VAR, &[], &[]).await,
             "1",
             "Hermes spawns must default {VAR}=1"
         );
         assert_eq!(
-            spawn_named_and_read_child_env("hermes-acp", VAR, &[(VAR.into(), "0".into())]).await,
+            spawn_named_and_read_child_env("hermes-acp", VAR, &[(VAR.into(), "0".into())], &[],)
+                .await,
             "0",
             "an explicit extra_env entry must override the runtime default"
         );
         assert_eq!(
-            spawn_named_and_read_child_env("other-agent", VAR, &[]).await,
+            spawn_named_and_read_child_env("other-agent", VAR, &[], &[]).await,
             "<unset>",
             "non-Hermes spawns must not receive Hermes defaults"
+        );
+    }
+
+    #[test]
+    fn hermes_spawn_forwards_buzz_routing_env_through_hermes_sandbox_aliases() {
+        let values = std::collections::HashMap::from([
+            ("BUZZ_RELAY_URL", "wss://community-a.example"),
+            ("BUZZ_PRIVATE_KEY", "nsec1test"),
+            ("BUZZ_AUTH_TAG", "test-auth-tag"),
+            ("BUZZ_API_TOKEN", "must-not-be-forwarded"),
+        ]);
+
+        let env = forced_buzz_env_for_hermes(
+            "/opt/bin/hermes-acp",
+            "wss://community-a.example",
+            "nsec1test",
+            |name| values.get(name).map(|value| (*value).to_string()),
+        );
+
+        assert_eq!(
+            env,
+            vec![
+                (
+                    "_HERMES_FORCE_BUZZ_RELAY_URL".to_string(),
+                    "wss://community-a.example".to_string(),
+                ),
+                (
+                    "_HERMES_FORCE_BUZZ_PRIVATE_KEY".to_string(),
+                    "nsec1test".to_string(),
+                ),
+                (
+                    "_HERMES_FORCE_BUZZ_AUTH_TAG".to_string(),
+                    "test-auth-tag".to_string(),
+                ),
+            ]
+        );
+        assert!(
+            forced_buzz_env_for_hermes("goose", "wss://unused", "unused", |_| {
+                Some("value".to_string())
+            })
+            .is_empty()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn forced_spawn_env_beats_persona_value_structurally() {
+        const VAR: &str = "_HERMES_FORCE_BUZZ_RELAY_URL";
+        assert_eq!(
+            spawn_named_and_read_child_env(
+                "hermes-acp",
+                VAR,
+                &[(VAR.into(), "wss://persona.example".into())],
+                &[(VAR.into(), "wss://resolved.example".into())],
+            )
+            .await,
+            "wss://resolved.example"
         );
     }
 
@@ -3717,7 +3822,7 @@ mod tests {
     /// which is fine — these tests don't read from the agent, they just
     /// feed JSON into the parser.
     async fn spawn_inert_client() -> AcpClient {
-        AcpClient::spawn("cat", &[], &[], false)
+        AcpClient::spawn("cat", &[], &[], &[], false)
             .await
             .expect("spawn cat as inert client")
     }
