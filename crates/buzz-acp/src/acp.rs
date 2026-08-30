@@ -762,6 +762,7 @@ impl AcpClient {
         self.session_prompt_blocks_with_idle_timeout(
             session_id,
             std::slice::from_ref(&prompt_text),
+            None,
             idle_timeout,
             max_duration,
         )
@@ -774,14 +775,19 @@ impl AcpClient {
     /// Used for slash-command pass-through: ACP connectors detect commands via
     /// the **first** block's text starting with `/`, so the harness sends
     /// `["/cmd args", "<buzz context>"]` instead of one wrapped block.
+    /// `prompt_meta`, when `Some`, is attached verbatim as the request's `_meta`
+    /// object — the out-of-band channel for authenticated facts (e.g. the
+    /// verified author pubkeys of the triggering Buzz events) that agents must
+    /// never have to parse out of prompt text.
     pub async fn session_prompt_blocks_with_idle_timeout(
         &mut self,
         session_id: &str,
         prompt_blocks: &[&str],
+        prompt_meta: Option<serde_json::Value>,
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
-        let params = build_prompt_params(session_id, prompt_blocks);
+        let params = build_prompt_params(session_id, prompt_blocks, prompt_meta);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
 
@@ -2041,15 +2047,23 @@ impl AcpClient {
 }
 
 /// Build `session/prompt` params from one or more text content blocks.
-fn build_prompt_params(session_id: &str, prompt_blocks: &[&str]) -> serde_json::Value {
+fn build_prompt_params(
+    session_id: &str,
+    prompt_blocks: &[&str],
+    meta: Option<serde_json::Value>,
+) -> serde_json::Value {
     let blocks: Vec<serde_json::Value> = prompt_blocks
         .iter()
         .map(|text| serde_json::json!({ "type": "text", "text": text }))
         .collect();
-    serde_json::json!({
+    let mut params = serde_json::json!({
         "sessionId": session_id,
         "prompt": blocks,
-    })
+    });
+    if let Some(meta) = meta {
+        params["_meta"] = meta;
+    }
+    params
 }
 
 /// Build `_goose/unstable/session/steer` params from one or more text
@@ -2577,6 +2591,29 @@ mod tests {
     }
 
     #[test]
+    fn build_prompt_params_attaches_meta_out_of_band() {
+        let params = build_prompt_params(
+            "sess_abc123",
+            &["[Buzz event: @mention]\nContent: hello"],
+            Some(serde_json::json!({
+                "buzz": {
+                    "channelId": "0b0e1d2c-0000-0000-0000-000000000000",
+                    "events": [
+                        { "id": "ff".repeat(32), "authorPubkey": "aa".repeat(32) }
+                    ]
+                }
+            })),
+        );
+        assert_eq!(
+            params["_meta"]["buzz"]["events"][0]["authorPubkey"].as_str(),
+            Some("aa".repeat(32).as_str())
+        );
+        // Ohne meta bleibt der Request unveraendert (kein leeres _meta).
+        let ohne = build_prompt_params("sess_abc123", &["x"], None);
+        assert!(ohne.get("_meta").is_none());
+    }
+
+    #[test]
     fn session_prompt_slash_command_two_block_format() {
         // Slash-command pass-through: bare command first, wrapped context second.
         let params = build_prompt_params(
@@ -2585,6 +2622,7 @@ mod tests {
                 "/goal ship it",
                 "[Buzz event: @mention]\nContent: @Eva /goal ship it",
             ],
+            None,
         );
         let prompt = params["prompt"].as_array().unwrap();
         assert_eq!(prompt.len(), 2);
