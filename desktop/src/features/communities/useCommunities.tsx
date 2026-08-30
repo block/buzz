@@ -58,12 +58,21 @@ export function resolveCommunityUpdateResult(
     return { kind: "duplicate-relay" };
   }
 
+  // `token` and `reposDir` are optional fields cleared by sending `undefined`
+  // — that is a real, intentional value, not "field omitted." Gating on
+  // `!== undefined` (as the other fields below do) would treat a clear as no
+  // change and silently drop it, so these two check key presence instead.
+  const tokenChanged =
+    Object.hasOwn(updates, "token") && updates.token !== current.token;
+  const reposDirChanged =
+    Object.hasOwn(updates, "reposDir") && updates.reposDir !== current.reposDir;
+
   const hasChange =
     (updates.name !== undefined && updates.name !== current.name) ||
     (updates.relayUrl !== undefined && updates.relayUrl !== current.relayUrl) ||
-    (updates.token !== undefined && updates.token !== current.token) ||
+    tokenChanged ||
     (updates.pubkey !== undefined && updates.pubkey !== current.pubkey) ||
-    (updates.reposDir !== undefined && updates.reposDir !== current.reposDir);
+    reposDirChanged;
 
   if (!hasChange) return { kind: "unchanged" };
 
@@ -72,9 +81,8 @@ export function resolveCommunityUpdateResult(
     isActive &&
     ((updates.relayUrl !== undefined &&
       updates.relayUrl !== current.relayUrl) ||
-      (updates.token !== undefined && updates.token !== current.token) ||
-      (updates.reposDir !== undefined &&
-        updates.reposDir !== current.reposDir));
+      tokenChanged ||
+      reposDirChanged);
 
   return { kind: "updated", requiresReinit: backendFieldsChanged };
 }
