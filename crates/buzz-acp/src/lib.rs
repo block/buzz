@@ -304,6 +304,54 @@ pub(crate) async fn is_dm_channel(
     }
 }
 
+/// In the built-in Mentions mode, DM membership is already an explicit
+/// audience boundary. Requiring a second textual mention makes ordinary DM
+/// messages appear to be ignored. Explicit Config mode remains authoritative.
+fn relax_dm_mention_filter(
+    subscribe_mode: &config::SubscribeMode,
+    channel_type: Option<&str>,
+    filter: &mut config::ChannelFilter,
+) {
+    if *subscribe_mode == config::SubscribeMode::Mentions && channel_type == Some("dm") {
+        filter.require_mention = false;
+    }
+}
+
+#[cfg(test)]
+mod dm_subscription_tests {
+    use super::*;
+
+    fn mention_filter() -> config::ChannelFilter {
+        config::ChannelFilter {
+            kinds: Some(vec![9]),
+            require_mention: true,
+        }
+    }
+
+    #[test]
+    fn mentions_mode_allows_plain_dm_messages() {
+        let mut filter = mention_filter();
+        relax_dm_mention_filter(&config::SubscribeMode::Mentions, Some("dm"), &mut filter);
+        assert!(!filter.require_mention);
+    }
+
+    #[test]
+    fn mentions_mode_keeps_group_and_stream_gate() {
+        for channel_type in [Some("stream"), Some("forum"), None] {
+            let mut filter = mention_filter();
+            relax_dm_mention_filter(&config::SubscribeMode::Mentions, channel_type, &mut filter);
+            assert!(filter.require_mention);
+        }
+    }
+
+    #[test]
+    fn explicit_config_mode_remains_authoritative_for_dms() {
+        let mut filter = mention_filter();
+        relax_dm_mention_filter(&config::SubscribeMode::Config, Some("dm"), &mut filter);
+        assert!(filter.require_mention);
+    }
+}
+
 /// Query an author's kind:0 profile and check if their NIP-OA auth tag
 /// proves the same owner as us.
 async fn check_sibling_via_profile(
@@ -2137,7 +2185,16 @@ async fn tokio_main() -> Result<()> {
         }
     };
 
-    let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let mut channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
+    for (channel_id, filter) in &mut channel_filters {
+        relax_dm_mention_filter(
+            &config.subscribe_mode,
+            channel_info_map
+                .get(channel_id)
+                .map(|info| info.channel_type.as_str()),
+            filter,
+        );
+    }
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
@@ -2691,7 +2748,17 @@ async fn tokio_main() -> Result<()> {
 
                                     if subscribed_channel_ids.contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
-                                    } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
+                                    } else if let Some(mut filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
+                                        let channel_type = ctx
+                                            .channel_info
+                                            .resolve(ch)
+                                            .await
+                                            .map(|info| info.channel_type);
+                                        relax_dm_mention_filter(
+                                            &config.subscribe_mode,
+                                            channel_type.as_deref(),
+                                            &mut filter,
+                                        );
                                         tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
