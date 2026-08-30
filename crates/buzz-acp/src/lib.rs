@@ -4,6 +4,7 @@ mod acp;
 mod config;
 mod engram_fetch;
 mod filter;
+mod inbound_denial;
 mod observer;
 mod pool;
 mod pool_lifecycle;
@@ -37,6 +38,9 @@ use config::{
 };
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
+use inbound_denial::{
+    classify_inbound, event_allows_denial, publish_denial, DenialLimiter, GateOutcome,
+};
 use nostr::{PublicKey, ToBech32};
 use pool::{
     AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
@@ -2055,6 +2059,7 @@ async fn tokio_main() -> Result<()> {
         }
     }
     let owner_cache = OwnerCache::new(startup_owner.clone());
+    let mut denial_limiter = DenialLimiter::new();
 
     let mut relay_observer_control_rx = None;
     let mut relay_observer_publisher_task = None;
@@ -2883,15 +2888,71 @@ async fn tokio_main() -> Result<()> {
                                     &ctx.rest_client,
                                 )
                                 .await;
-                                if !allowed {
-                                    tracing::debug!(
-                                        channel_id = %buzz_event.channel_id,
-                                        author = %buzz_event.event.pubkey.to_hex(),
-                                        mode = %config.respond_to,
-                                        is_dm,
-                                        "inbound author gate — dropping event"
-                                    );
-                                    continue;
+                                let mentioned =
+                                    event_mentions_agent(&buzz_event.event, &pubkey_hex);
+                                let kind_allows_denial = event_allows_denial(
+                                    &buzz_event.event,
+                                    kind_u32,
+                                    !matches!(config.respond_to, RespondTo::Nobody),
+                                );
+                                let cooled_down = if !allowed
+                                    && mentioned
+                                    && kind_allows_denial
+                                {
+                                    denial_limiter.allows(buzz_event.channel_id, &author)
+                                } else {
+                                    false
+                                };
+
+                                let outcome = classify_inbound(
+                                    allowed,
+                                    mentioned,
+                                    cooled_down,
+                                    kind_allows_denial,
+                                );
+                                match outcome {
+                                    GateOutcome::Proceed => {}
+                                    GateOutcome::Drop => {
+                                        tracing::debug!(
+                                            channel_id = %buzz_event.channel_id,
+                                            author,
+                                            mode = %config.respond_to,
+                                            is_dm,
+                                            "inbound author gate — dropping event"
+                                        );
+                                        continue;
+                                    }
+                                    GateOutcome::DropAndDeny => {
+                                        denial_limiter.record(buzz_event.channel_id, &author);
+                                        tracing::debug!(
+                                            channel_id = %buzz_event.channel_id,
+                                            author,
+                                            mode = %config.respond_to,
+                                            is_dm,
+                                            "inbound author gate — denying and dropping event"
+                                        );
+                                        let publisher = relay.event_publisher();
+                                        let keys = config.keys.clone();
+                                        let channel_id = buzz_event.channel_id;
+                                        let triggering_event = buzz_event.event.clone();
+                                        tokio::spawn(async move {
+                                            if let Err(error) = publish_denial(
+                                                &publisher,
+                                                &keys,
+                                                channel_id,
+                                                &triggering_event,
+                                            )
+                                            .await
+                                            {
+                                                tracing::warn!(
+                                                    channel_id = %channel_id,
+                                                    event_id = %triggering_event.id,
+                                                    "failed to publish inbound denial: {error}"
+                                                );
+                                            }
+                                        });
+                                        continue;
+                                    }
                                 }
                             }
 
