@@ -882,16 +882,12 @@ test.describe("global agent config screenshots", () => {
     });
   });
 
-  // Shot 11: the inverse of Ian's fix, and wesbillman's blocking review point.
-  // A runtime-LESS legacy/builtin definition (no runtime, but a saved model)
-  // still EXPOSES the provider picker via blankRuntimeModelProviderEditable, so
-  // an empty provider must keep Save DISABLED. The gate must key off the field's
-  // visibility (runtimeCanChooseLlmProvider), not the raw runtime capability —
-  // otherwise Save persists `provider: undefined` despite the visible picker.
-  // A global provider/model default keeps localMode satisfied, so the ONLY thing
-  // that can block Save here is the Customize-pair provider gate (step 7), which
-  // is exactly what this regression pins.
-  test("11-edit-runtime-less-provider-required-save-blocked", async ({
+  // Shot 11: a legacy runtime-less definition can still save non-execution
+  // metadata while its existing execution projection remains unchanged. The
+  // provider picker stays visible so the incomplete legacy configuration is
+  // clear. Focused readiness tests separately pin that changing an execution
+  // field restores the gate and that create mode is always gated.
+  test("11-edit-runtime-less-unchanged-execution-save-enabled", async ({
     page,
   }) => {
     const PERSONA_ID = "persona-runtime-less-edit-e2e";
@@ -921,8 +917,9 @@ test.describe("global agent config screenshots", () => {
           id: PERSONA_ID,
           displayName: "Legacy Editor",
           systemPrompt: "You are the runtime-less edit-mode e2e persona.",
-          // Runtime-less definition with a saved model and NO provider — the
-          // picker is editable-without-runtime, so the provider stays required.
+          // Runtime-less definition with a saved model and NO provider. The
+          // picker remains visible, while unchanged-edit readiness allows
+          // non-execution metadata to be saved.
           runtime: null,
           model: "claude-opus-4-5",
           provider: null,
@@ -958,11 +955,13 @@ test.describe("global agent config screenshots", () => {
     await expect(page.locator("#persona-llm-provider")).toBeVisible({
       timeout: 10_000,
     });
-    // … so the empty provider must block Save …
-    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
+    // … but an unchanged legacy execution projection does not block metadata
+    // edits such as profile, instructions, access, or behavior (Rule 14).
+    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
       timeout: 10_000,
     });
-    // Disabled-state guidance belongs with the fields, not in the modal footer.
+    // No footer-level blocked-state guidance should appear for this saveable
+    // unchanged edit.
     await expect(page.getByTestId("persona-dialog-submit-reason")).toHaveCount(
       0,
     );
@@ -971,7 +970,7 @@ test.describe("global agent config screenshots", () => {
 
     const dialog = page.getByRole("dialog");
     await dialog.screenshot({
-      path: `${SHOTS}/11-edit-runtime-less-provider-required-save-blocked.png`,
+      path: `${SHOTS}/11-edit-runtime-less-unchanged-execution-save-enabled.png`,
     });
   });
 
