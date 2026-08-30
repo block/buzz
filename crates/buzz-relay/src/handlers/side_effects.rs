@@ -3163,6 +3163,25 @@ async fn publish_nip43_delta(
         return Ok(());
     }
 
+    // Publish through Redis before local fan-out so subscribers connected to
+    // other relay pods receive the global NIP-43 delta. Mark the event first so
+    // this pod suppresses its Redis echo after delivering locally.
+    state.mark_local_event(tenant.community(), &stored.event.id);
+    if let Err(e) = state
+        .pubsub
+        .publish_event(tenant, EventTopic::Global, &stored.event)
+        .await
+    {
+        state
+            .local_event_ids
+            .invalidate(&(tenant.community(), stored.event.id.to_bytes()));
+        warn!(
+            target = %target_pubkey_hex,
+            kind,
+            "NIP-43 {label} Redis publish failed: {e}"
+        );
+    }
+
     // Routed through the guarded send path for uniformity; the access gate
     // no-ops for this globally-scoped (channel_id = None) NIP-43 event.
     crate::handlers::event::fan_out_event_to_local_subscribers(state, tenant.community(), &stored)
