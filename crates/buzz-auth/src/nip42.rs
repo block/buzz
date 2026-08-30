@@ -22,8 +22,11 @@ fn normalize_relay_url(raw: &str) -> String {
         Err(_) => return raw.to_string(),
     };
     // Treat localhost variants as equivalent by normalizing to 127.0.0.1.
+    // `Url::host_str` returns IPv6 literals wrapped in brackets, so the loopback
+    // address arrives as `[::1]`, not `::1`. Match the bracketed form or the
+    // branch never fires and a valid `[::1]` client is rejected as a mismatch.
     if let Some(host) = parsed.host_str() {
-        if host == "localhost" || host == "::1" {
+        if host == "localhost" || host == "[::1]" {
             let _ = parsed.set_host(Some("127.0.0.1"));
         }
     }
@@ -170,6 +173,13 @@ mod tests {
     #[test]
     fn localhost_and_127_are_equivalent() {
         let a = normalize_relay_url("ws://localhost:3030");
+        let b = normalize_relay_url("ws://127.0.0.1:3030");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn ipv6_loopback_and_127_are_equivalent() {
+        let a = normalize_relay_url("ws://[::1]:3030");
         let b = normalize_relay_url("ws://127.0.0.1:3030");
         assert_eq!(a, b);
     }
