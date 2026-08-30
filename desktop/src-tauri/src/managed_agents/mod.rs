@@ -27,6 +27,7 @@ mod personas;
 #[cfg(windows)]
 mod process_lifecycle;
 pub(crate) mod readiness;
+pub(crate) mod readiness_spawn;
 pub(crate) mod reconcile;
 mod relay_mesh;
 mod repos;
@@ -35,6 +36,7 @@ pub mod retention;
 mod runtime;
 mod runtime_commands;
 mod runtime_types;
+pub(crate) mod setup_payload;
 pub(crate) mod snapshot_avatar;
 pub(crate) mod spawn_snapshot;
 pub(crate) mod storage;
@@ -77,6 +79,7 @@ pub(crate) use readiness::{
     agent_readiness, resolve_effective_agent_env, resolve_effective_harness_descriptor,
     AgentReadiness, Requirement,
 };
+pub(crate) use readiness_spawn::agent_readiness_for_spawn;
 pub use relay_mesh::*;
 pub use repos::{
     effective_repos_dir, ensure_repos_symlink, resolve_repos_at_boot, validate_repos_dir,

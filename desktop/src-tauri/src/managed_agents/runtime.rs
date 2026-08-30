@@ -573,7 +573,9 @@ pub fn spawn_agent_child(
     let spawned_setup_mode;
     {
         use crate::managed_agents::readiness::EffectiveAgentEnv;
-        use crate::managed_agents::{agent_readiness, AgentReadiness, Requirement};
+        use crate::managed_agents::{
+            agent_readiness_for_spawn, setup_payload::build_setup_payload,
+        };
 
         // Construct EffectiveAgentEnv from the descriptor computed above — no second
         // resolver call; the descriptor's env is already the fully layered result.
@@ -582,67 +584,16 @@ pub fn spawn_agent_child(
             config_file_path: runtime_meta.and_then(|r| r.config_file_path),
             effective_command: descriptor.command.clone(),
         };
-        // Compute the optional payload before touching the command.
-        let setup_payload_json =
-            if let AgentReadiness::NotReady { requirements } = agent_readiness(&effective) {
-                let reqs: Vec<serde_json::Value> = requirements
-                    .into_iter()
-                    .map(|r| match r {
-                        Requirement::NormalizedField { field } => serde_json::json!({
-                            "surface": "normalized_field",
-                            "field": field,
-                        }),
-                        Requirement::EnvKey { key } => serde_json::json!({
-                            "surface": "env_key",
-                            "key": key,
-                        }),
-                        Requirement::CliLogin {
-                            probe_args,
-                            setup_copy,
-                            availability,
-                        } => serde_json::json!({
-                            "surface": "cli_login",
-                            "probe_args": probe_args,
-                            "setup_copy": setup_copy,
-                            "availability": availability,
-                        }),
-                        Requirement::CliConfigInvalid {
-                            probe_args,
-                            setup_copy,
-                            diagnostic,
-                        } => serde_json::json!({
-                            "surface": "cli_config_invalid",
-                            "probe_args": probe_args,
-                            "setup_copy": setup_copy,
-                            "diagnostic": diagnostic,
-                        }),
-                        Requirement::GitBash => serde_json::json!({
-                            "surface": "git_bash",
-                        }),
-                        Requirement::MissingBinary { command } => serde_json::json!({
-                            "surface": "missing_binary",
-                            "command": command,
-                        }),
-                    })
-                    .collect();
-                let payload = serde_json::json!({
-                    "agent_name": record.name,
-                    "agent_pubkey": record.pubkey,
-                    "requirements": reqs,
-                });
-                match serde_json::to_string(&payload) {
-                    Ok(json) => Some(json),
-                    Err(e) => {
-                        eprintln!(
-                            "buzz-desktop: failed to serialize setup payload for {}: {e}",
-                            record.name
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
+        // `agent_readiness_for_spawn` post-passes any transient CLI-login
+        // LoggedOut through `login_probe_with_recheck` before this
+        // snapshot is baked, so a sub-second `claude auth status` flap
+        // cannot trap the child in setup-listener mode for its lifetime
+        // (`buzz-acp/setup_mode.rs` never re-derives readiness).
+        let setup_payload_json = build_setup_payload(
+            &record.name,
+            &record.pubkey,
+            agent_readiness_for_spawn(&effective),
+        );
 
         spawned_setup_mode = setup_payload_json.is_some();
 
