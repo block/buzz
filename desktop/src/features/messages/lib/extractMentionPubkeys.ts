@@ -1,4 +1,5 @@
 import { getMentionOffsets } from "./hasMention";
+import { extractNostrUriPubkeys } from "./nostrUriMentions";
 
 export type MentionPubkeyCandidate = {
   displayName: string | null;
@@ -16,9 +17,10 @@ function normalizeDisplayName(name: string): string {
 }
 
 /**
- * Returns explicit selected mention pubkeys and manually typed channel-member
- * mentions. At each `@` offset, only the longest valid display name wins so a
- * member whose name prefixes another member is not spuriously tagged.
+ * Returns explicit selected mention pubkeys, manually typed channel-member
+ * mentions, and NIP-21 `nostr:` profile URIs. At each `@` offset, only the
+ * longest valid display name wins so a member whose name prefixes another
+ * member is not spuriously tagged.
  */
 export function extractMentionPubkeys({
   text,
@@ -87,5 +89,18 @@ export function extractMentionPubkeys({
       pubkeys.push(candidate.pubkey);
     }
   }
+
+  // A `nostr:npub…` URI addresses someone the same way `@Name` does, but it
+  // carries its own pubkey, so it resolves without a display-name match.
+  const taggedPubkeys = new Set(
+    pubkeys.map((pubkey) => pubkey.trim().toLowerCase()),
+  );
+  for (const pubkey of extractNostrUriPubkeys(text)) {
+    if (!taggedPubkeys.has(pubkey)) {
+      taggedPubkeys.add(pubkey);
+      pubkeys.push(pubkey);
+    }
+  }
+
   return pubkeys;
 }
