@@ -1693,13 +1693,12 @@ async fn run_storage_sweep_tick(
     }
 
     let media_storage = Arc::clone(&state.media_storage);
-    let max_objects = config.max_objects;
     storage_sweep::maybe_spawn_sweep(
         &state.storage_sweep,
         config.interval,
         config.timeout,
         async move {
-            buzz_media::fold_bucket_listing(max_objects, move |token| {
+            buzz_media::fold_bucket_listing(move |token| {
                 let media_storage = Arc::clone(&media_storage);
                 async move { media_storage.list_page(token, 1000).await }
             })
