@@ -40,6 +40,8 @@ const HARNESS_DESCRIPTIONS: Record<string, string> = {
   // Sources: https://github.com/NousResearch/hermes-agent,
   // https://hermes-agent.nousresearch.com/docs/
   hermes: "A general-purpose AI agent from Nous Research.",
+  // Source: https://github.com/letta-ai/letta-acp
+  letta: "A stateful Letta agent connected to Buzz through an ACP adapter.",
   // Sources: https://github.com/openclaw/openclaw,
   // https://docs.openclaw.ai/start/getting-started
   openclaw: "A personal AI assistant that runs on your own devices.",
