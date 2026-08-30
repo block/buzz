@@ -9,6 +9,7 @@ This guide covers the most common rendering failures on Linux and how to resolve
 | Blank or transparent window, then `SIGABRT` with `colrv1_configure_skpaint` in the output | COLRv1 color emoji font (AppImage only) | Upgrade to the latest AppImage (v0.5.2+) |
 | Blank window on startup / SIGSEGV when switching workspaces | dmabuf renderer incompatibility (NVIDIA or AppImage) | Prefer `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` (shipped automatically) or `--safe-rendering`. Do **not** set `WEBKIT_DISABLE_DMABUF_RENDERER=1` on current WebKitGTK — see [#3654](https://github.com/block/buzz/issues/3654). On Debian/Ubuntu with the proprietary NVIDIA driver the crash can persist (distro WebKit patch) — [#3654](https://github.com/block/buzz/issues/3654) stays open for that path. |
 | Blank window on any hardware, no crash output | Unknown GPU/driver combination | `--safe-rendering` flag (see below) |
+| UI paints, then the window freezes and the web process `SIGABRT`s ~20-30s in | A camera whose caps carry no `framerate` field (Intel IPU6 laptops expose one via libcamera) | Hide the offending camera — see [Crash after the UI loads](#crash-after-the-ui-loads-camera-enumeration) |
 
 ---
 
@@ -114,6 +115,98 @@ buzz-desktop
 - `WEBKIT_DMABUF_RENDERER_FORCE_SHM=1` keeps shared-memory transport without the #3654 empty-mode crash from `WEBKIT_DISABLE_DMABUF_RENDERER` (needs WebKitGTK ≥ 2.44).
 
 A dedicated fix for RDNA4 detection is being tracked in [#2643](https://github.com/block/buzz/issues/2643).
+
+---
+
+## Crash after the UI loads: camera enumeration
+
+**Affected hardware:** Laptops whose camera stack publishes a capture device with
+no `framerate` field in its caps. Confirmed on Intel IPU6 machines (Dell XPS 9320,
+sensor `ov01a10`) on Ubuntu 26.04 with webkit2gtk 2.52.3. Issue
+[#6339](https://github.com/block/buzz/issues/6339).
+
+**Symptom:** Buzz starts normally and the UI paints — you see the loading screen or
+the app itself. Roughly 20-30 seconds later the window freezes on whatever it last
+drew and never progresses. There is no error in Buzz's output. The web process is
+gone:
+
+```bash
+pgrep -x WebKitWebProces || echo "web process died"
+```
+
+This is easy to misread as a hang or a slow network. It is a crash, and because it
+lands *after* first paint, any check taken in the first ~15 seconds reports a
+healthy process.
+
+**Root cause:** This is a WebKitGTK bug, not a Buzz bug. When a page calls
+`navigator.mediaDevices.enumerateDevices()`, WebKit builds video presets for every
+capture device it can see. `GStreamerVideoCaptureSource.cpp` handles a `framerate`
+that is a fraction range or a single fraction, and otherwise assumes a list. When
+the field is absent entirely, `gst_structure_get_value()` returns `NULL` and
+`gstStructureGetList()` aborts the whole web process on a `RELEASE_ASSERT` that sits
+one line above its own graceful early-return. Symbolicated:
+
+```
+#2  abort ()
+#3  WTFCrashWithInfo(int, char const*, char const*, int)   WTF/Assertions.h:987
+#4  gstStructureGetList<double>()                          GStreamerCommon.cpp:1460
+#5  generatePresets()                                      GStreamerVideoCaptureSource.cpp:326
+#8  capabilities()                                         GStreamerVideoCaptureSource.cpp:256
+#25 enumerateDevices()                                     RealtimeMediaSourceCenter.cpp:307
+```
+
+On IPU6 laptops the sensor reaches userspace twice. The usable device, fed by
+`icamerasrc` through `v4l2loopback`, is fine. The libcamera duplicate is not:
+
+```
+Intel MIPI Camera (V4L2)      video/x-raw, format=NV12, width=1280, height=720, framerate=30/1
+Built-in Front Camera         video/x-raw, format=RGBA, width=640, height=480, colorimetry=sRGB
+```
+
+**Check whether you are affected:**
+
+```bash
+gst-device-monitor-1.0 Video/Source 2>/dev/null | grep 'caps  :' | grep -v framerate
+```
+
+Any line printed is a device that will abort WebKit. No output means this is not
+your problem.
+
+**Workaround:** Hide the framerate-less duplicate. Both steps are needed — PipeWire
+and GStreamer enumerate libcamera independently — and neither disturbs the working
+camera, which does not go through libcamera:
+
+```bash
+# 1. PipeWire's libcamera backend
+mkdir -p ~/.config/wireplumber/wireplumber.conf.d
+cat > ~/.config/wireplumber/wireplumber.conf.d/50-disable-libcamera.conf <<'CONF'
+wireplumber.profiles = {
+  main = {
+    monitor.libcamera = disabled
+  }
+}
+CONF
+systemctl --user restart wireplumber
+
+# 2. GStreamer's own libcamera device provider
+sudo apt remove gstreamer1.0-libcamera
+```
+
+Re-run the check above; it should print nothing. Note that removing
+`gstreamer1.0-libcamera` also removes GNOME's Camera app (`gnome-snapshot`), which
+depends on it.
+
+Verify your camera still works afterwards — on IPU6 the capture path is
+`icamerasrc` → `v4l2loopback`, so it is unaffected:
+
+```bash
+gst-device-monitor-1.0 Video/Source 2>/dev/null | grep 'name  :'
+```
+
+**Upstream:** The fix belongs in WebKit — the `RELEASE_ASSERT` should be dropped so
+the existing `GST_WARNING` and early return can skip the device instead of killing
+the process. Still present on WebKit `main` at the time of writing
+(`GStreamerCommon.cpp:1403-1408`).
 
 ---
 
