@@ -385,6 +385,61 @@ pub fn build_diff_message(
     Ok(EventBuilder::new(Kind::Custom(40008), content).tags(tags))
 }
 
+/// Build a structured work report rooted in a channel thread (kind 40009).
+pub fn build_work_report(
+    channel_id: Uuid,
+    thread_root: nostr::EventId,
+    prior: Option<nostr::EventId>,
+    report: &crate::WorkReport,
+) -> Result<EventBuilder, SdkError> {
+    let outcome = report.outcome.trim();
+    if outcome.is_empty() {
+        return Err(SdkError::InvalidInput(
+            "work report outcome is required".into(),
+        ));
+    }
+    if outcome.len() > 1_024 {
+        return Err(SdkError::InvalidInput(
+            "work report outcome exceeds 1024 bytes".into(),
+        ));
+    }
+    for (field, values) in [
+        ("deliverables", &report.deliverables),
+        ("decisions", &report.decisions),
+        ("verification", &report.verification),
+        ("risks", &report.risks),
+        ("next_actions", &report.next_actions),
+    ] {
+        if values.len() > 20 {
+            return Err(SdkError::InvalidInput(format!(
+                "work report {field} exceeds 20 entries"
+            )));
+        }
+        if values
+            .iter()
+            .any(|value| value.trim().is_empty() || value.len() > 2_048)
+        {
+            return Err(SdkError::InvalidInput(format!(
+                "work report {field} entries must be non-empty and at most 2048 bytes"
+            )));
+        }
+    }
+
+    let content = serde_json::to_string(report)
+        .map_err(|error| SdkError::InvalidInput(format!("invalid work report: {error}")))?;
+    check_content(&content, 32 * 1024)?;
+    let mut tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["e", &thread_root.to_hex(), "", "root"])?,
+        tag(&["t", "work-report"])?,
+        tag(&["status", report.status.as_str()])?,
+    ];
+    if let Some(prior) = prior {
+        tags.push(tag(&["prior", &prior.to_hex()])?);
+    }
+    Ok(EventBuilder::new(Kind::Custom(40009), content).tags(tags))
+}
+
 /// Build an edit event targeting an existing message (kind 40003).
 pub fn build_edit(
     channel_id: Uuid,
@@ -2628,6 +2683,59 @@ mod tests {
         assert!(has_tag(&ev, "repo", "https://github.com/example/repo"));
         assert!(has_tag(&ev, "commit", "abc1234"));
         assert!(has_tag(&ev, "l", "rust"));
+    }
+
+    fn completed_report() -> crate::WorkReport {
+        crate::WorkReport {
+            status: crate::WorkReportStatus::Completed,
+            outcome: "Shipped the result-first report contract".into(),
+            deliverables: vec!["https://example.com/pr/1".into()],
+            decisions: vec!["Keep raw conversation as evidence".into()],
+            verification: vec!["SDK and CLI tests passed".into()],
+            risks: vec![],
+            next_actions: vec!["Maintainer: review the PR".into()],
+        }
+    }
+
+    #[test]
+    fn work_report_has_root_status_and_prior_contract() {
+        let channel_id = uuid();
+        let root = event_id();
+        let prior = event_id();
+        let event =
+            sign(build_work_report(channel_id, root, Some(prior), &completed_report()).unwrap());
+        assert_eq!(event.kind.as_u16(), 40009);
+        assert!(has_tag(&event, "h", &channel_id.to_string()));
+        assert!(has_tag(&event, "t", "work-report"));
+        assert!(has_tag(&event, "status", "completed"));
+        assert!(has_tag(&event, "prior", &prior.to_hex()));
+        let root_tag = event
+            .tags
+            .iter()
+            .find(|tag| tag.as_slice().first().map(String::as_str) == Some("e"))
+            .expect("root tag");
+        assert_eq!(root_tag.as_slice().get(1), Some(&root.to_hex()));
+        assert_eq!(root_tag.as_slice().get(3).map(String::as_str), Some("root"));
+        let body: crate::WorkReport = serde_json::from_str(&event.content).unwrap();
+        assert_eq!(body, completed_report());
+    }
+
+    #[test]
+    fn work_report_rejects_empty_outcome_and_oversized_lists() {
+        let channel_id = uuid();
+        let root = event_id();
+        let mut report = completed_report();
+        report.outcome = "  ".into();
+        assert!(matches!(
+            build_work_report(channel_id, root, None, &report),
+            Err(SdkError::InvalidInput(_))
+        ));
+        report = completed_report();
+        report.verification = (0..21).map(|index| format!("check {index}")).collect();
+        assert!(matches!(
+            build_work_report(channel_id, root, None, &report),
+            Err(SdkError::InvalidInput(_))
+        ));
     }
 
     #[test]

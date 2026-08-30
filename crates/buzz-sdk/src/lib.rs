@@ -57,6 +57,59 @@ pub struct DiffMeta {
     pub alt_text: Option<String>,
 }
 
+/// Machine-readable status of a work report (kind 40009).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkReportStatus {
+    /// Work and verification are complete.
+    Completed,
+    /// Work is ready for review but not yet shipped.
+    InReview,
+    /// A human decision is required before progress can continue.
+    NeedsDecision,
+    /// Work cannot continue until an external dependency changes.
+    Blocked,
+    /// Work ended unsuccessfully.
+    Failed,
+}
+
+impl WorkReportStatus {
+    /// Stable wire value used in the event status tag and JSON body.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::InReview => "in_review",
+            Self::NeedsDecision => "needs_decision",
+            Self::Blocked => "blocked",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Structured outcome body for a work report (kind 40009).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkReport {
+    /// Current outcome state.
+    pub status: WorkReportStatus,
+    /// One-sentence description of what changed or what is needed.
+    pub outcome: String,
+    /// Openable PR, file, document, or artifact references.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deliverables: Vec<String>,
+    /// Material decisions and their rationale.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<String>,
+    /// Tests, CI runs, runtime checks, or other evidence.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub verification: Vec<String>,
+    /// Risks or limitations that affect use of the result.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub risks: Vec<String>,
+    /// Action, owner, and optional timing for the next step.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub next_actions: Vec<String>,
+}
+
 /// Vote direction for `build_vote`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VoteDirection {
