@@ -17,6 +17,8 @@ class _MentionSuggestions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final collidingLabels = mentionNameCollisions(suggestions);
+
     return Material(
       key: const ValueKey('mention-suggestions-popover'),
       type: MaterialType.card,
@@ -61,6 +63,7 @@ class _MentionSuggestions extends StatelessWidget {
                 currentPubkey: currentPubkey,
                 isDmChannel: isDmChannel,
                 userCache: userCache,
+                hasNameCollision: collidingLabels.contains(name.toLowerCase()),
               ),
               onTap: () => _runComposerAction(() => onSelect(candidate)),
             );
@@ -73,7 +76,8 @@ class _MentionSuggestions extends StatelessWidget {
 
 /// The secondary info line under a mention suggestion — mirrors desktop's
 /// `MentionAutocomplete` subtitle: bot icon + "agent" (or an "admin" badge
-/// for human admins), then "managed by …" / "not in channel".
+/// for human admins), then "managed by …" / "not in channel", and — when the
+/// name is shared with another suggestion — that candidate's truncated npub.
 abstract final class _MentionSuggestionInfo {
   static Widget? build(
     BuildContext context, {
@@ -81,6 +85,7 @@ abstract final class _MentionSuggestionInfo {
     required String? currentPubkey,
     required bool isDmChannel,
     required Map<String, UserProfile> userCache,
+    bool hasNameCollision = false,
   }) {
     final ownerLabel = candidate.isAgent
         ? formatOwnerLabel(candidate.ownerPubkey, currentPubkey, userCache)
@@ -99,13 +104,24 @@ abstract final class _MentionSuggestionInfo {
       detail = null;
     }
 
-    if (!candidate.isAgent && !isAdmin && detail == null) return null;
+    // Name collisions are the impersonation vector: a vanity-ground key can
+    // wear any display name, and duplicate agent identities legitimately share
+    // one. When a name is not unique in the list, the key is the only thing
+    // that distinguishes the rows.
+    final collisionNpub = hasNameCollision ? safeNpub(candidate.pubkey) : null;
+
+    if (!candidate.isAgent &&
+        !isAdmin &&
+        detail == null &&
+        collisionNpub == null) {
+      return null;
+    }
 
     final style = context.textTheme.labelSmall?.copyWith(
       color: context.colors.onSurfaceVariant,
     );
 
-    return Row(
+    final infoRow = Row(
       children: [
         if (candidate.isAgent) ...[
           Icon(
@@ -139,6 +155,25 @@ abstract final class _MentionSuggestionInfo {
           ),
         ],
       ],
+    );
+
+    if (collisionNpub == null) return infoRow;
+
+    final npubLine = Text(
+      key: const ValueKey('mention-collision-npub'),
+      truncatePubkey(collisionNpub),
+      style: style?.copyWith(fontFamily: 'GeistMono'),
+      overflow: TextOverflow.ellipsis,
+    );
+
+    // A plain person with no badge and no detail has an empty info row; show
+    // the key on its own rather than stacking it under blank space.
+    if (!candidate.isAgent && !isAdmin && detail == null) return npubLine;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [infoRow, npubLine],
     );
   }
 }
