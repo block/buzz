@@ -1940,6 +1940,43 @@ async fn handle_create_group(
     )
     .await?;
 
+    // Auto-enroll the relay owner into channels they did not create, so the
+    // owner's channel list stays in sync with agent- and member-created channels
+    // without a manual join. Gated by BUZZ_AUTO_ADD_OWNER_TO_CHANNELS; a no-op
+    // unless RELAY_OWNER_PUBKEY is configured. Runs before discovery emission so
+    // the NIP-29 kind:39002 roster already includes the owner. Non-fatal: the
+    // channel and creator membership are already committed.
+    let mut auto_added_owner: Option<Vec<u8>> = None;
+    if state.config.auto_add_owner_to_channels {
+        if let Some(owner_bytes) = state
+            .config
+            .relay_owner_pubkey
+            .as_deref()
+            .and_then(|hex_pk| hex::decode(hex_pk).ok())
+            .filter(|bytes| *bytes != actor_bytes)
+        {
+            match state
+                .db
+                .add_member(
+                    tenant.community(),
+                    channel.id,
+                    &owner_bytes,
+                    buzz_db::channel::MemberRole::Admin,
+                    Some(&actor_bytes),
+                )
+                .await
+            {
+                Ok(_) => {
+                    state.invalidate_membership(tenant, channel.id, &owner_bytes);
+                    auto_added_owner = Some(owner_bytes);
+                }
+                Err(e) => {
+                    warn!(channel = %channel.id, error = %e, "auto-add relay owner to channel failed");
+                }
+            }
+        }
+    }
+
     if let Err(e) = emit_group_discovery_events(tenant, state, channel.id).await {
         warn!(channel = %channel.id, error = %e, "NIP-29 group discovery emission failed");
     }
@@ -1955,6 +1992,23 @@ async fn handle_create_group(
     .await
     {
         warn!(channel = %channel.id, error = %e, "membership notification emission failed");
+    }
+
+    // Notify the auto-added owner so their client subscribes to the new channel
+    // in real time (mirrors the creator notification above).
+    if let Some(owner_bytes) = auto_added_owner {
+        if let Err(e) = emit_membership_notification(
+            tenant,
+            state,
+            channel.id,
+            &actor_bytes,
+            &owner_bytes,
+            KIND_MEMBER_ADDED_NOTIFICATION,
+        )
+        .await
+        {
+            warn!(channel = %channel.id, error = %e, "owner membership notification emission failed");
+        }
     }
 
     info!(channel_id = %channel.id, name = %name, "NIP-29 CREATE_GROUP processed");
