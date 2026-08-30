@@ -1031,16 +1031,28 @@ impl Config {
             )));
         }
 
+        // An empty `BUZZ_ACP_RESPOND_TO_ALLOWLIST` is how launchers spell "no
+        // allowlist" — the env var is exported unconditionally and clap turns
+        // `""` into `Some([""])`, which is *set* but carries no entries. Treat
+        // blank entries as absent so an empty export neither trips the
+        // ignored-flag warning below nor reaches hex validation as a bogus
+        // pubkey.
+        let allowlist_entries: Vec<String> = args
+            .respond_to_allowlist
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|entry| !entry.trim().is_empty())
+            .collect();
+
         let respond_to_allowlist = if args.respond_to == RespondTo::Allowlist {
-            let raw = args.respond_to_allowlist.unwrap_or_default();
-            if raw.is_empty() {
+            if allowlist_entries.is_empty() {
                 return Err(ConfigError::ConfigFile(
                     "--respond-to=allowlist requires --respond-to-allowlist with at least one pubkey".into(),
                 ));
             }
-            validate_allowlist(&raw)?
+            validate_allowlist(&allowlist_entries)?
         } else {
-            if args.respond_to_allowlist.is_some() {
+            if !allowlist_entries.is_empty() {
                 tracing::warn!(
                     "--respond-to-allowlist is ignored when --respond-to is not 'allowlist'"
                 );
@@ -2808,6 +2820,55 @@ channels = "ALL"
     // A minimal valid private key for test use (secp256k1 scalar = 1).
     const TEST_PRIVATE_KEY: &str =
         "0000000000000000000000000000000000000000000000000000000000000001";
+
+    #[test]
+    fn empty_allowlist_is_treated_as_absent() {
+        // Launchers export BUZZ_ACP_RESPOND_TO_ALLOWLIST unconditionally, so an
+        // agent with no allowlist gets `""`. clap parses that into Some([""]),
+        // which must not read as "an allowlist was supplied".
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--respond-to",
+            "anyone",
+            "--respond-to-allowlist",
+            "",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("empty allowlist should not fail config");
+
+        assert!(
+            config.respond_to_allowlist.is_empty(),
+            "blank entries must not land in the resolved allowlist"
+        );
+    }
+
+    #[test]
+    fn empty_allowlist_in_allowlist_mode_reports_the_missing_pubkey_error() {
+        // Same empty export, but in allowlist mode: the blank entry must surface
+        // the "requires at least one pubkey" error rather than failing hex
+        // validation on an empty string.
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--respond-to",
+            "allowlist",
+            "--respond-to-allowlist",
+            "",
+        ])
+        .expect("clap should parse args");
+        let result = Config::from_args(args);
+
+        let msg = result
+            .expect_err("allowlist mode with a blank allowlist must fail")
+            .to_string();
+        assert!(
+            msg.contains("at least one pubkey"),
+            "error should name the missing pubkey requirement: {msg}"
+        );
+    }
 
     #[test]
     fn allowed_respond_to_full_path_rejects_disallowed_mode() {
