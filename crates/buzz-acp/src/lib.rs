@@ -250,17 +250,44 @@ async fn is_owner_or_sibling(
 /// siblings may fire a turn — the explicit allowlist and `anyone` mode do
 /// NOT apply inside DMs. `Nobody` still drops everything. Callers must
 /// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
+///
+/// # DM allowlist opt-in (`allow_dm_allowlist`)
+///
+/// Owner-only DMs are the safe default, but they are surprising when the
+/// operator has *deliberately* named a human on `--respond-to-allowlist`:
+/// that person can talk to the agent in a stream channel and then finds
+/// every DM silently dropped, which is indistinguishable from a broken
+/// agent. `--allow-dm-allowlist` opts a deployment out of that surprise:
+/// when it is set *and* the mode is `Allowlist`, the explicit pubkey list
+/// also admits authors inside DMs.
+///
+/// The tradeoff being accepted: inside a DM, an allowlisted pubkey can
+/// prompt the agent with no channel-membership context around it — no
+/// stream, no other participants, no audit trail anyone else can see. The
+/// transitive-grant hole stays closed, because admission is still gated on
+/// an explicit list the operator wrote by hand; landing in a DM with the
+/// agent grants nothing by itself. That is exactly why the opt-in is scoped
+/// to `Allowlist` alone: `Anyone` inside a DM would restore the original
+/// hole (any pubkey that gets into a DM could prompt the agent), so it
+/// remains owner/sibling-only regardless of this flag, and `Nobody` still
+/// drops everything including the owner.
 async fn author_allowed(
     respond_to: &RespondTo,
     allowlist: &HashSet<String>,
     author: &str,
     is_dm: bool,
+    allow_dm_allowlist: bool,
     owner_cache: &OwnerCache,
     rest_client: &relay::RestClient,
 ) -> bool {
     if is_dm {
         return match respond_to {
             RespondTo::Nobody => false,
+            // Opt-in only, and only for the explicit list — never `Anyone`.
+            RespondTo::Allowlist if allow_dm_allowlist => {
+                allowlist.contains(author)
+                    || is_owner_or_sibling(author, owner_cache, rest_client).await
+            }
             _ => is_owner_or_sibling(author, owner_cache, rest_client).await,
         };
     }
@@ -2879,6 +2906,7 @@ async fn tokio_main() -> Result<()> {
                                     &config.respond_to_allowlist,
                                     &author,
                                     is_dm,
+                                    config.allow_dm_allowlist,
                                     &owner_cache,
                                     &ctx.rest_client,
                                 )
@@ -5406,6 +5434,7 @@ mod author_gate_tests {
                 &allowlist,
                 SIBLING,
                 false,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -5423,6 +5452,7 @@ mod author_gate_tests {
                 &RespondTo::Allowlist,
                 &allowlist,
                 EXTERNAL,
+                false,
                 false,
                 &cache,
                 &dummy_rest_client()
@@ -5442,6 +5472,7 @@ mod author_gate_tests {
                 &allowlist,
                 STRANGER,
                 false,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -5459,6 +5490,7 @@ mod author_gate_tests {
                 &RespondTo::Allowlist,
                 &allowlist,
                 OWNER,
+                false,
                 false,
                 &cache,
                 &dummy_rest_client()
@@ -5481,6 +5513,7 @@ mod author_gate_tests {
                 &HashSet::new(),
                 STRANGER,
                 false,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -5499,6 +5532,7 @@ mod author_gate_tests {
                     &HashSet::new(),
                     who,
                     false,
+                    false,
                     &cache,
                     &dummy_rest_client()
                 )
@@ -5513,7 +5547,10 @@ mod author_gate_tests {
     // In a DM, clients auto-p-tag every participant, and an agent can be
     // asked to open a DM with a third party. The gate must therefore ignore
     // the allowlist and `anyone` mode inside DMs: only owner + verified
-    // siblings fire turns.
+    // siblings fire turns. `--allow-dm-allowlist` (the `allow_dm_allowlist`
+    // argument) opts back in to the *explicit* allowlist inside DMs, and
+    // nothing else; the flag-off cases below are the default behaviour and
+    // must not change.
 
     #[tokio::test]
     async fn test_dm_rejects_allowlisted_external_pubkey() {
@@ -5525,11 +5562,135 @@ mod author_gate_tests {
                 &allowlist,
                 EXTERNAL,
                 true,
+                // allow_dm_allowlist OFF — the default.
+                false,
                 &cache,
                 &dummy_rest_client()
             )
             .await,
-            "an allowlisted external pubkey must NOT fire a turn inside a DM"
+            "by default an allowlisted external pubkey must NOT fire a turn inside a DM"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dm_allowlist_optin_admits_allowlisted_external_pubkey() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+        assert!(
+            author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                EXTERNAL,
+                true,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "with allow_dm_allowlist on, an explicitly allowlisted pubkey must fire a turn in a DM"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dm_allowlist_optin_still_rejects_unlisted_stranger() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+        assert!(
+            !author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                STRANGER,
+                true,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "allow_dm_allowlist must only admit the explicit list — a stranger stays dropped in a DM"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dm_allowlist_optin_does_not_loosen_anyone() {
+        let cache = cache_with_sibling();
+        // A non-empty list is present but the mode is `anyone`: neither the
+        // listed pubkey nor an unlisted stranger may pass inside a DM.
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+        for who in [STRANGER, EXTERNAL] {
+            assert!(
+                !author_allowed(
+                    &RespondTo::Anyone,
+                    &allowlist,
+                    who,
+                    true,
+                    true,
+                    &cache,
+                    &dummy_rest_client()
+                )
+                .await,
+                "respond_to=anyone in a DM must stay owner/sibling-only even with allow_dm_allowlist on"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dm_allowlist_optin_does_not_loosen_nobody() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string(), OWNER.to_string()]);
+        for who in [OWNER, SIBLING, EXTERNAL, STRANGER] {
+            assert!(
+                !author_allowed(
+                    &RespondTo::Nobody,
+                    &allowlist,
+                    who,
+                    true,
+                    true,
+                    &cache,
+                    &dummy_rest_client()
+                )
+                .await,
+                "respond_to=nobody must drop everything in a DM even with allow_dm_allowlist on"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dm_allowlist_optin_still_admits_owner_and_sibling() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+        for (who, label) in [(OWNER, "owner"), (SIBLING, "sibling")] {
+            assert!(
+                author_allowed(
+                    &RespondTo::Allowlist,
+                    &allowlist,
+                    who,
+                    true,
+                    true,
+                    &cache,
+                    &dummy_rest_client()
+                )
+                .await,
+                "the {label} must remain admitted in a DM with allow_dm_allowlist on"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dm_allowlist_optin_does_not_affect_owner_only_mode() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+        assert!(
+            !author_allowed(
+                &RespondTo::OwnerOnly,
+                &allowlist,
+                EXTERNAL,
+                true,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "respond_to=owner-only must ignore the allowlist in a DM even with allow_dm_allowlist on"
         );
     }
 
@@ -5542,6 +5703,7 @@ mod author_gate_tests {
                 &HashSet::new(),
                 STRANGER,
                 true,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -5565,6 +5727,7 @@ mod author_gate_tests {
                         &HashSet::new(),
                         who,
                         true,
+                        false,
                         &cache,
                         &dummy_rest_client()
                     )
@@ -5584,6 +5747,7 @@ mod author_gate_tests {
                 &HashSet::new(),
                 OWNER,
                 true,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -5724,6 +5888,7 @@ mod author_gate_tests {
                 &allowlist,
                 EXTERNAL,
                 is_dm,
+                false,
                 &owner_cache,
                 &dummy_rest_client(),
             )
@@ -6824,6 +6989,7 @@ mod build_mcp_servers_tests {
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: std::collections::HashSet::new(),
+            allow_dm_allowlist: false,
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
             has_generated_codex_config: false,
@@ -7048,6 +7214,7 @@ mod error_outcome_emission_tests {
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
+            allow_dm_allowlist: false,
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
             has_generated_codex_config: false,

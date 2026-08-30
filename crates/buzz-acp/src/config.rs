@@ -472,6 +472,16 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_RESPOND_TO_ALLOWLIST", value_delimiter = ',')]
     pub respond_to_allowlist: Option<Vec<String>>,
 
+    /// Opt in to letting an *explicit* `--respond-to-allowlist` also apply
+    /// inside DMs. Default off.
+    ///
+    /// Without this, DMs are owner/sibling-only regardless of `--respond-to`
+    /// (see the DM hardening notes on the inbound author gate). With it,
+    /// `--respond-to=allowlist` additionally admits the listed pubkeys in DMs.
+    /// It never loosens `--respond-to=anyone` or `--respond-to=nobody`.
+    #[arg(long, env = "BUZZ_ACP_ALLOW_DM_ALLOWLIST")]
+    pub allow_dm_allowlist: bool,
+
     /// Comma-separated list of allowed `--respond-to` modes.
     /// When set, the harness rejects startup if `--respond-to` is not in this list.
     /// Modes: owner-only, allowlist, anyone, nobody.
@@ -569,6 +579,10 @@ pub struct Config {
     pub respond_to: RespondTo,
     /// Validated allowlist of pubkey hex strings (used when respond_to == Allowlist).
     pub respond_to_allowlist: HashSet<String>,
+    /// Whether the explicit `respond_to_allowlist` also applies inside DMs.
+    /// Opt-in via `--allow-dm-allowlist` / `BUZZ_ACP_ALLOW_DM_ALLOWLIST`.
+    /// Never affects `RespondTo::Anyone` or `RespondTo::Nobody`.
+    pub allow_dm_allowlist: bool,
     /// Allowed `respond_to` modes. Empty = all modes allowed.
     pub allowed_respond_to: Vec<String>,
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
@@ -1048,6 +1062,15 @@ impl Config {
             HashSet::new()
         };
 
+        // The DM allowlist opt-in is only meaningful for allowlist mode; it is
+        // deliberately inert (and never loosening) under anyone/nobody/owner-only.
+        let allow_dm_allowlist = args.allow_dm_allowlist;
+        if allow_dm_allowlist && args.respond_to != RespondTo::Allowlist {
+            tracing::warn!(
+                "--allow-dm-allowlist has no effect when --respond-to is not 'allowlist'"
+            );
+        }
+
         // Validate respond_to against the allowed set.
         let allowed_respond_to = if let Some(raw) = args.allowed_respond_to {
             // Validate each entry is a known RespondTo mode.
@@ -1133,6 +1156,7 @@ impl Config {
             permission_mode: args.permission_mode,
             respond_to: args.respond_to,
             respond_to_allowlist,
+            allow_dm_allowlist,
             allowed_respond_to,
             persona_env_vars,
             has_generated_codex_config,
@@ -1152,7 +1176,15 @@ impl Config {
     pub fn summary(&self) -> String {
         let respond_to_detail = match &self.respond_to {
             RespondTo::Allowlist => {
-                format!("respond_to=allowlist({})", self.respond_to_allowlist.len())
+                let dm = if self.allow_dm_allowlist {
+                    " dm_allowlist=on"
+                } else {
+                    ""
+                };
+                format!(
+                    "respond_to=allowlist({}){dm}",
+                    self.respond_to_allowlist.len()
+                )
             }
             other => format!("respond_to={other}"),
         };
@@ -1506,6 +1538,7 @@ mod tests {
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
             respond_to_allowlist: HashSet::new(),
+            allow_dm_allowlist: false,
             allowed_respond_to: Vec::new(),
             persona_env_vars: vec![],
             has_generated_codex_config: false,
