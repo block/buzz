@@ -4700,6 +4700,9 @@ const REACTION_WORKING: &str = "💬";
 /// Best-effort timeout for a single reaction REST call.
 const REACTION_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Best-effort timeout for a single failure-notice REST call.
+pub(crate) const FAILURE_NOTICE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Percent-encode a string for use in a URL path segment (used in tests only).
 #[cfg(test)]
 fn pct_encode(s: &str) -> String {
@@ -4789,7 +4792,7 @@ pub(crate) async fn post_failure_notice(
             return;
         }
     };
-    match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
+    match tokio::time::timeout(FAILURE_NOTICE_TIMEOUT, rest.submit_event(&event)).await {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => tracing::warn!(channel = %channel_id, "failure notice failed: {e}"),
         Err(_) => tracing::warn!(channel = %channel_id, "failure notice timed out"),
