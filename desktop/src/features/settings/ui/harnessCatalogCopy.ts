@@ -32,6 +32,10 @@ const HARNESS_DESCRIPTIONS: Record<string, string> = {
   grok: "xAI's coding agent, connected to Buzz through its ACP entrypoint.",
   // Source: https://github.com/anomalyco/opencode
   opencode: "An open-source coding agent.",
+  // Sources: https://poolside.ai, https://docs.poolside.ai/cli/pool —
+  // "poolside's coding agent" available in the terminal via the pool CLI.
+  poolside:
+    "Poolside's coding agent, connected through the pool CLI's ACP mode.",
   // Sources: https://github.com/MoonshotAI/kimi-cli,
   // https://moonshotai.github.io/kimi-cli/en/
   kimi: "A terminal coding agent for software development and command-line tasks.",
