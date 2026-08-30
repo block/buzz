@@ -4,13 +4,14 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/profile/presence_cache_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
-/// Tests for [PresenceCacheNotifier] in the pure-Nostr world.
+/// Tests for [PresenceCacheNotifier].
 ///
-/// The cache is now purely WS-driven: the notifier subscribes to kind:20001
-/// (presence updates) over the relay session and only mutates state for
-/// pubkeys that have been registered via [PresenceCacheNotifier.track].
-/// There is no longer a REST backstop — the previous test seeded state via
-/// a `GET /api/presence` call which has been removed.
+/// The cache is WS-driven for live updates: the notifier subscribes to
+/// kind:20001 (presence updates) over the relay session and only mutates
+/// state for pubkeys registered via [PresenceCacheNotifier.track]. Newly
+/// tracked pubkeys are additionally seeded once via the HTTP bridge
+/// (`queryRelay`), which returns relay-signed synthesized events carrying
+/// the subject in the `p` tag.
 void main() {
   test('WS presence event updates cache for tracked pubkey', () async {
     final relaySession = _RecordingRelaySessionNotifier();
@@ -104,6 +105,48 @@ void main() {
     expect(relaySession.filters.single.limit, 0);
   });
 
+  test('track() seeds presence via HTTP bridge query', () async {
+    final relaySession = _RecordingRelaySessionNotifier();
+    // Relay-synthesized event: relay-signed, subject in the `p` tag.
+    relaySession.queryResponse = [_synthesizedPresence('alice', 'online')];
+    final container = _buildContainer(relaySession: relaySession);
+    addTearDown(container.dispose);
+
+    container.read(presenceCacheProvider);
+    await _pumpEventQueue();
+
+    container.read(presenceCacheProvider.notifier).track(['alice']);
+    await _pumpEventQueue();
+
+    // The fetch used the presence filter for the tracked pubkey…
+    expect(relaySession.queries, hasLength(1));
+    final filter = relaySession.queries.single.single;
+    expect(filter.kinds, [EventKind.presenceUpdate]);
+    expect(filter.authors, ['alice']);
+    // …and the synthesized event seeded the cache.
+    expect(container.read(presenceCacheProvider)['alice'], 'online');
+  });
+
+  test('track() does not refetch already-tracked pubkeys', () async {
+    final relaySession = _RecordingRelaySessionNotifier();
+    final container = _buildContainer(relaySession: relaySession);
+    addTearDown(container.dispose);
+
+    container.read(presenceCacheProvider);
+    await _pumpEventQueue();
+
+    final notifier = container.read(presenceCacheProvider.notifier);
+    notifier.track(['alice']);
+    notifier.track(['alice']);
+    notifier.track(['alice', 'bob']);
+    await _pumpEventQueue();
+
+    // alice fetched once; the third call only fetched the new pubkey bob.
+    expect(relaySession.queries, hasLength(2));
+    expect(relaySession.queries[0].single.authors, ['alice']);
+    expect(relaySession.queries[1].single.authors, ['bob']);
+  });
+
   test('WS event uses pubkey variable, not literal string', () async {
     // Regression test for the map key bug where `{...state, pubkey: status}`
     // used the literal string "pubkey" instead of the variable's value.
@@ -143,6 +186,18 @@ NostrEvent _presence(String pubkey, String status) => NostrEvent(
   sig: 'sig',
 );
 
+NostrEvent _synthesizedPresence(String subject, String status) => NostrEvent(
+  id: 'synth-$subject-$status',
+  pubkey: 'relay-pubkey',
+  createdAt: 1000,
+  kind: EventKind.presenceUpdate,
+  tags: [
+    ['p', subject],
+  ],
+  content: status,
+  sig: 'sig',
+);
+
 Future<void> _pumpEventQueue() async {
   await Future<void>.delayed(Duration.zero);
   await Future<void>.delayed(Duration.zero);
@@ -162,9 +217,20 @@ ProviderContainer _buildContainer({
 class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   final List<NostrFilter> filters = [];
   final List<void Function(NostrEvent)> _listeners = [];
+  final List<List<NostrFilter>> queries = [];
+  List<NostrEvent> queryResponse = [];
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    queries.add(filters);
+    return queryResponse;
+  }
 
   @override
   Future<void Function()> subscribe(
