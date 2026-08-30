@@ -683,7 +683,14 @@ async fn enforce_ws_admission(
         ClientMessage::Req { sub_id, .. } => Some(sub_id.as_str()),
         _ => None,
     };
-    if !send_admission_result(conn, ws_result, sub_id) {
+    // Rejected EVENTs must get a per-event OK false (NIP-01/NIP-20), not just a
+    // NOTICE: clients correlate publish outcomes by event id, and a NOTICE-only
+    // rejection leaves the message pending until the client-side timeout.
+    let event_id_hex = match msg {
+        ClientMessage::Event(event) => Some(event.id.to_hex()),
+        _ => None,
+    };
+    if !send_admission_result(conn, ws_result, sub_id, event_id_hex.as_deref()) {
         return false;
     }
 
@@ -702,7 +709,7 @@ async fn enforce_ws_admission(
             message_limit,
         )
         .await;
-        if !send_admission_result(conn, message_result, None) {
+        if !send_admission_result(conn, message_result, None, event_id_hex.as_deref()) {
             return false;
         }
     }
@@ -714,23 +721,26 @@ fn send_admission_result(
     conn: &ConnectionState,
     result: Result<(), crate::admission::AdmissionError>,
     sub_id: Option<&str>,
+    event_id_hex: Option<&str>,
 ) -> bool {
+    let send_rejection = |reason: &str| {
+        conn.send(match event_id_hex {
+            Some(event_id) => RelayMessage::ok(event_id, false, reason),
+            None => request_rejection_message(sub_id, reason),
+        });
+    };
     match result {
         Ok(()) => true,
         Err(crate::admission::AdmissionError::Exceeded { reset_in_secs }) => {
             metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "quota").increment(1);
-            conn.send(request_rejection_message(
-                sub_id,
-                &format!("rate-limited: quota exceeded; retry in {reset_in_secs}s"),
+            send_rejection(&format!(
+                "rate-limited: quota exceeded; retry in {reset_in_secs}s"
             ));
             false
         }
         Err(crate::admission::AdmissionError::Unavailable) => {
             metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "unavailable").increment(1);
-            conn.send(request_rejection_message(
-                sub_id,
-                "rate-limited: shared admission unavailable",
-            ));
+            send_rejection("rate-limited: shared admission unavailable");
             false
         }
     }

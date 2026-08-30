@@ -2450,6 +2450,23 @@ async fn handle_ws_message(
                         warn!("mid-session AUTH rejected (event {event_id}): {message} — triggering reconnect");
                         return false;
                     }
+                    if !accepted && message.starts_with("rate-limited:") {
+                        // The relay rejects rate-limited EVENTs with a per-event
+                        // OK false. Same treatment as the NOTICE path: arm the
+                        // gate and requeue in-flight frames — acknowledging here
+                        // would silently drop the frame.
+                        let secs = parse_rate_limit_retry_secs(&message).unwrap_or(0);
+                        let deadline = state.set_rate_limit_gate(secs);
+                        state.requeue_observer_in_flight();
+                        warn!(
+                            "event {event_id} rate-limited — gate armed until ~{:.1}s from now",
+                            deadline
+                                .checked_duration_since(tokio::time::Instant::now())
+                                .unwrap_or_default()
+                                .as_secs_f64()
+                        );
+                        return true;
+                    }
                     state.acknowledge_observer_frame(&event_id);
                     debug!("OK for event {event_id}: accepted={accepted} message={message}");
                 }
