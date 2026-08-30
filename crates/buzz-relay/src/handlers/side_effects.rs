@@ -596,6 +596,18 @@ pub async fn validate_admin_event(
                 k == "name" || k == "about" || k == "archived" || k == "visibility" || k == "ttl"
             });
             if has_privileged_tag {
+                // A DM rename is gated on participation, not on a role no DM
+                // participant can hold. See `is_dm_rename_only`.
+                if is_dm_rename_only(&channel.channel_type, event) {
+                    return if state
+                        .is_member_cached(tenant.community(), channel_id, &actor_bytes)
+                        .await?
+                    {
+                        Ok(())
+                    } else {
+                        Err(anyhow::anyhow!("actor is not a participant of this DM"))
+                    };
+                }
                 let members = state.db.get_members(tenant.community(), channel_id).await?;
                 let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
                 match actor_member {
@@ -2554,6 +2566,24 @@ fn actor_is_channel_owner_or_admin(members: &[MemberRecord], actor: &[u8]) -> bo
         .any(|m| m.pubkey == actor && (m.role == "owner" || m.role == "admin"))
 }
 
+/// Whether a kind:9002 event is a DM rename and nothing else.
+///
+/// A DM's privileged-metadata gate is unsatisfiable by construction:
+/// `buzz_db::dm` enrols every participant with a hardcoded `member` role
+/// ("always `member` for DMs"), and a DM never carries an owner-role agent, so
+/// neither the `owner`/`admin` branch nor the NIP-OA agent-owner fallback can
+/// admit anyone — not even the community owner. Renaming is the one privileged
+/// tag that is meaningful for a DM, so it joins `topic`/`purpose` on the
+/// any-active-participant tier. Every other privileged tag stays locked, which
+/// is why this returns false as soon as one of them is present.
+fn is_dm_rename_only(channel_type: &str, event: &Event) -> bool {
+    channel_type == "dm"
+        && extract_tag_value(event, "name").is_some()
+        && !["about", "archived", "visibility", "ttl"]
+            .iter()
+            .any(|tag| extract_tag_value(event, tag).is_some())
+}
+
 #[cfg(test)]
 fn delete_tombstone_content(
     actor_hex: String,
@@ -3787,5 +3817,43 @@ mod tests {
         }];
 
         assert!(actor_is_channel_owner_or_admin(&members, &actor));
+    }
+
+    fn metadata_event(tags: &[&[&str]]) -> Event {
+        let keys = nostr::Keys::generate();
+        let nostr_tags: Vec<Tag> = tags
+            .iter()
+            .map(|parts| Tag::parse(parts.to_vec()).expect("valid tag"))
+            .collect();
+        EventBuilder::new(Kind::from(9002_u16), "")
+            .tags(nostr_tags)
+            .sign_with_keys(&keys)
+            .expect("signing failed")
+    }
+
+    #[test]
+    fn non_dm_name_edit_stays_role_gated() {
+        let ev = metadata_event(&[&["h", "chan"], &["name", "general"]]);
+        assert!(!is_dm_rename_only("stream", &ev));
+        assert!(!is_dm_rename_only("forum", &ev));
+    }
+
+    #[test]
+    fn dm_edit_touching_another_privileged_tag_stays_role_gated() {
+        // A rename must  not become a way to smuggle `visibility` or `archived`
+        // past the owner/admin gate.
+        for extra in ["about", "archived", "visibility", "ttl"] {
+            let ev = metadata_event(&[&["h", "chan"], &["name", "Founders"], &[extra, "x"]]);
+            assert!(
+                !is_dm_rename_only("dm", &ev),
+                "`{extra}` alongside `name` must keep the owner/admin gate"
+            );
+        }
+    }
+
+    #[test]
+    fn dm_edit_with_a_name_tag_is_not_a_rename() {
+        let ev = metadata_event(&[&["h", "chan"], &["archived", "true"]]);
+        assert!(!is_dm_rename_only("dm", &ev));
     }
 }
