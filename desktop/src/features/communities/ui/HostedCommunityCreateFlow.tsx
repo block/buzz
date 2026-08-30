@@ -100,12 +100,13 @@ export function HostedCommunityCreateFlow({
     }
   };
 
-  const signIn = () => {
+  const startLogin = (options?: { screenHint?: string }) => {
+    const isSignup = options?.screenHint === "signup";
     const attempt = ++loginAttempt.current;
     signingIn.current = true;
-    setAction("Signing in…");
+    setAction(isSignup ? "Creating account…" : "Signing in…");
     setError(null);
-    void startBuilderlabLogin()
+    void startBuilderlabLogin(options)
       .then(async (nextAuth) => {
         if (loginAttempt.current !== attempt) return;
         setAuth(nextAuth);
@@ -122,6 +123,9 @@ export function HostedCommunityCreateFlow({
         }
       });
   };
+
+  const signIn = () => startLogin();
+  const signUp = () => startLogin({ screenHint: "signup" });
 
   const connectIdentity = () =>
     run("Connecting identity…", async () => {
@@ -292,12 +296,24 @@ export function HostedCommunityCreateFlow({
           your browser, then bring you back here.
         </p>
         {errorBox}
-        <div className="flex justify-end pt-1">
+        <div className="flex justify-end gap-2 pt-1">
+          <Button
+            disabled={Boolean(action)}
+            onClick={signUp}
+            type="button"
+            variant="outline"
+          >
+            {action === "Creating account…" ? (
+              <LoaderCircle className="h-4 w-4 animate-spin" />
+            ) : null}
+            {action === "Creating account…" ? "Creating account…" : "Create account"}
+            {action ? null : <ExternalLink className="h-4 w-4" />}
+          </Button>
           <Button disabled={Boolean(action)} onClick={signIn} type="button">
             {action === "Signing in…" ? (
               <LoaderCircle className="h-4 w-4 animate-spin" />
             ) : null}
-            {action ?? "Continue to Builderlab"}
+            {action === "Signing in…" ? "Signing in…" : "Sign in"}
             {action ? null : <ExternalLink className="h-4 w-4" />}
           </Button>
         </div>
