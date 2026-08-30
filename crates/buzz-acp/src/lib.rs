@@ -244,12 +244,16 @@ async fn is_owner_or_sibling(
 /// Clients auto-p-tag every DM participant, so in a DM *any* participant's
 /// message looks like a mention and would fire a turn. Combined with
 /// agent-initiated DMs (the agent can be asked to DM a third party), that
-/// turns `anyone`/`allowlist` modes into transitive access grants: whoever
-/// lands in a DM with the agent can prompt it. To close that hole, when
-/// `is_dm` is true only the owner and cryptographically verified same-owner
-/// siblings may fire a turn — the explicit allowlist and `anyone` mode do
-/// NOT apply inside DMs. `Nobody` still drops everything. Callers must
-/// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
+/// turns `anyone` mode into a transitive access grant: whoever lands in a
+/// DM with the agent can prompt it. To close that hole, `Anyone` inside a
+/// DM still only admits the owner and cryptographically verified same-owner
+/// siblings.
+///
+/// `Allowlist` ("Selected people") is an explicit grant. Those pubkeys must
+/// be able to DM the agent — the settings UI does not say "channels only".
+/// A stranger who is not on the list is still dropped. `Nobody` still drops
+/// everything. Callers must resolve `is_dm` fail-closed: unknown channel
+/// type ⇒ treat as DM.
 async fn author_allowed(
     respond_to: &RespondTo,
     allowlist: &HashSet<String>,
@@ -261,6 +265,10 @@ async fn author_allowed(
     if is_dm {
         return match respond_to {
             RespondTo::Nobody => false,
+            RespondTo::Allowlist => {
+                allowlist.contains(author)
+                    || is_owner_or_sibling(author, owner_cache, rest_client).await
+            }
             _ => is_owner_or_sibling(author, owner_cache, rest_client).await,
         };
     }
@@ -2870,8 +2878,8 @@ async fn tokio_main() -> Result<()> {
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
                                 // DM hardening: resolve channel type (fail-closed
-                                // to DM) so allowlist/anyone modes cannot be
-                                // exercised by non-owner authors inside DMs.
+                                // to DM). `anyone` still cannot be exercised by
+                                // non-owner authors inside DMs; allowlist can.
                                 let is_dm =
                                     is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                                 let allowed = author_allowed(
@@ -5511,16 +5519,16 @@ mod author_gate_tests {
     // ── DM hardening ──────────────────────────────────────────────────────
     //
     // In a DM, clients auto-p-tag every participant, and an agent can be
-    // asked to open a DM with a third party. The gate must therefore ignore
-    // the allowlist and `anyone` mode inside DMs: only owner + verified
-    // siblings fire turns.
+    // asked to open a DM with a third party. `anyone` must not become a
+    // transitive grant. `allowlist` is an explicit Selected-people grant
+    // and must still fire in a DM.
 
     #[tokio::test]
-    async fn test_dm_rejects_allowlisted_external_pubkey() {
+    async fn test_dm_admits_allowlisted_external_pubkey() {
         let cache = cache_with_sibling();
         let allowlist = HashSet::from([EXTERNAL.to_string()]);
         assert!(
-            !author_allowed(
+            author_allowed(
                 &RespondTo::Allowlist,
                 &allowlist,
                 EXTERNAL,
@@ -5529,7 +5537,25 @@ mod author_gate_tests {
                 &dummy_rest_client()
             )
             .await,
-            "an allowlisted external pubkey must NOT fire a turn inside a DM"
+            "an allowlisted external pubkey must fire a turn inside a DM"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dm_rejects_stranger_under_allowlist() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+        assert!(
+            !author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                STRANGER,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "a stranger who is not on the allowlist must not fire a turn inside a DM"
         );
     }
 
@@ -5719,7 +5745,7 @@ mod author_gate_tests {
         let is_dm = is_dm_channel(id, &channel_info).await;
         assert!(is_dm, "unknown startup metadata must fail closed as DM");
         assert!(
-            !author_allowed(
+            author_allowed(
                 &RespondTo::Allowlist,
                 &allowlist,
                 EXTERNAL,
@@ -5728,7 +5754,19 @@ mod author_gate_tests {
                 &dummy_rest_client(),
             )
             .await,
-            "an external author must not pass when startup discovery omitted metadata"
+            "an allowlisted external author must pass even when startup discovery omitted metadata"
+        );
+        assert!(
+            !author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                STRANGER,
+                is_dm,
+                &owner_cache,
+                &dummy_rest_client(),
+            )
+            .await,
+            "a stranger must not pass when startup discovery omitted metadata"
         );
     }
 
