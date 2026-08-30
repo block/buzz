@@ -24,7 +24,13 @@ import { cn } from "@/shared/lib/cn";
  * kind:30617 issues are a different substrate; this view is the 0033 task
  * table over `/api/tasks`. v1 slice: list + create + complete/reopen.
  */
-export function ChannelTaskList({ channelId }: { channelId: string | null }) {
+export function ChannelTaskList({
+  channelId,
+  channelNamesById,
+}: {
+  channelId: string | null;
+  channelNamesById?: ReadonlyMap<string, string>;
+}) {
   const tasks = useChannelTasks(channelId);
   const createTask = useCreateChannelTask(channelId);
   const setStatus = useSetChannelTaskStatus();
@@ -201,7 +207,19 @@ export function ChannelTaskList({ channelId }: { channelId: string | null }) {
                     ) : (
                       <Circle className="mt-0.5 h-4 w-4 shrink-0" />
                     )}
-                    <span className="min-w-0 break-words">{task.title}</span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block break-words">{task.title}</span>
+                      {channelId === null && task.channelId ? (
+                        <span
+                          className="mt-0.5 block text-xs text-muted-foreground no-underline"
+                          data-testid="channel-task-channel"
+                        >
+                          #
+                          {channelNamesById?.get(task.channelId) ??
+                            task.channelId}
+                        </span>
+                      ) : null}
+                    </span>
                   </button>
                   {task.assignee === null ? (
                     <SuggestedOwners

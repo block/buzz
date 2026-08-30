@@ -1,4 +1,5 @@
 import * as React from "react";
+import { ListTodo } from "lucide-react";
 
 import type { SearchHighlightNavigation } from "@/app/navigation/searchHighlightNavigation";
 import { getCachedSearchHitEvent } from "@/app/navigation/searchHitEventCache";
@@ -16,9 +17,11 @@ import { useProfileQuery } from "@/features/profile/hooks";
 import { useProjectsQuery } from "@/features/projects/hooks";
 import { findProjectHomeByChannelId } from "@/features/projects/lib/projectHomeChannel";
 import { ProjectChannelHome } from "@/features/projects/ui/ProjectChannelHome";
+import { ChannelTaskList } from "@/features/tasks/ui/ChannelTaskList";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { getEventById } from "@/shared/api/tauri";
 import type { RelayEvent } from "@/shared/api/types";
+import { Button } from "@/shared/ui/button";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
 
 type ChannelRouteScreenProps = {
@@ -117,6 +120,9 @@ export function ChannelRouteScreen({
   const projectsQuery = useProjectsQuery();
   const identityQuery = useIdentityQuery();
   const profileQuery = useProfileQuery();
+  const [channelTasksPanelChannelId, setChannelTasksPanelChannelId] =
+    React.useState<string | null>(null);
+  const channelTasksPanelOpen = channelTasksPanelChannelId === channelId;
   const channels = channelsQuery.data ?? [];
   const memberChannel =
     channels.find((channel) => channel.id === channelId) ?? null;
@@ -291,6 +297,41 @@ export function ChannelRouteScreen({
       autoSendDraftKey={autoSendDraftKey}
       currentIdentity={identityQuery.data}
       currentProfile={profileQuery.data}
+      headerEndActions={
+        <Button
+          aria-label={
+            channelTasksPanelOpen ? "Hide channel tasks" : "Show channel tasks"
+          }
+          aria-pressed={channelTasksPanelOpen}
+          data-testid="toggle-channel-tasks"
+          onClick={() =>
+            setChannelTasksPanelChannelId(
+              channelTasksPanelOpen ? null : channelId,
+            )
+          }
+          size="icon"
+          title={
+            channelTasksPanelOpen ? "Hide channel tasks" : "Show channel tasks"
+          }
+          type="button"
+          variant={channelTasksPanelOpen ? "secondary" : "outline"}
+        >
+          <ListTodo className="h-4 w-4" />
+        </Button>
+      }
+      idleAuxiliaryPanel={
+        channelTasksPanelOpen ? (
+          <div className="flex min-h-0 flex-col gap-3 py-3">
+            <p className="text-sm text-muted-foreground">
+              Tasks scoped to #{activeChannel?.name ?? "this channel"}.
+            </p>
+            <ChannelTaskList channelId={channelId} />
+          </div>
+        ) : undefined
+      }
+      idleAuxiliaryOverridesThread={channelTasksPanelOpen}
+      idleAuxiliaryTitle="Channel tasks"
+      onCloseIdleAuxiliaryPanel={() => setChannelTasksPanelChannelId(null)}
       onCloseForumPost={() => {
         void closeForumPost(channelId);
       }}

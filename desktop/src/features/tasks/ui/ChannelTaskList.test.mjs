@@ -132,7 +132,7 @@ function makeQueryClient() {
   });
 }
 
-async function mountList() {
+async function mountList(props = { channelId: "chan-1" }) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -143,7 +143,7 @@ async function mountList() {
       React.createElement(
         QueryClientProvider,
         { client: queryClient },
-        React.createElement(ChannelTaskList, { channelId: "chan-1" }),
+        React.createElement(ChannelTaskList, props),
       ),
     );
   });
@@ -214,6 +214,33 @@ describe("ChannelTaskList — derived ranking signals are actually wired", () =>
     });
     container.remove();
     queryClient.clear();
+  });
+
+  it("shows channel identity in the global list and hides it in a scoped channel panel", async () => {
+    const channelNamesById = new Map([["chan-1", "general"]]);
+    const global = await mountList({ channelId: null, channelNamesById });
+
+    const globalLabels = global.container.querySelectorAll(
+      '[data-testid="channel-task-channel"]',
+    );
+    assert.equal(globalLabels.length, TASKS.length);
+    assert.equal(globalLabels[0].textContent, "#general");
+
+    await act(async () => global.root.unmount());
+    global.container.remove();
+    global.queryClient.clear();
+
+    const scoped = await mountList({ channelId: "chan-1", channelNamesById });
+    assert.equal(
+      scoped.container.querySelectorAll('[data-testid="channel-task-channel"]')
+        .length,
+      0,
+      "the channel panel already supplies its channel context in the header",
+    );
+
+    await act(async () => scoped.root.unmount());
+    scoped.container.remove();
+    scoped.queryClient.clear();
   });
 
   it("an already-assigned task renders no suggestion panel (FM1)", async () => {
