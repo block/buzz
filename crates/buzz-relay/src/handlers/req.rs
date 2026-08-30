@@ -47,6 +47,89 @@ pub(crate) const MAX_EXPLICIT_CHANNEL_VALUES: usize = 128;
 // the range fails the build.
 const _: () = assert!(FILTER_QUERY_CONCURRENCY >= 2 && FILTER_QUERY_CONCURRENCY <= 8);
 
+fn distinct_channels(rows: &[Option<uuid::Uuid>]) -> Vec<uuid::Uuid> {
+    let mut set: std::collections::BTreeSet<uuid::Uuid> = std::collections::BTreeSet::new();
+    for channel_id in rows.iter().flatten() {
+        set.insert(*channel_id);
+    }
+    set.into_iter().collect()
+}
+
+async fn maybe_emit_read_message_rows_with_lookup<Rows, Lookup, Fut, E>(
+    tracer: &Arc<dyn crate::conformance::Tracer>,
+    trace_state: Option<&crate::conformance::AbstractState>,
+    filter_channel: Option<uuid::Uuid>,
+    rows: Rows,
+    lookup: Lookup,
+) -> bool
+where
+    Rows: FnOnce() -> Vec<Option<uuid::Uuid>>,
+    Lookup: FnOnce(Vec<uuid::Uuid>) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<std::collections::HashMap<uuid::Uuid, buzz_core::tenant::CommunityId>, E>,
+    >,
+    E: std::fmt::Display,
+{
+    let Some(state_snap) = trace_state.filter(|_| tracer.enabled()) else {
+        return false;
+    };
+
+    let row_channels = rows();
+    let distinct = distinct_channels(&row_channels);
+    let channel_communities = match lookup(distinct).await {
+        Ok(map) => map,
+        Err(e) => {
+            warn!("conformance row-community lookup failed: {e}");
+            std::collections::HashMap::new()
+        }
+    };
+    crate::conformance::record_read_message_rows(
+        tracer,
+        state_snap,
+        filter_channel,
+        &row_channels,
+        &channel_communities,
+    );
+    true
+}
+
+async fn maybe_emit_read_by_id_rows_with_lookup<Rows, Lookup, Fut, E>(
+    tracer: &Arc<dyn crate::conformance::Tracer>,
+    trace_state: Option<&crate::conformance::AbstractState>,
+    rows: Rows,
+    lookup: Lookup,
+) -> bool
+where
+    Rows: FnOnce() -> Vec<Option<uuid::Uuid>>,
+    Lookup: FnOnce(Vec<uuid::Uuid>) -> Fut,
+    Fut: std::future::Future<
+        Output = Result<std::collections::HashMap<uuid::Uuid, buzz_core::tenant::CommunityId>, E>,
+    >,
+    E: std::fmt::Display,
+{
+    let Some(state_snap) = trace_state.filter(|_| tracer.enabled()) else {
+        return false;
+    };
+
+    let row_channels = rows();
+    let distinct = distinct_channels(&row_channels);
+    let channel_communities = match lookup(distinct).await {
+        Ok(map) => map,
+        Err(e) => {
+            warn!("conformance row-community lookup failed: {e}");
+            std::collections::HashMap::new()
+        }
+    };
+    crate::conformance::record_read_by_id_rows(
+        tracer,
+        state_snap,
+        None,
+        &row_channels,
+        &channel_communities,
+    );
+    true
+}
+
 /// Handle a REQ message: register the subscription, deliver historical events, then send EOSE.
 pub async fn handle_req(
     sub_id: String,
@@ -398,35 +481,15 @@ pub async fn handle_req(
         // `channels` read whose only consumer is `record_read_message_rows`,
         // and this emit runs once PER FILTER. Gating on `trace_state` alone was
         // not enough — that is `Some` for every well-formed request.
-        if let Some(state_snap) = trace_state.as_ref().filter(|_| state.tracer.enabled()) {
-            let row_channels: Vec<Option<uuid::Uuid>> =
-                events.iter().map(|e| e.channel_id).collect();
-            let distinct: Vec<uuid::Uuid> = {
-                let mut s: std::collections::BTreeSet<uuid::Uuid> =
-                    std::collections::BTreeSet::new();
-                for c in row_channels.iter().flatten() {
-                    s.insert(*c);
-                }
-                s.into_iter().collect()
-            };
-            let channel_communities = match state.db.communities_of_channels(&distinct).await {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!(
-                        conn_id = %conn_id, sub_id = %sub_id,
-                        "conformance row-community lookup failed: {e}"
-                    );
-                    std::collections::HashMap::new()
-                }
-            };
-            crate::conformance::record_read_message_rows(
-                &state.tracer,
-                state_snap,
-                per_filter_channel,
-                &row_channels,
-                &channel_communities,
-            );
-        }
+        let db = state.db.clone();
+        let _ = maybe_emit_read_message_rows_with_lookup(
+            &state.tracer,
+            trace_state.as_ref(),
+            per_filter_channel,
+            || events.iter().map(|e| e.channel_id).collect::<Vec<_>>(),
+            move |distinct| async move { db.communities_of_channels(&distinct).await },
+        )
+        .await;
 
         for stored in &events {
             // Per-filter NIP-01 matching — use the current filter only, not the
@@ -725,36 +788,14 @@ async fn handle_search_req(
                 // honestly.
                 // Same `enabled()` gate as the non-search lane: skip the
                 // trace-only `channels` lookup when nothing observes the emit.
-                if let Some(state_snap) = trace_state.filter(|_| state.tracer.enabled()) {
-                    let row_channels: Vec<Option<uuid::Uuid>> =
-                        events.iter().map(|e| e.channel_id).collect();
-                    let distinct: Vec<uuid::Uuid> = {
-                        let mut s: std::collections::BTreeSet<uuid::Uuid> =
-                            std::collections::BTreeSet::new();
-                        for c in row_channels.iter().flatten() {
-                            s.insert(*c);
-                        }
-                        s.into_iter().collect()
-                    };
-                    let channel_communities =
-                        match state.db.communities_of_channels(&distinct).await {
-                            Ok(m) => m,
-                            Err(e) => {
-                                warn!(
-                                    sub_id = %sub_id,
-                                    "conformance row-community lookup failed: {e}"
-                                );
-                                std::collections::HashMap::new()
-                            }
-                        };
-                    crate::conformance::record_read_by_id_rows(
-                        &state.tracer,
-                        state_snap,
-                        None,
-                        &row_channels,
-                        &channel_communities,
-                    );
-                }
+                let db = state.db.clone();
+                let _ = maybe_emit_read_by_id_rows_with_lookup(
+                    &state.tracer,
+                    trace_state,
+                    || events.iter().map(|e| e.channel_id).collect::<Vec<_>>(),
+                    move |distinct| async move { db.communities_of_channels(&distinct).await },
+                )
+                .await;
 
                 let event_map: std::collections::HashMap<[u8; 32], &buzz_core::StoredEvent> =
                     events
@@ -1417,6 +1458,7 @@ pub(crate) fn author_only_filters_authorized(filters: &[Filter], authed_pubkey_h
 mod tests {
     use super::*;
     use nostr::{Alphabet, Filter, SingleLetterTag};
+    use std::sync::Mutex;
 
     #[test]
     fn global_queries_push_access_scope_before_limit() {
@@ -1858,6 +1900,214 @@ mod tests {
         let channel_id = uuid::Uuid::new_v4();
         let filters = vec![filter_with_channel(channel_id), Filter::new()];
         assert_eq!(extract_channel_id_from_filters(&filters), None);
+    }
+
+    #[derive(Debug, Default)]
+    struct VecTracer {
+        steps: Mutex<Vec<crate::conformance::TraceStep>>,
+    }
+
+    impl crate::conformance::Tracer for VecTracer {
+        fn record(&self, step: crate::conformance::TraceStep) {
+            self.steps.lock().expect("vec tracer mutex").push(step);
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct DisabledTracer;
+
+    impl crate::conformance::Tracer for DisabledTracer {
+        fn record(&self, _step: crate::conformance::TraceStep) {}
+        fn enabled(&self) -> bool {
+            false
+        }
+    }
+
+    fn dummy_trace_state() -> crate::conformance::AbstractState {
+        crate::conformance::AbstractState {
+            resolved_community: crate::conformance::CommunityLabel::from_uuid(
+                uuid::Uuid::from_u128(0xA),
+            ),
+            bound_host: crate::conformance::HostLabel("test.local".to_string()),
+            actor: crate::conformance::ActorLabel("0123456789abcdef".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn historical_req_multi_filter_disabled_tracer_skips_lookup() {
+        let tracer: Arc<dyn crate::conformance::Tracer> = Arc::new(DisabledTracer);
+        assert!(
+            !tracer.enabled(),
+            "disabled tracer must report enabled()=false"
+        );
+        let state = dummy_trace_state();
+        let lookup_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rows = vec![Some(uuid::Uuid::new_v4()), Some(uuid::Uuid::new_v4())];
+
+        let called_first = maybe_emit_read_message_rows_with_lookup(
+            &tracer,
+            Some(&state),
+            Some(uuid::Uuid::new_v4()),
+            || rows.clone(),
+            {
+                let calls = Arc::clone(&lookup_calls);
+                move |_distinct| async move {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Ok::<_, std::convert::Infallible>(std::collections::HashMap::new())
+                }
+            },
+        )
+        .await;
+
+        let called_second = maybe_emit_read_message_rows_with_lookup(
+            &tracer,
+            Some(&state),
+            None,
+            || rows.clone(),
+            {
+                let calls = Arc::clone(&lookup_calls);
+                move |_distinct| async move {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Ok::<_, std::convert::Infallible>(std::collections::HashMap::new())
+                }
+            },
+        )
+        .await;
+
+        assert!(!called_first);
+        assert!(!called_second);
+        assert_eq!(
+            lookup_calls.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "disabled tracer must skip `communities_of_channels` for each historical filter"
+        );
+    }
+
+    #[tokio::test]
+    async fn historical_req_multi_filter_enabled_tracer_calls_lookup_and_emits() {
+        let typed = Arc::new(VecTracer::default());
+        let tracer: Arc<dyn crate::conformance::Tracer> = typed.clone();
+        let state = dummy_trace_state();
+        let lookup_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let ch1 = uuid::Uuid::new_v4();
+        let ch2 = uuid::Uuid::new_v4();
+        let rows = vec![Some(ch1), None, Some(ch2)];
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+
+        for filter_channel in [Some(ch1), None] {
+            let called = maybe_emit_read_message_rows_with_lookup(
+                &tracer,
+                Some(&state),
+                filter_channel,
+                || rows.clone(),
+                {
+                    let calls = Arc::clone(&lookup_calls);
+                    move |distinct| async move {
+                        calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let map = distinct
+                            .iter()
+                            .copied()
+                            .map(|channel_id| (channel_id, community))
+                            .collect::<std::collections::HashMap<_, _>>();
+                        Ok::<_, std::convert::Infallible>(map)
+                    }
+                },
+            )
+            .await;
+            assert!(called);
+        }
+
+        assert_eq!(
+            lookup_calls.load(std::sync::atomic::Ordering::Relaxed),
+            2,
+            "enabled tracer must call `communities_of_channels` once per historical filter"
+        );
+
+        let steps = typed.steps.lock().expect("vec tracer mutex");
+        assert_eq!(steps.len(), 2, "one emit per filter expected");
+        for step in steps.iter() {
+            assert!(
+                matches!(
+                    step.action,
+                    crate::conformance::TraceAction::ReadMessageRows { .. }
+                ),
+                "expected ReadMessageRows emit, got {:?}",
+                step.action
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn search_hydration_disabled_tracer_skips_lookup() {
+        let tracer: Arc<dyn crate::conformance::Tracer> = Arc::new(DisabledTracer);
+        assert!(
+            !tracer.enabled(),
+            "disabled tracer must report enabled()=false"
+        );
+        let state = dummy_trace_state();
+        let lookup_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let rows = vec![Some(uuid::Uuid::new_v4())];
+
+        let called =
+            maybe_emit_read_by_id_rows_with_lookup(&tracer, Some(&state), || rows.clone(), {
+                let calls = Arc::clone(&lookup_calls);
+                move |_distinct| async move {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Ok::<_, std::convert::Infallible>(std::collections::HashMap::new())
+                }
+            })
+            .await;
+
+        assert!(!called);
+        assert_eq!(
+            lookup_calls.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "disabled tracer must skip `communities_of_channels` on search hydration"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_hydration_enabled_tracer_calls_lookup_and_emits() {
+        let typed = Arc::new(VecTracer::default());
+        let tracer: Arc<dyn crate::conformance::Tracer> = typed.clone();
+        let state = dummy_trace_state();
+        let lookup_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let channel = uuid::Uuid::new_v4();
+        let rows = vec![Some(channel)];
+        let community = buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4());
+
+        let called =
+            maybe_emit_read_by_id_rows_with_lookup(&tracer, Some(&state), || rows.clone(), {
+                let calls = Arc::clone(&lookup_calls);
+                move |distinct| async move {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let map = distinct
+                        .iter()
+                        .copied()
+                        .map(|channel_id| (channel_id, community))
+                        .collect::<std::collections::HashMap<_, _>>();
+                    Ok::<_, std::convert::Infallible>(map)
+                }
+            })
+            .await;
+
+        assert!(called);
+        assert_eq!(
+            lookup_calls.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "enabled tracer must call `communities_of_channels` for search hydration"
+        );
+
+        let steps = typed.steps.lock().expect("vec tracer mutex");
+        assert_eq!(steps.len(), 1);
+        assert!(
+            matches!(
+                steps[0].action,
+                crate::conformance::TraceAction::ReadByIdRows { .. }
+            ),
+            "expected ReadByIdRows emit, got {:?}",
+            steps[0].action
+        );
     }
 
     #[test]
