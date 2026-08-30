@@ -86,7 +86,7 @@ async function openPersonaCatalog(page: import("@playwright/test").Page) {
 
 async function getCatalogOrder(page: import("@playwright/test").Page) {
   return page
-    .locator('[data-testid^="persona-catalog-list-item-"]')
+    .locator('[data-testid^="community-catalog-agent-"]')
     .evaluateAll((elements) =>
       elements.map((element) => element.getAttribute("data-testid") ?? ""),
     );
@@ -96,7 +96,7 @@ async function selectCatalogPersona(
   page: import("@playwright/test").Page,
   personaId: string,
 ) {
-  await page.getByTestId(`persona-catalog-list-item-${personaId}`).click();
+  await page.getByTestId(`community-catalog-agent-${personaId}`).click();
 }
 
 async function sharePersonaToCatalog(
@@ -245,24 +245,26 @@ test("catalog hides built-ins and shows the shared-agent empty state", async ({
 
   await openPersonaCatalog(page);
   for (const personaName of ["Fizz", "Honey", "Pollen"]) {
-    await expect(page.getByTestId("persona-catalog-dialog")).not.toContainText(
-      personaName,
-    );
+    await expect(
+      page.getByTestId("community-catalog-dialog"),
+    ).not.toContainText(personaName);
   }
-  await expect(page.getByTestId("persona-catalog-dialog-header")).toBeVisible();
-  await expect(page.getByTestId("persona-catalog-dialog-body")).toBeVisible();
   await expect(
-    page.getByText("No shared agents", { exact: true }),
+    page.getByTestId("community-catalog-dialog-header"),
+  ).toBeVisible();
+  await expect(page.getByTestId("community-catalog-dialog-body")).toBeVisible();
+  const emptyState = page.getByTestId("community-catalog-empty-state");
+  await expect(emptyState).toContainText("Nothing shared yet");
+  await expect(
+    emptyState.getByTestId("community-catalog-empty-artwork"),
   ).toBeVisible();
   await expect(
-    page.locator('[data-testid^="persona-catalog-list-item-"]'),
+    page.locator('[data-testid^="community-catalog-agent-"]'),
   ).toHaveCount(0);
-  await expect(
-    page.getByTestId("persona-catalog-use-agent-target"),
-  ).toHaveCount(0);
+  await expect(page.getByTestId("community-catalog-use-agent")).toHaveCount(0);
 
   await page
-    .getByTestId("persona-catalog-dialog")
+    .getByTestId("community-catalog-dialog")
     .getByRole("button", { name: "Close" })
     .click();
   await page.getByLabel("Open actions for Fizz").click();
@@ -277,19 +279,17 @@ test("catalog empty state remains available after reopening", async ({
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await openPersonaCatalog(page);
-  await expect(
-    page.getByText("No shared agents", { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByTestId("community-catalog-empty-state")).toBeVisible();
 
   await page
-    .getByTestId("persona-catalog-dialog")
+    .getByTestId("community-catalog-dialog")
     .getByRole("button", { name: "Close" })
     .click();
-  await expect(page.getByTestId("persona-catalog-dialog")).not.toBeVisible();
+  await expect(page.getByTestId("community-catalog-dialog")).not.toBeVisible();
   await openPersonaCatalog(page);
-  await expect(
-    page.getByText("No shared agents", { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByTestId("community-catalog-empty-state")).toContainText(
+    "Nothing shared yet",
+  );
 });
 
 test("built-in persona edits persist", async ({ page }) => {
@@ -451,7 +451,7 @@ test("the new agent card opens unified create, catalog, and import flows", async
   );
 
   await newAgentCard.click();
-  const catalogDialog = page.getByTestId("persona-catalog-dialog");
+  const catalogDialog = page.getByTestId("community-catalog-dialog");
   await expect(catalogDialog).toBeVisible();
   await expect(page.getByTestId("agent-catalog-create")).toHaveAttribute(
     "aria-current",
@@ -825,28 +825,28 @@ test("catalog detail pane shows the full persona details", async ({ page }) => {
 
   await selectCatalogPersona(page, personaId);
   const useAgentTarget = page.getByTestId(
-    `persona-catalog-use-agent-target-${personaId}`,
+    `community-catalog-use-agent-${personaId}`,
   );
 
-  await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
+  await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
     "Researcher",
   );
-  await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
+  await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
     "Added by You",
   );
-  await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
+  await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
     "Research the question and cite the evidence.",
   );
-  await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
+  await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
     "Custom agent",
   );
-  await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
+  await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
     "Preferred model",
   );
-  await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
+  await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
     "Preferred runtime",
   );
-  await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
+  await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
     "Agent instruction",
   );
   await expect(useAgentTarget).toHaveAttribute(
@@ -1507,7 +1507,7 @@ This deliberately long fenced-code example must not establish the minimum width 
   await page.getByTestId("open-agents-view").click();
   await openPersonaCatalog(page);
   await expect(
-    page.getByTestId(`persona-catalog-list-item-${personaId}`),
+    page.getByTestId(`community-catalog-agent-${personaId}`),
   ).toHaveCount(0);
   await page.keyboard.press("Escape");
 
@@ -1559,11 +1559,11 @@ This deliberately long fenced-code example must not establish the minimum width 
 
   await openPersonaCatalog(page);
   await expect(
-    page.getByTestId(`persona-catalog-list-item-${personaId}`),
+    page.getByTestId(`community-catalog-agent-${personaId}`),
   ).toContainText("Catalog Analyst");
   await selectCatalogPersona(page, personaId);
-  const catalogDialog = page.getByTestId("persona-catalog-dialog");
-  const catalogDetailPane = page.getByTestId("persona-catalog-detail-pane");
+  const catalogDialog = page.getByTestId("community-catalog-dialog");
+  const catalogDetailPane = page.getByTestId("community-catalog-detail-pane");
   await expect(catalogDetailPane).toContainText("Design System And Styling");
   await expect(catalogDialog).toBeVisible();
   await expect(catalogDetailPane).toBeVisible();
@@ -1628,7 +1628,7 @@ This deliberately long fenced-code example must not establish the minimum width 
 
   await openPersonaCatalog(page);
   await selectCatalogPersona(page, personaId);
-  await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
+  await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
     "Review the latest catalog changes.",
   );
   await page.keyboard.press("Escape");
@@ -1645,7 +1645,7 @@ This deliberately long fenced-code example must not establish the minimum width 
 
   await openPersonaCatalog(page);
   await expect(
-    page.getByTestId(`persona-catalog-list-item-${personaId}`),
+    page.getByTestId(`community-catalog-agent-${personaId}`),
   ).toHaveCount(0);
 });
 
@@ -1682,7 +1682,7 @@ test("a queued catalog share is not presented as relay-published", async ({
 
   await openPersonaCatalog(page);
   await expect(
-    page.getByTestId(`persona-catalog-list-item-${personaId}`),
+    page.getByTestId(`community-catalog-agent-${personaId}`),
   ).toHaveCount(0);
 });
 
@@ -1708,11 +1708,9 @@ test("a foreign reader does not receive an unshared kind 30175 persona", async (
   await openPersonaCatalog(page);
 
   await expect(
-    page.getByTestId(`persona-catalog-list-item-${remoteCatalogId}`),
+    page.getByTestId(`community-catalog-agent-${remoteCatalogId}`),
   ).toHaveCount(0);
-  await expect(
-    page.getByText("No shared agents", { exact: true }),
-  ).toBeVisible();
+  await expect(page.getByTestId("community-catalog-empty-state")).toBeVisible();
 });
 
 test("catalog exposes exact instructions and rejects hidden Unicode controls", async ({
@@ -1768,16 +1766,16 @@ test("catalog exposes exact instructions and rejects hidden Unicode controls", a
   const bidiCatalogId = `catalog:${TEST_IDENTITIES.alice.pubkey}:${bidiPersonaId}`;
 
   await expect(
-    page.getByTestId(`persona-catalog-list-item-${visibleCatalogId}`),
+    page.getByTestId(`community-catalog-agent-${visibleCatalogId}`),
   ).toBeVisible();
   await expect(
-    page.getByTestId(`persona-catalog-list-item-${emojiCatalogId}`),
+    page.getByTestId(`community-catalog-agent-${emojiCatalogId}`),
   ).toContainText("Emoji Reviewer 👩‍💻");
   await expect(
-    page.getByTestId(`persona-catalog-list-item-${zeroWidthCatalogId}`),
+    page.getByTestId(`community-catalog-agent-${zeroWidthCatalogId}`),
   ).toHaveCount(0);
   await expect(
-    page.getByTestId(`persona-catalog-list-item-${bidiCatalogId}`),
+    page.getByTestId(`community-catalog-agent-${bidiCatalogId}`),
   ).toHaveCount(0);
 
   await selectCatalogPersona(page, visibleCatalogId);
@@ -1820,12 +1818,12 @@ test("a catalog entry keeps the owner's emoji avatar", async ({ page }) => {
   // An `<img>` carrying the avatar — not the initials fallback — in both the
   // list row and the detail header is what proves the projection kept it.
   const remoteEntry = page.getByTestId(
-    `persona-catalog-list-item-${remoteCatalogId}`,
+    `community-catalog-agent-${remoteCatalogId}`,
   );
   await expect(remoteEntry.locator("img")).toHaveAttribute("src", avatarUrl);
   await remoteEntry.click();
   await expect(
-    page.getByTestId("persona-catalog-detail-pane").locator("img").first(),
+    page.getByTestId("community-catalog-detail-pane").locator("img").first(),
   ).toHaveAttribute("src", avatarUrl);
 });
 
@@ -1849,19 +1847,19 @@ test("a community member can discover and add another member's catalog agent", a
   await openPersonaCatalog(page);
 
   const remoteEntry = page.getByTestId(
-    `persona-catalog-list-item-${remoteCatalogId}`,
+    `community-catalog-agent-${remoteCatalogId}`,
   );
   await expect(remoteEntry).toContainText("Alice’s Reviewer");
   await remoteEntry.click();
   // The detail pane resolves the publisher's display name; 'Community member'
   // is only the fallback for an unresolvable pubkey.
-  await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
+  await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
     "Added by alice",
   );
 
   await page
     .getByRole("button", {
-      name: "Add Alice’s Reviewer from Agent Catalog",
+      name: "Add Alice’s Reviewer from Community Catalog",
     })
     .click();
   await expect
@@ -1895,10 +1893,10 @@ test("a community member can discover and add another member's catalog agent", a
   // The entry now projects onto the local copy, so its list-item testid is the
   // local persona id rather than the catalog coordinate.
   await expect(
-    page.getByTestId(`persona-catalog-list-item-${remoteCatalogId}`),
+    page.getByTestId(`community-catalog-agent-${remoteCatalogId}`),
   ).toHaveCount(0);
   await page
-    .locator('[data-testid^="persona-catalog-list-item-"]')
+    .locator('[data-testid^="community-catalog-agent-"]')
     .filter({ hasText: "Alice’s Reviewer" })
     .click();
   const addedTarget = page.getByRole("button", {
@@ -1934,10 +1932,10 @@ test("catalog detail shows Community member when the publisher profile cannot be
 
   await page
     .getByTestId(
-      `persona-catalog-list-item-catalog:${unknownPubkey}:${personaId}`,
+      `community-catalog-agent-catalog:${unknownPubkey}:${personaId}`,
     )
     .click();
-  await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
+  await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
     "Added by Community member",
   );
 });

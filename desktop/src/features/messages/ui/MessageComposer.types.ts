@@ -10,6 +10,7 @@ export type MessageComposerEditTarget = {
   author: string;
   body: string;
   id: string;
+  isThreadReply: boolean;
   /**
    * NIP-92 imeta attachments on the original event, in tag order. Loaded
    * into the composer's pending-imeta state on edit-open so the user sees
@@ -94,6 +95,8 @@ export type MessageComposerProps = {
   ) => Promise<void>;
   placeholder?: string;
   profiles?: UserProfileLookup;
+  /** Explicit mention pubkeys from the loaded channel window, newest first. */
+  recentMentionPubkeys?: readonly string[];
   replyTarget?: {
     author: string;
     body: string;

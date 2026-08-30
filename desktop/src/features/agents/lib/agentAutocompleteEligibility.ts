@@ -1,6 +1,19 @@
 import type { Channel, RelayAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
+export function isAgentDirectoryReady({
+  data,
+  error,
+}: {
+  data: unknown;
+  error: unknown;
+}) {
+  // A successful cached directory remains suitable for autocomplete during a
+  // refetch. Sending still re-fetches and fails closed at its authorization
+  // boundary, so suggestions are hints rather than permission to send.
+  return data !== undefined && error === null;
+}
+
 export function getSharedChannelIds(channels: readonly Channel[] | undefined) {
   return new Set(
     (channels ?? [])

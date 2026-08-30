@@ -19,12 +19,12 @@ import {
   extractBlockText,
   extractContentText,
   extractPlanText,
-  extractPromptText,
+  extractPromptBlocks,
   extractTriggeringEventIds,
   extractToolArgs,
   extractToolIdentity,
   extractToolResult,
-  parsePromptText,
+  parsePromptBlocks,
   parseSystemPromptSections,
 } from "./agentSessionTranscriptHelpers";
 import { friendlyTurnErrorCopy } from "../lib/friendlyAgentLastError";
@@ -839,9 +839,9 @@ export function processTranscriptEvent(
         }
       }
     } else if (event.kind === "acp_write" && method === "session/prompt") {
-      const promptText = extractPromptText(payload);
-      if (promptText) {
-        const parsedPrompt = parsePromptText(promptText);
+      const promptBlocks = extractPromptBlocks(payload);
+      if (promptBlocks.length > 0) {
+        const parsedPrompt = parsePromptBlocks(promptBlocks);
         if (parsedPrompt.userText) {
           upsertMessage(
             d,
@@ -871,7 +871,7 @@ export function processTranscriptEvent(
       }
     } else if (event.kind === "acp_write" && method === "session/new") {
       // The base + persona prompts ride session/new's systemPrompt, framed by
-      // the harness as [Base]/[Agent Instructions]/[Agent Memory — core]/[Channel Canvas].
+      // the harness as <base>/<system>/<core-memory>/<channel-canvas>.
       // claude-agent-acp uses _meta.systemPrompt.append instead; both paths
       // produce the same standalone card (turnId: null, acpSource "session/new");
       // the bare field takes precedence when both are present.
@@ -898,9 +898,9 @@ export function processTranscriptEvent(
       event.kind === "acp_write" &&
       method === "_goose/unstable/session/steer"
     ) {
-      const promptText = extractPromptText(payload);
-      if (promptText) {
-        const parsedPrompt = parsePromptText(promptText);
+      const promptBlocks = extractPromptBlocks(payload);
+      if (promptBlocks.length > 0) {
+        const parsedPrompt = parsePromptBlocks(promptBlocks);
         if (parsedPrompt.userText) {
           upsertMessage(
             d,

@@ -1,8 +1,10 @@
 import * as React from "react";
 
+import { resetPersistentAgentAudienceStore } from "./persistentAgentAudience";
+
 export const KEEP_MENTIONED_AGENTS_PINNED_STORAGE_KEY =
   "buzz.messages.keepMentionedAgentsPinned";
-export const DEFAULT_KEEP_MENTIONED_AGENTS_PINNED = true;
+export const DEFAULT_KEEP_MENTIONED_AGENTS_PINNED = false;
 
 const listeners = new Set<() => void>();
 let keepMentionedAgentsPinned = readStoredPreference();
@@ -37,6 +39,7 @@ export function getKeepMentionedAgentsPinned(): boolean {
 }
 
 export function setKeepMentionedAgentsPinned(value: boolean): void {
+  if (!value) resetPersistentAgentAudienceStore();
   if (value === keepMentionedAgentsPinned) return;
   keepMentionedAgentsPinned = value;
   try {

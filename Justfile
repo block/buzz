@@ -43,6 +43,7 @@ bootstrap:
         cp .env.example .env
         echo "Created .env from .env.example — review it before running just dev."
     fi
+    ./scripts/ensure-local-relay-key.sh .env
 
 # Start Docker services, run migrations, install desktop deps
 setup: bootstrap
@@ -92,7 +93,12 @@ build-release:
     cargo build --workspace --release
 
 # Run repo lint, formatting, and repository policy checks
-check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check file-size-check
+check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clippy web-check mobile-check security-review-check file-size-check
+
+# Validate the trusted security-review workflow support and renderer contract.
+security-review-check:
+    node --check .github/scripts/codex-security-review.js
+    node --test .github/scripts/codex-security-review.test.js
 
 # Run the repository-wide differential file-size ratchet and its policy tests.
 # The ratchet inspects only files changed from the merge base, so this stays
@@ -307,14 +313,23 @@ test:
 test-unit:
     #!/usr/bin/env bash
     set -euo pipefail
+    ./scripts/test-ensure-local-relay-key.sh
     if command -v cargo-nextest &>/dev/null; then
         cargo nextest run -p buzz-core -p buzz-auth --lib
+        # buzz-auth NIP-FI verifier doctests. The sealed-authority
+        # `compile_fail` doctests prove the default-feature public API alone
+        # cannot forge the issuer→JWKS authority; nextest does not run
+        # doctests, hence this separate step. The verifier's regression suite
+        # lives in the in-crate `#[cfg(test)] mod tests`, so `--lib` above
+        # already runs it.
+        cargo test -p buzz-auth --doc
         cargo nextest run -p buzz-voice --lib
         cargo nextest run -p buzz-cli
         # buzz-db migrator/lint tests: pure SQL-parsing unit tests (no infra).
-        # They guard the embedded-migrator invariant (exactly the consolidated
-        # 0001; cutover/backfill stays an operator script, not startup state)
-        # and the tenant-scoping lints. The Postgres-backed buzz-db tests are
+        # They guard the embedded-migrator invariant (the complete checked-in
+        # additive migration set; legacy cutover/backfill remains an operator
+        # script, not startup state) and the tenant-scoping lints. The
+        # Postgres-backed buzz-db tests are
         # #[ignore]d, so --lib runs only the infra-free set. Without this gate a
         # stray file in migrations/ or a broken lint ships green.
         cargo nextest run -p buzz-db --lib
@@ -340,6 +355,31 @@ test-unit:
         # `cargo test --workspace`; without this step a manifest edit that
         # diverges Rust from the corpus ships green.
         cargo nextest run -p buzz-agent --lib
+        # Admin API auth-boundary tests (api::admin in buzz-relay): the NIP-98
+        # duplicate-tag rejections, the Host/Origin replay-ordering causal pair,
+        # the admin.localhost origin/advertisement/canonical-URL pins, and the
+        # host-oracle/credential-first checks. These are the regression guard for
+        # the /api/admin/v1 moderation auth surface. Enumerated explicitly because
+        # nothing in CI runs `cargo test --workspace`, `just test-unit` did not
+        # enumerate `buzz-relay --lib`, and Backend Integration selects only the
+        # #[ignore]d Postgres suites — so these non-ignored tests ran in no lane
+        # and a red one could ship green (exactly how a broken admin test slipped
+        # past every gate once). Scoped to api::admin, not the whole buzz-relay
+        # --lib, because api::media has non-ignored tests that require Postgres.
+        # Two api::admin tests are excluded: both exercise a read-route DB
+        # fallthrough and pass without a database only by waiting out the sqlx
+        # acquire timeout (~30s each), so they do not belong in the infra-free
+        # unit job. nip98_mode_unrostered_signer_does_not_consume_a_replay_slot
+        # asserts a unique replay-guard invariant, so it is wired into the
+        # Postgres-backed Backend Integration job (see ci.yml "Admin API
+        # unrostered-signer replay invariant"). disabled_mode_allows_
+        # unauthenticated_requests_on_the_admin_host has no unique invariant:
+        # disabled-mode unauthenticated success is covered by
+        # disabled_mode_regression_pin_unauthenticated_request_is_served on the
+        # DB-free /probe route, and its Host/Origin gating is covered here by
+        # disabled_mode_still_requires_the_correct_host / _a_matching_origin.
+        cargo nextest run -p buzz-relay --lib \
+            -E 'test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)'
     else
         ./scripts/run-tests.sh unit
     fi
@@ -423,6 +463,9 @@ relay: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     cargo run -p buzz-relay
 
 # Start the relay with the built web UI served from it
@@ -430,36 +473,53 @@ relay-web: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     [[ -d node_modules ]] || pnpm install
     pnpm -C web build
     BUZZ_WEB_DIR=./web/dist cargo run -p buzz-relay
 
-# Build and run the private read-only admin dashboard
+# Build and run the private admin dashboard
 admin: bootstrap _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     [[ -d node_modules ]] || pnpm install
     pnpm -C admin-web build
     export BUZZ_ADMIN_HOST="${BUZZ_ADMIN_HOST:-admin.localhost:3000}"
     export BUZZ_ADMIN_WEB_DIR="${BUZZ_ADMIN_WEB_DIR:-{{justfile_directory()}}/admin-web/dist}"
+    # Default to disabled auth locally: localhost is the network boundary and a
+    # NIP-07 signer extension can't be assumed in dev. Override per run with
+    # BUZZ_ADMIN_AUTH=nip98 (plus RELAY_OPERATOR_PUBKEYS or RELAY_OWNER_PUBKEY)
+    # to exercise the authenticated path.
+    export BUZZ_ADMIN_AUTH="${BUZZ_ADMIN_AUTH:-disabled}"
     echo "Admin dashboard: http://${BUZZ_ADMIN_HOST}/reports"
+    echo "Auth mode: ${BUZZ_ADMIN_AUTH} (set BUZZ_ADMIN_AUTH=nip98 to require a signed operator)"
     cargo run -p buzz-relay
 
 # Seed deterministic reports and product feedback for local admin dashboard review
 admin-seed: _ensure-migrations
     ./scripts/seed-admin-dashboard.sh
 
-# Run focused relay and browser checks for the read-only admin dashboard
+# Run focused relay and browser checks for the admin dashboard
 admin-check: fmt-check
     cargo check -p buzz-relay --all-targets
     cargo test -p buzz-relay api::admin
     cargo test -p buzz-relay router::tests
     pnpm -C admin-web check
-    pnpm -C admin-web exec playwright test
+    pnpm -C admin-web test:e2e
 
 # Start the relay server in release mode
-relay-release: _ensure-migrations
+relay-release: bootstrap _ensure-migrations
+    #!/usr/bin/env bash
+    set -euo pipefail
+    set -o allexport
+    source .env
+    set +o allexport
     cargo run -p buzz-relay --release
 
 
@@ -468,6 +528,9 @@ dev *ARGS: bootstrap _ensure-sidecar-stubs _ensure-migrations
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
+    set -o allexport
+    source .env
+    set +o allexport
     bind_addr="${BUZZ_BIND_ADDR:-0.0.0.0:3000}"
     relay_port="${bind_addr##*:}"; [[ -n "$relay_port" ]] || relay_port=3000
     health_port="${BUZZ_HEALTH_PORT:-8080}"
@@ -988,7 +1051,7 @@ goose-bg relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BU
 
 # ─── Benchmarking ─────────────────────────────────────────────────────────────
 
-# Run the Buzz orchestra benchmark — leaderboard-eligible by default (TB 2.1, k=5, Sonnet+Haiku). Stands up its own Docker stack; --gui opens a live spectator desktop app; other flags pass to benchmark.py (--dataset/--path, --include-task, --attempts, --manifest, --dry-run, ...)
+# Run the Buzz orchestra benchmark — TB defaults to leaderboard-eligible k=5; Buzz task layers default to regression k=1 and workflow k=3. Stands up its own Docker stack; --gui opens a live spectator desktop app; other flags pass to benchmark.py (--dataset/--path, --layer, --include-task, --attempts, --manifest, --dry-run, ...)
 benchmark *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail

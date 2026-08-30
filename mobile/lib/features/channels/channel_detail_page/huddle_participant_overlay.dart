@@ -5,6 +5,7 @@ const _huddleParticipantSpotlightRadius = 68.0;
 
 void _showHuddleParticipantSpotlight({
   required BuildContext context,
+  required String ephemeralChannelId,
   required String pubkey,
   required bool isSelf,
 }) {
@@ -12,6 +13,7 @@ void _showHuddleParticipantSpotlight({
     context: context,
     barrierLabel: 'Dismiss participant',
     childBuilder: (dialogContext) => _HuddleParticipantSpotlight(
+      ephemeralChannelId: ephemeralChannelId,
       pubkey: pubkey,
       isSelf: isSelf,
       onDismiss: () => Navigator.of(dialogContext).pop(),
@@ -19,11 +21,15 @@ void _showHuddleParticipantSpotlight({
   );
 }
 
-void _showHuddleParticipantRoster({required BuildContext context}) {
+void _showHuddleParticipantRoster({
+  required BuildContext context,
+  required String ephemeralChannelId,
+}) {
   _showHuddleParticipantOverlay(
     context: context,
     barrierLabel: 'Dismiss participant list',
-    childBuilder: (_) => const _HuddleParticipantRoster(),
+    childBuilder: (_) =>
+        _HuddleParticipantRoster(ephemeralChannelId: ephemeralChannelId),
   );
 }
 
@@ -123,22 +129,24 @@ class _HuddleParticipantOverlay extends StatelessWidget {
 
 class _HuddleParticipantSpotlight extends ConsumerWidget {
   const _HuddleParticipantSpotlight({
+    required this.ephemeralChannelId,
     required this.pubkey,
     required this.isSelf,
     required this.onDismiss,
   });
 
+  final String ephemeralChannelId;
   final String pubkey;
   final bool isSelf;
   final VoidCallback onDismiss;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final participantPresent = ref.watch(
-      huddleSessionProvider.select(
-        (session) => isSelf || session.participantPubkeys.contains(pubkey),
-      ),
-    );
+    final participantPresent =
+        isSelf ||
+        ref
+            .watch(_huddleLogicalParticipantPubkeysProvider(ephemeralChannelId))
+            .contains(pubkey);
     if (!participantPresent) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (context.mounted) onDismiss();
@@ -233,13 +241,16 @@ class _HuddleParticipantSpotlight extends ConsumerWidget {
 }
 
 class _HuddleParticipantRoster extends ConsumerWidget {
-  const _HuddleParticipantRoster();
+  const _HuddleParticipantRoster({required this.ephemeralChannelId});
+
+  final String ephemeralChannelId;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final session = ref.watch(huddleSessionProvider);
     final localPubkey = session.currentPubkey?.toLowerCase();
-    final pubkeys = session.participantPubkeys
+    final pubkeys = ref
+        .watch(_huddleLogicalParticipantPubkeysProvider(ephemeralChannelId))
         .where((pubkey) => pubkey != localPubkey)
         .skip(_huddleClusterVisibleParticipantCount)
         .toList(growable: false);
