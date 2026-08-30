@@ -290,6 +290,21 @@ fn is_safe_media_path_segment(sha256_ext: &str) -> bool {
     }
 }
 
+fn is_primary_blob_path_segment(segment: &str, expected_sha256: &str) -> bool {
+    match segment.split('.').collect::<Vec<_>>().as_slice() {
+        [hash] => *hash == expected_sha256,
+        [hash, ext] => *hash == expected_sha256 && is_safe_media_ext(ext),
+        _ => false,
+    }
+}
+
+fn is_thumbnail_path_segment(segment: &str, expected_sha256: &str) -> bool {
+    matches!(
+        segment.split('.').collect::<Vec<_>>().as_slice(),
+        [hash, "thumb", "jpg"] if *hash == expected_sha256
+    )
+}
+
 fn is_lower_hex_sha256(value: &str) -> bool {
     value.len() == 64 && value.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
 }
@@ -339,7 +354,7 @@ fn media_url_from_input(relay_url: &str, input: &str) -> Result<String, CliError
                 "refusing to sign media GET for a non-relay origin".to_string(),
             ));
         }
-        return Ok(input.to_string());
+        return Ok(parsed.to_string());
     }
     if input.contains("://") {
         return Err(CliError::Usage(
@@ -366,7 +381,7 @@ fn media_url_from_input(relay_url: &str, input: &str) -> Result<String, CliError
 
 fn validate_upload_descriptor(
     relay_url: &str,
-    descriptor: BlobDescriptor,
+    mut descriptor: BlobDescriptor,
     expected_sha256: &str,
     expected_size: u64,
     expected_mime: &str,
@@ -393,21 +408,34 @@ fn validate_upload_descriptor(
         .map_err(|e| CliError::Other(format!("relay returned an invalid upload URL: {e}")))?;
     let parsed = url::Url::parse(&validated_url)
         .map_err(|e| CliError::Other(format!("relay returned an invalid upload URL: {e}")))?;
-    let path_hash = parsed
+    let path_segment = parsed
         .path()
         .strip_prefix("/media/")
-        .and_then(|segment| segment.split('.').next())
         .ok_or_else(|| CliError::Other("relay returned an invalid upload URL path".to_string()))?;
-    if path_hash != expected_sha256 {
+    if !is_primary_blob_path_segment(path_segment, expected_sha256) {
         return Err(CliError::Other(
-            "relay returned an upload URL for a different SHA-256".to_string(),
+            "relay returned an upload URL that does not identify the uploaded blob".to_string(),
         ));
     }
+    descriptor.url = validated_url;
 
-    if let Some(thumb) = descriptor.thumb.as_deref() {
-        media_url_from_input(relay_url, thumb).map_err(|e| {
+    if let Some(thumb) = descriptor.thumb.clone() {
+        let validated_thumb = media_url_from_input(relay_url, &thumb).map_err(|e| {
             CliError::Other(format!("relay returned an invalid thumbnail URL: {e}"))
         })?;
+        let parsed_thumb = url::Url::parse(&validated_thumb).map_err(|e| {
+            CliError::Other(format!("relay returned an invalid thumbnail URL: {e}"))
+        })?;
+        let thumb_segment = parsed_thumb.path().strip_prefix("/media/").ok_or_else(|| {
+            CliError::Other("relay returned an invalid thumbnail URL path".to_string())
+        })?;
+        if !is_thumbnail_path_segment(thumb_segment, expected_sha256) {
+            return Err(CliError::Other(
+                "relay returned a thumbnail URL that does not identify the uploaded blob's thumbnail"
+                    .to_string(),
+            ));
+        }
+        descriptor.thumb = Some(validated_thumb);
     }
 
     Ok(descriptor)
@@ -500,6 +528,14 @@ mod media_download_tests {
             &format!("https://relay.example/media/{hash}.jpg")
         )
         .is_ok());
+        assert_eq!(
+            media_url_from_input(
+                "https://relay.example",
+                &format!("https://relay.example:443/media/{hash}.jpg")
+            )
+            .unwrap(),
+            format!("https://relay.example/media/{hash}.jpg")
+        );
         assert!(media_url_from_input(
             "https://relay.example",
             &format!("http://relay.example/media/{hash}.jpg")
@@ -546,6 +582,13 @@ mod media_download_tests {
         )
         .is_ok());
 
+        let mut explicit_default_port = descriptor.clone();
+        explicit_default_port.url = format!("https://relay.example:443/media/{hash}.pdf");
+        let canonical =
+            validate_upload_descriptor(relay, explicit_default_port, &hash, 42, "application/pdf")
+                .unwrap();
+        assert_eq!(canonical.url, descriptor.url);
+
         let mut wrong_hash = descriptor.clone();
         wrong_hash.sha256 = "b".repeat(64);
         assert!(
@@ -564,10 +607,41 @@ mod media_download_tests {
             validate_upload_descriptor(relay, wrong_mime, &hash, 42, "application/pdf").is_err()
         );
 
-        let mut wrong_url = descriptor;
+        let mut wrong_url = descriptor.clone();
         wrong_url.url = format!("https://evil.example/media/{hash}.pdf");
         assert!(
             validate_upload_descriptor(relay, wrong_url, &hash, 42, "application/pdf").is_err()
+        );
+
+        let mut thumbnail_as_primary = descriptor.clone();
+        thumbnail_as_primary.url = format!("{relay}/media/{hash}.thumb.jpg");
+        assert!(validate_upload_descriptor(
+            relay,
+            thumbnail_as_primary,
+            &hash,
+            42,
+            "application/pdf"
+        )
+        .is_err());
+
+        let mut valid_thumb = descriptor.clone();
+        valid_thumb.thumb = Some(format!("{relay}/media/{hash}.thumb.jpg"));
+        assert!(
+            validate_upload_descriptor(relay, valid_thumb, &hash, 42, "application/pdf").is_ok()
+        );
+
+        let mut unrelated_thumb = descriptor.clone();
+        unrelated_thumb.thumb = Some(format!("{relay}/media/{}.thumb.jpg", "b".repeat(64)));
+        assert!(
+            validate_upload_descriptor(relay, unrelated_thumb, &hash, 42, "application/pdf")
+                .is_err()
+        );
+
+        let mut primary_as_thumb = descriptor;
+        primary_as_thumb.thumb = Some(format!("{relay}/media/{hash}.jpg"));
+        assert!(
+            validate_upload_descriptor(relay, primary_as_thumb, &hash, 42, "application/pdf")
+                .is_err()
         );
     }
 

@@ -676,12 +676,21 @@ fn validate_attachment_content_budget(
     relay_url: &str,
 ) -> Result<(), CliError> {
     // Upload descriptors are restricted to this relay's `/media/{sha256}[.ext]`
-    // URLs. Reserve the longest permitted URL and the generic-file markdown form
-    // before any upload so a later content-size failure cannot orphan a blob.
-    let max_url_bytes = relay_url.trim_end_matches('/').len() + "/media/".len() + 64 + 1 + 8;
+    // URLs. Reserve the longest permitted URL and the longest markdown form for
+    // each filename before any upload so a later content-size failure cannot
+    // orphan a blob. Short filenames make image/video markup longer than generic
+    // file markup, while long escaped filenames make the generic form longer.
+    let mut max_media_url = url::Url::parse(relay_url)
+        .map_err(|e| CliError::Usage(format!("invalid relay URL: {e}")))?;
+    max_media_url.set_path(&format!("/media/{}.{}", "a".repeat(64), "a".repeat(8)));
+    max_media_url.set_query(None);
+    max_media_url.set_fragment(None);
+    let max_url_bytes = max_media_url.as_str().len();
     let attachment_bytes = files.iter().try_fold(0usize, |total, file_path| {
         let label = escape_markdown_label(&safe_attachment_filename(file_path));
-        total.checked_add(5 + label.len() + max_url_bytes)
+        let generic_markdown_bytes = "\n[]()".len() + label.len();
+        let inline_media_markdown_bytes = "\n![image]()".len();
+        total.checked_add(generic_markdown_bytes.max(inline_media_markdown_bytes) + max_url_bytes)
     });
     let final_bytes = attachment_bytes.and_then(|bytes| content.len().checked_add(bytes));
     if final_bytes.is_none_or(|bytes| bytes > MAX_CONTENT_BYTES) {
@@ -1311,12 +1320,30 @@ mod tests {
 
     #[test]
     fn attachment_budget_is_checked_before_upload() {
+        let relay = "https://relay.example";
         let files = vec!["report.pdf".to_string()];
-        assert!(validate_attachment_content_budget("ok", &files, "https://relay.example").is_ok());
+        assert!(validate_attachment_content_budget("ok", &files, relay).is_ok());
+        assert!(
+            validate_attachment_content_budget(&"x".repeat(MAX_CONTENT_BYTES), &files, relay)
+                .is_err()
+        );
+
+        // A one-character filename makes inline image/video markdown longer than
+        // the generic-file form. The boundary must still be conservative so an
+        // image cannot upload and then fail the final content-size check.
+        let short_name = vec!["a".to_string()];
+        let max_url_bytes = relay.len() + "/media/".len() + 64 + 1 + 8;
+        let reserved_bytes = "\n![image]()".len() + max_url_bytes;
         assert!(validate_attachment_content_budget(
-            &"x".repeat(MAX_CONTENT_BYTES),
-            &files,
-            "https://relay.example"
+            &"x".repeat(MAX_CONTENT_BYTES - reserved_bytes),
+            &short_name,
+            relay
+        )
+        .is_ok());
+        assert!(validate_attachment_content_budget(
+            &"x".repeat(MAX_CONTENT_BYTES - reserved_bytes + 1),
+            &short_name,
+            relay
         )
         .is_err());
     }
