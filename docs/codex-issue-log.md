@@ -121,4 +121,4 @@
 - 根因：LAN fast path 通过明文 WebSocket 直连，同时保留公网 Host 进行 Community 租户绑定。Relay 因直连协议要求 NIP-42 `relay` 标签为 `ws://公网主机名`，客户端却一直按 canonical 公网配置签入 `wss://公网主机名`，严格认证因此返回 `auth-required: verification failed`。此前 UI 把握手、认证和网络失败统一显示成“内网不可用”，进一步掩盖了真实原因。
 - 处理：LAN transport 的 AUTH 事件只把 canonical URL 的协议改为 `ws`，保留相同公网主机名和 Community 身份；公网 transport 继续使用原始 `wss`。手动检测结果现在区分 LAN 失败与公网回退失败，并显示 Relay 返回的具体错误。
 - 验证：AUTH URL 与入站缓冲测试 5/5、TypeScript、Biome、Tauri native WebSocket 9/9、Relay NIP-42 9/9 通过。对真实 `10.24.11.82:3000` 保持公网 Host 的 A/B 探测中，`wss://公网主机名` 返回 `auth-required: verification failed`，`ws://同一公网主机名` 返回认证成功，直接确认根因与修复方向。待生成标识测试包进行实机验证。
-- 版本/提交：待提交。
+- 版本/提交：`0.5.16` 本地发布；源代码提交见本次版本提交。

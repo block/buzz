@@ -8,6 +8,14 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 export const STARTUP_CHANGELOG: StartupChangelogEntry[] = [
   {
+    date: "2026-08-30",
+    items: [
+      "【主要更新】修复内网 LAN Relay 认证协议不匹配：内网连接现在可以正常完成 NIP-42 登录。",
+      "同一个 Community 支持 LAN 优先、不可用时自动回退公网，并可通过按钮重新检测并切回 LAN。",
+      "修复“内网不可用”提示过于笼统的问题，现在会显示连接、认证和公网回退的具体结果。",
+    ],
+  },
+  {
     date: "2026-08-28",
     items: [
       "修复旧 Community 与 WebView 状态可能导致 Buzz 启动后一直加载的问题。",
