@@ -676,7 +676,11 @@ impl EventQueue {
         ids
     }
 
-    /// Whether a prompt is currently in-flight for the given channel.
+    /// Whether the queue currently has a task owning the given channel.
+    ///
+    /// Ownership begins before `session/prompt` while the task performs setup
+    /// and context enrichment. Callers that need to target an active prompt
+    /// must also consult `AgentPool::has_in_flight_prompt`.
     pub fn is_channel_in_flight(&self, channel_id: Uuid) -> bool {
         self.in_flight_channels.contains(&channel_id)
     }
