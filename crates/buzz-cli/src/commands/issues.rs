@@ -335,7 +335,9 @@ fn reduce_task_transitions(
         }
         let causal = match head.as_deref() {
             None => prior.is_empty(),
-            Some(current) => prior.first().is_some_and(|value| *value == current),
+            Some(current) => prior
+                .first()
+                .is_some_and(|value| value.eq_ignore_ascii_case(current)),
         };
         if !causal || state.as_deref().is_some_and(|current| current != from[0]) {
             continue;
@@ -344,6 +346,21 @@ fn reduce_task_transitions(
         state = Some(to[0].to_string());
     }
     TaskTransitionContext { head, state }
+}
+
+fn next_task_transition_created_at(now: u64, events: &[&AssignmentQueryEvent]) -> u64 {
+    let latest = events
+        .iter()
+        .filter(|event| {
+            event.kind == 1
+                && query_tag_values(event, "t")
+                    .iter()
+                    .any(|label| *label == TASK_TRANSITION_LABEL)
+        })
+        .map(|event| event.created_at)
+        .max()
+        .unwrap_or(0);
+    now.max(latest.saturating_add(1))
 }
 
 impl IssueAssignmentOperation {
@@ -730,17 +747,11 @@ pub async fn cmd_transition_issue(
             context.state.unwrap_or_default()
         )));
     }
-    let latest_signer_comment = operations
-        .iter()
-        .filter(|event| event.pubkey.eq_ignore_ascii_case(&signer))
-        .map(|event| event.created_at)
-        .max()
-        .unwrap_or(0);
-    let created_at = std::time::SystemTime::now()
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| CliError::Other(format!("read system clock: {error}")))?
-        .as_secs()
-        .max(latest_signer_comment.saturating_add(1));
+        .as_secs();
+    let created_at = next_task_transition_created_at(now, &operations);
     let builder = buzz_sdk::build_git_issue_transition(
         &repo,
         issue,
@@ -1005,8 +1016,8 @@ mod tests {
 
     use super::{
         assignment_note_label, dependency_graph_has_cycle, dependency_is_resolved,
-        reduce_assignment_operations, reduce_task_transitions, AssignmentEvent,
-        AssignmentQueryEvent, ISSUE_ASSIGNMENT_LABEL, ISSUE_UNASSIGNMENT_LABEL,
+        next_task_transition_created_at, reduce_assignment_operations, reduce_task_transitions,
+        AssignmentEvent, AssignmentQueryEvent, ISSUE_ASSIGNMENT_LABEL, ISSUE_UNASSIGNMENT_LABEL,
     };
 
     const ISSUE: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
@@ -1204,7 +1215,7 @@ mod tests {
             1,
             vec![vec!["t".into(), "graph".into()]],
         );
-        let first = "1".repeat(64);
+        let first = "a".repeat(64);
         let second = "2".repeat(64);
         let stale = "3".repeat(64);
         let unauthorized = "4".repeat(64);
@@ -1224,7 +1235,7 @@ mod tests {
                 30,
                 "implementation",
                 "quality-gate",
-                Some(&first),
+                Some(&first.to_ascii_uppercase()),
             ),
             transition_event(&stale, OWNER, 40, "quality-gate", "done", Some(&first)),
         ];
@@ -1294,5 +1305,28 @@ mod tests {
             OWNER,
             &[&resolved, &reopened],
         ));
+    }
+
+    #[test]
+    fn next_transition_follows_future_head_from_another_signer() {
+        let future = transition_event(
+            &"1".repeat(64),
+            AUTHOR,
+            10_000,
+            "implementation",
+            "quality-gate",
+            None,
+        );
+        let unrelated = query_event(
+            &"2".repeat(64),
+            1,
+            VOLUNTEER,
+            20_000,
+            vec![vec!["t".into(), "assignment".into()]],
+        );
+        assert_eq!(
+            next_task_transition_created_at(100, &[&future, &unrelated]),
+            10_001
+        );
     }
 }
