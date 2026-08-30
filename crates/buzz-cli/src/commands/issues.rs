@@ -352,8 +352,7 @@ fn next_task_transition_created_at(now: u64, events: &[&AssignmentQueryEvent]) -
     let latest = events
         .iter()
         .filter(|event| {
-            event.kind == 1
-                && query_tag_values(event, "t").contains(&TASK_TRANSITION_LABEL)
+            event.kind == 1 && query_tag_values(event, "t").contains(&TASK_TRANSITION_LABEL)
         })
         .map(|event| event.created_at)
         .max()
