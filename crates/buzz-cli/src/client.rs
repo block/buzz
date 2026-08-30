@@ -305,6 +305,15 @@ fn media_url_from_input(relay_url: &str, input: &str) -> Result<String, CliError
     if input.starts_with("http://") || input.starts_with("https://") {
         let parsed = url::Url::parse(input)
             .map_err(|e| CliError::Usage(format!("invalid media URL: {e}")))?;
+        if !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(CliError::Usage(
+                "media URL must not contain credentials, a query, or a fragment".to_string(),
+            ));
+        }
         if !parsed.path().starts_with("/media/") {
             return Err(CliError::Usage(
                 "media URL must point at a /media/ path".to_string(),
@@ -353,6 +362,55 @@ fn media_url_from_input(relay_url: &str, input: &str) -> Result<String, CliError
         "{}/media/{sha256_ext}",
         relay_url.trim_end_matches('/')
     ))
+}
+
+fn validate_upload_descriptor(
+    relay_url: &str,
+    descriptor: BlobDescriptor,
+    expected_sha256: &str,
+    expected_size: u64,
+    expected_mime: &str,
+) -> Result<BlobDescriptor, CliError> {
+    if descriptor.sha256 != expected_sha256 {
+        return Err(CliError::Other(
+            "relay returned an upload descriptor with a mismatched SHA-256".to_string(),
+        ));
+    }
+    if descriptor.size != expected_size {
+        return Err(CliError::Other(format!(
+            "relay returned an upload descriptor with a mismatched size ({} != {expected_size})",
+            descriptor.size
+        )));
+    }
+    if descriptor.mime_type != expected_mime {
+        return Err(CliError::Other(format!(
+            "relay returned an upload descriptor with a mismatched MIME type ({} != {expected_mime})",
+            descriptor.mime_type
+        )));
+    }
+
+    let validated_url = media_url_from_input(relay_url, &descriptor.url)
+        .map_err(|e| CliError::Other(format!("relay returned an invalid upload URL: {e}")))?;
+    let parsed = url::Url::parse(&validated_url)
+        .map_err(|e| CliError::Other(format!("relay returned an invalid upload URL: {e}")))?;
+    let path_hash = parsed
+        .path()
+        .strip_prefix("/media/")
+        .and_then(|segment| segment.split('.').next())
+        .ok_or_else(|| CliError::Other("relay returned an invalid upload URL path".to_string()))?;
+    if path_hash != expected_sha256 {
+        return Err(CliError::Other(
+            "relay returned an upload URL for a different SHA-256".to_string(),
+        ));
+    }
+
+    if let Some(thumb) = descriptor.thumb.as_deref() {
+        media_url_from_input(relay_url, thumb).map_err(|e| {
+            CliError::Other(format!("relay returned an invalid thumbnail URL: {e}"))
+        })?;
+    }
+
+    Ok(descriptor)
 }
 
 fn sign_blossom_get(keys: &Keys, media_url: &str) -> Result<String, CliError> {
@@ -462,6 +520,55 @@ mod media_download_tests {
             &format!("ftp://relay.example/media/{hash}.jpg")
         )
         .is_err());
+    }
+
+    #[test]
+    fn upload_descriptor_must_match_local_file_and_relay() {
+        let hash = "a".repeat(64);
+        let relay = "https://relay.example";
+        let descriptor = BlobDescriptor {
+            url: format!("{relay}/media/{hash}.pdf"),
+            sha256: hash.clone(),
+            size: 42,
+            mime_type: "application/pdf".to_string(),
+            uploaded: 0,
+            dim: None,
+            duration: None,
+            blurhash: None,
+            thumb: None,
+        };
+        assert!(validate_upload_descriptor(
+            relay,
+            descriptor.clone(),
+            &hash,
+            42,
+            "application/pdf"
+        )
+        .is_ok());
+
+        let mut wrong_hash = descriptor.clone();
+        wrong_hash.sha256 = "b".repeat(64);
+        assert!(
+            validate_upload_descriptor(relay, wrong_hash, &hash, 42, "application/pdf").is_err()
+        );
+
+        let mut wrong_size = descriptor.clone();
+        wrong_size.size = 41;
+        assert!(
+            validate_upload_descriptor(relay, wrong_size, &hash, 42, "application/pdf").is_err()
+        );
+
+        let mut wrong_mime = descriptor.clone();
+        wrong_mime.mime_type = "image/png".to_string();
+        assert!(
+            validate_upload_descriptor(relay, wrong_mime, &hash, 42, "application/pdf").is_err()
+        );
+
+        let mut wrong_url = descriptor;
+        wrong_url.url = format!("https://evil.example/media/{hash}.pdf");
+        assert!(
+            validate_upload_descriptor(relay, wrong_url, &hash, 42, "application/pdf").is_err()
+        );
     }
 
     #[test]
@@ -1204,6 +1311,7 @@ impl BuzzClient {
                 let mime = mime.clone();
                 let sha256 = sha256.clone();
                 async move {
+                    let expected_size = upload_body.len() as u64;
                     let auth_header =
                         sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
                     let resp = self
@@ -1224,7 +1332,17 @@ impl BuzzClient {
                         let body = resp.text().await.unwrap_or_default();
                         return Err(CliError::Relay { status: s, body });
                     }
-                    resp.json::<BlobDescriptor>().await.map_err(CliError::from)
+                    let descriptor = resp
+                        .json::<BlobDescriptor>()
+                        .await
+                        .map_err(CliError::from)?;
+                    validate_upload_descriptor(
+                        &self.relay_url,
+                        descriptor,
+                        &sha256,
+                        expected_size,
+                        &mime,
+                    )
                 }
             })
             .await;
@@ -1251,6 +1369,7 @@ impl BuzzClient {
             let mime = mime.clone();
             let sha256 = sha256.clone();
             async move {
+                let expected_size = upload_body.len() as u64;
                 let auth_header = sign_blossom_upload(&self.keys, &sha256, &mime, &self.relay_url)?;
                 let resp = self
                     .with_auth_tag(
@@ -1269,7 +1388,17 @@ impl BuzzClient {
                     let body = resp.text().await.unwrap_or_default();
                     return Err(CliError::Relay { status, body });
                 }
-                resp.json::<BlobDescriptor>().await.map_err(CliError::from)
+                let descriptor = resp
+                    .json::<BlobDescriptor>()
+                    .await
+                    .map_err(CliError::from)?;
+                validate_upload_descriptor(
+                    &self.relay_url,
+                    descriptor,
+                    &sha256,
+                    expected_size,
+                    &mime,
+                )
             }
         })
         .await
@@ -2187,6 +2316,7 @@ mod retry_policy_tests {
         ];
         tmp.write_all(jpeg_header).unwrap();
         let file_path = tmp.path().to_str().unwrap().to_string();
+        let expected_sha = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(jpeg_header));
 
         let counter = Arc::new(AtomicU32::new(0));
         let counter2 = counter.clone();
@@ -2226,7 +2356,10 @@ mod retry_policy_tests {
                     let _ = stream.write_all(partial).await;
                 } else {
                     // Valid BlobDescriptor response.
-                    let ok_body = r#"{"url":"https://relay.test/media/aabbcc.jpg","sha256":"aabbcc","size":12,"type":"image/jpeg","uploaded":0}"#;
+                    let ok_body = format!(
+                        r#"{{"url":"http://{addr}/media/{expected_sha}.jpg","sha256":"{expected_sha}","size":{},"type":"image/jpeg","uploaded":0}}"#,
+                        jpeg_header.len()
+                    );
                     let ok = format!(
                         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
                         ok_body.len(),
