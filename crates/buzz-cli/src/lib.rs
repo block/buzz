@@ -1677,6 +1677,9 @@ pub enum IssuesCmd {
         /// Label — can be specified multiple times
         #[arg(long = "label")]
         label: Vec<String>,
+        /// Issue event ID this task depends on. Can be specified multiple times.
+        #[arg(long = "depends-on")]
+        depends_on: Vec<String>,
         /// Additional recipient pubkey(s) — can be specified multiple times
         #[arg(long = "to")]
         to: Vec<String>,
@@ -1771,6 +1774,30 @@ pub enum IssuesCmd {
         /// Defaults to the truncated assignee pubkeys.
         #[arg(long)]
         label: Option<String>,
+    },
+    /// Record a graph-mode task state transition as a causal issue operation.
+    Transition {
+        /// Issue event id (64-char hex)
+        #[arg(long)]
+        issue: String,
+        /// Repo owner pubkey (64-char hex)
+        #[arg(long)]
+        repo_owner: String,
+        /// Repo identifier (d-tag)
+        #[arg(long)]
+        repo_id: String,
+        /// Current graph state slug
+        #[arg(long)]
+        from: String,
+        /// Next graph state slug
+        #[arg(long)]
+        to: String,
+        /// Markdown reason/evidence for the transition ('-' to read from stdin)
+        #[arg(long)]
+        content: String,
+        /// Optional gate slug, such as tests or human-approval
+        #[arg(long)]
+        gate: Option<String>,
     },
 }
 
@@ -2637,5 +2664,74 @@ mod tests {
             .is_err(),
             "--visibility chartreuse on update must be rejected at parse time"
         );
+    }
+
+    #[test]
+    fn issues_create_accepts_multiple_dependencies() {
+        let owner = "a".repeat(64);
+        let first = "b".repeat(64);
+        let second = "c".repeat(64);
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "issues",
+            "create",
+            "--repo-owner",
+            owner.as_str(),
+            "--repo-id",
+            "buzz",
+            "--title",
+            "Graph task",
+            "--content",
+            "body",
+            "--label",
+            "graph",
+            "--depends-on",
+            first.as_str(),
+            "--depends-on",
+            second.as_str(),
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn issues_transition_requires_reason_and_states() {
+        let owner = "a".repeat(64);
+        let issue = "b".repeat(64);
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "issues",
+            "transition",
+            "--issue",
+            issue.as_str(),
+            "--repo-owner",
+            owner.as_str(),
+            "--repo-id",
+            "buzz",
+            "--from",
+            "implementation",
+            "--to",
+            "quality-gate",
+            "--content",
+            "tests started",
+            "--gate",
+            "tests",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "issues",
+            "transition",
+            "--issue",
+            issue.as_str(),
+            "--repo-owner",
+            owner.as_str(),
+            "--repo-id",
+            "buzz",
+            "--from",
+            "implementation",
+            "--to",
+            "quality-gate",
+        ])
+        .is_err());
     }
 }
