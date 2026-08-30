@@ -1587,6 +1587,12 @@ test("first-community shows the scenario cards for localhost", async ({
   await installMockBridge(
     page,
     {
+      globalAgentConfig: {
+        env_vars: {},
+        provider: null,
+        model: null,
+        preferred_runtime: "claude",
+      },
       acpRuntimesCatalog: [
         {
           id: "claude",
@@ -1650,13 +1656,9 @@ test("first-community shows the scenario cards for localhost", async ({
   await page.getByTestId("welcome-setup-back").click();
   await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
   await expect(
-    page.getByRole("heading", {
-      name: "Configure your default model settings",
-    }),
+    page.getByRole("heading", { name: "Set up Claude Code" }),
   ).toBeVisible();
-  await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
-    "Claude Code",
-  );
+  await expect(page.getByText(/Claude Code is ready/i)).toBeVisible();
   await expect(page.getByTestId("onboarding-finish")).toBeEnabled();
 });
 

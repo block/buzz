@@ -77,6 +77,11 @@ function AgentDefaultsSection({
     initialDraftRef.current?.isCustomModelEditing ?? false,
   );
   const [bakedEnv, setBakedEnv] = React.useState<BakedEnvEntry[]>([]);
+  const [configLoadError, setConfigLoadError] = React.useState(false);
+  const [configLoadNonce, retryConfigLoad] = React.useReducer(
+    (nonce: number) => nonce + 1,
+    0,
+  );
   const configRef = React.useRef<GlobalAgentConfig>(
     initialDraftRef.current?.config ?? EMPTY_GLOBAL_CONFIG,
   );
@@ -86,7 +91,9 @@ function AgentDefaultsSection({
   React.useEffect(() => {
     let unmounted = false;
 
-    async function loadDefaults() {
+    async function loadDefaults(_retryAttempt: number) {
+      setIsLoading(true);
+      setConfigLoadError(false);
       const [configResult, bakedEnvResult] = await Promise.allSettled([
         getGlobalAgentConfig(),
         getBakedBuildEnv(),
@@ -94,25 +101,27 @@ function AgentDefaultsSection({
 
       if (unmounted) return;
 
-      if (
-        initialDraftRef.current === null &&
-        configResult.status === "fulfilled"
-      ) {
-        configRef.current = configResult.value;
-        setConfig(configResult.value);
-      }
       if (bakedEnvResult.status === "fulfilled") {
         setBakedEnv(bakedEnvResult.value);
+      }
+      if (configResult.status === "rejected") {
+        setConfigLoadError(true);
+        setIsLoading(false);
+        return;
+      }
+      if (initialDraftRef.current === null) {
+        configRef.current = configResult.value;
+        setConfig(configResult.value);
       }
       setIsLoading(false);
     }
 
-    void loadDefaults();
+    void loadDefaults(configLoadNonce);
 
     return () => {
       unmounted = true;
     };
-  }, []);
+  }, [configLoadNonce]);
 
   const effectiveReadyRuntimeIds = React.useMemo(
     () =>
@@ -147,6 +156,7 @@ function AgentDefaultsSection({
   const configSurfaceLoading = isLoading || runtimesQuery.isLoading;
 
   const configSurfaceError =
+    configLoadError ||
     runtimesQuery.isError ||
     (!configSurfaceLoading &&
       effectiveReadyRuntimeIds.length > 0 &&
@@ -212,12 +222,14 @@ function AgentDefaultsSection({
       // configIsValid comes from AgentConfigFields' onValidityChange and
       // covers model + provider credentials — a harness selection alone is
       // not a working default (e.g. buzz-agent with no provider configured).
-      canComplete: selectedRuntimeId.length > 0 && configIsValid,
+      canComplete:
+        !configLoadError && selectedRuntimeId.length > 0 && configIsValid,
       commit: commitPersistence,
     });
   }, [
     commitPersistence,
     configIsValid,
+    configLoadError,
     onPersistenceStateChange,
     selectedRuntimeId,
   ]);
@@ -232,6 +244,20 @@ function AgentDefaultsSection({
         <div className="flex items-center justify-center gap-2 py-4 text-sm text-muted-foreground">
           <Spinner className="h-4 w-4 border-2" />
           Loading…
+        </div>
+      ) : configLoadError ? (
+        <div className="flex flex-col items-center gap-3 py-4 text-center text-sm">
+          <p className="text-destructive">
+            Couldn't load your existing default harness. Try again.
+          </p>
+          <Button
+            className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
+            disabled={isLoading}
+            onClick={retryConfigLoad}
+            type="button"
+          >
+            {isLoading ? "Checking…" : "Try again"}
+          </Button>
         </div>
       ) : configSurfaceError ? (
         <p className="py-4 text-center text-sm text-destructive">
