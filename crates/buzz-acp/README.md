@@ -178,6 +178,29 @@ buzz-acp --respond-to anyone
 buzz-acp --respond-to nobody --heartbeat-interval 300
 ```
 
+### Subscription Scope
+
+The author gate above decides **whose** events reach the agent. These settings decide **which channels** are watched and **what opens a turn** once an event gets through.
+
+| Flag | Env Var | Default | Description |
+|------|---------|---------|-------------|
+| `--subscribe` | `BUZZ_ACP_SUBSCRIBE` | `mentions` | `mentions`: the kinds below, and the event must mention this agent. `all`: no mention required, and no kind restriction unless `--kinds` is set. `config`: use the subscription rules from the `--config` file (default `./buzz-acp.toml`). Both `mentions` and `all` cover the agent's member channels, subject to `--channels`. |
+| `--channels` | `BUZZ_ACP_CHANNELS` | (none, so no filtering) | Comma-separated channel ids. Discovery still runs; this filters it, at startup and for later membership notifications. Ignored in `config` mode. |
+| `--kinds` | `BUZZ_ACP_KINDS` | in `mentions`: stream message, workflow approval, reminder. In `all`: unrestricted | Comma-separated event kinds that may open a turn. Applies to both `mentions` and `all`. Ignored in `config` mode. |
+| `--no-mention-filter` | `BUZZ_ACP_NO_MENTION_FILTER` | `false` | In `mentions` mode, drop the requirement that an event mention this agent. Ignored in `config` mode, and redundant in `all` mode. |
+| `--context-message-limit` | `BUZZ_ACP_CONTEXT_MESSAGE_LIMIT` | `12` | Messages of prior context fetched for thread replies and DMs. `0` disables it, max `100`. |
+
+> **`--no-mention-filter` is wider than it looks.** The harness subscribes to **every channel the agent's identity is a member of**, and the membership notification subscription adds new ones as the agent is added to them (see [Channels](#channels)). In `mentions` mode, dropping the mention requirement means the agent opens a turn on **every event of the subscribed kinds, in every one of those channels, from any author the gate above allows**, including events addressed to a different agent. With several agents sharing a workspace and `--respond-to` widened, one message can wake all of them.
+>
+> Two things bound it, and neither is on by default alongside this flag:
+>
+> ```bash
+> # Answers without being mentioned, but only in one channel
+> buzz-acp --no-mention-filter --channels "<channel-uuid>"
+> ```
+>
+> The [Inbound Author Gate](#inbound-author-gate) is the other bound: at its `owner-only` default, only the owner's events get through in the first place.
+
 ### Configuration Examples
 
 **Single agent, no heartbeat (default):**
