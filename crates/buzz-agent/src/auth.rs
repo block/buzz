@@ -1343,3 +1343,563 @@ mod tests {
         );
     }
 }
+
+/// A bearer token re-read from an on-disk OIDC session, refreshed as needed.
+///
+/// # Why this exists
+///
+/// The OpenAI-compatible provider used `StaticTokenSource`: the key was
+/// resolved once, at process start, from `OPENAI_COMPAT_API_KEY`. An
+/// environment variable cannot be changed from outside a running process, so
+/// the ONLY way to pick up a renewed token was to restart the agent.
+///
+/// That made restarts load-bearing, and on 2026-08-06 that assumption broke a
+/// six-agent fleet: a `systemctl --user` reload no longer reached units that
+/// had moved to system scope, no restart happened, and every agent ran for ten
+/// hours on a token that died after six. `StaticTokenSource::refresh_now`
+/// returns the same dead string, so each 401 was terminal — the fleet took
+/// mentions, failed, retried, and discarded them while every unit reported
+/// `active (running)`.
+///
+/// Tools that do not have this problem (OpenClaw, Hermes) share one property:
+/// they resolve the credential **per request**, from a file or keyring, rather
+/// than capturing one at spawn. This is that, for the OpenAI-compat path.
+///
+/// # Shape
+///
+/// Reads the session JSON written by the Grok CLI (`~/.grok/auth.json`):
+/// a single-entry object whose value carries `key`, `refresh_token`,
+/// `oidc_client_id` and an RFC 3339 `expires_at`. On each `bearer()` the file
+/// is consulted; if the token is inside `SKEW` of expiry it is refreshed via
+/// the standard `refresh_token` grant and written back atomically.
+///
+/// Re-reading the file per call is deliberate beyond refresh: it also means an
+/// external `grok login` is picked up without restarting anything.
+pub struct GrokSessionTokenSource {
+    path: PathBuf,
+    token_url: String,
+    http: Client,
+    /// How long before a held refresh lock is presumed abandoned. A field
+    /// rather than a constant so the staleness path is testable without a
+    /// filetime dependency — backdating a file portably is more machinery than
+    /// the behaviour being tested.
+    stale_after: Duration,
+    /// Serialises refreshes. Grok's OIDC refresh tokens ROTATE, so two
+    /// concurrent refreshes race and the loser is left holding a token the
+    /// server has already retired.
+    lock: Mutex<()>,
+}
+
+/// Refresh this long before expiry. Generous because a refresh is cheap and a
+/// dead token is not: 26 minutes of retries and then discarded work.
+const GROK_REFRESH_SKEW: Duration = Duration::from_secs(600);
+
+/// Cross-process refresh lock tuning. A refresh is one HTTP round trip, so a
+/// peer holding the lock should be done well inside LOCK_ATTEMPTS * LOCK_POLL.
+const LOCK_ATTEMPTS: usize = 60;
+const LOCK_POLL: Duration = Duration::from_millis(100);
+/// Longer than any plausible refresh, short enough that a killed process does
+/// not wedge the fleet until someone notices.
+const LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
+
+impl GrokSessionTokenSource {
+    pub fn new(path: PathBuf, token_url: impl Into<String>) -> Self {
+        Self {
+            path,
+            token_url: token_url.into(),
+            http: Client::new(),
+            stale_after: LOCK_STALE_AFTER,
+            lock: Mutex::new(()),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_stale_after(mut self, d: Duration) -> Self {
+        self.stale_after = d;
+        self
+    }
+
+    fn read(&self) -> Result<(Value, String, CachedToken), AgentError> {
+        let raw = fs::read_to_string(&self.path)
+            .map_err(|e| AgentError::LlmAuth(format!("read {:?}: {e}", self.path)))?;
+        let doc: Value = serde_json::from_str(&raw)
+            .map_err(|e| AgentError::LlmAuth(format!("parse {:?}: {e}", self.path)))?;
+        let (entry_key, entry) = doc
+            .as_object()
+            .and_then(|m| m.iter().next())
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .ok_or_else(|| AgentError::LlmAuth(format!("{:?} is empty", self.path)))?;
+
+        let access = entry
+            .get("key")
+            .or_else(|| entry.get("access_token"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if access.is_empty() {
+            return Err(AgentError::LlmAuth(format!(
+                "no access token in {:?}",
+                self.path
+            )));
+        }
+        let expires_at = entry
+            .get("expires_at")
+            .and_then(Value::as_str)
+            .and_then(parse_rfc3339_secs);
+        Ok((
+            doc,
+            entry_key,
+            CachedToken {
+                access_token: access,
+                refresh_token: entry
+                    .get("refresh_token")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                expires_at,
+            },
+        ))
+    }
+
+    fn expiring_within(tok: &CachedToken, skew: Duration) -> bool {
+        match tok.expires_at {
+            // No expiry metadata: trust it and let a 401 drive refresh_now.
+            None => false,
+            Some(exp) => now_secs() + skew.as_secs() >= exp,
+        }
+    }
+
+    /// Acquire the cross-process refresh lock, or return the token a peer just
+    /// wrote while we waited.
+    ///
+    /// The in-process `Mutex` is not enough: six agents share one session file,
+    /// and Grok's refresh tokens ROTATE. Two processes refreshing concurrently
+    /// both present the same refresh token, one wins, and the loser is left
+    /// holding one the server has already retired — which is exactly how a
+    /// fleet goes dark quietly.
+    ///
+    /// O_EXCL rather than flock so there is no new dependency, with a staleness
+    /// steal so a process killed mid-refresh cannot wedge the fleet forever.
+    async fn acquire_file_lock(&self) -> Result<Option<String>, AgentError> {
+        let lock_path = self.path.with_extension("lock");
+        for _ in 0..LOCK_ATTEMPTS {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(_) => return Ok(None), // acquired; caller refreshes
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // A peer is refreshing. Give it a moment, then check whether
+                    // its result is already on disk — the common case, and it
+                    // saves us burning a rotation.
+                    tokio::time::sleep(LOCK_POLL).await;
+                    if let Ok((_, _, tok)) = self.read() {
+                        if !Self::expiring_within(&tok, GROK_REFRESH_SKEW) {
+                            return Ok(Some(tok.access_token));
+                        }
+                    }
+                    // Steal a lock whose owner evidently died.
+                    if let Ok(md) = fs::metadata(&lock_path) {
+                        if md
+                            .modified()
+                            .ok()
+                            .and_then(|m| m.elapsed().ok())
+                            .is_some_and(|age| age > self.stale_after)
+                        {
+                            let _ = fs::remove_file(&lock_path);
+                        }
+                    }
+                }
+                Err(e) => {
+                    return Err(AgentError::LlmAuth(format!(
+                        "refresh lock {lock_path:?}: {e}"
+                    )))
+                }
+            }
+        }
+        Err(AgentError::LlmAuth(
+            "timed out waiting for the refresh lock".into(),
+        ))
+    }
+
+    fn release_file_lock(&self) {
+        let _ = fs::remove_file(self.path.with_extension("lock"));
+    }
+
+    /// Refresh and write back. Caller must hold the in-process `lock`.
+    async fn refresh_locked(&self) -> Result<String, AgentError> {
+        if let Some(peer_token) = self.acquire_file_lock().await? {
+            return Ok(peer_token); // a peer refreshed while we waited
+        }
+        let out = self.refresh_inner().await;
+        self.release_file_lock();
+        out
+    }
+
+    async fn refresh_inner(&self) -> Result<String, AgentError> {
+        let (mut doc, entry_key, tok) = self.read()?;
+        let refresh = tok.refresh_token.clone().ok_or_else(|| {
+            AgentError::LlmAuth(format!(
+                "{:?} has no refresh_token — run `grok login --oauth`",
+                self.path
+            ))
+        })?;
+        let client_id = doc
+            .get(&entry_key)
+            .and_then(|e| e.get("oidc_client_id"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if client_id.is_empty() {
+            return Err(AgentError::LlmAuth(format!(
+                "{:?} has no oidc_client_id — run `grok login --oauth`",
+                self.path
+            )));
+        }
+
+        let params = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh.as_str()),
+            ("client_id", client_id.as_str()),
+        ];
+        let resp = self
+            .http
+            .post(&self.token_url)
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| AgentError::LlmAuth(format!("grok refresh: {e}")))?;
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(AgentError::LlmAuth(format!(
+                "grok refresh rejected: {body}"
+            )));
+        }
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| AgentError::LlmAuth(format!("grok refresh json: {e}")))?;
+        let new_access = v
+            .get("access_token")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AgentError::LlmAuth("grok refresh: no access_token".into()))?
+            .to_string();
+
+        // Persist so the Grok CLI and any sibling process see the same session.
+        // Rotation means the NEW refresh token must be saved or the next
+        // refresh presents one the server has already retired.
+        if let Some(entry) = doc.get_mut(&entry_key) {
+            entry["key"] = Value::String(new_access.clone());
+            if let Some(rt) = v.get("refresh_token").and_then(Value::as_str) {
+                entry["refresh_token"] = Value::String(rt.to_string());
+            }
+            if let Some(sec) = v.get("expires_in").and_then(Value::as_u64) {
+                entry["expires_at"] = Value::String(format_rfc3339_secs(now_secs() + sec));
+            }
+        }
+        let body = serde_json::to_vec_pretty(&doc)
+            .map_err(|e| AgentError::LlmAuth(format!("grok session serialize: {e}")))?;
+        let tmp = self.path.with_extension("json.tmp");
+        // Atomic rename: a concurrent reader never sees a partial session, and
+        // a crash mid-write cannot leave an unusable file.
+        fs::write(&tmp, &body)
+            .map_err(|e| AgentError::LlmAuth(format!("grok session write: {e}")))?;
+        fs::rename(&tmp, &self.path)
+            .map_err(|e| AgentError::LlmAuth(format!("grok session rename: {e}")))?;
+        Ok(new_access)
+    }
+}
+
+#[async_trait]
+impl TokenSource for GrokSessionTokenSource {
+    async fn bearer(&self) -> Result<String, AgentError> {
+        let (_, _, tok) = self.read()?;
+        if !Self::expiring_within(&tok, GROK_REFRESH_SKEW) {
+            return Ok(tok.access_token);
+        }
+        let _g = self.lock.lock().await;
+        // Re-check under the lock: a concurrent caller may have just refreshed,
+        // and refreshing twice would burn a rotated token for nothing.
+        let (_, _, tok) = self.read()?;
+        if !Self::expiring_within(&tok, GROK_REFRESH_SKEW) {
+            return Ok(tok.access_token);
+        }
+        self.refresh_locked().await
+    }
+
+    async fn refresh_now(&self, rejected: &str) -> Result<String, AgentError> {
+        let _g = self.lock.lock().await;
+        // The server rejected `rejected`, so the local clock is not to be
+        // trusted here. Refresh unless someone already replaced it.
+        let (_, _, tok) = self.read()?;
+        if tok.access_token != rejected {
+            return Ok(tok.access_token);
+        }
+        self.refresh_locked().await
+    }
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Parse the RFC 3339 stamp the Grok CLI writes (`2026-08-06T04:55:48.98Z`).
+/// Deliberately tolerant: an unparseable expiry yields `None`, which means
+/// "trust the token and let a 401 drive the refresh" rather than failing.
+fn parse_rfc3339_secs(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (date, rest) = s.split_once('T')?;
+    let time = rest.split(['Z', '+']).next()?.split('.').next()?;
+    let mut d = date.split('-');
+    let (y, mo, da) = (
+        d.next()?.parse::<i64>().ok()?,
+        d.next()?.parse::<i64>().ok()?,
+        d.next()?.parse::<i64>().ok()?,
+    );
+    let mut t = time.split(':');
+    let (h, mi, se) = (
+        t.next()?.parse::<i64>().ok()?,
+        t.next()?.parse::<i64>().ok()?,
+        t.next().unwrap_or("0").parse::<i64>().ok()?,
+    );
+    // Range-check before converting. Without this, "2026-13-99T99:99:99Z"
+    // parses into a plausible-looking epoch far in the future, the token then
+    // never looks expired, and the agent goes dark holding it — the exact
+    // failure this type exists to prevent. Out of range must mean "unknown",
+    // which routes to refresh-on-401.
+    if !(1..=12).contains(&mo)
+        || !(1..=31).contains(&da)
+        || !(0..=23).contains(&h)
+        || !(0..=59).contains(&mi)
+        || !(0..=60).contains(&se)
+        || !(1970..=9999).contains(&y)
+    {
+        return None;
+    }
+    // Days from civil (Howard Hinnant's algorithm) — no chrono dependency.
+    let y2 = if mo <= 2 { y - 1 } else { y };
+    let era = if y2 >= 0 { y2 } else { y2 - 399 } / 400;
+    let yoe = y2 - era * 400;
+    let mp = (mo + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + da - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let secs = days * 86_400 + h * 3600 + mi * 60 + se;
+    u64::try_from(secs).ok()
+}
+
+fn format_rfc3339_secs(epoch: u64) -> String {
+    let days = (epoch / 86_400) as i64;
+    let rem = epoch % 86_400;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+#[cfg(test)]
+mod grok_session_tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_stamp_the_grok_cli_writes() {
+        // Real value observed in ~/.grok/auth.json on 2026-08-06.
+        let t = parse_rfc3339_secs("2026-08-06T04:55:48.989687Z").expect("parses");
+        assert_eq!(format_rfc3339_secs(t), "2026-08-06T04:55:48Z");
+    }
+
+    #[test]
+    fn round_trips_across_epochs_and_leap_years() {
+        // The civil-days conversion is hand-rolled to avoid a chrono dep, so
+        // pin the cases that break naive implementations.
+        for s in [
+            "1970-01-01T00:00:00Z",
+            "2000-02-29T12:00:00Z", // leap, century divisible by 400
+            "2024-02-29T23:59:59Z",
+            "2026-12-31T23:59:59Z",
+            "2100-03-01T00:00:00Z", // century NOT a leap year
+        ] {
+            let secs = parse_rfc3339_secs(s).unwrap_or_else(|| panic!("parse {s}"));
+            assert_eq!(format_rfc3339_secs(secs), s, "round-trip {s}");
+        }
+    }
+
+    #[test]
+    fn tolerates_offsets_and_missing_fractions() {
+        assert_eq!(
+            parse_rfc3339_secs("2026-08-06T04:55:48+00:00"),
+            parse_rfc3339_secs("2026-08-06T04:55:48Z")
+        );
+    }
+
+    /// An unparseable expiry must NOT be an error: it yields None, which means
+    /// "use the token and let a 401 drive the refresh". Failing closed here
+    /// would take a fleet down over a formatting change.
+    #[test]
+    fn unparseable_expiry_is_none_not_an_error() {
+        for bad in ["", "never", "2026-13-99T99:99:99Z", "not-a-date"] {
+            assert!(parse_rfc3339_secs(bad).is_none(), "{bad:?} should be None");
+        }
+    }
+
+    #[test]
+    fn expiry_window_triggers_refresh_before_death_not_after() {
+        let mk = |exp: Option<u64>| CachedToken {
+            access_token: "t".into(),
+            refresh_token: None,
+            expires_at: exp,
+        };
+        let now = now_secs();
+        // Comfortably alive -> no refresh.
+        assert!(!GrokSessionTokenSource::expiring_within(
+            &mk(Some(now + 3600)),
+            GROK_REFRESH_SKEW
+        ));
+        // Inside the skew -> refresh BEFORE it dies, which is the point.
+        assert!(GrokSessionTokenSource::expiring_within(
+            &mk(Some(now + 60)),
+            GROK_REFRESH_SKEW
+        ));
+        // Already dead -> refresh.
+        assert!(GrokSessionTokenSource::expiring_within(
+            &mk(Some(now.saturating_sub(1))),
+            GROK_REFRESH_SKEW
+        ));
+        // No metadata -> trust it; a 401 will drive refresh_now.
+        assert!(!GrokSessionTokenSource::expiring_within(
+            &mk(None),
+            GROK_REFRESH_SKEW
+        ));
+    }
+
+    #[test]
+    fn reads_the_key_out_of_a_grok_shaped_session() {
+        let dir = std::env::temp_dir().join(format!("grok-sess-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("auth.json");
+        std::fs::write(
+            &p,
+            r#"{"https://auth.x.ai::abc":{"key":"tok-123","refresh_token":"r-1",
+                 "oidc_client_id":"cid","expires_at":"2099-01-01T00:00:00Z"}}"#,
+        )
+        .unwrap();
+        let src = GrokSessionTokenSource::new(p.clone(), "https://example.invalid/token");
+        let (_, entry_key, tok) = src.read().expect("reads");
+        assert_eq!(entry_key, "https://auth.x.ai::abc");
+        assert_eq!(tok.access_token, "tok-123");
+        assert_eq!(tok.refresh_token.as_deref(), Some("r-1"));
+        assert!(!GrokSessionTokenSource::expiring_within(
+            &tok,
+            GROK_REFRESH_SKEW
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_or_empty_session_is_an_auth_error_not_a_panic() {
+        let src = GrokSessionTokenSource::new(
+            std::path::PathBuf::from("/nonexistent/auth.json"),
+            "https://example.invalid/token",
+        );
+        assert!(matches!(src.read(), Err(AgentError::LlmAuth(_))));
+    }
+}
+
+#[cfg(test)]
+mod grok_lock_tests {
+    use super::*;
+
+    fn session(dir: &std::path::Path, expires: &str) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join("auth.json");
+        std::fs::write(
+            &p,
+            format!(
+                r#"{{"https://auth.x.ai::t":{{"key":"tok","refresh_token":"r",
+                     "oidc_client_id":"c","expires_at":"{expires}"}}}}"#
+            ),
+        )
+        .unwrap();
+        p
+    }
+
+    /// A held lock must NOT be bypassed — that is the rotation race.
+    #[tokio::test]
+    async fn a_held_lock_blocks_a_second_refresher() {
+        let dir = std::env::temp_dir().join(format!("grok-lock-a-{}", std::process::id()));
+        let p = session(&dir, "2020-01-01T00:00:00Z"); // expired
+        let src = GrokSessionTokenSource::new(p.clone(), "https://example.invalid/token");
+        // Simulate a peer mid-refresh.
+        std::fs::write(p.with_extension("lock"), b"").unwrap();
+        let start = std::time::Instant::now();
+        let got = src.acquire_file_lock().await;
+        // It must have waited rather than charging ahead, and given up rather
+        // than stealing a fresh lock.
+        assert!(start.elapsed() >= LOCK_POLL, "returned without waiting");
+        // The peer never finished and the lock is fresh, so we must NOT have
+        // acquired it — charging ahead here is the rotation race.
+        match got {
+            Err(_) => {} // timed out waiting: correct
+            Ok(Some(_)) => panic!("adopted a token nobody wrote"),
+            Ok(None) => panic!("acquired a lock a live peer still holds"),
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// If a peer finishes while we wait, take its token instead of burning a
+    /// rotation of our own.
+    #[tokio::test]
+    async fn adopts_a_peers_result_instead_of_refreshing_again() {
+        let dir = std::env::temp_dir().join(format!("grok-lock-b-{}", std::process::id()));
+        let p = session(&dir, "2020-01-01T00:00:00Z");
+        let lock = p.with_extension("lock");
+        std::fs::write(&lock, b"").unwrap();
+        let src = GrokSessionTokenSource::new(p.clone(), "https://example.invalid/token");
+        let p2 = p.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            // Peer writes a fresh session, then releases.
+            std::fs::write(
+                &p2,
+                r#"{"https://auth.x.ai::t":{"key":"NEW","refresh_token":"r2",
+                     "oidc_client_id":"c","expires_at":"2099-01-01T00:00:00Z"}}"#,
+            )
+            .unwrap();
+            std::fs::remove_file(p2.with_extension("lock")).ok();
+        });
+        let got = src.acquire_file_lock().await.expect("no error");
+        assert_eq!(got.as_deref(), Some("NEW"), "should adopt the peer's token");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A process killed mid-refresh must not wedge the fleet forever.
+    #[tokio::test]
+    async fn steals_a_stale_lock() {
+        let dir = std::env::temp_dir().join(format!("grok-lock-c-{}", std::process::id()));
+        let p = session(&dir, "2020-01-01T00:00:00Z");
+        let lock = p.with_extension("lock");
+        std::fs::write(&lock, b"").unwrap();
+        // Rather than backdating the file, shrink the staleness threshold to
+        // zero: the lock is older than "instantly", so the steal path runs.
+        let src = GrokSessionTokenSource::new(p.clone(), "https://example.invalid/token")
+            .with_stale_after(Duration::from_millis(0));
+        let got = src.acquire_file_lock().await.expect("no error");
+        assert!(got.is_none(), "should have acquired after stealing");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

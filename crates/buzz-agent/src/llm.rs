@@ -2061,6 +2061,19 @@ pub(crate) fn databricks_pkce_config(host: &str) -> PkceOAuthConfig {
 ///   flow; subsequent requests use the cache + refresh transparently.
 pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, AgentError> {
     match cfg.provider {
+        // A configured session file wins: the bearer is then re-read and
+        // refreshed per request, so a long-lived process never holds a token
+        // past its expiry. Without it, behaviour is exactly as before. Ordered
+        // before the general arm because a match guard only fires from the arm
+        // it is attached to.
+        Provider::OpenAi if cfg.session_file.is_some() => {
+            let path = cfg.session_file.clone().expect("checked by the guard");
+            Ok(Arc::new(crate::auth::GrokSessionTokenSource::new(
+                path,
+                std::env::var("OPENAI_COMPAT_TOKEN_URL")
+                    .unwrap_or_else(|_| "https://auth.x.ai/oauth2/token".to_string()),
+            )))
+        }
         Provider::Anthropic | Provider::OpenAi | Provider::OpenRouter => {
             Ok(Arc::new(StaticTokenSource::new(cfg.api_key.clone())))
         }
@@ -2575,6 +2588,7 @@ mod tests {
 
     fn cfg(provider: Provider) -> Config {
         Config {
+            session_file: None,
             provider,
             system_prompt: "system".into(),
             max_rounds: 10,
