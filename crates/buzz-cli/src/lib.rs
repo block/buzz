@@ -995,12 +995,15 @@ pub enum SocialCmd {
     /// Publish a text note (NIP-01 kind:1)
     #[command(name = "publish")]
     PublishNote {
-        /// Text content of the note.
+        /// Text content of the note. Pass `-` to read the body from stdin.
         #[arg(long)]
         content: String,
         /// 64-char hex event ID to reply to.
         #[arg(long)]
         reply_to: Option<String>,
+        /// Allow publishing an empty body read from stdin.
+        #[arg(long)]
+        allow_empty: bool,
     },
     /// Set your contact list (NIP-02 kind:3)
     #[command(name = "set-contacts")]
