@@ -214,6 +214,8 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// Text emitted by `agent_message_chunk` updates for the active prompt.
+    current_agent_response: String,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -563,6 +565,7 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            current_agent_response: String::new(),
         })
     }
 
@@ -597,6 +600,11 @@ impl AcpClient {
                 payload,
             );
         }
+    }
+
+    /// Take the assistant text accumulated during the most recent prompt.
+    pub(crate) fn take_agent_response_text(&mut self) -> String {
+        std::mem::take(&mut self.current_agent_response)
     }
 
     /// Send the `initialize` request and return the agent's response result value.
@@ -781,6 +789,7 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
+        self.current_agent_response.clear();
         let params = build_prompt_params(session_id, prompt_blocks);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
@@ -1755,6 +1764,7 @@ impl AcpClient {
         match update_type {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
+                    self.current_agent_response.push_str(text);
                     tracing::info!(target: "acp::stream", "{text}");
                 }
                 false
@@ -3027,6 +3037,25 @@ mod tests {
         AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
             .await
             .expect("failed to spawn test script")
+    }
+
+    #[tokio::test]
+    async fn agent_message_chunks_accumulate_and_take_clears_response() {
+        let mut client = spawn_script("sleep 10").await;
+        for text in ["hello", " ", "world"] {
+            let update = serde_json::json!({
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": { "type": "text", "text": text }
+                    }
+                }
+            });
+            let _ = client.handle_session_update(&update);
+        }
+
+        assert_eq!(client.take_agent_response_text(), "hello world");
+        assert_eq!(client.take_agent_response_text(), "");
     }
 
     #[cfg(unix)]

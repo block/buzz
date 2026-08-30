@@ -2777,7 +2777,7 @@ pub async fn run_prompt_task(
                             agent,
                             source,
                             PromptOutcome::Ok(StopReason::EndTurn),
-                            None, // turn succeeded — batch was processed, no requeue
+                            batch,
                         );
                         return;
                     }
@@ -2852,7 +2852,7 @@ pub async fn run_prompt_task(
                 agent,
                 source,
                 PromptOutcome::Ok(stop_reason),
-                None,
+                batch,
             );
         }
         Err(AcpError::AgentExited) => {
@@ -4796,6 +4796,78 @@ pub(crate) async fn post_failure_notice(
     }
 }
 
+/// Best-effort: publish the assistant text produced by a successful ACP turn.
+///
+/// ACP streams visible text through `agent_message_chunk` notifications and
+/// returns only a stop reason from `session/prompt`. The managed harness owns
+/// the signing key, so it must publish the accumulated text on the agent's
+/// behalf; the sandboxed agent process cannot sign this event itself.
+pub(crate) async fn post_success_reply(
+    rest: &crate::relay::RestClient,
+    batch: &FlushBatch,
+    content: &str,
+) {
+    let Some(event) = build_success_reply_event(&rest.keys, batch, content) else {
+        return;
+    };
+    match tokio::time::timeout(Duration::from_secs(5), rest.submit_event(&event)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!(channel = %batch.channel_id, "successful reply failed: {e}"),
+        Err(_) => tracing::warn!(channel = %batch.channel_id, "successful reply timed out"),
+    }
+}
+
+fn build_success_reply_event(
+    keys: &nostr::Keys,
+    batch: &FlushBatch,
+    content: &str,
+) -> Option<nostr::Event> {
+    let trigger = batch.events.last().map(|event| &event.event)?;
+    if content.trim().is_empty() {
+        tracing::debug!(channel = %batch.channel_id, "successful turn produced no visible text");
+        return None;
+    }
+
+    // Keep replies flat within an existing thread. For a top-level trigger,
+    // the trigger itself becomes both root and parent.
+    let thread_tags = crate::queue::parse_thread_tags(trigger);
+    let thread_ref = if let Some(root) = thread_tags.root_event_id.as_deref() {
+        nostr::EventId::from_hex(root)
+            .ok()
+            .map(|root_event_id| buzz_sdk::ThreadRef {
+                root_event_id,
+                parent_event_id: root_event_id,
+            })
+    } else {
+        Some(buzz_sdk::ThreadRef {
+            root_event_id: trigger.id,
+            parent_event_id: trigger.id,
+        })
+    };
+    let author = trigger.pubkey.to_hex();
+    let builder = match buzz_sdk::build_message(
+        batch.channel_id,
+        content,
+        thread_ref.as_ref(),
+        &[&author],
+        false,
+        &[],
+    ) {
+        Ok(builder) => builder,
+        Err(e) => {
+            tracing::warn!(channel = %batch.channel_id, "successful reply: build failed: {e}");
+            return None;
+        }
+    };
+    match builder.sign_with_keys(keys) {
+        Ok(event) => Some(event),
+        Err(e) => {
+            tracing::warn!(channel = %batch.channel_id, "successful reply: sign failed: {e}");
+            None
+        }
+    }
+}
+
 /// Best-effort: remove a reaction via a signed kind:5 (NIP-09) deletion event.
 ///
 /// Queries kind:7 reactions by our pubkey targeting the event, finds the matching
@@ -4916,6 +4988,86 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    fn success_reply_batch(trigger: nostr::Event, channel_id: Uuid) -> FlushBatch {
+        FlushBatch {
+            channel_id,
+            events: vec![crate::queue::BatchEvent {
+                event: trigger,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    #[test]
+    fn successful_reply_is_signed_threaded_and_mentions_trigger_author() {
+        let channel_id = Uuid::new_v4();
+        let author_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let root = EventBuilder::new(Kind::Custom(9), "root")
+            .sign_with_keys(&author_keys)
+            .unwrap();
+        let trigger = EventBuilder::new(Kind::Custom(9), "question")
+            .tags([
+                Tag::parse(["h", &channel_id.to_string()]).unwrap(),
+                Tag::parse(["e", &root.id.to_hex(), "", "reply"]).unwrap(),
+            ])
+            .sign_with_keys(&author_keys)
+            .unwrap();
+        let event = build_success_reply_event(
+            &agent_keys,
+            &success_reply_batch(trigger.clone(), channel_id),
+            "answer",
+        )
+        .expect("visible reply event");
+
+        assert_eq!(event.kind, Kind::Custom(9));
+        assert_eq!(event.content, "answer");
+        assert_eq!(event.pubkey, agent_keys.public_key());
+        assert!(event.verify().is_ok());
+        let tags: Vec<&[String]> = event.tags.iter().map(|tag| tag.as_slice()).collect();
+        assert!(tags
+            .iter()
+            .any(|tag| tag.len() >= 2 && tag[0] == "h" && tag[1] == channel_id.to_string()));
+        assert!(tags.iter().any(|tag| tag.len() >= 4
+            && tag[0] == "e"
+            && tag[1] == root.id.to_hex()
+            && tag[3] == "root"));
+        assert!(tags.iter().any(|tag| tag.len() >= 4
+            && tag[0] == "e"
+            && tag[1] == root.id.to_hex()
+            && tag[3] == "reply"));
+        assert!(tags
+            .iter()
+            .any(|tag| tag.len() >= 2 && tag[0] == "p" && tag[1] == trigger.pubkey.to_hex()));
+    }
+
+    #[test]
+    fn successful_reply_uses_top_level_trigger_as_root_and_skips_blank_text() {
+        let channel_id = Uuid::new_v4();
+        let author_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let trigger = EventBuilder::new(Kind::Custom(9), "question")
+            .sign_with_keys(&author_keys)
+            .unwrap();
+        let batch = success_reply_batch(trigger.clone(), channel_id);
+
+        assert!(build_success_reply_event(&agent_keys, &batch, " \n\t").is_none());
+        let event =
+            build_success_reply_event(&agent_keys, &batch, "answer").expect("visible reply event");
+        let tags: Vec<&[String]> = event.tags.iter().map(|tag| tag.as_slice()).collect();
+        assert!(tags.iter().any(|tag| tag.len() >= 4
+            && tag[0] == "e"
+            && tag[1] == trigger.id.to_hex()
+            && tag[3] == "root"));
+        assert!(tags.iter().any(|tag| tag.len() >= 4
+            && tag[0] == "e"
+            && tag[1] == trigger.id.to_hex()
+            && tag[3] == "reply"));
+    }
 
     fn test_mcp_server() -> McpServer {
         McpServer {
