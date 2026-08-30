@@ -2,7 +2,18 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
-String channelSectionsKey(String pubkey) => 'buzz.channel-sections.v1:$pubkey';
+/// Normalizes a relay URL for storage keys so equivalent URLs share a scope.
+/// Matches desktop `normalizeRelayUrl` and mobile channel-sort.
+String normalizeChannelSectionsRelayUrl(String relayUrl) =>
+    relayUrl.trim().replaceFirst(RegExp(r'/+$'), '').toLowerCase();
+
+/// Relay-scoped local storage key for channel sections.
+String channelSectionsKey(String pubkey, String relayUrl) =>
+    'buzz.channel-sections.v1:$pubkey:${Uri.encodeComponent(normalizeChannelSectionsRelayUrl(relayUrl))}';
+
+/// Pre-scoping key (account-global). Used only for one-time migration.
+String legacyChannelSectionsKey(String pubkey) =>
+    'buzz.channel-sections.v1:$pubkey';
 
 class ChannelSection {
   final String id;
@@ -90,27 +101,53 @@ class ChannelSectionsStorage {
 
   ChannelSectionsStorage(this._prefs);
 
-  ChannelSectionStore read(String pubkey) {
-    final raw = _prefs.getString(channelSectionsKey(pubkey));
+  /// Read sections for [pubkey] scoped to [relayUrl].
+  ///
+  /// On first access for a scoped key, migrates any existing data from the
+  /// legacy pubkey-only key so users don't lose their sections on upgrade.
+  /// After a successful migration the legacy key is deleted — subsequent
+  /// empty scoped-key reads (a different relay) won't see legacy data.
+  ChannelSectionStore read(String pubkey, String relayUrl) {
+    final scoped = _readKey(channelSectionsKey(pubkey, relayUrl));
+    if (scoped != null) return scoped;
+
+    // One-time migration from account-global storage (pre-relay-scope).
+    // The first active relay claims the legacy value; removing it prevents
+    // the same unscoped sections from bleeding into later communities.
+    final legacy = _readKey(legacyChannelSectionsKey(pubkey));
+    if (legacy != null && legacy.sections.isNotEmpty) {
+      write(pubkey, relayUrl, legacy);
+      _prefs.remove(legacyChannelSectionsKey(pubkey));
+      return legacy;
+    }
+
+    return const ChannelSectionStore();
+  }
+
+  ChannelSectionStore? _readKey(String key) {
+    final raw = _prefs.getString(key);
     if (raw == null || raw.isEmpty) {
-      return const ChannelSectionStore();
+      return null;
     }
 
     try {
       final parsed = jsonDecode(raw);
       if (parsed is! Map<String, dynamic>) {
-        return const ChannelSectionStore();
+        return null;
       }
       if (parsed['version'] != 1) {
-        return const ChannelSectionStore();
+        return null;
       }
       return ChannelSectionStore.fromJson(parsed);
     } catch (_) {
-      return const ChannelSectionStore();
+      return null;
     }
   }
 
-  void write(String pubkey, ChannelSectionStore store) {
-    _prefs.setString(channelSectionsKey(pubkey), jsonEncode(store.toJson()));
+  void write(String pubkey, String relayUrl, ChannelSectionStore store) {
+    _prefs.setString(
+      channelSectionsKey(pubkey, relayUrl),
+      jsonEncode(store.toJson()),
+    );
   }
 }

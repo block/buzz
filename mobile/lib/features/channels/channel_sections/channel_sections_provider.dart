@@ -31,8 +31,8 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
 
     final relayConfig = ref.watch(relayConfigProvider);
     final sessionState = ref.watch(relaySessionProvider);
-    // Rebuild when the active community changes (pubkey may differ).
-    ref.watch(activeCommunityProvider);
+    // Rebuild when the active community changes (pubkey/relay may differ).
+    final activeCommunity = ref.watch(activeCommunityProvider).value;
 
     final nsec = relayConfig.nsec?.trim();
     if (nsec == null || nsec.isEmpty) {
@@ -51,6 +51,14 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
       return const ChannelSectionsState();
     }
 
+    // Sections are relay-scoped (Desktop #1477). The active community origin is
+    // the only scope key — no fallback, so the one-time legacy migration can
+    // never be consumed under a different key while the community is loading.
+    final relayUrl = activeCommunity?.relayUrl.trim();
+    if (relayUrl == null || relayUrl.isEmpty) {
+      return const ChannelSectionsState();
+    }
+
     final prefs = ref.read(savedPrefsProvider);
     final signedRelay = SignedEventRelay(
       session: ref.read(relaySessionProvider.notifier),
@@ -60,6 +68,7 @@ class ChannelSectionsNotifier extends Notifier<ChannelSectionsState> {
     late final ChannelSectionsManager manager;
     manager = ChannelSectionsManager(
       pubkey: pubkey,
+      relayUrl: relayUrl,
       prefs: prefs,
       crypto: crypto,
       relaySession: ref.read(relaySessionProvider.notifier),
