@@ -65,6 +65,7 @@ test("presents the signed work result before the conversation", async ({
     "Result reports now appear before long thread transcripts.",
   );
   await expect(card).toContainText("Desktop tests passed at abc1234.");
+  await expect(card).toContainText("Reported by");
   await expect(page.getByTestId("message-thread-head")).toBeHidden();
 
   await page.getByTestId("work-report-conversation-toggle").click();

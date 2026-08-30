@@ -16,7 +16,11 @@ import type { MessageComposerEditTarget } from "@/features/messages/ui/MessageCo
 import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManageMessage";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { VideoReviewPresentation } from "@/features/messages/lib/videoReviewContext";
-import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import {
+  resolveUserLabel,
+  type UserProfileLookup,
+} from "@/features/profile/lib/identity";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import type { Channel } from "@/shared/api/types";
 import type { ThreadPanelLayoutProps } from "@/features/channels/lib/threadPanelLayout";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
@@ -224,10 +228,11 @@ export function MessageThreadPanel({
   >(null);
   const isOverlay = useIsThreadPanelOverlay();
   const threadHeadId = threadHead?.id ?? null;
-  const { data: workReport = null } = useWorkReport(
-    isHuddleTranscript ? null : channelId,
-    isHuddleTranscript ? null : threadHeadId,
-  );
+  const { data: workReport = null, isPending: workReportPending } =
+    useWorkReport(
+      isHuddleTranscript ? null : channelId,
+      isHuddleTranscript ? null : threadHeadId,
+    );
   const [conversationPreference, setConversationPreference] = React.useState<{
     rootId: string;
     visible: boolean;
@@ -235,7 +240,26 @@ export function MessageThreadPanel({
   const conversationVisible =
     conversationPreference?.rootId === threadHeadId
       ? conversationPreference.visible
-      : workReport === null;
+      : true;
+  React.useEffect(() => {
+    if (workReportPending || !threadHeadId) return;
+    setConversationPreference((current) =>
+      current?.rootId === threadHeadId
+        ? current
+        : { rootId: threadHeadId, visible: workReport === null },
+    );
+  }, [threadHeadId, workReport, workReportPending]);
+  const workReportAuthorProfile = workReport
+    ? profiles?.[normalizePubkey(workReport.authorPubkey)]
+    : undefined;
+  const workReportAuthorLabel = workReport
+    ? resolveUserLabel({
+        pubkey: workReport.authorPubkey,
+        currentPubkey,
+        profiles,
+        preferResolvedSelfLabel: true,
+      })
+    : "";
   useEscapeKey(
     onClose,
     !isHuddleTranscript && (isOverlay || isSinglePanelView || isFocusMode),
@@ -540,6 +564,8 @@ export function MessageThreadPanel({
         {workReport ? (
           <div className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-3 pt-3")}>
             <WorkReportCard
+              authorAvatarUrl={workReportAuthorProfile?.avatarUrl ?? null}
+              authorLabel={workReportAuthorLabel}
               conversationVisible={conversationVisible}
               onToggleConversation={() =>
                 setConversationPreference({
