@@ -8,6 +8,7 @@ import { truncatePubkey } from "@/shared/lib/pubkey";
 import { PubKey } from "@/shared/ui/PubKey";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserSearchQuery } from "@/features/profile/hooks";
+import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import type { RespondToMode, UserSearchResult } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
@@ -66,10 +67,9 @@ function formatSearchUserName(user: UserSearchResult) {
 function formatSearchUserSecondary(user: UserSearchResult) {
   const displayName = user.displayName?.trim();
   const nip05Handle = user.nip05Handle?.trim();
-  if (displayName && nip05Handle) {
-    return nip05Handle;
-  }
-  return truncatePubkey(user.pubkey);
+  const detail =
+    displayName && nip05Handle ? nip05Handle : truncatePubkey(user.pubkey);
+  return user.isAgent ? `Agent · ${detail}` : detail;
 }
 
 const RESPOND_TO_OPTIONS: PersonaDropdownOption[] = [
@@ -77,6 +77,9 @@ const RESPOND_TO_OPTIONS: PersonaDropdownOption[] = [
   { label: "Anyone", value: "anyone" },
   { label: "Selected people", value: "allowlist" },
 ];
+
+/** Prefix search on busy relays can return many agent profiles before humans. */
+const ALLOWLIST_SEARCH_LIMIT = 50;
 
 export const OWNER_ONLY_ACCESS_DISABLED_REASON =
   "This build disallows changing this setting.";
@@ -125,18 +128,28 @@ export function CreateAgentRespondToField({
   );
   const userSearchQuery = useUserSearchQuery(deferredQuery, {
     enabled: mode === "allowlist" && deferredQuery.length > 0,
-    limit: 8,
+    limit: ALLOWLIST_SEARCH_LIMIT,
   });
   const isArchivedDiscovery = useIsArchivedPredicate();
-  const searchResults = React.useMemo(
-    () =>
-      (userSearchQuery.data ?? []).filter(
-        (user) =>
-          !allowlistSet.has(user.pubkey.toLowerCase()) &&
-          !isArchivedDiscovery(user.pubkey),
-      ),
-    [allowlistSet, isArchivedDiscovery, userSearchQuery.data],
-  );
+  const searchResults = React.useMemo(() => {
+    const candidates = (userSearchQuery.data ?? []).filter(
+      (user) =>
+        !allowlistSet.has(user.pubkey.toLowerCase()) &&
+        !isArchivedDiscovery(user.pubkey),
+    );
+
+    return rankUserCandidatesBySearch({
+      candidates,
+      getLabel: formatSearchUserName,
+      limit: ALLOWLIST_SEARCH_LIMIT,
+      query: deferredQuery,
+    });
+  }, [
+    allowlistSet,
+    deferredQuery,
+    isArchivedDiscovery,
+    userSearchQuery.data,
+  ]);
 
   const pasteParsed = React.useMemo(
     () => parsePubkeyInput(pasteText),

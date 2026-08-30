@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use buzz_core_pkg::PresenceStatus;
+use nostr::Event;
 use serde_json::Value;
 use tauri::State;
 
@@ -261,6 +262,29 @@ fn build_user_search_filter(query: &str, limit: usize, page: u32) -> serde_json:
     })
 }
 
+/// Whole-word FTS recall for profiles whose exact `display_name` is crowded
+/// out of the prefix typeahead page by many longer prefix hits (e.g. the human
+/// "aviz" behind dozens of "Aviz-*" agent profiles on busy relays).
+fn build_user_search_supplement_filter(query: &str, limit: usize, page: u32) -> serde_json::Value {
+    serde_json::json!({
+        "kinds": [0],
+        "search": query,
+        "limit": limit,
+        "page": page,
+    })
+}
+
+fn merge_kind0_search_events(primary: Vec<Event>, supplement: Vec<Event>) -> Vec<Event> {
+    let mut seen_ids: HashSet<String> = primary.iter().map(|ev| ev.id.to_hex()).collect();
+    let mut merged = primary;
+    for ev in supplement {
+        if seen_ids.insert(ev.id.to_hex()) {
+            merged.push(ev);
+        }
+    }
+    merged
+}
+
 #[tauri::command]
 pub async fn search_users(
     query: String,
@@ -325,7 +349,22 @@ pub async fn search_users(
     // the relay runs whole-word `websearch_to_tsquery` matching and "tyl"
     // returns zero results for "Tyler". Same bridge-only extension the topbar
     // message search uses (see `build_search_messages_filter`).
-    let events = query_relay(&state, &[build_user_search_filter(trimmed, max, page)]).await?;
+    //
+    // Prefix recall alone can omit an exact human match when many longer names
+    // share the same prefix (live case: "aviz" human missing from the first
+    // prefix page of "Aviz-*" agent profiles). Merge a bounded whole-word page
+    // before local re-ranking so exact display_name hits survive crowding.
+    let supplement_limit = max.min(100);
+    let prefix_filter = build_user_search_filter(trimmed, max, page);
+    let supplement_filter =
+        build_user_search_supplement_filter(trimmed, supplement_limit, page);
+    let prefix_filters = [prefix_filter];
+    let supplement_filters = [supplement_filter];
+    let (prefix_events, supplement_events) = tokio::join!(
+        query_relay(&state, &prefix_filters),
+        query_relay(&state, &supplement_filters),
+    );
+    let events = merge_kind0_search_events(prefix_events?, supplement_events?);
 
     let mut response = nostr_convert::rank_user_search_results(&events, trimmed, max);
     if events.len() >= max {
@@ -480,5 +519,14 @@ mod tests {
         assert_eq!(filter["search_mode"], serde_json::json!("prefix"));
         assert_eq!(filter["limit"], serde_json::json!(25));
         assert_eq!(filter["page"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn user_search_supplement_filter_uses_whole_word_recall() {
+        let filter = build_user_search_supplement_filter("aviz", 50, 1);
+
+        assert_eq!(filter["search"], serde_json::json!("aviz"));
+        assert!(filter.get("search_mode").is_none());
+        assert_eq!(filter["limit"], serde_json::json!(50));
     }
 }
