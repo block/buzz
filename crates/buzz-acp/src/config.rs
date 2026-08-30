@@ -1276,6 +1276,27 @@ pub fn resolve_channel_filters(
     discovered_channels: &[Uuid],
     rules: &[SubscriptionRule],
 ) -> HashMap<Uuid, ChannelFilter> {
+    resolve_channel_filters_with_implicit_mentions(
+        config,
+        discovered_channels,
+        rules,
+        &HashSet::new(),
+    )
+}
+
+/// Resolve per-channel filters while treating selected channels as already
+/// addressed to the agent.
+///
+/// Channels in `implicitly_addressed_channels` do not require a recipient
+/// `p` tag in mentions mode. Callers use this for DMs, where every message is
+/// already directed to the participants. Explicit config-mode rules retain
+/// their configured `require_mention` behavior.
+pub fn resolve_channel_filters_with_implicit_mentions(
+    config: &Config,
+    discovered_channels: &[Uuid],
+    rules: &[SubscriptionRule],
+    implicitly_addressed_channels: &HashSet<Uuid>,
+) -> HashMap<Uuid, ChannelFilter> {
     use buzz_core::kind::{
         KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
     };
@@ -1301,13 +1322,13 @@ pub fn resolve_channel_filters(
                     KIND_STREAM_REMINDER,
                 ]
             });
-            let require_mention = !config.no_mention_filter;
             for ch in &target_channels {
                 result.insert(
                     *ch,
                     ChannelFilter {
                         kinds: Some(kinds.clone()),
-                        require_mention,
+                        require_mention: !config.no_mention_filter
+                            && !implicitly_addressed_channels.contains(ch),
                     },
                 );
             }
@@ -1364,7 +1385,7 @@ pub fn resolve_channel_filters(
     result
 }
 
-/// Resolve the subscription filter for a single dynamically-discovered channel.
+/// Resolve a dynamic channel filter with optional implicit addressing.
 ///
 /// In Mentions/All mode, `channels_override` (--channels) is enforced — the agent
 /// won't subscribe to channels outside the operator's allowlist. In Config mode,
@@ -1373,10 +1394,14 @@ pub fn resolve_channel_filters(
 /// Returns `None` when the channel is outside the agent's configured scope:
 /// - Mentions/All: channel not in `channels_override` (if set)
 /// - Config: no subscription rules match the channel
-pub fn resolve_dynamic_channel_filter(
+///
+/// `mention_is_implicit` only affects mentions mode. Config mode continues to
+/// honor each rule's explicit `require_mention` setting.
+pub fn resolve_dynamic_channel_filter_with_implicit_mention(
     config: &Config,
     channel_id: Uuid,
     rules: &[crate::filter::SubscriptionRule],
+    mention_is_implicit: bool,
 ) -> Option<ChannelFilter> {
     use buzz_core::kind::{
         KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
@@ -1406,7 +1431,7 @@ pub fn resolve_dynamic_channel_filter(
                     KIND_STREAM_REMINDER,
                 ]
             })),
-            require_mention: !config.no_mention_filter,
+            require_mention: !config.no_mention_filter && !mention_is_implicit,
         }),
         SubscribeMode::All => Some(ChannelFilter {
             kinds: config.kinds_override.clone(),
@@ -1557,6 +1582,38 @@ mod tests {
     }
 
     #[test]
+    fn test_mentions_mode_treats_dm_messages_as_implicitly_addressed() {
+        let config = test_config(SubscribeMode::Mentions);
+        let dm = Uuid::new_v4();
+        let discovered = crate::relay::merge_discovered_channels(
+            vec![dm],
+            &serde_json::json!([{
+                "tags": [["d", dm.to_string()], ["name", "DM"], ["t", "dm"]]
+            }]),
+        );
+        let channel_ids: Vec<Uuid> = discovered.keys().copied().collect();
+
+        let implicitly_addressed_channels: HashSet<Uuid> = discovered
+            .iter()
+            .filter_map(|(channel_id, info)| (info.channel_type == "dm").then_some(*channel_id))
+            .collect();
+        let result = resolve_channel_filters_with_implicit_mentions(
+            &config,
+            &channel_ids,
+            &[],
+            &implicitly_addressed_channels,
+        );
+
+        assert!(
+            !result
+                .get(&dm)
+                .expect("DM should be subscribed")
+                .require_mention,
+            "a message in a private DM is already addressed to the agent"
+        );
+    }
+
+    #[test]
     fn test_mentions_mode_custom_kinds() {
         let mut config = test_config(SubscribeMode::Mentions);
         config.kinds_override = Some(vec![1, 7]);
@@ -1576,6 +1633,22 @@ mod tests {
 
         let f = result.get(&channels[0]).unwrap();
         assert!(!f.require_mention);
+    }
+
+    #[test]
+    fn test_dynamic_mentions_mode_only_skips_mention_for_implicit_channels() {
+        let config = test_config(SubscribeMode::Mentions);
+        let channel = Uuid::new_v4();
+
+        let dm_filter =
+            resolve_dynamic_channel_filter_with_implicit_mention(&config, channel, &[], true)
+                .expect("DM should be subscribed");
+        assert!(!dm_filter.require_mention);
+
+        let stream_filter =
+            resolve_dynamic_channel_filter_with_implicit_mention(&config, channel, &[], false)
+                .expect("stream should be subscribed");
+        assert!(stream_filter.require_mention);
     }
 
     #[test]
@@ -1866,6 +1939,31 @@ mod tests {
         let f = result.get(&ch).unwrap();
         assert_eq!(f.kinds.as_ref().unwrap(), &[9]);
         assert!(!f.require_mention);
+    }
+
+    #[test]
+    fn test_config_mode_preserves_explicit_mention_rule_for_dm() {
+        let config = test_config(SubscribeMode::Config);
+        let dm = Uuid::new_v4();
+        let rules = vec![make_rule(
+            "explicit-dm-mention",
+            ChannelScope::All("all".into()),
+            vec![9],
+            true,
+        )];
+
+        let filters = resolve_channel_filters_with_implicit_mentions(
+            &config,
+            &[dm],
+            &rules,
+            &HashSet::from([dm]),
+        );
+        assert!(filters.get(&dm).unwrap().require_mention);
+
+        let dynamic =
+            resolve_dynamic_channel_filter_with_implicit_mention(&config, dm, &rules, true)
+                .expect("config rule should subscribe the DM");
+        assert!(dynamic.require_mention);
     }
 
     #[test]
