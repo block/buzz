@@ -240,6 +240,9 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+    /// Mint and claim relay invite codes, and accept the join policy
+    #[command(subcommand)]
+    Invites(InvitesCmd),
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -1990,6 +1993,66 @@ pub enum ModerationCmd {
     },
 }
 
+/// Relay invite commands.
+///
+/// The community (tenant) is selected by the relay host in `--relay` /
+/// `BUZZ_RELAY_URL`. `mint` requires an owner/admin signing key; `claim` is
+/// the one relay operation that works before you are a member, so a fresh
+/// identity can onboard itself onto a closed relay without an operator
+/// running `buzz-admin add-member` out of band.
+#[derive(Subcommand)]
+pub enum InvitesCmd {
+    /// Mint an invite code (owner/admin only)
+    #[command(
+        after_help = "Examples:\n  buzz invites mint\n  buzz invites mint --ttl-secs 3600 --max-uses 1\n\nPrints {code, expires_at, max_uses, uses_remaining, url}."
+    )]
+    Mint {
+        /// Invite lifetime in seconds (60 – 2592000)
+        #[arg(long, default_value_t = buzz_core::invite::DEFAULT_INVITE_TTL_SECS)]
+        ttl_secs: u64,
+        /// Maximum redemptions before the invite is exhausted (omit for unlimited)
+        #[arg(long)]
+        max_uses: Option<i32>,
+    },
+    /// Claim an invite code and join the relay
+    #[command(
+        after_help = "Examples:\n  printf %s \"$CODE\" | buzz invites claim --code -\n  buzz invites claim --code v2.AbC...\n  buzz invites claim --code v2.AbC... --policy-receipt -\n\nPrints {status, community_id, host, role}; status is joined | already_member.\nPrefer '-' over a literal token: argv is recorded in shell history and is\nreadable from `ps`. stdin is one stream, so only one argument may use '-'."
+    )]
+    Claim {
+        /// The invite code to redeem — the bare token, not the invite URL
+        /// (use '-' to read it from stdin; preferred)
+        #[arg(long)]
+        code: String,
+        /// Join-policy acceptance receipt, required only on relays that
+        /// configure terms of service (from `buzz invites accept-policy`;
+        /// use '-' to read it from stdin)
+        #[arg(long)]
+        policy_receipt: Option<String>,
+    },
+    /// Show the relay's join policy (terms, privacy, version)
+    #[command(
+        after_help = "Examples:\n  buzz invites policy\n  buzz invites policy | jq -r .terms_markdown\n\nPrints {configured, version, age_attestation_required, terms_markdown, privacy_markdown},\nor {\"configured\":false} when the relay has no join policy. The same documents are\nalso served as browser pages at /api/join-policy/terms and /api/join-policy/privacy."
+    )]
+    Policy,
+    /// Accept the relay's join policy and print an invite-bound receipt
+    #[command(
+        after_help = "Examples:\n  buzz invites policy                      # read the terms first\n  printf %s \"$CODE\" | buzz invites accept-policy --code - --policy-version <VERSION>\n  buzz invites accept-policy --code v2.AbC... --policy-version <VERSION> --age-confirmed\n\nPrints {receipt}; pass it to `buzz invites claim --policy-receipt -`.\n--policy-version is never inferred and --age-confirmed is never implied:\nacceptance is an assertion about a human, so the CLI will not make it for you."
+    )]
+    AcceptPolicy {
+        /// The invite code the receipt will be bound to (use '-' to read it
+        /// from stdin; preferred)
+        #[arg(long)]
+        code: String,
+        /// The exact policy version being accepted, from `buzz invites policy`
+        #[arg(long)]
+        policy_version: String,
+        /// Attest that you meet the relay's minimum age requirement — only
+        /// pass this when a human has read the policy and it is true
+        #[arg(long)]
+        age_confirmed: bool,
+    },
+}
+
 /// Normalize hand-authored `BUZZ_AUTH_TAG` input to strict JSON.
 ///
 /// `.env` files and shell exports sometimes carry the tag in the unquoted
@@ -2095,6 +2158,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
+        Cmd::Invites(sub) => commands::invites::dispatch(sub, &client).await,
         Cmd::Pack(_) => unreachable!("handled above"),
     }
 }
@@ -2229,6 +2293,7 @@ mod tests {
             "dms",
             "emoji",
             "feed",
+            "invites",
             "issues",
             "media",
             "mem",

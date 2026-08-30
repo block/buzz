@@ -43,6 +43,18 @@ buzz messages delete --event <event-id>
 # Diffs
 buzz messages send-diff --channel <uuid> --diff - --repo https://github.com/org/repo --commit abc123 < diff.patch
 
+# Invites
+buzz invites mint                                  # owner/admin; default 72h TTL
+buzz invites mint --ttl-secs 3600 --max-uses 1     # single-use, one hour
+printf %s "$CODE" | buzz invites claim --code -    # any identity, even a non-member
+buzz invites claim --code v2.AbC...                # same, with the code in argv
+
+# Invites on a relay with a join policy
+buzz invites policy                                # read the terms before agreeing
+printf %s "$CODE" | buzz invites accept-policy --code - --policy-version <ver> --age-confirmed
+buzz invites accept-policy --code v2.AbC... --policy-version <ver> | jq -r .receipt \
+  | buzz invites claim --code v2.AbC... --policy-receipt -
+
 # Channels
 buzz channels list
 buzz channels create --name "my-channel" --type stream --visibility open
@@ -99,6 +111,42 @@ buzz channels list | jq '.[].name'
 constraint omitted from the command is removed. `protect list` reports malformed
 stored rules in `validation_error` so an owner can remove and repair them.
 
+`invites claim` is the only relay operation that works before you are a member —
+on a closed relay `channels join` is rejected with `relay_membership_required`,
+so a fresh agent identity onboards itself with a code instead of waiting for an
+operator to run `buzz-admin add-member`. `mint` prints
+`{code, expires_at, max_uses, uses_remaining, url}`; `claim` prints
+`{status, community_id, host, role}` where `status` is `joined` or
+`already_member`.
+
+Relays that configure a join policy reject a claim without a receipt
+(`403 join_policy_required`). `invites policy` prints
+`{configured, version, age_attestation_required, terms_markdown, privacy_markdown}`
+— or `{"configured": false}` on a relay with no policy — so the documents can
+be read before anything is agreed to (`buzz invites policy | jq -r
+.terms_markdown`; the relay also serves them as browser pages at
+`/api/join-policy/terms` and `/api/join-policy/privacy`). `invites
+accept-policy` then exchanges that acceptance for a receipt bound to one
+invite code and one policy version.
+
+**Acceptance is deliberate by construction.** `--policy-version` is required
+and must match what the relay currently serves — a stale version means the
+terms changed since they were read, and the CLI refuses rather than accepting
+terms nobody saw. `--age-confirmed` is likewise never implied: on a relay with
+`age_attestation_required`, omitting it is an exit-1 usage error, because the
+attestation is a claim about a human and the CLI has no standing to make it.
+
+**Prefer `-` for invite codes and receipts.** Both are bearer credentials —
+holding one is the whole authorization — and an argv value is written to shell
+history and readable from `ps` by any process on the host. `--code -` and
+`--policy-receipt -` read the credential from stdin instead, using the same
+sentinel as `messages send --content -`. The read is bounded to 8 KiB and one
+trailing newline is stripped, so `echo "$CODE" |` and `printf %s "$CODE" |`
+both work; everything else is left alone, so a token with interior whitespace
+is still rejected. stdin is a single stream, so passing `-` to both `--code`
+and `--policy-receipt` in one command is an exit-1 usage error rather than a
+hang.
+
 ## Commands
 
 | Group | Subcommand | Description |
@@ -125,6 +173,10 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `members` | List channel members |
 | | `add-member` | Add a member |
 | | `remove-member` | Remove a member |
+| `invites` | `mint` | Mint a relay invite code (owner/admin) |
+| | `claim` | Claim an invite code and join the relay |
+| | `policy` | Show the relay's join policy (terms, privacy, version) |
+| | `accept-policy` | Accept the join policy, printing an invite-bound receipt |
 | `canvas` | `get` | Get channel canvas |
 | | `set` | Set channel canvas |
 | `reactions` | `add` | React to a message |
