@@ -86,7 +86,7 @@ const REPLY_GUARD_SERVER: &str = "buzz-agent";
 /// Explicitly licenses silence. The base prompt tells agents that publishing is
 /// optional and "silence is usually correct"; a reminder that argued otherwise
 /// would fight that instruction and make agents chattier.
-const REPLY_GUARD_NAG: &str = "You are about to end this turn without calling `buzz messages send`. \
+const REPLY_GUARD_NAG: &str = "You are about to end this turn without calling `buzz messages send` or `buzz messages report`. \
 Your assistant text and reasoning are never shown to anyone — if you did work, found an answer, \
 or hit a blocker that someone is waiting on, it exists only if you publish it. \
 If you already posted, or if silence is genuinely correct for this turn, ignore this and end your turn.";
@@ -132,11 +132,15 @@ fn is_reply_shaped(name: &str, arguments: &serde_json::Value) -> bool {
             .get("command")
             .and_then(|v| v.as_str())
             .is_some_and(|cmd| {
-                // `messages send` also covers `messages send-diff`. `reactions
+                // `messages send` also covers `messages send-diff`. A
+                // structured `messages report` is a human-visible publish too.
+                // `reactions
                 // add` counts because the base prompt directs agents to react
                 // rather than post a bare acknowledgement, so nagging an agent
                 // that reacted would punish documented-correct behavior.
-                cmd.contains("messages send") || cmd.contains("reactions add")
+                cmd.contains("messages send")
+                    || cmd.contains("messages report")
+                    || cmd.contains("reactions add")
             })
 }
 
@@ -1448,13 +1452,14 @@ mod tests {
     /// The shapes the guard must recognize as a publish attempt. Callers apply
     /// the registry checks first; these cover the name suffix and command text.
     #[test]
-    fn reply_shape_matches_documented_send_forms() {
+    fn reply_shape_matches_documented_publish_forms() {
         for cmd in [
             "buzz messages send --channel X --content Y",
             "buzz --relay wss://r messages send --channel X --content Y",
             "/abs/path/buzz messages send",
             "printf 'hi' | buzz messages send --content -",
             "buzz messages send-diff --diff -",
+            "buzz messages report --channel X --thread E --status completed --outcome done",
             "buzz reactions add --event E --emoji +",
             // Assembled through another shell: rev 3's tokenizer missed this.
             r#"sh -c "buzz messages send --channel X""#,

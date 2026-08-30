@@ -4491,6 +4491,18 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_teaches_result_first_reporting_without_self_elected_coordinators() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("#### Result-first work reports"));
+        assert!(prompt.contains("buzz messages report --channel <UUID> --thread <ROOT_EVENT_ID>"));
+        assert!(prompt.contains("pass `--prior"));
+        assert!(prompt.contains("Only a\n  coordinator explicitly named"));
+        assert!(prompt.contains("do not elect yourself"));
+        assert!(prompt.contains("A report does not notify a delegator by itself"));
+        assert!(prompt.contains("Use `buzz messages send`, or `buzz messages report`"));
+    }
+
+    #[test]
     fn shared_base_prompt_teaches_repo_context_and_learning_loop() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("read its root `AGENTS.md`"));
