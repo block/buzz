@@ -18,7 +18,23 @@ fn main() {
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_RELAY_RECONNECT_CMD");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY");
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_CANDIDATE_ID");
     println!("cargo:rustc-check-cfg=cfg(buzz_updater_enabled)");
+
+    // Restored from the 0.5.4-era upstream: scopes the OS keyring service for
+    // candidate builds so a test build never shares an identity with the
+    // released Buzz app. Removed upstream by 0.5.10 with no replacement.
+    if let Ok(candidate_id) = std::env::var("BUZZ_BUILD_CANDIDATE_ID") {
+        let valid = !candidate_id.is_empty()
+            && candidate_id.len() <= 48
+            && candidate_id.chars().all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+            });
+        if !valid {
+            panic!("BUZZ_BUILD_CANDIDATE_ID must match [a-z0-9-] and be at most 48 characters");
+        }
+        println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_CANDIDATE_ID={candidate_id}");
+    }
 
     // Explicit owner-only agent-access capability. Release packaging sets this
     // presence-only marker; OSS/custom builds leave agent access configurable.
