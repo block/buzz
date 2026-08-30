@@ -4771,6 +4771,38 @@ async fn initialize_agent_pool(
     Ok(AgentPool::from_slots(agent_slots))
 }
 
+#[cfg(test)]
+mod pool_startup_tests {
+    use super::*;
+    use clap::Parser;
+
+    /// Full chain: CLI `--relay-url` → `Config::from_args` → `PoolStartup::
+    /// from_config` → the `extra_env` handed to every `AcpClient::spawn` in
+    /// `initialize_agent_pool` carries the resolved relay URL.
+    #[test]
+    fn pool_startup_extra_env_carries_resolved_relay_url() {
+        let args = config::CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            "--relay-url",
+            "wss://relay.example.com",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("from_args should succeed");
+        let startup = PoolStartup::from_config(&config, None);
+
+        assert!(
+            startup
+                .extra_env
+                .iter()
+                .any(|(k, v)| k == "BUZZ_RELAY_URL" && v == "wss://relay.example.com"),
+            "pool spawn env must carry the resolved relay URL; got {:?}",
+            startup.extra_env
+        );
+    }
+}
+
 // ── spawn_and_init ────────────────────────────────────────────────────────────
 /// Spawn an agent subprocess and run the MCP `initialize` handshake.
 ///

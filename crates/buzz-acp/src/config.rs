@@ -1078,6 +1078,27 @@ impl Config {
         let mut persona_env_vars = Vec::new();
         let model = args.model;
 
+        // Reply-path preflight: a relay URL that cannot even be parsed can
+        // never deliver a reply. Fail terminally here (missing-config), before
+        // the harness connects, subscribes, or takes any work — a child that
+        // consumes a mention and then 404s on the relay loses that mention.
+        // Only the URL is printed; keys are never included.
+        if let Err(e) = Url::parse(&args.relay_url) {
+            return Err(ConfigError::ConfigFile(format!(
+                "missing-config: --relay-url / BUZZ_RELAY_URL '{}' is not a valid URL ({e})",
+                args.relay_url
+            )));
+        }
+
+        // The resolved relay URL is authoritative for every ACP child spawn.
+        // Inject it into the spawn env so children never fall back to a
+        // missing or stale parent BUZZ_RELAY_URL (which silently pointed them
+        // at the ws://localhost:3000 default → "404 no community for this
+        // host"). Unlike ordinary persona vars, `AcpClient::spawn` force-sets
+        // this key, so the parent environment cannot shadow it. clap has
+        // already given the CLI flag precedence over the parent env here.
+        persona_env_vars.push(("BUZZ_RELAY_URL".into(), args.relay_url.clone()));
+
         // Inject CODEX_CONFIG so the @agentclientprotocol/codex-acp adapter (1.x)
         // opens the Seatbelt network sandbox for buzz-cli (an MCP subprocess). No-op
         // for non-Codex agents or unparseable relay URLs.
@@ -2876,6 +2897,57 @@ channels = "ALL"
         assert!(
             result.is_ok(),
             "from_args should accept any mode when allowed list is unset: {result:?}"
+        );
+    }
+
+    // --- resolved relay URL: spawn-env injection + preflight ---
+
+    #[test]
+    fn from_args_injects_resolved_relay_url_into_spawn_env() {
+        // The resolved --relay-url must land in persona_env_vars so every ACP
+        // child spawn carries it (AcpClient::spawn force-sets this key).
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--relay-url",
+            "wss://relay.example.com",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("from_args should succeed");
+
+        assert_eq!(config.relay_url, "wss://relay.example.com");
+        assert!(
+            config
+                .persona_env_vars
+                .iter()
+                .any(|(k, v)| k == "BUZZ_RELAY_URL" && v == "wss://relay.example.com"),
+            "persona_env_vars must carry the resolved relay URL; got {:?}",
+            config.persona_env_vars
+        );
+    }
+
+    #[test]
+    fn from_args_rejects_unparseable_relay_url_as_missing_config() {
+        // Reply-path preflight: an unresolvable relay URL must fail terminally
+        // before the harness can subscribe and consume mentions.
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--relay-url",
+            "",
+        ])
+        .expect("clap should parse args");
+        let err = Config::from_args(args).expect_err("empty relay URL must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("missing-config"),
+            "error should be terminal missing-config: {msg}"
+        );
+        assert!(
+            !msg.contains(TEST_PRIVATE_KEY),
+            "preflight error must not leak secrets: {msg}"
         );
     }
 
