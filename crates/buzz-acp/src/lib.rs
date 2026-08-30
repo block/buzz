@@ -12,6 +12,7 @@ mod prompt_project;
 mod queue;
 mod relay;
 mod setup_mode;
+mod thread_follow;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -2137,6 +2138,10 @@ async fn tokio_main() -> Result<()> {
         }
     };
 
+    // Thread-follow: bounded set of thread roots the agent participates in.
+    // Only consulted when `config.thread_follow` is set.
+    let mut thread_follow_set = thread_follow::ThreadFollowSet::new(thread_follow::DEFAULT_CAP);
+
     let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
@@ -2749,6 +2754,14 @@ async fn tokio_main() -> Result<()> {
                             }
 
                             if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
+                                // Learn from our own replies before dropping:
+                                // a self-authored reply marks its thread as
+                                // followed, so thread-follow can admit later
+                                // un-mentioned replies there.
+                                if config.thread_follow {
+                                    thread_follow_set
+                                        .insert(thread_follow::followable_root(&buzz_event.event));
+                                }
                                 tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
                                 continue;
                             }
@@ -2895,8 +2908,32 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
 
-                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
+                            // Thread-follow: learn roots from events that
+                            // mention the agent (the author gate has already
+                            // passed), then exempt events in followed threads
+                            // from the mention requirement.
+                            let mention_exempt = if config.thread_follow {
+                                if thread_follow::mentions_pubkey(&buzz_event.event, &pubkey_hex) {
+                                    thread_follow_set
+                                        .insert(thread_follow::followable_root(&buzz_event.event));
+                                    false
+                                } else {
+                                    thread_follow::thread_root_of(&buzz_event.event)
+                                        .is_some_and(|root| thread_follow_set.contains(&root))
+                                }
+                            } else {
+                                false
+                            };
+                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex, mention_exempt).await;
                             let prompt_tag = match matched {
+                                Some(_) if mention_exempt => {
+                                    tracing::debug!(
+                                        channel_id = %buzz_event.channel_id,
+                                        followed_threads = thread_follow_set.len(),
+                                        "thread-follow — admitting un-mentioned thread reply"
+                                    );
+                                    "thread-follow".to_string()
+                                }
                                 Some(m) => m.prompt_tag,
                                 None => {
                                     tracing::debug!(channel_id = %buzz_event.channel_id, kind = buzz_event.event.kind.as_u16(), "event matched no rule — dropping");
@@ -6812,6 +6849,7 @@ mod build_mcp_servers_tests {
             kinds_override: None,
             channels_override: None,
             no_mention_filter: false,
+            thread_follow: false,
             config_path: std::path::PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
             max_turns_per_session: 0,
@@ -7036,6 +7074,7 @@ mod error_outcome_emission_tests {
             kinds_override: None,
             channels_override: None,
             no_mention_filter: false,
+            thread_follow: false,
             config_path: std::path::PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
             max_turns_per_session: 0,

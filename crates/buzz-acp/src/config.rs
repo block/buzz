@@ -344,6 +344,13 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_MENTION_FILTER")]
     pub no_mention_filter: bool,
 
+    /// Follow threads the agent participates in: after the agent is
+    /// @mentioned in a thread (or has replied there itself), subsequent
+    /// replies in that thread trigger turns without a fresh @mention.
+    /// Mentions mode only; ignored in all/config modes.
+    #[arg(long, env = "BUZZ_ACP_THREAD_FOLLOW")]
+    pub thread_follow: bool,
+
     #[arg(long, env = "BUZZ_ACP_CONFIG", default_value = "./buzz-acp.toml")]
     pub config: PathBuf,
 
@@ -541,6 +548,11 @@ pub struct Config {
     pub kinds_override: Option<Vec<u32>>,
     pub channels_override: Option<Vec<String>>,
     pub no_mention_filter: bool,
+    /// Follow threads the agent participates in (see the `--thread-follow`
+    /// CLI flag). When set, mentions-mode subscriptions drop the server-side
+    /// `#p` filter and the event loop admits un-mentioned replies whose
+    /// thread root is in the agent's follow set.
+    pub thread_follow: bool,
     pub config_path: PathBuf,
     pub context_message_limit: u32,
     /// Maximum turns per session before proactive rotation. 0 = disabled.
@@ -933,6 +945,12 @@ impl Config {
             if args.no_mention_filter {
                 tracing::warn!("--no-mention-filter is ignored in config mode");
             }
+            if args.thread_follow {
+                tracing::warn!("--thread-follow is ignored in config mode");
+            }
+        }
+        if args.thread_follow && matches!(args.subscribe, SubscribeMode::All) {
+            tracing::warn!("--thread-follow is a no-op in all mode (every event already triggers)");
         }
 
         let agent_command = args.agent_command;
@@ -1118,6 +1136,7 @@ impl Config {
             kinds_override: args.kinds,
             channels_override: args.channels,
             no_mention_filter: args.no_mention_filter,
+            thread_follow: args.thread_follow,
             config_path: args.config,
             context_message_limit: args.context_message_limit,
             max_turns_per_session: args.max_turns_per_session,
@@ -1164,7 +1183,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} thread_follow={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1178,6 +1197,7 @@ impl Config {
             self.dedup_mode,
             self.multiple_event_handling,
             self.ignore_self,
+            self.thread_follow,
             self.context_message_limit,
             self.max_turns_per_session,
             self.presence_enabled,
@@ -1301,7 +1321,11 @@ pub fn resolve_channel_filters(
                     KIND_STREAM_REMINDER,
                 ]
             });
-            let require_mention = !config.no_mention_filter;
+            // Thread-follow needs to see un-mentioned replies, so the
+            // server-side `#p` filter must come off; the event loop
+            // re-applies the mention gate client-side (with the
+            // follow-set exemption).
+            let require_mention = !config.no_mention_filter && !config.thread_follow;
             for ch in &target_channels {
                 result.insert(
                     *ch,
@@ -1406,7 +1430,7 @@ pub fn resolve_dynamic_channel_filter(
                     KIND_STREAM_REMINDER,
                 ]
             })),
-            require_mention: !config.no_mention_filter,
+            require_mention: !config.no_mention_filter && !config.thread_follow,
         }),
         SubscribeMode::All => Some(ChannelFilter {
             kinds: config.kinds_override.clone(),
@@ -1494,6 +1518,7 @@ mod tests {
             kinds_override: None,
             channels_override: None,
             no_mention_filter: false,
+            thread_follow: false,
             config_path: PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
             max_turns_per_session: 0,
