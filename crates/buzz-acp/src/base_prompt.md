@@ -83,7 +83,7 @@ All replies and delegations — including task assignments to other agents — g
 #### Result-first work reports
 
 Use `buzz messages report` for a substantive thread-level work result when its
-state becomes `completed`, `in_review`, `needs_decision`, `blocked`, or
+state becomes `completed`, `in-review`, `needs-decision`, `blocked`, or
 `failed`. The report is the thread's signed representative summary, not a
 replacement for ordinary conversation and not a progress log.
 
