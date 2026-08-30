@@ -66,6 +66,7 @@ function entryRenderKey(entry: MainTimelineEntry): string {
 type MembershipChangePayload =
   | { mode: "self-arrival"; target: string }
   | { actor: string; mode: "addition"; target: string }
+  | { actor: string; mode: "removal"; target: string }
   | { mode: "departure"; target: string };
 
 function parseMembershipChangePayload(
@@ -84,7 +85,7 @@ function parseMembershipChangePayload(
       return target ? { mode: "departure", target } : null;
     }
     if (
-      payload.type !== "member_joined" ||
+      (payload.type !== "member_joined" && payload.type !== "member_removed") ||
       typeof payload.actor !== "string" ||
       typeof payload.target !== "string"
     ) {
@@ -94,6 +95,11 @@ function parseMembershipChangePayload(
     const actor = payload.actor.trim().toLowerCase();
     const target = payload.target.trim().toLowerCase();
     if (!actor || !target) return null;
+    if (payload.type === "member_removed") {
+      // A removal is only ever attributed to the administrator who performed
+      // it, so self-removal has no distinct rendering to preserve.
+      return { actor, mode: "removal", target };
+    }
     return actor === target
       ? { mode: "self-arrival", target }
       : { actor, mode: "addition", target };
@@ -112,6 +118,9 @@ function membershipChangesCanGroup(
       (second.mode === "departure" && first.target === second.target)
     );
   }
+  if (first.mode === "removal") {
+    return second.mode === "removal" && first.actor === second.actor;
+  }
   return (
     first.mode === "addition" &&
     second.mode === "addition" &&
@@ -126,10 +135,11 @@ function membershipChangesCanGroup(
  * its contents, but not its identity or the virtual list's existing key suffix.
  *
  * Compatible membership activities stay together while they are contiguous.
- * Self-joins and additions from one administrator each form their own summary;
- * a self-join immediately followed by that member leaving becomes a single
- * lifecycle summary. Each adjacent event must fall within the one-hour activity
- * window, so uninterrupted activity can extend beyond an hour overall.
+ * Self-joins, additions from one administrator, and removals by one
+ * administrator each form their own summary; a self-join immediately followed
+ * by that member leaving becomes a single lifecycle summary. Each adjacent
+ * event must fall within the one-hour activity window, so uninterrupted
+ * activity can extend beyond an hour overall.
  */
 function buildMembershipGroups(
   entries: readonly MainTimelineEntry[],

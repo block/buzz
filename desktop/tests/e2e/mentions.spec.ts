@@ -2737,6 +2737,74 @@ test("groups contiguous arrival activity with hidden names in the standard toolt
   await expect(avatarStack.locator("..")).toHaveCSS("align-items", "center");
 });
 
+test("groups contiguous removal activity with hidden names in the standard tooltip", async ({
+  page,
+}) => {
+  const actor = {
+    pubkey: "20".repeat(32),
+    displayName: "Alice Chen",
+  };
+  const targets = [
+    { pubkey: "21".repeat(32), displayName: "Erica Chapman" },
+    { pubkey: "22".repeat(32), displayName: "Peter Griffin" },
+    { pubkey: "23".repeat(32), displayName: "Marcia Thomas" },
+    { pubkey: "24".repeat(32), displayName: "Jordan Lee" },
+    { pubkey: "25".repeat(32), displayName: "Olivia Park" },
+    { pubkey: "26".repeat(32), displayName: "Sam Rivera" },
+  ];
+  await installMockBridge(page, {
+    searchProfiles: [actor, ...targets],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await waitForMockLiveSubscription(page, "general", SYSTEM_MESSAGE_KIND);
+
+  await page.evaluate(
+    ({ actorPubkey, kind, removedTargets }) => {
+      const createdAt = Math.floor(Date.now() / 1_000);
+      for (const [index, target] of removedTargets.entries()) {
+        window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+          channelName: "general",
+          content: JSON.stringify({
+            type: "member_removed",
+            actor: actorPubkey,
+            target: target.pubkey,
+          }),
+          createdAt: createdAt + index,
+          kind,
+        });
+      }
+    },
+    {
+      actorPubkey: actor.pubkey,
+      kind: SYSTEM_MESSAGE_KIND,
+      removedTargets: targets,
+    },
+  );
+  await waitForTimelineSettled(page);
+
+  const groupedRow = page
+    .getByTestId("system-message-row")
+    .filter({ hasText: "Alice Chen removed" });
+  await expect(groupedRow).toHaveCount(1);
+  await expect(
+    groupedRow.locator("p").filter({ hasText: "Alice Chen removed" }),
+  ).toContainText(
+    "Alice Chen removed Erica Chapman, Peter Griffin, Marcia Thomas, and 3 others from the channel",
+  );
+
+  const avatarStack = groupedRow.getByTestId("system-message-avatar-stack");
+  await expect(avatarStack).toHaveCount(1);
+
+  const othersTrigger = groupedRow.getByRole("button", { name: "3 others" });
+  await othersTrigger.hover();
+  const tooltip = page.getByRole("tooltip");
+  await expect(tooltip).toContainText("Jordan Lee");
+  await expect(tooltip).toContainText("Olivia Park");
+  await expect(tooltip).toContainText("Sam Rivera");
+});
+
 test("system agent profile exposes owned agent actions", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
