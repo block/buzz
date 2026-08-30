@@ -110,12 +110,34 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_RELAY_URL` | no | `ws://localhost:3000` | Relay WebSocket URL. |
 | `BUZZ_ACP_AGENT_COMMAND` | no | `goose` | Agent binary to spawn. |
 | `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). |
-| `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
+| `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to the Buzz MCP server binary. Buzz relay credentials are injected into this server. |
+| `BUZZ_ACP_MCP_SERVERS_FILE` | no | — | Path to a JSON array of additional ACP stdio MCP server definitions. |
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
 
 **Note:** `BUZZ_ACP_AGENT_ARGS` splits on commas. For args with values, use: `-c,key="value"`.
+
+Additional MCP servers use the ACP stdio schema. Keep `BUZZ_ACP_MCP_COMMAND` set for the Buzz messaging/development MCP, then point `BUZZ_ACP_MCP_SERVERS_FILE` at a JSON file for any other servers:
+
+```json
+[
+  {
+    "name": "filesystem",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
+    "env": [{ "name": "LOG_LEVEL", "value": "info" }]
+  },
+  {
+    "name": "search",
+    "command": "/usr/local/bin/search-mcp",
+    "args": [],
+    "env": []
+  }
+]
+```
+
+File-defined servers receive only the environment entries declared in the file. Buzz credentials are injected only into the legacy `BUZZ_ACP_MCP_COMMAND` server.
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
 
