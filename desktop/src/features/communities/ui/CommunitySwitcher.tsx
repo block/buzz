@@ -133,15 +133,20 @@ export function CommunitySwitcher({
     if (!activeCommunity?.lanRelayUrl || isProbingLan) return;
     setIsProbingLan(true);
     try {
-      const switched = await relayClient.probeLanAndSwitch();
-      toast(
-        switched ? "已切换到内网 Relay" : "内网不可用，继续使用公网 Relay",
-        {
-          description: switched
-            ? activeCommunity.lanRelayUrl
-            : activeCommunity.relayUrl,
-        },
-      );
+      const result = await relayClient.probeLanAndSwitch();
+      if (result.status === "lan") {
+        toast("已切换到内网 Relay", {
+          description: activeCommunity.lanRelayUrl,
+        });
+      } else if (result.status === "public") {
+        toast("内网 Relay 检测失败，已继续使用公网 Relay", {
+          description: result.lanError,
+        });
+      } else {
+        toast.error("内网与公网 Relay 均连接失败", {
+          description: `内网：${result.lanError}；公网：${result.publicError}`,
+        });
+      }
     } catch (error) {
       toast.error("检测内网 Relay 失败", {
         description: error instanceof Error ? error.message : String(error),

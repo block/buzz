@@ -83,7 +83,16 @@ import {
   type RelayAuthRequest,
 } from "@/shared/api/relayAuthPolicy";
 import { createRelayInboundBuffer } from "@/shared/api/relayInboundBuffer";
+import {
+  relayAuthUrlForTransport,
+  type RelayTransport,
+} from "@/shared/api/relayAuthUrl";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
+
+export type LanProbeResult =
+  | { status: "lan" }
+  | { status: "public"; lanError: string }
+  | { status: "failed"; lanError: string; publicError: string };
 
 export class RelayClient {
   private wsId: number | null = null;
@@ -112,10 +121,8 @@ export class RelayClient {
   // fallback after a LAN attempt fails during startup/authentication.
   private skipLanTransportOnce = false;
   private transportPreference: "auto" | "lan" | "public" = "auto";
-  private activeTransport: "lan" | "public" | null = null;
-  private transportListeners = new Set<
-    (transport: "lan" | "public" | null) => void
-  >();
+  private activeTransport: RelayTransport = null;
+  private transportListeners = new Set<(transport: RelayTransport) => void>();
 
   private terminal = false;
 
@@ -447,26 +454,28 @@ export class RelayClient {
     await this.connectBypassingBackoff();
   }
 
-  getActiveTransport(): "lan" | "public" | null {
+  getActiveTransport(): RelayTransport {
     return this.activeTransport;
   }
 
-  subscribeToTransport(listener: (transport: "lan" | "public" | null) => void) {
+  subscribeToTransport(listener: (transport: RelayTransport) => void) {
     this.transportListeners.add(listener);
     listener(this.activeTransport);
     return () => this.transportListeners.delete(listener);
   }
 
-  private setActiveTransport(transport: "lan" | "public" | null) {
+  private setActiveTransport(transport: RelayTransport) {
     if (this.activeTransport === transport) return;
     this.activeTransport = transport;
     for (const listener of this.transportListeners) listener(transport);
   }
 
   /** Probe LAN through WebSocket + AUTH, then keep LAN or fall back publicly. */
-  async probeLanAndSwitch(): Promise<boolean> {
+  async probeLanAndSwitch(): Promise<LanProbeResult> {
     const lanRelayUrl = await getRelayLanWsUrl();
-    if (!lanRelayUrl) return false;
+    if (!lanRelayUrl) {
+      return { status: "public", lanError: "No LAN relay URL is configured." };
+    }
 
     if (this.connectPromise) {
       await this.connectPromise.catch(() => undefined);
@@ -481,13 +490,19 @@ export class RelayClient {
     this.skipLanTransportOnce = false;
     this.terminal = false;
     this.keepAliveRequested = true;
+    let lanError = "LAN relay connection failed.";
     try {
       await this.connectBypassingBackoff();
       if (this.activeTransport === "lan") {
         this.transportPreference = "auto";
-        return true;
+        return { status: "lan" };
       }
-    } catch {
+      lanError = "LAN relay connected without selecting the LAN transport.";
+    } catch (error) {
+      lanError = this.normalizeRelayError(
+        error,
+        "LAN relay connection failed.",
+      ).message;
       // Fall through to a canonical public reconnect.
     }
 
@@ -496,11 +511,16 @@ export class RelayClient {
     this.terminal = false;
     try {
       await this.connectBypassingBackoff();
-    } catch {
-      // Keep the normal reconnect policy in charge of subsequent attempts.
+    } catch (error) {
+      const publicError = this.normalizeRelayError(
+        error,
+        "Public relay fallback failed.",
+      ).message;
+      this.transportPreference = "auto";
+      return { status: "failed", lanError, publicError };
     }
     this.transportPreference = "auto";
-    return false;
+    return { status: "public", lanError };
   }
 
   /**
@@ -970,7 +990,7 @@ export class RelayClient {
 
     const event = await createAuthEvent({
       challenge,
-      relayUrl: this.relayUrl,
+      relayUrl: relayAuthUrlForTransport(this.relayUrl, this.activeTransport),
     });
 
     if (generation !== this.connectionGeneration || !this.authRequest) {
