@@ -732,7 +732,7 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        | "claudecode" | "buzz-agent" | "antigravity" | "buzz-acp-antigravity" => Some(Vec::new()),
         _ => None,
     }
 }
@@ -3019,5 +3019,12 @@ channels = "ALL"
             "Found secret-bearing env args without hide_env_values=true. \
              Add `hide_env_values = true` to each: {violations:?}"
         );
+    }
+    #[test]
+    fn test_antigravity_command_identity_and_default_args() {
+        assert_eq!(normalize_agent_command_identity("buzz-acp-antigravity"), "buzz-acp-antigravity");
+        assert_eq!(normalize_agent_command_identity("antigravity"), "antigravity");
+        assert_eq!(default_agent_args("antigravity"), Some(Vec::new()));
+        assert_eq!(default_agent_args("buzz-acp-antigravity"), Some(Vec::new()));
     }
 }
