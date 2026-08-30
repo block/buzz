@@ -511,11 +511,44 @@ async fn main() -> anyhow::Result<()> {
             race_rounds,
             "running git object-store conformance probe (A3 gate)"
         );
-        let report = state
-            .git_store
-            .run_conformance_probe(cfg)
-            .await
-            .map_err(|e| anyhow::anyhow!("git conformance probe failed: {e}"))?;
+        // The S3/MinIO backend can still be coming up when the relay starts
+        // (e.g. both launched together by systemd/compose with no ordering
+        // dependency) — the probe's first request then fails with a
+        // transport error, not a conformance verdict. Retry only that
+        // transport-error case with backoff; a real `ProbeFailure` (the
+        // backend answered but violated A3) is a deployment problem no
+        // retry fixes, so it still fails fast on the first attempt.
+        let startup_retries: u32 = std::env::var("BUZZ_GIT_PROBE_STARTUP_RETRIES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5);
+        let mut backoff_ms: u64 = std::env::var("BUZZ_GIT_PROBE_STARTUP_BACKOFF_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(500);
+        let mut attempt = 0u32;
+        let report = loop {
+            match state.git_store.run_conformance_probe(cfg.clone()).await {
+                Ok(report) => break report,
+                Err(e @ buzz_relay::api::git::store::StoreError::Backend(_))
+                    if attempt < startup_retries =>
+                {
+                    attempt += 1;
+                    tracing::warn!(
+                        attempt,
+                        max_attempts = startup_retries,
+                        backoff_ms,
+                        error = %e,
+                        "git object-store conformance probe hit a transport error, retrying (backend may still be starting)"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    backoff_ms = (backoff_ms * 2).min(8_000);
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!("git conformance probe failed: {e}"));
+                }
+            }
+        };
         tracing::info!(
             race_width = report.race_width,
             race_rounds = report.race_rounds,
