@@ -1,94 +1,207 @@
+import 'dart:async';
+
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/profile/presence_cache_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
-/// Tests for [PresenceCacheNotifier] in the pure-Nostr world.
-///
-/// The cache is now purely WS-driven: the notifier subscribes to kind:20001
-/// (presence updates) over the relay session and only mutates state for
-/// pubkeys that have been registered via [PresenceCacheNotifier.track].
-/// There is no longer a REST backstop — the previous test seeded state via
-/// a `GET /api/presence` call which has been removed.
 void main() {
   test('WS presence event updates cache for tracked pubkey', () async {
     final relaySession = _RecordingRelaySessionNotifier();
     final container = _buildContainer(relaySession: relaySession);
     addTearDown(container.dispose);
 
-    // Initialize the notifier (triggers build → subscribes to WS).
     container.read(presenceCacheProvider);
-    await _pumpEventQueue();
+    await _waitFor(() => relaySession.filters.isNotEmpty);
 
-    // Track alice, then emit her initial 'online' status.
     container.read(presenceCacheProvider.notifier).track(['alice']);
     relaySession.emit(_presence('alice', 'online'));
     expect(container.read(presenceCacheProvider)['alice'], 'online');
 
-    // Simulate a WS presence event: alice goes away.
-    relaySession.emit(_presence('alice', 'away'));
+    relaySession.emit(_presence('alice', 'away', createdAt: 1001));
     expect(container.read(presenceCacheProvider)['alice'], 'away');
   });
 
-  test('WS presence event ignores untracked pubkeys', () async {
+  test(
+    'backfills tracked presence from authenticated query snapshot',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier()
+        ..queryResults = [_snapshot('alice', 'online')];
+      final container = _buildContainer(relaySession: relaySession);
+      addTearDown(container.dispose);
+
+      container.read(presenceCacheProvider);
+      await _waitFor(() => relaySession.filters.isNotEmpty);
+      container.read(presenceCacheProvider.notifier).track(['ALICE']);
+
+      await _waitFor(
+        () => container.read(presenceCacheProvider)['alice'] == 'online',
+      );
+      expect(relaySession.queries, hasLength(1));
+      final filter = relaySession.queries.single.single;
+      expect(filter.kinds, [EventKind.presenceUpdate]);
+      expect(filter.authors, ['alice']);
+      expect(filter.limit, 1);
+    },
+  );
+
+  test('snapshot marks a missing tracked identity offline', () async {
     final relaySession = _RecordingRelaySessionNotifier();
     final container = _buildContainer(relaySession: relaySession);
     addTearDown(container.dispose);
 
     container.read(presenceCacheProvider);
-    await _pumpEventQueue();
-
-    // Track only alice.
+    await _waitFor(() => relaySession.filters.isNotEmpty);
     container.read(presenceCacheProvider.notifier).track(['alice']);
 
-    // Emit event for bob (untracked).
-    relaySession.emit(_presence('bob', 'online'));
-
-    // Bob should NOT appear in the cache.
-    expect(container.read(presenceCacheProvider).containsKey('bob'), isFalse);
+    await _waitFor(
+      () => container.read(presenceCacheProvider)['alice'] == 'offline',
+    );
   });
 
-  test('WS presence event ignores invalid status values', () async {
-    final relaySession = _RecordingRelaySessionNotifier();
+  test('live heartbeat wins over an older in-flight snapshot', () async {
+    final snapshotCompleter = Completer<List<NostrEvent>>();
+    final relaySession = _RecordingRelaySessionNotifier()
+      ..queryCompleter = snapshotCompleter;
     final container = _buildContainer(relaySession: relaySession);
     addTearDown(container.dispose);
 
     container.read(presenceCacheProvider);
+    await _waitFor(() => relaySession.filters.isNotEmpty);
+    container.read(presenceCacheProvider.notifier).track(['alice']);
+    await _waitFor(() => relaySession.queries.isNotEmpty);
+
+    relaySession.emit(_presence('alice', 'online'));
+    snapshotCompleter.complete([_snapshot('alice', 'away')]);
     await _pumpEventQueue();
 
-    container.read(presenceCacheProvider.notifier).track(['alice']);
-    relaySession.emit(_presence('alice', 'online'));
     expect(container.read(presenceCacheProvider)['alice'], 'online');
-
-    // Emit event with garbage status — should be rejected.
-    relaySession.emit(_presence('alice', 'garbage-status'));
-
-    // Status should remain 'online'.
-    expect(container.read(presenceCacheProvider)['alice'], 'online');
   });
 
-  test('WS presence event skips no-op updates', () async {
+  test('fresh live status survives a temporarily empty snapshot', () async {
     final relaySession = _RecordingRelaySessionNotifier();
     final container = _buildContainer(relaySession: relaySession);
     addTearDown(container.dispose);
 
     container.read(presenceCacheProvider);
-    await _pumpEventQueue();
-
+    await _waitFor(() => relaySession.filters.isNotEmpty);
     container.read(presenceCacheProvider.notifier).track(['alice']);
     relaySession.emit(_presence('alice', 'online'));
 
-    // Listen for state changes after initial setup.
-    var stateChangeCount = 0;
-    container.listen(presenceCacheProvider, (prev, next) => stateChangeCount++);
+    await _waitFor(() => relaySession.queries.isNotEmpty);
+    await _pumpEventQueue();
 
-    // Emit event with same status as current.
-    relaySession.emit(_presence('alice', 'online'));
-
-    // No state change should occur — it's a no-op.
-    expect(stateChangeCount, 0);
+    expect(container.read(presenceCacheProvider)['alice'], 'online');
   });
+
+  test('live event never trusts a spoofed p-tag subject', () async {
+    final relaySession = _RecordingRelaySessionNotifier();
+    final container = _buildContainer(relaySession: relaySession);
+    addTearDown(container.dispose);
+
+    container.read(presenceCacheProvider);
+    await _waitFor(() => relaySession.filters.isNotEmpty);
+    container.read(presenceCacheProvider.notifier).track(['alice']);
+    relaySession.emit(
+      _presence(
+        'mallory',
+        'online',
+        tags: const [
+          ['p', 'alice'],
+        ],
+      ),
+    );
+
+    expect(container.read(presenceCacheProvider).containsKey('alice'), isFalse);
+  });
+
+  test(
+    'WS presence event ignores untracked pubkeys and invalid status',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier();
+      final container = _buildContainer(relaySession: relaySession);
+      addTearDown(container.dispose);
+
+      container.read(presenceCacheProvider);
+      await _waitFor(() => relaySession.filters.isNotEmpty);
+      container.read(presenceCacheProvider.notifier).track(['alice']);
+
+      relaySession.emit(_presence('bob', 'online'));
+      relaySession.emit(_presence('alice', 'garbage-status'));
+
+      final cache = container.read(presenceCacheProvider);
+      expect(cache.containsKey('bob'), isFalse);
+      expect(cache.containsKey('alice'), isFalse);
+    },
+  );
+
+  test(
+    'older replayed heartbeat cannot overwrite a newer live status',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier();
+      final container = _buildContainer(relaySession: relaySession);
+      addTearDown(container.dispose);
+
+      container.read(presenceCacheProvider);
+      await _waitFor(() => relaySession.filters.isNotEmpty);
+      container.read(presenceCacheProvider.notifier).track(['alice']);
+
+      relaySession.emit(_presence('alice', 'away', createdAt: 1001));
+      relaySession.emit(_presence('alice', 'online', createdAt: 1000));
+
+      expect(container.read(presenceCacheProvider)['alice'], 'away');
+    },
+  );
+
+  test('snapshot timestamp rejects an older replayed live heartbeat', () async {
+    final relaySession = _RecordingRelaySessionNotifier()
+      ..queryResults = [_snapshot('alice', 'online')];
+    final container = _buildContainer(relaySession: relaySession);
+    addTearDown(container.dispose);
+
+    container.read(presenceCacheProvider);
+    await _waitFor(() => relaySession.filters.isNotEmpty);
+    container.read(presenceCacheProvider.notifier).track(['alice']);
+    await _waitFor(
+      () => container.read(presenceCacheProvider)['alice'] == 'online',
+    );
+
+    relaySession.emit(_presence('alice', 'away', createdAt: 1999));
+
+    expect(container.read(presenceCacheProvider)['alice'], 'online');
+  });
+
+  test(
+    'keeps cached presence during reconnect and then resynchronizes',
+    () async {
+      final relaySession = _RecordingRelaySessionNotifier()
+        ..queryResults = [_snapshot('alice', 'online')];
+      final container = _buildContainer(relaySession: relaySession);
+      addTearDown(container.dispose);
+
+      container.read(presenceCacheProvider);
+      await _waitFor(() => relaySession.filters.isNotEmpty);
+      container.read(presenceCacheProvider.notifier).track(['alice']);
+      await _waitFor(
+        () => container.read(presenceCacheProvider)['alice'] == 'online',
+      );
+
+      relaySession.setStatus(SessionStatus.reconnecting);
+      container.read(presenceCacheProvider);
+      await _pumpEventQueue();
+      expect(container.read(presenceCacheProvider)['alice'], 'online');
+
+      relaySession.queryResults = [_snapshot('alice', 'away')];
+      final queryCount = relaySession.queries.length;
+      relaySession.setStatus(SessionStatus.connected);
+      container.read(presenceCacheProvider);
+      await _waitFor(() => relaySession.queries.length > queryCount);
+      await _waitFor(
+        () => container.read(presenceCacheProvider)['alice'] == 'away',
+      );
+    },
+  );
 
   test('subscribes to kind:20001 with limit 0', () async {
     final relaySession = _RecordingRelaySessionNotifier();
@@ -96,51 +209,93 @@ void main() {
     addTearDown(container.dispose);
 
     container.read(presenceCacheProvider);
-    await _pumpEventQueue();
+    await _waitFor(() => relaySession.filters.isNotEmpty);
 
-    // Should have subscribed with the correct filter.
     expect(relaySession.filters, hasLength(1));
     expect(relaySession.filters.single.kinds, [EventKind.presenceUpdate]);
     expect(relaySession.filters.single.limit, 0);
   });
 
-  test('WS event uses pubkey variable, not literal string', () async {
-    // Regression test for the map key bug where `{...state, pubkey: status}`
-    // used the literal string "pubkey" instead of the variable's value.
-    final relaySession = _RecordingRelaySessionNotifier();
+  test(
+    'relay change clears cache and discards an in-flight snapshot',
+    () async {
+      final relayConfig = _FakeRelayConfigNotifier();
+      final relaySession = _RecordingRelaySessionNotifier()
+        ..queryResults = [_snapshot('alice', 'online')];
+      final container = _buildContainer(
+        relaySession: relaySession,
+        relayConfig: relayConfig,
+      );
+      addTearDown(container.dispose);
+
+      container.read(presenceCacheProvider);
+      await _waitFor(() => relaySession.filters.isNotEmpty);
+      container.read(presenceCacheProvider.notifier).track(['alice']);
+      await _waitFor(
+        () => container.read(presenceCacheProvider)['alice'] == 'online',
+      );
+
+      final staleQuery = Completer<List<NostrEvent>>();
+      relaySession.queryCompleter = staleQuery;
+      final queryCount = relaySession.queries.length;
+      container.read(presenceCacheProvider.notifier).track(['bob']);
+      await _waitFor(() => relaySession.queries.length > queryCount);
+
+      relayConfig.setRelay('https://other-relay.example');
+      container.read(presenceCacheProvider);
+      expect(container.read(presenceCacheProvider), isEmpty);
+
+      staleQuery.complete([_snapshot('bob', 'online')]);
+      await _pumpEventQueue();
+
+      expect(container.read(presenceCacheProvider), isEmpty);
+    },
+  );
+
+  test('dispose discards an in-flight snapshot', () async {
+    final snapshotCompleter = Completer<List<NostrEvent>>();
+    final relaySession = _RecordingRelaySessionNotifier()
+      ..queryCompleter = snapshotCompleter;
     final container = _buildContainer(relaySession: relaySession);
-    addTearDown(container.dispose);
 
     container.read(presenceCacheProvider);
+    await _waitFor(() => relaySession.filters.isNotEmpty);
+    container.read(presenceCacheProvider.notifier).track(['alice']);
+    await _waitFor(() => relaySession.queries.isNotEmpty);
+
+    container.dispose();
+    snapshotCompleter.complete([_snapshot('alice', 'online')]);
     await _pumpEventQueue();
 
-    container.read(presenceCacheProvider.notifier).track([
-      'deadbeef',
-      'cafebabe',
-    ]);
-
-    // Seed cafebabe -> offline, then set deadbeef online.
-    relaySession.emit(_presence('cafebabe', 'offline'));
-    relaySession.emit(_presence('deadbeef', 'online'));
-
-    final cache = container.read(presenceCacheProvider);
-    // deadbeef should be online (the actual pubkey, not a literal "pubkey" key).
-    expect(cache['deadbeef'], 'online');
-    // cafebabe should still be offline (not clobbered).
-    expect(cache['cafebabe'], 'offline');
-    // There should be no literal "pubkey" key in the map.
-    expect(cache.containsKey('pubkey'), isFalse);
+    expect(relaySession.filters, isEmpty);
   });
 }
 
-NostrEvent _presence(String pubkey, String status) => NostrEvent(
-  id: 'evt-$pubkey-$status',
+NostrEvent _presence(
+  String pubkey,
+  String status, {
+  int createdAt = 1000,
+  List<List<String>> tags = const [],
+}) => NostrEvent(
+  id: 'evt-$pubkey-$status-$createdAt',
   pubkey: pubkey,
-  createdAt: 1000,
+  createdAt: createdAt,
   kind: EventKind.presenceUpdate,
-  tags: const [],
+  tags: tags,
   content: status,
   sig: 'sig',
+);
+
+NostrEvent _snapshot(String subject, String status) => NostrEvent(
+  id: 'snapshot-$subject-$status',
+  pubkey: 'relay',
+  createdAt: 2000,
+  kind: EventKind.presenceUpdate,
+  tags: [
+    ['p', subject],
+  ],
+  content: status,
+  sig: 'relay-sig',
 );
 
 Future<void> _pumpEventQueue() async {
@@ -148,12 +303,24 @@ Future<void> _pumpEventQueue() async {
   await Future<void>.delayed(Duration.zero);
 }
 
+Future<void> _waitFor(bool Function() predicate) async {
+  for (var attempt = 0; attempt < 50; attempt++) {
+    if (predicate()) return;
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+  fail('condition was not met before timeout');
+}
+
 ProviderContainer _buildContainer({
   required _RecordingRelaySessionNotifier relaySession,
+  _FakeRelayConfigNotifier? relayConfig,
 }) {
   return ProviderContainer(
     overrides: [
       appLifecycleProvider.overrideWith(() => _FakeAppLifecycleNotifier()),
+      relayConfigProvider.overrideWith(
+        () => relayConfig ?? _FakeRelayConfigNotifier(),
+      ),
       relaySessionProvider.overrideWith(() => relaySession),
     ],
   );
@@ -161,7 +328,10 @@ ProviderContainer _buildContainer({
 
 class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
   final List<NostrFilter> filters = [];
+  final List<List<NostrFilter>> queries = [];
   final List<void Function(NostrEvent)> _listeners = [];
+  List<NostrEvent> queryResults = [];
+  Completer<List<NostrEvent>>? queryCompleter;
 
   @override
   SessionState build() => const SessionState(status: SessionStatus.connected);
@@ -180,15 +350,36 @@ class _RecordingRelaySessionNotifier extends RelaySessionNotifier {
     };
   }
 
-  /// Emit an event synchronously to all live subscribers.
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) {
+    queries.add(filters);
+    return queryCompleter?.future ?? Future.value(queryResults);
+  }
+
   void emit(NostrEvent event) {
     for (final listener in List.of(_listeners)) {
       listener(event);
     }
+  }
+
+  void setStatus(SessionStatus status) {
+    state = SessionState(status: status);
   }
 }
 
 class _FakeAppLifecycleNotifier extends AppLifecycleNotifier {
   @override
   AppLifecycleState build() => AppLifecycleState.resumed;
+}
+
+class _FakeRelayConfigNotifier extends RelayConfigNotifier {
+  @override
+  RelayConfig build() => const RelayConfig(baseUrl: 'https://relay.example');
+
+  void setRelay(String baseUrl) {
+    state = RelayConfig(baseUrl: baseUrl);
+  }
 }
