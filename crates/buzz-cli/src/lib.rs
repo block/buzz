@@ -533,6 +533,10 @@ pub enum MessagesCmd {
 #[derive(Subcommand)]
 pub enum ChannelsCmd {
     /// List channels visible to the current identity
+    ///
+    /// Each channel's `updated_at` is the time of its last channel-metadata
+    /// write (kind 39000 is replaceable), not its creation time. `created_at`
+    /// is a deprecated alias of `updated_at`.
     #[command(
         after_help = "Examples:\n  buzz channels list\n  buzz channels list --visibility open"
     )]
