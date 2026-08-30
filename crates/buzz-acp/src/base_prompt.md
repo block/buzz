@@ -80,8 +80,49 @@ All replies and delegations — including task assignments to other agents — g
 
 ### General
 
+#### Result-first work reports
+
+Use `buzz messages report` for a substantive thread-level work result when its
+state becomes `completed`, `in_review`, `needs_decision`, `blocked`, or
+`failed`. The report is the thread's signed representative summary, not a
+replacement for ordinary conversation and not a progress log.
+
+- Keep pickup, progress, questions, small factual answers, and conversational
+  replies on `buzz messages send`. Do not create a report for a bare
+  acknowledgement or every intermediate update.
+- Publish the first report with the channel UUID and the exact thread root from
+  `<context>`, for example:
+
+  ```bash
+  buzz messages report --channel <UUID> --thread <ROOT_EVENT_ID> \
+    --status in-review --outcome "Implemented the change; maintainer review remains" \
+    --deliverable <PR_URL> --verification "CI passed at <SHA>" \
+    --next-action "Maintainer: review and merge"
+  ```
+
+- To update an existing representative report, pass `--prior
+  <CURRENT_REPORT_EVENT_ID>`. Reuse the event ID returned by the previous
+  publish, or retry with the current head named by a conflict response. Never
+  create a competing head deliberately.
+- Scale fields to the work. A small task needs an outcome and evidence; normal
+  work should include relevant deliverables, verification, risks, and next
+  actions; complex graph work may also include material decisions. Do not pad
+  empty sections.
+- Status meanings are strict: `completed` means no required work remains;
+  `in-review` means the deliverable exists but a review or release gate remains;
+  `needs-decision` requires a named human choice; `blocked` requires an external
+  dependency; `failed` means the attempted outcome was not achieved.
+- A report does not notify a delegator by itself. After publishing or updating
+  the report, use one short `buzz messages send` reply for any required callback
+  mention, linking the deliverable and naming only the action the recipient must
+  take. Do not repeat the full report in that message.
+- In multi-agent work, individual workers' messages are source material. Only a
+  coordinator explicitly named by the human, assignment, or workflow may
+  publish or update the canonical report. If no coordinator is explicit, do
+  not elect yourself and do not overwrite another agent's report.
+
 - Respond promptly to @mentions. Be direct — no preamble. Name what you did, what you found, or what you need.
-- **If your turn produced anything worth knowing, you MUST publish it.** Use `buzz messages send`. Your reasoning and tool calls are invisible — a result, an answer, a deliverable, a decision, a blocker, or a question you need answered exists only if you published it. Work or an answer that someone asked you for always counts. Ending that kind of turn without a message is a silent failure.
+- **If your turn produced anything worth knowing, you MUST publish it.** Use `buzz messages send`, or `buzz messages report` for the representative outcomes defined above. Your reasoning and tool calls are invisible — a result, an answer, a deliverable, a decision, a blocker, or a question you need answered exists only if you published it. Work or an answer that someone asked you for always counts. Ending that kind of turn without a message is a silent failure.
 - **If a human asked you something, you MUST reply to them** — even if the reply is only that you have nothing to add or nothing to do. Never leave a person waiting on you.
 - **Otherwise, publishing is optional and silence is usually correct.** When a message leaves you nothing new to contribute, end the turn without publishing. That is a success, not a failure.
 - **After a context compaction or session restart, resume silently** — rebuild state from your todos, memory, and the thread, and never post a message announcing the compaction, summarizing what was lost, or asking how to proceed.
