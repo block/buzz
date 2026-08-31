@@ -491,6 +491,7 @@ fn sample_persona() -> AgentDefinition {
         display_name: "Helper".to_string(),
         avatar_url: Some("https://example.com/a.png".to_string()),
         system_prompt: "You help.".to_string(),
+        acp_command: None,
         runtime: Some("goose".to_string()),
         model: Some("gpt-x".to_string()),
         provider: Some("openai".to_string()),
@@ -565,6 +566,20 @@ fn persona_into_agent_record_is_keyless_and_slugged() {
     assert_eq!(record.runtime.as_deref(), Some("goose"));
     assert_eq!(record.source_team.as_deref(), Some("team-1"));
     assert_eq!(record.env_vars.get("K").map(String::as_str), Some("v"));
+}
+
+#[test]
+fn alternate_acp_command_survives_the_agent_store_fold() {
+    let mut persona = sample_persona();
+    persona.acp_command = Some("buzz-janet-acp".to_string());
+
+    let view = persona
+        .clone()
+        .into_agent_record()
+        .to_definition_view()
+        .expect("slugged record must present a persona view");
+
+    assert_eq!(view.acp_command, persona.acp_command);
 }
 
 #[test]

@@ -1,7 +1,6 @@
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-
 import type {
   AcpRuntimeCatalogEntry,
   CreatePersonaInput,
@@ -66,8 +65,13 @@ import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
-import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
+import {
+  useAcpCommandsQuery,
+  useBakedBuildEnvKeysQuery,
+  useRuntimeFileConfigQuery,
+} from "../hooks";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
+import { AcpCommandField } from "./AcpCommandField";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { AgentHarnessField } from "./AgentHarnessField";
 import {
@@ -90,7 +94,6 @@ import {
   runtimeDropdownAction,
   usePendingHarnessSelection,
 } from "./addCustomHarness";
-
 type AgentDefinitionDialogProps = {
   open: boolean;
   embedded?: boolean;
@@ -114,11 +117,9 @@ type AgentDefinitionDialogProps = {
   /** Extra create-mode submit gate (e.g. incomplete provider config). */
   createSubmitBlocked?: boolean;
 };
-
 export type AgentDefinitionSubmitOptions = {
   publishCatalogUpdates: boolean;
 };
-
 export function AgentDefinitionDialog({
   open,
   embedded = false,
@@ -138,11 +139,13 @@ export function AgentDefinitionDialog({
   createSubmitBlocked = false,
 }: AgentDefinitionDialogProps) {
   const runtimesLoading = runtimeCatalogStatus === "loading";
+  const acpCommandsQuery = useAcpCommandsQuery({ enabled: open });
   const [displayName, setDisplayName] = React.useState("");
   const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [avatarUrl, setAvatarUrl] = React.useState("");
   const [systemPrompt, setSystemPrompt] = React.useState("");
+  const [acpCommand, setAcpCommand] = React.useState("buzz-acp");
   const [runtime, setRuntime] = React.useState("");
   const [model, setModel] = React.useState("");
   const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
@@ -194,29 +197,22 @@ export function AgentDefinitionDialog({
       !hasText(initialValues.runtime) &&
       (hasText(initialValues.model) || hasText(initialValues.provider)),
   );
-
   React.useEffect(() => {
     onDirtyChange?.(hasUserChanges);
   }, [hasUserChanges, onDirtyChange]);
-
   React.useEffect(() => {
     if (!open || !initialValues) {
       return;
     }
-
     setDisplayName(initialValues.displayName);
     setAvatarUrl(initialValues.avatarUrl ?? "");
     setSystemPrompt(initialValues.systemPrompt);
+    setAcpCommand(initialValues.acpCommand ?? "buzz-acp");
     setRuntime(initialValues.runtime ?? "");
     setModel(initialValues.model ?? "");
     setIsCustomModelEditing(false);
     setProvider(initialValues.provider ?? "");
-    setAiConfigurationMode(
-      initialAgentAiConfigurationMode({
-        provider: initialValues.provider ?? "",
-        model: initialValues.model ?? "",
-      }),
-    );
+    setAiConfigurationMode(initialAgentAiConfigurationMode(initialValues));
     setIsCustomProviderEditing(false);
     const nextNamePoolText =
       "namePool" in initialValues
@@ -236,7 +232,6 @@ export function AgentDefinitionDialog({
     isRuntimeAutoSeededRef.current = false;
     hasSeededForOpenRef.current = false;
   }, [initialValues, open]);
-
   React.useEffect(() => {
     if (
       !open ||
@@ -249,7 +244,6 @@ export function AgentDefinitionDialog({
     ) {
       return;
     }
-
     setRuntime(defaultRuntime.id);
     hasSeededForOpenRef.current = true;
     if ("id" in initialValues) {
@@ -260,7 +254,6 @@ export function AgentDefinitionDialog({
       isRuntimeAutoSeededRef.current = true;
     }
   }, [defaultRuntime, initialValues, open, runtime, runtimesLoading]);
-
   // Keep an inherited Create runtime synced with defaults saved in-place.
   React.useEffect(() => {
     if (
@@ -275,7 +268,6 @@ export function AgentDefinitionDialog({
     ) {
       return;
     }
-
     if (runtime !== defaultRuntime.id) setRuntime(defaultRuntime.id);
     isRuntimeAutoSeededRef.current = true;
     hasSeededForOpenRef.current = true;
@@ -287,7 +279,6 @@ export function AgentDefinitionDialog({
     runtime,
     runtimesLoading,
   ]);
-
   // Keep setup guidance reachable when no available runtime can be inherited.
   React.useEffect(() => {
     if (
@@ -300,13 +291,13 @@ export function AgentDefinitionDialog({
       setAiConfigurationMode("custom");
     }
   }, [defaultRuntime, isCreateMode, open, runtime, runtimesLoading]);
-
   function handleOpenChange(next: boolean) {
     // The catalog may veto embedded close requests; preserve the draft until unmount.
     if (!next && !embedded) {
       setDisplayName("");
       setAvatarUrl("");
       setSystemPrompt("");
+      setAcpCommand("buzz-acp");
       setRuntime("");
       setModel("");
       setIsCustomModelEditing(false);
@@ -324,15 +315,12 @@ export function AgentDefinitionDialog({
       // isRuntimeAutoSeededRef and hasSeededForOpenRef are NOT reset here — the
       // [initialValues, open] effect resets both when the dialog re-opens.
     }
-
     onOpenChange(next);
   }
-
   async function handleSubmit() {
     // D1: the same localModeSatisfied gate as canSubmit prevents form-submit
     // (Enter) from bypassing a missing credential.
     if (!initialValues || !localModeSatisfied || !canSubmit) return;
-
     const {
       runtime: runtimeForSubmit,
       model: modelForSubmit,
@@ -359,6 +347,7 @@ export function AgentDefinitionDialog({
       displayName: displayName.trim(),
       avatarUrl: avatarUrl.trim() || undefined,
       systemPrompt: systemPrompt,
+      acpCommand: acpCommand.trim() || "buzz-acp",
       runtime: runtimeForSubmit,
       model: modelForSubmit,
       provider: providerForSubmit,
@@ -370,7 +359,6 @@ export function AgentDefinitionDialog({
         "id" in initialValues,
       ),
     };
-
     if ("id" in initialValues) {
       await onSubmit(
         {
@@ -383,7 +371,6 @@ export function AgentDefinitionDialog({
       );
       return;
     }
-
     await onSubmit(baseInput, { publishCatalogUpdates: false });
   }
 
@@ -822,15 +809,26 @@ export function AgentDefinitionDialog({
           data-testid={`agent-${aiConfigurationMode}-configuration-section`}
         >
           {aiConfigurationMode === "custom" ? (
-            <AgentHarnessField
-              catalogStatus={runtimeCatalogStatus}
-              disabled={isPending || runtimesLoading}
-              onValueChange={handleRuntimeDropdownChange}
-              options={runtimeDropdownOptions}
-              placeholder={blankRuntimeOptionLabel}
-              value={runtimeDropdownValue}
-              warning={runtimeWarning}
-            />
+            <>
+              <AgentHarnessField
+                catalogStatus={runtimeCatalogStatus}
+                disabled={isPending || runtimesLoading}
+                onValueChange={handleRuntimeDropdownChange}
+                options={runtimeDropdownOptions}
+                placeholder={blankRuntimeOptionLabel}
+                value={runtimeDropdownValue}
+                warning={runtimeWarning}
+              />
+              <AcpCommandField
+                candidates={acpCommandsQuery.data ?? []}
+                disabled={isPending || acpCommandsQuery.isLoading}
+                onValueChange={(command) => {
+                  setAcpCommand(command);
+                  setHasUserChanges(true);
+                }}
+                value={acpCommand}
+              />
+            </>
           ) : null}
           {llmProviderFieldVisible && aiConfigurationMode === "custom" ? (
             <div className="space-y-1.5">

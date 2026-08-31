@@ -11,6 +11,7 @@ use crate::managed_agents::{
 };
 use nostr::{EventBuilder, JsonUtil, Kind, Tag};
 use std::collections::BTreeMap;
+mod acp_transport;
 mod concealment; // executable-text concealment gate (Carl P1)
 mod retention; // adoption-path retention enqueue (Wes/Carl P1)
 mod reuse; // built-in reuse decision (`reusable_builtin`)
@@ -25,6 +26,7 @@ fn persona(id: &str, prompt: &str) -> AgentDefinition {
         display_name: id.to_string(),
         avatar_url: None,
         system_prompt: prompt.to_string(),
+        acp_command: None,
         runtime: None,
         model: None,
         provider: None,
@@ -47,6 +49,7 @@ fn persona(id: &str, prompt: &str) -> AgentDefinition {
 
 fn member(member_key: &str, prompt: &str) -> TeamCatalogMember {
     TeamCatalogMember {
+        acp_command: None,
         member_key: member_key.to_string(),
         display_name: member_key.to_string(),
         system_prompt: Some(prompt.to_string()),

@@ -1,5 +1,6 @@
 use super::*;
 use std::{collections::BTreeMap, path::PathBuf};
+mod acp_transport;
 mod concealment; // executable-text concealment gate (Carl P1)
 mod reuse_hint; // built-in reuse-hint projection-hash boundary gate (Carl r9 P1)
 
@@ -9,6 +10,7 @@ fn member(id: &str, display_name: &str) -> AgentDefinition {
         display_name: display_name.to_string(),
         avatar_url: None,
         system_prompt: "Do the work.".to_string(),
+        acp_command: None,
         runtime: Some("goose".to_string()),
         model: Some("claude-opus-4".to_string()),
         provider: Some("anthropic".to_string()),

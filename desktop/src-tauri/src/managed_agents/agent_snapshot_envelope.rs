@@ -332,6 +332,7 @@ mod tests {
             format: FORMAT_DISCRIMINATOR.to_string(),
             version: FORMAT_VERSION,
             definition: AgentSnapshotDefinition {
+                acp_command: None,
                 name: "Locked Test".to_string(),
                 system_prompt: Some("You are a locked test agent.".to_string()),
                 runtime: None,

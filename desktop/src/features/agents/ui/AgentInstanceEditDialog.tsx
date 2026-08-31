@@ -4,6 +4,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { toast } from "sonner";
 
 import {
+  useAcpCommandsQuery,
   useAcpRuntimesQuery,
   useAgentConfigSurface,
   useBakedBuildEnvKeysQuery,
@@ -115,8 +116,9 @@ export function AgentInstanceEditDialog({
   onUpdated?: (agent: ManagedAgent) => void;
 }) {
   const updateMutation = useUpdateManagedAgentMutation();
-  const startMutation = useStartManagedAgentMutation();
-  const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
+  const startMutation = useStartManagedAgentMutation(),
+    runtimesQuery = useAcpRuntimesQuery({ enabled: open }),
+    acpCommandsQuery = useAcpCommandsQuery({ enabled: open });
   const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
   const runtimes = runtimesQuery.data ?? [];
 
@@ -1125,9 +1127,7 @@ export function AgentInstanceEditDialog({
                 </p>
               ) : null}
             </div>
-
             <EffortPickerField agent={agent} config={configSurfaceQuery.data} />
-
             <AgentAiDefaultsNotice
               onEditDefaults={() => setAiDefaultsOpen(true)}
               triggerRef={aiDefaultsTriggerRef}
@@ -1136,7 +1136,6 @@ export function AgentInstanceEditDialog({
               inheritedModel={inheritedModelDefault}
               inheritedProvider={inheritedProviderDefault}
             />
-
             <AgentDefaultsDialog
               onOpenChange={setAiDefaultsOpen}
               open={aiDefaultsOpen}
@@ -1176,6 +1175,7 @@ export function AgentInstanceEditDialog({
                   >
                     <EditAgentAdvancedFields
                       acpCommand={acpCommand}
+                      acpCommandCandidates={acpCommandsQuery.data ?? []}
                       agentArgs={agentArgs}
                       autoRestartOnConfigChange={autoRestartOnConfigChange}
                       disabled={updateMutation.isPending}

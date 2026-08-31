@@ -439,6 +439,7 @@ fn member_copy(
         display_name: member.display_name.clone(),
         avatar_url: member.avatar_url.clone(),
         system_prompt: member.system_prompt.clone().unwrap_or_default(),
+        acp_command: member.acp_command.clone(),
         runtime: member.runtime.clone(),
         model: member.model.clone(),
         provider: member.provider.clone(),

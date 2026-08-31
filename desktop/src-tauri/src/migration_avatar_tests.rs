@@ -29,6 +29,7 @@ fn refresh_builtin_agent_avatars_updates_seeded_values_and_preserves_customizati
         display_name: "Fizz".to_string(),
         avatar_url: Some(old_fizz.to_string()),
         system_prompt: "A customized built-in prompt".to_string(),
+        acp_command: None,
         runtime: Some("goose".to_string()),
         model: Some("test-model".to_string()),
         provider: Some("test-provider".to_string()),

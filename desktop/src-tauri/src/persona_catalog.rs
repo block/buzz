@@ -49,6 +49,7 @@ struct CatalogAgentProjection {
     avatar_url: Option<String>,
     system_prompt: String,
     runtime: Option<String>,
+    acp_command: Option<String>,
     model: Option<String>,
     provider: Option<String>,
     name_pool: Vec<String>,
@@ -223,6 +224,12 @@ fn parse_agent(content: &str) -> Option<CatalogAgentProjection> {
         .unwrap_or_default()
         .to_string();
     validate_agent_definition_text(&display_name, &system_prompt).ok()?;
+    let acp_command = match object.get("acp_command") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(command)) => Some(command.clone()),
+        _ => return None,
+    };
+    crate::managed_agents::validate_portable_acp_command(acp_command.as_deref()).ok()?;
 
     let respond_to = match object.get("respond_to").and_then(Value::as_str) {
         Some("allowlist") => Some("owner-only".to_string()),
@@ -254,6 +261,7 @@ fn parse_agent(content: &str) -> Option<CatalogAgentProjection> {
             .map(ToOwned::to_owned),
         system_prompt,
         runtime: optional_string(object.get("runtime")),
+        acp_command,
         model: optional_string(object.get("model")),
         provider: optional_string(object.get("provider")),
         name_pool,

@@ -107,6 +107,7 @@ fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
         display_name: id.into(),
         avatar_url: None,
         system_prompt: prompt.into(),
+        acp_command: None,
         runtime: runtime.map(str::to_string),
         model: None,
         provider: None,

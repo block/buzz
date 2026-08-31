@@ -30,6 +30,7 @@ pub async fn create_persona(
         let system_prompt = input.system_prompt.clone();
         validate_agent_definition_text(&display_name, &system_prompt)?;
         let avatar_url = trim_optional(input.avatar_url);
+        let acp_command = trim_optional(input.acp_command);
         let runtime = trim_optional(input.runtime);
         let model = trim_optional(input.model);
         let provider = trim_optional(input.provider);
@@ -59,6 +60,7 @@ pub async fn create_persona(
             display_name,
             avatar_url,
             system_prompt,
+            acp_command,
             runtime,
             model,
             provider,

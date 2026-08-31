@@ -11,6 +11,7 @@ export type RawPersona = {
   display_name: string;
   avatar_url: string | null;
   system_prompt: string;
+  acp_command?: string | null;
   runtime?: string | null;
   model?: string | null;
   provider?: string | null;
@@ -41,6 +42,7 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
     displayName: persona.display_name,
     avatarUrl: persona.avatar_url,
     systemPrompt: persona.system_prompt,
+    acpCommand: persona.acp_command ?? "buzz-acp",
     runtime: persona.runtime ?? null,
     model: persona.model ?? null,
     provider: persona.provider ?? null,
@@ -77,6 +79,7 @@ export async function createPersona(
         displayName: input.displayName,
         avatarUrl: input.avatarUrl,
         systemPrompt: input.systemPrompt,
+        acpCommand: input.acpCommand,
         runtime: input.runtime,
         model: input.model,
         provider: input.provider,
@@ -96,6 +99,7 @@ function updatePersonaPayload(input: UpdatePersonaInput) {
     displayName: input.displayName,
     avatarUrl: input.avatarUrl,
     systemPrompt: input.systemPrompt,
+    acpCommand: input.acpCommand,
     runtime: input.runtime,
     model: input.model,
     provider: input.provider,

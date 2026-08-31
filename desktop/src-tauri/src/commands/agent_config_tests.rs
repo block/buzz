@@ -131,6 +131,7 @@ fn persona_with_model(model: &str) -> AgentDefinition {
         display_name: "Persona".to_string(),
         avatar_url: None,
         system_prompt: "You are a persona.".to_string(),
+        acp_command: None,
         runtime: None,
         model: Some(model.to_string()),
         provider: None,

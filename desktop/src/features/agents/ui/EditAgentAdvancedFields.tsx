@@ -9,8 +9,8 @@ import {
   PERSONA_FIELD_SHELL_CLASS,
   PERSONA_LABEL_OPTIONAL_CLASS,
 } from "./agentConfigOptions";
-import type { AgentPersona } from "@/shared/api/types";
-import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
+import type { AcpCommandCandidate } from "@/shared/api/acpCommands";
+import type { AcpRuntimeCatalogEntry, AgentPersona } from "@/shared/api/types";
 import {
   BuzzAgentModelTuningFields,
   NumericTuningFields,
@@ -29,8 +29,12 @@ import {
   type RuntimeCatalogStatus,
 } from "../lib/agentConfigCore";
 
+import { PersonaDropdownField } from "./PersonaDropdownField";
+import { acpCommandPickerState } from "./acpCommandPicker";
+
 export function EditAgentAdvancedFields({
   acpCommand,
+  acpCommandCandidates,
   agentArgs,
   autoRestartOnConfigChange,
   disabled,
@@ -58,6 +62,7 @@ export function EditAgentAdvancedFields({
   onSystemPromptChange,
 }: {
   acpCommand: string;
+  acpCommandCandidates: readonly AcpCommandCandidate[];
   agentArgs: string;
   autoRestartOnConfigChange: boolean;
   disabled: boolean;
@@ -108,6 +113,11 @@ export function EditAgentAdvancedFields({
   onAutoRestartChange: (value: boolean) => void;
   onSystemPromptChange: (value: string) => void;
 }) {
+  const acpCommandPicker = React.useMemo(
+    () => acpCommandPickerState(acpCommand, acpCommandCandidates),
+    [acpCommand, acpCommandCandidates],
+  );
+
   // Numeric tuning descriptors — gate on catalog status so that loading/error
   // never collapses to "no controls": keys stay visible as generic rows.
   const numericDescriptors = React.useMemo(
@@ -269,33 +279,25 @@ export function EditAgentAdvancedFields({
           active community relay — so offering a knob here would advertise a
           setting with no effect. The stored field is preserved untouched. */}
 
-      {/* ACP command */}
-      <div className="space-y-1.5">
-        <label
-          className="text-sm font-medium text-foreground"
-          htmlFor="edit-agent-acp-command"
-        >
-          ACP command
-        </label>
-        <div
-          className={cn(
-            "flex min-h-11 items-center px-3",
-            PERSONA_FIELD_SHELL_CLASS,
-          )}
-        >
-          <Input
-            autoCorrect="off"
-            className={cn(
-              "h-8 px-0 py-0 leading-6",
-              PERSONA_FIELD_CONTROL_CLASS,
-            )}
+      {/* Definition-less legacy agents keep a direct ACP command control. */}
+      {linkedPersona == null ? (
+        <div className="space-y-1.5">
+          <label
+            className="text-sm font-medium text-foreground"
+            htmlFor="edit-agent-acp-command"
+          >
+            ACP command
+          </label>
+          <PersonaDropdownField
             disabled={disabled}
             id="edit-agent-acp-command"
-            onChange={(event) => onAcpCommandChange(event.target.value)}
-            value={acpCommand}
+            onValueChange={onAcpCommandChange}
+            options={acpCommandPicker.options}
+            placeholder="Choose an ACP command"
+            value={acpCommandPicker.selectValue}
           />
         </div>
-      </div>
+      ) : null}
 
       {/* System prompt override — hidden for linked instances; the persona
           definition is authoritative and the backend will reject any override. */}

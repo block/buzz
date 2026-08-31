@@ -352,16 +352,61 @@ test.describe("edit agent dialog", () => {
     ).toBeVisible();
   });
 
-  test("profile Edit routes persona-linked agents to the definition editor", async ({
+  test("discovers, selects, and persists an ACP command from the agent profile", async ({
     page,
   }) => {
-    // Routing pin for handleEditAgent (UserProfilePanel): when the agent has
-    // a resolvable non-built-in persona, the Edit quick action opens the
-    // DEFINITION editor (persona dialog), not EditAgentDialog. The instance
-    // editor (and its inherit-runtime toggle) is reachable for persona-linked
-    // agents only via the requestOpenEditAgent event (ConfigNudgeCard) — no
-    // plain UI path — so its inherit-toggle behavior is covered by B3b's
-    // component-level pinning test, not e2e.
+    await installMockBridge(page, {
+      acpCommands: [
+        {
+          command: "buzz-janet-acp",
+          binaryPath: "/usr/local/bin/buzz-janet-acp",
+        },
+      ],
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+    });
+
+    await openEditDialog(page);
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+
+    const acpPicker = page.locator("#edit-agent-acp-command");
+    await expect(acpPicker).toBeVisible();
+    await acpPicker.click();
+    await expect(
+      page.getByRole("menuitemradio", { name: "buzz-janet-acp" }),
+    ).toBeVisible();
+    await page.getByRole("menuitemradio", { name: "buzz-janet-acp" }).click();
+    await expect(acpPicker).toContainText("buzz-janet-acp");
+    await page.screenshot({
+      path: test.info().outputPath("acp-command-selected.png"),
+      fullPage: true,
+    });
+
+    await page.getByTestId("edit-agent-dialog-submit").click();
+    await expect(page.getByTestId("edit-agent-dialog")).not.toBeVisible();
+
+    await page.getByTestId("user-profile-edit-agent").click();
+    await page.getByRole("button", { name: "Advanced", exact: true }).click();
+    await expect(page.locator("#edit-agent-acp-command")).toContainText(
+      "buzz-janet-acp",
+    );
+    await page.screenshot({
+      path: test.info().outputPath("acp-command-persisted.png"),
+      fullPage: true,
+    });
+  });
+
+  test("profile Edit opens the persona editor for a persona-linked agent", async ({
+    page,
+  }) => {
+    // A persona-linked agent inherits ACP transport from its definition, so the
+    // profile Edit action must open the persona editor.
     await installMockBridge(page, {
       managedAgents: [
         {
@@ -396,14 +441,12 @@ test.describe("edit agent dialog", () => {
     });
     await page.getByTestId("user-profile-edit-agent").click();
 
-    // Definition editor opens; the instance editor does not.
+    // Persona editor opens with the definition-owned ACP command field.
     await expect(page.getByTestId("persona-dialog")).toBeVisible({
       timeout: 10_000,
     });
     await expect(page.getByTestId("edit-agent-dialog")).not.toBeVisible();
-    // And it is the persona's record that's being edited.
-    await expect(page.locator("#persona-display-name")).toHaveValue(
-      "Edit E2E Persona",
-    );
+    await page.getByRole("tab", { name: "Customize for this agent" }).click();
+    await expect(page.locator("#persona-acp-command")).toBeVisible();
   });
 });

@@ -150,6 +150,7 @@ mod tests {
             display_name: "Catalog Reviewer".to_string(),
             avatar_url: None,
             system_prompt: "Review the catalog.".to_string(),
+            acp_command: None,
             runtime: None,
             model: None,
             provider: None,

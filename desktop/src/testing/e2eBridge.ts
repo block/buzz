@@ -634,6 +634,8 @@ type E2eConfig = {
      * returning a catalog.
      */
     discoverAgentModelsError?: string;
+    /** ACP commands returned by the discovery IPC in mock mode. */
+    acpCommands?: Array<{ command: string; binaryPath: string }>;
     // Backend provider mocks for the create-agent "Run on" section. See
     // tests/helpers/bridge.ts:MockBridgeOptions for semantics.
     backendProviders?: Array<{ id: string; binaryPath: string }>;
@@ -986,6 +988,7 @@ type RawManagedAgentPrereqs = {
 };
 
 type RawPersona = {
+  acp_command?: string | null;
   id: string;
   display_name: string;
   avatar_url: string | null;
@@ -3333,6 +3336,11 @@ function mockPersonaCatalogPublications() {
     } catch {
       continue;
     }
+    if (
+      content.acp_command != null &&
+      !portableMockAcpCommand(content.acp_command)
+    )
+      continue;
     const displayName = content.display_name;
     const systemPrompt = content.system_prompt ?? "";
     const optionalString = (value: unknown) =>
@@ -3407,6 +3415,7 @@ function mockPersonaCatalogPublications() {
         displayName,
         avatarUrl: optionalString(content.avatar_url),
         systemPrompt,
+        acpCommand: optionalString(content.acp_command),
         runtime: optionalString(content.runtime),
         model: optionalString(content.model),
         provider: optionalString(content.provider),
@@ -8640,6 +8649,7 @@ function applyMockPersonaBehavior(
 
 async function handleCreatePersona(args: {
   input: {
+    acpCommand?: string;
     displayName: string;
     avatarUrl?: string;
     systemPrompt: string;
@@ -8657,6 +8667,7 @@ async function handleCreatePersona(args: {
     display_name: args.input.displayName.trim(),
     avatar_url: args.input.avatarUrl?.trim() || null,
     system_prompt: args.input.systemPrompt.trim(),
+    acp_command: args.input.acpCommand ?? "buzz-acp",
     runtime: args.input.runtime?.trim() || null,
     model: args.input.model?.trim() || null,
     provider: args.input.provider?.trim() || null,
@@ -8685,6 +8696,7 @@ async function handleCreatePersona(args: {
 }
 
 type MockUpdatePersonaInput = {
+  acpCommand?: string;
   id: string;
   displayName: string;
   avatarUrl?: string;
@@ -8722,6 +8734,7 @@ async function applyMockPersonaUpdate(
   persona.display_name = input.displayName.trim();
   persona.avatar_url = input.avatarUrl?.trim() || null;
   persona.system_prompt = input.systemPrompt.trim();
+  if (input.acpCommand !== undefined) persona.acp_command = input.acpCommand;
   persona.runtime = input.runtime?.trim() || null;
   persona.model = input.model?.trim() || null;
   persona.provider = input.provider?.trim() || null;
@@ -8814,6 +8827,14 @@ function upsertMockPersonaRelayEvent(event: RelayEvent): void {
   mockPersonaEvents.push(event);
 }
 
+function portableMockAcpCommand(command: unknown): command is string {
+  return (
+    typeof command === "string" &&
+    command.length <= 255 &&
+    (command === "buzz-acp" || /^buzz-[A-Za-z0-9_-]+-acp$/.test(command))
+  );
+}
+
 function upsertMockPersonaEvent(
   persona: RawPersona,
   identity?: TestIdentity,
@@ -8825,6 +8846,13 @@ function upsertMockPersonaEvent(
     content: JSON.stringify({
       display_name: persona.display_name,
       system_prompt: persona.system_prompt,
+      acp_command: persona.shared
+        ? persona.acp_command == null
+          ? "buzz-acp"
+          : portableMockAcpCommand(persona.acp_command)
+            ? persona.acp_command
+            : undefined
+        : persona.acp_command,
       avatar_url: persona.avatar_url,
       runtime: persona.runtime ?? null,
       model: persona.model ?? null,
@@ -9616,6 +9644,7 @@ async function handleUpdateManagedAgent(args: {
     envVars?: Record<string, string>;
     respondTo?: "owner-only" | "allowlist" | "anyone";
     respondToAllowlist?: string[];
+    acpCommand?: string;
   };
 }): Promise<{ agent: RawManagedAgent; profile_sync_error: string | null }> {
   const agent = getMockManagedAgent(args.input.pubkey);
@@ -9636,6 +9665,9 @@ async function handleUpdateManagedAgent(args: {
   }
   if (args.input.respondToAllowlist !== undefined) {
     agent.respond_to_allowlist = args.input.respondToAllowlist;
+  }
+  if (args.input.acpCommand !== undefined) {
+    agent.acp_command = args.input.acpCommand;
   }
   agent.updated_at = new Date().toISOString();
   return { agent: cloneManagedAgent(agent), profile_sync_error: null };
@@ -13040,6 +13072,8 @@ export function maybeInstallE2eTauriMocks() {
           payload as { runtimeId?: string },
           activeConfig,
         );
+      case "discover_acp_commands":
+        return activeConfig?.mock?.acpCommands ?? [];
       case "discover_backend_providers":
         return activeConfig?.mock?.backendProviders ?? [];
       case "probe_backend_provider": {

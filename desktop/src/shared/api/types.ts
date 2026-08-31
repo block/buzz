@@ -1,7 +1,6 @@
 export type ChannelType = "stream" | "forum" | "dm";
 export type ChannelVisibility = "open" | "private";
 export type ChannelRole = "owner" | "admin" | "member" | "guest" | "bot";
-
 export type Channel = {
   id: string;
   name: string;
@@ -20,7 +19,6 @@ export type Channel = {
   ttlSeconds: number | null;
   ttlDeadline: string | null;
 };
-
 export type ChannelDetail = Channel & {
   createdBy: string;
   createdAt: string;
@@ -33,7 +31,6 @@ export type ChannelDetail = Channel & {
   maxMembers: number | null;
   nip29GroupId: string | null;
 };
-
 export type ChannelMember = {
   pubkey: string;
   role: ChannelRole;
@@ -708,6 +705,7 @@ export type AgentPersona = {
   displayName: string;
   avatarUrl: string | null;
   systemPrompt: string;
+  acpCommand: string; // ACP transport selected before deployment.
   /** Preferred ACP runtime ID (e.g. "goose", "claude"). */
   runtime: string | null;
   /** Opaque, harness-specific model identifier string. Buzz stores and passes through without interpretation. */
@@ -761,6 +759,7 @@ export type CreatePersonaInput = {
   displayName: string;
   avatarUrl?: string;
   systemPrompt: string;
+  acpCommand?: string;
   runtime?: string;
   model?: string;
   provider?: string;
@@ -779,6 +778,7 @@ export type UpdatePersonaInput = {
   displayName: string;
   avatarUrl?: string;
   systemPrompt: string;
+  acpCommand?: string;
   runtime?: string;
   model?: string;
   provider?: string;

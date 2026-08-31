@@ -1,5 +1,4 @@
 use super::*;
-
 #[test]
 fn access_policy_change_requires_runtime_refresh_for_effective_gate_changes() {
     use crate::managed_agents::RespondTo;
@@ -433,6 +432,7 @@ fn model_discovery_ignores_stale_record_for_linked_agent() {
         display_name: "Persona".to_string(),
         avatar_url: None,
         system_prompt: "You are a persona.".to_string(),
+        acp_command: None,
         runtime: Some("goose".to_string()),
         model: Some("persona-model".to_string()),
         provider: Some("anthropic".to_string()),

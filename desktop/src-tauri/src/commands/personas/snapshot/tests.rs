@@ -99,6 +99,7 @@ fn make_snapshot(
         format: FORMAT_DISCRIMINATOR.to_string(),
         version: FORMAT_VERSION,
         definition: AgentSnapshotDefinition {
+            acp_command: None,
             name: "Test Agent".to_string(),
             source_is_builtin: false,
             system_prompt: Some("You are helpful.".to_string()),

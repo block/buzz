@@ -97,6 +97,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let system_prompt = input.system_prompt.clone();
             validate_agent_definition_text(&display_name, &system_prompt)?;
             let avatar_url = trim_optional(input.avatar_url);
+            let acp_command = trim_optional(input.acp_command);
             let runtime = trim_optional(input.runtime);
             let model = trim_optional(input.model);
             let provider = trim_optional(input.provider);
@@ -120,6 +121,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             persona.display_name = display_name;
             persona.avatar_url = avatar_url;
             persona.system_prompt = system_prompt;
+            persona.acp_command = acp_command;
             persona.runtime = runtime;
             persona.model = model;
             persona.provider = provider;

@@ -59,8 +59,8 @@ const PUBLISH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 /// The JSON body stored in a persona event's content field.
 ///
 /// Field order MUST match the NIP-AP reference vectors (`docs/nips/NIP-AP.md`
-/// content body: `display_name, system_prompt, avatar_url, runtime, model,
-/// provider, name_pool`). serde emits fields in declaration order, so this
+/// content body: `display_name, system_prompt, acp_command, avatar_url, runtime,
+/// model, provider, name_pool, respond_to, respond_to_allowlist, parallelism`). serde emits fields in declaration order, so this
 /// order pins the exact content bytes and therefore the NIP-01 event id — a
 /// reorder here breaks cross-implementation interop. Guarded by
 /// `content_matches_nip_ap_vector`.
@@ -73,6 +73,8 @@ pub struct PersonaEventContent {
     /// and therefore `persona_content_hash` — are unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -176,7 +178,18 @@ pub fn monotonic_created_at(prior_head_created_at: Option<i64>) -> nostr::Timest
 pub fn build_persona_event(record: &AgentDefinition) -> Result<EventBuilder, String> {
     // Single projection point — persona_event_content owns the field mapping
     // (and the hash-stability rules that come with it).
-    let content = persona_event_content(record);
+    let mut content = persona_event_content(record);
+    if record.shared {
+        // Public catalog heads carry only portable aliases. Explicit stock
+        // distinguishes a reset from an omitted machine-local owner override.
+        content.acp_command = match record.acp_command.as_deref() {
+            None => Some(super::DEFAULT_ACP_COMMAND.to_string()),
+            Some(command) if super::backend::is_portable_acp_command(command) => {
+                Some(command.to_string())
+            }
+            Some(_) => None,
+        };
+    }
 
     let content_json = serde_json::to_string(&content)
         .map_err(|e| format!("failed to serialize persona content: {e}"))?;
@@ -230,6 +243,7 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
         display_name: content.display_name,
         avatar_url: content.avatar_url,
         system_prompt: content.system_prompt.unwrap_or_default(),
+        acp_command: content.acp_command,
         runtime: content.runtime,
         model: content.model,
         provider: content.provider,
@@ -510,6 +524,7 @@ pub fn persona_event_content(record: &AgentDefinition) -> PersonaEventContent {
         // records serialize byte-identically and persona_content_hash is
         // stable across the upgrade (drift badges must not flip).
         system_prompt: Some(record.system_prompt.clone()),
+        acp_command: record.acp_command.clone(),
         runtime: record.runtime.clone(),
         model: record.model.clone(),
         provider: record.provider.clone(),
@@ -536,6 +551,7 @@ pub fn persona_event_content(record: &AgentDefinition) -> PersonaEventContent {
 /// the definition's current content hash.
 pub struct PersonaSnapshot {
     pub system_prompt: Option<String>,
+    pub acp_command: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
     /// Preferred ACP runtime ID, copied verbatim from the persona (including
@@ -557,6 +573,7 @@ pub struct PersonaSnapshot {
 pub fn persona_snapshot(persona: &AgentDefinition) -> PersonaSnapshot {
     PersonaSnapshot {
         system_prompt: Some(persona.system_prompt.clone()),
+        acp_command: persona.acp_command.clone(),
         model: persona.model.clone(),
         provider: persona.provider.clone(),
         runtime: persona.runtime.clone(),
@@ -587,6 +604,11 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
     if let Some(prompt) = snapshot.system_prompt {
         record.system_prompt = Some(prompt);
     }
+    // The definition view omits stock buzz-acp. Absence therefore resets a
+    // previously selected wrapper; preserving the instance would resurrect it.
+    record.acp_command = snapshot
+        .acp_command
+        .unwrap_or_else(|| super::DEFAULT_ACP_COMMAND.to_string());
     record.model = snapshot.model;
     record.provider = snapshot.provider;
     record.runtime = snapshot.runtime;

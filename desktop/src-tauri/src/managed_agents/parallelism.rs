@@ -133,6 +133,7 @@ mod tests {
             display_name: String::new(),
             avatar_url: None,
             system_prompt: String::new(),
+            acp_command: None,
             runtime: runtime.map(str::to_string),
             model: None,
             provider: None,

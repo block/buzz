@@ -74,6 +74,7 @@ fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> Agen
         display_name: "Test Persona".to_string(),
         avatar_url: None,
         system_prompt: "".to_string(),
+        acp_command: None,
         runtime: None,
         model: model.map(str::to_string),
         provider: provider.map(str::to_string),

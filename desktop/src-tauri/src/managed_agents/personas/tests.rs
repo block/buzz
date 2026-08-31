@@ -12,6 +12,7 @@ fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
         display_name: display_name.to_string(),
         avatar_url: Some("https://example.com/avatar.png".to_string()),
         system_prompt: "Custom prompt".to_string(),
+        acp_command: None,
         runtime: None,
         model: None,
         provider: None,

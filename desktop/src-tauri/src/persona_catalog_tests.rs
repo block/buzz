@@ -202,6 +202,7 @@ fn serialized_catalog_matches_the_typescript_contract() {
         source_persona_id: "persona-1".into(),
         created_at: 42,
         agent: CatalogAgentProjection {
+            acp_command: Some("buzz-janet-acp".into()),
             display_name: "Ada".into(),
             avatar_url: Some("https://example.com/a.png".into()),
             system_prompt: "be kind".into(),
@@ -224,6 +225,7 @@ fn serialized_catalog_matches_the_typescript_contract() {
             "avatarUrl": "https://example.com/a.png",
             "systemPrompt": "be kind",
             "runtime": "acp",
+            "acpCommand": "buzz-janet-acp",
             "model": "m1",
             "provider": "p1",
             "namePool": ["Ada", "Lin"],
@@ -232,4 +234,62 @@ fn serialized_catalog_matches_the_typescript_contract() {
         },
     }]);
     assert_eq!(actual, expected);
+}
+
+#[test]
+fn catalog_preserves_portable_acp_alias_and_rejects_nonportable_values() {
+    let mut content = valid_content("Reviewer");
+    assert_eq!(parse_agent(&content.to_string()).unwrap().acp_command, None);
+    for command in ["buzz-acp", "buzz-janet-acp"] {
+        content["acp_command"] = json!(command);
+        let projected = parse_agent(&content.to_string()).unwrap();
+        assert_eq!(projected.acp_command.as_deref(), Some(command));
+        assert_eq!(
+            serde_json::to_value(projected).unwrap()["acpCommand"],
+            command
+        );
+    }
+    for command in [
+        json!("/tmp/buzz-janet-acp"),
+        json!(r"C:\buzz-janet-acp.cmd"),
+        json!("sh"),
+        json!("buzz-a&b-acp"),
+        json!(7),
+    ] {
+        content["acp_command"] = command;
+        assert!(parse_agent(&content.to_string()).is_none());
+    }
+}
+
+#[test]
+fn shared_persona_publication_is_portable_and_catalog_readable() {
+    use crate::managed_agents::persona_events::{build_persona_event, persona_from_event};
+    let keys = Keys::generate();
+    let mut content = valid_content("Reviewer");
+    content["name_pool"] = json!(["Reviewer"]);
+    let seed = event(&keys, 1, "reviewer", false, content);
+    let mut persona = persona_from_event(&seed).unwrap();
+    persona.shared = true;
+    for (command, projected) in [
+        (Some("/opt/custom-acp"), None),
+        (Some("buzz-janet-acp"), Some("buzz-janet-acp")),
+        (Some("buzz-acp"), Some("buzz-acp")),
+        (None, Some("buzz-acp")),
+    ] {
+        persona.acp_command = command.map(str::to_string);
+        let published = build_persona_event(&persona)
+            .unwrap()
+            .sign_with_keys(&keys)
+            .unwrap();
+        published.verify().unwrap();
+        assert!(!published.content.contains("/opt/custom-acp"));
+        let publications = publications_from_verified_events(vec![published]);
+        assert_eq!(publications.len(), 1);
+        assert_eq!(publications[0].agent.acp_command.as_deref(), projected);
+        assert_eq!(
+            persona.acp_command.as_deref(),
+            command,
+            "publication must not mutate local state"
+        );
+    }
 }

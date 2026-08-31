@@ -12,6 +12,7 @@ fn definition(
         display_name: "Test Definition".to_string(),
         avatar_url: None,
         system_prompt: prompt.to_string(),
+        acp_command: None,
         runtime: None,
         model: model.map(str::to_string),
         provider: provider.map(str::to_string),

@@ -587,6 +587,8 @@ type MockBridgeOptions = {
    * returning a catalog. Exercises the discovery-failure UI path.
    */
   discoverAgentModelsError?: string;
+  /** ACP commands returned by `discover_acp_commands`. Defaults to `[]`. */
+  acpCommands?: Array<{ command: string; binaryPath: string }>;
   /**
    * Providers returned by `discover_backend_providers`. Defaults to `[]`
    * (the "Run on" section stays hidden). Setting this renders the remote

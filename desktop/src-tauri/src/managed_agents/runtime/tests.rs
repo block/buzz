@@ -1,5 +1,4 @@
 use crate::managed_agents::known_acp_runtime;
-
 #[path = "cli_tests.rs"]
 mod cli_tests;
 
@@ -277,6 +276,7 @@ fn persona_with_provider(
         display_name: id.to_string(),
         avatar_url: None,
         system_prompt: prompt.to_string(),
+        acp_command: None,
         runtime: None,
         model: model.map(str::to_string),
         provider: provider.map(str::to_string),

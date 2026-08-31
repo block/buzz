@@ -320,6 +320,7 @@ export function usePersonaActions() {
             displayName: persona.displayName,
             avatarUrl: persona.avatarUrl ?? undefined,
             systemPrompt: persona.systemPrompt,
+            acpCommand: persona.acpCommand,
             runtime: persona.runtime ?? undefined,
             model: persona.model ?? undefined,
             provider: persona.provider ?? undefined,

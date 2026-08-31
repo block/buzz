@@ -23,7 +23,7 @@
 //!   - `auth_tag` (NIP-OA)
 //!   - `env_vars` (API keys / credentials)
 //!   - `relay_url` (machine-local endpoint)
-//!   - `acp_command` / `agent_command` / `agent_command_override` / `agent_args`
+//!   - nonportable `acp_command` values / `agent_command` / `agent_command_override` / `agent_args`
 //!     (machine-local harness paths)
 //!   - `mcp_command` (machine-local)
 //!   - runtime state: `runtime_pid`, `backend_agent_id`, `backend` blob,
@@ -106,6 +106,9 @@ pub struct AgentSnapshotDefinition {
     pub system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+    /// Portable transport alias; machine-specific legacy commands are excluded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_command: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -209,6 +212,8 @@ pub fn build_snapshot(
         source_is_builtin: record.is_builtin,
         system_prompt: record.system_prompt.clone(),
         runtime: record.runtime.clone(),
+        acp_command: super::is_portable_acp_command(&record.acp_command)
+            .then(|| record.acp_command.clone()),
         model: record.model.clone(),
         provider: record.provider.clone(),
         parallelism: record.definition_parallelism.or(Some(record.parallelism)),
@@ -404,6 +409,7 @@ pub(crate) fn validate_snapshot(snapshot: &AgentSnapshot) -> Result<(), String> 
             snapshot.version
         ));
     }
+    super::validate_portable_acp_command(snapshot.definition.acp_command.as_deref())?;
     if snapshot.definition.name.trim().is_empty() {
         return Err("Snapshot definition.name is empty".to_string());
     }

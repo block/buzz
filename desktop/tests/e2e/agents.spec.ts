@@ -503,6 +503,64 @@ test("embedded create keeps its draft when discard is cancelled", async ({
   );
 });
 
+test("an ACP-only edit publishes the selected transport", async ({ page }) => {
+  const personaId = "custom:acp-only";
+  await installMockBridge(page, {
+    globalAgentConfig: {
+      env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
+    },
+    acpCommands: [
+      { command: "buzz-janet-acp", binaryPath: "/opt/buzz-janet-acp" },
+    ],
+    personas: [
+      {
+        id: personaId,
+        displayName: "ACP Only",
+        systemPrompt: "Review changes.",
+        runtime: "goose",
+        model: "claude-opus-4-5",
+        provider: "anthropic",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await sharePersonaToCatalog(page, "ACP Only");
+  await page.getByLabel("Open actions for ACP Only").click();
+  await page.getByRole("menuitem", { name: "Edit", exact: true }).click();
+  const dialog = page.getByTestId("persona-dialog");
+  await expect(
+    dialog.getByRole("button", { name: "Save changes" }),
+  ).toBeVisible();
+  // Model config starts in Customize; touching that tab would itself dirty the
+  // form and mask this regression. Change ONLY the Radix ACP selection.
+  await dialog.locator("#persona-acp-command").click();
+  await page
+    .getByRole("menuitemradio", { name: "buzz-janet-acp", exact: true })
+    .click();
+  await expect(
+    dialog.getByTestId("persona-dialog-catalog-publish-notice"),
+  ).toBeVisible();
+  await dialog.getByRole("button", { name: "Save and publish" }).click();
+  await expect(dialog).toHaveCount(0);
+  expect(
+    await countCommandInvocations(page, "update_persona_and_publish"),
+  ).toBe(1);
+  const personas = await invokeTauri<
+    Array<{ id: string; acp_command?: string }>
+  >(page, "list_personas");
+  expect(
+    personas.find((persona) => persona.id === personaId)?.acp_command,
+  ).toBe("buzz-janet-acp");
+  const publications = await invokeTauri<
+    Array<{ sourcePersonaId: string; agent: { acpCommand?: string } }>
+  >(page, "fetch_persona_catalog");
+  expect(
+    publications.find((entry) => entry.sourcePersonaId === personaId)?.agent
+      .acpCommand,
+  ).toBe("buzz-janet-acp");
+});
+
 test("the new team card offers create and import", async ({ page }) => {
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();

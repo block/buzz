@@ -12,6 +12,7 @@ fn member(name: &str) -> AgentSnapshot {
         format: crate::managed_agents::agent_snapshot::FORMAT_DISCRIMINATOR.to_string(),
         version: crate::managed_agents::agent_snapshot::FORMAT_VERSION,
         definition: AgentSnapshotDefinition {
+            acp_command: None,
             name: name.to_string(),
             source_is_builtin: false,
             system_prompt: Some(format!("{name} prompt")),
@@ -59,6 +60,7 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
             display_name: "Alice".to_string(),
             avatar_url: None,
             system_prompt: "Alice prompt".to_string(),
+            acp_command: Some("buzz-janet-acp".to_string()),
             runtime: Some("goose".to_string()),
             model: None,
             provider: None,
@@ -82,6 +84,7 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
             display_name: "Bob".to_string(),
             avatar_url: None,
             system_prompt: "Bob prompt".to_string(),
+            acp_command: None,
             runtime: Some("goose".to_string()),
             model: None,
             provider: None,
@@ -136,6 +139,12 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
     assert_eq!(decoded.team.description.as_deref(), Some("Reviews changes"));
     assert_eq!(decoded.team.instructions.as_deref(), Some("Be thorough."));
     assert_eq!(decoded.members.len(), 2);
+    let imported = build_import_definitions(&decoded, false, "now").unwrap();
+    assert_eq!(imported[0].acp_command.as_deref(), Some("buzz-janet-acp"));
+    assert_eq!(
+        imported[0].clone().into_agent_record().acp_command,
+        "buzz-janet-acp"
+    );
     assert!(decoded.members.iter().all(|member| {
         member.memory.level == MemoryLevel::None && member.memory.entries.is_empty()
     }));
@@ -148,6 +157,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         display_name: "Alice".to_string(),
         avatar_url: None,
         system_prompt: "Alice prompt".to_string(),
+        acp_command: None,
         runtime: Some("goose".to_string()),
         model: None,
         provider: None,

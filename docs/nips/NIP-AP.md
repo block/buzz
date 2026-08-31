@@ -63,6 +63,7 @@ The `content` field is a **plaintext** (unencrypted) JSON object:
 {
   "display_name": "<string>",
   "system_prompt": "<string | null>",
+  "acp_command": "<string | null>",
   "avatar_url": "<string | null>",
   "runtime": "<string | null>",
   "model": "<string | null>",
@@ -85,6 +86,7 @@ The `content` field is a **plaintext** (unencrypted) JSON object:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `system_prompt` | string \| null | `null` | The system prompt injected into agent sessions. Optional since the unified agent model: a definition can be pure configuration (e.g. provider/model only). Readers MUST treat an absent or `null` prompt as "no prompt". |
+| `acp_command` | string \| null | `"buzz-acp"` | ACP transport command, distinct from the runtime/harness. See transport portability below. |
 | `avatar_url` | string \| null | `null` | URL to an avatar image. |
 | `runtime` | string \| null | `null` | ACP runtime identifier (e.g. `"goose"`, `"claude-code"`). |
 | `model` | string \| null | `null` | Model identifier (e.g. `"claude-opus-4"`). |
@@ -109,6 +111,31 @@ carrying these fields round-trips through the wire type but the values do not
 survive a local edit-and-republish cycle.
 
 Unknown fields MUST be ignored by readers (forward compatibility).
+
+### Transport portability
+
+`acp_command` is optional; legacy absence/null selects stock `buzz-acp` for
+new definitions. Portable commands are `buzz-acp` or a name of at most 255
+ASCII bytes matching `buzz-[A-Za-z0-9_-]+-acp`. Discovery resolves these aliases
+on the receiving device; publication does not guarantee local availability.
+
+Catalog publications carry `["shared", "true"]`. Their writers MUST omit
+nonportable commands (including machine-local paths), and MUST emit explicit
+`"buzz-acp"` when stock is selected. Foreign catalog readers MUST reject a
+present nonportable value, and use stock when the field is omitted/null.
+
+Owner-to-self synchronization of non-catalog heads retains existing custom
+command compatibility; it is not a foreign adoption path or a sandbox. On an
+owner's existing definition, absent/null transport on a shared head MUST
+preserve an existing nonportable local command, because that value may have
+been redacted. Otherwise absence selects stock. An explicit portable value,
+including `"buzz-acp"`, replaces the previous command. A shared custom command
+therefore remains local rather than synchronizing its path to another device.
+The `shared` tag is catalog presentation, not confidentiality: all kind:30175
+content remains plaintext, including non-catalog heads.
+
+Writers serialize optional `acp_command` after `system_prompt` and before
+`avatar_url`; omission preserves the existing reference vector's bytes.
 
 ### Prohibited: secrets in content
 
@@ -282,11 +309,11 @@ These rules are enforced at the following relay read surfaces (content and event
 - **NIP-98 HTTP bridge `/count`** — `needs_shared_gate_filtering` forces the per-event fallback path for any filter that can match a shared-gated kind; the fast SQL `count_events()` path is not used. Both the channel-scoped and unconstrained fallback loops apply `event_visible_to_reader`, preventing existence-leak via COUNT over HTTP.
 - **FTS (NIP-50 search) and `/search`** — no shared-gated kind is in the relay's FTS allowlist (migration 8 indexes only kinds `0, 9, 40002, 45001, 45003`); no FTS result can contain an unshared event. A defense-in-depth check is also present in the bridge search result loop so that a future FTS allowlist change cannot silently reopen the bypass.
 
-**Device sync is unaffected.** The sync subscription (`{kinds:[30175], authors:[self]}`) reads the author's own events, which are always returned regardless of shared state.
+**Owner read access is unaffected.** The sync subscription (`{kinds:[30175], authors:[self]}`) reads the author's own events regardless of shared state. Shared heads redact nonportable transport commands, however, so those commands remain device-local under the transport replay rules above.
 
 **Opting in to community sharing.** Publish a NIP-33 replacement head for the persona with a `["shared", "true"]` tag. Unsharing is the reverse: republish without the tag. NIP-33 replacement semantics apply (newest `created_at` wins).
 
-**`shared` is a tag, not a content field.** Content bytes are hash-pinned as the NIP-01 event id and also used as the `source_version` for persona drift detection. A content-field toggle would look like a definition edit; a tag does not affect content bytes.
+**`shared` is a tag, not a content field.** The tag controls visibility, but sharing also changes the transport projection: stock becomes explicit and nonportable commands are omitted. NIP-01 hashes the published event, including those projected content bytes and tags. Local `source_version` drift detection instead hashes the unredacted, spawn-relevant definition content; it need not equal a hash of the catalog body. A sharing-only change does not change that local definition hash.
 
 **Non-goal: side-band existence oracles.** Reaction, report, and event-deletion validation resolves target events by id to check that they exist. These paths intentionally accept arbitrary event references by design — they leak one bit (existence) but never content, and exploiting them requires already possessing a 64-hex event id that unshared personas never expose through any gated read path. Gating these side-band resolvers would require teaching reaction/report validation about persona read semantics with no realistic attack mitigated. If a stricter "zero existence leakage" property is required in future, it is a separate scoped task.
 

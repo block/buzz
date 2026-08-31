@@ -18,6 +18,11 @@ pub struct AgentDefinition {
     pub display_name: String,
     pub avatar_url: Option<String>,
     pub system_prompt: String,
+    /// ACP transport command selected alongside the runtime before deployment.
+    /// `None` preserves legacy definitions that predate persona-owned ACP
+    /// selection; linked instances then fall back to their stored command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_command: Option<String>,
     /// Preferred ACP runtime ID (e.g., 'goose', 'claude', 'codex'). Determines which agent binary
     /// Buzz spawns. When deploying from this persona, this runtime is pre-selected in the UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -112,7 +117,9 @@ impl AgentDefinition {
             auth_tag: None,
             relay_url: String::new(),
             avatar_url: self.avatar_url,
-            acp_command: DEFAULT_ACP_COMMAND.to_string(),
+            acp_command: self
+                .acp_command
+                .unwrap_or_else(|| DEFAULT_ACP_COMMAND.to_string()),
             agent_command: String::new(),
             agent_command_override: None,
             agent_args: Vec::new(),
@@ -181,6 +188,8 @@ impl ManagedAgentRecord {
                 .unwrap_or_else(|| self.name.clone()),
             avatar_url: self.avatar_url.clone(),
             system_prompt: self.system_prompt.clone().unwrap_or_default(),
+            acp_command: (self.acp_command != DEFAULT_ACP_COMMAND)
+                .then(|| self.acp_command.clone()),
             runtime: self.runtime.clone(),
             model: self.model.clone(),
             provider: self.provider.clone(),

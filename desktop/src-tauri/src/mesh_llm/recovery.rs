@@ -444,6 +444,7 @@ mod tests {
             display_name: pubkey.to_string(),
             avatar_url: None,
             system_prompt: String::new(),
+            acp_command: None,
             runtime: None,
             model: None,
             provider: None,

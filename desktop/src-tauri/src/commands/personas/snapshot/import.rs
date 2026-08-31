@@ -568,6 +568,7 @@ pub async fn confirm_agent_snapshot_import(
                 .system_prompt
                 .clone()
                 .unwrap_or_default(),
+            acp_command: snapshot.definition.acp_command.clone(),
             runtime: snapshot.definition.runtime.clone(),
             model: snapshot.definition.model.clone(),
             provider: snapshot.definition.provider.clone(),
@@ -605,9 +606,13 @@ pub async fn confirm_agent_snapshot_import(
             auth_tag: auth_tag.clone(),
             relay_url: String::new(), // resolves to workspace relay at runtime
             avatar_url: effective_avatar.clone(),
-            // Machine-local commands: derive from the runtime catalog at
-            // spawn time — never manufacture from snapshot data.
-            acp_command: crate::managed_agents::DEFAULT_ACP_COMMAND.to_string(),
+            // Only the validated portable ACP alias crosses the snapshot boundary.
+            // Harness paths still resolve locally at spawn.
+            acp_command: snapshot
+                .definition
+                .acp_command
+                .clone()
+                .unwrap_or_else(|| crate::managed_agents::DEFAULT_ACP_COMMAND.to_string()),
             agent_command: String::new(),
             agent_command_override: None,
             agent_args: vec![],
