@@ -690,7 +690,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 40);
+        assert_eq!(migrations.len(), 41);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1232,6 +1232,12 @@ mod tests {
             operator_audit.contains("_operator_global_tables"),
             "migration 39 must register relay_operator_audit in _operator_global_tables"
         );
+
+        assert_eq!(migrations[40].version, 41);
+        let channel_picture = migrations[40].sql.as_str();
+        assert!(channel_picture.contains("ADD COLUMN picture_url"));
+        assert!(channel_picture.contains("octet_length(picture_url) <= 2048"));
+        assert!(desired_schema.contains("picture_url     TEXT CHECK"));
     }
 
     #[test]

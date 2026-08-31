@@ -659,6 +659,28 @@ pub fn build_update_channel(
     Ok(EventBuilder::new(Kind::Custom(9002), "").tags(tags))
 }
 
+/// Build a NIP-29 channel-picture update (kind 9002).
+///
+/// `Some(url)` sets a public HTTPS picture URL. `None` clears the current
+/// picture by emitting an explicit empty `picture` tag.
+pub fn build_set_channel_picture(
+    channel_id: Uuid,
+    picture: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    let value = picture.unwrap_or("");
+    if !value.is_empty() && !buzz_core::channel::is_safe_channel_picture_url(value) {
+        return Err(SdkError::InvalidTag(
+            "channel picture must be a public HTTPS URL without credentials, query, or fragment"
+                .into(),
+        ));
+    }
+    let tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["picture", value])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(9002), "").tags(tags))
+}
+
 /// Build a NIP-29 edit-metadata event for topic (kind 9002).
 pub fn build_set_topic(channel_id: Uuid, topic: &str) -> Result<EventBuilder, SdkError> {
     let tags = vec![
@@ -3027,6 +3049,33 @@ mod tests {
             build_update_channel(cid, None, None, None, None),
             Err(SdkError::InvalidTag(_))
         ));
+    }
+
+    #[test]
+    fn set_and_clear_channel_picture() {
+        let cid = uuid();
+        let picture = "https://media.example.test/groups/photo.jpg";
+        let set = sign(build_set_channel_picture(cid, Some(picture)).unwrap());
+        assert_eq!(set.kind.as_u16(), 9002);
+        assert!(has_tag(&set, "picture", picture));
+
+        let clear = sign(build_set_channel_picture(cid, None).unwrap());
+        assert!(has_tag(&clear, "picture", ""));
+    }
+
+    #[test]
+    fn channel_picture_rejects_unsafe_urls() {
+        for value in [
+            "http://media.example.test/photo.jpg",
+            "https://user@media.example.test/photo.jpg",
+            "https://media.example.test/photo.jpg?token=secret",
+            "https://media.example.test/photo.jpg#fragment",
+        ] {
+            assert!(matches!(
+                build_set_channel_picture(uuid(), Some(value)),
+                Err(SdkError::InvalidTag(_))
+            ));
+        }
     }
 
     #[test]

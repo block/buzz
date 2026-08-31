@@ -83,6 +83,10 @@ CREATE TABLE channels (
     channel_type    channel_type NOT NULL DEFAULT 'stream',
     visibility      channel_visibility NOT NULL DEFAULT 'open',
     description     TEXT,
+    picture_url     TEXT CHECK (
+        picture_url IS NULL
+        OR (octet_length(picture_url) <= 2048 AND lower(picture_url) LIKE 'https://%')
+    ),
     canvas          TEXT,
     created_by      BYTEA NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),

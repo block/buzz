@@ -17,6 +17,27 @@ pub fn canonical_channel_name(name: &str) -> &str {
         .trim_end()
 }
 
+/// Returns whether `value` is a safe, durable URL for a channel picture.
+///
+/// Channel pictures are projected into relay-signed NIP-29 metadata, so the
+/// stored value must be a public HTTPS URL without credentials, query tokens,
+/// or fragments. The byte limit matches the event-tag boundary used by Buzz
+/// clients.
+pub fn is_safe_channel_picture_url(value: &str) -> bool {
+    if value.is_empty() || value.len() > 2_048 {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+}
+
 /// Whether a channel is publicly visible or invite-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelVisibility {
@@ -180,7 +201,7 @@ impl FromStr for MemberRole {
 
 #[cfg(test)]
 mod tests {
-    use super::canonical_channel_name;
+    use super::{canonical_channel_name, is_safe_channel_picture_url};
 
     #[test]
     fn channel_names_trim_whitespace_and_drop_all_leading_hashes() {
@@ -194,5 +215,25 @@ mod tests {
         assert_eq!(canonical_channel_name("# #"), "");
         assert_eq!(canonical_channel_name("### ###"), "");
         assert_eq!(canonical_channel_name("channel#topic"), "channel#topic");
+    }
+
+    #[test]
+    fn channel_picture_urls_are_public_https_without_embedded_secrets() {
+        assert!(is_safe_channel_picture_url(
+            "https://media.example.test/groups/photo.jpg"
+        ));
+        for unsafe_url in [
+            "",
+            "http://media.example.test/groups/photo.jpg",
+            "https://user@media.example.test/groups/photo.jpg",
+            "https://media.example.test/groups/photo.jpg?token=secret",
+            "https://media.example.test/groups/photo.jpg#fragment",
+        ] {
+            assert!(!is_safe_channel_picture_url(unsafe_url), "{unsafe_url}");
+        }
+        assert!(!is_safe_channel_picture_url(&format!(
+            "https://media.example.test/{}",
+            "a".repeat(2_048)
+        )));
     }
 }
