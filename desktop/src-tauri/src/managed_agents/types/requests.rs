@@ -200,6 +200,9 @@ pub struct CreateManagedAgentRequest {
 #[serde(rename_all = "camelCase")]
 pub struct UpdateManagedAgentRequest {
     pub pubkey: String,
+    /// Absent = don't touch. null = clear. Value = bind to one Team context.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub team_id: Option<Option<String>>,
     /// Absent = don't touch. Present = rename the agent.
     #[serde(default)]
     pub name: Option<String>,

@@ -656,6 +656,8 @@ export type RuntimeConfigSurface = {
 
 export type UpdateManagedAgentInput = {
   pubkey: string;
+  /** Absent = don't touch. null = clear. Value = bind this singleton instance to one team. */
+  teamId?: string | null;
   name?: string;
   model?: string | null;
   provider?: string | null;
