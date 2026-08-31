@@ -1,3 +1,4 @@
+import { waitForAnimations } from "../helpers/animations";
 import { expect, test, type Page } from "@playwright/test";
 import {
   installMockBridge,
@@ -115,9 +116,13 @@ test("owned nonmember uses authorized add before exact publication", async ({
   await page.getByTestId("send-message").click();
   const invite = page.getByRole("button", { name: "Invite", exact: true });
   await expect(invite).toBeVisible();
+  await waitForAnimations(page);
+  await page.screenshot({ path: "test-results/remote-invite.png" });
   expect(await sent(page)).toEqual([]);
   await invite.click();
   await expect.poll(() => sent(page)).toEqual([[REMOTE]]);
+  await waitForAnimations(page);
+  await page.screenshot({ path: "test-results/remote-sent.png" });
   const calls = await page.evaluate(
     () => window.__BUZZ_E2E_COMMAND_LOG__ ?? [],
   );
@@ -147,6 +152,10 @@ for (const error of [
     await page.getByTestId("send-message").click();
     await page.getByRole("button", { name: "Invite", exact: true }).click();
     await expect(page.getByText(error, { exact: true })).toBeVisible();
+    await waitForAnimations(page);
+    await page.screenshot({
+      path: `test-results/remote-error-${error.split(" ")[0]}.png`,
+    });
     await expect(page.getByTestId("message-input")).toHaveText(
       "@RemoteScout hello",
     );
