@@ -38,13 +38,17 @@ import { useActiveAgentPubkeys } from "./useActiveAgentPubkeys";
 import { useDefaultAgentSuggestion } from "./useDefaultAgentSuggestion";
 import { flushMentionDebounce, isPlainSpace } from "./flushMentionDebounce";
 import { useAgentMentionRevalidation } from "./agentMentionRevalidation";
-import { extractMentionPubkeys } from "./extractMentionPubkeys";
 import type { MentionIdentity } from "./mentionClipboard";
 import {
   useMentionPasteBinding,
   type RegisterMentionPubkey,
 } from "./mentionPasteBinding";
 import { useVerifyMentionIdentities } from "./useVerifyMentionIdentities";
+import {
+  extractMentionPubkeys,
+  selectedMentionLabel,
+  selectedMentionLabels,
+} from "./extractMentionPubkeys";
 import {
   extractMentionPersonasFromMaps,
   type PersonaMentionTarget,
@@ -489,15 +493,24 @@ export function useMentions(
         clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = null;
       }
-      const displayName = suggestion.displayName;
+      const [boundSuggestion] = selectedMentionLabels(
+        [suggestion],
+        mentionMapRef.current,
+      );
+      const displayName = boundSuggestion.displayName;
       const teamMembers =
-        suggestion.kind === "team" ? suggestion.teamMembers : null;
+        suggestion.kind === "team" && suggestion.teamMembers
+          ? selectedMentionLabels(suggestion.teamMembers, mentionMapRef.current)
+          : null;
       const insertText = teamMembers
         ? formatTeamMention(displayName, teamMembers)
         : `@${displayName} `;
       const mentions = mentionMapRef.current;
       const personaMentions = personaMentionMapRef.current;
-      const selectedMentions = teamMembers ?? [suggestion];
+      const selectedMentions = teamMembers ?? [boundSuggestion];
+      for (const selected of suggestion.teamMembers ?? [suggestion]) {
+        pasteBinding.claimMentionIntent(selected.displayName);
+      }
       for (const selected of selectedMentions) {
         // A picked name is the user's newest word on that label, so it retires
         // any pasted identity still being verified for it — persona routing
@@ -566,13 +579,21 @@ export function useMentions(
       setSelected,
     ],
   );
-  // Every caller is explicit user intent — a resolved insert, an agent-address
-  // lock, a persona created at send time — so this claims the label before
-  // writing it, and a paste still verifying that name settles into nothing.
-  const registerMentionPubkey = React.useCallback<RegisterMentionPubkey>(
-    (displayName, pubkey, options) => {
+  // Registration is explicit user intent; paste settlement keeps its separate
+  // non-bumping write. Reserve the exact label before claiming either name so
+  // a pending paste cannot take the original name after a qualified selection.
+  const registerMentionPubkey = React.useCallback(
+    (displayName: string, pubkey: string, options?: { isAgent?: boolean }) => {
+      const label = selectedMentionLabel(
+        displayName.trim(),
+        pubkey,
+        mentionMapRef.current,
+      );
+      if (!label) return;
       pasteBinding.claimMentionIntent(displayName);
-      writeMentionPubkey(displayName, pubkey, options);
+      pasteBinding.claimMentionIntent(label);
+      writeMentionPubkey(label, pubkey, options);
+      return label;
     },
     [pasteBinding.claimMentionIntent, writeMentionPubkey],
   );
@@ -622,11 +643,11 @@ export function useMentions(
       replaceToOffset: number;
       isAgent?: boolean;
     }): AutocompleteEdit => {
-      registerMentionPubkey(displayName, pubkey, { isAgent });
+      const label = registerMentionPubkey(displayName, pubkey, { isAgent });
       return {
         replaceFromOffset,
         replaceToOffset,
-        insertText: `@${displayName.trim()} `,
+        insertText: `@${label ?? displayName.trim()} `,
       };
     },
     [registerMentionPubkey],

@@ -153,9 +153,9 @@ export function useAgentAddressLockPicker({
       const normalized = normalizePubkey(pubkey);
       if (!audienceScope || !normalized) return;
       unpinAddressedAgent(normalized);
-      const displayName = lockedAgents.find(
-        (agent) => agent.pubkey === normalized,
-      )?.displayName;
+      const displayName =
+        mentions.getMentionDisplayName(normalized) ??
+        lockedAgents.find((agent) => agent.pubkey === normalized)?.displayName;
       if (displayName) {
         const text = richText.getPlainTextAndCursor().text;
         const implicitPrefix = `@${displayName}${text === `@${displayName}` ? "" : " "}`;
@@ -177,6 +177,7 @@ export function useAgentAddressLockPicker({
       applyAutocompleteEdit,
       audienceScope,
       lockedAgents,
+      mentions.getMentionDisplayName,
       onImplicitPrefixRemoved,
       richText.getPlainTextAndCursor,
       unpinAddressedAgent,
@@ -201,12 +202,13 @@ export function useAgentAddressLockPicker({
         );
       } else {
         unpinnedAgentPubkeysRef.current.delete(pubkey);
-        mentions.registerMentionPubkey(suggestion.displayName, pubkey, {
-          isAgent: true,
-        });
+        const label =
+          mentions.registerMentionPubkey(suggestion.displayName, pubkey, {
+            isAgent: true,
+          }) ?? suggestion.displayName;
         const { text } = richText.getPlainTextAndCursor();
-        if (getMentionOffsets(text, suggestion.displayName).length === 0) {
-          const insertedText = `@${suggestion.displayName} `;
+        if (getMentionOffsets(text, label).length === 0) {
+          const insertedText = `@${label} `;
           onImplicitPrefixInserted?.([{ pubkey, prefix: insertedText }]);
           applyAutocompleteEdit({
             replaceFromOffset: 0,
@@ -359,37 +361,30 @@ export function useAgentAddressLockPicker({
       // refs retain the identity of its already-inserted automatic prefix, so
       // use that identity as well as the current display name when deciding
       // whether restoration is needed.
-      const presentAgentPubkeys = new Set(
-        mentions
-          .getDraftMentionRefs(text)
-          .filter((ref) => ref.isAgent)
-          .map((ref) => normalizePubkey(ref.pubkey)),
-      );
+      const presentRefs = mentions.getDraftMentionRefs(text);
+      const missingAgents: Array<{ pubkey: string; displayName: string }> = [];
       for (const agent of targetAgents) {
-        if (
-          presentAgentPubkeys.has(agent.pubkey) ||
-          getMentionOffsets(text, agent.displayName).length > 0
+        const existingRef = presentRefs.find(
+          (ref) => ref.isAgent && normalizePubkey(ref.pubkey) === agent.pubkey,
+        );
+        // A present exact-key binding wins over renamed or colliding labels.
+        const displayName =
+          mentions.registerMentionPubkey(
+            existingRef?.displayName ?? agent.displayName,
+            agent.pubkey,
+            { isAgent: true },
+          ) ?? agent.displayName;
+        if (existingRef || getMentionOffsets(text, displayName).length > 0) {
+          visibleAgentMentionPubkeysRef.current.add(agent.pubkey);
+        } else if (
+          !unpinnedAgentPubkeysRef.current.has(agent.pubkey) ||
+          allowedUnpinned.has(agent.pubkey)
         ) {
-          mentions.registerMentionPubkey(agent.displayName, agent.pubkey, {
-            isAgent: true,
-          });
+          missingAgents.push({ ...agent, displayName });
           visibleAgentMentionPubkeysRef.current.add(agent.pubkey);
         }
       }
-      const missingAgents = targetAgents.filter(
-        (agent) =>
-          (!unpinnedAgentPubkeysRef.current.has(agent.pubkey) ||
-            allowedUnpinned.has(agent.pubkey)) &&
-          !presentAgentPubkeys.has(agent.pubkey) &&
-          getMentionOffsets(text, agent.displayName).length === 0,
-      );
       if (missingAgents.length === 0) return text;
-      for (const agent of missingAgents) {
-        mentions.registerMentionPubkey(agent.displayName, agent.pubkey, {
-          isAgent: true,
-        });
-        visibleAgentMentionPubkeysRef.current.add(agent.pubkey);
-      }
       const insertedText = `${missingAgents
         .map((agent) => `@${agent.displayName}`)
         .join(" ")} `;

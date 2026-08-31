@@ -572,7 +572,9 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
     // In-channel selections send immediately without opening the prompt.
   }
   await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@carl remote"))
+    .poll(() =>
+      readOutgoingMentionPubkeys(page, `@carl (${relayPubkey}) remote`),
+    )
     .toEqual([relayPubkey]);
 
   await page.getByTestId("channel-members-trigger").click();

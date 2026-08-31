@@ -94,11 +94,24 @@ export async function submitMessageEdit({
       restoreMentionRefs(draft.mentionRefs);
     }
   };
-  const addedMentionPubkeys = diffAddedMentionPubkeys(
-    extractMentionPubkeys(originalContent),
-    extractMentionPubkeys(content),
-    ownerPubkey ?? "",
-  );
+  let originalMentionPubkeys: string[] = [];
+  try {
+    originalMentionPubkeys = extractMentionPubkeys(originalContent);
+  } catch {
+    // An old ambiguous label must not prevent removing it. If the original
+    // cannot be resolved, conservatively revalidate every current recipient.
+  }
+  let addedMentionPubkeys: string[];
+  try {
+    addedMentionPubkeys = diffAddedMentionPubkeys(
+      originalMentionPubkeys,
+      extractMentionPubkeys(content),
+      ownerPubkey ?? "",
+    );
+  } catch (error) {
+    setUploadError(error instanceof Error ? error.message : String(error));
+    return;
+  }
   const hasQueuedAttachments = draft.queuedAttachments.length > 0;
   if (hasQueuedAttachments) setDeferredUploadPending(true);
   clearComposer();

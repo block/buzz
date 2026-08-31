@@ -142,3 +142,55 @@ test("edit upload pause revalidates revoked mentions only after upload completes
     ["save", []],
   ]);
 });
+
+test("ambiguous extractor failure is visible before edit draft clearing or save", async () => {
+  const calls = [];
+  const error =
+    "The mention @Scout is ambiguous. Choose a recipient from the mention picker.";
+  await submitMessageEdit({
+    ...baseOptions(async () => calls.push("save")),
+    extractMentionPubkeys: () => {
+      throw new Error(error);
+    },
+    clearComposer: () => calls.push("clear"),
+    setUploadError: (message) => calls.push(message),
+  });
+  assert.deepEqual(calls, [error]);
+});
+
+for (const replacement of ["hello", "hello @Alice"]) {
+  test(`an ambiguous historical mention can be replaced with ${replacement}`, async () => {
+    const { extractMentionPubkeys } = await import(
+      "../lib/extractMentionPubkeys.ts"
+    );
+    const alice = "e".repeat(64);
+    const calls = [];
+    await submitMessageEdit({
+      ...baseOptions(async (_content, _tags, pubkeys) =>
+        calls.push(["save", pubkeys]),
+      ),
+      content: replacement,
+      originalContent: "hello @Scout",
+      extractMentionPubkeys: (text) =>
+        extractMentionPubkeys({
+          text,
+          selectedMentions: new Map(),
+          memberCandidates: [
+            { displayName: "Scout", pubkey: "c".repeat(64), isMember: true },
+            { displayName: "Scout", pubkey: "d".repeat(64), isMember: true },
+            { displayName: "Alice", pubkey: alice, isMember: true },
+          ],
+        }),
+      revalidateMentionPubkeys: async (pubkeys) => {
+        calls.push(["revalidate", pubkeys]);
+        return pubkeys;
+      },
+      setUploadError: (error) => calls.push(["error", error]),
+    });
+    const expected = replacement.includes("@Alice") ? [alice] : [];
+    assert.deepEqual(calls, [
+      ["revalidate", expected],
+      ["save", expected],
+    ]);
+  });
+}

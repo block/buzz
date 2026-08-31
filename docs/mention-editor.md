@@ -40,3 +40,25 @@ Regression coverage: `pastedMentionOccurrences.test.mjs` (range ownership
 through the real plugin), `mentionPasteBinding.test.mjs` (ordering, through the
 production hook), and the send-window, namesake, and delete-then-retype cases in
 `mention-clipboard.spec.ts`.
+## Exact recipient labels
+
+A selected label is a binding to one exact public key, not a lookup by the latest
+profile name. Selecting a second identity with the same name reserves a qualified
+label containing its full key (and, if needed, a collision suffix). Team members
+reserve labels sequentially. Automatic addressing inserts/restores/removes that
+registered label, never a different recipient with the same name.
+
+Manually typed member names with multiple exact-key matches are rejected with a
+visible instruction to use the mention picker. Chat, edits and standalone forum
+composition retain their draft and publish nothing on this error. An edit may
+remove an ambiguous historical label; when the old content cannot be resolved,
+all recipients in the valid replacement are revalidated. Selection stays bound
+across profile renames. This does not expand eligibility or change relay
+revalidation, invitation or publication authorization.
+
+Coverage: `useMentions.test.mjs`, `useAgentAddressLockPicker.test.mjs`,
+`submitMessageEdit.test.mjs`, `mention-recipients.spec.ts`, and the existing
+same-name agent case in `mentions.spec.ts`. The integration-project
+`onboarding.spec.ts` checks that an ambiguous Fizz mention cannot complete the
+welcome flow, then selects the exact newly started starter and asserts its sole
+recipient tag before checking the original completion and layout behavior.

@@ -792,6 +792,10 @@ export function useMentionSendFlow({
         }
         sendPromoted = true;
         await completeSend(pendingDraft, pubkeys);
+      } catch (error) {
+        toast.error(
+          getErrorMessage(error, "Could not prepare mentions. Please retry."),
+        );
       } finally {
         if (!sendPromoted) {
           if (preparedLinkPreviews) {
