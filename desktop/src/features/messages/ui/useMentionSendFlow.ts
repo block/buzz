@@ -82,8 +82,8 @@ export function useMentionSendFlow({
   // Persistence identity is independent of the host component and destination
   // channel. A -> B -> A must not revive A's previous invitation or recovery.
   const sourceOwner = React.useMemo(
-    () => ({ channelId, draftKey: effectiveDraftKey }),
-    [channelId, effectiveDraftKey],
+    () => ({ channelId, draftKey: effectiveDraftKey, getComposerRevision }),
+    [channelId, effectiveDraftKey, getComposerRevision],
   );
   const sourceOwnerRef = React.useRef(sourceOwner);
   sourceOwnerRef.current = sourceOwner;
@@ -303,25 +303,15 @@ export function useMentionSendFlow({
         draft.queuedAttachments.length > 0
           ? prepareBackgroundMediaUpload(draft.queuedAttachments)
           : null;
-      const persistPreflightDraft = () => {
-        if (isSendCancelled() || !draft.recoveryDraftKey) return;
-        drafts.persistDraft(
-          draft.recoveryDraftKey,
-          draft.savedContent,
-          draft.capturedChannelId ?? draft.recoveryDraftKey,
-          draft.savedImeta,
-          [...draft.savedSpoileredAttachmentUrls],
-          draft.savedMentionRefs,
-        );
-        saveQueuedAttachmentsForDraft(
-          draft.recoveryDraftKey,
-          draft.queuedAttachments,
-        );
-      };
-      const persistCanceledDraft = () => {
+      const persistRecoverableDraft = () => {
         // Invitation cancellation still owes the captured draft recovery. Link
         // preview cancellation retains its existing independent recovery owner.
-        if (sendSignal?.aborted || !draft.recoveryDraftKey) return false;
+        if (
+          sendSignal?.aborted ||
+          !draft.recoveryDraftKey ||
+          draft.sourceOwner.getComposerRevision() !== draft.composerRevision
+        )
+          return false;
         const existing = drafts.loadDraft(draft.recoveryDraftKey);
         if (
           existing &&
@@ -347,6 +337,18 @@ export function useMentionSendFlow({
         );
         return true;
       };
+      const persistPreflightDraft = () => {
+        if (
+          !draft.recoveryDraftKey ||
+          isSendCancelled() ||
+          !persistRecoverableDraft()
+        )
+          return;
+        saveQueuedAttachmentsForDraft(
+          draft.recoveryDraftKey,
+          draft.queuedAttachments,
+        );
+      };
       let composerCleared = false;
       let optimisticComposerContent = "";
       let clearedRevision = -1;
@@ -355,8 +357,8 @@ export function useMentionSendFlow({
         composerCleared = false;
         // An authored edit (even edit -> clear) ends optimistic recovery's
         // authority over this visit, including its persisted record and files.
-        if (ownsComposer() && getComposerRevision() !== clearedRevision) return;
-        const persisted = persistCanceledDraft();
+        if (draft.sourceOwner.getComposerRevision() !== clearedRevision) return;
+        const persisted = persistRecoverableDraft();
         const canAnimateCurrentComposer =
           isMountedRef.current && ownsComposer();
         if (
@@ -605,7 +607,7 @@ export function useMentionSendFlow({
           }
           if (
             draft.sentDraftKey &&
-            (!ownsComposer() || getComposerRevision() === clearedRevision) &&
+            draft.sourceOwner.getComposerRevision() === clearedRevision &&
             JSON.stringify(
               drafts.loadDraft(draft.sentDraftKey)?.mentionRefs ?? [],
             ) === JSON.stringify(draft.savedMentionRefs)

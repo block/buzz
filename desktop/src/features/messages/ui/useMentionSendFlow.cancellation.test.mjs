@@ -633,3 +633,181 @@ for (const action of ["unchanged", "navigate", "edit"]) {
     }
   });
 }
+
+// Independent reviewer reproduction, plus storage/queued-file boundaries.
+for (const media of [false, true]) {
+  for (const action of ["dismiss", "navigate", "unmount"]) {
+    test(`authored edit-clear before ${action} stays deleted (queued media: ${media})`, async () => {
+      const s = await setup({ lifecycle: true });
+      const gate = deferred();
+      s.control.publish = gate;
+      if (media) {
+        s.dismiss();
+        s.control.attachments = [{ id: "file", file: {}, spoilered: false }];
+        await s.prompt();
+      }
+      await s.invite();
+      let upload;
+      if (media) {
+        await s.act(async () => {
+          upload = s.control.uploadCallbacks.onComplete(
+            [],
+            new AbortController().signal,
+          );
+        });
+      }
+      assert.equal(s.events("publish").length, 1);
+      s.edit("new authored text");
+      s.edit("", []);
+      assert.equal(s.store.has("thread:a"), false);
+      const recoveryWrites = s.events("save-queue").length;
+      if (action === "navigate") s.navigate("thread:b");
+      else if (action === "unmount") s.unmount();
+      else s.dismiss();
+      assert.equal(s.store.has("thread:a"), false);
+      if (action === "navigate") {
+        s.edit(TEXT, [{ ...s.refs[0], pubkey: "c".repeat(64) }]);
+        s.navigate("thread:a");
+        assert.equal(s.options.contentRef.current, "");
+        assert.equal(s.control.currentRefs.length, 0);
+        s.edit("new A after return", []);
+        s.navigate("thread:b");
+      }
+      await s.finish(gate);
+      if (upload) await upload;
+      assert.equal(s.events("SEND").length, 0);
+      assert.equal(s.events("save-queue").length, recoveryWrites);
+      if (action === "navigate") {
+        assert.equal(s.options.contentRef.current, TEXT);
+        assert.equal(s.control.currentRefs[0].pubkey, "c".repeat(64));
+        assert.equal(s.store.get("thread:a").content, "new A after return");
+        assert.deepEqual(s.store.get("thread:a").mentionRefs, []);
+      } else assert.equal(s.store.has("thread:a"), false);
+    });
+  }
+}
+for (const incoming of [TEXT, "different B text"]) {
+  for (const edit of ["untouched", "same-text-new-refs", "new-text"]) {
+    test(`source authority survives navigation: ${edit}, ${incoming}`, async () => {
+      const s = await setup({ lifecycle: true });
+      const otherRefs = [{ ...s.refs[0], pubkey: "c".repeat(64) }];
+      s.store.set("thread:b", {
+        content: incoming,
+        channelId: "general",
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        mentionRefs: otherRefs,
+      });
+      const gate = deferred();
+      s.control.publish = gate;
+      await s.invite();
+      if (edit !== "untouched")
+        s.edit(edit === "new-text" ? "new A text" : TEXT, otherRefs);
+      s.navigate("thread:b");
+      const saved = s.store.get("thread:a");
+      assert.equal(saved.content, edit === "new-text" ? "new A text" : TEXT);
+      assert.deepEqual(
+        saved.mentionRefs,
+        edit === "untouched" ? s.refs : otherRefs,
+      );
+      s.edit("B edit during old await", []);
+      await s.finish(gate);
+      assert.equal(s.store.get("thread:a"), saved);
+      assert.equal(s.options.contentRef.current, "B edit during old await");
+      assert.equal(s.control.currentRefs.length, 0);
+      assert.equal(s.events("SEND").length, 0);
+    });
+  }
+}
+
+for (const action of ["untouched", "deleted", "superseded"]) {
+  test(`ordinary send preflight recovery respects source authority on unmount: ${action}`, async () => {
+    const s = await setup({ lifecycle: true });
+    s.dismiss();
+    s.options.mentions.memberPubkeys = new Set([KEY]);
+    const gate = deferred();
+    s.control.prepare = gate;
+    s.rerender();
+    let send;
+    await s.act(async () => {
+      send = s.result.current.sendMessageWithMentionFlow({
+        capturedChannelId: "general",
+        pendingImeta: [],
+        trimmed: TEXT,
+        recoveryDraftKey: "thread:a",
+      });
+    });
+    assert.equal(s.options.contentRef.current, "");
+    if (action === "deleted") {
+      s.edit("new text");
+      s.edit("", []);
+    }
+    s.unmount();
+    const other = {
+      content: "new saved draft",
+      channelId: "general",
+      pendingImeta: [],
+      spoileredAttachmentUrls: [],
+      mentionRefs: [],
+    };
+    if (action === "superseded") s.store.set("thread:a", other);
+    await s.finish(gate);
+    await send;
+    assert.equal(s.events("SEND").length, 0);
+    if (action === "deleted") assert.equal(s.store.has("thread:a"), false);
+    else if (action === "superseded")
+      assert.equal(s.store.get("thread:a"), other);
+    else {
+      assert.equal(s.store.get("thread:a").content, TEXT);
+      assert.deepEqual(s.store.get("thread:a").mentionRefs, s.refs);
+    }
+  });
+}
+for (const authored of [false, true]) {
+  test(`sent-draft cleanup consults exited source visit, not B revision (authored: ${authored})`, async () => {
+    const s = await setup({ lifecycle: true });
+    s.dismiss();
+    s.options.mentions.memberPubkeys = new Set([KEY]);
+    s.options.drafts.markDraftSent = (...args) =>
+      s.calls.push(["mark-sent", ...args]);
+    const gate = deferred();
+    s.control.publish = gate;
+    s.rerender();
+    let send;
+    await s.act(async () => {
+      send = s.result.current.sendMessageWithMentionFlow({
+        capturedChannelId: "general",
+        pendingImeta: [],
+        trimmed: TEXT,
+        recoveryDraftKey: "thread:a",
+        sentDraftKey: "thread:a",
+      });
+    });
+    if (authored) s.edit(TEXT); // same snapshot, but a genuinely newer draft
+    const sourceRevision = s.options.getComposerRevision;
+    const revision = sourceRevision();
+    s.navigate("thread:b");
+    s.edit("B edit", []);
+    assert.equal(
+      sourceRevision(),
+      revision,
+      "B must not change the captured A revision",
+    );
+    // An untouched optimistic empty has no stored refs. Seed the unchanged
+    // submitted snapshot to exercise markDraftSent's bounded exact-ref guard.
+    if (!authored)
+      s.store.set("thread:a", {
+        content: TEXT,
+        channelId: "general",
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        mentionRefs: s.refs,
+      });
+    await s.finish(gate);
+    await send;
+    assert.equal(s.events("SEND").length, 1); // ordinary destination-bound send
+    assert.equal(s.events("mark-sent").length, authored ? 0 : 1);
+    assert.equal(s.options.contentRef.current, "B edit");
+    assert.equal(s.control.currentRefs.length, 0);
+  });
+}

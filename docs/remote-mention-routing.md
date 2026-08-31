@@ -52,8 +52,13 @@ visible pending, Escape/retry and route navigation at deferred IPC boundaries.
 
 Invitation intent belongs to one visit of the effective persistence key and
 channel, not just the mounted composer or destination channel. Same-channel
-thread changes and A → B → A invalidate the original visit. The same owner gates
-optimistic clear, recovery and pending state. Invalidation makes recovery durable
+thread changes and A → B → A invalidate the original visit. The visible owner gates
+optimistic clear, editor recovery and pending state. Storage recovery instead
+consults the captured source visit's authored revision even after that visit
+exits; losing visible ownership never revokes an authored deletion. The lifecycle
+retains a per-visit revision record through its captured accessor, so B's edits
+cannot authorize or suppress A's recovery. Preflight recovery and sent-draft
+cleanup use that same source authority. Invalidation makes recovery durable
 synchronously, before a later visit can load or edit the source draft; late async
 completion cannot revive that recovery or release a newer attempt's latch.
 

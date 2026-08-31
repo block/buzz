@@ -66,7 +66,7 @@ type UseDraftPersistLifecycleParams = {
 };
 
 type UseDraftPersistLifecycleResult = {
-  /** Monotonic editor revision, including same-text edit/clear cycles. */
+  /** Captured visit revision; remains readable after exit, excluding later visits. */
   getComposerRevision: () => number;
   /** Optimistic send/recovery is not an authored edit or authoritative deletion. */
   runComposerUpdate: (update: () => void) => void;
@@ -139,11 +139,13 @@ export function useDraftPersistLifecycle({
     [getImplicitAgentMentionPrefix],
   );
 
-  const composerRevision = React.useRef(0);
-  const getComposerRevision = React.useCallback(
-    () => composerRevision.current,
-    [],
+  // Pending sends retain this visit's record after navigation/unmount. A live
+  // editor ref would lose A's deletion authority as soon as B became visible.
+  const visit = React.useMemo(
+    () => ({ channelId, draftKey: effectiveDraftKey, revision: 0 }),
+    [channelId, effectiveDraftKey],
   );
+  const getComposerRevision = React.useCallback(() => visit.revision, [visit]);
   const pendingImetaForPersistRef = React.useRef<ImetaMedia[]>([]);
   const emptyContentIsAuthoritativeRef = React.useRef(false);
   const isRestoringContentRef = React.useRef(false);
@@ -240,7 +242,7 @@ export function useDraftPersistLifecycle({
   const trackAuthoredContent = React.useCallback(
     (content: string) => {
       if (isRestoringContentRef.current) return;
-      composerRevision.current += 1;
+      visit.revision += 1;
       if (!effectiveDraftKey) return;
       const authoritativeDraftKey = scopedDraftKey(effectiveDraftKey);
       if (content.length > 0) {
@@ -259,7 +261,13 @@ export function useDraftPersistLifecycle({
         [],
       );
     },
-    [channelId, effectiveDraftKey, persistDraft, spoileredAttachmentUrlsRef],
+    [
+      channelId,
+      effectiveDraftKey,
+      persistDraft,
+      spoileredAttachmentUrlsRef,
+      visit,
+    ],
   );
 
   return { trackAuthoredContent, getComposerRevision, runComposerUpdate };
