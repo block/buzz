@@ -90,6 +90,57 @@ test("uses an agent's current name, never an internal profile ID", () => {
   assert.deepEqual(parseAgentManagementRequest(payload), payload);
 });
 
+test("parses an allowlist-mode update and carries the pubkey list", () => {
+  const payload = {
+    type: AGENT_MANAGEMENT_REQUEST,
+    action: "update",
+    requestId: "request-4",
+    request: {
+      channelId: CHANNEL_ID,
+      agentName: "Review helper",
+      respondTo: "allowlist",
+      respondToAllowlist: ["a".repeat(64), "b".repeat(64)],
+    },
+  };
+
+  assert.deepEqual(parseAgentManagementRequest(payload), payload);
+});
+
+test("drops respondToAllowlist when respondTo isn't allowlist mode", () => {
+  const payload = {
+    type: AGENT_MANAGEMENT_REQUEST,
+    action: "update",
+    requestId: "request-5",
+    request: {
+      channelId: CHANNEL_ID,
+      agentName: "Review helper",
+      respondTo: "anyone",
+      respondToAllowlist: ["a".repeat(64)],
+    },
+  };
+
+  const parsed = parseAgentManagementRequest(payload);
+  assert.ok(parsed && parsed.action === "update");
+  assert.equal(parsed.request.respondTo, "anyone");
+  assert.equal(parsed.request.respondToAllowlist, undefined);
+});
+
+test("rejects a malformed respondToAllowlist", () => {
+  const payload = {
+    type: AGENT_MANAGEMENT_REQUEST,
+    action: "update",
+    requestId: "request-6",
+    request: {
+      channelId: CHANNEL_ID,
+      agentName: "Review helper",
+      respondTo: "allowlist",
+      respondToAllowlist: [42],
+    },
+  };
+
+  assert.equal(parseAgentManagementRequest(payload), null);
+});
+
 test("allows agents to update only personal, editable profiles", () => {
   assert.equal(
     requestTargetsEditablePersona({ isBuiltIn: false, sourceTeam: null }),

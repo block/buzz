@@ -36,6 +36,8 @@ pub struct UpdateAgentDraft {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub respond_to: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub respond_to_allowlist: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -97,6 +99,28 @@ fn required(value: String, label: &str, max: usize) -> Result<String, CliError> 
 
 fn optional(value: Option<String>, label: &str) -> Result<Option<String>, CliError> {
     value.map(|value| required(value, label, 300)).transpose()
+}
+
+/// Validate and normalize a respond-to allowlist: each entry must be exactly
+/// 64 hex chars (any case in, lowercase out); duplicates are removed,
+/// insertion order preserved. Mirrors the desktop-side validation in
+/// `managed_agents::types::validate_respond_to_allowlist`.
+fn validate_respond_to_allowlist(input: &[String]) -> Result<Vec<String>, CliError> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(input.len());
+    for entry in input {
+        let trimmed = entry.trim();
+        if trimmed.len() != 64 || !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(CliError::Usage(format!(
+                "invalid pubkey in --respond-to-allowlist: '{trimmed}' (must be 64 hex chars)"
+            )));
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if seen.insert(lower.clone()) {
+            out.push(lower);
+        }
+    }
+    Ok(out)
 }
 
 fn build<T: Serialize>(
@@ -175,10 +199,21 @@ pub fn build_update(
     let respond_to = optional(draft.respond_to, "respond-to")?;
     if respond_to
         .as_deref()
-        .is_some_and(|value| value != "owner-only" && value != "anyone")
+        .is_some_and(|value| value != "owner-only" && value != "allowlist" && value != "anyone")
     {
         return Err(CliError::Usage(
-            "respond-to must be owner-only or anyone".into(),
+            "respond-to must be owner-only, allowlist, or anyone".into(),
+        ));
+    }
+    let respond_to_allowlist = validate_respond_to_allowlist(&draft.respond_to_allowlist)?;
+    if respond_to.as_deref() == Some("allowlist") && respond_to_allowlist.is_empty() {
+        return Err(CliError::Usage(
+            "--respond-to allowlist requires at least one --respond-to-allowlist pubkey".into(),
+        ));
+    }
+    if !respond_to_allowlist.is_empty() && respond_to.as_deref() != Some("allowlist") {
+        return Err(CliError::Usage(
+            "--respond-to-allowlist requires --respond-to allowlist".into(),
         ));
     }
     let request = UpdateAgentDraft {
@@ -193,6 +228,7 @@ pub fn build_update(
         provider: optional(draft.provider, "provider")?,
         model: optional(draft.model, "model")?,
         respond_to,
+        respond_to_allowlist,
     };
     if request.display_name.is_none()
         && request.system_prompt.is_none()
@@ -320,10 +356,108 @@ mod tests {
                 provider: None,
                 model: None,
                 respond_to: None,
+                respond_to_allowlist: Vec::new(),
             },
         )
         .unwrap_err();
         assert!(error.to_string().contains("at least one field"));
+    }
+
+    #[test]
+    fn update_allowlist_mode_requires_at_least_one_pubkey() {
+        let error = build_update(
+            &Keys::generate(),
+            &Keys::generate().public_key(),
+            UpdateAgentDraft {
+                channel_id: CHANNEL.into(),
+                agent_name: "Scout".into(),
+                display_name: None,
+                system_prompt: None,
+                runtime: None,
+                provider: None,
+                model: None,
+                respond_to: Some("allowlist".into()),
+                respond_to_allowlist: Vec::new(),
+            },
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("at least one --respond-to-allowlist"));
+    }
+
+    #[test]
+    fn update_allowlist_without_mode_is_rejected() {
+        let pubkey = "a".repeat(64);
+        let error = build_update(
+            &Keys::generate(),
+            &Keys::generate().public_key(),
+            UpdateAgentDraft {
+                channel_id: CHANNEL.into(),
+                agent_name: "Scout".into(),
+                display_name: None,
+                system_prompt: None,
+                runtime: None,
+                provider: None,
+                model: None,
+                respond_to: None,
+                respond_to_allowlist: vec![pubkey],
+            },
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("--respond-to-allowlist requires --respond-to allowlist"));
+    }
+
+    #[test]
+    fn update_allowlist_mode_is_included_in_encrypted_payload_and_dedupes() {
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let pubkey = "B".repeat(64);
+        let built = build_update(
+            &agent,
+            &owner.public_key(),
+            UpdateAgentDraft {
+                channel_id: CHANNEL.into(),
+                agent_name: "Scout".into(),
+                display_name: None,
+                system_prompt: None,
+                runtime: None,
+                provider: None,
+                model: None,
+                respond_to: Some("allowlist".into()),
+                respond_to_allowlist: vec![pubkey.clone(), pubkey.to_ascii_uppercase()],
+            },
+        )
+        .unwrap();
+        let payload: serde_json::Value = decrypt_observer_payload(&owner, &built.event).unwrap();
+        assert_eq!(payload["payload"]["request"]["respondTo"], "allowlist");
+        assert_eq!(
+            payload["payload"]["request"]["respondToAllowlist"],
+            serde_json::json!([pubkey.to_ascii_lowercase()])
+        );
+    }
+
+    #[test]
+    fn update_rejects_invalid_allowlist_pubkey() {
+        let error = build_update(
+            &Keys::generate(),
+            &Keys::generate().public_key(),
+            UpdateAgentDraft {
+                channel_id: CHANNEL.into(),
+                agent_name: "Scout".into(),
+                display_name: None,
+                system_prompt: None,
+                runtime: None,
+                provider: None,
+                model: None,
+                respond_to: Some("allowlist".into()),
+                respond_to_allowlist: vec!["not-hex".into()],
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("must be 64 hex chars"));
     }
 
     #[test]
