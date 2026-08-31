@@ -12,6 +12,10 @@
 //!   window on multi-channel backfills and reconnects.
 //! - Archived channels are dropped at discovery: re-offering one draws a
 //!   `CLOSED restricted` loop.
+//! - The relay acks a client CLOSE with an empty-message CLOSED. Every
+//!   one-shot REQ therefore gets a connection-unique sub id (a late ack for a
+//!   reused id would kill the next request), and the live loop ignores CLOSED
+//!   frames for subscriptions it does not own. Observed live 2026-08-31.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -120,7 +124,8 @@ async fn discover_channels(
         json!({ "kinds": [buzz_core::kind::KIND_NIP29_GROUP_MEMBERS], "#p": [me] }),
         PAGE_TIMEOUT,
     )
-    .await?;
+    .await?
+    .settled_or_bail("membership discovery")?;
     let channel_ids: BTreeSet<String> = members
         .iter()
         .filter_map(|ev| tag_value(ev, "d").map(str::to_string))
@@ -133,16 +138,17 @@ async fn discover_channels(
     // Metadata lookups are chunked to stay under the 128-explicit-value cap.
     let mut meta = Vec::new();
     let ids: Vec<String> = channel_ids.iter().cloned().collect();
-    for chunk in ids.chunks(100) {
+    for (i, chunk) in ids.chunks(100).enumerate() {
         tokio::time::sleep(REQ_PACING).await;
         meta.extend(
             request_until_eose(
                 conn,
-                "disc-meta",
+                &format!("disc-meta-{i}"),
                 json!({ "kinds": [buzz_core::kind::KIND_NIP29_GROUP_METADATA], "#d": chunk }),
                 PAGE_TIMEOUT,
             )
-            .await?,
+            .await?
+            .settled_or_bail("channel metadata discovery")?,
         );
     }
 
@@ -204,19 +210,38 @@ async fn backfill(
             .backfill_cursor
             .unwrap_or_else(|| chrono::Utc::now().timestamp());
         registry.channel(&ch.id, |c| c.backfill = "paging".into());
+        let mut page_no: u64 = 0;
         loop {
             tokio::time::sleep(REQ_PACING).await;
-            let sub = format!("bf-{}", ch.id);
-            let page = request_until_eose(
+            let sub = format!("bf-{page_no}-{}", ch.id);
+            page_no += 1;
+            let page = match request_until_eose(
                 conn,
                 &sub,
                 json!({ "#h": [ch.id], "until": cursor, "limit": PAGE_LIMIT }),
                 PAGE_TIMEOUT,
             )
-            .await?;
+            .await?
+            {
+                ReqOutcome::Settled(events) => events,
+                ReqOutcome::Denied(message) => {
+                    // Revoked mid-backfill; bailing would hard-loop the
+                    // reconnect, so drop the channel and move on.
+                    warn!(channel = %ch.id, %message, "channel access revoked during backfill");
+                    store.deactivate_channel(&ch.id).await?;
+                    registry.channel_revoked(&ch.id);
+                    break;
+                }
+            };
             let stored = verify_and_map(page).await;
             let inserted = store.upsert_events(&stored).await?;
-            registry.channel(&ch.id, |c| c.pages += 1);
+            let newest = stored.iter().map(|e| e.created_at).max();
+            registry.channel(&ch.id, |c| {
+                c.pages += 1;
+                if let Some(ts) = newest {
+                    c.newest_ts = Some(c.newest_ts.unwrap_or(ts).max(ts));
+                }
+            });
             let done = stored.len() < PAGE_LIMIT;
             if done {
                 store.set_backfill(&ch.id, None, true).await?;
@@ -265,14 +290,17 @@ fn oldest_ts(page: &[StoredEvent]) -> Option<i64> {
 /// are logged and skipped, never fatal.
 async fn backfill_profiles(conn: &mut NostrWsConnection, store: &Store) -> anyhow::Result<()> {
     tokio::time::sleep(REQ_PACING).await;
-    let profiles = request_until_eose(
+    let profiles = match request_until_eose(
         conn,
         "profiles-backfill",
         json!({ "kinds": [0], "limit": PAGE_LIMIT }),
         PAGE_TIMEOUT,
     )
     .await
-    .unwrap_or_default();
+    {
+        Ok(ReqOutcome::Settled(events)) => events,
+        Ok(ReqOutcome::Denied(_)) | Err(_) => Vec::new(),
+    };
     let count = profiles.len();
     for ev in profiles {
         let name = profile_name(&ev.content);
@@ -401,8 +429,11 @@ async fn live_tail(
                         registry.channel_revoked(channel_id);
                         continue;
                     }
+                    anyhow::bail!("subscription {subscription_id} closed: {message}");
                 }
-                anyhow::bail!("subscription {subscription_id} closed: {message}");
+                // Straggling ack for an already-CLOSEd one-shot sub
+                // (discovery/backfill); not ours to act on.
+                warn!(%subscription_id, %message, "ignoring CLOSED for non-live subscription");
             }
             RelayMessage::Auth { challenge } => {
                 // Mid-stream re-auth: answer it and carry on.
@@ -416,13 +447,36 @@ async fn live_tail(
     }
 }
 
+/// How a one-shot REQ ended.
+enum ReqOutcome {
+    /// EOSE reached (or the relay settled the sub); here is everything.
+    Settled(Vec<nostr::Event>),
+    /// The relay refused with a channel-access CLOSED.
+    Denied(String),
+}
+
+impl ReqOutcome {
+    /// Unwraps `Settled`, turning `Denied` into an error — for requests where
+    /// an access refusal means the whole connection is mis-scoped.
+    fn settled_or_bail(self, what: &str) -> anyhow::Result<Vec<nostr::Event>> {
+        match self {
+            ReqOutcome::Settled(events) => Ok(events),
+            ReqOutcome::Denied(message) => anyhow::bail!("{what} denied: {message}"),
+        }
+    }
+}
+
 /// Sends one REQ, collects its events until EOSE, then CLOSEs the sub.
+///
+/// `sub_id` must be unique for the lifetime of the connection: the relay acks
+/// CLOSE with an empty-message CLOSED, and a late ack for a reused id would
+/// be indistinguishable from a refusal of the current request.
 async fn request_until_eose(
     conn: &mut NostrWsConnection,
     sub_id: &str,
     filter: Value,
     timeout: Duration,
-) -> anyhow::Result<Vec<nostr::Event>> {
+) -> anyhow::Result<ReqOutcome> {
     conn.send_raw(&json!(["REQ", sub_id, filter])).await?;
     let deadline = tokio::time::Instant::now() + timeout;
     let mut events = Vec::new();
@@ -442,12 +496,21 @@ async fn request_until_eose(
             }
             RelayMessage::Eose { subscription_id } if subscription_id == sub_id => {
                 conn.send_raw(&json!(["CLOSE", sub_id])).await?;
-                return Ok(events);
+                return Ok(ReqOutcome::Settled(events));
             }
             RelayMessage::Closed {
                 subscription_id,
                 message,
             } if subscription_id == sub_id => {
+                if CHANNEL_ACCESS_DENIED.contains(&message.as_str()) {
+                    return Ok(ReqOutcome::Denied(message));
+                }
+                if message.is_empty() {
+                    // Relay-side settle of an active sub; whatever arrived is
+                    // everything it will send.
+                    warn!(%sub_id, "relay settled subscription with empty CLOSED");
+                    return Ok(ReqOutcome::Settled(events));
+                }
                 anyhow::bail!("subscription {sub_id} closed: {message}");
             }
             _ => {}

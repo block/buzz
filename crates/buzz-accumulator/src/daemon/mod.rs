@@ -36,7 +36,8 @@ pub const DEFAULT_RELAY_URL: &str = "wss://buzz.block.builderlab.xyz";
 #[derive(Debug, Parser)]
 #[command(
     name = "buzz-accumulator",
-    about = "Standalone accumulator daemon: mirrors everything your key can see into local SQLite and folds it into artifacts"
+    about = "Standalone accumulator daemon: mirrors everything your key can see into local SQLite and folds it into artifacts",
+    long_about = None
 )]
 pub struct Config {
     /// Relay websocket URL. Pinned to the team relay by default — the generic
