@@ -564,8 +564,16 @@ export function useMentionSendFlow({
           );
           if (!finalOutgoingTags || signal?.aborted || isSendCancelled())
             return;
+          // Mention authorization was already established by the pre-side-effect
+          // pass above. Re-validate at the publish boundary only when a deferred
+          // wait (background media upload, link-preview settlement) separated
+          // that pass from this publish and authorization could have been
+          // revoked meanwhile; on the immediate path a second pass would repeat
+          // the same relay round-trips with the same inputs.
           const revalidatedMentionPubkeys =
-            await mentions.revalidateMentionPubkeys(mentionPubkeys);
+            preparedUpload || draft.preparedLinkPreviews
+              ? await mentions.revalidateMentionPubkeys(mentionPubkeys)
+              : admittedMentionPubkeys;
           if (signal?.aborted || isSendCancelled()) return;
           const finalTagsWithAgentAddress = [
             ...finalOutgoingTags,

@@ -129,6 +129,15 @@ pub struct AppState {
     /// bounded and letting a later leave correctly flip the channel back to
     /// `is_member=false`.
     pub pending_owned_channels: Mutex<std::collections::HashSet<(String, String)>>,
+    /// NIP-11 `self` pubkeys keyed by relay WS URL, each with its fetch
+    /// instant. A relay's signing identity is effectively static, yet every
+    /// send-time agent revalidation used to re-GET the document — one of the
+    /// dominant costs of agent-mention send latency. Entries expire after
+    /// `identity_archive::RELAY_SELF_CACHE_TTL` so a relay-side key rotation
+    /// still converges. Keyed by URL, so switching communities can never serve
+    /// another relay's identity; only verified `Some` values are stored (an
+    /// outage or a document without `self` must stay retryable).
+    pub relay_self_cache: Mutex<HashMap<String, (std::time::Instant, String)>>,
     pub archive_db: crate::archive::ArchiveDb,
 }
 
@@ -231,6 +240,7 @@ pub fn build_app_state() -> AppState {
         #[cfg(feature = "mesh-llm")]
         mesh_coordinator: AsyncMutex::new(None),
         pending_owned_channels: Mutex::new(std::collections::HashSet::new()),
+        relay_self_cache: Mutex::new(HashMap::new()),
         archive_db: crate::archive::ArchiveDb::default(),
     }
 }

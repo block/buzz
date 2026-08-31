@@ -1919,8 +1919,10 @@ test("relay-only allowlisted agents emit a p tag when sent", async ({
     .toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
 
   const commands = await readCommandLog(page);
+  // Exactly one targeted revalidation: the pre-side-effect pass doubles as the
+  // publish-boundary check on the immediate (no deferred upload/preview) path.
   expect(commandCount(commands, "revalidate_relay_agents")).toBe(
-    commandCount(baselineCommands, "revalidate_relay_agents") + 2,
+    commandCount(baselineCommands, "revalidate_relay_agents") + 1,
   );
   expect(commandCount(commands, "list_relay_agents")).toBe(
     commandCount(baselineCommands, "list_relay_agents"),
@@ -2029,7 +2031,7 @@ test("targeted revocation before send causes no agent side effects", async ({
     .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
   const commands = await readCommandLog(page);
   expect(commandCount(commands, "revalidate_relay_agents")).toBe(
-    commandCount(baselineCommands, "revalidate_relay_agents") + 2,
+    commandCount(baselineCommands, "revalidate_relay_agents") + 1,
   );
   expect(commandCount(commands, "list_relay_agents")).toBe(
     commandCount(baselineCommands, "list_relay_agents"),
@@ -2044,6 +2046,108 @@ test("targeted revocation before send causes no agent side effects", async ({
       commandCount(baselineCommands, command),
     );
   }
+});
+
+test("deferred-upload sends revalidate agent authorization at the publish boundary", async ({
+  page,
+}) => {
+  // The immediate send path reuses the pre-side-effect authorization pass, but
+  // a background media upload can hold the publish open for arbitrarily long —
+  // authorization revoked during that window must still strip the p tag. This
+  // pins the second, publish-boundary revalidation on the deferred path.
+  await installMockBridge(page, {
+    deferredComposerUploads: true,
+    uploadDelayMs: 1_500,
+    uploadDescriptors: [
+      {
+        url: `https://mock.relay/media/${"c".repeat(64)}.mp4`,
+        sha256: "c".repeat(64),
+        size: 1024 * 1024,
+        type: "video/mp4",
+        uploaded: Math.floor(Date.now() / 1000),
+        filename: "upload-race.mp4",
+      },
+    ],
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock bridge is not installed.");
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels"],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+    },
+  );
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+  await expect(quinnRow).toBeVisible();
+  await quinnRow.click();
+  await page.keyboard.type("hello");
+
+  // Only video files queue until send; anything else uploads at attach time.
+  const [chooser] = await Promise.all([
+    page.waitForEvent("filechooser"),
+    page.getByRole("button", { name: "Attach file" }).click(),
+  ]);
+  await chooser.setFiles({
+    buffer: Buffer.alloc(1024 * 1024, 1),
+    mimeType: "video/mp4",
+    name: "upload-race.mp4",
+  });
+  await expect(
+    page.getByTestId("composer-queued-media-attachment"),
+  ).toBeVisible();
+
+  const baselineCommands = await readCommandLog(page);
+  await page.getByTestId("send-message").click();
+
+  // Revoke after the pre-side-effect pass has been admitted but while the
+  // deferred upload (1.5s mock delay) still holds the publish open.
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "revalidate_relay_agents"),
+    )
+    .toBe(commandCount(baselineCommands, "revalidate_relay_agents") + 1);
+  await page.evaluate(() => {
+    window.__BUZZ_E2E__.mock ??= {};
+    window.__BUZZ_E2E__.mock.relayAgentListErrors = Array(100).fill(
+      "mock directory revoked during deferred upload",
+    );
+  });
+
+  const outgoingContent = `@quinn hello\n![video](https://mock.relay/media/${"c".repeat(64)}.mp4)`;
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, outgoingContent))
+    .not.toBeNull();
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, outgoingContent))
+    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  const commands = await readCommandLog(page);
+  expect(commandCount(commands, "revalidate_relay_agents")).toBe(
+    commandCount(baselineCommands, "revalidate_relay_agents") + 2,
+  );
 });
 
 test("selected relay agents are invited as bots before sending", async ({
