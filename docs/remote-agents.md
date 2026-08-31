@@ -106,7 +106,7 @@ The defining constraint, stated as a design axiom:
 An agent's identity is a Nostr keypair. The **agent record** on `D` carries:
 `name`, `relay_url`, the nsec (keyring-hydrated), the NIP-OA `auth` tag
 attesting owner authorization, `agent_command`/`agent_args` (the ACP agent the
-harness spawns — `goose`, `claude-agent-acp`, `codex-acp`, `buzz-agent`, or
+harness spawns — `goose`, `claude-agent-acp`, `codex-acp`, `opencode`, `buzz-agent`, or
 any user-supplied command: this is the **configurable harness** requirement),
 effective `system_prompt`/`model`/`provider`, timeout and parallelism knobs,
 the `respond_to` gate, merged `env_vars`, and a `backend` discriminator:
@@ -1028,8 +1028,9 @@ the local spawn's `credential.<relay-url>/git.helper` scoping — never a
 global `credential.helper`: a global nostr helper would answer for every
 remote, including github.com. ~15–25MB;
 not FROM-scratch (bash and git preclude it). Sprig-only: alternate-harness
-dependencies (node for Claude Code / Codex) come via the `image` override
-field, not a fatter default. Tagging follows the relay image's matrix —
+dependencies (node for Claude Code / Codex, the OpenCode binary) come via the
+`image` override field, not a fatter default — see
+`examples/sprig-opencode/` for the reference derived image. Tagging follows the relay image's matrix —
 `sha-<short>` on main, semver on `sprig-v*` tags (the sprig tarball's
 `+git.<sha>` version string is not a legal Docker tag). **The default image
 reference MUST be pinned by digest, not tag**: the provider bakes, at

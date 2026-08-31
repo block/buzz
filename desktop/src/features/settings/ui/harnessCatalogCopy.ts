@@ -21,6 +21,8 @@ const HARNESS_DESCRIPTIONS: Record<string, string> = {
   // Source: https://block.github.io/goose/ — "an open source, extensible AI
   // agent".
   goose: "Block's open-source, extensible AI agent.",
+  // Source: https://github.com/anomalyco/opencode
+  opencode: "An open-source coding agent.",
 
   // Bundled presets — sources per RESEARCH/BYOH_CATALOG_IA.md.
   // Source: https://cursor.com/docs/cli/acp
@@ -30,8 +32,6 @@ const HARNESS_DESCRIPTIONS: Record<string, string> = {
   // Source: https://build.x.ai (docs unavailable during research; kept
   // deliberately conservative).
   grok: "xAI's coding agent, connected to Buzz through its ACP entrypoint.",
-  // Source: https://github.com/anomalyco/opencode
-  opencode: "An open-source coding agent.",
   // Sources: https://github.com/MoonshotAI/kimi-cli,
   // https://moonshotai.github.io/kimi-cli/en/
   kimi: "A terminal coding agent for software development and command-line tasks.",
