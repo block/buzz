@@ -276,6 +276,106 @@ fn unix_now_secs() -> u64 {
         .as_secs()
 }
 
+/// Verify an HTTP `/query` response before any caller can inspect event fields.
+///
+/// A relay controls both the response bytes and which events it returns. NIP-01
+/// verification authenticates each event, while local filter matching prevents
+/// a valid event from being substituted into a query for a different author,
+/// kind, channel, or thread.
+async fn verify_query_response(response: Value, filters: Vec<Value>) -> Result<Value, RelayError> {
+    tokio::task::spawn_blocking(move || verify_query_response_blocking(response, &filters))
+        .await
+        .map_err(|error| RelayError::Http(format!("query verification task failed: {error}")))?
+}
+
+fn verify_query_response_blocking(response: Value, filters: &[Value]) -> Result<Value, RelayError> {
+    if filters.is_empty() {
+        return Err(RelayError::Http(
+            "query verification requires at least one filter".into(),
+        ));
+    }
+
+    let events = response
+        .as_array()
+        .ok_or_else(|| RelayError::Http("query response is not an array".into()))?;
+
+    for (index, raw) in events.iter().enumerate() {
+        let event: Event = serde_json::from_value(raw.clone()).map_err(|error| {
+            RelayError::Http(format!(
+                "query response event {index} is malformed: {error}"
+            ))
+        })?;
+        buzz_core::verify_event(&event).map_err(|error| {
+            RelayError::Http(format!(
+                "query response event {index} failed NIP-01 verification: {error}"
+            ))
+        })?;
+
+        let mut matched = false;
+        for filter in filters {
+            if query_filter_matches_event(filter, &event)? {
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            return Err(RelayError::Http(format!(
+                "query response event {index} does not match any requested filter"
+            )));
+        }
+    }
+
+    Ok(response)
+}
+
+fn query_filter_matches_event(filter: &Value, event: &Event) -> Result<bool, RelayError> {
+    let object = filter
+        .as_object()
+        .ok_or_else(|| RelayError::Http("query filter is not an object".into()))?;
+    let nostr_filter: nostr::Filter = serde_json::from_value(filter.clone())
+        .map_err(|error| RelayError::Http(format!("invalid query filter: {error}")))?;
+
+    if !nostr_filter.match_event(event, nostr::filter::MatchEventOptions::default()) {
+        return Ok(false);
+    }
+
+    // `nostr::Filter` supports NIP-01's single-letter generic tags. Buzz also
+    // queries multi-character tags such as `#buzz-channel`, so enforce every
+    // raw `#...` constraint explicitly as well.
+    for (key, value) in object {
+        let Some(tag_name) = key.strip_prefix('#') else {
+            continue;
+        };
+        if tag_name.is_empty() {
+            return Err(RelayError::Http(
+                "query filter has an empty tag name".into(),
+            ));
+        }
+        let allowed = value
+            .as_array()
+            .ok_or_else(|| RelayError::Http(format!("query filter {key} value is not an array")))?;
+        let allowed: Vec<&str> = allowed
+            .iter()
+            .map(|value| {
+                value.as_str().ok_or_else(|| {
+                    RelayError::Http(format!("query filter {key} contains a non-string value"))
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        let tag_matches = event.tags.iter().any(|tag| {
+            let parts = tag.as_slice();
+            parts.len() >= 2
+                && parts[0] == tag_name
+                && allowed.iter().any(|value| parts[1] == *value)
+        });
+        if !tag_matches {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
 impl RestClient {
     /// Sign a NIP-98 HTTP Auth event (kind:27235) for the given method/URL/body.
     ///
@@ -415,12 +515,19 @@ impl RestClient {
     /// Accepts a slice of `nostr::Filter` (serialized as JSON array).
     /// Returns the events as a `serde_json::Value` (JSON array of event objects).
     pub async fn query(&self, filters: &[nostr::Filter]) -> Result<Value, RelayError> {
-        let body_bytes = serde_json::to_vec(filters)
+        let filter_values = filters
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
+        let body_bytes = serde_json::to_vec(&filter_values)
             .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
         let resp = self.bridge_post("/query", &body_bytes).await?;
-        resp.json()
+        let response = resp
+            .json()
             .await
-            .map_err(|e| RelayError::Http(e.to_string()))
+            .map_err(|e| RelayError::Http(e.to_string()))?;
+        verify_query_response(response, filter_values).await
     }
 
     /// Query events via `POST /query` with a raw NIP-01 filter document.
@@ -431,9 +538,11 @@ impl RestClient {
         let body_bytes = serde_json::to_vec(filters)
             .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
         let resp = self.bridge_post("/query", &body_bytes).await?;
-        resp.json()
+        let response = resp
+            .json()
             .await
-            .map_err(|e| RelayError::Http(e.to_string()))
+            .map_err(|e| RelayError::Http(e.to_string()))?;
+        verify_query_response(response, filters.to_vec()).await
     }
 
     /// Query every historical event matching one raw filter across bounded pages.
@@ -2256,6 +2365,26 @@ async fn handle_ws_message(
                             Err(mpsc::error::TrySendError::Closed(_)) => return false,
                         }
                     } else if let Some(channel_id) = channel_id_from_sub_id(&subscription_id) {
+                        let active_subscription = state
+                            .active_subscriptions
+                            .get(&channel_id)
+                            .map(String::as_str);
+                        if active_subscription != Some(subscription_id.as_str()) {
+                            warn!(
+                                channel_id = %channel_id,
+                                subscription_id,
+                                "received EVENT for inactive channel subscription — dropping"
+                            );
+                            return true;
+                        }
+                        if !event_has_h_tag(&event, channel_id) {
+                            warn!(
+                                channel_id = %channel_id,
+                                event_id = %event.id.to_hex(),
+                                "channel EVENT does not carry the subscribed h tag — dropping"
+                            );
+                            return true;
+                        }
                         let ts = event.created_at.as_secs();
                         let event_id_hex = event.id.to_hex();
                         if state.record_event(channel_id, &event) {
@@ -3545,6 +3674,14 @@ fn extract_h_tag_uuid(event: &nostr::Event) -> Option<Uuid> {
     })
 }
 
+fn event_has_h_tag(event: &nostr::Event, channel_id: Uuid) -> bool {
+    let expected = channel_id.to_string();
+    event.tags.iter().any(|tag| {
+        let parts = tag.as_slice();
+        parts.len() >= 2 && parts[0] == "h" && parts[1] == expected
+    })
+}
+
 /// Build and send a NIP-42 AUTH response event.
 ///
 /// If `auth_tag` is provided (NIP-OA owner attestation), it is included in the
@@ -4533,6 +4670,19 @@ mod tests {
             .expect("sign channel event")
     }
 
+    fn make_signed_channel_scoped_event(
+        keys: &Keys,
+        channel_id: Uuid,
+        content: &str,
+        created_at_secs: u64,
+    ) -> Event {
+        EventBuilder::new(Kind::Custom(9), content)
+            .tags([Tag::parse(["h", &channel_id.to_string()]).expect("h tag")])
+            .custom_created_at(nostr::Timestamp::from(created_at_secs))
+            .sign_with_keys(keys)
+            .expect("sign channel event")
+    }
+
     fn replace_event_field(event: &Event, field: &str, replacement: Value) -> Event {
         let mut value = serde_json::to_value(event).expect("serialize event");
         value[field] = replacement;
@@ -4548,6 +4698,115 @@ mod tests {
             &event.content,
         );
         replace_event_field(event, "id", json!(id.to_hex()))
+    }
+
+    #[test]
+    fn query_response_accepts_verified_event_matching_any_requested_filter() {
+        let keys = Keys::generate();
+        let channel_id = Uuid::new_v4();
+        let event = make_signed_channel_scoped_event(&keys, channel_id, "hello", 2_000);
+        let filters = vec![
+            serde_json::to_value(nostr::Filter::new().kind(Kind::Metadata))
+                .expect("serialize first filter"),
+            serde_json::to_value(
+                nostr::Filter::new()
+                    .kind(Kind::Custom(9))
+                    .author(keys.public_key())
+                    .custom_tags(
+                        nostr::SingleLetterTag::lowercase(nostr::Alphabet::H),
+                        [channel_id.to_string()],
+                    ),
+            )
+            .expect("serialize matching filter"),
+        ];
+        let response = json!([event]);
+
+        let verified = verify_query_response_blocking(response.clone(), &filters)
+            .expect("valid matching query response");
+
+        assert_eq!(verified, response);
+    }
+
+    #[test]
+    fn query_response_rejects_event_with_recomputed_id_and_stale_signature() {
+        let channel_id = Uuid::new_v4();
+        let event = make_signed_channel_scoped_event(&Keys::generate(), channel_id, "safe", 2_000);
+        let forged = recompute_event_id(&replace_event_field(
+            &event,
+            "content",
+            json!("forged prompt context"),
+        ));
+        let filter = serde_json::to_value(nostr::Filter::new().kind(Kind::Custom(9)).custom_tags(
+            nostr::SingleLetterTag::lowercase(nostr::Alphabet::H),
+            [channel_id.to_string()],
+        ))
+        .expect("serialize filter");
+
+        let error = verify_query_response_blocking(json!([forged]), &[filter])
+            .expect_err("forged query event must be rejected");
+
+        assert!(error.to_string().contains("failed NIP-01 verification"));
+    }
+
+    #[test]
+    fn query_response_rejects_valid_event_outside_requested_filter() {
+        let requested_channel = Uuid::new_v4();
+        let other_channel = Uuid::new_v4();
+        let event = make_signed_channel_scoped_event(
+            &Keys::generate(),
+            other_channel,
+            "wrong channel",
+            2_000,
+        );
+        let filter = serde_json::to_value(nostr::Filter::new().kind(Kind::Custom(9)).custom_tags(
+            nostr::SingleLetterTag::lowercase(nostr::Alphabet::H),
+            [requested_channel.to_string()],
+        ))
+        .expect("serialize filter");
+
+        let error = verify_query_response_blocking(json!([event]), &[filter])
+            .expect_err("relay must not substitute a valid event from another channel");
+
+        assert!(error
+            .to_string()
+            .contains("does not match any requested filter"));
+    }
+
+    #[test]
+    fn query_response_enforces_multi_character_tag_filters() {
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_PROJECT as u16),
+            "project",
+        )
+        .tags([Tag::parse(["buzz-channel", &channel_id.to_string()]).expect("buzz-channel tag")])
+        .custom_created_at(nostr::Timestamp::from(2_000))
+        .sign_with_keys(&Keys::generate())
+        .expect("sign project event");
+        let matching_filter = json!({
+            "kinds": [buzz_core::kind::KIND_PROJECT],
+            "#buzz-channel": [channel_id.to_string()],
+        });
+        let wrong_filter = json!({
+            "kinds": [buzz_core::kind::KIND_PROJECT],
+            "#buzz-channel": [Uuid::new_v4().to_string()],
+        });
+
+        assert!(verify_query_response_blocking(json!([event.clone()]), &[matching_filter]).is_ok());
+        assert!(verify_query_response_blocking(json!([event]), &[wrong_filter]).is_err());
+    }
+
+    #[test]
+    fn query_response_rejects_malformed_or_non_array_payloads() {
+        let filter = serde_json::to_value(nostr::Filter::new().kind(Kind::Custom(9)))
+            .expect("serialize filter");
+
+        assert!(verify_query_response_blocking(json!({}), std::slice::from_ref(&filter)).is_err());
+        assert!(verify_query_response_blocking(
+            json!([{"id": "not-an-event"}]),
+            std::slice::from_ref(&filter),
+        )
+        .is_err());
     }
 
     async fn handle_test_relay_event(
@@ -4583,7 +4842,10 @@ mod tests {
         let (observer_control_tx, mut observer_control_rx) = mpsc::channel(4);
         let mut state = BgState::new();
         let channel_id = Uuid::new_v4();
-        let event = make_signed_channel_event(&Keys::generate(), "hello", 2_000);
+        state
+            .active_subscriptions
+            .insert(channel_id, channel_sub_id(channel_id));
+        let event = make_signed_channel_scoped_event(&Keys::generate(), channel_id, "hello", 2_000);
 
         assert!(
             handle_test_relay_event(
@@ -4607,6 +4869,73 @@ mod tests {
             observer_control_rx.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
         ));
+    }
+
+    #[tokio::test]
+    async fn verified_event_for_inactive_channel_is_dropped_before_state_or_queue_changes() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let channel_id = Uuid::new_v4();
+        let event = make_signed_channel_scoped_event(&Keys::generate(), channel_id, "hello", 2_000);
+
+        assert!(
+            handle_test_relay_event(
+                &mut client,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &channel_sub_id(channel_id),
+                &event,
+            )
+            .await
+        );
+
+        assert!(matches!(
+            event_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(state.last_seen.is_empty());
+        assert!(!state.seen_ids.contains(&event.id.to_hex()));
+    }
+
+    #[tokio::test]
+    async fn verified_event_with_wrong_channel_tag_is_dropped_before_state_or_queue_changes() {
+        let (mut client, _server) = test_ws_pair().await;
+        let (event_tx, mut event_rx) = mpsc::channel(4);
+        let (observer_control_tx, _observer_control_rx) = mpsc::channel(4);
+        let mut state = BgState::new();
+        let subscribed_channel = Uuid::new_v4();
+        let signed_channel = Uuid::new_v4();
+        state
+            .active_subscriptions
+            .insert(subscribed_channel, channel_sub_id(subscribed_channel));
+        let event = make_signed_channel_scoped_event(
+            &Keys::generate(),
+            signed_channel,
+            "wrong channel",
+            2_000,
+        );
+
+        assert!(
+            handle_test_relay_event(
+                &mut client,
+                &event_tx,
+                &observer_control_tx,
+                &mut state,
+                &channel_sub_id(subscribed_channel),
+                &event,
+            )
+            .await
+        );
+
+        assert!(matches!(
+            event_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(state.last_seen.is_empty());
+        assert!(!state.seen_ids.contains(&event.id.to_hex()));
     }
 
     #[tokio::test]

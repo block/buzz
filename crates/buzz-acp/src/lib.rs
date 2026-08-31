@@ -5693,9 +5693,19 @@ mod author_gate_tests {
         use std::sync::atomic::Ordering;
 
         let id = Uuid::new_v4();
-        let response = serde_json::json!([{
-            "tags": [["d", id.to_string()], ["name", "DM"], ["t", "dm"]]
-        }]);
+        let id_string = id.to_string();
+        let event = nostr::EventBuilder::new(
+            nostr::Kind::Custom(buzz_core::kind::KIND_NIP29_GROUP_METADATA as u16),
+            "",
+        )
+        .tags([
+            nostr::Tag::parse(["d", id_string.as_str()]).expect("d tag"),
+            nostr::Tag::parse(["name", "DM"]).expect("name tag"),
+            nostr::Tag::parse(["t", "dm"]).expect("type tag"),
+        ])
+        .sign_with_keys(&nostr::Keys::generate())
+        .expect("sign channel metadata");
+        let response = serde_json::json!([event]);
         let (resolver, requests, server) = lazy_resolver_with_response(response).await;
 
         assert!(is_dm_channel(id, &resolver).await);

@@ -4917,6 +4917,44 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
 
+    fn request_queries_kind(request: &[u8], kind: u32) -> bool {
+        let request = String::from_utf8_lossy(request);
+        let Some((_, body)) = request.split_once("\r\n\r\n") else {
+            return false;
+        };
+        let Ok(filters) = serde_json::from_str::<serde_json::Value>(body) else {
+            return false;
+        };
+        filters.as_array().is_some_and(|filters| {
+            filters.iter().any(|filter| {
+                filter
+                    .get("kinds")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|kinds| {
+                        kinds
+                            .iter()
+                            .any(|candidate| candidate.as_u64() == Some(kind as u64))
+                    })
+            })
+        })
+    }
+
+    fn signed_event_value(
+        keys: &Keys,
+        kind: u32,
+        tags: Vec<Tag>,
+        created_at: u64,
+    ) -> serde_json::Value {
+        serde_json::to_value(
+            EventBuilder::new(Kind::Custom(kind as u16), "")
+                .tags(tags)
+                .custom_created_at(Timestamp::from(created_at))
+                .sign_with_keys(keys)
+                .expect("sign test query event"),
+        )
+        .expect("serialize test query event")
+    }
+
     fn test_mcp_server() -> McpServer {
         McpServer {
             name: "dev".into(),
@@ -6450,11 +6488,14 @@ done"#
 
         let channel_id = Uuid::new_v4();
         let keys = Keys::generate();
+        let h_tag = Tag::parse(["h", &channel_id.to_string()]).expect("h tag");
         let carry_over = EventBuilder::new(Kind::Custom(9), "merged carry-over sentinel")
+            .tags([h_tag.clone()])
             .sign_with_keys(&keys)
             .unwrap();
         let carry_over_id = carry_over.id.to_hex();
         let new_event = EventBuilder::new(Kind::Custom(9), "merged new-event sentinel")
+            .tags([h_tag])
             .sign_with_keys(&keys)
             .unwrap();
         let new_event_id = new_event.id.to_hex();
@@ -6496,10 +6537,17 @@ done"#
         let server = tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
                 let mut request = vec![0; 16 * 1024];
-                let _ = socket.read(&mut request).await;
+                let read = socket.read(&mut request).await.unwrap_or(0);
+                let body =
+                    if request_queries_kind(&request[..read], buzz_core::kind::KIND_STREAM_MESSAGE)
+                    {
+                        response_body.as_str()
+                    } else {
+                        "[]"
+                    };
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    response_body.len(), response_body
+                    body.len(), body
                 );
                 let _ = socket.write_all(response.as_bytes()).await;
             }
@@ -6624,6 +6672,7 @@ done"#
         let channel_id = Uuid::new_v4();
         let keys = Keys::generate();
         let steered_event = EventBuilder::new(Kind::Custom(9), "steered context must not replay")
+            .tags([Tag::parse(["h", &channel_id.to_string()]).expect("h tag")])
             .sign_with_keys(&keys)
             .unwrap();
         let steered_event_id = steered_event.id.to_hex();
@@ -6652,10 +6701,17 @@ done"#
         let server = tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
                 let mut request = vec![0; 16 * 1024];
-                let _ = socket.read(&mut request).await;
+                let read = socket.read(&mut request).await.unwrap_or(0);
+                let body =
+                    if request_queries_kind(&request[..read], buzz_core::kind::KIND_STREAM_MESSAGE)
+                    {
+                        response_body.as_str()
+                    } else {
+                        "[]"
+                    };
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    response_body.len(), response_body
+                    body.len(), body
                 );
                 let _ = socket.write_all(response.as_bytes()).await;
             }
@@ -8629,12 +8685,20 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         let base_url = format!("http://{}", listener.local_addr().unwrap());
         let requests = std::sync::Arc::new(AtomicUsize::new(0));
         let server_requests = requests.clone();
-        let body = response.to_string();
+        let metadata_body = response.to_string();
         let server = tokio::spawn(async move {
             while let Ok((mut socket, _)) = listener.accept().await {
                 let mut buf = vec![0; 8192];
-                let _ = socket.read(&mut buf).await;
+                let read = socket.read(&mut buf).await.unwrap_or(0);
                 server_requests.fetch_add(1, Ordering::SeqCst);
+                let body = if request_queries_kind(
+                    &buf[..read],
+                    buzz_core::kind::KIND_NIP29_GROUP_METADATA,
+                ) {
+                    metadata_body.as_str()
+                } else {
+                    "[]"
+                };
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
@@ -8657,9 +8721,18 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     }
 
     fn channel_metadata_response(id: Uuid, tags: &[[&str; 2]]) -> serde_json::Value {
-        let mut event_tags = vec![json!(["d", id.to_string()])];
-        event_tags.extend(tags.iter().map(|[k, v]| json!([k, v])));
-        json!([{ "tags": event_tags }])
+        let id = id.to_string();
+        let mut event_tags = vec![Tag::parse(["d", id.as_str()]).expect("d tag")];
+        event_tags.extend(
+            tags.iter()
+                .map(|[key, value]| Tag::parse([*key, *value]).expect("metadata tag")),
+        );
+        json!([signed_event_value(
+            &Keys::generate(),
+            buzz_core::kind::KIND_NIP29_GROUP_METADATA,
+            event_tags,
+            2_000,
+        )])
     }
 
     #[tokio::test]
@@ -8668,19 +8741,29 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
 
         let id = Uuid::new_v4();
         let channel = id.to_string();
-        let owner = "a".repeat(64);
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key().to_hex();
         let coordinate = format!("30617:{owner}:app");
         let responses = [
-            json!([{
-                "kind": 30621,
-                "pubkey": owner,
-                "tags": [["d", "app"], ["buzz-channel", channel], ["a", coordinate]]
-            }]),
-            json!([{
-                "kind": 30617,
-                "pubkey": "a".repeat(64),
-                "tags": [["d", "app"], ["buzz-channel", id.to_string()]]
-            }]),
+            json!([signed_event_value(
+                &owner_keys,
+                buzz_core::kind::KIND_PROJECT,
+                vec![
+                    Tag::parse(["d", "app"]).expect("project d tag"),
+                    Tag::parse(["buzz-channel", channel.as_str()]).expect("project channel tag"),
+                    Tag::parse(["a", coordinate.as_str()]).expect("project repo tag"),
+                ],
+                2_000,
+            )]),
+            json!([signed_event_value(
+                &owner_keys,
+                buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT,
+                vec![
+                    Tag::parse(["d", "app"]).expect("repo d tag"),
+                    Tag::parse(["buzz-channel", channel.as_str()]).expect("repo channel tag"),
+                ],
+                1_999,
+            )]),
         ];
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
@@ -8947,30 +9030,46 @@ done"#
 
         let id = Uuid::new_v4();
         let channel = id.to_string();
-        let owner = "a".repeat(64);
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key().to_hex();
         let coordinate = format!("30617:{owner}:app");
+        let decoy_keys = Keys::generate();
         let first_page: Vec<_> = (0..500)
             .map(|index| {
-                json!({
-                    "id": format!("{index:064x}"),
-                    "created_at": 1_000 - index,
-                    "kind": 30621,
-                    "pubkey": "b".repeat(64),
-                    "tags": [["d", format!("decoy-{index}")], ["buzz-channel", channel]]
-                })
+                let identifier = format!("decoy-{index}");
+                signed_event_value(
+                    &decoy_keys,
+                    buzz_core::kind::KIND_PROJECT,
+                    vec![
+                        Tag::parse(["d", identifier.as_str()]).expect("decoy d tag"),
+                        Tag::parse(["buzz-channel", channel.as_str()]).expect("decoy channel tag"),
+                    ],
+                    1_000 - index,
+                )
             })
             .collect();
         let responses = [
             channel_metadata_response(id, &[["name", "project-home"], ["t", "stream"]]),
             serde_json::Value::Array(first_page),
-            json!([{
-                "id": "f".repeat(64), "created_at": 1, "kind": 30621, "pubkey": owner,
-                "tags": [["d", "app"], ["buzz-channel", channel], ["a", coordinate]]
-            }]),
-            json!([{
-                "id": "e".repeat(64), "created_at": 1, "kind": 30617, "pubkey": "a".repeat(64),
-                "tags": [["d", "app"], ["buzz-channel", id.to_string()]]
-            }]),
+            json!([signed_event_value(
+                &owner_keys,
+                buzz_core::kind::KIND_PROJECT,
+                vec![
+                    Tag::parse(["d", "app"]).expect("project d tag"),
+                    Tag::parse(["buzz-channel", channel.as_str()]).expect("project channel tag"),
+                    Tag::parse(["a", coordinate.as_str()]).expect("project repo tag"),
+                ],
+                1,
+            )]),
+            json!([signed_event_value(
+                &owner_keys,
+                buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT,
+                vec![
+                    Tag::parse(["d", "app"]).expect("repo d tag"),
+                    Tag::parse(["buzz-channel", channel.as_str()]).expect("repo channel tag"),
+                ],
+                1,
+            )]),
         ];
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
