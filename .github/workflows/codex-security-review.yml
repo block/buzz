@@ -214,7 +214,7 @@ jobs:
     if: needs.prepare-review.outputs.authorized == 'true'
     runs-on: ubuntu-latest
     environment: codex-review
-    timeout-minutes: 30
+    timeout-minutes: 40
     concurrency:
       group: codex-security-review-${{ needs.prepare-review.outputs.pr_number }}
       cancel-in-progress: true
@@ -289,9 +289,9 @@ jobs:
         id: run_codex
         # Codex CLI ≥0.149.x can leave a PTY descendant holding inherited stdio
         # after the turn completes, stalling the action indefinitely. The output
-        # file is written before the hang, so a timeout here wastes at most 20
-        # minutes instead of the full 30, and the salvage step recovers the result.
-        timeout-minutes: 20
+        # file is written before the hang, so a timeout here wastes at most 30
+        # minutes instead of the full 40, and the salvage step recovers the result.
+        timeout-minutes: 30
         continue-on-error: true
         uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e # v1.12
         env:
