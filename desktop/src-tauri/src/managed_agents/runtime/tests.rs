@@ -577,7 +577,7 @@ fn name_matches_interpreter_accepts_node_and_python_hermes_hosts() {
 #[test]
 fn name_matches_interpreter_rejects_unknown() {
     // Interpreters not in KNOWN_SCRIPT_INTERPRETERS must not match.
-    assert!(!super::name_matches_interpreter("python3"));
+    assert!(!super::name_matches_interpreter("ruby"));
     assert!(!super::name_matches_interpreter("deno"));
     assert!(!super::name_matches_interpreter("bun"));
 }
