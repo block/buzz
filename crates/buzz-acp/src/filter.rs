@@ -340,6 +340,23 @@ fn build_eval_context(ctx: &FilterContext) -> Result<evalexpr::HashMapContext, S
 /// a pathological expression from silently widening the subscription.
 const MAX_CONSECUTIVE_TIMEOUTS: u32 = 5;
 
+/// Returns `true` if `event` carries a `p` tag naming `agent_pubkey_hex`.
+///
+/// This is the "someone tagged me" predicate. [`match_event`] uses it for its
+/// `require_mention` check, and the acknowledgement path uses it to decide
+/// whether an event deserves a NIP-MR receipt at all. Sharing one predicate is
+/// deliberate: an agent must acknowledge exactly the events a `require_mention`
+/// rule would treat as mentions, no more and no fewer. In `all` subscription
+/// mode the harness sees every message in a channel, and acknowledging those
+/// would bury the channel in receipts.
+pub fn event_mentions(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
+    event.tags.iter().any(|tag| {
+        let s = tag.as_slice();
+        s.first().map(|k| k.as_str()) == Some("p")
+            && s.get(1).map(|v| v.as_str()) == Some(agent_pubkey_hex)
+    })
+}
+
 /// Match a Nostr event against an ordered list of subscription rules.
 ///
 /// Rules are evaluated in order; the first rule whose conditions all pass
@@ -387,15 +404,8 @@ pub async fn match_event(
         // 3. Mention check — look for a `p` tag whose first element equals
         //    agent_pubkey_hex. Uses tag.as_slice() for stable, library-independent
         //    access — avoids relying on the Display impl of tag kind.
-        if rule.require_mention {
-            let mentioned = event.tags.iter().any(|tag| {
-                let s = tag.as_slice();
-                s.first().map(|k| k.as_str()) == Some("p")
-                    && s.get(1).map(|v| v.as_str()) == Some(agent_pubkey_hex)
-            });
-            if !mentioned {
-                continue;
-            }
+        if rule.require_mention && !event_mentions(event, agent_pubkey_hex) {
+            continue;
         }
 
         // 4. Optional evalexpr filter expression.
@@ -486,6 +496,32 @@ mod tests {
 
     fn any_channel() -> Uuid {
         Uuid::new_v4()
+    }
+
+    #[test]
+    fn event_mentions_matches_p_tag() {
+        let me = "a".repeat(64);
+        let event = make_event_with_p_tag(9, "hey", &me);
+        assert!(event_mentions(&event, &me));
+    }
+
+    #[test]
+    fn event_mentions_rejects_other_pubkey() {
+        let me = "a".repeat(64);
+        let someone_else = "b".repeat(64);
+        let event = make_event_with_p_tag(9, "hey", &someone_else);
+        assert!(
+            !event_mentions(&event, &me),
+            "a mention of another pubkey is not a mention of me"
+        );
+    }
+
+    #[test]
+    fn event_mentions_rejects_untagged_event() {
+        // This is the gate that keeps `all` subscription mode from acking every
+        // message in the channel — an untagged message earns no receipt.
+        let event = make_event(9, "just talking");
+        assert!(!event_mentions(&event, &"a".repeat(64)));
     }
 
     fn make_rule(
