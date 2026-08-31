@@ -1,18 +1,31 @@
+import { RefreshCcw } from "lucide-react";
 import * as React from "react";
+import { toast } from "sonner";
 
 import { useChannelsQuery } from "@/features/channels/hooks";
-import { ChannelTaskList } from "@/features/tasks/ui/ChannelTaskList";
+import {
+  useChannelTasks,
+  useSetChannelTaskStatus,
+} from "@/features/tasks/lib/useChannelTasks";
+import { MyWorkView } from "@/features/tasks/ui/MyWorkView";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import { Button } from "@/shared/ui/button";
 
 /**
- * Community-wide task view with an explicit channel scope. The all-channels
- * state keeps channel identity on every row; choosing a channel reuses the
- * same scoped list shown inside that channel's auxiliary panel.
+ * Community work supervision surface. Channel-task rows remain the durable
+ * substrate; this screen projects them into an intervention-first queue and a
+ * truthful selected-task brief. A channel filter narrows the same query used by
+ * channel-local task panels rather than creating a second task implementation.
  */
 export function TasksScreen() {
-  const channels = useChannelsQuery().data ?? [];
+  const channelsQuery = useChannelsQuery();
+  const channels = channelsQuery.data ?? [];
+  const identityQuery = useIdentityQuery();
   const [selectedChannelId, setSelectedChannelId] = React.useState<
     string | null
   >(null);
+  const tasks = useChannelTasks(selectedChannelId);
+  const setStatus = useSetChannelTaskStatus();
   const channelNamesById = React.useMemo(
     () => new Map(channels.map((channel) => [channel.id, channel.name])),
     [channels],
@@ -33,37 +46,69 @@ export function TasksScreen() {
   }, [channels, selectedChannelId]);
 
   return (
-    <div className="flex h-full flex-col gap-4 overflow-y-auto p-4">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-lg font-semibold">Channel tasks</h1>
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      <header className="flex min-h-16 flex-wrap items-center gap-3 border-b bg-background px-5 py-3">
+        <div className="min-w-0">
+          <h1 className="text-lg font-semibold text-foreground">My Work</h1>
           <p className="text-sm text-muted-foreground">
-            Review every channel together or focus on one channel. Changes are
-            visible to every member and on mobile.
+            Requests, owned work, and verified task state in one place.
           </p>
         </div>
-        <label className="flex min-w-48 flex-col gap-1 text-xs font-medium text-muted-foreground">
-          Channel
-          <select
-            className="h-9 rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
-            data-testid="channel-task-scope"
-            onChange={(event) =>
-              setSelectedChannelId(event.target.value || null)
-            }
-            value={selectedChannelId ?? ""}
+        <div className="ml-auto flex items-end gap-2">
+          <label className="flex min-w-44 flex-col gap-1 text-xs font-medium text-muted-foreground">
+            Channel
+            <select
+              className="h-9 rounded-md border border-input bg-background px-3 text-sm text-foreground shadow-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              data-testid="channel-task-scope"
+              onChange={(event) =>
+                setSelectedChannelId(event.target.value || null)
+              }
+              value={selectedChannelId ?? ""}
+            >
+              <option value="">All channels</option>
+              {sortedChannels.map((channel) => (
+                <option key={channel.id} value={channel.id}>
+                  #{channel.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <Button
+            aria-label="Refresh My Work"
+            disabled={tasks.isFetching}
+            onClick={() => void tasks.refetch()}
+            size="icon"
+            type="button"
+            variant="outline"
           >
-            <option value="">All channels</option>
-            {sortedChannels.map((channel) => (
-              <option key={channel.id} value={channel.id}>
-                #{channel.name}
-              </option>
-            ))}
-          </select>
-        </label>
+            <RefreshCcw
+              className={tasks.isFetching ? "animate-spin" : undefined}
+            />
+          </Button>
+        </div>
       </header>
-      <ChannelTaskList
-        channelId={selectedChannelId}
+      <MyWorkView
         channelNamesById={channelNamesById}
+        currentPubkey={identityQuery.data?.pubkey}
+        error={tasks.error}
+        isLoading={tasks.isLoading}
+        isStatusPending={setStatus.isPending}
+        onRetry={() => void tasks.refetch()}
+        onSetStatus={(task, status) => {
+          setStatus.mutate(
+            { taskId: task.id, status },
+            {
+              onError: (error: unknown) => {
+                toast.error(
+                  error instanceof Error
+                    ? error.message
+                    : "Could not update the task",
+                );
+              },
+            },
+          );
+        }}
+        tasks={tasks.data ?? []}
       />
     </div>
   );

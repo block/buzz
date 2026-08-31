@@ -162,11 +162,11 @@ export function AppSidebarPrimaryMenu({
               data-testid="open-tasks-view"
               isActive={selectedView === "tasks"}
               onClick={onSelectTasks}
-              tooltip="Channel tasks"
+              tooltip="My Work"
               type="button"
             >
               <CheckSquare className="h-4 w-4" />
-              <SidebarMenuLabel>Tasks</SidebarMenuLabel>
+              <SidebarMenuLabel>My Work</SidebarMenuLabel>
             </SidebarMenuButton>
           </SidebarMenuItem>
           <SidebarMenuItem>

@@ -12,9 +12,16 @@ export type ChannelTask = {
   id: string;
   channelId: string | null;
   title: string;
+  body: string | null;
   status: string;
   assignee: string | null;
   createdBy: string | null;
+  priority: number;
+  source: string | null;
+  sourceRef: string | null;
+  dueAt: number | null;
+  doneAt: number | null;
+  createdAt: number;
   updatedAt: number;
 };
 

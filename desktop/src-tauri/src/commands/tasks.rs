@@ -44,9 +44,16 @@ pub struct ChannelTask {
     pub id: String,
     pub channel_id: Option<String>,
     pub title: String,
+    pub body: Option<String>,
     pub status: String,
     pub assignee: Option<String>,
     pub created_by: Option<String>,
+    pub priority: i64,
+    pub source: Option<String>,
+    pub source_ref: Option<String>,
+    pub due_at: Option<i64>,
+    pub done_at: Option<i64>,
+    pub created_at: i64,
     pub updated_at: i64,
 }
 
@@ -57,9 +64,16 @@ impl ChannelTask {
             id: value["id"].as_str().unwrap_or_default().to_owned(),
             channel_id: value["channel_id"].as_str().map(str::to_owned),
             title: value["title"].as_str().unwrap_or_default().to_owned(),
+            body: value["body"].as_str().map(str::to_owned),
             status: value["status"].as_str().unwrap_or_default().to_owned(),
             assignee: value["assignee"].as_str().map(str::to_owned),
             created_by: value["created_by"].as_str().map(str::to_owned),
+            priority: value["priority"].as_i64().unwrap_or_default(),
+            source: value["source"].as_str().map(str::to_owned),
+            source_ref: value["source_ref"].as_str().map(str::to_owned),
+            due_at: value["due_at"].as_i64(),
+            done_at: value["done_at"].as_i64(),
+            created_at: value["created_at"].as_i64().unwrap_or_default(),
             updated_at: value["updated_at"].as_i64().unwrap_or_default(),
         }
     }
@@ -378,16 +392,29 @@ mod tests {
             "id": "5d8c5b0e-3b1e-4b7a-9b0d-5f9b9a5c1d01",
             "channel_id": null,
             "title": "Ship the thing",
+            "body": "Original request body",
             "status": "in_progress",
             "assignee": null,
             "created_by": "aa" .repeat(32),
+            "priority": 4,
+            "source": "telegram",
+            "source_ref": "telegram:thread:42",
+            "due_at": 1_756_100_000_i64,
+            "done_at": null,
+            "created_at": 1_755_900_000_i64,
             "updated_at": 1_756_000_000_i64,
         });
         let task = ChannelTask::from_json(&value);
         assert_eq!(task.title, "Ship the thing");
+        assert_eq!(task.body.as_deref(), Some("Original request body"));
         assert_eq!(task.status, "in_progress");
         assert_eq!(task.channel_id, None);
         assert_eq!(task.assignee, None);
+        assert_eq!(task.priority, 4);
+        assert_eq!(task.source.as_deref(), Some("telegram"));
+        assert_eq!(task.source_ref.as_deref(), Some("telegram:thread:42"));
+        assert_eq!(task.due_at, Some(1_756_100_000));
+        assert_eq!(task.created_at, 1_755_900_000);
         assert!(task.created_by.unwrap().starts_with("aaaa"));
     }
 
