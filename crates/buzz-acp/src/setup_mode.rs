@@ -499,7 +499,9 @@ pub(crate) fn should_nudge_for_event(
     nudged_event_ids: &mut HashSet<EventId>,
 ) -> bool {
     if !author_allowed {
-        tracing::debug!("setup-mode: event filtered by author gate");
+        // INFO to match the normal-mode gate: a rejection produces no sender
+        // feedback, so the log line is the only evidence it happened.
+        tracing::info!(%event_id, "setup-mode: event filtered by author gate");
         return false;
     }
     if !filter_matched {

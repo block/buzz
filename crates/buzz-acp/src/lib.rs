@@ -2884,9 +2884,16 @@ async fn tokio_main() -> Result<()> {
                                 )
                                 .await;
                                 if !allowed {
-                                    tracing::debug!(
+                                    // INFO, not DEBUG: a gate rejection is invisible to the
+                                    // sender (their mention just sits there), so the operator's
+                                    // log is the only place the refusal exists at all. At debug
+                                    // level a blocked mention is indistinguishable from a
+                                    // working one under default logging — "@agent doesn't
+                                    // work" then has no evidence to find, only absence.
+                                    tracing::info!(
                                         channel_id = %buzz_event.channel_id,
                                         author = %buzz_event.event.pubkey.to_hex(),
+                                        event_id = %buzz_event.event.id.to_hex(),
                                         mode = %config.respond_to,
                                         is_dm,
                                         "inbound author gate — dropping event"
