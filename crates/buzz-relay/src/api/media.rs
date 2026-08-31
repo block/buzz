@@ -456,30 +456,39 @@ pub async fn upload_blob(
     )
     .increment(1);
 
-    // Audit via bounded channel — same pattern as event audit.
-    if let Some(audit_tx) = &state.audit_tx {
+    // Persist the audit intent before returning — same pattern as event audit.
+    if let Some(audit_queue) = &state.audit_queue {
         let desc = descriptor.clone();
-        if let Err(e) = audit_tx
-            .send(NewAuditEntry {
-                community_id: auth.tenant.community(),
-                action: AuditAction::MediaUploaded,
-                actor_pubkey: Some(auth.auth_event.pubkey.to_bytes().to_vec()),
-                object_id: Some(desc.sha256.clone()),
-                detail: serde_json::json!({
-                    "sha256": desc.sha256,
-                    "size": desc.size,
-                    "mime": desc.mime_type,
-                }),
-            })
+        let dedupe_key = media_audit_dedupe_key(&auth.auth_event);
+        audit_queue
+            .send(
+                NewAuditEntry {
+                    community_id: auth.tenant.community(),
+                    action: AuditAction::MediaUploaded,
+                    actor_pubkey: Some(auth.auth_event.pubkey.to_bytes().to_vec()),
+                    object_id: Some(desc.sha256.clone()),
+                    detail: serde_json::json!({
+                        "sha256": desc.sha256,
+                        "size": desc.size,
+                        "mime": desc.mime_type,
+                    }),
+                },
+                Some(&dedupe_key),
+            )
             .await
-        {
-            tracing::error!("Media audit channel closed — entry lost: {e}");
-            metrics::counter!("buzz_audit_send_errors_total").increment(1);
-        }
+            .map_err(|e| {
+                tracing::error!("Media audit intent could not be persisted: {e}");
+                metrics::counter!("buzz_audit_send_errors_total").increment(1);
+                MediaError::Internal
+            })?;
     }
 
     serving_write.finish().await.map_err(serving_lease_lost)?;
     Ok(Json(descriptor))
+}
+
+fn media_audit_dedupe_key(auth_event: &nostr::Event) -> String {
+    format!("media_uploaded:{}", auth_event.id)
 }
 
 pub(crate) fn media_base_url_for_tenant(config_relay_url: &str, tenant_host: &str) -> String {
@@ -1022,6 +1031,27 @@ mod tests {
     use uuid::Uuid;
 
     const VALID_HASH: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    #[test]
+    fn media_audit_dedupe_key_tracks_the_signed_upload_action() {
+        let first = EventBuilder::new(Kind::from(24242), "Upload media")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign first upload authorization");
+        let second = EventBuilder::new(Kind::from(24242), "Upload media")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign second upload authorization");
+
+        assert_eq!(
+            media_audit_dedupe_key(&first),
+            media_audit_dedupe_key(&first),
+            "a retry with the same signed authorization must dedupe",
+        );
+        assert_ne!(
+            media_audit_dedupe_key(&first),
+            media_audit_dedupe_key(&second),
+            "distinct signed uploads of identical bytes must remain distinct",
+        );
+    }
 
     #[test]
     fn serving_write_error_taxonomy_separates_fence_from_backend_failure() {

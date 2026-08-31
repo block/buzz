@@ -16,7 +16,7 @@ use nostr::{EventBuilder, Kind, Tag};
 use tracing::info;
 use uuid::Uuid;
 
-use crate::handlers::event::dispatch_persistent_event;
+use crate::handlers::event::{dispatch_persistent_event, enqueue_persistent_event_audit};
 use crate::state::AppState;
 
 /// Resolves `@Name` mentions in workflow message text to the pubkeys of the
@@ -445,7 +445,7 @@ impl ActionSink for RelayActionSink {
             // 5. Post-persist side effects (fan-out, search, audit)
             //    Only if actually inserted (idempotency guard).
             if was_inserted {
-                let _ = dispatch_persistent_event(
+                dispatch_persistent_event(
                     &tenant,
                     &state,
                     &stored_event,
@@ -453,8 +453,21 @@ impl ActionSink for RelayActionSink {
                     &author_pubkey_hex,
                     None,
                 )
-                .await;
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            } else {
+                enqueue_persistent_event_audit(
+                    &tenant,
+                    &state,
+                    &stored_event,
+                    kind_u32,
+                    &author_pubkey_hex,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            }
 
+            if was_inserted {
                 // A threaded reply changed its thread's counters — push a fresh
                 // relay-signed kind:39005 so subscribed clients update badge
                 // counts without refetching the head window, exactly as the

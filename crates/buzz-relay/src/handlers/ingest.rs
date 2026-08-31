@@ -3120,7 +3120,8 @@ async fn ingest_event_inner(
             &pubkey_hex,
             threaded_visibility.clone(),
         )
-        .await;
+        .await
+        .map_err(|e| IngestError::Internal(format!("audit persistence failed: {e}")))?;
 
         info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
         return Ok(IngestResult {
@@ -3263,7 +3264,8 @@ async fn ingest_event_inner(
         &pubkey_hex,
         threaded_visibility.clone(),
     )
-    .await;
+    .await
+    .map_err(|e| IngestError::Internal(format!("audit persistence failed: {e}")))?;
 
     info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
 

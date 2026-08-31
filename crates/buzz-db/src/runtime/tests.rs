@@ -2389,6 +2389,64 @@ async fn session_timeouts_install_through_db_new_and_bound_lock_waits() {
     drop_scratch_db(&admin, db.pool.clone(), &name).await;
 }
 
+/// The idle-transaction timeout must terminate the wedged backend, and SQLx
+/// must replace it with a freshly configured writer connection.
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn idle_transaction_timeout_reaps_backend_and_pool_replaces_connection() {
+    let admin = PgPool::connect(&admin_url().await)
+        .await
+        .expect("connect admin");
+    let (seed_pool, name) = create_scratch_db(&admin, "idle_txn_reap").await;
+    seed_pool.close().await;
+
+    let base = admin_url().await;
+    let idx = base.rfind('/').expect("db url has a path segment");
+    let scratch_url = format!("{}/{}", &base[..idx], name);
+    let db = Db::new(&DbConfig {
+        database_url: scratch_url,
+        max_connections: 1,
+        min_connections: 0,
+        idle_txn_timeout_ms: 100,
+        ..DbConfig::default()
+    })
+    .await
+    .expect("connect Db with idle transaction timeout");
+
+    let mut wedged = db.pool.acquire().await.expect("acquire writer connection");
+    let old_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *wedged)
+        .await
+        .expect("read original backend pid");
+    sqlx::query("BEGIN")
+        .execute(&mut *wedged)
+        .await
+        .expect("begin transaction");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    sqlx::query("SELECT 1")
+        .execute(&mut *wedged)
+        .await
+        .expect_err("idle transaction backend must be terminated");
+    drop(wedged);
+
+    let mut replacement =
+        tokio::time::timeout(std::time::Duration::from_secs(3), db.pool.acquire())
+            .await
+            .expect("pool did not replace terminated backend")
+            .expect("acquire replacement writer connection");
+    let (new_pid, timeout): (i32, String) = sqlx::query_as(
+        "SELECT pg_backend_pid(), current_setting('idle_in_transaction_session_timeout')",
+    )
+    .fetch_one(&mut *replacement)
+    .await
+    .expect("inspect replacement backend");
+    assert_ne!(new_pid, old_pid, "pool must replace the terminated backend");
+    assert_eq!(timeout, "100ms", "replacement must reinstall the timeout");
+    drop(replacement);
+
+    drop_scratch_db(&admin, db.pool.clone(), &name).await;
+}
+
 /// The armed writer pool (`Db::new`) must enforce the floor end-to-end
 /// through the public insert APIs, and the session GUC must be verifiably
 /// set on pooled connections.

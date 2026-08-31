@@ -699,7 +699,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 40);
+        assert_eq!(migrations.len(), 41);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1339,6 +1339,26 @@ mod tests {
     }
 
     #[test]
+    fn durable_audit_outbox_is_additive_deduplicated_and_fenced() {
+        let migration = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 41)
+            .expect("durable audit outbox migration");
+        let sql = migration.sql.as_str();
+        assert!(sql.contains("CREATE TABLE audit_outbox"));
+        assert!(sql.contains("CREATE TABLE audit_delivery_keys"));
+        assert!(sql.contains("GENERATED ALWAYS AS IDENTITY"));
+        assert!(sql.contains("attach_community_write_fence('audit_outbox')"));
+        assert!(sql.contains("attach_community_write_fence('audit_delivery_keys')"));
+
+        let desired_schema = include_str!("../../../../schema/schema.sql");
+        assert!(desired_schema.contains("CREATE TABLE audit_outbox"));
+        assert!(desired_schema.contains("CREATE TABLE audit_delivery_keys"));
+        assert!(desired_schema.contains("attach_community_write_fence('audit_outbox')"));
+        assert!(desired_schema.contains("attach_community_write_fence('audit_delivery_keys')"));
+    }
+
+    #[test]
     fn migration_lint_detects_tables_missing_community_id_by_default() {
         let sql = r#"
             CREATE TABLE communities (id UUID PRIMARY KEY);
@@ -1776,6 +1796,9 @@ mod tests {
         let mut expected_fences = migration.fence_attachments.clone();
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
+        for additive in MIGRATOR.iter().filter(|migration| migration.version > 29) {
+            expected_fences.extend(surface(additive.sql.as_ref()).fence_attachments);
+        }
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"
@@ -2425,6 +2448,8 @@ mod tests {
             "channels",
             "scheduled_workflow_fires",
             "audit_log",
+            "audit_outbox",
+            "audit_delivery_keys",
         ] {
             let exists = sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = $1)",

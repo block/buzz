@@ -1152,9 +1152,10 @@ async fn main() -> anyhow::Result<()> {
     serve(router, health_router, Arc::clone(&state)).await?;
     state.community_revalidator_cancel.cancel();
 
-    // Signal the audit worker to stop accepting, flush buffered entries, and
-    // exit. Uses a CancellationToken so it works regardless of how many
-    // Arc<AppState> clones are still alive in background tasks.
+    // Signal the audit worker to deliver ready entries and exit. Deferred
+    // entries remain in the durable outbox for another worker or restart. Uses
+    // a CancellationToken so it works regardless of how many Arc<AppState>
+    // clones are still alive in background tasks.
     audit_shutdown
         .drain(std::time::Duration::from_secs(5))
         .await;

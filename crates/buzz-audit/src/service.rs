@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use futures_util::FutureExt as _;
-use sqlx::{Acquire, PgPool, Row};
+use sqlx::{Acquire, PgPool, Postgres, Row, Transaction};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -26,8 +26,34 @@ fn log_timestamp() -> DateTime<Utc> {
 /// Per-community advisory lock key. Derived in Postgres from the community UUID
 /// so two communities never serialize each other's audit writes (which would be
 /// both a throughput bottleneck and a cross-tenant timing oracle). The lock is
-/// taken with `pg_advisory_lock(hashtextextended(...))` — see [`AuditService::log`].
+/// taken with `pg_advisory_lock` for direct appends and
+/// `pg_advisory_xact_lock` for durable outbox delivery.
 const AUDIT_LOCK_NAMESPACE: &str = "buzz_audit:";
+
+/// Outcome of one durable audit-outbox delivery attempt.
+#[derive(Debug)]
+pub enum PendingAuditResult {
+    /// No community currently has a due head entry.
+    Idle,
+    /// One pending entry was appended and removed from the outbox atomically.
+    Appended,
+    /// A timeout deferred the entry without blocking other communities.
+    Deferred {
+        /// Number of delivery attempts made for this entry.
+        attempt_count: i32,
+        /// Delay before the entry becomes eligible again.
+        retry_delay_ms: u64,
+        /// PostgreSQL SQLSTATE that made the attempt retryable.
+        sqlstate: String,
+    },
+}
+
+struct ClaimedAuditEntry {
+    id: Uuid,
+    entry: NewAuditEntry,
+    enqueued_at: DateTime<Utc>,
+    attempt_count: i32,
+}
 
 /// Append-only, per-community hash-chain audit log backed by Postgres.
 ///
@@ -43,6 +69,172 @@ impl AuditService {
     /// Creates a new `AuditService` using the given connection pool.
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Persist an audit intent before the producer reports completion.
+    ///
+    /// Delivery is asynchronous, but the intent survives relay shutdown and is
+    /// ordered by `enqueue_seq` within its community. A logical `dedupe_key`
+    /// suppresses retries after both pending and completed delivery.
+    pub async fn enqueue(
+        &self,
+        entry: NewAuditEntry,
+        dedupe_key: Option<&str>,
+    ) -> Result<(), AuditError> {
+        let mut tx = self.pool.begin().await?;
+        if let Some(dedupe_key) = dedupe_key {
+            let inserted = sqlx::query(
+                "INSERT INTO audit_delivery_keys (community_id, dedupe_key) \
+                 VALUES ($1, $2) \
+                 ON CONFLICT (community_id, dedupe_key) DO NOTHING",
+            )
+            .bind(entry.community_id.as_uuid())
+            .bind(dedupe_key)
+            .execute(&mut *tx)
+            .await?;
+            if inserted.rows_affected() == 0 {
+                tx.commit().await?;
+                return Ok(());
+            }
+        }
+        sqlx::query(
+            "INSERT INTO audit_outbox \
+                 (community_id, action, actor_pubkey, object_id, detail) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(entry.community_id.as_uuid())
+        .bind(entry.action.as_str())
+        .bind(entry.actor_pubkey.as_deref())
+        .bind(entry.object_id.as_deref())
+        .bind(&entry.detail)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Deliver one due per-community head from the durable outbox.
+    ///
+    /// A short claim lease lets multiple relay processes share the outbox.
+    /// Timeout failures are rescheduled with capped exponential backoff, so a
+    /// contended community cannot monopolize a worker. Appending the hash-chain
+    /// row and deleting its outbox row occur in the same transaction.
+    pub async fn deliver_next_pending(&self) -> Result<PendingAuditResult, AuditError> {
+        let Some(claimed) = self.claim_next_pending().await? else {
+            return Ok(PendingAuditResult::Idle);
+        };
+
+        match self.append_claimed(&claimed).await {
+            Ok(()) => Ok(PendingAuditResult::Appended),
+            Err(error) => {
+                let Some(sqlstate) = retryable_sqlstate(&error) else {
+                    return Err(error);
+                };
+                let retry_delay_ms = retry_delay_ms(claimed.attempt_count);
+                self.defer_claimed(&claimed, retry_delay_ms).await?;
+                Ok(PendingAuditResult::Deferred {
+                    attempt_count: claimed.attempt_count,
+                    retry_delay_ms,
+                    sqlstate,
+                })
+            }
+        }
+    }
+
+    async fn claim_next_pending(&self) -> Result<Option<ClaimedAuditEntry>, AuditError> {
+        let row = sqlx::query(
+            r#"
+            WITH candidate AS (
+                SELECT pending.community_id, pending.id
+                FROM audit_outbox AS pending
+                WHERE pending.next_attempt_at <= clock_timestamp()
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM audit_outbox AS older
+                      WHERE older.community_id = pending.community_id
+                        AND older.enqueue_seq < pending.enqueue_seq
+                  )
+                ORDER BY pending.next_attempt_at, pending.enqueue_seq
+                FOR UPDATE OF pending SKIP LOCKED
+                LIMIT 1
+            )
+            UPDATE audit_outbox AS pending
+            SET attempt_count = pending.attempt_count + 1,
+                next_attempt_at = clock_timestamp() + INTERVAL '5 seconds'
+            FROM candidate
+            WHERE pending.community_id = candidate.community_id
+              AND pending.id = candidate.id
+            RETURNING pending.id, pending.community_id, pending.action,
+                      pending.actor_pubkey, pending.object_id, pending.detail,
+                      pending.enqueued_at, pending.attempt_count
+            "#,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let action_string: String = row.get("action");
+        let action = action_string
+            .parse()
+            .map_err(|_| AuditError::UnknownAction)?;
+        Ok(Some(ClaimedAuditEntry {
+            id: row.get("id"),
+            entry: NewAuditEntry {
+                community_id: CommunityId::from_uuid(row.get("community_id")),
+                action,
+                actor_pubkey: row.get("actor_pubkey"),
+                object_id: row.get("object_id"),
+                detail: row.get("detail"),
+            },
+            enqueued_at: row.get("enqueued_at"),
+            attempt_count: row.get("attempt_count"),
+        }))
+    }
+
+    async fn append_claimed(&self, claimed: &ClaimedAuditEntry) -> Result<(), AuditError> {
+        let mut tx = self.pool.begin().await?;
+        let lock_key = format!("{AUDIT_LOCK_NAMESPACE}{}", claimed.entry.community_id);
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&lock_key)
+            .execute(&mut *tx)
+            .await?;
+        Self::append_in_transaction(
+            &mut tx,
+            claimed.entry.clone(),
+            to_storage_precision(claimed.enqueued_at),
+        )
+        .await?;
+        let deleted = sqlx::query("DELETE FROM audit_outbox WHERE community_id = $1 AND id = $2")
+            .bind(claimed.entry.community_id.as_uuid())
+            .bind(claimed.id)
+            .execute(&mut *tx)
+            .await?;
+        if deleted.rows_affected() != 1 {
+            return Err(AuditError::Database(sqlx::Error::RowNotFound));
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn defer_claimed(
+        &self,
+        claimed: &ClaimedAuditEntry,
+        retry_delay_ms: u64,
+    ) -> Result<(), AuditError> {
+        sqlx::query(
+            "UPDATE audit_outbox \
+             SET next_attempt_at = clock_timestamp() \
+                 + make_interval(secs => $3::double precision / 1000.0) \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(claimed.entry.community_id.as_uuid())
+        .bind(claimed.id)
+        .bind(retry_delay_ms as f64)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Append a new entry to the calling community's chain.
@@ -91,6 +283,17 @@ impl AuditService {
     ) -> Result<AuditEntry, AuditError> {
         let mut tx = conn.begin().await?;
 
+        let audit_entry = Self::append_in_transaction(&mut tx, entry, log_timestamp()).await?;
+        tx.commit().await?;
+
+        Ok(audit_entry)
+    }
+
+    async fn append_in_transaction(
+        tx: &mut Transaction<'_, Postgres>,
+        entry: NewAuditEntry,
+        created_at: DateTime<Utc>,
+    ) -> Result<AuditEntry, AuditError> {
         // The stored row keys on the raw UUID; the typed `CommunityId` on the
         // input is the provenance fence, dereferenced here at the DB boundary.
         let community_id = *entry.community_id.as_uuid();
@@ -102,7 +305,7 @@ impl AuditService {
              ORDER BY seq DESC LIMIT 1",
         )
         .bind(community_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
 
         let (prev_seq, prev_hash): (i64, Option<Vec<u8>>) = match head {
@@ -113,8 +316,6 @@ impl AuditService {
             None => (0, None), // community's first entry
         };
         let seq = prev_seq + 1;
-
-        let created_at: DateTime<Utc> = log_timestamp();
 
         let mut audit_entry = AuditEntry {
             community_id,
@@ -148,10 +349,8 @@ impl AuditService {
         .bind(audit_entry.object_id.as_deref())
         .bind(&audit_entry.detail)
         .bind(audit_entry.created_at)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-
-        tx.commit().await?;
 
         Ok(audit_entry)
     }
@@ -246,6 +445,19 @@ impl AuditService {
 
         rows.iter().map(row_to_audit_entry).collect()
     }
+}
+
+fn retryable_sqlstate(error: &AuditError) -> Option<String> {
+    let AuditError::Database(sqlx::Error::Database(database_error)) = error else {
+        return None;
+    };
+    let code = database_error.code()?;
+    matches!(code.as_ref(), "55P03" | "57014").then(|| code.into_owned())
+}
+
+fn retry_delay_ms(attempt_count: i32) -> u64 {
+    let exponent = attempt_count.saturating_sub(1).clamp(0, 5) as u32;
+    (50u64.saturating_mul(1u64 << exponent)).min(1_000)
 }
 
 fn row_to_audit_entry(row: &sqlx::postgres::PgRow) -> Result<AuditEntry, AuditError> {

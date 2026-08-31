@@ -16,7 +16,7 @@ use buzz_core::kind::{
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
 
-use super::event::dispatch_persistent_event;
+use super::event::{dispatch_persistent_event, enqueue_persistent_event_audit};
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
 use buzz_core::tenant::TenantContext;
@@ -1042,7 +1042,10 @@ async fn emit_addressable_discovery_event(
         .await?;
     if was_inserted {
         let kind_u32 = event_kind_u32(&stored.event);
-        dispatch_persistent_event(tenant, state, &stored, kind_u32, relay_pubkey_hex, None).await;
+        dispatch_persistent_event(tenant, state, &stored, kind_u32, relay_pubkey_hex, None).await?;
+    } else {
+        let kind_u32 = event_kind_u32(&stored.event);
+        enqueue_persistent_event_audit(tenant, state, &stored, kind_u32, relay_pubkey_hex).await?;
     }
     Ok(())
 }
@@ -1064,7 +1067,7 @@ async fn store_group_members_event(
     state: &Arc<AppState>,
     channel_id: Uuid,
     member_snapshot: &mut buzz_db::channel::LockedMemberSnapshot,
-) -> anyhow::Result<Option<buzz_core::StoredEvent>> {
+) -> anyhow::Result<(buzz_core::StoredEvent, bool)> {
     let group_id = channel_id.to_string();
     let tags = group_members_tags(&group_id, &member_snapshot.members)?;
     let relay_pubkey = state.relay_keypair.public_key().to_bytes();
@@ -1094,16 +1097,17 @@ async fn store_group_members_event(
     let (stored, inserted) = member_snapshot
         .replace_member_event(tenant.community(), channel_id, &event)
         .await?;
-    Ok(inserted.then_some(stored))
+    Ok((stored, inserted))
 }
 
 async fn dispatch_group_members_event(
     tenant: &TenantContext,
     state: &Arc<AppState>,
-    stored: Option<buzz_core::StoredEvent>,
+    stored: (buzz_core::StoredEvent, bool),
     relay_pubkey_hex: &str,
-) {
-    if let Some(stored) = stored {
+) -> anyhow::Result<()> {
+    let (stored, inserted) = stored;
+    if inserted {
         dispatch_persistent_event(
             tenant,
             state,
@@ -1112,8 +1116,18 @@ async fn dispatch_group_members_event(
             relay_pubkey_hex,
             None,
         )
-        .await;
+        .await?;
+    } else {
+        enqueue_persistent_event_audit(
+            tenant,
+            state,
+            &stored,
+            KIND_NIP29_GROUP_MEMBERS,
+            relay_pubkey_hex,
+        )
+        .await?;
     }
+    Ok(())
 }
 
 /// Emit NIP-29 group discovery events (39000, 39001, 39002) signed by the relay keypair.
@@ -1229,7 +1243,7 @@ pub async fn emit_group_discovery_events(
     let stored_members =
         store_group_members_event(tenant, state, channel_id, &mut member_snapshot).await?;
     member_snapshot.release().await?;
-    dispatch_group_members_event(tenant, state, stored_members, &relay_pubkey_hex).await;
+    dispatch_group_members_event(tenant, state, stored_members, &relay_pubkey_hex).await?;
 
     Ok(())
 }
@@ -3124,7 +3138,16 @@ async fn publish_nip43_membership_list_inner(
             &relay_pubkey_hex,
             None,
         )
-        .await;
+        .await?;
+    } else {
+        enqueue_persistent_event_audit(
+            tenant,
+            state,
+            &stored,
+            KIND_NIP43_MEMBERSHIP_LIST,
+            &relay_pubkey_hex,
+        )
+        .await?;
     }
 
     info!(member_count, "NIP-43 membership list published");
@@ -3231,7 +3254,7 @@ pub async fn reconcile_large_channel_member_snapshots(
             let stored_members =
                 store_group_members_event(&tenant, state, channel_id, &mut member_snapshot).await?;
             member_snapshot.release().await?;
-            dispatch_group_members_event(&tenant, state, stored_members, &relay_pubkey_hex).await;
+            dispatch_group_members_event(&tenant, state, stored_members, &relay_pubkey_hex).await?;
             Ok::<bool, anyhow::Error>(true)
         }
         .await;
@@ -3438,6 +3461,14 @@ pub async fn publish_nipia_archival_list(
             .replace_addressable_event(tenant.community(), &event, None)
             .await?;
         if !was_inserted {
+            enqueue_persistent_event_audit(
+                tenant,
+                state,
+                &stored,
+                KIND_IA_ARCHIVED_LIST,
+                &relay_pubkey_hex,
+            )
+            .await?;
             continue;
         }
 
@@ -3461,7 +3492,7 @@ pub async fn publish_nipia_archival_list(
             &relay_pubkey_hex,
             None,
         )
-        .await;
+        .await?;
         info!(
             archived_count = archived.len(),
             "NIP-IA archived identities list published"
@@ -3551,7 +3582,16 @@ pub async fn publish_dm_visibility_snapshot(
             &relay_pubkey_hex,
             None,
         )
-        .await;
+        .await?;
+    } else {
+        enqueue_persistent_event_audit(
+            tenant,
+            state,
+            &stored,
+            KIND_DM_VISIBILITY,
+            &relay_pubkey_hex,
+        )
+        .await?;
     }
 
     info!(
@@ -3610,10 +3650,11 @@ async fn publish_nipia_delta(
         .insert_event(tenant.community(), &event, None)
         .await?;
     if !was_inserted {
+        enqueue_persistent_event_audit(tenant, state, &stored, kind, &relay_pubkey_hex).await?;
         return Ok(());
     }
 
-    dispatch_persistent_event(tenant, state, &stored, kind, &relay_pubkey_hex, None).await;
+    dispatch_persistent_event(tenant, state, &stored, kind, &relay_pubkey_hex, None).await?;
 
     info!(
         target = %target_pubkey_hex,

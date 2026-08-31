@@ -10,7 +10,7 @@ use axum::body::Bytes;
 use axum::extract::ws::{Message as WsMessage, Utf8Bytes as WsUtf8Bytes};
 use dashmap::DashMap;
 use futures_util::future::join_all;
-use tokio::sync::{mpsc, watch, Semaphore};
+use tokio::sync::{mpsc, watch, Notify, Semaphore};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -693,8 +693,8 @@ pub struct AppState {
     /// access check so open channels stay zero-cost. Invalidated on a flip.
     pub channel_visibility_cache: Arc<moka::sync::Cache<(CommunityId, Uuid), String>>,
 
-    /// Bounded channel for audit logging, absent when audit logging is disabled.
-    pub audit_tx: Option<mpsc::Sender<buzz_audit::NewAuditEntry>>,
+    /// Durable audit outbox producer, absent when audit logging is disabled.
+    pub audit_queue: Option<AuditQueue>,
     /// Media storage client (S3/MinIO).
     pub media_storage: Arc<MediaStorage>,
     /// Single-flight + cache state for the hourly S3 storage sweep. See
@@ -776,8 +776,9 @@ impl AppState {
     /// Constructs `AppState` from its component services.
     ///
     /// Returns `(state, audit_shutdown)`. The caller should call
-    /// `audit_shutdown.drain().await` during graceful shutdown so queued
-    /// audit entries are flushed before the process exits.
+    /// `audit_shutdown.drain().await` during graceful shutdown so ready audit
+    /// entries are delivered; deferred entries already live durably in the
+    /// outbox and resume on another worker or after restart.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Config,
@@ -796,43 +797,20 @@ impl AppState {
         let search_arc = Arc::new(search);
 
         let audit_arc = audit.into().map(Arc::new);
-        let (audit_tx, mut audit_rx) = mpsc::channel::<buzz_audit::NewAuditEntry>(1000);
-        let audit_for_worker = audit_arc.clone();
-        let audit_cancel = CancellationToken::new();
-        let audit_cancel_worker = audit_cancel.clone();
-        let audit_worker_handle = tokio::spawn(async move {
-            let Some(audit_for_worker) = audit_for_worker else {
-                audit_cancel_worker.cancelled().await;
-                return;
-            };
-            // Normal operation: process entries as they arrive.
-            loop {
-                tokio::select! {
-                    entry = audit_rx.recv() => {
-                        match entry {
-                            Some(entry) => log_audit_entry(&audit_for_worker, entry).await,
-                            None => break, // channel closed
-                        }
-                    }
-                    _ = audit_cancel_worker.cancelled() => {
-                        // Close the receiver: rejects future sends and lets us
-                        // drain everything already buffered without a race.
-                        audit_rx.close();
-                        break;
-                    }
-                }
+        let (audit_queue, audit_shutdown) = match audit_arc.clone() {
+            Some(audit) => {
+                let (queue, shutdown) = start_audit_worker(audit);
+                (Some(queue), shutdown)
             }
-            // Drain: recv() returns buffered entries, then None once empty.
-            let mut drained = 0u32;
-            while let Some(entry) = audit_rx.recv().await {
-                log_audit_entry(&audit_for_worker, entry).await;
-                drained += 1;
+            None => {
+                let cancel = CancellationToken::new();
+                let cancel_worker = cancel.clone();
+                let handle = tokio::spawn(async move {
+                    cancel_worker.cancelled().await;
+                });
+                (None, AuditShutdownHandle { cancel, handle })
             }
-            if drained > 0 {
-                tracing::info!(drained, "audit worker flushed remaining entries");
-            }
-            tracing::warn!("audit log worker exited (expected on shutdown)");
-        });
+        };
 
         let git_max_concurrent_ops = config.git_max_concurrent_ops;
         let media_max_concurrent_uploads = config.media_max_concurrent_uploads;
@@ -857,7 +835,6 @@ impl AppState {
             Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
         let gif_http_client = crate::api::gifs::build_gif_http_client();
         let admission_rate_limiter = Arc::new(RedisRateLimiter::new(redis_pool.clone()));
-        let audit_enabled = audit_arc.is_some();
         let state = Self {
             config: Arc::new(config),
             db,
@@ -905,7 +882,7 @@ impl AppState {
                     .support_invalidation_closures()
                     .build(),
             ),
-            audit_tx: audit_enabled.then_some(audit_tx),
+            audit_queue,
             media_storage: Arc::new(media_storage),
             storage_sweep: Arc::new(tokio::sync::Mutex::new(
                 crate::storage_sweep::StorageSweepState::default(),
@@ -946,13 +923,7 @@ impl AppState {
             tracer: Arc::new(crate::conformance::NoopTracer),
             mesh: Arc::new(std::sync::OnceLock::new()),
         };
-        (
-            state,
-            AuditShutdownHandle {
-                cancel: audit_cancel,
-                handle: audit_worker_handle,
-            },
-        )
+        (state, audit_shutdown)
     }
 
     /// Inter-relay mesh handle. `None` ⇒ mesh-off / single-instance: callers
@@ -1319,61 +1290,133 @@ pub struct ThreadedChannelVisibility {
 
 /// Handle for graceful audit worker shutdown.
 ///
-/// Signals the worker to stop accepting new entries, drain its buffer,
-/// and exit. Independent of `Arc<AppState>` lifetime — works even when
-/// background tasks (reaper, pubsub, health) still hold state clones.
+/// Signals the worker to finish its current delivery pass and exit. Pending
+/// entries remain durable in PostgreSQL. Independent of `Arc<AppState>`
+/// lifetime — works even when background tasks (reaper, pubsub, health) still
+/// hold state clones.
 pub struct AuditShutdownHandle {
     cancel: CancellationToken,
     handle: JoinHandle<()>,
 }
 
 impl AuditShutdownHandle {
-    /// Signal the audit worker to drain and wait up to `timeout` for it to finish.
+    /// Stop the audit worker and wait up to `timeout` for it to finish.
+    ///
+    /// Producers persist entries before waking the worker, so shutdown does not
+    /// wait indefinitely on a contended community and pending rows resume after
+    /// restart.
     pub async fn drain(self, timeout: std::time::Duration) {
         self.cancel.cancel();
-        match tokio::time::timeout(timeout, self.handle).await {
+        let mut handle = self.handle;
+        match tokio::time::timeout(timeout, &mut handle).await {
             Ok(Ok(())) => tracing::info!("Audit worker drained cleanly"),
             Ok(Err(e)) => tracing::error!("Audit worker panicked: {e}"),
-            Err(_) => tracing::error!(
-                ?timeout,
-                "Audit worker did not drain in time — exiting anyway"
-            ),
+            Err(_) => {
+                tracing::error!(?timeout, "Audit worker did not drain in time — aborting it");
+                handle.abort();
+                if let Err(error) = handle.await {
+                    if !error.is_cancelled() {
+                        tracing::error!(%error, "Audit worker failed while being aborted");
+                    }
+                }
+            }
         }
     }
 }
 
-/// Log a single audit entry with metrics. Extracted so the normal loop
-/// and the post-cancel drain share the same logic.
-async fn log_audit_entry(audit: &buzz_audit::AuditService, entry: buzz_audit::NewAuditEntry) {
-    let t = std::time::Instant::now();
-    let mut retry_delay_ms = 50u64;
-    let mut retries = 0u64;
-    loop {
-        match audit.log(entry.clone()).await {
-            Ok(_) => {
-                metrics::histogram!("buzz_audit_log_seconds").record(t.elapsed().as_secs_f64());
-                return;
+/// Durable audit producer backed by the shared PostgreSQL outbox.
+#[derive(Clone)]
+pub struct AuditQueue {
+    audit: Arc<AuditService>,
+    wake: Arc<Notify>,
+}
+
+impl AuditQueue {
+    /// Persist one entry and wake a worker after the transaction commits.
+    pub async fn send(
+        &self,
+        entry: buzz_audit::NewAuditEntry,
+        dedupe_key: Option<&str>,
+    ) -> Result<(), buzz_audit::AuditError> {
+        self.audit.enqueue(entry, dedupe_key).await?;
+        self.wake.notify_one();
+        Ok(())
+    }
+}
+
+fn start_audit_worker(audit: Arc<AuditService>) -> (AuditQueue, AuditShutdownHandle) {
+    let wake = Arc::new(Notify::new());
+    let queue = AuditQueue {
+        audit: Arc::clone(&audit),
+        wake: Arc::clone(&wake),
+    };
+    let cancel = CancellationToken::new();
+    let cancel_worker = cancel.clone();
+    let handle = tokio::spawn(async move {
+        let mut final_delivery_attempted = false;
+        loop {
+            // Allow one final delivery attempt after cancellation so a producer
+            // that just committed an intent can still observe graceful delivery.
+            // The second check bounds teardown even while the outbox stays busy.
+            if cancel_worker.is_cancelled() {
+                if final_delivery_attempted {
+                    break;
+                }
+                final_delivery_attempted = true;
             }
-            Err(buzz_audit::AuditError::Database(sqlx::Error::Database(database_error)))
-                if database_error.code().as_deref() == Some("55P03") =>
-            {
-                retries += 1;
-                metrics::counter!("buzz_audit_log_lock_retries_total").increment(1);
-                tracing::warn!(
-                    retries,
+            let started = std::time::Instant::now();
+            match audit.deliver_next_pending().await {
+                Ok(buzz_audit::PendingAuditResult::Appended) => {
+                    metrics::histogram!("buzz_audit_log_seconds")
+                        .record(started.elapsed().as_secs_f64());
+                }
+                Ok(buzz_audit::PendingAuditResult::Deferred {
+                    attempt_count,
                     retry_delay_ms,
-                    "Audit advisory lock timed out; preserving entry for retry"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
-                retry_delay_ms = (retry_delay_ms * 2).min(1_000);
-            }
-            Err(error) => {
-                metrics::counter!("buzz_audit_log_errors_total").increment(1);
-                tracing::error!("Audit log failed: {error}");
-                return;
+                    sqlstate,
+                }) => {
+                    metrics::counter!(
+                        "buzz_audit_log_retries_total",
+                        "sqlstate" => sqlstate.clone()
+                    )
+                    .increment(1);
+                    if sqlstate == "55P03" {
+                        metrics::counter!("buzz_audit_log_lock_retries_total").increment(1);
+                    }
+                    tracing::warn!(
+                        attempt_count,
+                        retry_delay_ms,
+                        %sqlstate,
+                        "Audit delivery timed out; durable entry rescheduled"
+                    );
+                }
+                Ok(buzz_audit::PendingAuditResult::Idle) => {
+                    if cancel_worker.is_cancelled() {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = cancel_worker.cancelled() => {},
+                        _ = wake.notified() => {},
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {},
+                    }
+                }
+                Err(error) => {
+                    metrics::counter!("buzz_audit_log_errors_total").increment(1);
+                    tracing::error!(%error, "Audit outbox delivery failed; entry remains durable");
+                    if cancel_worker.is_cancelled() {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = cancel_worker.cancelled() => break,
+                        _ = wake.notified() => {},
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
+                    }
+                }
             }
         }
-    }
+        tracing::warn!("audit log worker exited (expected on shutdown)");
+    });
+    (queue, AuditShutdownHandle { cancel, handle })
 }
 
 impl std::fmt::Debug for AppState {
@@ -1472,26 +1515,16 @@ pub(crate) mod tests {
         let observer = sqlx::PgPool::connect(&database_url)
             .await
             .expect("connect observer pool");
-        let application_name = format!("audit-retry-test-{}", Uuid::new_v4());
-        let hook_application_name = application_name.clone();
-        let audit_pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .after_connect(move |conn, _meta| {
-                let application_name = hook_application_name.clone();
-                Box::pin(async move {
-                    sqlx::query(
-                        "SELECT set_config('application_name', $1, false), \
-                                set_config('lock_timeout', '100', false)",
-                    )
-                    .bind(application_name)
-                    .execute(&mut *conn)
-                    .await?;
-                    Ok(())
-                })
-            })
-            .connect(&database_url)
-            .await
-            .expect("connect audit pool");
+        let audit_pool = buzz_db::Db::connect_writer_pool(&buzz_db::DbConfig {
+            database_url: database_url.clone(),
+            max_connections: 1,
+            min_connections: 0,
+            lock_timeout_ms: 100,
+            statement_timeout_ms: 0,
+            ..buzz_db::DbConfig::default()
+        })
+        .await
+        .expect("connect audit pool");
 
         let community_id = Uuid::new_v4();
         sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
@@ -1519,37 +1552,28 @@ pub(crate) mod tests {
             .expect("hold community audit lock");
 
         let audit = Arc::new(AuditService::new(audit_pool));
-        let worker = tokio::spawn({
-            let audit = Arc::clone(&audit);
-            async move { log_audit_entry(&audit, entry).await }
-        });
+        let (queue, shutdown) = start_audit_worker(Arc::clone(&audit));
+        queue
+            .send(entry, None)
+            .await
+            .expect("durably enqueue audit entry");
 
-        // Observe one timed-out advisory-lock attempt and then a second wait.
-        // Releasing during the first wait would not prove that the worker
-        // preserved and retried the original queue entry.
+        // Observe the durable row reach a second attempt. Releasing during the
+        // first wait would not prove that the worker preserved and retried it.
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            let mut saw_first_wait = false;
-            let mut saw_retry_gap = false;
             loop {
-                let waiting: bool = sqlx::query_scalar(
-                    "SELECT EXISTS (\
-                         SELECT 1 FROM pg_stat_activity \
-                         WHERE application_name = $1 \
-                           AND query LIKE 'SELECT pg_advisory_lock%' \
-                           AND wait_event = 'advisory'\
-                     )",
+                let attempts: i32 = sqlx::query_scalar(
+                    "SELECT COALESCE(MAX(attempt_count), 0)::integer \
+                     FROM audit_outbox \
+                     WHERE community_id = $1 AND object_id = $2",
                 )
-                .bind(&application_name)
+                .bind(community_id)
+                .bind(&object_id)
                 .fetch_one(&observer)
                 .await
-                .expect("inspect audit lock waiter");
-                if waiting {
-                    if saw_retry_gap {
-                        break;
-                    }
-                    saw_first_wait = true;
-                } else if saw_first_wait {
-                    saw_retry_gap = true;
+                .expect("inspect durable retry count");
+                if attempts >= 2 {
+                    break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
@@ -1562,10 +1586,25 @@ pub(crate) mod tests {
             .execute(&mut *holder)
             .await
             .expect("release community audit lock");
-        tokio::time::timeout(std::time::Duration::from_secs(3), worker)
-            .await
-            .expect("audit worker did not finish after lock release")
-            .expect("audit worker task panicked");
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let rows: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM audit_log WHERE community_id = $1 AND object_id = $2",
+                )
+                .bind(community_id)
+                .bind(&object_id)
+                .fetch_one(&observer)
+                .await
+                .expect("count retried audit rows");
+                if rows == 1 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("audit worker did not finish after lock release");
+        shutdown.drain(std::time::Duration::from_secs(1)).await;
 
         let rows: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM audit_log WHERE community_id = $1 AND object_id = $2",
@@ -1588,6 +1627,503 @@ pub(crate) mod tests {
             .execute(&observer)
             .await
             .expect("remove test community");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn audit_worker_retries_statement_timeout_until_original_entry_is_appended_once() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let observer = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("connect observer pool");
+        let audit_pool = buzz_db::Db::connect_writer_pool(&buzz_db::DbConfig {
+            database_url: database_url.clone(),
+            max_connections: 1,
+            min_connections: 0,
+            lock_timeout_ms: 1_000,
+            statement_timeout_ms: 100,
+            ..buzz_db::DbConfig::default()
+        })
+        .await
+        .expect("connect audit pool");
+
+        let community_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("audit-statement-retry-{community_id}.example"))
+            .execute(&observer)
+            .await
+            .expect("insert test community");
+        let object_id = format!("audit-statement-retry-object-{}", Uuid::new_v4());
+        let entry = buzz_audit::NewAuditEntry {
+            community_id: CommunityId::from_uuid(community_id),
+            action: buzz_audit::AuditAction::EventCreated,
+            actor_pubkey: Some(vec![0xcd; 32]),
+            object_id: Some(object_id.clone()),
+            detail: serde_json::json!({"test": "statement-timeout-retry"}),
+        };
+
+        let lock_key = format!("buzz_audit:{community_id}");
+        let mut holder = observer.acquire().await.expect("acquire lock holder");
+        sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+            .bind(&lock_key)
+            .execute(&mut *holder)
+            .await
+            .expect("hold community audit lock");
+
+        let audit = Arc::new(AuditService::new(audit_pool));
+        let (queue, shutdown) = start_audit_worker(Arc::clone(&audit));
+        queue
+            .send(entry, None)
+            .await
+            .expect("durably enqueue audit entry");
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let attempts: i32 = sqlx::query_scalar(
+                    "SELECT COALESCE(MAX(attempt_count), 0)::integer \
+                     FROM audit_outbox \
+                     WHERE community_id = $1 AND object_id = $2",
+                )
+                .bind(community_id)
+                .bind(&object_id)
+                .fetch_one(&observer)
+                .await
+                .expect("inspect durable statement-timeout retry count");
+                if attempts >= 2 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("audit worker did not exercise statement-timeout retry");
+        sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+            .bind(&lock_key)
+            .execute(&mut *holder)
+            .await
+            .expect("release community audit lock");
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let rows: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM audit_log WHERE community_id = $1 AND object_id = $2",
+                )
+                .bind(community_id)
+                .bind(&object_id)
+                .fetch_one(&observer)
+                .await
+                .expect("count retried audit rows");
+                if rows == 1 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("audit worker did not finish after statement timeout");
+        shutdown.drain(std::time::Duration::from_secs(1)).await;
+
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM audit_log WHERE community_id = $1 AND object_id = $2",
+        )
+        .bind(community_id)
+        .bind(&object_id)
+        .fetch_one(&observer)
+        .await
+        .expect("count retried audit rows");
+        assert_eq!(rows, 1, "the preserved entry must be appended exactly once");
+
+        sqlx::query("DELETE FROM audit_log WHERE community_id = $1 AND object_id = $2")
+            .bind(community_id)
+            .bind(&object_id)
+            .execute(&observer)
+            .await
+            .expect("remove test audit row");
+        sqlx::query("DELETE FROM communities WHERE id = $1")
+            .bind(community_id)
+            .execute(&observer)
+            .await
+            .expect("remove test community");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn audit_queue_dedupes_logical_event_while_pending_and_after_delivery() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let observer = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("connect observer pool");
+        let audit_pool = buzz_db::Db::connect_writer_pool(&buzz_db::DbConfig {
+            database_url,
+            max_connections: 2,
+            min_connections: 0,
+            lock_timeout_ms: 100,
+            statement_timeout_ms: 0,
+            ..buzz_db::DbConfig::default()
+        })
+        .await
+        .expect("connect audit pool");
+
+        let community_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("audit-dedupe-{community_id}.example"))
+            .execute(&observer)
+            .await
+            .expect("insert test community");
+        let object_id = format!("audit-dedupe-object-{}", Uuid::new_v4());
+        let dedupe_key = format!("event_created:{object_id}");
+        let entry = buzz_audit::NewAuditEntry {
+            community_id: CommunityId::from_uuid(community_id),
+            action: buzz_audit::AuditAction::EventCreated,
+            actor_pubkey: Some(vec![0xde; 32]),
+            object_id: Some(object_id.clone()),
+            detail: serde_json::json!({"test": "logical-dedupe"}),
+        };
+        let audit = Arc::new(AuditService::new(audit_pool));
+        let (queue, shutdown) = start_audit_worker(audit);
+
+        queue
+            .send(entry.clone(), Some(&dedupe_key))
+            .await
+            .expect("enqueue original audit intent");
+        queue
+            .send(entry.clone(), Some(&dedupe_key))
+            .await
+            .expect("dedupe pending audit retry");
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let rows: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM audit_log WHERE community_id = $1 AND object_id = $2",
+                )
+                .bind(community_id)
+                .bind(&object_id)
+                .fetch_one(&observer)
+                .await
+                .expect("count delivered audit rows");
+                if rows == 1 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("original audit intent was not delivered");
+
+        queue
+            .send(entry, Some(&dedupe_key))
+            .await
+            .expect("dedupe delivered audit retry");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let (audit_rows, pending_rows, key_rows): (i64, i64, i64) = sqlx::query_as(
+            "SELECT \
+                 (SELECT count(*) FROM audit_log WHERE community_id = $1 AND object_id = $2), \
+                 (SELECT count(*) FROM audit_outbox WHERE community_id = $1), \
+                 (SELECT count(*) FROM audit_delivery_keys \
+                  WHERE community_id = $1 AND dedupe_key = $3)",
+        )
+        .bind(community_id)
+        .bind(&object_id)
+        .bind(&dedupe_key)
+        .fetch_one(&observer)
+        .await
+        .expect("inspect logical audit dedupe state");
+        assert_eq!(audit_rows, 1, "logical event must be audited exactly once");
+        assert_eq!(
+            pending_rows, 0,
+            "duplicate retry must not recreate outbox row"
+        );
+        assert_eq!(key_rows, 1, "delivery key must survive completed delivery");
+        shutdown.drain(std::time::Duration::from_secs(1)).await;
+
+        sqlx::query("DELETE FROM audit_log WHERE community_id = $1")
+            .bind(community_id)
+            .execute(&observer)
+            .await
+            .expect("remove audit rows");
+        sqlx::query("DELETE FROM audit_delivery_keys WHERE community_id = $1")
+            .bind(community_id)
+            .execute(&observer)
+            .await
+            .expect("remove audit delivery key");
+        sqlx::query("DELETE FROM communities WHERE id = $1")
+            .bind(community_id)
+            .execute(&observer)
+            .await
+            .expect("remove test community");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn durable_audit_queue_survives_saturation_and_contended_tenant_teardown() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let observer = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("connect observer pool");
+        let audit_pool = buzz_db::Db::connect_writer_pool(&buzz_db::DbConfig {
+            database_url: database_url.clone(),
+            max_connections: 4,
+            min_connections: 0,
+            lock_timeout_ms: 100,
+            statement_timeout_ms: 0,
+            ..buzz_db::DbConfig::default()
+        })
+        .await
+        .expect("connect audit pool");
+
+        let community_a = Uuid::new_v4();
+        let community_b = Uuid::new_v4();
+        for (id, label) in [(community_a, "a"), (community_b, "b")] {
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(id)
+                .bind(format!("audit-fairness-{label}-{id}.example"))
+                .execute(&observer)
+                .await
+                .expect("insert test community");
+        }
+
+        let lock_key_a = format!("buzz_audit:{community_a}");
+        let mut holder = observer.acquire().await.expect("acquire lock holder");
+        sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+            .bind(&lock_key_a)
+            .execute(&mut *holder)
+            .await
+            .expect("hold community A audit lock");
+
+        let audit = Arc::new(AuditService::new(audit_pool));
+        let (queue, shutdown) = start_audit_worker(Arc::clone(&audit));
+        for index in 0..=1000 {
+            queue
+                .send(
+                    buzz_audit::NewAuditEntry {
+                        community_id: CommunityId::from_uuid(community_a),
+                        action: buzz_audit::AuditAction::EventCreated,
+                        actor_pubkey: Some(vec![0xaa; 32]),
+                        object_id: Some(format!("audit-saturated-a-{index}")),
+                        detail: serde_json::json!({"index": index}),
+                    },
+                    None,
+                )
+                .await
+                .expect("durably enqueue community A audit entry");
+        }
+        let object_b = format!("audit-progress-b-{}", Uuid::new_v4());
+        queue
+            .send(
+                buzz_audit::NewAuditEntry {
+                    community_id: CommunityId::from_uuid(community_b),
+                    action: buzz_audit::AuditAction::EventCreated,
+                    actor_pubkey: Some(vec![0xbb; 32]),
+                    object_id: Some(object_b.clone()),
+                    detail: serde_json::json!({"test": "cross-community-progress"}),
+                },
+                None,
+            )
+            .await
+            .expect("durably enqueue community B audit entry");
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let rows: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM audit_log WHERE community_id = $1 AND object_id = $2",
+                )
+                .bind(community_b)
+                .bind(&object_b)
+                .fetch_one(&observer)
+                .await
+                .expect("count community B audit rows");
+                if rows == 1 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("contended community A blocked community B progress");
+
+        let pending_a: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM audit_outbox WHERE community_id = $1")
+                .bind(community_a)
+                .fetch_one(&observer)
+                .await
+                .expect("count durable community A audit intents");
+        assert_eq!(pending_a, 1001, "saturated entries must remain durable");
+
+        let shutdown_started = std::time::Instant::now();
+        shutdown.drain(std::time::Duration::from_secs(1)).await;
+        assert!(
+            shutdown_started.elapsed() < std::time::Duration::from_secs(1),
+            "durable queue teardown must not wait on a contended tenant"
+        );
+
+        sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+            .bind(&lock_key_a)
+            .execute(&mut *holder)
+            .await
+            .expect("release community A audit lock");
+        let (_queue_after_restart, shutdown_after_restart) = start_audit_worker(Arc::clone(&audit));
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let rows: i64 = sqlx::query_scalar(
+                    "SELECT count(*) FROM audit_log \
+                     WHERE community_id = $1 AND object_id = 'audit-saturated-a-0'",
+                )
+                .bind(community_a)
+                .fetch_one(&observer)
+                .await
+                .expect("count recovered community A audit row");
+                if rows == 1 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("restart did not resume the durable community A intent");
+        shutdown_after_restart
+            .drain(std::time::Duration::from_secs(1))
+            .await;
+
+        sqlx::query("DELETE FROM audit_outbox WHERE community_id IN ($1, $2)")
+            .bind(community_a)
+            .bind(community_b)
+            .execute(&observer)
+            .await
+            .expect("remove pending audit test rows");
+        sqlx::query("DELETE FROM audit_log WHERE community_id IN ($1, $2)")
+            .bind(community_a)
+            .bind(community_b)
+            .execute(&observer)
+            .await
+            .expect("remove audit test rows");
+        sqlx::query("DELETE FROM communities WHERE id IN ($1, $2)")
+            .bind(community_a)
+            .bind(community_b)
+            .execute(&observer)
+            .await
+            .expect("remove test communities");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn audit_worker_cancellation_stops_a_continuously_ready_backlog() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let observer = sqlx::PgPool::connect(&database_url)
+            .await
+            .expect("connect observer pool");
+        let audit_pool = buzz_db::Db::connect_writer_pool(&buzz_db::DbConfig {
+            database_url,
+            max_connections: 4,
+            min_connections: 0,
+            lock_timeout_ms: 100,
+            statement_timeout_ms: 0,
+            ..buzz_db::DbConfig::default()
+        })
+        .await
+        .expect("connect audit pool");
+
+        let community_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("audit-ready-backlog-{community_id}.example"))
+            .execute(&observer)
+            .await
+            .expect("insert test community");
+        sqlx::query(
+            "INSERT INTO audit_outbox (community_id, action, object_id, detail) \
+             SELECT $1, 'event_created', 'audit-ready-' || item::text, \
+                    jsonb_build_object('item', item) \
+             FROM generate_series(1, 10000) AS item",
+        )
+        .bind(community_id)
+        .execute(&observer)
+        .await
+        .expect("seed continuously ready audit backlog");
+
+        let audit = Arc::new(AuditService::new(audit_pool));
+        let (_queue, shutdown) = start_audit_worker(audit);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let appended: i64 =
+                    sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE community_id = $1")
+                        .bind(community_id)
+                        .fetch_one(&observer)
+                        .await
+                        .expect("count appended audit rows");
+                if appended > 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("audit worker did not begin draining ready backlog");
+
+        shutdown.drain(std::time::Duration::from_secs(1)).await;
+        let appended_after_shutdown: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE community_id = $1")
+                .bind(community_id)
+                .fetch_one(&observer)
+                .await
+                .expect("count rows after shutdown");
+        let pending_after_shutdown: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM audit_outbox WHERE community_id = $1")
+                .bind(community_id)
+                .fetch_one(&observer)
+                .await
+                .expect("count durable rows after shutdown");
+        assert!(
+            pending_after_shutdown > 0,
+            "shutdown must not drain the entire continuously ready backlog"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let appended_later: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM audit_log WHERE community_id = $1")
+                .bind(community_id)
+                .fetch_one(&observer)
+                .await
+                .expect("count rows after worker should have stopped");
+        assert_eq!(
+            appended_later, appended_after_shutdown,
+            "audit worker must not remain detached after shutdown"
+        );
+
+        sqlx::query("DELETE FROM audit_outbox WHERE community_id = $1")
+            .bind(community_id)
+            .execute(&observer)
+            .await
+            .expect("remove pending audit rows");
+        sqlx::query("DELETE FROM audit_log WHERE community_id = $1")
+            .bind(community_id)
+            .execute(&observer)
+            .await
+            .expect("remove appended audit rows");
+        sqlx::query("DELETE FROM communities WHERE id = $1")
+            .bind(community_id)
+            .execute(&observer)
+            .await
+            .expect("remove test community");
+    }
+
+    #[tokio::test]
+    async fn audit_shutdown_aborts_a_worker_that_exceeds_its_timeout() {
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_worker = Arc::clone(&completed);
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            completed_worker.store(true, Ordering::SeqCst);
+        });
+        let shutdown = AuditShutdownHandle {
+            cancel: CancellationToken::new(),
+            handle,
+        };
+
+        shutdown.drain(std::time::Duration::from_millis(5)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(125)).await;
+        assert!(
+            !completed.load(Ordering::SeqCst),
+            "timed-out worker must be aborted instead of detached"
+        );
     }
 
     #[test]

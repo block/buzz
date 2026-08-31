@@ -28,7 +28,7 @@ use uuid::Uuid;
 use buzz_core::kind::{event_kind_u32, KIND_STREAM_MESSAGE};
 use buzz_core::tenant::TenantContext;
 
-use super::event::dispatch_persistent_event;
+use super::event::{dispatch_persistent_event, enqueue_persistent_event_audit};
 use super::side_effects::emit_group_discovery_events;
 use crate::state::AppState;
 
@@ -180,7 +180,7 @@ pub async fn send_moderation_notice(
         .await?;
 
     let kind_u32 = event_kind_u32(&stored.event);
-    dispatch_persistent_event(tenant, state, &stored, kind_u32, &relay_pubkey_hex, None).await;
+    dispatch_persistent_event(tenant, state, &stored, kind_u32, &relay_pubkey_hex, None).await?;
 
     Ok(())
 }
@@ -212,7 +212,10 @@ async fn publish_moderation_profile(
         .await?;
     if was_inserted {
         let kind_u32 = event_kind_u32(&stored.event);
-        dispatch_persistent_event(tenant, state, &stored, kind_u32, relay_pubkey_hex, None).await;
+        dispatch_persistent_event(tenant, state, &stored, kind_u32, relay_pubkey_hex, None).await?;
+    } else {
+        let kind_u32 = event_kind_u32(&stored.event);
+        enqueue_persistent_event_audit(tenant, state, &stored, kind_u32, relay_pubkey_hex).await?;
     }
     Ok(())
 }

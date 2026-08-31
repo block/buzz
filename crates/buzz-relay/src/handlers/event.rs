@@ -339,11 +339,11 @@ pub async fn fan_out_pubsub_event(state: &Arc<AppState>, channel_event: buzz_pub
 
 /// Schedule post-commit delivery/side effects for a stored event.
 ///
-/// This intentionally returns after only the bounded audit enqueue has completed:
+/// This intentionally returns after only the durable audit enqueue has completed:
 /// NIP-01 `OK` means the event was durably accepted, not that Redis publish,
 /// local fan-out, or workflow triggering have completed. Keeping audit enqueue on
-/// the awaited path preserves the bounded-channel backpressure posture when the
-/// audit DB is overloaded; the spawned task still runs the same guarded fan-out
+/// the awaited path preserves audit intent before acceptance when the audit DB
+/// is overloaded; the spawned task still runs the same guarded fan-out
 /// path, Redis publish, `mark_local_event` echo dedupe, and delivery metrics as
 /// the former inline path.
 pub(crate) async fn dispatch_persistent_event(
@@ -353,17 +353,10 @@ pub(crate) async fn dispatch_persistent_event(
     kind_u32: u32,
     actor_pubkey_hex: &str,
     threaded_visibility: Option<crate::state::ThreadedChannelVisibility>,
-) -> usize {
+) -> Result<usize, buzz_audit::AuditError> {
+    enqueue_persistent_event_audit(tenant, state, stored_event, kind_u32, actor_pubkey_hex).await?;
+
     let event_id_hex = stored_event.event.id.to_hex();
-    enqueue_event_created_audit(
-        tenant,
-        state,
-        stored_event,
-        kind_u32,
-        actor_pubkey_hex,
-        &event_id_hex,
-    )
-    .await;
 
     let tenant = tenant.clone();
     let state = Arc::clone(state);
@@ -389,7 +382,31 @@ pub(crate) async fn dispatch_persistent_event(
         );
     });
 
-    0
+    Ok(0)
+}
+
+/// Repair only the durable audit intent for an already-persisted event.
+///
+/// Internal producers use this when an earlier attempt committed the event but
+/// failed to enqueue its audit intent. Their duplicate retry must not repeat
+/// fan-out or workflows, but it must repair the missing audit handoff.
+pub(crate) async fn enqueue_persistent_event_audit(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    stored_event: &StoredEvent,
+    kind_u32: u32,
+    actor_pubkey_hex: &str,
+) -> Result<(), buzz_audit::AuditError> {
+    let event_id_hex = stored_event.event.id.to_hex();
+    enqueue_event_created_audit(
+        tenant,
+        state,
+        stored_event,
+        kind_u32,
+        actor_pubkey_hex,
+        &event_id_hex,
+    )
+    .await
 }
 
 /// Run post-commit delivery/side effects for a stored event.
@@ -506,7 +523,7 @@ async fn dispatch_persistent_event_inner(
     // `search_index_tx` mpsc are gone with the Typesense backend.
 
     if enqueue_audit {
-        enqueue_event_created_audit(
+        if let Err(error) = enqueue_event_created_audit(
             tenant,
             state,
             stored_event,
@@ -514,7 +531,10 @@ async fn dispatch_persistent_event_inner(
             actor_pubkey_hex,
             &event_id_hex,
         )
-        .await;
+        .await
+        {
+            error!(event_id = %event_id_hex, %error, "Pubsub audit intent could not be persisted");
+        }
     }
 
     // Skip workflow triggering for workflow-execution kinds and relay-signed workflow messages.
@@ -567,17 +587,14 @@ async fn enqueue_event_created_audit(
     kind_u32: u32,
     actor_pubkey_hex: &str,
     event_id_hex: &str,
-) {
-    let Some(audit_tx) = &state.audit_tx else {
-        return;
+) -> Result<(), buzz_audit::AuditError> {
+    let Some(audit_queue) = &state.audit_queue else {
+        return Ok(());
     };
-    // Audit via bounded channel (capacity 1000). Uses .send().await so entries
-    // are never silently dropped — backpressure propagates to the event handler
-    // if the queue is full. This is intentional: the audit advisory lock already
-    // serializes writes (at most 1 in-flight), so a full queue means the audit
-    // DB is genuinely overloaded and the relay should slow down rather than
-    // accumulate unbounded in-memory state. DB write failures in the worker are
-    // logged but not retried (same as the previous per-event tokio::spawn).
+    // Persist the audit intent before returning the NIP-01 acceptance. Delivery
+    // is asynchronous and retries both lock and statement timeouts from the
+    // durable outbox; a contended community cannot block another community's
+    // chain, and restart resumes any pending entry.
     let audit_entry = buzz_audit::NewAuditEntry {
         community_id: tenant.community(),
         action: buzz_audit::AuditAction::EventCreated,
@@ -594,10 +611,13 @@ async fn enqueue_event_created_audit(
             "channel_id": stored_event.channel_id,
         }),
     };
-    if let Err(e) = audit_tx.send(audit_entry).await {
-        error!(event_id = %event_id_hex, "Audit channel closed — entry lost: {e}");
+    let dedupe_key = format!("event_created:{event_id_hex}");
+    if let Err(e) = audit_queue.send(audit_entry, Some(&dedupe_key)).await {
+        error!(event_id = %event_id_hex, "Audit intent could not be persisted: {e}");
         metrics::counter!("buzz_audit_send_errors_total").increment(1);
+        return Err(e);
     }
+    Ok(())
 }
 
 /// Handle an EVENT message from a WebSocket connection.

@@ -43,11 +43,11 @@ pub struct AuditEntry {
 /// `TenantContext`), never a client-supplied value — the same provenance rule
 /// the whole multi-tenant model rests on.
 ///
-/// Not `Serialize`/`Deserialize`: this is an in-process input struct (consumed
-/// by `AuditService::log`, threaded through the in-memory audit sink), never
-/// crossing a wire or DB boundary as a whole. Keeping it non-deserializable
-/// reinforces the fence — there is no path by which a client-supplied blob
-/// becomes a `NewAuditEntry` (and thus a `CommunityId`).
+/// Not `Serialize`/`Deserialize`: this is an in-process input struct consumed by
+/// `AuditService`; durable outbox columns are bound individually, never decoded
+/// from a client-supplied blob. Keeping it non-deserializable reinforces the
+/// fence — there is no path by which client JSON becomes a `NewAuditEntry` (and
+/// thus a `CommunityId`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewAuditEntry {
     /// Server-resolved community this entry belongs to. Typed as [`CommunityId`]
