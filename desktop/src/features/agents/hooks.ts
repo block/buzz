@@ -623,7 +623,8 @@ export function useStopManagedAgentMutation() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: (pubkey: string) => stopManagedAgent(pubkey),
+    mutationFn: (input: Parameters<typeof stopManagedAgent>[0]) =>
+      stopManagedAgent(input),
     onSettled: () => {
       invalidateManagedAgentQueriesInBackground(queryClient);
     },

@@ -1,3 +1,4 @@
+use super::test_fixtures::receipt_fixture;
 use crate::managed_agents::known_acp_runtime;
 
 #[path = "cli_tests.rs"]
@@ -855,17 +856,6 @@ fn own_group_grandchild_detected_by_ancestor_walk() {
 }
 
 // ── pair receipt validation tests ───────────────────────────────────────
-
-fn receipt_fixture(
-    key: crate::managed_agents::ManagedAgentRuntimeKey,
-) -> crate::managed_agents::ManagedAgentRuntimeReceipt {
-    crate::managed_agents::ManagedAgentRuntimeReceipt {
-        key,
-        pid: std::process::id(),
-        desktop_instance_id: "test-instance".into(),
-        started_at: "now".into(),
-    }
-}
 
 #[test]
 fn receipt_validation_rejects_noncanonical_identity() {

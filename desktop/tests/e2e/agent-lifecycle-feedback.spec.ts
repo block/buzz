@@ -393,3 +393,99 @@ test.describe("agent lifecycle feedback screenshots", () => {
     await expect(saveButton).toBeEnabled();
   });
 });
+
+for (const switchBeforeStart of [false, true]) {
+  test(`summary Start uses its emitted workspace scope, not the legacy pin (switch=${switchBeforeStart})`, async ({
+    page,
+  }) => {
+    const pubkey = CASCADE_AGENT_A_PUBKEY;
+    const relay = "wss://clicked.example";
+    await installMockBridge(
+      page,
+      {
+        personas: [
+          {
+            id: CASCADE_PERSONA_ID,
+            displayName: "Scope Agent",
+            systemPrompt: "Test scope.",
+          },
+        ],
+        managedAgents: [
+          {
+            pubkey,
+            name: "Scope Agent",
+            personaId: CASCADE_PERSONA_ID,
+            status: "stopped",
+            relayUrl: "wss://legacy-pin.example",
+          },
+        ],
+      },
+      { relayWsUrl: relay },
+    );
+    await openAgentsView(page);
+    const summary = await page.evaluate(async (key) => {
+      const rows = (await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.(
+        "list_managed_agents",
+        {},
+      )) as Array<{
+        pubkey: string;
+        selected_relay_url: string;
+        selected_run_id: string | null;
+      }>;
+      return rows.find((row) => row.pubkey === key);
+    }, pubkey);
+    expect(summary?.selected_relay_url).toBe(relay);
+    expect(summary?.selected_run_id).toBeNull();
+    if (switchBeforeStart) {
+      // Change native-side authority while retaining the clicked UI summary.
+      await page.evaluate(() => {
+        const id = localStorage.getItem("buzz-active-community-id");
+        const communities = JSON.parse(
+          localStorage.getItem("buzz-communities") ?? "[]",
+        );
+        for (const community of communities) {
+          if (community.id === id) community.relayUrl = "wss://other.example";
+        }
+        localStorage.setItem("buzz-communities", JSON.stringify(communities));
+      });
+    }
+    await page.getByTestId(`agent-runtime-start-${pubkey}`).click();
+    if (switchBeforeStart) {
+      await expect(
+        page.getByText(/active community changed/).first(),
+      ).toBeVisible();
+      await expect(
+        page.getByTestId(`agent-runtime-active-${pubkey}`),
+      ).toHaveCount(0);
+    } else {
+      await expect(
+        page.getByTestId(`agent-runtime-active-${pubkey}`),
+      ).toBeVisible();
+    }
+    const { starts, runtimes } = await page.evaluate(async () => ({
+      starts: window.__BUZZ_E2E_COMMAND_LOG__?.filter(
+        (entry) => entry.command === "start_managed_agent",
+      ),
+      runtimes: await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.(
+        "list_managed_agent_runtimes",
+        {},
+      ),
+    }));
+    expect(starts).toHaveLength(1);
+    expect(starts?.[0].payload).toMatchObject({
+      pubkey,
+      expectedRelayUrl: relay,
+    });
+    expect(runtimes).toEqual(
+      switchBeforeStart
+        ? []
+        : [
+            expect.objectContaining({
+              pubkey,
+              relayUrl: relay,
+              lifecycle: "ready",
+            }),
+          ],
+    );
+  });
+}

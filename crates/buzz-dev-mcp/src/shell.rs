@@ -24,6 +24,7 @@ const ARTIFACT_RING_SIZE: usize = 8;
 const READ_CHUNK: usize = 16 * 1024;
 
 pub struct SharedState {
+    pub(crate) workloads: crate::workloads::Workloads,
     pub cwd: PathBuf,
     pub shim: Shim,
     pub session_dir: TempDir,
@@ -52,6 +53,7 @@ impl SharedState {
         };
         let bootstrap_instructions = build_bootstrap(&cwd, shell_hint);
         Ok(Self {
+            workloads: Default::default(),
             cwd,
             shim,
             session_dir,
@@ -132,6 +134,13 @@ pub async fn run(
     p: ShellParams,
     ct: CancellationToken,
 ) -> Result<CallToolResult, ErrorData> {
+    let _work = state
+        .workloads
+        .enter()
+        .ok_or_else(|| ErrorData::internal_error("shell connection is shutting down", None))?;
+    if state.workloads.cancel.is_cancelled() {
+        return Ok(CallToolResult::error(vec![Content::text("cancelled")]));
+    }
     if p.command.len() > MAX_COMMAND_BYTES {
         return Err(ErrorData::invalid_params(
             format!("command exceeds {MAX_COMMAND_BYTES} byte limit"),
@@ -190,6 +199,7 @@ pub async fn run(
     };
 
     let pid = child.id();
+    let mut owned_work = state.workloads.child();
 
     // KillGroup ties the spawned bash and all its descendants to a single kill
     // primitive (Unix process group / Windows Job Object). Built from the live
@@ -217,7 +227,12 @@ pub async fn run(
     let mut notes: Vec<String> = Vec::new();
     let (status, timed_out) = tokio::select! {
         biased;
-        _ = ct.cancelled() => {
+        _ = async {
+            tokio::select! {
+                _ = ct.cancelled() => {}
+                _ = state.workloads.cancel.cancelled() => {}
+            }
+        } => {
             // Kill process group, reap child, abort reader tasks.
             kill_group.kill_immediate();
             // Bounded reap so we don't leak zombies. If reap times out,
@@ -232,8 +247,11 @@ pub async fn run(
                     tracing::debug!("cancel: child reap timed out; guard will kill on drop");
                 }
             }
+            owned_work.finish(pid, matches!(child.try_wait(), Ok(Some(_)))).await;
             stdout_handle.abort();
             stderr_handle.abort();
+            let _ = stdout_handle.await;
+            let _ = stderr_handle.await;
             return Ok(CallToolResult::error(vec![Content::text("cancelled")]));
         }
         r = tokio::time::timeout(timeout_dur, child.wait()) => match r {
@@ -319,6 +337,9 @@ pub async fn run(
         "notes": notes,
     });
     let text = serde_json::to_string_pretty(&body).unwrap_or_else(|_| "{}".into());
+    owned_work
+        .finish(pid, matches!(child.try_wait(), Ok(Some(_))))
+        .await;
     kill_group.disarm();
     Ok(CallToolResult::success(vec![Content::text(text)]))
 }

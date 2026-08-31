@@ -22,6 +22,10 @@ name = "buzz_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [features]
+# Explicitly non-default: native Start tracer is not yet release-certified.
+remote-start-preview = []
+# Isolated native executable harness; never enabled in release packaging.
+remote-start-tracer = ["remote-start-preview"]
 default = ["system-keyring"]
 mesh-llm = ["dep:iroh", "dep:mesh-llm-sdk", "dep:mesh-llm-host-runtime", "dep:mesh-llm-client", "dep:mesh-llm-node", "dep:mesh-llm-system", "dep:mesh-llm-events"]
 # OS keyring backing for desktop secret storage (nsec private keys). When
@@ -68,6 +72,7 @@ keyring = { version = "3.6.3", default-features = false, features = ["windows-na
 user-idle = { version = "0.6", default-features = false }
 
 [dependencies]
+gethostname = "1.1.0"
 atomic-write-file = "0.3"
 anyhow = "1"
 dirs = "6"
@@ -157,3 +162,8 @@ tokio = { version = "1", features = ["test-util"] }
 # The relay's media validation, so the snapshot-sharing tests can prove the
 # full export → sanitize → relay-accept → import contract end to end.
 buzz_media_pkg = { package = "buzz-media", path = "../../crates/buzz-media" }
+
+[[bin]]
+name = "host-start-tracer"
+path = "src/bin/host_start_tracer.rs"
+required-features = ["remote-start-tracer"]

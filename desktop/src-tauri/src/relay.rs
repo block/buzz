@@ -100,7 +100,7 @@ pub fn relay_http_base_url(relay_url: &str) -> String {
 mod scope;
 pub use scope::{
     assert_expected_relay_scope, assert_expected_signer, bind_expected_relay_scope,
-    bind_expected_signer, ScopedWorkspaceRelay,
+    bind_expected_signer, ScopedWorkspaceRelay, ScopedWorkspaceSigner,
 };
 
 pub fn relay_api_base_url() -> String {
@@ -349,6 +349,9 @@ pub async fn relay_error_message(response: reqwest::Response) -> String {
     // Non-JSON, non-HTML body: emit status only — no raw body in the UI.
     format!("relay returned {status}")
 }
+
+mod private_host;
+pub(crate) use private_host::{query_private_host_at_with_keys, PRIVATE_HOST_REQUEST_TIMEOUT};
 
 // ── HTTP bridge: POST /query ────────────────────────────────────────────────
 

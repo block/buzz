@@ -353,8 +353,7 @@ pub async fn get_presence(
             "authors": pubkeys,
         })],
     )
-    .await
-    .unwrap_or_default();
+    .await?;
 
     let mut latest: HashMap<String, (u64, PresenceStatus)> = HashMap::new();
     for ev in &events {

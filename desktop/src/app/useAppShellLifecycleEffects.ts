@@ -1,5 +1,8 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { useCommunities } from "@/features/communities/useCommunities";
+import { useHostRegistration } from "@/features/hosts/useHostRegistration";
+import { useIdentityQuery } from "@/shared/api/hooks";
 
 import { startBootWarm } from "@/features/agents/acpRuntimesQuery";
 import { setDesktopAppBadge } from "@/features/notifications/lib/desktop";
@@ -22,6 +25,13 @@ export function useAppShellLifecycleEffects({
 }: AppShellLifecycleEffectsOptions) {
   // Event-driven reconnect: network online / focus / visibility short-circuit
   // the backoff timer when the relay session is degraded (CMD+R gap G1).
+  const { activeCommunity } = useCommunities();
+  const { data: identity } = useIdentityQuery();
+  // Huddle companion windows must not create a second host publisher.
+  useHostRegistration(
+    desktopBadgeEnabled ? identity?.pubkey : undefined,
+    activeCommunity?.relayUrl,
+  );
   useRelayResumeTriggers();
   useForegroundQueryRefresh();
 

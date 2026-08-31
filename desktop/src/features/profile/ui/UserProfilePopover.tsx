@@ -1,6 +1,8 @@
 import * as React from "react";
 import { Activity, Headphones, MessageSquare } from "lucide-react";
 
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
+
 import { useChannelsQuery } from "@/features/channels/hooks";
 import {
   useUserProfileQuery,
@@ -391,6 +393,11 @@ function UserProfilePopoverBody({
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
           <HoverPubkeyName displayName={displayName} pubkey={pubkey} />
+          <AgentManagementMarker
+            pubkey={pubkey}
+            ownerPubkey={ownerPubkey}
+            testId="user-profile-popover-agent-provenance"
+          />
           {isBotProfile && botIdenticonValue ? (
             <BotIdenticon
               value={botIdenticonValue}

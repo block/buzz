@@ -1444,8 +1444,9 @@ async fn cancel_kills_inflight_tool_via_mcp_notification() {
         )
         .await;
 
-    // Wait for the tool call to be in-progress.
-    h.recv_until(|v| {
+    // Approval is required before the tool can be in-progress. This test
+    // exercises MCP cancellation, not a pending permission request.
+    h.recv_until_approving(|v| {
         v.get("params")
             .and_then(|p| p.get("update"))
             .and_then(|u| u.get("status"))

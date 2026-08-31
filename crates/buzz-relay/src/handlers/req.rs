@@ -7,8 +7,8 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
-    KIND_DM_VISIBILITY, P_GATED_KINDS, RESULT_GATED_KINDS, SHARED_GATED_KINDS,
+    is_unshared_gated_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, P_GATED_KINDS,
+    RESULT_GATED_KINDS, SHARED_GATED_KINDS,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
@@ -246,6 +246,17 @@ pub async fn handle_req(
     // already ran, so an authed member cannot use search to bypass author/#p
     // rules for kind:30174 or other globally-stored gated kinds.
     let has_search = filters.iter().any(|f| f.search.is_some());
+    if has_search
+        && filters
+            .iter()
+            .any(super::history::explicitly_requests_hosts)
+    {
+        conn.send(RelayMessage::closed(
+            &sub_id,
+            "error: host history search is unsupported",
+        ));
+        return;
+    }
     if has_search {
         if filters.iter().any(|f| f.search.is_none()) {
             conn.send(RelayMessage::closed(
@@ -359,16 +370,19 @@ pub async fn handle_req(
         .collect();
 
     // Phase 2 — DB reads, bounded-concurrent. `buffered` (not `buffer_unordered`)
-    // yields results in input order, so phase 3 observes filters in their
-    // original order and NIP-01 dedupe / conformance-trace / error semantics are
-    // byte-identical to the previous serial loop.
+    // yields results in input order, so phase 3 preserves NIP-01 dedupe and
+    // conformance-trace ordering. Host-capable query failures below explicitly
+    // close the entire history rather than reporting partial success.
     use futures_util::stream::{self, StreamExt};
     let db = state.db.clone();
+    let requires_primary = filters.iter().any(super::history::requires_primary);
     let mut results = stream::iter(filter_queries.into_iter().map(
         |(idx, per_filter_channel, params)| {
             let db = db.clone();
+            let filter = &filters[idx];
             async move {
-                let filter_events = db.query_events_routed("req_historical", &params).await;
+                let filter_events =
+                    super::history::query(&db, "req_historical", filter, params).await;
                 (idx, per_filter_channel, filter_events)
             }
         },
@@ -382,7 +396,20 @@ pub async fn handle_req(
             Ok(evs) => evs,
             Err(e) => {
                 warn!(conn_id = %conn_id, sub_id = %sub_id, "Historical query failed: {e}");
-                conn.send(RelayMessage::eose(&sub_id));
+                if requires_primary {
+                    // CLOSED is failure, EOSE is successful completion. Remove
+                    // the live subscription as well: no continuing fan-out on a
+                    // read whose partial history the client must discard.
+                    conn.subscriptions.lock().await.remove(&sub_id);
+                    if let Some(removed) = state.sub_registry.remove_subscription(conn_id, &sub_id)
+                    {
+                        release_subscription_topics(&state, &conn.tenant, &removed.scope).await;
+                    }
+                    conn.send(RelayMessage::closed(&sub_id, e.wire_message()));
+                } else {
+                    // Preserve legacy behavior for unrelated history reads.
+                    conn.send(RelayMessage::eose(&sub_id));
+                }
                 return;
             }
         };
@@ -1202,7 +1229,7 @@ pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: 
         let explicitly_no_ids_exemption = filter.kinds.as_ref().is_some_and(|ks| {
             ks.iter().any(|kind| {
                 let k = kind.as_u16() as u32;
-                k == KIND_DM_VISIBILITY || k == KIND_AGENT_TURN_METRIC
+                RESULT_GATED_KINDS.contains(&k)
             })
         });
         if !explicitly_no_ids_exemption && filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
@@ -1875,6 +1902,55 @@ mod tests {
         let search_filter = Filter::new().search("hello world");
         let filters = [search_filter];
         assert!(filters.iter().any(|f| f.search.is_some()));
+    }
+
+    #[test]
+    fn private_host_filters_and_known_id_counts_require_owner() {
+        let owner = nostr::Keys::generate();
+        let other = nostr::Keys::generate();
+        let host = nostr::Keys::generate();
+        let event = buzz_core::host::registration(&owner, host.public_key(), 100).unwrap();
+        let kind = nostr::Kind::Custom(buzz_core::kind::KIND_HOST as u16);
+        let p = SingleLetterTag::lowercase(Alphabet::P);
+        let owner_hex = owner.public_key().to_hex();
+        let other_hex = other.public_key().to_hex();
+        for filter in [
+            Filter::new().kind(kind),
+            Filter::new().kind(kind).id(event.id),
+            Filter::new().kind(kind).custom_tags(p, [&owner_hex]),
+            Filter::new()
+                .kind(kind)
+                .custom_tags(p, [&owner_hex, &other_hex]),
+            Filter::new()
+                .kinds([kind, nostr::Kind::TextNote])
+                .custom_tags(p, [&owner_hex]),
+        ] {
+            assert!(!p_gated_filters_authorized(
+                std::slice::from_ref(&filter),
+                &other_hex
+            ));
+            assert!(filter_can_match_result_gated_kinds(&filter));
+        }
+        let own = Filter::new()
+            .kind(kind)
+            .id(event.id)
+            .custom_tags(p, [&owner_hex]);
+        assert!(p_gated_filters_authorized(&[own], &owner_hex));
+        // A kindless ID query passes the filter gate, but must count/return no
+        // private rows to a foreign reader. Pin both sides of that composition.
+        let ids = Filter::new().id(event.id);
+        assert!(p_gated_filters_authorized(
+            std::slice::from_ref(&ids),
+            &other_hex
+        ));
+        assert!(filter_can_match_result_gated_kinds(&ids));
+        assert!(!result_gated_count_safe_for_pushdown(&ids, &other_hex));
+        assert!(!buzz_core::filter::reader_authorized_for_event(
+            &event, &other_hex
+        ));
+        assert!(buzz_core::filter::reader_authorized_for_event(
+            &event, &owner_hex
+        ));
     }
 
     #[test]

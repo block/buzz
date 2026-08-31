@@ -269,6 +269,7 @@ const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
     ("src/commands/team_snapshot.rs", 1, 1),            // boundary 6
     ("src/commands/personas/snapshot/import.rs", 2, 1), // boundary 7 + its in-file injection-test fixture URL
     ("src/native_websocket.rs", 0, 2),                  // boundary 8 (WS frames; no events URL)
+    ("src/commands/host_start.rs", 1, 1),               // boundary 9 (commands and receipts)
     // Test-only fixtures — no production egress, no guard:
     ("src/relay_admission.rs", 1, 0),
     ("src/archive/mod_tests.rs", 1, 0),
@@ -453,6 +454,7 @@ fn ncryptsec_handling_is_confined_to_allowlisted_files() {
         "src/huddle/pipeline.rs",
         "src/commands/team_snapshot.rs",
         "src/commands/team_snapshot/tests.rs",
+        "src/commands/host_start.rs", // boundary-9 injection fixture only
         "src/commands/personas/snapshot/import.rs",
         "src/native_websocket.rs",
     ];

@@ -3,6 +3,8 @@
 //! Reads JSON-RPC line frames on stdin and replies on stdout. Driven by
 //! environment variables so tests can simulate misbehavior:
 //!
+//!   FAKE_MCP_INIT_DELAY_MS=N — delay initialize response
+//!   FAKE_MCP_EOF_FILE=path   — write after a short EOF cleanup delay
 //!   FAKE_MCP_HANG_INIT=1     — never reply to `initialize` (init timeout)
 //!   FAKE_MCP_HANG_TOOLS=1    — never reply to `tools/list` (list timeout)
 //!   FAKE_MCP_TOOL_COUNT=N    — return N tools (default: 1)
@@ -236,6 +238,10 @@ fn main() {
                 if hang_init {
                     hang_forever();
                 }
+                std::thread::sleep(std::time::Duration::from_millis(env_u64(
+                    "FAKE_MCP_INIT_DELAY_MS",
+                    0,
+                )));
                 write_response(
                     id,
                     json!({
@@ -276,6 +282,13 @@ fn main() {
                     .and_then(|p| p.get("name"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
+                if called_name == "_buzz_shutdown_v1" {
+                    write_response(
+                        id,
+                        json!({"content":[{"type":"text","text":"buzz.owned-work.stopped.v1"}],"isError":false}),
+                    );
+                    continue;
+                }
                 // Append every invoked tool name so a test can prove a call
                 // reached the server exactly once (or never). This fires for
                 // ALL tools/call, including `_Stop`/`_PostCompact` hooks, so a
@@ -373,5 +386,15 @@ fn main() {
                 let _ = out.flush();
             }
         }
+    }
+    if env_flag("FAKE_MCP_HANG_EXIT") {
+        hang_forever();
+    }
+    if env_flag("FAKE_MCP_FAIL_EXIT") {
+        std::process::exit(7);
+    }
+    if let Ok(path) = std::env::var("FAKE_MCP_EOF_FILE") {
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        std::fs::write(path, "cleanup complete").unwrap();
     }
 }

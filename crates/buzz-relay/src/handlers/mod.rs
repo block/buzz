@@ -64,3 +64,8 @@ pub fn resolve_ttl(event: &nostr::Event, ephemeral_ttl_override: Option<i32>) ->
         (ttl, _) => ttl,
     }
 }
+
+/// Authoritative host history shared by WebSocket and HTTP reads.
+pub(crate) mod history;
+/// Private host registration authorization.
+mod hosts;

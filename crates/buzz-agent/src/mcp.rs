@@ -2,10 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::owned_mcp::{Client, OwnedTransport};
 use arc_swap::ArcSwap;
 use rmcp::model::CallToolRequestParams;
-use rmcp::service::{RoleClient, RunningService};
-use rmcp::transport::TokioChildProcess;
 use rmcp::ServiceError;
 use rmcp::ServiceExt;
 use serde_json::{Map, Value};
@@ -109,8 +108,6 @@ fn windows_child_passthrough_env() -> impl Iterator<Item = &'static str> {
         .copied()
         .chain(crate::WINDOWS_SHELL_RESOLUTION_ENV.iter().copied())
 }
-
-type Client = RunningService<RoleClient, ()>;
 
 #[derive(Clone)]
 struct ServerSpec {
@@ -222,6 +219,16 @@ impl McpRegistry {
             hook_timeouts: std::sync::Mutex::new(HashMap::new()),
         };
 
+        let result = reg.populate(servers, cwd).await;
+        if let Err(error) = result {
+            reg.shutdown().await;
+            return Err(error);
+        }
+        Ok(reg)
+    }
+
+    async fn populate(&mut self, servers: &[McpServerStdio], cwd: &str) -> Result<(), AgentError> {
+        let reg = self;
         let mut seen_names = HashSet::new();
         for s in servers {
             if !valid_name(&s.name) || s.name.contains("__") {
@@ -290,7 +297,44 @@ impl McpRegistry {
                 reg.by_qname.insert(qname, Entry { server_idx, bare });
             }
         }
-        Ok(reg)
+        Ok(())
+    }
+
+    /// Close all transports after the connection's prompt/init tasks are joined.
+    /// The owned transport retains actual exit evidence separately from rmcp's
+    /// close result. Unsupported or incomplete child work remains unconfirmed.
+    pub async fn shutdown(&self) {
+        let mut closing = tokio::task::JoinSet::new();
+        for server in &self.servers {
+            let server = server.clone();
+            closing.spawn(async move {
+                let _lock = server.restart_lock.lock().await;
+                let old = server.client.swap(Arc::new(ClientState::Dead {
+                    attempts: u32::MAX,
+                    next_retry: Instant::now(),
+                    reason: "connection closed".into(),
+                    tools: Arc::new(Vec::new()),
+                }));
+                let Ok(state) = Arc::try_unwrap(old) else {
+                    tracing::warn!(server = %server.name, "MCP still borrowed at shutdown; teardown unconfirmed");
+                    return;
+                };
+                if let ClientState::Healthy { client, pgid, .. } = state {
+                    match Arc::try_unwrap(client) {
+                        Ok(client) => {
+                            if let Err(error) = client.cancel().await {
+                                tracing::warn!(%error, "MCP cleanup task failed");
+                                if let Some(pid) = pgid {
+                                    killpg(pid, &server.name, "close_failed");
+                                }
+                            }
+                        }
+                        Err(_) => tracing::warn!(server = %server.name, "MCP client still borrowed; teardown unconfirmed"),
+                    }
+                }
+            });
+        }
+        while closing.join_next().await.is_some() {}
     }
 
     pub fn server_of(&self, qname: &str) -> Option<&str> {
@@ -756,9 +800,10 @@ async fn spawn_one(
 
     configure_no_window(&mut cmd);
 
-    let transport = TokioChildProcess::new(cmd)
+    let transport = OwnedTransport::spawn(cmd)
         .map_err(|e| AgentError::Mcp(format!("spawn {}: {e}", spec.name)))?;
     let pgid = transport.id();
+    let exit = transport.evidence();
 
     struct PgidGuard {
         pgid: Option<u32>,
@@ -776,7 +821,7 @@ async fn spawn_one(
         name: spec.name.clone(),
     };
 
-    let client: Client = match tokio::time::timeout(timeout, ().serve(transport)).await {
+    let service = match tokio::time::timeout(timeout, ().serve(transport)).await {
         Ok(Ok(c)) => c,
         Ok(Err(e)) => {
             return Err(AgentError::Mcp(format!("init {}: {e}", spec.name)));
@@ -786,12 +831,21 @@ async fn spawn_one(
         }
     };
 
+    let mut client = Client {
+        service,
+        exit,
+        supported: false,
+    };
     let tools = match tokio::time::timeout(timeout, client.peer().list_all_tools()).await {
         Ok(Ok(t)) => t,
         Ok(Err(e)) => {
+            let _ = client.cancel().await;
+            guard.pgid = None;
             return Err(AgentError::Mcp(format!("list_tools {}: {e}", spec.name)));
         }
         Err(_) => {
+            let _ = client.cancel().await;
+            guard.pgid = None;
             return Err(AgentError::Mcp(timeout_msg(
                 "list_tools",
                 &spec.name,
@@ -799,6 +853,7 @@ async fn spawn_one(
             )));
         }
     };
+    client.supported = tools.iter().any(|t| t.name == "_buzz_shutdown_v1");
     let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
     guard.pgid = None;
     Ok((client, pgid, names, tools))

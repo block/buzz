@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -45,6 +46,13 @@ async fn connect_audit_pool(config: &DbConfig) -> anyhow::Result<sqlx::PgPool> {
     Db::connect_writer_pool(&audit_config)
         .await
         .map_err(Into::into)
+}
+
+// Health and metrics must honor the main listener's interface restriction.
+// The default main address is 0.0.0.0, so default wildcard behavior is unchanged.
+fn auxiliary_listener_addr(mut bind_addr: SocketAddr, port: u16) -> SocketAddr {
+    bind_addr.set_port(port);
+    bind_addr
 }
 
 fn relay_keypair_from_config(relay_private_key: Option<&str>) -> anyhow::Result<nostr::Keys> {
@@ -179,7 +187,10 @@ async fn main() -> anyhow::Result<()> {
 
     let usage_interval_secs = usage_metrics_interval_secs();
     let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(usage_interval_secs);
-    relay_metrics::install(config.metrics_port, usage_idle_timeout_secs);
+    relay_metrics::install(
+        auxiliary_listener_addr(config.bind_addr, config.metrics_port),
+        usage_idle_timeout_secs,
+    );
     metrics::gauge!("buzz_audit_enabled").set(if config.audit_enabled { 1.0 } else { 0.0 });
     metrics::gauge!("buzz_push_enabled").set(if config.push_enabled { 1.0 } else { 0.0 });
     info!(
@@ -1303,9 +1314,12 @@ async fn serve(
 ) -> anyhow::Result<()> {
     let config = &state.config;
 
-    let health_listener = tokio::net::TcpListener::bind(("0.0.0.0", config.health_port))
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to bind health port {}: {e}", config.health_port))?;
+    let health_listener = tokio::net::TcpListener::bind(auxiliary_listener_addr(
+        config.bind_addr,
+        config.health_port,
+    ))
+    .await
+    .map_err(|e| anyhow::anyhow!("Failed to bind health port {}: {e}", config.health_port))?;
     info!(port = config.health_port, "Health probe listener started");
     tokio::spawn(async move {
         axum::serve(health_listener, health_router).await.ok();
@@ -2157,6 +2171,63 @@ mod tests {
             .execute(&mut *holder)
             .await
             .expect("release audit advisory lock");
+    }
+
+    #[test]
+    fn auxiliary_listeners_preserve_main_interface_and_override_only_port() {
+        for main in [
+            "127.0.0.1:53001",
+            "[::1]:53001",
+            "0.0.0.0:3000",
+            "[::]:3000",
+            "192.0.2.1:3000",
+            "[fe80::1%3]:3000",
+        ] {
+            let main: std::net::SocketAddr = main.parse().unwrap();
+            for port in [58081, 59101] {
+                let actual = super::auxiliary_listener_addr(main, port);
+                assert_eq!(actual.ip(), main.ip());
+                assert_eq!(actual.port(), port);
+                let mut restored = actual;
+                restored.set_port(main.port());
+                assert_eq!(restored, main, "preserve IPv6 scope and flow information");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn auxiliary_listener_binds_only_configured_loopback() {
+        for main in ["127.0.0.1:53001", "[::1]:53001"] {
+            let main: std::net::SocketAddr = main.parse().unwrap();
+            let listener = tokio::net::TcpListener::bind(super::auxiliary_listener_addr(main, 0))
+                .await
+                .unwrap();
+            assert_eq!(listener.local_addr().unwrap().ip(), main.ip());
+            assert_ne!(listener.local_addr().unwrap().port(), 0);
+        }
+    }
+
+    // Keep the global recorder install in the binary test process, separate
+    // from library tests. This exercises the real exporter, not just addresses.
+    #[tokio::test]
+    async fn metrics_exporter_uses_configured_loopback_interface() {
+        let reservation = std::net::TcpListener::bind("[::1]:0").unwrap();
+        let addr = reservation.local_addr().unwrap();
+        // A hard-coded IPv4 wildcard exporter would collide with this socket.
+        let _ipv4_guard = std::net::TcpListener::bind(("127.0.0.1", addr.port())).unwrap();
+        drop(reservation);
+        super::relay_metrics::install(addr, 600);
+
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(format!("http://{addr}/metrics"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
     }
 
     #[test]

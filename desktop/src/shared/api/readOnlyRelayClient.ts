@@ -51,6 +51,7 @@ export class ReadOnlyRelayClient {
   private histories = new Map<string, PendingHistory>();
   private publishes = new Map<string, PendingPublish>();
   private generation = 0;
+  private pendingChallenge: string | null = null;
 
   private readonly relayUrl: string;
 
@@ -59,8 +60,8 @@ export class ReadOnlyRelayClient {
   }
 
   async connect(): Promise<void> {
-    if (this.wsId !== null) return;
     if (this.connectPromise) return this.connectPromise;
+    if (this.wsId !== null) return;
 
     const promise = this.openConnection();
     this.connectPromise = promise;
@@ -102,6 +103,7 @@ export class ReadOnlyRelayClient {
 
     this.onMessageChannel = null;
     this.connectPromise = null;
+    this.pendingChallenge = null;
   }
 
   async fetchEvents(filter: RelaySubscriptionFilter): Promise<RelayEvent[]> {
@@ -142,15 +144,22 @@ export class ReadOnlyRelayClient {
     const generation = ++this.generation;
     this.onMessageChannel = new Channel<unknown>((delivery) => {
       for (const message of toRelayFrames(delivery)) {
-        void this.handleWsMessage(message, generation);
+        void this.handleWsMessage(message, generation).catch(() => {
+          if (generation === this.generation) this.disconnect();
+        });
       }
     });
 
-    this.wsId = await invoke<number>("plugin:websocket|connect", {
+    const wsId = await invoke<number>("plugin:websocket|connect", {
       url: this.relayUrl,
       onMessage: this.onMessageChannel,
       config: {},
     });
+    if (generation !== this.generation) {
+      void closeWebSocket(wsId, "observer connection cancelled");
+      throw new Error("Observer relay connection cancelled.");
+    }
+    this.wsId = wsId;
 
     await new Promise<void>((resolve, reject) => {
       const timeout = window.setTimeout(() => {
@@ -165,6 +174,14 @@ export class ReadOnlyRelayClient {
         reject,
         timeout,
       };
+      // Native delivery can beat resolution of the connect IPC command.
+      if (this.pendingChallenge !== null) {
+        const challenge = this.pendingChallenge;
+        this.pendingChallenge = null;
+        void this.handleAuthChallenge(challenge, generation).catch(() => {
+          if (generation === this.generation) this.disconnect();
+        });
+      }
     });
   }
 
@@ -242,6 +259,10 @@ export class ReadOnlyRelayClient {
 
     const [type, ...rest] = data;
     if (type === "AUTH" && typeof rest[0] === "string") {
+      if (this.wsId === null) {
+        this.pendingChallenge = rest[0];
+        return;
+      }
       await this.handleAuthChallenge(rest[0], generation);
       return;
     }
@@ -259,6 +280,16 @@ export class ReadOnlyRelayClient {
         rest[1],
         typeof rest[2] === "string" ? rest[2] : "",
       );
+      return;
+    }
+    if (type === "CLOSED" && typeof rest[0] === "string") {
+      const pending = this.histories.get(rest[0]);
+      if (pending) {
+        window.clearTimeout(pending.timeout);
+        this.histories.delete(rest[0]);
+        // Discard partial history. A later EOSE cannot turn failure into absence.
+        pending.reject(new Error("Observer relay history request was closed."));
+      }
       return;
     }
     if (type === "EOSE" && typeof rest[0] === "string") {

@@ -12,6 +12,7 @@ mod prompt_project;
 mod queue;
 mod relay;
 mod setup_mode;
+mod shutdown;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -84,29 +85,8 @@ fn current_working_directory() -> Result<String> {
     Ok(cwd.to_string_lossy().into_owned())
 }
 
-/// Publish a kind:20001 presence update event via the WebSocket connection.
-///
-/// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
-/// updates must be routed through the WS path.
-///
-/// Content is a bare status string (`"online"`, `"away"`, `"offline"`) matching
-/// the desktop client's format. The relay stores this in Redis and synthesizes
-/// it back on presence queries.
-async fn publish_presence(
-    publisher: &relay::RelayEventPublisher,
-    keys: &nostr::Keys,
-    status: &str,
-) -> Result<(), relay::RelayError> {
-    use buzz_core::kind::KIND_PRESENCE_UPDATE;
-    use nostr::{EventBuilder, Kind};
-
-    let event = EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
-        .tags([])
-        .sign_with_keys(keys)
-        .map_err(|e| relay::RelayError::Http(format!("presence sign error: {e}")))?;
-    publisher.publish_event(event).await?;
-    Ok(())
-}
+mod run_presence;
+use run_presence::PresencePublisher;
 
 fn emit_runtime_lifecycle(
     observer: Option<&observer::ObserverHandle>,
@@ -2071,7 +2051,7 @@ impl RespawnGuard {
     /// Send the result and disarm the guard. Uses `try_send` (sync) so there
     /// is no await boundary between marking `sent` and actually enqueueing —
     /// cancellation cannot slip between the two.
-    fn send(mut self, result: Result<(AcpClient, u32, String)>) {
+    async fn send(mut self, result: Result<(AcpClient, u32, String)>) {
         // Invariant: try_send succeeds because the channel capacity equals the
         // slot count, and respawn_in_flight guarantees at most one outstanding
         // result per slot. If this ever fails, the channel sizing or the
@@ -2086,6 +2066,9 @@ impl RespawnGuard {
                     agent = self.index,
                     "respawn result channel full or closed: {e}"
                 );
+                if let Ok((mut acp, _, _)) = e.into_inner().result {
+                    acp.shutdown().await;
+                }
                 // Drop will fire and send a failure result as fallback.
             }
         }
@@ -2451,11 +2434,37 @@ async fn tokio_main() -> Result<()> {
         );
     }
 
+    // Install handlers synchronously before the first child can exist.
+    let (shutdown_tx, mut shutdown_rx) = shutdown::install()?;
+    let run_presence = PresencePublisher::from_env().map_err(anyhow::Error::msg)?;
+    let cwd = current_working_directory()?;
+
     let mut pool = if config.lazy_pool {
         AgentPool::from_slots((0..config.agents).map(|_| None).collect())
     } else {
-        initialize_agent_pool(&PoolStartup::from_config(&config, observer.clone()), None).await?
+        initialize_agent_pool(
+            &PoolStartup::from_config(&config, observer.clone()),
+            Some(shutdown_rx.clone()),
+        )
+        .await?
     };
+    // Startup awaits own the pool: cancellation/error must drain, not Drop it.
+    macro_rules! startup_step {
+        ($future:expr) => {{
+            let result = tokio::select! {
+                biased;
+                _ = shutdown::cancelled(&mut shutdown_rx) => Err(anyhow::anyhow!("startup cancelled")),
+                result = $future => result.map_err(anyhow::Error::from),
+            };
+            match result {
+                Ok(value) => value,
+                Err(error) => {
+                    shutdown_agent_pool(&mut pool).await;
+                    return Err(error);
+                }
+            }
+        }};
+    }
     let mut pool_ready = !config.lazy_pool;
     let mut pool_lifecycle: PoolLifecycle<AgentPool> = PoolLifecycle::listening();
 
@@ -2477,29 +2486,33 @@ async fn tokio_main() -> Result<()> {
         .filter(|s| !s.is_empty())
         .and_then(|s| buzz_sdk::nip_oa::parse_auth_tag(&s).ok());
 
-    let mut relay =
-        HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
-            .await
-            .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
+    let mut relay = startup_step!(HarnessRelay::connect(
+        &config.relay_url,
+        &config.keys,
+        &pubkey_hex,
+        relay_auth_tag
+    ));
 
     // Tell the relay background task the watermark so it can use
     // `since = watermark - 5s` on the first REQ instead of `since=now`.
     // Best-effort: a failure here is non-fatal (we just lose the startup window
     // protection, which is the same as the pre-fix behaviour).
-    if let Err(e) = relay.set_startup_watermark(startup_watermark).await {
+    if let Err(e) = startup_step!(async {
+        Ok::<_, anyhow::Error>(relay.set_startup_watermark(startup_watermark).await)
+    }) {
         tracing::warn!("failed to set startup watermark: {e}");
     }
 
     tracing::info!("connected to relay at {}", config.relay_url);
 
     let relay_rest_client = relay.rest_client();
-    let mut author_gate_ctx =
-        InboundAuthorGate::connect(&relay_rest_client, &pubkey_hex, "startup").await;
+    let mut author_gate_ctx = startup_step!(async {
+        Ok::<_, anyhow::Error>(
+            InboundAuthorGate::connect(&relay_rest_client, &pubkey_hex, "startup").await,
+        )
+    });
 
-    relay
-        .subscribe_membership_notifications()
-        .await
-        .map_err(|e| anyhow::anyhow!("membership notification subscribe error: {e}"))?;
+    startup_step!(relay.subscribe_membership_notifications());
     tracing::info!("subscribed to membership notifications");
 
     let presence_publisher = relay.event_publisher();
@@ -2550,10 +2563,7 @@ async fn tokio_main() -> Result<()> {
                         owner_pubkey_hex,
                         owner_pubkey,
                     ));
-                    relay
-                        .subscribe_observer_controls()
-                        .await
-                        .map_err(|e| anyhow::anyhow!("observer control subscribe error: {e}"))?;
+                    startup_step!(relay.subscribe_observer_controls());
                     relay_observer_control_rx = relay.take_observer_control_rx();
                     tracing::info!("relay observer enabled");
                 }
@@ -2569,10 +2579,7 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    let channel_info_map = relay
-        .discover_channels()
-        .await
-        .map_err(|e| anyhow::anyhow!("channel discovery error: {e}"))?;
+    let channel_info_map = startup_step!(relay.discover_channels());
 
     tracing::info!("discovered {} channel(s)", channel_info_map.len());
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
@@ -2610,7 +2617,7 @@ async fn tokio_main() -> Result<()> {
         }
         SubscribeMode::Config => {
             // load_rules() already warns if the config file has zero rules.
-            config::load_rules(&config.config_path)?
+            startup_step!(async { config::load_rules(&config.config_path) })
         }
     };
 
@@ -2620,7 +2627,9 @@ async fn tokio_main() -> Result<()> {
     }
     let mut subscribed_channel_ids = HashSet::with_capacity(channel_filters.len());
     for (channel_id, filter) in &channel_filters {
-        if let Err(e) = relay.subscribe_channel(*channel_id, filter.clone()).await {
+        if let Err(e) = startup_step!(async {
+            Ok::<_, anyhow::Error>(relay.subscribe_channel(*channel_id, filter.clone()).await)
+        }) {
             tracing::warn!("failed to subscribe to channel {channel_id}: {e}");
         } else {
             subscribed_channel_ids.insert(*channel_id);
@@ -2650,7 +2659,13 @@ async fn tokio_main() -> Result<()> {
     // connected. Publishing after channel subscriptions gives desktop callers
     // a durable readiness boundary before they send a startup mention.
     if config.presence_enabled {
-        match publish_presence(&presence_publisher, &presence_keys, "online").await {
+        match startup_step!(async {
+            Ok::<_, anyhow::Error>(
+                run_presence
+                    .publish(&presence_publisher, &presence_keys, "online")
+                    .await,
+            )
+        }) {
             Ok(_) => tracing::info!("presence set to online"),
             Err(e) => tracing::warn!("failed to set initial presence: {e}"),
         }
@@ -2668,7 +2683,6 @@ async fn tokio_main() -> Result<()> {
     }
 
     let base_prompt_content = config.base_prompt_content.take();
-    let cwd = current_working_directory()?;
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -2804,26 +2818,6 @@ async fn tokio_main() -> Result<()> {
     //      `IN_FLIGHT_DEADLINE_SECS` expires.
     let (steer_ack_tx, mut steer_ack_rx) = mpsc::unbounded_channel::<SteerAckEvent>();
 
-    // ── Step 7: Shutdown signal ───────────────────────────────────────────────
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(());
-
-    let tx = shutdown_tx.clone();
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
-        let _ = tx.send(());
-    });
-
-    #[cfg(unix)]
-    {
-        let tx = shutdown_tx.clone();
-        tokio::spawn(async move {
-            use tokio::signal::unix::{signal, SignalKind};
-            let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
-            sigterm.recv().await;
-            let _ = tx.send(());
-        });
-    }
-
     // Track the newest membership notification timestamp per channel.
     // On reconnect the relay replays events newest-first, so the first event
     // per channel is authoritative. Any later event with ts < newest is stale.
@@ -2941,7 +2935,7 @@ async fn tokio_main() -> Result<()> {
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
                     let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
-                    guard.send(result);
+                    guard.send(result).await;
                 });
             }
 
@@ -3246,7 +3240,7 @@ async fn tokio_main() -> Result<()> {
                                             sender = %buzz_event.event.pubkey.to_hex(),
                                             "shutdown command from owner — exiting gracefully"
                                         );
-                                        let _ = shutdown_tx.send(());
+                                        let _ = shutdown_tx.send(true);
                                         continue;
                                     }
                                 }
@@ -3419,7 +3413,7 @@ async fn tokio_main() -> Result<()> {
                             inactivity_seconds = config.exit_after_inactivity_secs,
                             "inactivity bound reached — exiting gracefully"
                         );
-                        let _ = shutdown_tx.send(());
+                        let _ = shutdown_tx.send(true);
                     }
                     None
                 }
@@ -3509,8 +3503,9 @@ async fn tokio_main() -> Result<()> {
                     }
                     let pp = presence_publisher.clone();
                     let pk = presence_keys.clone();
+                    let pulse = run_presence.clone();
                     presence_task = Some(tokio::spawn(async move {
-                        if let Err(e) = publish_presence(&pp, &pk, "online").await {
+                        if let Err(e) = pulse.publish(&pp, &pk, "online").await {
                             tracing::warn!("presence heartbeat failed: {e}");
                         }
                     }));
@@ -3539,7 +3534,7 @@ async fn tokio_main() -> Result<()> {
                     }
                     None
                 }
-                _ = shutdown_rx.changed() => {
+                _ = shutdown::cancelled(&mut shutdown_rx) => {
                     tracing::info!("shutting down");
                     break;
                 }
@@ -3823,7 +3818,7 @@ async fn tokio_main() -> Result<()> {
     // signal handlers (result channel closed, LoopAction::Exit) cancel the wake
     // just as promptly. Timeout is a backstop for a slot stuck outside the
     // select (e.g. in spawn); only then do we fall back to aborting.
-    let _ = shutdown_tx.send(());
+    let _ = shutdown_tx.send(true);
     let wake_drain = tokio::time::timeout(Duration::from_secs(30), async {
         while wake_tasks.join_next().await.is_some() {}
     })
@@ -3838,6 +3833,14 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
+    // Stop work before draining. Waiting alone leaves long-running tools alive
+    // until the grace expires, then aborts their AcpClient owner mid-cleanup.
+    // Includes heartbeat turns (which have no channel_id).
+    for meta in pool.task_map_mut().values_mut() {
+        if let Some(tx) = meta.control_tx.take() {
+            let _ = tx.send(ControlSignal::Cancel);
+        }
+    }
     tracing::info!("shutdown: waiting for in-flight prompts");
     // 30 s is generous for in-flight prompts to be cancelled; using
     // max_turn_duration here would cause Ctrl+C to hang for up to an hour.
@@ -3892,11 +3895,16 @@ async fn tokio_main() -> Result<()> {
     }
     drop(pool);
 
-    // Abort any in-flight respawn tasks. They may be sleeping in backoff or
-    // running spawn_and_init — either way, we don't want them spawning new
-    // children after the main loop has exited. RespawnGuard::Drop sends a
-    // failure result for aborted tasks, so respawn_in_flight is cleared.
-    respawn_tasks.shutdown().await;
+    // The same sticky stop signal interrupts respawn backoff/initialization.
+    // Join owners so they can drain clients; abort is only an uncertain fallback.
+    if tokio::time::timeout(Duration::from_secs(30), async {
+        while respawn_tasks.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        respawn_tasks.shutdown().await;
+    }
 
     // Drain any respawn results that completed before the abort. Explicitly
     // shut down returned agents instead of relying on AcpClient::Drop.
@@ -3916,7 +3924,7 @@ async fn tokio_main() -> Result<()> {
     if config.presence_enabled {
         match tokio::time::timeout(
             Duration::from_secs(2),
-            publish_presence(&presence_publisher, &presence_keys, "offline"),
+            run_presence.publish(&presence_publisher, &presence_keys, "offline"),
         )
         .await
         {
@@ -3934,6 +3942,7 @@ async fn tokio_main() -> Result<()> {
     // for the background task to finish, rather than aborting immediately (#40).
     relay.shutdown().await;
 
+    shutdown::write_receipt(&config.keys, &config.relay_url, &runtime_start_nonce)?;
     tracing::info!("buzz-acp stopped");
     Ok(())
 }
@@ -4768,10 +4777,10 @@ fn recover_panicked_agent(
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
-            tokio::time::sleep(delay).await;
+            shutdown::backoff(delay).await;
         }
         let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
-        guard.send(result);
+        guard.send(result).await;
     });
 }
 
@@ -4835,6 +4844,7 @@ fn dispatch_heartbeat(
     let turn_id = Uuid::new_v4().to_string();
     let task_turn_id = turn_id.clone();
 
+    let (control_tx, control_rx) = tokio::sync::oneshot::channel();
     let abort_handle = pool.join_set.spawn(async move {
         pool::run_prompt_task(
             agent,
@@ -4842,7 +4852,7 @@ fn dispatch_heartbeat(
             Some(prompt_text),
             ctx_clone,
             result_tx,
-            None,
+            Some(control_rx),
             task_turn_id,
         )
         .await;
@@ -4855,7 +4865,7 @@ fn dispatch_heartbeat(
             channel_id: None,
             turn_id,
             recoverable_batch: None,
-            control_tx: None,
+            control_tx: Some(control_tx),
             steer_tx: None,
             successful_steer_deliveries: HashSet::new(),
         },
@@ -4973,6 +4983,10 @@ fn spawn_respawn_task(
     let delay = match slot.record_crash() {
         CrashVerdict::CircuitOpen => {
             tracing::error!(agent = index, "circuit open — not respawning");
+            respawn_tasks.spawn(async move {
+                let mut agent = old_agent;
+                agent.acp.shutdown().await;
+            });
             return false;
         }
         CrashVerdict::HalfOpenProbe => {
@@ -5000,11 +5014,11 @@ fn spawn_respawn_task(
         drop(agent);
 
         if !delay.is_zero() {
-            tokio::time::sleep(delay).await;
+            shutdown::backoff(delay).await;
         }
 
         let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
-        guard.send(result);
+        guard.send(result).await;
     });
 
     true
@@ -5069,12 +5083,16 @@ impl PoolStartup {
 
 async fn initialize_agent_pool(
     startup: &PoolStartup,
-    mut shutdown: Option<watch::Receiver<()>>,
+    mut shutdown: Option<watch::Receiver<bool>>,
 ) -> Result<AgentPool> {
     // One agent failing to start must not kill the whole pool.
     // Attempt each spawn under a 60-second timeout; a partial pool is valid.
     let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(startup.agents as usize);
     for i in 0..startup.agents as usize {
+        if shutdown.as_ref().is_some_and(|rx| *rx.borrow()) {
+            shutdown_agent_slots(&mut agent_slots).await;
+            return Err(anyhow::anyhow!("pool initialization cancelled by shutdown"));
+        }
         let spawn_result = AcpClient::spawn(
             &startup.command,
             &startup.args,
@@ -5089,7 +5107,7 @@ async fn initialize_agent_pool(
                 let initialize_result = match shutdown.as_mut() {
                     Some(shutdown) => tokio::select! {
                         biased;
-                        _ = shutdown.changed() => {
+                        _ = shutdown::cancelled(shutdown) => {
                             acp.shutdown().await;
                             shutdown_agent_slots(&mut agent_slots).await;
                             return Err(anyhow::anyhow!("pool initialization cancelled by shutdown"));
@@ -5186,12 +5204,21 @@ async fn spawn_and_init(
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, String)> {
+    let mut shutdown = shutdown::receiver();
+    if shutdown.as_ref().is_some_and(|rx| *rx.borrow()) {
+        return Err(anyhow::anyhow!("respawn cancelled"));
+    }
     let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
     acp.set_observer(observer, agent_index);
 
-    match acp.initialize().await {
+    let initialized = tokio::select! {
+        biased;
+        _ = shutdown::cancelled_optional(&mut shutdown) => Err(acp::AcpError::Protocol("respawn cancelled".into())),
+        result = acp.initialize() => result,
+    };
+    match initialized {
         Ok(init_result) => {
             tracing::info!("agent initialized: {init_result}");
             let protocol_version = init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;

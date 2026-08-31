@@ -20,6 +20,8 @@ pub mod event;
 pub mod filter;
 /// Git permission types — ref patterns, protection rules, policy evaluation.
 pub mod git_perms;
+/// Private host registration and expiring reports.
+pub mod host;
 /// Shared invite-link contract constants.
 pub mod invite;
 /// Buzz kind number registry — custom event type constants.
@@ -30,6 +32,8 @@ pub mod network;
 pub mod nip10;
 /// Agent observer frame helpers.
 pub mod observer;
+/// Authenticated local owned-work teardown evidence.
+pub mod owned_stop;
 /// NIP-AB device pairing — crypto primitives, message types, and errors.
 pub mod pairing;
 /// Presence status types shared across crates.
@@ -79,3 +83,9 @@ pub mod test_helpers {
         StoredEvent::with_received_at(make_event(kind), Utc::now(), channel_id, true)
     }
 }
+
+/// Per-run presence and public placement wire contract.
+pub mod run_presence;
+
+/// Authenticated, private host execution protocol foundations.
+pub mod host_execution;

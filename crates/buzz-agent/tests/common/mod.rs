@@ -224,8 +224,29 @@ impl Harness {
 
     pub async fn shutdown(mut self) {
         drop(self.stdin);
-        let _ = tokio::time::timeout(Duration::from_secs(2), self.child.wait()).await;
-        let _ = self.child.start_kill();
+        let drain = tokio::spawn(async move {
+            let _ = tokio::io::copy(&mut self.stdout, &mut tokio::io::sink()).await;
+        });
+        if tokio::time::timeout(Duration::from_secs(10), self.child.wait())
+            .await
+            .is_err()
+        {
+            let _ = self.child.kill().await;
+        }
+        let _ = drain.await;
+    }
+
+    pub async fn finish_connection(mut self) {
+        drop(self.stdin);
+        let drain = tokio::spawn(async move {
+            let _ = tokio::io::copy(&mut self.stdout, &mut tokio::io::sink()).await;
+        });
+        let status = tokio::time::timeout(Duration::from_secs(8), self.child.wait())
+            .await
+            .expect("agent cleanup timed out")
+            .unwrap();
+        assert!(status.success(), "agent exit: {status}");
+        drain.await.unwrap();
     }
 
     pub fn stderr_text(&self) -> String {

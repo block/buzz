@@ -3,9 +3,7 @@
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{CallToolResult, ServerCapabilities, ServerInfo},
-    tool, tool_handler, tool_router,
-    transport::stdio,
-    ErrorData, ServerHandler, ServiceExt,
+    tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -19,6 +17,7 @@ mod str_replace;
 mod todo;
 mod tree;
 mod view_image;
+mod workloads;
 
 #[derive(Clone)]
 struct DevMcp {
@@ -35,6 +34,23 @@ impl DevMcp {
             todos: Arc::new(todo::TodoState::new()),
             tool_router: Self::tool_router(),
         }
+    }
+
+    // Hidden from the model by buzz-agent's underscore-tool rule. Discovery
+    // of this exact versioned tool is the supported teardown capability.
+    #[tool(
+        name = "_buzz_shutdown_v1",
+        description = "Close shell admission and confirm owned process-group work has ended. Supervisor only."
+    )]
+    async fn shutdown_owned_work(&self) -> Result<CallToolResult, ErrorData> {
+        self.state
+            .workloads
+            .drain()
+            .await
+            .map_err(|_| ErrorData::internal_error("owned work teardown unconfirmed", None))?;
+        Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+            "buzz.owned-work.stopped.v1",
+        )]))
     }
 
     #[tool(
@@ -180,9 +196,34 @@ async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
     let shim = shim::Shim::install()?;
     let state = Arc::new(shell::SharedState::new(cwd, shim)?);
 
-    let service = DevMcp::new(state).serve(stdio()).await?;
-    service.waiting().await?;
-    Ok(())
+    serve_connection(state, tokio::io::stdin(), tokio::io::stdout())
+        .await
+        .map_err(|e| e as Box<dyn std::error::Error>)
+}
+
+async fn serve_connection<R, W>(
+    state: Arc<shell::SharedState>,
+    reader: R,
+    writer: W,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    R: tokio::io::AsyncRead + Send + Unpin + 'static,
+    W: tokio::io::AsyncWrite + Send + Unpin + 'static,
+{
+    let input = workloads::CancelOnEof {
+        reader,
+        state: state.clone(),
+    };
+    let result = async {
+        let service = DevMcp::new(state.clone()).serve((input, writer)).await?;
+        service.waiting().await?;
+        Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
+    }
+    .await;
+    // Also covers failed initialization and broken stdout. Never leave runtime
+    // destruction to race the independently grouped shell cleanup futures.
+    state.workloads.drain().await?;
+    result
 }
 
 /// Suppress the console window that Windows otherwise allocates for every

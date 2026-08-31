@@ -174,6 +174,28 @@ pub async fn filter_fanout_by_access(
         matches
     };
 
+    // This is the shared fence for local ingest, direct sends and Redis fan-out.
+    // A subscription (including a kindless known-id lookup) is not read authority.
+    let matches =
+        if buzz_core::kind::RESULT_GATED_KINDS.contains(&event_kind_u32(&stored_event.event)) {
+            matches
+                .into_iter()
+                .filter(|(conn_id, _)| {
+                    state
+                        .conn_manager
+                        .pubkey_for_conn(*conn_id)
+                        .is_some_and(|pk| {
+                            buzz_core::filter::reader_authorized_for_event(
+                                &stored_event.event,
+                                &hex::encode(pk),
+                            )
+                        })
+                })
+                .collect()
+        } else {
+            matches
+        };
+
     let Some(channel_id) = stored_event.channel_id else {
         return matches;
     };
@@ -234,10 +256,8 @@ pub async fn filter_fanout_by_access(
 ///
 /// All relay-local live fan-out routes through here. The two exceptions are
 /// `dispatch_persistent_event` (persistent ingest) and `fan_out_pubsub_event`
-/// (Redis cross-node), which call `filter_fanout_by_access` inline: the former
-/// layers an additional per-recipient DM-visibility-owner gate on top, the
-/// latter skips local echoes — both are equivalent to this helper plus their
-/// own extra step.
+/// (Redis cross-node), which call `filter_fanout_by_access` inline. The latter
+/// also skips local echoes; neither bypasses the shared private-event gates.
 pub(crate) async fn fan_out_event_to_local_subscribers(
     state: &AppState,
     community_id: CommunityId,
@@ -454,40 +474,10 @@ async fn dispatch_persistent_event_inner(
             return 0;
         }
     };
-    // For viewer-private events (kind:30622 DM visibility, kind:44200 agent turn
-    // metrics), live fan-out must reach only the owner — a kindless `ids:[…]`
-    // subscription can otherwise match it. Pull paths (HTTP /query, WS historical)
-    // are gated separately by reader_authorized_for_event.
-    let owner_only_kind = kind_u32 == buzz_core::kind::KIND_DM_VISIBILITY
-        || kind_u32 == buzz_core::kind::KIND_AGENT_TURN_METRIC;
-    let private_event_owner: Option<String> = owner_only_kind
-        .then(|| {
-            let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
-            stored_event
-                .event
-                .tags
-                .filter(nostr::TagKind::SingleLetter(p))
-                .find_map(|t| t.content().map(|s| s.to_string()))
-        })
-        .flatten();
-    // Author-only delivery gating (NIP-ER reminders) is enforced centrally in
-    // filter_fanout_by_access, applied to `matches` above before this loop. The
-    // DM visibility owner gate is an additional delivery fence, so build shared
-    // frames only after applying it to the already access-filtered recipient set.
+    // All private-event gates have already run in filter_fanout_by_access.
     let recipients: Vec<_> = matches
         .iter()
-        .filter_map(|(target_conn_id, sub_id)| {
-            if let Some(ref owner_hex) = private_event_owner {
-                let is_owner = state
-                    .conn_manager
-                    .pubkey_for(*target_conn_id)
-                    .is_some_and(|pk| hex::encode(pk) == *owner_hex);
-                if !is_owner {
-                    return None;
-                }
-            }
-            Some((*target_conn_id, sub_id.as_str()))
-        })
+        .map(|(conn_id, sub_id)| (*conn_id, sub_id.as_str()))
         .collect();
     let frames = fanout_frame_cache(recipients.iter().map(|(_, sub_id)| *sub_id), &event_json);
     let drop_count = send_fanout_frames(state, recipients, &frames);
@@ -653,11 +643,36 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         }
     };
 
-    // Must run before both ephemeral and persistent branches. Persistent
-    // events get a second check inside ingest_event() (step 3), but
-    // ephemeral events bypass the pipeline entirely.
-    let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
-    if event.pubkey != auth_pubkey && !is_gift_wrap {
+    // Only WS-local events need a signer check here: they bypass ingest.
+    // Persistent events must use the shared WS/HTTP validation below, including
+    // its strictly validated owner-transport host reports and gift wraps. A
+    // second, narrower guard here would reject reports before host authorization.
+    let ws_local = is_ephemeral(kind_u32) || kind_u32 == KIND_AGENT_OBSERVER_FRAME;
+    let host_pulse = kind_u32 == KIND_PRESENCE_UPDATE
+        && event
+            .tags
+            .iter()
+            .any(|t| t.as_slice()[0] == "host_registration");
+    if host_pulse {
+        if let Err(error) = super::hosts::authorize_presence(
+            &conn.tenant,
+            &state,
+            &event,
+            auth_pubkey,
+            channel_ids.is_some(),
+        )
+        .await
+        {
+            reject("invalid");
+            conn.send(RelayMessage::ok(
+                &event_id_hex,
+                false,
+                &format!("restricted: {error}"),
+            ));
+            return;
+        }
+    }
+    if ws_local && event.pubkey != auth_pubkey && !host_pulse {
         reject("invalid");
         conn.send(RelayMessage::ok(
             &event_id_hex,
@@ -812,35 +827,54 @@ async fn handle_ephemeral_event(
 
     // Special handling for presence events (kind:20001).
     if event_kind_u32(&event) == KIND_PRESENCE_UPDATE {
-        // Accept both bare strings ("online") and legacy JSON ({"status":"online"}).
-        let raw = event.content.to_string();
-        let status = if raw.starts_with('{') {
-            serde_json::from_str::<serde_json::Value>(&raw)
-                .ok()
-                .and_then(|v| v.get("status")?.as_str().map(String::from))
-                .unwrap_or(raw)
-        } else if raw.len() > 128 {
-            let mut end = 128;
-            while !raw.is_char_boundary(end) {
-                end -= 1;
+        if let Some(pulse) =
+            buzz_core::run_presence::parse_run(&event, nostr::Timestamp::now().as_secs())?
+        {
+            // No process-local disconnect cleanup and no shared pubkey slot:
+            // one run stopping must not erase another node's live placement.
+            if !state
+                .pubsub
+                .update_run_presence(
+                    &conn.tenant,
+                    &event.pubkey,
+                    &pulse,
+                    nostr::Timestamp::now().as_secs(),
+                )
+                .await
+                .map_err(|_| "error: presence store unavailable")?
+            {
+                return Ok(()); // stale/duplicate updates are never fanned out
             }
-            raw[..end].to_string()
         } else {
-            raw
-        };
+            // Accept both bare strings ("online") and legacy JSON ({"status":"online"}).
+            let raw = event.content.to_string();
+            let status = if raw.starts_with('{') {
+                serde_json::from_str::<serde_json::Value>(&raw)
+                    .ok()
+                    .and_then(|v| v.get("status")?.as_str().map(String::from))
+                    .unwrap_or(raw)
+            } else if raw.len() > 128 {
+                let mut end = 128;
+                while !raw.is_char_boundary(end) {
+                    end -= 1;
+                }
+                raw[..end].to_string()
+            } else {
+                raw
+            };
 
-        if status == "offline" {
-            let _ = state
-                .pubsub
-                .clear_presence(&conn.tenant, &auth_pubkey)
-                .await;
-        } else {
-            let _ = state
-                .pubsub
-                .set_presence(&conn.tenant, &auth_pubkey, &status)
-                .await;
+            if status == "offline" {
+                let _ = state
+                    .pubsub
+                    .clear_presence(&conn.tenant, &auth_pubkey)
+                    .await;
+            } else {
+                let _ = state
+                    .pubsub
+                    .set_presence(&conn.tenant, &auth_pubkey, &status)
+                    .await;
+            }
         }
-
         // Presence is a channel-less ephemeral event. After updating Redis
         // presence state, let it fall through to the shared global ephemeral
         // publish/fan-out path below so other relay nodes receive the live delta.
@@ -1165,6 +1199,8 @@ fn single_tag_content<'a>(event: &'a Event, tag_name: &str) -> Result<&'a str, S
 
 #[cfg(test)]
 mod tests {
+    mod host_transport_tests;
+
     use std::collections::HashMap;
     use std::sync::atomic::AtomicU8;
     use std::sync::Arc;
@@ -1657,6 +1693,93 @@ mod tests {
                 other_rx.try_recv().is_err(),
                 "membership notification should only reach matching #p subscribers"
             );
+        }
+
+        #[tokio::test]
+        async fn private_hosts_only_reach_owner_across_all_live_delivery_paths() {
+            let owner = Keys::generate();
+            let host = Keys::generate();
+            let outsider = Keys::generate();
+            let reg = buzz_core::host::registration(&owner, host.public_key(), 100).unwrap();
+            let rep = buzz_core::host::report(
+                &host,
+                &reg,
+                &buzz_core::host::Report {
+                    v: 1,
+                    name: "private machine".into(),
+                    os: "macos".into(),
+                    arch: "aarch64".into(),
+                    launcher_version: "test".into(),
+                    runtimes: vec![],
+                    accepts_start: false,
+                    provisioned: vec![],
+                },
+                101,
+            )
+            .unwrap();
+            for event in [reg, rep] {
+                for path in ["pubsub", "direct", "ingest"] {
+                    let state = test_state().await;
+                    let filter = Filter::new().id(event.id); // no kind or #p gate
+                    let mut receivers = Vec::new();
+                    for (name, key) in [
+                        ("owner", Some(&owner)),
+                        ("outsider", Some(&outsider)),
+                        ("host", Some(&host)),
+                        ("anonymous", None),
+                    ] {
+                        let (_, rx) = register_global_sub(
+                            &state,
+                            name,
+                            filter.clone(),
+                            key.map(|k| k.public_key().to_bytes().to_vec()),
+                        );
+                        receivers.push((name, rx));
+                    }
+                    let community = buzz_core::tenant::CommunityId::from_uuid(Uuid::nil());
+                    let stored = buzz_core::StoredEvent::new(event.clone(), None);
+                    match path {
+                        "pubsub" => {
+                            fan_out_pubsub_event(
+                                &state,
+                                ChannelEvent {
+                                    community_id: community,
+                                    topic: EventTopic::Global,
+                                    event: event.clone(),
+                                },
+                            )
+                            .await
+                        }
+                        "direct" => {
+                            super::super::fan_out_event_to_local_subscribers(
+                                &state, community, &stored,
+                            )
+                            .await
+                        }
+                        _ => {
+                            super::super::dispatch_persistent_event_inner(
+                                &buzz_core::tenant::TenantContext::resolved(community, "test"),
+                                &state,
+                                &stored,
+                                buzz_core::kind::KIND_HOST,
+                                &owner.public_key().to_hex(),
+                                false,
+                                None,
+                            )
+                            .await;
+                        }
+                    }
+                    for (name, mut rx) in receivers {
+                        if name == "owner" {
+                            assert_eq!(event_from_ws_message(rx.try_recv().unwrap()).id, event.id);
+                        }
+                        assert!(
+                            rx.try_recv().is_err(),
+                            "{path}: unexpected delivery to {name}"
+                        );
+                    }
+                }
+            }
         }
 
         async fn redis_url_if_available() -> Option<String> {

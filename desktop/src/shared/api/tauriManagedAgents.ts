@@ -28,10 +28,19 @@ export async function startManagedAgent(
   return fromRawManagedAgent(response);
 }
 
-export async function stopManagedAgent(pubkey: string): Promise<ManagedAgent> {
-  const response = await invokeTauri<RawManagedAgent>("stop_managed_agent", {
-    pubkey,
-  });
+export type SelectedAgentStop = {
+  pubkey: string;
+  selectedRunId?: string | null;
+  expectedRelayUrl?: string | null;
+};
+
+export async function stopManagedAgent(
+  input: string | SelectedAgentStop,
+): Promise<ManagedAgent> {
+  const response = await invokeTauri<RawManagedAgent>(
+    "stop_managed_agent",
+    typeof input === "string" ? { pubkey: input } : input,
+  );
   return fromRawManagedAgent(response);
 }
 
@@ -96,15 +105,25 @@ export async function startManagedAgentRuntime(
 export async function stopManagedAgentRuntime(
   pubkey: string,
   relayUrl: string,
+  selectedRunId?: string | null,
 ): Promise<ManagedAgentRuntimeStatus> {
-  return invokeTauri("stop_managed_agent_runtime", { pubkey, relayUrl });
+  return invokeTauri("stop_managed_agent_runtime", {
+    pubkey,
+    relayUrl,
+    selectedRunId,
+  });
 }
 
 export async function restartManagedAgentRuntime(
   pubkey: string,
   relayUrl: string,
+  selectedRunId?: string | null,
 ): Promise<ManagedAgentRuntimeStatus> {
-  return invokeTauri("restart_managed_agent_runtime", { pubkey, relayUrl });
+  return invokeTauri("restart_managed_agent_runtime", {
+    pubkey,
+    relayUrl,
+    selectedRunId,
+  });
 }
 
 export async function putManagedAgentRuntimeLifecycle(

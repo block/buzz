@@ -95,3 +95,15 @@ pub(super) fn fixture(
         effort_level: None,
     }
 }
+
+pub(super) fn receipt_fixture(
+    key: crate::managed_agents::ManagedAgentRuntimeKey,
+) -> crate::managed_agents::ManagedAgentRuntimeReceipt {
+    crate::managed_agents::ManagedAgentRuntimeReceipt {
+        key,
+        pid: std::process::id(),
+        desktop_instance_id: "test-instance".into(),
+        started_at: "now".into(),
+        run_id: None,
+    }
+}

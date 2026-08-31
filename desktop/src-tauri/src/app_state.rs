@@ -155,12 +155,12 @@ fn identity_from_env() -> Option<Keys> {
 }
 
 /// Build the no-redirect HTTP client used for authenticated relay media
-/// fetches (download / copy).
+/// fetches (download / copy) and owner-private host transport.
 ///
 /// This client is a security boundary, not a convenience: it carries a minted
 /// media `Authorization` header, so it MUST NOT follow redirects. A relay 3xx
-/// to an off-origin or private host would otherwise forward that header across
-/// origins (a redirect-hop SSRF). `redirect::Policy::none()` returns the 3xx
+/// must not forward bodies or make redirect-hop requests, regardless of header
+/// stripping. `redirect::Policy::none()` returns the 3xx
 /// verbatim so the caller can reject it.
 ///
 /// Returned as a `Result` so the fail-closed invariant is testable — callers

@@ -18,7 +18,7 @@ import {
   getManagedAgentPrimaryActionLabel,
   isManagedAgentActive,
 } from "@/features/agents/lib/managedAgentControlActions";
-import { OtherSetupAgentMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
+import { LiveAgentHostMarker } from "@/features/agents/ui/LiveAgentHostMarker";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import { PresenceDot } from "@/features/presence/ui/PresenceBadge";
 import {
@@ -198,11 +198,11 @@ export function MembersSidebarMemberCard({
                 </span>
               </span>
             </div>
-            {showOtherSetupMarker ? (
-              <OtherSetupAgentMarker
-                testId={`sidebar-member-agent-provenance-${member.pubkey}`}
-              />
-            ) : null}
+            <LiveAgentHostMarker
+              pubkey={member.pubkey}
+              otherSetup={showOtherSetupMarker}
+              testId={`sidebar-member-agent-provenance-${member.pubkey}`}
+            />
           </div>
         ) : (
           <div className="flex min-w-0 items-center gap-2">

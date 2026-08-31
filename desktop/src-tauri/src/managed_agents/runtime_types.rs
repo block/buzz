@@ -90,6 +90,8 @@ pub struct ManagedAgentRuntimeStatus {
     pub local_setup: bool,
     pub lifecycle: ManagedAgentRuntimeLifecycle,
     pub pid: Option<u32>,
+    /// Launcher generation, also the public run-presence ID.
+    pub run_id: Option<String>,
     pub error: Option<String>,
     pub log_path: Option<String>,
 }
@@ -117,4 +119,7 @@ pub struct ManagedAgentRuntimeReceipt {
     pub pid: u32,
     pub desktop_instance_id: String,
     pub started_at: String,
+    /// Absent on legacy receipts; never infer an exact-run stop from their PID.
+    #[serde(default)]
+    pub run_id: Option<String>,
 }

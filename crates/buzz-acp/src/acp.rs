@@ -139,10 +139,12 @@ fn build_initialize_params() -> serde_json::Value {
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
 /// same client via repeated calls to [`session_new`](AcpClient::session_new).
 pub struct AcpClient {
+    teardown_supported: bool,
+    teardown_confirmed: bool,
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
     /// Write end of the agent's stdin pipe.
-    stdin: ChildStdin,
+    stdin: Option<ChildStdin>,
     /// Framed reader over the agent's stdout pipe (line-oriented, bounded).
     /// Uses `LinesCodec::new_with_max_length` to enforce MAX_LINE_SIZE at the
     /// read level — prevents OOM from rogue agents writing infinite non-newline bytes.
@@ -414,12 +416,53 @@ fn build_client_capabilities() -> serde_json::Value {
 }
 
 impl AcpClient {
-    /// Kill the agent subprocess and wait for it to exit (no zombies).
-    ///
-    /// `Drop` only calls `start_kill()` (sends SIGKILL but doesn't reap).
-    /// Call this when you need guaranteed cleanup — e.g., in `run_models`
-    /// before process exit.
+    /// Close the agent connection and drain output while it tears down its MCP
+    /// children. Escalate only if the cooperative owner does not exit in time.
+    /// An exit here is not a certificate for arbitrary third-party executors.
     pub async fn shutdown(&mut self) {
+        self.shutdown_with_grace(std::time::Duration::from_secs(20))
+            .await;
+    }
+
+    async fn shutdown_with_grace(&mut self, grace: std::time::Duration) {
+        if self.teardown_confirmed {
+            return;
+        }
+        let confirmed = if self.teardown_supported && self.stdin.is_some() {
+            matches!(tokio::time::timeout(grace,
+                self.send_request("_buzz/shutdown_v1", serde_json::json!({}))
+            ).await, Ok(Ok(ref result)) if result["v"] == 1 && result["ownedWorkStopped"] == true)
+        } else {
+            false
+        };
+        drop(self.stdin.take());
+        let graceful = tokio::time::timeout(grace, async {
+            loop {
+                tokio::select! {
+                    status = self.child.wait() => return status,
+                    // Without draining, an agent finishing a prompt can block
+                    // on stdout and never reach its own connection cleanup.
+                    line = self.reader.next() => {
+                        if line.is_none() {
+                            return self.child.wait().await;
+                        }
+                    }
+                }
+            }
+        })
+        .await;
+        match graceful {
+            Ok(Ok(status)) => {
+                tracing::info!(%status, "agent connection closed and child reaped");
+                if confirmed && status.success() {
+                    self.teardown_confirmed = true;
+                    crate::shutdown::child_confirmed();
+                }
+                return;
+            }
+            Ok(Err(error)) => tracing::warn!(%error, "agent wait failed; teardown unconfirmed"),
+            Err(_) => tracing::warn!("agent graceful shutdown timed out; teardown unconfirmed"),
+        }
         // Kill the entire process group when possible. The child was spawned
         // with process_group(0), so its PID == its PGID. Killing the group
         // ensures subprocesses (MCP servers, tool processes) are cleaned up
@@ -534,7 +577,10 @@ impl AcpClient {
                 "codex" | "codex-acp" => Some(StandardAdapterKind::Codex),
                 _ => None,
             };
+        // Only the harness may write its final generation receipt.
+        cmd.env_remove("BUZZ_STOP_RECEIPT_PATH");
         let mut child = cmd.spawn()?;
+        crate::shutdown::child_spawned();
 
         let stdin = child
             .stdin
@@ -546,8 +592,10 @@ impl AcpClient {
             .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
 
         Ok(Self {
+            teardown_supported: false,
+            teardown_confirmed: false,
             child,
-            stdin,
+            stdin: Some(stdin),
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
             next_id: 0,
             pending_permission_id: None,
@@ -613,6 +661,10 @@ impl AcpClient {
         // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
         let params = build_initialize_params();
         let result = self.send_request("initialize", params).await?;
+        self.teardown_supported = result
+            .pointer("/_meta/buzzOwnedWorkShutdown")
+            .and_then(|v| v.as_u64())
+            == Some(1);
         self.steering_supported = result
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
@@ -1069,9 +1121,12 @@ impl AcpClient {
         const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
         let line = serde_json::to_string(value)?;
         tokio::time::timeout(WRITE_TIMEOUT, async {
-            self.stdin.write_all(line.as_bytes()).await?;
-            self.stdin.write_all(b"\n").await?;
-            self.stdin.flush().await?;
+            let stdin = self.stdin.as_mut().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "agent connection closed")
+            })?;
+            stdin.write_all(line.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+            stdin.flush().await?;
             Ok::<(), std::io::Error>(())
         })
         .await
@@ -5028,3 +5083,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "acp_shutdown_tests.rs"]
+mod shutdown_tests;

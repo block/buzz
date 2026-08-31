@@ -49,6 +49,9 @@ import type { Community } from "./types";
  * community starts with a clean slate. Hook-managed singletons
  * (e.g. ChannelMuteSyncManager, ChannelSectionSyncManager) are
  * destroyed via effect cleanup and do not need entries here.
+ * Host publication has no decrypted singleton cache: its scoped pending
+ * journal contains signed ciphertext only. hostNativeDrain is a data-free
+ * native-work barrier and deliberately survives switching/keyed remounts.
  * See AGENTS.md "Community Switching" for the full contract.
  */
 async function resetCommunityState({

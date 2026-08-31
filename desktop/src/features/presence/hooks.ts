@@ -19,7 +19,11 @@ import {
 } from "@/features/presence/lib/presence";
 import { PresenceSubscriptionReconciler } from "@/features/presence/lib/presenceSubscriptionReconciler";
 import { openPresenceSubscription } from "@/shared/api/presenceRelaySubscription";
-import type { PresenceLookup, PresenceStatus } from "@/shared/api/types";
+import type {
+  PresenceLookup,
+  PresenceStatus,
+  RelayEvent,
+} from "@/shared/api/types";
 
 const PRESENCE_STATUS_TICK_INTERVAL_MS = 30_000;
 /** Keeps focused polling for presence at the established 60-second backstop cadence. */
@@ -127,11 +131,24 @@ export function usePresenceSubscription() {
     let isCancelled = false;
     let reconcileTimer: ReturnType<typeof setTimeout> | null = null;
 
-    function handlePresenceEvent(event: { pubkey: string; content: string }) {
+    function handlePresenceEvent(event: RelayEvent) {
       if (isCancelled) return;
       const parsed = parseLivePresenceEvent(event);
       if (!parsed) return;
       const { pubkey, status } = parsed;
+      void queryClient.invalidateQueries({
+        queryKey: ["presence-runs"],
+        predicate: (query) => query.queryKey.slice(3).includes(pubkey),
+      });
+      if (event.tags.some((tag) => tag[0] === "run")) {
+        // Offline ends one run, not the identity. Ask the relay for the aggregate.
+        void queryClient.invalidateQueries({
+          queryKey: ["presence"],
+          predicate: (query) =>
+            presenceQueryWantsPubkey(query.queryKey, pubkey),
+        });
+        return;
+      }
       queryClient.setQueriesData<PresenceLookup>(
         {
           queryKey: ["presence"],
@@ -150,9 +167,23 @@ export function usePresenceSubscription() {
     });
 
     function reconcileActiveQueries() {
-      reconciler.setAuthors(
-        activePresencePubkeys(queryClient.getQueryCache().getAll()),
-      );
+      reconciler.setAuthors([
+        ...new Set([
+          ...activePresencePubkeys(queryClient.getQueryCache().getAll()),
+          ...queryClient
+            .getQueryCache()
+            .getAll()
+            .filter(
+              (query) =>
+                query.isActive() && query.queryKey[0] === "presence-runs",
+            )
+            .flatMap((query) =>
+              query.queryKey
+                .slice(3)
+                .filter((key): key is string => typeof key === "string"),
+            ),
+        ]),
+      ]);
     }
 
     function scheduleReconcile() {
@@ -175,8 +206,10 @@ export function usePresenceSubscription() {
     reconcileActiveQueries();
 
     const unsubReconnect = relayClient.subscribeToReconnects(() => {
-      if (!isCancelled)
+      if (!isCancelled) {
         void queryClient.invalidateQueries({ queryKey: ["presence"] });
+        void queryClient.invalidateQueries({ queryKey: ["presence-runs"] });
+      }
     });
 
     return () => {

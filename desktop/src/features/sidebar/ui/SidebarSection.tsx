@@ -7,6 +7,7 @@ import {
   ContextMenuTrigger,
 } from "@/shared/ui/context-menu";
 
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { ChannelContextMenuItems } from "@/features/sidebar/ui/ChannelContextMenu";
 import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurnsStore";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
@@ -334,6 +335,12 @@ export function ChannelMenuButton({
           display={ephemeralDisplay}
           testId={`channel-ephemeral-${channel.name}`}
           variant="sidebar"
+        />
+      ) : null}
+      {channel.channelType === "dm" && dmParticipants?.length === 1 ? (
+        <AgentManagementMarker
+          pubkey={dmParticipants[0].pubkey}
+          testId={`channel-agent-provenance-${channel.id}`}
         />
       ) : null}
       {activeWorking ? (

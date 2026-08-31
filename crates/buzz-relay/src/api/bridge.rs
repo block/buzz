@@ -1158,6 +1158,15 @@ async fn query_events_authed(
     .await?;
 
     if filters.iter().any(|f| f.search.is_some()) {
+        if filters
+            .iter()
+            .any(crate::handlers::history::explicitly_requests_hosts)
+        {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "error: host history search is unsupported",
+            ));
+        }
         if has_mixed_search_filters(&filters) {
             return Err(api_error(
                 StatusCode::BAD_REQUEST,
@@ -1476,7 +1485,13 @@ async fn query_events_authed(
     let db = state.db.clone();
     let mut catchall_results = stream::iter(catchall_queries.into_iter().map(|(idx, query)| {
         let db = db.clone();
-        async move { (idx, db.query_events_routed("bridge_query", &query).await) }
+        let filter = &filters[idx];
+        async move {
+            (
+                idx,
+                crate::handlers::history::query(&db, "bridge_query", filter, query).await,
+            )
+        }
     }))
     .buffered(crate::handlers::req::FILTER_QUERY_CONCURRENCY);
 
@@ -1506,6 +1521,10 @@ async fn query_events_authed(
                 }
             }
             Err(e) => {
+                if crate::handlers::history::requires_primary(filter) {
+                    tracing::warn!("Host-capable historical query failed: {e}");
+                    return Err(internal_error(e.wire_message()));
+                }
                 return Err(internal_error(&format!("query error: {e}")));
             }
         }
@@ -2285,28 +2304,52 @@ async fn synthesize_presence(
     // Look up Redis. A lookup failure must surface as an error, not a
     // fake-empty success — otherwise a Redis outage is indistinguishable from
     // an authoritative all-offline snapshot to the consumer.
-    let presence_map = match pubsub.get_presence_bulk(tenant, &all_pubkeys).await {
+    let mut presence_map = match pubsub.get_presence_bulk(tenant, &all_pubkeys).await {
         Ok(map) => map,
         Err(e) => return Some(Err(internal_error(&format!("presence lookup: {e}")))),
     };
-
-    if presence_map.is_empty() {
-        return Some(Ok(Vec::new()));
-    }
-
-    // Synthesize kind:20001 events signed by the relay.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let mut events = Vec::with_capacity(presence_map.len());
-    for (pubkey_hex, status) in &presence_map {
-        // Build a synthetic event: relay-signed, content = status, p-tag = subject.
-        // A build/sign failure here is an internal fault, not a "not a presence
-        // query" signal, so surface it as an error rather than falling through.
-        let tags = match nostr::Tag::parse(["p", pubkey_hex]) {
-            Ok(tag) => vec![tag],
+    let now = nostr::Timestamp::now().as_secs();
+    let detailed = filters.iter().any(|f| {
+        f.kinds.as_ref().is_some_and(|ks| {
+            ks.iter()
+                .any(|k| k.as_u16() as u32 == KIND_PRESENCE_SNAPSHOT)
+        })
+    });
+    let mut events = Vec::new();
+    for author in all_pubkeys {
+        let runs = match pubsub.active_presence_runs(tenant, &author, now).await {
+            Ok(runs) => runs,
+            Err(e) => return Some(Err(internal_error(&format!("presence runs: {e}")))),
+        };
+        let pk = author.to_hex();
+        let legacy = presence_map.remove(&pk);
+        let status =
+            if runs.iter().any(|r| r.status == "online") || legacy.as_deref() == Some("online") {
+                "online"
+            } else if !runs.is_empty() {
+                "away"
+            } else {
+                legacy.as_deref().unwrap_or("offline")
+            };
+        if !detailed && status == "offline" {
+            continue;
+        }
+        let mut raw_tags = vec![vec!["p".to_string(), pk]];
+        if detailed {
+            let payload = match serde_json::to_string(&runs) {
+                Ok(value) => value,
+                Err(e) => {
+                    return Some(Err(internal_error(&format!("presence serialization: {e}"))))
+                }
+            };
+            raw_tags.push(vec!["presence_runs".into(), "1".into(), payload]);
+        }
+        let tags = match raw_tags
+            .into_iter()
+            .map(nostr::Tag::parse)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(tags) => tags,
             Err(e) => return Some(Err(internal_error(&format!("presence tag: {e}")))),
         };
         let event = match nostr::EventBuilder::new(
@@ -2320,9 +2363,9 @@ async fn synthesize_presence(
             Ok(event) => event,
             Err(e) => return Some(Err(internal_error(&format!("presence sign: {e}")))),
         };
-
-        if let Ok(v) = serde_json::to_value(&event) {
-            events.push(v);
+        match serde_json::to_value(&event) {
+            Ok(value) => events.push(value),
+            Err(e) => return Some(Err(internal_error(&format!("presence serialization: {e}")))),
         }
     }
 

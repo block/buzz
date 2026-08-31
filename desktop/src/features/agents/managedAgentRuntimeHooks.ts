@@ -185,17 +185,21 @@ export function useManagedAgentRuntimeAction() {
       action,
       pubkey,
       relayUrl,
+      selectedRunId,
     }: {
       action: "start" | "stop" | "restart";
       pubkey: string;
       relayUrl: string;
+      selectedRunId?: string | null;
     }) => {
-      if (action === "stop") return stopManagedAgentRuntime(pubkey, relayUrl);
+      const stopSelected = (pubkey: string, relayUrl: string) =>
+        stopManagedAgentRuntime(pubkey, relayUrl, selectedRunId);
+      if (action === "stop") return stopSelected(pubkey, relayUrl);
       if (action === "restart") {
         return restartManagedAgentPair(
           pubkey,
           relayUrl,
-          stopManagedAgentRuntime,
+          stopSelected,
           clearActiveTurnsForAgentOnStop,
           startManagedAgentRuntime,
         );

@@ -36,6 +36,8 @@ pub mod presence;
 pub mod publisher;
 /// Redis-backed rate limiter (fixed-window INCR + EXPIRE).
 pub mod rate_limiter;
+/// Per-run presence leases and ordering fences.
+pub mod run_presence;
 /// Redis SUBSCRIBE for channel event delivery.
 pub mod subscriber;
 /// Community-scoped Redis event topics.
@@ -328,6 +330,26 @@ impl PubSubManager {
         publisher::publish_event(&self.pool, ctx, topic, event).await
     }
 
+    /// Accept a newer per-run pulse without erasing other placements.
+    pub async fn update_run_presence(
+        &self,
+        ctx: &TenantContext,
+        author: &PublicKey,
+        pulse: &buzz_core::run_presence::RunPresence,
+        now: u64,
+    ) -> Result<bool, PubSubError> {
+        run_presence::update(&self.pool, ctx, author, pulse, now).await
+    }
+    /// Return unexpired runs with original expiry deadlines.
+    pub async fn active_presence_runs(
+        &self,
+        ctx: &TenantContext,
+        author: &PublicKey,
+        now: u64,
+    ) -> Result<Vec<buzz_core::run_presence::RunPresence>, PubSubError> {
+        run_presence::active(&self.pool, ctx, author, now).await
+    }
+
     /// Set presence with 180s TTL. Call on connect and every 60s heartbeat.
     pub async fn set_presence(
         &self,
@@ -368,8 +390,11 @@ impl PubSubManager {
 
 #[cfg(test)]
 pub(crate) mod test_util {
+    pub fn redis_url() -> String {
+        std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into())
+    }
     pub fn make_test_pool() -> deadpool_redis::Pool {
-        let cfg = deadpool_redis::Config::from_url("redis://127.0.0.1:6379");
+        let cfg = deadpool_redis::Config::from_url(redis_url());
         cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("Failed to create Redis pool")
     }
@@ -386,7 +411,7 @@ mod tests {
     async fn make_manager() -> Arc<PubSubManager> {
         let pool = make_test_pool();
         Arc::new(
-            PubSubManager::new("redis://127.0.0.1:6379", pool)
+            PubSubManager::new(&crate::test_util::redis_url(), pool)
                 .await
                 .expect("Failed to create PubSubManager"),
         )
@@ -513,7 +538,7 @@ mod tests {
         let pool = make_test_pool();
         let manager = Arc::new(
             PubSubManager::with_config(
-                PubSubConfig::new("redis://127.0.0.1:6379")
+                PubSubConfig::new(crate::test_util::redis_url())
                     .with_unsubscribe_debounce(Duration::from_millis(25)),
                 pool,
             )
@@ -593,7 +618,7 @@ mod tests {
     async fn retain_release_refcounts_and_debounces_last_release() {
         let pool = make_test_pool();
         let manager = PubSubManager::with_config(
-            PubSubConfig::new("redis://127.0.0.1:6379")
+            PubSubConfig::new(crate::test_util::redis_url())
                 .with_unsubscribe_debounce(Duration::from_millis(1)),
             pool,
         )

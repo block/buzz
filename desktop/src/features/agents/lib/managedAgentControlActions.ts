@@ -12,8 +12,31 @@ type DeleteManagedAgentInput = {
   forceRemoteDelete?: boolean;
 };
 
-type StartManagedAgent = (pubkey: string) => Promise<unknown>;
-type StopManagedAgent = (pubkey: string) => Promise<unknown>;
+export type StartManagedAgent = (input: {
+  pubkey: string;
+  expectedRelayUrl: string;
+}) => Promise<unknown>;
+type StopManagedAgent = (input: {
+  pubkey: string;
+  selectedRunId?: string | null;
+  expectedRelayUrl?: string | null;
+}) => Promise<unknown>;
+
+function selectedStop(agent: ManagedAgent) {
+  return {
+    pubkey: agent.pubkey,
+    selectedRunId: agent.selectedRunId,
+    expectedRelayUrl: agent.selectedRelayUrl,
+  };
+}
+function selectedStart(agent: ManagedAgent) {
+  if (!agent.selectedRelayUrl) {
+    throw new Error(
+      "Cannot start without a selected community; refresh agent status",
+    );
+  }
+  return { pubkey: agent.pubkey, expectedRelayUrl: agent.selectedRelayUrl };
+}
 type DeleteManagedAgent = (input: DeleteManagedAgentInput) => Promise<unknown>;
 
 type ManagedAgentChannelContext = {
@@ -85,7 +108,7 @@ export async function startManagedAgentWithRules({
   // Relay-mesh agents are no longer blocked here: the backend start preflight
   // (ensure_relay_mesh_for_record) re-resolves a live serve target and dials
   // it, failing with an actionable error when no peer serves the model.
-  await startManagedAgent(agent.pubkey);
+  await startManagedAgent(selectedStart(agent));
 }
 
 export async function respawnManagedAgentWithRules({
@@ -101,12 +124,13 @@ export async function respawnManagedAgentWithRules({
    * clear stale working badges at the right boundary. */
   onStopped?: () => void;
 }) {
+  const start = selectedStart(agent);
   if (agent.backend.type === "local" && isManagedAgentActive(agent)) {
-    await stopManagedAgent(agent.pubkey);
+    await stopManagedAgent(selectedStop(agent));
     onStopped?.();
   }
 
-  await startManagedAgent(agent.pubkey);
+  await startManagedAgent(start);
 }
 
 export async function stopManagedAgentWithRules({
@@ -137,7 +161,7 @@ export async function stopManagedAgentWithRules({
     };
   }
 
-  await stopManagedAgent(agent.pubkey);
+  await stopManagedAgent(selectedStop(agent));
   return {};
 }
 

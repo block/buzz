@@ -436,7 +436,7 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
 /// Returns `Err` for unknown kinds — the relay rejects them.
 fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static str> {
     match kind {
-        KIND_PROFILE => Ok(Scope::UsersWrite),
+        KIND_PROFILE | buzz_core::kind::KIND_HOST | buzz_core::kind::KIND_HOST_COMMAND | buzz_core::kind::KIND_HOST_RECEIPT => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
         | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
@@ -695,6 +695,9 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // NIP-AM: agent turn metrics are owner-scoped global events.
             // Channel identity is encrypted inside the payload — no `h` tag.
             | KIND_AGENT_TURN_METRIC
+            | buzz_core::kind::KIND_HOST
+            | buzz_core::kind::KIND_HOST_COMMAND
+            | buzz_core::kind::KIND_HOST_RECEIPT
             // NIP-PL leases are author-owned, addressable global state.
             | super::push_lease::KIND_PUSH_LEASE
     )
@@ -2240,7 +2243,20 @@ async fn ingest_event_inner(
     }
 
     let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
-    if event.pubkey != *auth.pubkey() && !is_gift_wrap {
+    // Only validated host events have this narrow transport exception.
+    let host_owner_transport = if kind_u32 == buzz_core::kind::KIND_HOST {
+        super::hosts::authorize(tenant, state, &event, &auth).await?;
+        true
+    } else if matches!(
+        kind_u32,
+        buzz_core::kind::KIND_HOST_COMMAND | buzz_core::kind::KIND_HOST_RECEIPT
+    ) {
+        super::hosts::authorize_execution(tenant, state, &event, &auth).await?;
+        true
+    } else {
+        false
+    };
+    if event.pubkey != *auth.pubkey() && !is_gift_wrap && !host_owner_transport {
         return Err(IngestError::AuthFailed(
             "invalid: event pubkey does not match authenticated identity".into(),
         ));

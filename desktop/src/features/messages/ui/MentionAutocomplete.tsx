@@ -1,6 +1,7 @@
 import * as React from "react";
+import type { PresenceRuns } from "@/features/presence/runPresence";
 import { Bot, ChevronRight, Pin, Users } from "lucide-react";
-import { OtherSetupAgentMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
+import { AgentHostMarker } from "@/features/agents/ui/AgentHostMarker";
 import { motion } from "motion/react";
 import type { TeamMentionMember } from "@/features/messages/lib/mentionCandidates";
 
@@ -36,6 +37,8 @@ export type MentionSuggestion = {
 
 type MentionAutocompleteProps = {
   suggestions: MentionSuggestion[];
+  presenceRuns?: PresenceRuns;
+  presenceNow?: number;
   selectedIndex: number;
   onFetchMore?: () => void;
   onSelect: (suggestion: MentionSuggestion) => void;
@@ -58,6 +61,8 @@ export function showMentionAgentProvenanceMarker(
 
 export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   suggestions,
+  presenceRuns,
+  presenceNow = Date.now() / 1000,
   selectedIndex,
   onFetchMore,
   onSelect,
@@ -363,9 +368,18 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                               data-testid="mention-agent-icon"
                             />
                             agent
-                            {showAgentProvenanceMarker ? (
-                              <OtherSetupAgentMarker testId="mention-agent-provenance" />
-                            ) : null}
+                            <AgentHostMarker
+                              runs={
+                                suggestion.pubkey
+                                  ? presenceRuns?.[
+                                      suggestion.pubkey.toLowerCase()
+                                    ]
+                                  : undefined
+                              }
+                              now={presenceNow}
+                              otherSetup={showAgentProvenanceMarker}
+                              testId="mention-agent-provenance"
+                            />
                           </span>
                         ) : suggestion.role ? (
                           <Badge

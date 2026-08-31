@@ -159,6 +159,7 @@ export function useMembersSidebarActions({
           action,
           pubkey: agent.pubkey,
           relayUrl,
+          selectedRunId: runtime?.runId,
         });
         setActionNoticeMessage(
           action === "stop"

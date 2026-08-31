@@ -12,6 +12,7 @@ function agent(overrides = {}) {
     name: "Mesh Agent",
     personaId: null,
     relayUrl: "ws://localhost:3000",
+    selectedRelayUrl: "ws://localhost:3000",
     acpCommand: "buzz-acp",
     agentCommand: "goose",
     agentArgs: [],
@@ -56,7 +57,10 @@ test("relay-mesh agents delegate start to the backend preflight", async () => {
       calledWith = pubkey;
     },
   });
-  assert.equal(calledWith, meshAgent.pubkey);
+  assert.deepEqual(calledWith, {
+    pubkey: meshAgent.pubkey,
+    expectedRelayUrl: meshAgent.selectedRelayUrl,
+  });
 
   // Backend preflight failures (e.g. no live serve target) propagate as-is.
   await assert.rejects(
@@ -78,7 +82,10 @@ test("ordinary local agents still start normally", async () => {
       calledWith = pubkey;
     },
   });
-  assert.equal(calledWith, "deadbeef".repeat(8));
+  assert.deepEqual(calledWith, {
+    pubkey: "deadbeef".repeat(8),
+    expectedRelayUrl: "ws://localhost:3000",
+  });
 });
 
 // --- respawnManagedAgentWithRules: stop→clear→start boundary tests -----------
@@ -165,4 +172,68 @@ test("test_respawn_onStopped_fires_before_start_resolves", async () => {
     ["stop", "onStopped", "start"],
     "onStopped must fire after stop resolves and before start is called",
   );
+});
+
+test("ordinary Stop preserves clicked generation even when a successor appears", async () => {
+  const { stopManagedAgentWithRules } = await import(
+    "./managedAgentControlActions.ts"
+  );
+  const clicked = agent({
+    status: "running",
+    selectedRunId: "aa".repeat(16),
+    selectedRelayUrl: "wss://clicked.example",
+  });
+  let request;
+  await stopManagedAgentWithRules({
+    agent: clicked,
+    channels: [],
+    relayAgents: [],
+    stopManagedAgent: async (selected) => {
+      clicked.selectedRunId = "bb".repeat(16);
+      clicked.selectedRelayUrl = "wss://successor.example";
+      request = selected;
+    },
+  });
+  assert.deepEqual(request, {
+    pubkey: clicked.pubkey,
+    selectedRunId: "aa".repeat(16),
+    expectedRelayUrl: "wss://clicked.example",
+  });
+});
+
+test("Restart retains clicked community across the Stop await", async () => {
+  const clicked = agent({ status: "running", selectedRunId: "aa".repeat(16) });
+  const original = clicked.selectedRelayUrl;
+  let stop, start;
+  await respawnManagedAgentWithRules({
+    agent: clicked,
+    stopManagedAgent: async (input) => {
+      stop = input;
+      await Promise.resolve();
+      clicked.selectedRelayUrl = "wss://switched.example";
+    },
+    startManagedAgent: async (input) => {
+      start = input;
+    },
+  });
+  assert.equal(stop.expectedRelayUrl, original);
+  assert.equal(start.expectedRelayUrl, original);
+  assert.equal(stop.selectedRunId, "aa".repeat(16));
+});
+
+test("missing community fails before either Restart leg, never falls back to record pin", async () => {
+  let calls = 0;
+  await assert.rejects(
+    respawnManagedAgentWithRules({
+      agent: agent({ status: "running", selectedRelayUrl: null }),
+      stopManagedAgent: async () => {
+        calls++;
+      },
+      startManagedAgent: async () => {
+        calls++;
+      },
+    }),
+    /selected community/,
+  );
+  assert.equal(calls, 0);
 });

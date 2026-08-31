@@ -283,18 +283,7 @@ export type ManagedAgentRuntimeLifecycle =
   | "failed"
   | "stopped";
 
-export type ManagedAgentRuntimeStatus = {
-  pubkey: string;
-  /** Exact submitted descriptor, present only on startup reconcile results. */
-  requestedRelayUrl?: string;
-  /** Canonical, backend-owned pair identity component. Do not normalize in TS. */
-  relayUrl: string;
-  localSetup: boolean;
-  lifecycle: ManagedAgentRuntimeLifecycle;
-  pid: number | null;
-  error: string | null;
-  logPath: string | null;
-};
+export type { ManagedAgentRuntimeStatus } from "./managedAgentRuntimeTypes";
 
 export type ManagedAgentBackend =
   | { type: "local" }
@@ -303,6 +292,8 @@ export type ManagedAgentBackend =
 import type { RestartDiffEntry } from "./restartDiff";
 export type { JsonValue, RestartChange, RestartDiffEntry } from "./restartDiff";
 export type ManagedAgent = {
+  selectedRunId?: string | null;
+  selectedRelayUrl?: string | null;
   pubkey: string;
   name: string;
   personaId: string | null;

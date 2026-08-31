@@ -29,7 +29,7 @@ pub(crate) use metadata::{
 
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
-pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
+pub use stop::stop_managed_agent_process;
 
 mod sweep;
 pub(crate) use sweep::sweep_untracked_bundle_harnesses;
@@ -42,7 +42,8 @@ use process::{
 };
 pub(crate) use process::{
     current_instance_id, process_belongs_to_us, process_has_buzz_marker, process_is_running,
-    terminate_process, terminate_untracked_pair_runtime, valid_agent_runtime_receipt,
+    terminate_exact_owned_group, terminate_process, terminate_untracked_pair_runtime,
+    valid_agent_runtime_receipt,
 };
 
 mod orphan_sweep;
@@ -68,37 +69,14 @@ mod lifecycle;
 #[cfg(test)]
 use lifecycle::kill_stale_tracked_processes_with;
 pub use lifecycle::{kill_stale_tracked_processes, sync_managed_agent_processes};
+mod spawn_entry;
+use spawn_entry::child_rust_log_filter;
+pub use spawn_entry::spawn_agent_child;
 mod spawn_key; // production spawn-key derivation + its regressions
 pub(crate) use spawn_key::bound_runtime_key;
 
-/// Classify an agent's persona against the live catalog for the Agents-menu
-/// drift indicator. Returns `(out_of_date, orphaned)`.
-///
-/// Drift basis is the RECORD's `persona_source_version`, never the engram:
-/// - persona_id set + persona present: out_of_date when the snapshot hash
-///   differs from the persona's current content hash.
-/// - persona_id set + persona gone: orphaned (no current hash to respawn into,
-///   so never out_of_date — we must not tell the user to respawn into nothing).
-/// - no persona_id: neither — a hand-built agent has no persona to drift from.
-fn persona_drift_state(
-    record: &ManagedAgentRecord,
-    personas: &[crate::managed_agents::types::AgentDefinition],
-) -> (bool, bool) {
-    let Some(persona_id) = record.persona_id.as_deref() else {
-        return (false, false);
-    };
-    let Some(persona) = personas.iter().find(|p| p.id == persona_id) else {
-        return (false, true);
-    };
-    let current = crate::managed_agents::persona_events::persona_content_hash(
-        &crate::managed_agents::persona_events::persona_event_content(persona),
-    );
-    let out_of_date = record
-        .persona_source_version
-        .as_deref()
-        .is_some_and(|pinned| pinned != current);
-    (out_of_date, false)
-}
+mod persona_drift;
+use persona_drift::persona_drift_state;
 
 /// Resolve the runtime-pair key this record maps to for the active
 /// workspace: always the active workspace relay (the legacy per-record relay
@@ -299,6 +277,8 @@ pub fn build_managed_agent_summary(
         .to_string();
 
     Ok(ManagedAgentSummary {
+        selected_run_id: pair_runtime.map(|runtime| runtime.start_nonce.clone()),
+        selected_relay_url: pair_key.as_ref().map(|key| key.relay_url.clone()),
         pubkey: record.pubkey.clone(),
         name: record.name.clone(),
         persona_id: record.persona_id.clone(),
@@ -397,18 +377,13 @@ pub(crate) fn configure_runtime_cli(
     }
 }
 
-/// Spawn an agent process without holding any locks on records or runtimes.
-/// Returns the child process and log path on success. The caller is responsible
-/// for updating `ManagedAgentRecord` fields and inserting into the runtimes map.
-///
-/// `owner_hex`: the workspace owner's pubkey, used as a fallback for legacy
-/// records that have no NIP-OA `auth_tag`. See `build_respond_to_env`.
-pub fn spawn_agent_child(
+pub(super) fn spawn_agent_child_for_run(
     app: &AppHandle,
     record: &ManagedAgentRecord,
     relay_url: &str,
     lazy: bool,
     owner_hex: Option<&str>,
+    generation: Option<(&str, &str)>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
     if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
@@ -457,6 +432,13 @@ pub fn spawn_agent_child(
                     crate::managed_agents::user_facing_harness_error(&e)
                 )
             })?;
+    if let Some((_, expected_revision)) = generation {
+        if super::execution::config_revision(record, &personas, &global, &teams, &descriptor)?
+            != expected_revision
+        {
+            return Err("destination configuration changed before spawn".into());
+        }
+    }
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
 
@@ -810,12 +792,9 @@ pub fn spawn_agent_child(
         command.env(key, value);
     }
 
-    // B5: carry persisted effort; harness resolves thought_level configId at first session.
-    // Written AFTER descriptor.env so the canonical persisted value wins over any
-    // user-supplied BUZZ_ACP_EFFORT_LEVEL entry, mirroring the A1 model-authority pattern
-    // (ANTHROPIC_MODEL is applied post-loop for the same reason). When effort_level is
-    // None there is no canonical value to assert, so env passthrough stands — user env
-    // legitimately seeds startup effort in that case.
+    // B5: carry persisted effort after user env; the harness resolves thought_level
+    // at first session. Canonical persisted effort wins, like ANTHROPIC_MODEL below.
+    // With no persisted effort, preserve user env to seed startup configuration.
     apply_effort_env(&mut command, record.effort_level.as_deref());
 
     // A1: for local claude agents, ANTHROPIC_MODEL is the single startup model authority.
@@ -826,6 +805,7 @@ pub fn spawn_agent_child(
         apply_claude_model_env(&mut command, effective_model.as_deref());
     }
     configure_runtime_cli(&mut command, runtime_meta);
+    super::host_location::apply(&mut command, owner_hex)?;
 
     // Buzz shared compute is stored as a native provider; derive the OpenAI-compatible
     // transport at spawn time and scrub any unrelated ambient OpenAI key.
@@ -842,11 +822,14 @@ pub fn spawn_agent_child(
     }
 
     // Stamp desktop ownership and an unpredictable harness-generation identity.
-    let start_nonce = uuid::Uuid::new_v4().simple().to_string();
+    let start_nonce = spawn_entry::launcher_generation(generation)?;
     command
         .env("BUZZ_MANAGED_AGENT", current_instance_id(app))
-        .env("BUZZ_MANAGED_AGENT_START_NONCE", &start_nonce);
-
+        .env("BUZZ_MANAGED_AGENT_START_NONCE", &start_nonce)
+        .env(
+            "BUZZ_STOP_RECEIPT_PATH",
+            super::execution::stop_proof_path(&log_path, &start_nonce),
+        );
     // Stamp the effective spawn config from the values that populated the
     // `Command` above, BEFORE spawning. Re-resolving after `spawn()` would let
     // a persona/harness/global edit landing in between stamp the NEW config
@@ -928,14 +911,6 @@ pub fn spawn_agent_child(
     })
 }
 
-fn child_rust_log_filter() -> String {
-    match std::env::var("RUST_LOG") {
-        Ok(existing) if existing.contains("buzz_acp") => existing,
-        Ok(existing) if !existing.trim().is_empty() => format!("{existing},buzz_acp=info"),
-        _ => "buzz_acp=info".to_string(),
-    }
-}
-
 /// Spawn (or adopt) the runtime pair for `record` on the caller's bound
 /// workspace relay. `workspace_relay` can only be produced by
 /// `bind_expected_relay_scope`, so this spawn consumes — by construction — the
@@ -974,6 +949,7 @@ pub fn start_managed_agent_process(
         pid: process.child.id(),
         desktop_instance_id: current_instance_id(app),
         started_at: now.clone(),
+        run_id: Some(process.start_nonce.clone()),
     };
     if let Err(error) = super::write_agent_runtime_receipt(app, &receipt) {
         let _ = terminate_process(process.child.id());

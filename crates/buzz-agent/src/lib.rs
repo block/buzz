@@ -6,9 +6,11 @@ pub mod catalog;
 pub mod config;
 mod handoff;
 mod hints;
+mod lifecycle;
 mod llm;
 mod mcp;
 pub mod model_capabilities;
+mod owned_mcp;
 mod permission;
 pub mod types;
 mod wire;
@@ -73,6 +75,8 @@ struct App {
     /// OAuth authentication and non-auth errors use the configured model for that
     /// response and retry on the next session.
     models_cache: tokio::sync::OnceCell<Vec<ModelEntry>>,
+    tasks: Mutex<tokio::task::JoinSet<()>>,
+    unfinished_tasks: std::sync::atomic::AtomicUsize,
 }
 
 struct Session {
@@ -205,6 +209,8 @@ async fn async_main() {
         negotiated_version: AtomicU32::new(PROTOCOL_VERSION),
         permissions,
         models_cache: tokio::sync::OnceCell::new(),
+        tasks: Mutex::new(tokio::task::JoinSet::new()),
+        unfinished_tasks: Default::default(),
     });
     let (wire_tx, wire_rx) = mpsc::channel::<WireMsg>(64);
     let mut writer = tokio::spawn(wire::writer_task(wire_rx));
@@ -214,22 +220,41 @@ async fn async_main() {
     // stop reading and cancel every session rather than leave the process
     // reading input while outstanding permission asks wait out their full
     // deadline for a response that can never arrive.
-    tokio::select! {
+    let shutdown_id = tokio::select! {
         r = read_loop(
             BufReader::new(tokio::io::stdin()),
             app.clone(),
             wire_tx,
             max_line,
         ) => {
-            if let Err(e) = r {
-                tracing::error!("io: reader: {e}");
-            }
-            cancel_all_sessions(&app).await;
-            let _ = writer.await;
+            r.unwrap_or_else(|e| { tracing::error!("io: reader: {e}"); None })
         }
         _ = &mut writer => {
             tracing::error!("io: writer exited (stdout closed); shutting down connection");
-            cancel_all_sessions(&app).await;
+            None
+        }
+    };
+    // No more requests can be admitted. Closing the output queue also releases
+    // tasks blocked on a full pipe; a peer which stopped reading must not hold
+    // workload teardown hostage.
+    writer.abort();
+    if !writer.is_finished() {
+        let _ = writer.await;
+    }
+    let confirmed = lifecycle::shutdown(&app).await;
+    if let Some(id) = shutdown_id {
+        // The ordinary writer is joined: no interleaving with its buffered
+        // notifications, and no further request can be admitted.
+        use tokio::io::AsyncWriteExt;
+        let response = wire::ok(id, json!({"ownedWorkStopped": confirmed, "v": 1}));
+        if let Ok(mut line) = serde_json::to_vec(&response) {
+            line.push(b'\n');
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                let mut out = tokio::io::stdout();
+                out.write_all(&line).await?;
+                out.flush().await
+            })
+            .await;
         }
     }
 }
@@ -248,13 +273,20 @@ async fn read_loop<R: tokio::io::AsyncBufRead + Unpin>(
     app: Arc<App>,
     wire_tx: WireSender,
     max_line: usize,
-) -> std::io::Result<()> {
+) -> std::io::Result<Option<Value>> {
     while let Some(line) = wire::read_bounded_line(&mut stdin, max_line).await? {
         if line.trim().is_empty() {
             continue;
         }
         match serde_json::from_str::<Value>(&line) {
-            Ok(msg) => dispatch(&app, msg, &wire_tx).await,
+            Ok(msg) => {
+                if let Inbound::Request { id, method, .. } = classify(&msg) {
+                    if method == "_buzz/shutdown_v1" {
+                        return Ok(Some(id));
+                    }
+                }
+                dispatch(&app, msg, &wire_tx).await;
+            }
             Err(e) => {
                 wire::send(
                     &wire_tx,
@@ -264,7 +296,7 @@ async fn read_loop<R: tokio::io::AsyncBufRead + Unpin>(
             }
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 async fn dispatch(app: &Arc<App>, msg: Value, wire_tx: &WireSender) {
@@ -295,9 +327,16 @@ async fn handle_request(
         "session/new" => {
             let app = app.clone();
             let wire_tx = wire_tx.clone();
-            tokio::spawn(async move { session_new(&app, id, params, &wire_tx).await });
+            let task_app = app.clone();
+            let mut tasks = app.tasks.lock().await;
+            while tasks.try_join_next().is_some() {}
+            app.unfinished_tasks.fetch_add(1, Ordering::AcqRel);
+            tasks.spawn(async move {
+                session_new(&task_app, id, params, &wire_tx).await;
+                task_app.unfinished_tasks.fetch_sub(1, Ordering::AcqRel);
+            });
         }
-        "session/prompt" => spawn_prompt(app.clone(), id, params, wire_tx.clone()),
+        "session/prompt" => spawn_prompt(app.clone(), id, params, wire_tx.clone()).await,
         "session/set_model" => {
             set_model_session(app, id, params, wire_tx).await;
         }
@@ -362,6 +401,7 @@ async fn initialize(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSend
                     "mcpCapabilities": { "http": false, "sse": false },
                 },
                 "agentInfo": { "name": "buzz-agent", "version": env!("CARGO_PKG_VERSION") },
+                "_meta": {"buzzOwnedWorkShutdown": 1},
             }),
         ),
     )
@@ -526,12 +566,17 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
     };
     let session_id = match session_token() {
         Ok(t) => format!("ses_{t}"),
-        Err(e) => return reject(wire_tx, id, -32000, &e).await,
+        Err(e) => {
+            mcp.shutdown().await;
+            return reject(wire_tx, id, -32000, &e).await;
+        }
     };
     let (cancel_tx, _) = watch::channel(false);
     let mut sessions = app.sessions.lock().await;
     // Re-check cap (another session may have been created while we spawned MCP).
     if sessions.len() >= app.cfg.max_sessions {
+        drop(sessions);
+        mcp.shutdown().await;
         return reject(
             wire_tx,
             id,
@@ -726,8 +771,15 @@ async fn steer_session(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireS
     .await;
 }
 
-fn spawn_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender) {
-    tokio::spawn(async move { run_prompt(app, id, params, wire_tx).await });
+async fn spawn_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender) {
+    let task_app = app.clone();
+    let mut tasks = app.tasks.lock().await;
+    while tasks.try_join_next().is_some() {}
+    app.unfinished_tasks.fetch_add(1, Ordering::AcqRel);
+    tasks.spawn(async move {
+        run_prompt(task_app.clone(), id, params, wire_tx).await;
+        task_app.unfinished_tasks.fetch_sub(1, Ordering::AcqRel);
+    });
 }
 
 async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender) {

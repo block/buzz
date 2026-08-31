@@ -32,6 +32,28 @@ pub use crate::reminder::{
 /// the advertised ceiling and the enforced one cannot drift.
 pub const DEFAULT_MAX_PAGE_LIMIT: i64 = 1_000;
 
+// Query and COUNT share the core matcher's generic-tag semantics. In particular,
+// #h falls back to the stored channel only when NO explicit h tag exists.
+fn push_exact_tags(
+    qb: &mut QueryBuilder<Postgres>,
+    tags: &[(String, Vec<String>)],
+    col_prefix: &str,
+) {
+    for (name, values) in tags {
+        qb.push(format!(" AND (EXISTS (SELECT 1 FROM jsonb_array_elements({col_prefix}tags) AS exact_tag WHERE exact_tag->>0 = "))
+            .push_bind(name)
+            .push(" AND exact_tag->>1 = ANY(")
+            .push_bind(values)
+            .push("))");
+        if name == "h" {
+            qb.push(format!(" OR (NOT EXISTS (SELECT 1 FROM jsonb_array_elements({col_prefix}tags) AS channel_tag WHERE channel_tag->>0 = 'h') AND {col_prefix}channel_id::text = ANY("))
+                .push_bind(values)
+                .push("))");
+        }
+        qb.push(")");
+    }
+}
+
 /// Optional filters for [`query_events`].
 #[derive(Debug, Clone)]
 pub struct EventQuery {
@@ -81,6 +103,12 @@ pub struct EventQuery {
     /// Restrict results to events with an exact custom tag pair.
     /// Uses JSONB containment against `tags` before SQL `LIMIT`.
     pub custom_tag: Option<(String, String)>,
+    /// Exact tag-name/value filters applied before LIMIT. Names are AND-ed,
+    /// values within each name are OR-ed, matching NIP-01 generic tag semantics.
+    /// `h` uses stored channel_id only in the absence of explicit h tags,
+    /// matching the core filter matcher. Host inventory uses this instead of
+    /// best-effort mention indexes.
+    pub exact_tags: Vec<(String, Vec<String>)>,
     /// Restrict results to events in any of these channels. By default,
     /// channel-less global events are retained so this can enforce a viewer's
     /// accessible-channel scope without hiding global events. Set
@@ -140,6 +168,7 @@ impl EventQuery {
             ids: None,
             e_tags: None,
             custom_tag: None,
+            exact_tags: Vec::new(),
             channel_ids: None,
             channel_ids_include_global: true,
             max_limit: None,
@@ -525,6 +554,8 @@ pub(crate) async fn query_events_on(
             .push_bind(containment);
     }
 
+    push_exact_tags(&mut qb, &q.exact_tags, col_prefix);
+
     if let Some(s) = q.since {
         qb.push(format!(" AND {col_prefix}created_at >= "))
             .push_bind(s);
@@ -783,6 +814,8 @@ pub(crate) async fn count_events_on(conn: &mut sqlx::PgConnection, q: &EventQuer
             qb.push(")");
         }
     }
+
+    push_exact_tags(&mut qb, &q.exact_tags, col_prefix);
 
     if let Some(s) = q.since {
         qb.push(format!(" AND {col_prefix}created_at >= "))

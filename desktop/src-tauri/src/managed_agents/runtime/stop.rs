@@ -111,48 +111,6 @@ fn stop_legacy_scalar_pid<R: tauri::Runtime>(
     Ok(())
 }
 
-/// Stop the runtime pair this record resolves to for the active workspace
-/// (explicit relay pin, else the active workspace relay) — the pair-scoped
-/// counterpart of [`stop_managed_agent_process`], which drains every pair.
-///
-/// Community-scoped surfaces (profile panel, Agents tab, auto-restart) stop
-/// through here so stopping an agent in one community never tears down its
-/// pairs in other communities. Clears the matching agent session cache
-/// (pair-scoped when a pair key resolves). When no pair is tracked for this
-/// workspace, only legacy scalar-PID cleanup runs.
-pub fn stop_managed_agent_workspace_pair(
-    app: &AppHandle,
-    record: &mut ManagedAgentRecord,
-    runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
-) -> Result<(), String> {
-    use tauri::Manager;
-    let state = app.state::<crate::app_state::AppState>();
-    match super::workspace_pair_key(app, record) {
-        Some(pair_key) if runtimes.contains_key(&pair_key) => {
-            stop_managed_agent_pair(app, record, runtimes, &pair_key)?;
-            state.clear_agent_session_cache(&pair_key);
-            super::super::remove_agent_pid_file(app, &record.pubkey);
-            let now = now_iso();
-            record.runtime_pid = None;
-            record.updated_at = now.clone();
-            record.last_stopped_at = Some(now);
-            record.last_error = None;
-            record.last_error_code = None;
-        }
-        Some(pair_key) => {
-            // No tracked pair here — a pubkey-wide cache clear would disturb
-            // live pairs in other communities, so stay pair-scoped.
-            stop_legacy_scalar_pid(app, record)?;
-            state.clear_agent_session_cache(&pair_key);
-        }
-        None => {
-            stop_legacy_scalar_pid(app, record)?;
-            state.clear_agent_session_caches(&record.pubkey);
-        }
-    }
-    Ok(())
-}
-
 pub fn stop_managed_agent_process<R: tauri::Runtime>(
     app: &AppHandle<R>,
     record: &mut ManagedAgentRecord,

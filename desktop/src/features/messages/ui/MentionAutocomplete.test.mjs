@@ -407,3 +407,63 @@ test("agents without trustworthy provenance omit management provenance", () => {
     false,
   );
 });
+
+test("live host names use the cloud marker even without a name collision", async () => {
+  const React = await import("react");
+  const { render } = await import("@testing-library/react");
+  const { MentionAutocomplete } = await import("./MentionAutocomplete.tsx");
+  const pubkey = "b".repeat(64);
+  const props = {
+    suggestions: [{ pubkey, displayName: "Agent Ada", isAgent: true }],
+    selectedIndex: 0,
+    onSelect: () => {},
+    presenceNow: 100,
+    presenceRuns: {
+      [pubkey]: [
+        {
+          run: "c".repeat(32),
+          seq: 0,
+          status: "online",
+          expires_at: 101,
+          location: { host: "a".repeat(64), label: "Workshop" },
+          registration: null,
+        },
+      ],
+    },
+  };
+  const view = render(React.createElement(MentionAutocomplete, props));
+  const marker = view.getByRole("img", { name: "Running on Workshop" });
+  assert.match(
+    marker.querySelector("svg").getAttribute("class"),
+    /lucide-cloud/,
+  );
+  assert.equal(marker.textContent, "Workshop");
+  view.rerender(
+    React.createElement(MentionAutocomplete, { ...props, presenceNow: 101 }),
+  );
+  assert.equal(view.queryByRole("img", { name: "Running on Workshop" }), null);
+});
+
+test("duplicate agent without a live host reports management, not location", async () => {
+  const React = await import("react");
+  const { render } = await import("@testing-library/react");
+  const { MentionAutocomplete } = await import("./MentionAutocomplete.tsx");
+  const view = render(
+    React.createElement(MentionAutocomplete, {
+      suggestions: [
+        { ...suggestion("managed-here"), pubkey: "a".repeat(64) },
+        { ...suggestion("managed-elsewhere"), pubkey: "b".repeat(64) },
+      ],
+      selectedIndex: 0,
+      onSelect: () => {},
+    }),
+  );
+  const marker = view.getByTestId("mention-agent-provenance");
+  assert.equal(marker.getAttribute("aria-label"), "Not managed on this device");
+  assert.equal(marker.getAttribute("title"), "Not managed on this device");
+  assert.equal(marker.textContent, "");
+  assert.match(
+    marker.querySelector("svg").getAttribute("class"),
+    /lucide-cloud/,
+  );
+});

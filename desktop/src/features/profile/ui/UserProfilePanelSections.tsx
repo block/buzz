@@ -1,3 +1,4 @@
+import { LiveAgentHostMarker } from "@/features/agents/ui/LiveAgentHostMarker";
 import * as React from "react";
 import { ChevronDown, ChevronUp, Pencil } from "lucide-react";
 
@@ -410,6 +411,11 @@ export function ProfileSummaryView({
           profile={profile}
           userStatus={userStatus}
         />
+        {isBot && pubkey ? (
+          <div className="flex justify-center pb-2">
+            <LiveAgentHostMarker pubkey={pubkey} testId="profile-agent-host" />
+          </div>
+        ) : null}
       </div>
 
       {canInstantiateAgent ? (

@@ -242,11 +242,23 @@ fn signal_process_group_or_leader(pid: u32, signal: i32, action: &str) -> Result
 }
 
 #[cfg(unix)]
+fn signal_owner(pid: u32) -> Result<(), String> {
+    let status = std::process::Command::new("/bin/kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .map_err(|error| format!("cannot signal selected owner: {error}"))?;
+    if !status.success() {
+        return Err("cannot signal selected owner".into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 pub(crate) fn terminate_process(pid: u32) -> Result<(), String> {
-    // Try graceful shutdown first (SIGTERM to the group).
+    // Legacy PID-only best-effort stop. Generation-fenced execution uses
+    // terminate_exact_owned_group below, retaining the child through cleanup.
     signal_process_group_or_leader(pid, libc::SIGTERM, "terminate")?;
 
-    // Wait up to 1s for graceful exit.
     for _ in 0..10 {
         if !process_is_running(pid) {
             return Ok(());
@@ -466,4 +478,137 @@ pub(crate) fn terminate_untracked_pair_runtime(
         process_is_running,
         super::super::remove_agent_runtime_receipt_path,
     )
+}
+
+/// Teardown observation for generation-fenced operations. Unlike the legacy
+/// helper, signal only the retained owner and allow nested stdio teardown before
+/// escalation. Reap the root and observe its group disappearing. Detached groups
+/// are outside this observation boundary; this is NOT a teardown certificate.
+#[cfg(unix)]
+pub(crate) fn terminate_exact_owned_group(child: &mut std::process::Child) -> Result<(), String> {
+    terminate_exact_owned_group_with_grace(child, std::time::Duration::from_secs(90))
+}
+
+#[cfg(unix)]
+fn terminate_exact_owned_group_with_grace(
+    child: &mut std::process::Child,
+    grace: std::time::Duration,
+) -> Result<(), String> {
+    if child
+        .try_wait()
+        .map_err(|_| "cannot inspect selected run")?
+        .is_some()
+    {
+        // Already reaped roots may have recycled PIDs. Never signal by a stale
+        // PID after restart/retry; lack of containment evidence remains unknown.
+        return Err("selected root already exited; group teardown is unconfirmed".into());
+    }
+    let pid = child.id();
+    signal_owner(pid)?;
+    let deadline = std::time::Instant::now() + grace;
+    loop {
+        if child
+            .try_wait()
+            .map_err(|_| "cannot wait for selected run")?
+            .is_some()
+        {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            // The root is still owned and unreaped. Escalation cannot certify
+            // separately grouped descendants, so leave the journal uncertain.
+            signal_process_group_or_leader(pid, libc::SIGKILL, "kill timed out run")?;
+            child.wait().map_err(|_| "failed to reap selected run")?;
+            return Err("selected owner timed out; descendant teardown unconfirmed".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    // Do not signal a reaped PID (it can already have been recycled). The
+    // cooperative owner is responsible for draining its remaining groups.
+    for _ in 0..20 {
+        let output = std::process::Command::new("/bin/ps")
+            .args(["-axo", "pgid="])
+            .output()
+            .map_err(|_| "cannot observe process groups")?;
+        if !output.status.success() {
+            return Err("cannot observe process groups".into());
+        }
+        let text =
+            std::str::from_utf8(&output.stdout).map_err(|_| "invalid process group observation")?;
+        let groups = text
+            .split_whitespace()
+            .map(str::parse::<u32>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "invalid process group observation")?;
+        if !groups.contains(&pid) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    Err("selected run group teardown is unconfirmed".into())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn terminate_exact_owned_group(_child: &mut std::process::Child) -> Result<(), String> {
+    Err("exact run teardown observation is not supported on this platform".into())
+}
+
+#[cfg(all(test, unix))]
+mod exact_run_tests {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    fn child() -> ChildGuard {
+        ChildGuard(
+            std::process::Command::new("/bin/sleep")
+                .arg("60")
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        )
+    }
+    #[test]
+    fn exact_group_teardown_reaps_root_and_leaves_peer_alive() {
+        let mut selected = child();
+        let mut peer = child();
+        terminate_exact_owned_group(&mut selected.0).unwrap();
+        assert!(selected.0.try_wait().unwrap().is_some());
+        assert!(peer.0.try_wait().unwrap().is_none());
+        // Retry after the root was reaped cannot signal a potentially reused PID.
+        assert!(terminate_exact_owned_group(&mut selected.0).is_err());
+        assert!(peer.0.try_wait().unwrap().is_none());
+    }
+    #[test]
+    fn hung_owner_escalation_is_uncertain_and_preserves_peer() {
+        use std::io::BufRead;
+        let mut selected = ChildGuard(
+            std::process::Command::new("/bin/sh")
+                .args(["-c", "trap '' TERM; echo ready; exec sleep 600"])
+                .stdout(std::process::Stdio::piped())
+                .process_group(0)
+                .spawn()
+                .unwrap(),
+        );
+        let mut line = String::new();
+        std::io::BufReader::new(selected.0.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line.trim(), "ready");
+        let mut peer = child();
+        assert!(terminate_exact_owned_group_with_grace(
+            &mut selected.0,
+            std::time::Duration::from_millis(30)
+        )
+        .unwrap_err()
+        .contains("unconfirmed"));
+        assert!(selected.0.try_wait().unwrap().is_some());
+        assert!(peer.0.try_wait().unwrap().is_none());
+    }
 }

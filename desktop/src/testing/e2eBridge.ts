@@ -94,6 +94,8 @@ type MockCommandAvailability = {
 };
 
 export type MockManagedAgentSeed = {
+  /** Persisted legacy pin, not the workspace selected for Start. */
+  relayUrl?: string;
   pubkey: string;
   name: string;
   avatarUrl?: string | null;
@@ -906,6 +908,8 @@ type RawRelayAgent = {
 };
 
 type RawManagedAgent = {
+  selected_relay_url?: string | null;
+  selected_run_id?: string | null;
   pubkey: string;
   name: string;
   persona_id: string | null;
@@ -1789,6 +1793,12 @@ function cloneRelayAgent(agent: RawRelayAgent): RawRelayAgent {
 
 function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
   return {
+    // Native build_managed_agent_summary selects the workspace pair even
+    // before first Start. A stored relay pin and a live run are NOT required.
+    selected_relay_url: /^[0-9a-f]{64}$/i.test(agent.pubkey)
+      ? activeMockRelayUrl(getConfig())
+      : null,
+    selected_run_id: null, // The mock does not model native generation receipts.
     pubkey: agent.pubkey,
     name: agent.name,
     persona_id: agent.persona_id,
@@ -2354,7 +2364,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     // Native serde always emits this key (`null` when unpinned) — the bridge
     // must mirror the wire shape, not omit the key.
     runtime: seed.runtime ?? null,
-    relay_url: DEFAULT_RELAY_WS_URL,
+    relay_url: seed.relayUrl ?? DEFAULT_RELAY_WS_URL,
     acp_command: "buzz-acp",
     agent_command: agentCommand,
     agent_args: agentArgs,
@@ -4215,12 +4225,7 @@ function getRelayWsUrl(config: E2eConfig | undefined): string {
  * switch with `openDmDelayMs` / `sendMessageDelayMs` and prove the send
  * fails closed.
  */
-function assertExpectedRelayScope(
-  expectedRelayUrl: string | null | undefined,
-  config: E2eConfig | undefined,
-): void {
-  const expected = expectedRelayUrl?.trim();
-  if (!expected) return;
+function activeMockRelayUrl(config: E2eConfig | undefined): string {
   let active: string | null = null;
   try {
     const activeId = window.localStorage.getItem("buzz-active-community-id");
@@ -4233,10 +4238,16 @@ function assertExpectedRelayScope(
   } catch {
     active = null;
   }
-  if (
-    normalizeMockRelayUrl(active ?? getRelayWsUrl(config)) !==
-    normalizeMockRelayUrl(expected)
-  ) {
+  return normalizeMockRelayUrl(active ?? getRelayWsUrl(config));
+}
+
+function assertExpectedRelayScope(
+  expectedRelayUrl: string | null | undefined,
+  config: E2eConfig | undefined,
+): void {
+  const expected = expectedRelayUrl?.trim();
+  if (!expected) return;
+  if (activeMockRelayUrl(config) !== normalizeMockRelayUrl(expected)) {
     throw new Error(
       "active community changed before the message was submitted; not sent",
     );
@@ -9527,7 +9538,11 @@ async function handleStartManagedAgent(
     agent.pid = agent.pid ?? 42000 + mockManagedAgents.indexOf(agent);
     // The real command spawns a pair runtime keyed by the agent's effective
     // relay (`start_managed_agent_process`), so mirror that row here.
-    upsertMockManagedAgentRuntime(agent.pubkey, agent.relay_url, "ready");
+    upsertMockManagedAgentRuntime(
+      agent.pubkey,
+      activeMockRelayUrl(config),
+      "ready",
+    );
   }
   agent.updated_at = now;
   agent.last_started_at = now;

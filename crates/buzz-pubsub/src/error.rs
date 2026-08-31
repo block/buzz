@@ -3,6 +3,9 @@ use thiserror::Error;
 /// Errors that can occur in pub/sub, presence, and typing operations.
 #[derive(Debug, Error)]
 pub enum PubSubError {
+    /// Bounded per-identity presence run capacity reached.
+    #[error("presence run limit reached")]
+    PresenceRunLimit,
     /// A Redis command failed.
     #[error("Redis error: {0}")]
     Redis(#[from] redis::RedisError),

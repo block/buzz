@@ -506,6 +506,10 @@ pub struct ManagedAgentProcess {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ManagedAgentSummary {
+    /// Selected active workspace generation; absent for legacy/untracked runtimes.
+    pub selected_run_id: Option<String>,
+    /// Community corresponding to selected_run_id, not a stored legacy pin.
+    pub selected_relay_url: Option<String>,
     pub pubkey: String,
     pub name: String,
     pub persona_id: Option<String>,

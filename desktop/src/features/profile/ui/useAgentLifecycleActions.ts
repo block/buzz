@@ -2,6 +2,7 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import {
+  type StartManagedAgent,
   isManagedAgentActive,
   respawnManagedAgentWithRules,
   startManagedAgentWithRules,
@@ -20,8 +21,12 @@ export function useAgentLifecycleActions({
   channels: readonly Channel[] | undefined;
   managedAgent: ManagedAgent | undefined;
   relayAgents: readonly RelayAgent[] | undefined;
-  startManagedAgent: (pubkey: string) => Promise<unknown>;
-  stopManagedAgent: (pubkey: string) => Promise<unknown>;
+  startManagedAgent: StartManagedAgent;
+  stopManagedAgent: (input: {
+    pubkey: string;
+    selectedRunId?: string | null;
+    expectedRelayUrl?: string | null;
+  }) => Promise<unknown>;
 }) {
   const handleAgentPrimaryAction = React.useCallback(async () => {
     if (!managedAgent) return;
