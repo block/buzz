@@ -25,7 +25,8 @@ report instead.
 9. [How to Add a New Event Kind](#how-to-add-a-new-event-kind)
 10. [How to Add a New MCP Tool](#how-to-add-a-new-mcp-tool)
 11. [How to Add a New API Endpoint](#how-to-add-a-new-api-endpoint)
-12. [License and CLA](#license-and-cla)
+12. [How to Ship a Feature Behind a Preview Flag](#how-to-ship-a-feature-behind-a-preview-flag)
+13. [License and CLA](#license-and-cla)
 
 ---
 
@@ -513,6 +514,56 @@ If an HTTP endpoint is still necessary:
    relevant success path.
 
 6. **Document** any public endpoint in `ARCHITECTURE.md` and user-facing docs.
+
+---
+
+## How to Ship a Feature Behind a Preview Flag
+
+Experimental desktop surfaces ship behind a preview flag so they can merge
+early without appearing for every user. The mechanism already exists
+end-to-end; this section documents the workflow.
+
+The manifest is `preview-features.json` at the repo root, runtime-validated at
+startup (`desktop/src/shared/features/manifest.ts`; on schema failure the app
+falls back to an empty manifest). It lists **only** preview features —
+membership signals "this needs gating." Any feature id not in the manifest is
+treated as stable and renders unconditionally (fail-open), so removing an
+entry un-gates a feature rather than hiding it.
+
+1. **Add a manifest entry** to `preview-features.json`:
+
+   ```json
+   {
+     "id": "my-feature",
+     "name": "My Feature",
+     "description": "One line shown in Settings > Experiments.",
+     "defaultEnabled": false
+   }
+   ```
+
+   The schema is defined in `desktop/src/shared/features/types.ts`. Omitting
+   `defaultEnabled` means off by default; `platforms` (`"desktop"` /
+   `"mobile"`) limits where the toggle appears and defaults to all.
+
+2. **Gate the UI** with the helpers in `desktop/src/shared/features/`:
+   wrap subtrees in `<FeatureGate feature="my-feature">` or branch on
+   `useFeatureEnabled("my-feature")`. Both resolve as: explicit user
+   override first, then the manifest default, then fail-open for unknown
+   ids (a stray gate on a removed id will never hide UI).
+
+3. **Settings exposure is automatic.** Every manifest entry gets a toggle in
+   Settings > Experiments (`ExperimentalFeaturesCard.tsx`); there is nothing
+   to register.
+
+4. **E2E tests see the feature by default.** The mock bridge seeds every
+   preview feature as enabled (`desktop/tests/helpers/bridge.ts`), so
+   Playwright specs exercise gated UI without extra setup; set
+   `seedPreviewFeatures: false` in specs that exercise the Experiments
+   toggle UI itself.
+
+5. **Graduate or remove.** When the feature is stable, delete its manifest
+   entry (fail-open makes it render for everyone) and remove the gates in a
+   follow-up; the gates are harmless in the interim.
 
 ---
 
