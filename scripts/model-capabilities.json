@@ -603,7 +603,7 @@
     },
     {
       "provider": "databricks_v2",
-      "raw_model_id": "databricks-claude-4-7-opus",
+      "raw_model_id": "goose-claude-4-7-opus",
       "registry_label": "Claude Opus 4.7",
       "thinking_mode": "adaptive",
       "supported_efforts": [
@@ -616,7 +616,7 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "anthropic-messages",
       "normalization_policy": "none",
-      "_provenance": "all axes copied from equivalent registry endpoint databricks-claude-opus-4-7",
+      "_provenance": "all axes copied from equivalent registry endpoint databricks-claude-opus-4-7 for the discovered Goose endpoint id",
       "_source": "registry_labels"
     },
     {
@@ -781,7 +781,7 @@
     },
     {
       "provider": "databricks_v2",
-      "raw_model_id": "databricks-claude-4-6-sonnet",
+      "raw_model_id": "goose-claude-4-6-sonnet",
       "registry_label": "Claude Sonnet 4.6",
       "thinking_mode": "adaptive",
       "supported_efforts": [
@@ -793,7 +793,7 @@
       "default_effort": "high",
       "databricks_v2_wire_route": "anthropic-messages",
       "normalization_policy": "none",
-      "_provenance": "all axes copied from equivalent registry endpoint databricks-claude-sonnet-4-6",
+      "_provenance": "all axes copied from equivalent registry endpoint databricks-claude-sonnet-4-6 for the discovered Goose endpoint id",
       "_source": "registry_labels"
     },
     {
