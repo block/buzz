@@ -24,11 +24,31 @@ const fixtures = JSON.parse(readFileSync(fixturePath, "utf8"));
 // layer RECOMPUTED at `observed_at` — never a stored presence field, because a
 // stored field is frozen at signature time and would show dead workers online.
 const EXPECTED = {
-  online_live_claim: { liveness: "online", live_claim: true, head_short: "abcdef0" },
-  stale_not_live: { liveness: "stale", live_claim: false, head_short: "abcdef0" },
-  offline_two_ttl: { liveness: "offline", live_claim: false, head_short: "abcdef0" },
-  no_heartbeat_offline: { liveness: "offline", live_claim: false, head_short: "abcdef0" },
-  fresh_heartbeat_expired_lease: { liveness: "online", live_claim: false, head_short: "abcdef0" },
+  online_live_claim: {
+    liveness: "online",
+    live_claim: true,
+    head_short: "abcdef0",
+  },
+  stale_not_live: {
+    liveness: "stale",
+    live_claim: false,
+    head_short: "abcdef0",
+  },
+  offline_two_ttl: {
+    liveness: "offline",
+    live_claim: false,
+    head_short: "abcdef0",
+  },
+  no_heartbeat_offline: {
+    liveness: "offline",
+    live_claim: false,
+    head_short: "abcdef0",
+  },
+  fresh_heartbeat_expired_lease: {
+    liveness: "online",
+    live_claim: false,
+    head_short: "abcdef0",
+  },
   missing_head_sha: { liveness: "online", live_claim: true, head_short: null },
 };
 
@@ -46,12 +66,24 @@ test("fixture file contains exactly the six known scenarios", () => {
 test("parseWorkstreamCard accepts all six fixture scenarios with exact projected values", () => {
   for (const scenario of SCENARIOS) {
     const entry = fixtures[scenario];
-    assert.equal(typeof entry.observed_at, "number", `${scenario}: observed_at`);
+    assert.equal(
+      typeof entry.observed_at,
+      "number",
+      `${scenario}: observed_at`,
+    );
     const card = parseWorkstreamCard(entry.card);
     const expected = EXPECTED[scenario];
     assert.equal(card.liveness, expected.liveness, `${scenario}: liveness`);
-    assert.equal(card.live_claim, expected.live_claim, `${scenario}: live_claim`);
-    assert.equal(card.head_short, expected.head_short, `${scenario}: head_short`);
+    assert.equal(
+      card.live_claim,
+      expected.live_claim,
+      `${scenario}: live_claim`,
+    );
+    assert.equal(
+      card.head_short,
+      expected.head_short,
+      `${scenario}: head_short`,
+    );
   }
 });
 
@@ -59,7 +91,8 @@ test("isDisplayableLiveClaim is true exactly when liveness is online AND live_cl
   for (const scenario of SCENARIOS) {
     const card = parseWorkstreamCard(fixtures[scenario].card);
     const expected =
-      EXPECTED[scenario].liveness === "online" && EXPECTED[scenario].live_claim === true;
+      EXPECTED[scenario].liveness === "online" &&
+      EXPECTED[scenario].live_claim === true;
     assert.equal(
       isDisplayableLiveClaim(card),
       expected,
