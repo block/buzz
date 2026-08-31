@@ -1,12 +1,15 @@
+import { agentDisplayGroupKey } from "@/features/agents/lib/agentIdentity";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import type { ManagedAgent } from "@/shared/api/types";
 
 /**
- * Pick the instance that represents a persona throughout the UI.
+ * Pick the instance that represents a *set of interchangeable instances* —
+ * a display group, or a whole persona when nothing has been renamed.
  *
- * A persona can have several historical agent instances. Keeping this rule in
- * one place prevents an avatar click on an older message from opening a
- * different detail surface than the card in the Agents library.
+ * Active-first, then by name, so the answer is stable for a given set. Callers
+ * choose the set; do not call this with a whole persona when the caller is
+ * resolving a specific instance — use `pickCanonicalProfileAgent`, which scopes
+ * the set to the requested instance's display group first.
  *
  * Relay-archived instances are never eligible, so an archived record early in
  * file order can't hijack the persona target. Returns `undefined` when every
@@ -30,6 +33,44 @@ export function pickProfileAgent(
 }
 
 /**
+ * Pick the instance a profile request should actually land on. This is the
+ * rule that keeps every profile entry point — Agents library card, message
+ * avatar, mention, deep link, Inbox — agreeing with each other.
+ *
+ * Collapsing onto the persona's representative instance is only correct while
+ * the instances are interchangeable presentations of that persona. Once the
+ * owner has renamed one, opening it must open *it*: the Agents library now
+ * shows the renamed instance its own card, and a message avatar must reach
+ * the same place that card does. So the requested instance's display group,
+ * not the whole persona, is the set we canonicalise over. Same-named siblings
+ * still collapse onto the active one, exactly as before.
+ *
+ * Scoping happens before archive filtering rather than after: the display group
+ * decides *which* siblings are candidates, and `pickProfileAgent` then drops the
+ * archived ones. A group whose every instance is archived falls back to the
+ * persona-wide list, so this never resolves to nothing where the unscoped
+ * selector would have found a live instance.
+ */
+export function pickCanonicalProfileAgent(
+  personaInstances: readonly ManagedAgent[],
+  requested: ManagedAgent | undefined,
+  isArchived: (pubkey: string) => boolean,
+) {
+  if (!requested) return pickProfileAgent(personaInstances, isArchived);
+
+  const key = agentDisplayGroupKey(requested);
+  const sameLabel = personaInstances.filter(
+    (instance) => agentDisplayGroupKey(instance) === key,
+  );
+
+  return (
+    pickProfileAgent(sameLabel, isArchived) ??
+    pickProfileAgent(personaInstances, isArchived) ??
+    requested
+  );
+}
+
+/**
  * Resolve which instance a profile panel opened for `directAgent` should
  * show, given every instance of the same persona.
  *
@@ -40,6 +81,12 @@ export function pickProfileAgent(
  * an old message from a retired instance), redirect to the active one so the
  * panel matches the Agents library. The `isArchived` predicate keeps that
  * redirect from ever landing on an archived sibling.
+ *
+ * The redirect resolves through `pickCanonicalProfileAgent`, so it also stays
+ * inside the clicked instance's display group: a retired instance the owner
+ * renamed falls back to an active sibling carrying *that* name, never to a
+ * differently named one. Redirecting across names would reopen the bug that
+ * made a renamed agent unreachable from its own card.
  */
 export function pickDirectProfileAgent(
   directAgent: ManagedAgent,
@@ -47,6 +94,10 @@ export function pickDirectProfileAgent(
   isArchived: (pubkey: string) => boolean,
 ) {
   if (isManagedAgentActive(directAgent)) return directAgent;
-  const canonical = pickProfileAgent(personaInstances, isArchived);
+  const canonical = pickCanonicalProfileAgent(
+    personaInstances,
+    directAgent,
+    isArchived,
+  );
   return canonical && isManagedAgentActive(canonical) ? canonical : directAgent;
 }
