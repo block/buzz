@@ -216,7 +216,7 @@ export function InboxMessageRow({
         <div className="min-w-0 flex-1">
           {isContinuation ? null : (
             <div
-              className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0"
+              className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0"
               data-testid="message-header"
             >
               <UserProfilePopover

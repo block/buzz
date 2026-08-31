@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
+import type { RelayEvent } from "../../src/shared/api/types";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
@@ -47,6 +48,262 @@ async function expectThreadReplyUnobscured(row: Locator) {
       }),
     )
     .toBe(true);
+}
+
+const FONT_SIZES = ["smaller", "default", "larger"] as const;
+const GEOMETRY_TOLERANCE_PX = 0.25;
+const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+
+type MockInboxFeedItem = Pick<
+  RelayEvent,
+  "content" | "created_at" | "id" | "kind" | "pubkey" | "tags"
+> & {
+  category: "mention";
+  channel_id: string;
+  channel_name: string;
+};
+
+type MockInboxWindow = Window & {
+  __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+    channelName: string;
+    content: string;
+    id?: string;
+    mentionPubkeys?: string[];
+    pubkey?: string;
+  }) => RelayEvent;
+  __BUZZ_E2E_PUSH_MOCK_FEED_ITEM__?: (item: MockInboxFeedItem) => unknown;
+};
+
+async function waitForLoadedAgentHeader(row: Locator, timestampTestId: string) {
+  await row.evaluate(async (element, timestampId) => {
+    const targets = [
+      element.querySelector<HTMLElement>('[data-testid="message-author"]'),
+      element.querySelector<HTMLElement>('[data-testid="message-agent-owner"]'),
+      element.querySelector<HTMLElement>(`[data-testid="${timestampId}"]`),
+    ];
+    if (targets.some((target) => !target)) {
+      throw new Error("Expected a complete agent message header.");
+    }
+
+    const fontSample = "alice managed by bob 5:57 PM";
+    const fontRequests = new Set(
+      targets.map((target) => {
+        const style = getComputedStyle(target as HTMLElement);
+        const primaryFamily = style.fontFamily
+          .split(",")[0]
+          ?.replaceAll('"', "")
+          .trim();
+        if (primaryFamily !== "Inter Variable") {
+          throw new Error(
+            `Expected Inter Variable, received ${style.fontFamily}.`,
+          );
+        }
+        return `${style.fontStyle} ${style.fontWeight} ${style.fontSize} "Inter Variable"`;
+      }),
+    );
+
+    for (const fontRequest of fontRequests) {
+      const loadedFaces = await document.fonts.load(fontRequest, fontSample);
+      if (
+        loadedFaces.length === 0 ||
+        loadedFaces.some(
+          (face) =>
+            face.family !== "Inter Variable" || face.status !== "loaded",
+        ) ||
+        !document.fonts.check(fontRequest, fontSample)
+      ) {
+        throw new Error(`Expected loaded font face: ${fontRequest}.`);
+      }
+    }
+    await document.fonts.ready;
+
+    await new Promise<void>((resolve, reject) => {
+      let previousSignature: string | null = null;
+      let stableFrameCount = 0;
+      let sampledFrameCount = 0;
+
+      const sample = () => {
+        const signature = targets
+          .map((target) => {
+            const rect = target?.getBoundingClientRect();
+            return rect
+              ? [rect.x, rect.y, rect.width, rect.height]
+                  .map((value) => value.toFixed(3))
+                  .join(",")
+              : "missing";
+          })
+          .join("|");
+
+        stableFrameCount =
+          signature === previousSignature ? stableFrameCount + 1 : 0;
+        sampledFrameCount += 1;
+        previousSignature = signature;
+
+        if (stableFrameCount >= 2) {
+          resolve();
+        } else if (sampledFrameCount >= 120) {
+          reject(new Error("Agent message header layout did not stabilize."));
+        } else {
+          requestAnimationFrame(sample);
+        }
+      };
+
+      requestAnimationFrame(sample);
+    });
+  }, timestampTestId);
+}
+
+async function measureAgentHeaderGeometry(
+  row: Locator,
+  timestampTestId: string,
+) {
+  return row.evaluate((element, timestampId) => {
+    const author = element.querySelector<HTMLElement>(
+      '[data-testid="message-author"]',
+    );
+    const ownerTreatment = element.querySelector<HTMLElement>(
+      '[data-testid="message-agent-owner"]',
+    );
+    const managedBy = Array.from(
+      ownerTreatment?.querySelectorAll<HTMLElement>('[aria-hidden="true"]') ??
+        [],
+    ).find((candidate) => candidate.textContent?.trim() === "managed by");
+    const owner = ownerTreatment?.querySelector<HTMLElement>(".font-semibold");
+    const icon = ownerTreatment?.querySelector<SVGElement>("svg");
+    const timestamp = element.querySelector<HTMLElement>(
+      `[data-testid="${timestampId}"]`,
+    );
+
+    if (
+      !author ||
+      !ownerTreatment ||
+      !managedBy ||
+      !owner ||
+      !icon ||
+      !timestamp
+    ) {
+      throw new Error("Expected measurable agent message header geometry.");
+    }
+
+    const ownerStyle = getComputedStyle(ownerTreatment);
+    const timestampStyle = getComputedStyle(timestamp);
+    const ownerRect = ownerTreatment.getBoundingClientRect();
+    const iconRect = icon.getBoundingClientRect();
+    const iconCenterOffset =
+      iconRect.top +
+      iconRect.height / 2 -
+      (ownerRect.top + ownerRect.height / 2);
+    const baselineElements = [author, managedBy, owner, timestamp];
+    const markers = baselineElements.map((baselineElement) => {
+      const marker = document.createElement("span");
+      marker.style.cssText =
+        "display:inline-block;width:0;height:0;margin:0;padding:0;border:0";
+      baselineElement.append(marker);
+      return marker;
+    });
+
+    try {
+      const [
+        authorBaseline,
+        managedByBaseline,
+        ownerBaseline,
+        timestampBaseline,
+      ] = markers.map((marker) => marker.getBoundingClientRect().top);
+
+      return {
+        baselines: {
+          author: authorBaseline,
+          managedBy: managedByBaseline,
+          owner: ownerBaseline,
+          timestamp: timestampBaseline,
+        },
+        iconCenterOffset,
+        ownerTypography: {
+          fontSize: ownerStyle.fontSize,
+          lineHeight: ownerStyle.lineHeight,
+        },
+        timestampTypography: {
+          fontSize: timestampStyle.fontSize,
+          lineHeight: timestampStyle.lineHeight,
+        },
+      };
+    } finally {
+      for (const marker of markers) marker.remove();
+    }
+  }, timestampTestId);
+}
+
+async function expectAlignedAgentHeader(
+  page: Page,
+  row: Locator,
+  timestampTestId: string,
+  surface: string,
+) {
+  for (const fontSize of FONT_SIZES) {
+    await page.evaluate((value) => {
+      document.documentElement.dataset.fontSize = value;
+    }, fontSize);
+    await waitForLoadedAgentHeader(row, timestampTestId);
+
+    const geometry = await measureAgentHeaderGeometry(row, timestampTestId);
+    for (const [label, baseline] of Object.entries(geometry.baselines)) {
+      expect(
+        Math.abs(baseline - geometry.baselines.author),
+        `${surface} ${label} baseline at ${fontSize} font size`,
+      ).toBeLessThanOrEqual(GEOMETRY_TOLERANCE_PX);
+    }
+    expect(geometry.ownerTypography).toEqual(geometry.timestampTypography);
+    expect(
+      Math.abs(geometry.iconCenterOffset),
+      `${surface} agent icon center at ${fontSize} font size`,
+    ).toBeLessThanOrEqual(GEOMETRY_TOLERANCE_PX);
+  }
+}
+
+async function seedAgentInboxMessage(page: Page) {
+  await page.waitForFunction(() => {
+    const win = window as MockInboxWindow;
+    return (
+      typeof win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ === "function"
+    );
+  });
+
+  return page.evaluate(
+    ({ channelId, currentPubkey, senderPubkey }) => {
+      const win = window as MockInboxWindow;
+      const emitMessage = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      const pushFeedItem = win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!emitMessage || !pushFeedItem) {
+        throw new Error("Mock Inbox helpers are unavailable.");
+      }
+
+      const message = emitMessage({
+        channelName: "general",
+        content: "Agent Inbox alignment check.",
+        id: "a9".repeat(32),
+        mentionPubkeys: [currentPubkey],
+        pubkey: senderPubkey,
+      });
+      pushFeedItem({
+        category: "mention",
+        channel_id: channelId,
+        channel_name: "general",
+        content: message.content,
+        created_at: message.created_at,
+        id: message.id,
+        kind: message.kind,
+        pubkey: message.pubkey,
+        tags: message.tags,
+      });
+      return message.id;
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      currentPubkey: TEST_IDENTITIES.tyler.pubkey,
+      senderPubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
 }
 
 async function measureThreadSummaryGeometry(summaryRow: Locator) {
@@ -378,7 +635,7 @@ test.beforeEach(async ({ page }, testInfo) => {
   await installMockBridge(page, mock);
 });
 
-test("agent owner label identifies the agent and owner", async ({ page }) => {
+test("agent owner label aligns in the timeline", async ({ page }) => {
   await page.goto("/");
   await page.getByTestId("channel-general").click();
 
@@ -395,6 +652,34 @@ test("agent owner label identifies the agent and owner", async ({ page }) => {
   await expect(ownerTreatment.getByRole("button")).toHaveAccessibleName("bob");
   await expect(ownerTreatment.locator(".sr-only")).toHaveText(
     "Agent managed by",
+  );
+
+  await expectAlignedAgentHeader(
+    page,
+    aliceMessage,
+    "message-timestamp",
+    "timeline",
+  );
+});
+
+test("agent owner label aligns in Inbox", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  const inboxMessageId = await seedAgentInboxMessage(page);
+
+  await page.getByTestId(`home-inbox-item-${inboxMessageId}`).click();
+  const inboxMessage = page.getByTestId("home-inbox-selected-message");
+  await expect(inboxMessage).toContainText("Agent Inbox alignment check.");
+  const inboxOwnerTreatment = inboxMessage.getByTestId("message-agent-owner");
+  await expect(
+    inboxOwnerTreatment.getByText("managed by", { exact: true }),
+  ).toBeVisible();
+  await expect(inboxOwnerTreatment.locator(".font-semibold")).toHaveText("bob");
+  await expectAlignedAgentHeader(
+    page,
+    inboxMessage,
+    "inbox-message-timestamp",
+    "Inbox",
   );
 });
 
