@@ -2,9 +2,9 @@
 //!
 //! Relay membership enforcement uses the shared
 //! [`crate::api::relay_members::enforce_relay_membership`] helper, which supports
-//! NIP-OA owner-delegation fallback on closed relays. On open relays, the auth
-//! handler calls [`crate::api::relay_members::extract_nip_oa_owner`] directly to
-//! extract the owner pubkey for agent→owner backfill (observer frame auth).
+//! NIP-OA owner-delegation fallback on closed relays. That helper also reports
+//! the verified owner after any successful admission, so the agent→owner
+//! backfill needs no per-transport special case here.
 //!
 //! For WebSocket auth, the NIP-OA `auth` tag is extracted from the signed AUTH
 //! event itself (the tag is integrity-protected by the event signature).
@@ -236,21 +236,6 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                     return;
                 }
             };
-
-            // Open relay NIP-OA backfill: extract owner for agent→owner DB mapping
-            // (needed for observer frame auth). Only runs on open relays — on closed
-            // relays, enforce_relay_membership already handles NIP-OA delegation.
-            // No feature flag needed: NIP-OA is cryptographically self-proving.
-            let nip_oa_owner = nip_oa_owner.or_else(|| {
-                if !state.config.require_relay_membership && auth_tag_json.is_some() {
-                    crate::api::relay_members::extract_nip_oa_owner(
-                        pubkey.as_bytes(),
-                        auth_tag_json.as_deref(),
-                    )
-                } else {
-                    None
-                }
-            });
 
             // Stash NIP-OA owner on the auth context only after the shared
             // backfill confirms the first-write-wins relationship.

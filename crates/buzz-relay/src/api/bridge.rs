@@ -897,13 +897,9 @@ async fn submit_event_authed(
     )
     .await
     {
-        Ok(owner) => owner.or_else(|| {
-            if !state.config.require_relay_membership {
-                super::relay_members::extract_nip_oa_owner(&pubkey_bytes, auth_tag)
-            } else {
-                None
-            }
-        }),
+        // enforce_relay_membership reports a verified owner after ANY successful
+        // admission, so there is nothing left to patch up per-transport.
+        Ok(owner) => owner,
         Err(e) => {
             return SubmitOutcome::Err {
                 status: e.0,
