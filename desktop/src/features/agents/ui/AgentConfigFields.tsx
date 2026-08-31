@@ -344,6 +344,7 @@ export function AgentConfigFields({
     apiKeyFileSatisfied,
     apiKeyInherited,
     apiKeyValue,
+    credentialProvider: credentialAuthProvider,
     credentialsValid,
   } = getGlobalAgentCredentialState({
     bakedEnvKeys,
@@ -782,7 +783,7 @@ export function AgentConfigFields({
             }
             isInherited={apiKeyInherited}
             isRequired={!apiKeyInherited && apiKeyValue.length === 0}
-            label={getProviderApiKeyLabel(effectiveProvider) ?? "API Key"}
+            label={getProviderApiKeyLabel(credentialAuthProvider) ?? "API Key"}
             onValueChange={(value) =>
               onConfigChange({
                 ...config,

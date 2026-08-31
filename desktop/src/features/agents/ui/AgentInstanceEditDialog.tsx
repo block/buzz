@@ -380,30 +380,29 @@ export function AgentInstanceEditDialog({
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
   } = useAgentDialogDefaults({ inheritedEnvVars, open });
 
-  // Runtime/provider-required credential state for the PROSPECTIVE post-submit runtime.
-  // globalProvider/globalEnvVars: fallback for empty per-agent provider; keys satisfied globally don't block Save.
-  const { requiredEnvKeys, fileSatisfiedEnvKeys, requiredEnvKeyMissing } =
-    useRequiredCredentialState({
-      open,
-      prospectiveRuntimeId,
-      provider: inheritedSubmission.provider ?? "",
-      globalProvider: inheritedProviderDefault.value,
-      envVars: inheritedSubmission.envVars,
-      globalEnvVars: globalConfig.env_vars,
-      personaEnvVars: inheritHarness ? inheritedEnvVars : undefined,
-    });
+  // Credential state for the prospective post-submit runtime.
+  const {
+    credentialProvider,
+    requiredEnvKeys,
+    fileSatisfiedEnvKeys,
+    requiredEnvKeyMissing,
+  } = useRequiredCredentialState({
+    open,
+    prospectiveRuntimeId,
+    provider: inheritedSubmission.provider ?? "",
+    globalProvider: inheritedProviderDefault.value,
+    envVars: inheritedSubmission.envVars,
+    globalEnvVars: globalConfig.env_vars,
+    personaEnvVars: inheritHarness ? inheritedEnvVars : undefined,
+  });
 
   const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
   const { data: agentAccessOwnerOnly } = useAgentAccessOwnerOnlyQuery({
     enabled: open,
   });
 
-  // Merge global env as the base layer so credential keys satisfied via global
-  // config (e.g. ANTHROPIC_API_KEY) are available to model discovery. Use
-  // `inheritedSubmission.envVars` (the same snapshot the credential gate
-  // validates) rather than raw `envVars`, so an inherit-transition that layers
-  // in persona env vars is reflected in discovery. Agent-local env takes
-  // precedence, matching the agent → global → file spawn-path precedence.
+  // Use the same layered credential snapshot for discovery and validation;
+  // agent-local env takes precedence over global and inherited values.
   const envVarsForDiscovery = React.useMemo(
     () => ({ ...globalConfig.env_vars, ...inheritedSubmission.envVars }),
     [globalConfig.env_vars, inheritedSubmission.envVars],
@@ -430,7 +429,7 @@ export function AgentInstanceEditDialog({
   // complete required-key list; advancedRequiredEnvKeys drives EnvVarsEditor
   // display only. The effective snapshot covers persona inheritance during an
   // instance inherit transition.
-  const providerApiKeyEnvVar = getProviderApiKeyEnvVar(effectiveProvider);
+  const providerApiKeyEnvVar = getProviderApiKeyEnvVar(credentialProvider);
   const personaSatisfied =
     providerApiKeyEnvVar != null &&
     !(providerApiKeyEnvVar in envVars) &&
@@ -442,7 +441,7 @@ export function AgentInstanceEditDialog({
     fileSatisfiedEnvKeys,
     globalEnvVars: globalConfig.env_vars,
     personaSatisfied,
-    provider: effectiveProvider,
+    provider: credentialProvider,
     requiredEnvKeys,
   });
   const {
@@ -1063,7 +1062,7 @@ export function AgentInstanceEditDialog({
                 isInherited={apiKeyIsInherited}
                 inheritedLabel={apiKeyInheritedLabel}
                 isRequired={apiKeyIsRequired}
-                label={getProviderApiKeyLabel(effectiveProvider) ?? "API Key"}
+                label={getProviderApiKeyLabel(credentialProvider) ?? "API Key"}
                 onValueChange={(next) => {
                   setEnvVars((prev) => ({
                     ...prev,

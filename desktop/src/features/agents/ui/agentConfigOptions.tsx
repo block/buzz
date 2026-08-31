@@ -193,6 +193,27 @@ export function requiredCredentialEnvKeys(
   return config?.requiredEnvKeys ?? [];
 }
 
+/**
+ * Resolve the provider whose authentication the harness will actually use.
+ *
+ * Goose owns its transport/auth provider in its native config. When that file
+ * names a provider, Buzz's provider picker scopes the model family only; it
+ * must not replace Goose's working Databricks/OAuth transport with a direct
+ * Anthropic or OpenAI connection. Other runtimes retain their existing
+ * selected-provider semantics.
+ */
+export function credentialProviderForRuntime(
+  runtimeId: string,
+  selectedProvider: string,
+  runtimeFileConfig: RuntimeFileConfigSubset | null | undefined,
+): string {
+  const fileProvider = runtimeFileConfig?.provider?.trim() ?? "";
+  if (runtimeId.trim() === "goose" && fileProvider.length > 0) {
+    return fileProvider;
+  }
+  return selectedProvider.trim();
+}
+
 export function isMissingRequiredDropdownField(
   field: { isRequired: boolean } | null | undefined,
   value: string,
@@ -750,7 +771,13 @@ export function computeLocalModeGate({
   // required beyond the normalized field gate above).
   // Use the effective provider (env → global → file) so credential
   // requirements are computed correctly for all config sources.
-  const providerForKeys = needsProviderSelection ? effectiveProvider : "";
+  const providerForKeys = needsProviderSelection
+    ? credentialProviderForRuntime(
+        runtimeId,
+        effectiveProvider,
+        runtimeFileConfig,
+      )
+    : "";
   const requiredKeys = requiredCredentialEnvKeys(runtimeId, providerForKeys);
 
   // Keys satisfied by the baked build env (Block-internal builds only).

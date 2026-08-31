@@ -92,14 +92,21 @@ pub async fn get_agent_models(
         provider: saved_provider,
         provider_env_var,
         env: merged_env,
-        command: _,
+        command: agent_runtime_command,
     } = discovery;
 
-    let merged_env = discovery_env_with_baked_floor(merged_env);
+    let mut merged_env = discovery_env_with_baked_floor(merged_env);
+    let native_goose_provider =
+        apply_goose_native_discovery_config(&agent_runtime_command, &mut merged_env);
     // Resolve against the baked/process env when the record saved no provider,
     // so a build-provided provider still gets live discovery.
-    let effective_provider =
-        effective_discovery_provider(saved_provider.as_deref(), provider_env_var, &merged_env);
+    let effective_provider = effective_discovery_provider(
+        native_goose_provider
+            .as_deref()
+            .or(saved_provider.as_deref()),
+        provider_env_var,
+        &merged_env,
+    );
     if let Some(models) = discover_openrouter_models(
         &state.http_client,
         &effective_provider,
@@ -142,7 +149,11 @@ pub async fn get_agent_models(
     )
     .await?
     {
-        return Ok(models);
+        return Ok(filter_databricks_models_for_family(
+            models,
+            saved_provider.as_deref(),
+            effective_provider.as_deref(),
+        ));
     }
 
     run_agent_models_command(
@@ -230,11 +241,14 @@ pub async fn discover_agent_models(
         &input.definition_env,
         &input.env_vars,
     );
-    let merged_env = discovery_env_with_baked_floor(merged_env);
+    let mut merged_env = discovery_env_with_baked_floor(merged_env);
+    let native_goose_provider = apply_goose_native_discovery_config(agent_command, &mut merged_env);
     // Recover a build-provided provider when the form has none, so the create
     // dialog discovers live models instead of falling through to the subprocess.
     let effective_provider = effective_discovery_provider(
-        input.provider.as_deref(),
+        native_goose_provider
+            .as_deref()
+            .or(input.provider.as_deref()),
         runtime_meta.and_then(|meta| meta.provider_env_var),
         &merged_env,
     );
@@ -318,10 +332,75 @@ pub async fn discover_agent_models(
     )
     .await?
     {
-        return Ok(models);
+        return Ok(filter_databricks_models_for_family(
+            models,
+            input.provider.as_deref(),
+            effective_provider.as_deref(),
+        ));
     }
 
     run_agent_models_command(resolved_acp, resolved_agent, agent_args, None, merged_env).await
+}
+
+/// Apply the non-secret pieces of Goose's native transport configuration to a
+/// discovery environment. The provider is authoritative: Buzz's structured
+/// provider may be an Anthropic/OpenAI model-family filter while Goose reaches
+/// those models through Databricks. User/process env still wins for the host.
+fn apply_goose_native_discovery_config(
+    agent_command: &str,
+    env: &mut BTreeMap<String, String>,
+) -> Option<String> {
+    if known_acp_runtime(agent_command).is_none_or(|runtime| runtime.id != "goose") {
+        return None;
+    }
+    let config = crate::managed_agents::config_bridge::read_goose_file_config()?;
+    if let Some(host) = config.extra.get("DATABRICKS_HOST") {
+        env.entry("DATABRICKS_HOST".to_string())
+            .or_insert_with(|| host.clone());
+    }
+    let provider = config.provider?.trim().to_string();
+    if provider.is_empty() {
+        return None;
+    }
+    env.insert("GOOSE_PROVIDER".to_string(), provider.clone());
+    Some(provider)
+}
+
+/// When Goose uses Databricks as its transport, the provider selected in Buzz
+/// scopes the model family rather than changing authentication. Databricks v2's
+/// capability manifest is the authority for whether an endpoint uses the
+/// Anthropic or OpenAI wire family.
+fn filter_databricks_models_for_family(
+    mut response: AgentModelsResponse,
+    requested_family: Option<&str>,
+    execution_provider: Option<&str>,
+) -> AgentModelsResponse {
+    use buzz_agent_pkg::model_capabilities::{resolve, DatabricksV2Route};
+
+    let execution_provider = execution_provider.unwrap_or_default().trim();
+    let requested_family = requested_family.unwrap_or_default().trim();
+    let requested_route = match requested_family.to_ascii_lowercase().as_str() {
+        "anthropic" => DatabricksV2Route::AnthropicMessages,
+        "openai" | "openai-compat" => DatabricksV2Route::OpenaiResponses,
+        _ => return response,
+    };
+    if !execution_provider.eq_ignore_ascii_case("databricks_v2")
+        && !execution_provider.eq_ignore_ascii_case("databricks-v2")
+    {
+        return response;
+    }
+
+    let matches_family = |model: &str| {
+        resolve(execution_provider, model).databricks_v2_wire_route == requested_route
+    };
+    response.models.retain(|model| matches_family(&model.id));
+    response.agent_default_model = response
+        .agent_default_model
+        .filter(|model| matches_family(model));
+    response.selected_model = response
+        .selected_model
+        .filter(|model| matches_family(model));
+    response
 }
 
 #[derive(Debug, Deserialize)]
@@ -787,3 +866,7 @@ pub(super) fn normalize_agent_models(
 #[cfg(test)]
 #[path = "agent_models_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "agent_models_databricks_family_tests.rs"]
+mod databricks_family_tests;

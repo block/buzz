@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  computeLocalModeGate,
+  credentialProviderForRuntime,
   getDefaultPersonaRuntime,
   getPersonaModelOptions,
   getPersonaProviderOptions,
@@ -23,6 +25,35 @@ function makeRuntime(id, availability = "available") {
     availability,
   };
 }
+
+test("Goose native provider is the credential authority", () => {
+  const fileConfig = {
+    provider: "databricks_v2",
+    model: "goose-claude-4-6-opus",
+    satisfiedEnvKeys: ["DATABRICKS_HOST"],
+  };
+
+  assert.equal(
+    credentialProviderForRuntime("goose", "anthropic", fileConfig),
+    "databricks_v2",
+  );
+  assert.equal(
+    credentialProviderForRuntime("buzz-agent", "anthropic", fileConfig),
+    "anthropic",
+  );
+
+  const gate = computeLocalModeGate({
+    envVars: {},
+    isProviderMode: false,
+    model: "goose-claude-4-6-opus",
+    provider: "anthropic",
+    runtimeId: "goose",
+    runtimeFileConfig: fileConfig,
+  });
+  assert.equal(gate.satisfied, true);
+  assert.deepEqual(gate.missingEnvKeys, []);
+  assert.deepEqual(gate.fileSatisfiedEnvKeys, ["DATABRICKS_HOST"]);
+});
 
 // ── getPersonaProviderOptions — hideProviderIds ───────────────────────────────
 

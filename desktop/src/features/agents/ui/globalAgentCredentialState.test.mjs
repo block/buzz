@@ -22,6 +22,25 @@ test("global defaults accept an advanced credential set in runtime config", () =
   assert.deepEqual(state.advancedFileSatisfiedEnvKeys, ["DATABRICKS_HOST"]);
 });
 
+test("Goose model-family selection keeps Databricks native authentication", () => {
+  const state = getGlobalAgentCredentialState({
+    bakedEnvKeys: [],
+    envVars: {},
+    provider: "anthropic",
+    runtimeFileConfig: {
+      provider: "databricks_v2",
+      model: "goose-claude-4-6-opus",
+      satisfiedEnvKeys: ["DATABRICKS_HOST"],
+    },
+    runtimeId: "goose",
+  });
+
+  assert.equal(state.credentialProvider, "databricks_v2");
+  assert.equal(state.apiKeyEnvVar, null);
+  assert.equal(state.credentialsValid, true);
+  assert.deepEqual(state.advancedFileSatisfiedEnvKeys, ["DATABRICKS_HOST"]);
+});
+
 test("an explicit empty global value shadows the runtime config", () => {
   const state = getGlobalAgentCredentialState({
     bakedEnvKeys: [],

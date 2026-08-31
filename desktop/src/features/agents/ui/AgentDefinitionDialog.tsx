@@ -36,6 +36,7 @@ import {
   BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   buildPersonaRuntimeDropdownOptions,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
+  credentialProviderForRuntime,
   computeLocalModeGate,
   formatRuntimeOptionLabel,
   getDefaultPersonaRuntime,
@@ -456,19 +457,22 @@ export function AgentDefinitionDialog({
   // satisfied keys so no further filtering is needed.
   const { requiredEnvKeys } = localModeGate;
   const localModeSatisfied = localModeGate.satisfied;
-  // Effective provider: agent value → global fallback → file fallback.
-  // Mirrors the chain inside computeLocalModeGate so model-option scoping and
-  // model requiredness are consistent with the readiness gate.
+  // Match the readiness gate's agent → global → file provider precedence.
   const fileProvider = runtimeFileConfig?.provider?.trim() ?? "";
   const effectiveProvider =
     trimmedProvider || inheritedProviderDefault.value || fileProvider;
+  const credentialProvider = credentialProviderForRuntime(
+    runtime,
+    effectiveProvider,
+    runtimeFileConfig,
+  );
   const apiKeyFieldState = useProviderApiKeyFieldState({
     bakedEnvKeys,
     effectiveEnvVars: envVars,
     envVars,
     fileSatisfiedEnvKeys: localModeGate.fileSatisfiedEnvKeys,
     globalEnvVars: globalConfig.env_vars,
-    provider: effectiveProvider,
+    provider: credentialProvider,
     requiredEnvKeys,
   });
   const {
@@ -502,14 +506,12 @@ export function AgentDefinitionDialog({
     // Crash-loop guard, create AND edit: an empty allowlist would crash
     // every instance minted from this definition at startup.
     personaBehaviorDraftValid(behaviorDraft) &&
-    // D1: localModeSatisfied covers both missingNormalizedFields AND
-    // missingEnvKeys — credential env keys now block submit, not just display.
+    // Credentials and normalized fields both block submission.
     localModeSatisfied &&
     customAiPairSatisfied &&
     !isAvatarUploadPending;
 
-  // Merge global env as the base layer so credential keys satisfied via global
-  // config are available to model discovery — same rationale as in AgentInstanceEditDialog.
+  // Global credentials are available to model discovery.
   const envVarsForDiscovery = React.useMemo(
     () => ({ ...globalConfig.env_vars, ...envVars }),
     [globalConfig.env_vars, envVars],
@@ -523,9 +525,7 @@ export function AgentDefinitionDialog({
     isCustomProviderEditing,
     modelFieldVisible,
     open,
-    // Gate provider by runtime: runtimes that don't support LLM provider
-    // selection (codex, claude) must not inherit the global provider — doing
-    // so causes them to discover models from the wrong provider.
+    // Provider-locked runtimes must not inherit the global provider.
     provider: runtimeSupportsLlmProviderSelection(runtime)
       ? effectiveProvider
       : "",
@@ -885,7 +885,7 @@ export function AgentDefinitionDialog({
               isInherited={apiKeyIsInherited}
               inheritedLabel={apiKeyInheritedLabel}
               isRequired={apiKeyIsRequired}
-              label={getProviderApiKeyLabel(effectiveProvider) ?? "API key"}
+              label={getProviderApiKeyLabel(credentialProvider) ?? "API key"}
               onValueChange={(next) => {
                 setEnvVars((prev) => ({
                   ...prev,
