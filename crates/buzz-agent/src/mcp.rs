@@ -285,7 +285,10 @@ impl McpRegistry {
                         t.description.as_deref().unwrap_or("").to_owned(),
                         MAX_DESCRIPTION_BYTES,
                     ),
-                    input_schema: cap_schema(&qname, Value::Object((*t.input_schema).clone())),
+                    input_schema: cap_schema(
+                        &qname,
+                        sanitize_tool_schema(Value::Object((*t.input_schema).clone())),
+                    ),
                 });
                 reg.by_qname.insert(qname, Entry { server_idx, bare });
             }
@@ -875,6 +878,61 @@ fn timeout_msg(stage: &str, name: &str, t: Duration) -> String {
     format!("{stage} {name}: timeout after {}s", t.as_secs())
 }
 
+/// JSON Schema keywords that are pure metadata or format/range assertions,
+/// not part of the safe common subset every OpenAI-compatible function-calling
+/// backend accepts. `rmcp`/`schemars`-derived tool schemas routinely carry
+/// `$schema`, `format` (e.g. `"format": "uint32"` on integer fields), and
+/// similar — some gateways hard-reject a tool schema for carrying them at all
+/// ("unsupported assertions or reserved metadata"), even though they're
+/// harmless everywhere else. Stripping is always safe: every key here only
+/// narrows or documents what the schema accepts, never widens it, so removal
+/// can loosen validation but never break a previously-valid tool call.
+const SCHEMA_DENYLIST: &[&str] = &[
+    "$schema",
+    "$id",
+    "$comment",
+    "title",
+    "examples",
+    "default",
+    "readOnly",
+    "writeOnly",
+    "deprecated",
+    "format",
+    "pattern",
+    "minLength",
+    "maxLength",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "minItems",
+    "maxItems",
+    "uniqueItems",
+    "minProperties",
+    "maxProperties",
+    "additionalProperties",
+    "contentEncoding",
+    "contentMediaType",
+];
+
+/// Recursively strip [`SCHEMA_DENYLIST`] keys from every object in the schema
+/// tree, applied once at tool registration so every downstream request
+/// builder (`anthropic_body`, `openai_body`, `responses_body`) inherits the
+/// sanitized form without re-deriving it per turn.
+fn sanitize_tool_schema(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .filter(|(k, _)| !SCHEMA_DENYLIST.contains(&k.as_str()))
+                .map(|(k, v)| (k, sanitize_tool_schema(v)))
+                .collect(),
+        ),
+        Value::Array(arr) => Value::Array(arr.into_iter().map(sanitize_tool_schema).collect()),
+        other => other,
+    }
+}
+
 fn cap_schema(qname: &str, schema: Value) -> Value {
     let size = serde_json::to_vec(&schema).map(|b| b.len()).unwrap_or(0);
     if size <= MAX_SCHEMA_BYTES {
@@ -1215,5 +1273,92 @@ mod content_tests {
         // CommandExt — but tokio wraps it; we verify by ensuring the call compiles and
         // the resulting spawn wouldn't OOM (build+flag-set is the full contract here).
         // The real protection is the cfg-gated production path in spawn_one().
+    }
+
+    #[test]
+    fn sanitize_tool_schema_strips_root_metadata() {
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "ShellArgs",
+            "type": "object",
+            "properties": {},
+        });
+        let out = sanitize_tool_schema(schema);
+        assert_eq!(
+            out,
+            serde_json::json!({ "type": "object", "properties": {} })
+        );
+    }
+
+    #[test]
+    fn sanitize_tool_schema_strips_nested_property_assertions() {
+        // schemars commonly emits "format" on integer fields (e.g. "uint32")
+        // and range/length assertions — these must be stripped wherever they
+        // appear in the tree, not just at the root.
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "timeout_ms": { "type": "integer", "format": "uint32", "minimum": 0 },
+                "command": { "type": "string", "minLength": 1, "pattern": "^.+$" },
+            },
+            "additionalProperties": false,
+        });
+        let out = sanitize_tool_schema(schema);
+        assert_eq!(
+            out,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "timeout_ms": { "type": "integer" },
+                    "command": { "type": "string" },
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn sanitize_tool_schema_preserves_structural_and_semantic_keywords() {
+        // type/properties/required/items/description/enum are load-bearing —
+        // they must survive untouched.
+        let schema = serde_json::json!({
+            "type": "object",
+            "description": "does a thing",
+            "properties": {
+                "mode": { "type": "string", "enum": ["fast", "slow"] },
+                "tags": { "type": "array", "items": { "type": "string" } },
+            },
+            "required": ["mode"],
+        });
+        let out = sanitize_tool_schema(schema.clone());
+        assert_eq!(out, schema, "no safe keyword should be removed");
+    }
+
+    #[test]
+    fn sanitize_tool_schema_recurses_into_arrays() {
+        // anyOf/array-of-schemas members must each be sanitized too.
+        let schema = serde_json::json!({
+            "properties": {
+                "x": {
+                    "anyOf": [
+                        { "type": "string", "format": "uuid" },
+                        { "type": "null" }
+                    ]
+                }
+            }
+        });
+        let out = sanitize_tool_schema(schema);
+        assert_eq!(
+            out,
+            serde_json::json!({
+                "properties": {
+                    "x": {
+                        "anyOf": [
+                            { "type": "string" },
+                            { "type": "null" }
+                        ]
+                    }
+                }
+            })
+        );
     }
 }

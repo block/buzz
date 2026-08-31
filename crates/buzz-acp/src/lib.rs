@@ -2221,6 +2221,7 @@ async fn tokio_main() -> Result<()> {
             .as_deref()
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
+        deliver_plain_replies: config.deliver_plain_replies,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
     });
@@ -6833,6 +6834,7 @@ mod build_mcp_servers_tests {
             idle_pool_sleep_secs: 0,
             agent_owner: None,
             no_base_prompt: false,
+            deliver_plain_replies: false,
             base_prompt_content: None,
         }
     }
@@ -7057,6 +7059,7 @@ mod error_outcome_emission_tests {
             idle_pool_sleep_secs: 0,
             agent_owner: None,
             no_base_prompt: false,
+            deliver_plain_replies: false,
             base_prompt_content: None,
         }
     }
