@@ -172,7 +172,46 @@ mod tests {
         value[7] = format!("{BASE}/media/{HASH}.png");
         value[8] = HASH.into();
         assert!(parse_link_preview_tags(&[value.clone()], URL, BASE).is_ok());
+
+        for invalid_url in [
+            format!("https://evil.example/media/{HASH}.png"),
+            format!("{BASE}/media/{HASH}.png?token=secret"),
+            format!("{BASE}/media/{HASH}.png#fragment"),
+            format!("{BASE}/media/{HASH}.svg"),
+            format!("{BASE}/media/{HASH}.png/extra"),
+        ] {
+            let mut malformed = snapshot();
+            malformed[7] = invalid_url;
+            malformed[8] = HASH.into();
+            assert!(parse_link_preview_tags(&[malformed], URL, BASE).is_err());
+        }
+
         value[8] = "b".repeat(64);
         assert!(parse_link_preview_tags(&[value], URL, BASE).is_err());
+    }
+
+    #[test]
+    fn rejects_over_limit_wrong_shape_and_unsafe_text() {
+        assert!(parse_link_preview_tags(&vec![snapshot(); MAX_SNAPSHOTS + 1], URL, BASE).is_err());
+
+        let mut wrong_shape = snapshot();
+        wrong_shape.pop();
+        assert!(parse_link_preview_tags(&[wrong_shape], URL, BASE).is_err());
+
+        for (index, value) in [
+            (4, "x".repeat(MAX_TITLE + 1)),
+            (5, "x".repeat(MAX_SITE + 1)),
+            (6, "unsafe\tdescription".into()),
+        ] {
+            let mut malformed = snapshot();
+            malformed[index] = value;
+            assert!(parse_link_preview_tags(&[malformed], URL, BASE).is_err());
+        }
+    }
+
+    #[test]
+    fn empty_input_is_a_no_op_and_invalid_base_fails_closed() {
+        assert!(parse_link_preview_tags(&[], "", BASE).unwrap().is_empty());
+        assert!(parse_link_preview_tags(&[snapshot()], URL, "not a URL").is_err());
     }
 }

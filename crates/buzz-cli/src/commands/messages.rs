@@ -618,7 +618,12 @@ fn read_link_preview_json(path: &str) -> Result<Vec<Vec<String>>, CliError> {
             "--link-preview-json does not accept stdin; provide a file path".into(),
         ));
     }
-    let metadata = std::fs::metadata(path).map_err(|error| {
+    let file = std::fs::File::open(path).map_err(|error| {
+        CliError::Usage(format!(
+            "failed to open --link-preview-json {path}: {error}"
+        ))
+    })?;
+    let metadata = file.metadata().map_err(|error| {
         CliError::Usage(format!(
             "failed to inspect --link-preview-json {path}: {error}"
         ))
@@ -633,7 +638,12 @@ fn read_link_preview_json(path: &str) -> Result<Vec<Vec<String>>, CliError> {
             "--link-preview-json exceeds {MAX_LINK_PREVIEW_JSON_BYTES} bytes"
         )));
     }
-    let bytes = std::fs::read(path).map_err(|error| {
+    // Read through the opened handle with a hard cap. A concurrent writer can
+    // grow the file after metadata(), so an uncapped std::fs::read(path) would
+    // both reopen a potentially different file and permit unbounded allocation.
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    let mut reader = std::io::Read::take(file, MAX_LINK_PREVIEW_JSON_BYTES + 1);
+    std::io::Read::read_to_end(&mut reader, &mut bytes).map_err(|error| {
         CliError::Usage(format!(
             "failed to read --link-preview-json {path}: {error}"
         ))
@@ -1123,9 +1133,9 @@ mod tests {
     use super::{
         channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
         format_events, match_profiles_by_name, merge_message_mentions, missing_members,
-        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
-        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
-        CliError, Uuid,
+        normalize_explicit_mentions, parse_member_pubkeys, read_link_preview_json,
+        resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
+        thread_ref_from_parent_tags, BuzzClient, CliError, Uuid, MAX_LINK_PREVIEW_JSON_BYTES,
     };
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
@@ -1142,6 +1152,38 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    fn preview_temp_file(bytes: &[u8]) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "buzz-link-preview-{}-{}.json",
+            std::process::id(),
+            NEXT_FILE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn link_preview_file_rejects_empty_malformed_and_oversized_input() {
+        for input in [b"[]".as_slice(), b"not-json".as_slice()] {
+            let path = preview_temp_file(input);
+            assert!(read_link_preview_json(path.to_str().unwrap()).is_err());
+            std::fs::remove_file(path).unwrap();
+        }
+
+        let path = preview_temp_file(&vec![b' '; MAX_LINK_PREVIEW_JSON_BYTES as usize + 1]);
+        let error = read_link_preview_json(path.to_str().unwrap()).unwrap_err();
+        assert!(error.to_string().contains("exceeds"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn link_preview_file_rejects_stdin_and_non_file_paths() {
+        assert!(read_link_preview_json("-").is_err());
+        assert!(read_link_preview_json(std::env::temp_dir().to_str().unwrap()).is_err());
+    }
 
     #[test]
     fn compact_event_format_remains_the_three_key_contract() {
