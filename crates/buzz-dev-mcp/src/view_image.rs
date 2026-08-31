@@ -50,26 +50,15 @@ pub(crate) const MAX_PIXELS: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_DECODER_ALLOC: u64 = 256 * 1024 * 1024;
 /// Connect timeout for URL fetches.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Whole-request budget, including the streamed body. This bounds a peer that
+/// keeps sending tiny chunks just before the per-read stall deadline.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Per-read deadline for streaming body reads. reqwest's client `timeout` is a
-/// whole-request budget that also covers the streamed body, so it cannot
-/// distinguish a dead connection from a slow-but-live large download; we omit
-/// it and instead fail any single read that stalls this long. The
-/// `MAX_SOURCE_BYTES` cap bounds the total volume, hence the worst-case total
-/// latency. Sized so a relay on a tailnet serving a ~21 MiB photo — where the
-/// old single 10 s all-purpose budget was marginal — can complete.
+/// whole-request budget, while this deadline identifies a dead connection with
+/// a specific error. A relay serving a ~21 MiB photo therefore gets more total
+/// time than the old single 10 s budget, without permitting a slow-drip peer to
+/// hold the tool open indefinitely.
 const READ_STALL_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// Compile-time guard: `ClientBuilder::timeout` resolves a `Duration` through
-/// `Into<RequestTimeout>`, so a future edit that writes
-/// `client_builder.timeout(READ_STALL_TIMEOUT)` would silently reinstate the
-/// whole-request budget this design deliberately omits — turning a 21 MiB
-/// tailnet fetch back into a stall at 15 s. Binding the constant to a
-/// `tokio::time::timeout` target (`&Duration`) means such an edit does not
-/// typecheck. `connect_timeout(CONNECT_TIMEOUT)` is unaffected: it takes
-/// `Into<Error>`.
-const _: fn(&Duration) = |_| {
-    let _ = tokio::time::timeout(READ_STALL_TIMEOUT, std::future::ready(()));
-};
 /// Lifetime of a Blossom `t=get` read token for relay media fetches.
 /// Matches the desktop client's `MEDIA_GET_AUTH_EXPIRY_SECS`.
 const MEDIA_GET_AUTH_EXPIRY_SECS: u64 = 600;
@@ -344,7 +333,25 @@ async fn fetch_url(url: &str) -> Result<Vec<u8>, ErrorData> {
     let parsed = reqwest::Url::parse(url)
         .map_err(|e| invalid_params(format!("invalid URL: {url} ({e})")))?;
     let auth = relay_media_get_auth(&parsed);
+    let auth_tag = auth.as_ref().and_then(|_| {
+        std::env::var("BUZZ_AUTH_TAG")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    });
+    fetch_url_with_auth(parsed, auth, auth_tag).await
+}
+
+/// Fetch a parsed URL with precomputed relay credentials. Keeping signing and
+/// origin selection in `fetch_url` lets tests exercise the bounded transport
+/// with an agent-signed header without mutating process-global environment.
+async fn fetch_url_with_auth(
+    parsed: reqwest::Url,
+    auth: Option<String>,
+    auth_tag: Option<String>,
+) -> Result<Vec<u8>, ErrorData> {
+    let url = parsed.to_string();
     let mut client_builder = reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT);
+    client_builder = client_builder.timeout(REQUEST_TIMEOUT);
     if auth.is_some() {
         // Do not forward Buzz auth headers to a redirect target. reqwest strips
         // Authorization cross-host, but `x-auth-tag` is not on reqwest's
@@ -358,10 +365,8 @@ async fn fetch_url(url: &str) -> Result<Vec<u8>, ErrorData> {
     let authed = auth.is_some();
     if let Some(header) = auth {
         req = req.header("Authorization", header);
-        if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-            if !auth_tag.trim().is_empty() {
-                req = req.header("x-auth-tag", auth_tag);
-            }
+        if let Some(auth_tag) = auth_tag {
+            req = req.header("x-auth-tag", auth_tag);
         }
     }
     let resp = req
@@ -751,12 +756,56 @@ mod tests {
     #[test]
     fn source_cap_is_32mb_and_documented() {
         assert_eq!(MAX_SOURCE_BYTES, 32 * 1024 * 1024);
+        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(10));
+        assert_eq!(REQUEST_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(READ_STALL_TIMEOUT, Duration::from_secs(15));
         let lib_rs = include_str!("lib.rs");
         let expected = format!("Hard cap {} MiB source", MAX_SOURCE_BYTES / (1024 * 1024));
         assert!(
             lib_rs.contains(&expected),
             "tool description must advertise the current cap ({expected})"
         );
+    }
+
+    #[tokio::test]
+    async fn agent_signed_fetch_accepts_a_source_between_20_and_32_mib() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        const BODY_LEN: usize = 21 * 1024 * 1024;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let keys = nostr::Keys::generate();
+        let auth = sign_media_get_auth(&keys, &address.to_string()).unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 16 * 1024];
+            let read = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.contains("authorization: Nostr "), "{request}");
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {BODY_LEN}\r\nContent-Type: image/jpeg\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let chunk = vec![0_u8; 64 * 1024];
+            let mut remaining = BODY_LEN;
+            while remaining > 0 {
+                let count = remaining.min(chunk.len());
+                socket.write_all(&chunk[..count]).await.unwrap();
+                remaining -= count;
+            }
+        });
+
+        let parsed = reqwest::Url::parse(&format!("http://{address}/media/photo.jpg")).unwrap();
+        let bytes = fetch_url_with_auth(parsed, Some(auth), None).await.unwrap();
+        assert_eq!(bytes.len(), BODY_LEN);
+        server.await.unwrap();
     }
 
     #[tokio::test]
