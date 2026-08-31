@@ -209,6 +209,7 @@ pub(super) async fn start_local_agent_with_preflight(
     allow_fresh_create_start: bool,
     expected_relay_url: Option<&str>,
     expected_signer_pubkey: Option<&str>,
+    replay_floor_unix: Option<u64>,
 ) -> Result<ManagedAgentSummary, String> {
     let record_snapshot = {
         let _store_guard = state
@@ -302,6 +303,7 @@ pub(super) async fn start_local_agent_with_preflight(
         &mut runtimes,
         Some(workspace_owner.as_str()),
         &workspace_relay_url,
+        replay_floor_unix,
     )?;
     save_managed_agents(app, &records)?;
     if let Some(saved_record) = records.iter().find(|r| r.pubkey == pubkey) {
@@ -753,7 +755,8 @@ pub async fn create_managed_agent(
     // ── Phase 3b: local spawn (async preflight outside store lock) ───────────
     let mut spawn_error = None;
     let agent = if input.spawn_after_create && input.backend == BackendKind::Local {
-        match start_local_agent_with_preflight(&app, &state, &pubkey, true, None, None).await {
+        match start_local_agent_with_preflight(&app, &state, &pubkey, true, None, None, None).await
+        {
             Ok(agent) => agent,
             Err(error) => {
                 let _store_guard = state
@@ -862,6 +865,7 @@ pub async fn start_managed_agent(
     pubkey: String,
     expected_relay_url: Option<String>,
     expected_signer_pubkey: Option<String>,
+    replay_floor_unix: Option<u64>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
@@ -961,6 +965,7 @@ pub async fn start_managed_agent(
                 false,
                 expected_relay_url.as_deref(),
                 expected_signer_pubkey.as_deref(),
+                replay_floor_unix,
             )
             .await
         }

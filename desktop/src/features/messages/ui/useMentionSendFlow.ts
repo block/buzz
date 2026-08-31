@@ -131,6 +131,26 @@ export function useMentionSendFlow({
     availableRuntimesQuery.isLoading,
     availableRuntimesQuery.refetch,
   ]);
+  const startAgentDetached = React.useCallback(
+    (agent: ManagedAgent) => {
+      // Publish-first: the send no longer waits for the agent start. The
+      // replay floor tells the spawned harness to replay at least back to
+      // this moment, so the about-to-publish message is inside its first
+      // subscription window however long the spawn takes.
+      const replayFloorUnix = Math.floor(Date.now() / 1000);
+      void startAgentMutation
+        .mutateAsync({ pubkey: agent.pubkey, replayFloorUnix })
+        .catch((error: unknown) => {
+          toast.error(
+            `Could not start ${agent.name} — your message was sent, but the agent may not respond. ${getErrorMessage(
+              error,
+              "Could not start agent.",
+            )}`,
+          );
+        });
+    },
+    [startAgentMutation],
+  );
   const ensureManagedAgentMentionsReady = React.useCallback(
     async (
       mentionPubkeys: string[],
@@ -178,13 +198,17 @@ export function useMentionSendFlow({
               (!isProviderBackedAgent(readyAgent) &&
                 !isManagedAgentRunning(readyAgent))
             ) {
-              await startAgentMutation.mutateAsync(readyAgent.pubkey);
+              startAgentDetached(readyAgent);
             }
           } else {
+            // The membership write must land before the publish (the harness
+            // only subscribes to channels it's a member of); only the start
+            // itself is detached.
             await attachAgentMutation.mutateAsync({
               channelId: capturedChannelId,
               agent: readyAgent,
               role: "bot",
+              detachedStart: startAgentDetached,
             });
           }
           pubkeys.push(pubkey);
@@ -201,7 +225,7 @@ export function useMentionSendFlow({
       getManagedAgentsByPubkey,
       getPersonas,
       mentions.memberPubkeys,
-      startAgentMutation,
+      startAgentDetached,
     ],
   );
   const createMentionedPersonaAgents = React.useCallback(
@@ -249,6 +273,7 @@ export function useMentionSendFlow({
             model: persona.model ?? undefined,
             role: "bot",
             ensureRunning: true,
+            detachedStart: startAgentDetached,
           };
           const result = shouldProvisionForDm
             ? await provisionPersonaAgentMutation.mutateAsync(input)
@@ -282,6 +307,7 @@ export function useMentionSendFlow({
       mentions.registerMentionPubkey,
       onPrepareSendChannel,
       provisionPersonaAgentMutation,
+      startAgentDetached,
     ],
   );
   const clearComposer = React.useCallback(() => {
@@ -488,8 +514,8 @@ export function useMentionSendFlow({
         if (agentReadiness.errors.length > 0) {
           const message =
             agentReadiness.errors.length === 1
-              ? `Could not start agent mention: ${agentReadiness.errors[0]}`
-              : `Could not start agent mentions: ${agentReadiness.errors.join(
+              ? `Could not prepare agent mention: ${agentReadiness.errors[0]}`
+              : `Could not prepare agent mentions: ${agentReadiness.errors.join(
                   "; ",
                 )}`;
           setNonMemberPromptError(message);
@@ -950,12 +976,14 @@ export function useMentionSendFlow({
     setNonMemberPromptError(null);
   }, []);
   return {
+    // Agent starts are detached (publish-first), so startAgentMutation.isPending
+    // deliberately does not gate the composer — a background start must not
+    // block the next send.
     isPreparingMentionSend:
       isMentionSendPending ||
       isCompleteSendPending ||
       attachAgentMutation.isPending ||
-      createPersonaAgentMutation.isPending ||
-      startAgentMutation.isPending,
+      createPersonaAgentMutation.isPending,
     nonMemberPromptProps: {
       canInvite: canInviteNonMembers,
       error: nonMemberPromptError,
@@ -964,8 +992,7 @@ export function useMentionSendFlow({
         isCompleteSendPending ||
         addMembersMutation.isPending ||
         attachAgentMutation.isPending ||
-        createPersonaAgentMutation.isPending ||
-        startAgentMutation.isPending,
+        createPersonaAgentMutation.isPending,
       names: pendingNonMemberNames,
       onDismiss: dismissNonMemberPrompt,
       onDoNothing: handleSendWithoutInviting,

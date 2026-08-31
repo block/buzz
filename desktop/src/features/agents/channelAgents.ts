@@ -36,6 +36,15 @@ export type AttachManagedAgentToChannelInput = {
   agent: ManagedAgent;
   role?: Exclude<ChannelRole, "owner">;
   ensureRunning?: boolean;
+  /**
+   * When set, a needed start/deploy is handed to this callback instead of
+   * being awaited: the attach resolves as soon as the membership write lands
+   * and the callback owns the fire-and-forget start, including surfacing its
+   * failure. The message-send path uses this so a publish never blocks on an
+   * agent start — the spawned harness replays the already-published message
+   * via its startup replay floor.
+   */
+  detachedStart?: (agent: ManagedAgent) => void;
 };
 
 export type AttachManagedAgentToChannelResult = {
@@ -85,6 +94,9 @@ export type CreateChannelManagedAgentInput = {
   respondToAllowlist?: string[];
   /** Skip reuse logic and always create a fresh agent instance. */
   forceNewInstance?: boolean;
+  /** Detached start hook forwarded to the channel attach — see
+   * `AttachManagedAgentToChannelInput.detachedStart`. */
+  detachedStart?: (agent: ManagedAgent) => void;
 };
 
 export type CreateChannelManagedAgentResult =
@@ -177,16 +189,16 @@ export async function attachManagedAgentToChannel(
     // pair — so this ensures the pair the caller is attaching to, never
     // another community's.
     const isRemote = input.agent.backend.type === "provider";
-    if (isRemote && input.agent.status !== "deployed") {
-      agent = await startManagedAgent(input.agent.pubkey);
-      started = true;
-    } else if (
-      !isRemote &&
-      input.agent.status !== "running" &&
-      input.agent.status !== "deployed"
-    ) {
-      agent = await startManagedAgent(input.agent.pubkey);
-      started = true;
+    const needsStart = isRemote
+      ? input.agent.status !== "deployed"
+      : input.agent.status !== "running" && input.agent.status !== "deployed";
+    if (needsStart) {
+      if (input.detachedStart) {
+        input.detachedStart(input.agent);
+      } else {
+        agent = await startManagedAgent(input.agent.pubkey);
+        started = true;
+      }
     }
   }
 
@@ -411,6 +423,7 @@ export async function createChannelManagedAgent(
     agent: provisioned.agent,
     role: input.role ?? "bot",
     ensureRunning: input.ensureRunning ?? true,
+    detachedStart: input.detachedStart,
   });
 
   return {

@@ -435,12 +435,19 @@ pub(crate) fn spawn_with_effort_proof(
 ///
 /// `owner_hex`: the workspace owner's pubkey, used as a fallback for legacy
 /// records that have no NIP-OA `auth_tag`. See `build_respond_to_env`.
+///
+/// `replay_floor_unix`: optional unix-seconds replay floor for the harness's
+/// startup watermark (`BUZZ_ACP_REPLAY_FLOOR`). A publish-first mention send
+/// publishes the triggering message before this spawn and passes its send
+/// timestamp here so the harness's first REQ replays past that message no
+/// matter how long the spawn takes. buzz-acp clamps stale floors to ~15 min.
 pub fn spawn_agent_child(
     app: &AppHandle,
     record: &ManagedAgentRecord,
     relay_url: &str,
     lazy: bool,
     owner_hex: Option<&str>,
+    replay_floor_unix: Option<u64>,
 ) -> Result<crate::managed_agents::ManagedAgentProcess, String> {
     if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
@@ -565,6 +572,18 @@ pub fn spawn_agent_child(
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_IDLE_POOL_SLEEP", idle_pool_sleep_env(lazy));
+    // Publish-first mention sends: the triggering message is already on the
+    // relay when this spawn runs, so hand the harness the send timestamp as a
+    // startup replay floor. Clear any ambient value on the None path so a
+    // floor from the parent environment can't leak into an unrelated spawn.
+    match replay_floor_unix {
+        Some(floor) => {
+            command.env("BUZZ_ACP_REPLAY_FLOOR", floor.to_string());
+        }
+        None => {
+            command.env_remove("BUZZ_ACP_REPLAY_FLOOR");
+        }
+    }
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
     match &resolved_mcp_command {
@@ -962,6 +981,7 @@ pub fn start_managed_agent_process(
     runtimes: &mut HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
     owner_hex: Option<&str>,
     workspace_relay: &crate::relay::ScopedWorkspaceRelay,
+    replay_floor_unix: Option<u64>,
 ) -> Result<(), String> {
     let key = bound_runtime_key(record, workspace_relay)?;
     if let Some(runtime) = runtimes.get_mut(&key) {
@@ -981,7 +1001,14 @@ pub fn start_managed_agent_process(
     // Scalar PIDs are migration-only and never establish pair liveness.
     record.runtime_pid = None;
 
-    let mut process = spawn_agent_child(app, record, &key.relay_url, false, owner_hex)?;
+    let mut process = spawn_agent_child(
+        app,
+        record,
+        &key.relay_url,
+        false,
+        owner_hex,
+        replay_floor_unix,
+    )?;
     let now = now_iso();
     let receipt = super::ManagedAgentRuntimeReceipt {
         key: key.clone(),

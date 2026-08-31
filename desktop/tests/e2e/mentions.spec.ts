@@ -1335,11 +1335,14 @@ test("selecting a managed agent mention inserts @Name into input", async ({
   await expect(agentMentionChip).toHaveCSS("border-top-width", "0px");
 });
 
-test("selecting a persona mention creates a channel agent before sending", async ({
+test("selecting a persona mention creates a channel agent before sending and starts it detached", async ({
   page,
 }) => {
   await installMockBridge(page, {
     activePersonaIds: ["builtin:fizz"],
+    // Far longer than the test runs: sign_event landing below proves the
+    // publish no longer waits for start_managed_agent to resolve.
+    startManagedAgentDelayMs: 45_000,
   });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
@@ -1401,11 +1404,19 @@ test("selecting a persona mention creates a channel agent before sending", async
   const commandsAfterSend = (await readCommandLog(page)).slice(
     baselineCommands.length,
   );
-  const startIndex = commandsAfterSend.indexOf("start_managed_agent");
+  const createIndex = commandsAfterSend.indexOf("create_managed_agent");
+  const addIndex = commandsAfterSend.indexOf("add_channel_members");
   const sendIndex = commandsAfterSend.indexOf("sign_event");
-  expect(startIndex).toBeGreaterThanOrEqual(0);
+  expect(createIndex).toBeGreaterThanOrEqual(0);
+  expect(addIndex).toBeGreaterThanOrEqual(0);
   expect(sendIndex).toBeGreaterThanOrEqual(0);
-  expect(startIndex).toBeLessThan(sendIndex);
+  // Publish-first: creation and the membership write still precede the
+  // publish (the outgoing tags need the agent's pubkey, and the harness only
+  // subscribes to channels it is a member of), but the start is detached —
+  // sign_event landed while start_managed_agent was still pending behind the
+  // injected 45s delay, which the old start-blocking send could never do.
+  expect(createIndex).toBeLessThan(sendIndex);
+  expect(addIndex).toBeLessThan(sendIndex);
 
   const mentionChip = page
     .getByTestId("message-row")
@@ -2378,7 +2389,7 @@ test("shared agents wait for initial directory authorization", async ({
   });
 });
 
-test("mentioning an in-channel stopped managed agent starts it before sending", async ({
+test("mentioning an in-channel stopped managed agent publishes first and starts it detached", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -2390,6 +2401,9 @@ test("mentioning an in-channel stopped managed agent starts it before sending", 
         channelNames: ["general"],
       },
     ],
+    // Far longer than the test runs: the publish landing below proves the
+    // send no longer waits for start_managed_agent to resolve.
+    startManagedAgentDelayMs: 45_000,
   });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
@@ -2404,17 +2418,35 @@ test("mentioning an in-channel stopped managed agent starts it before sending", 
   await input.press("Enter");
   await page.keyboard.type(" can you help?");
 
+  const baselineCommands = await readCommandLog(page);
   const baselineStartCount = commandCount(
-    await readCommandLog(page),
+    baselineCommands,
     "start_managed_agent",
   );
+  const baselineSignCount = commandCount(baselineCommands, "sign_event");
+  const baselinePayloadCount = (await readCommandPayloadLog(page)).length;
   await page.getByTestId("send-message").click();
 
+  // Publish-first: the message signs and renders while start_managed_agent
+  // is still pending behind the injected delay.
+  await expect
+    .poll(async () => commandCount(await readCommandLog(page), "sign_event"))
+    .toBeGreaterThan(baselineSignCount);
   await expect
     .poll(async () =>
       commandCount(await readCommandLog(page), "start_managed_agent"),
     )
     .toBeGreaterThan(baselineStartCount);
+
+  // The detached start carries a replay floor so the spawned harness's first
+  // REQ replays past the just-published message.
+  const startCall = (await readCommandPayloadLog(page))
+    .slice(baselinePayloadCount)
+    .find((entry) => entry.command === "start_managed_agent");
+  expect(
+    (startCall?.payload as { replayFloorUnix?: number } | undefined)
+      ?.replayFloorUnix,
+  ).toBeGreaterThan(0);
 
   const mentionChip = page
     .getByTestId("message-row")
@@ -2423,7 +2455,52 @@ test("mentioning an in-channel stopped managed agent starts it before sending", 
   await expect(mentionChip).toBeVisible();
 });
 
-test("mentioning an in-channel provider managed agent deploys it before sending", async ({
+test("a detached agent start failure surfaces as a toast after the message sends", async ({
+  page,
+}) => {
+  const startError = "Mock agent startup failed.";
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: IN_CHANNEL_MANAGED_AGENT_PUBKEY,
+        name: "fizz",
+        status: "stopped",
+        channelNames: ["general"],
+      },
+    ],
+    startManagedAgentErrors: [startError],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Hey @fizz");
+
+  const dropdown = autocomplete(page);
+  await expect(dropdown.getByText("fizz")).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" can you help?");
+
+  await page.getByTestId("send-message").click();
+
+  // The message still publishes — the start runs off the critical path.
+  const mentionChip = page
+    .getByTestId("message-row")
+    .last()
+    .locator("[data-mention].agent-mention-highlight", { hasText: "fizz" });
+  await expect(mentionChip).toBeVisible();
+
+  // The failed start surfaces as a post-send toast instead of blocking the
+  // send, and the sent text is not restored into the composer. (The
+  // persistent agent audience may legitimately re-seed an "@fizz"
+  // auto-mention, so only the message body proves there was no
+  // failed-send restore.)
+  await expect(page.getByText(startError, { exact: false })).toBeVisible();
+  await expect(input).not.toContainText("can you help");
+});
+
+test("mentioning an in-channel provider managed agent publishes first and deploys it detached", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -2440,6 +2517,9 @@ test("mentioning an in-channel provider managed agent deploys it before sending"
         },
       },
     ],
+    // Far longer than the test runs: the publish landing below proves the
+    // send no longer waits for the deploy to resolve.
+    startManagedAgentDelayMs: 45_000,
   });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
@@ -2454,12 +2534,19 @@ test("mentioning an in-channel provider managed agent deploys it before sending"
   await input.press("Enter");
   await page.keyboard.type(" can you help?");
 
+  const baselineCommands = await readCommandLog(page);
   const baselineStartCount = commandCount(
-    await readCommandLog(page),
+    baselineCommands,
     "start_managed_agent",
   );
+  const baselineSignCount = commandCount(baselineCommands, "sign_event");
   await page.getByTestId("send-message").click();
 
+  // Publish-first: the message signs and renders while the deploy is still
+  // pending behind the injected delay.
+  await expect
+    .poll(async () => commandCount(await readCommandLog(page), "sign_event"))
+    .toBeGreaterThan(baselineSignCount);
   await expect
     .poll(async () =>
       commandCount(await readCommandLog(page), "start_managed_agent"),
@@ -2473,7 +2560,7 @@ test("mentioning an in-channel provider managed agent deploys it before sending"
   await expect(mentionChip).toBeVisible();
 });
 
-test("mentioning a non-member managed agent adds and starts it before sending", async ({
+test("mentioning a non-member managed agent adds it before sending and starts it detached", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -2494,6 +2581,9 @@ test("mentioning a non-member managed agent adds and starts it before sending", 
         respondToAllowlist: [TEST_IDENTITIES.outsider.pubkey],
       },
     ],
+    // Far longer than the test runs: the publish landing below proves the
+    // send no longer waits for start_managed_agent to resolve.
+    startManagedAgentDelayMs: 45_000,
   });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
@@ -2527,6 +2617,11 @@ test("mentioning a non-member managed agent adds and starts it before sending", 
       commandCount(await readCommandLog(page), "add_channel_members"),
     )
     .toBeGreaterThan(baselineAddCount);
+  // Publish-first: the message signs while start_managed_agent is still
+  // pending behind the injected delay.
+  await expect
+    .poll(async () => commandCount(await readCommandLog(page), "sign_event"))
+    .toBeGreaterThan(commandCount(baselineCommands, "sign_event"));
   await expect
     .poll(async () =>
       commandCount(await readCommandLog(page), "start_managed_agent"),
@@ -2545,9 +2640,16 @@ test("mentioning a non-member managed agent adds and starts it before sending", 
   const startIndex = sendCommands.findIndex(
     (entry) => entry.command === "start_managed_agent",
   );
+  const sendIndex = sendCommands.findIndex(
+    (entry) => entry.command === "sign_event",
+  );
   expect(updateIndex).toBeGreaterThanOrEqual(0);
   expect(updateIndex).toBeLessThan(addIndex);
   expect(updateIndex).toBeLessThan(startIndex);
+  // The access-policy write and the membership write stay ahead of the
+  // publish; only the start itself is detached from the send.
+  expect(sendIndex).toBeGreaterThanOrEqual(0);
+  expect(addIndex).toBeLessThan(sendIndex);
   expect(sendCommands[updateIndex]?.payload).toMatchObject({
     input: {
       pubkey: OUT_OF_CHANNEL_MANAGED_AGENT_PUBKEY,
@@ -2555,6 +2657,15 @@ test("mentioning a non-member managed agent adds and starts it before sending", 
       respondToAllowlist: [],
     },
   });
+  // The detached start carries a replay floor so the spawned harness's first
+  // REQ replays past the just-published message.
+  expect(
+    (
+      sendCommands[startIndex]?.payload as
+        | { replayFloorUnix?: number }
+        | undefined
+    )?.replayFloorUnix,
+  ).toBeGreaterThan(0);
 
   const mentionChip = page
     .getByTestId("message-row")
@@ -2584,7 +2695,7 @@ test("mentioning a non-member managed agent adds and starts it before sending", 
   });
 });
 
-test("mentioning a non-member provider managed agent deploys it before sending", async ({
+test("mentioning a non-member provider managed agent adds it before sending and deploys it detached", async ({
   page,
 }) => {
   await installMockBridge(page, {
@@ -2600,6 +2711,9 @@ test("mentioning a non-member provider managed agent deploys it before sending",
         },
       },
     ],
+    // Far longer than the test runs: the publish landing below proves the
+    // send no longer waits for the deploy to resolve.
+    startManagedAgentDelayMs: 45_000,
   });
   await page.goto("/");
   await page.getByTestId("channel-general").click();
@@ -2623,6 +2737,7 @@ test("mentioning a non-member provider managed agent deploys it before sending",
     baselineCommands,
     "start_managed_agent",
   );
+  const baselineSignCount = commandCount(baselineCommands, "sign_event");
 
   await page.getByTestId("send-message").click();
   await expect(page.getByRole("alertdialog")).toHaveCount(0);
@@ -2632,6 +2747,11 @@ test("mentioning a non-member provider managed agent deploys it before sending",
       commandCount(await readCommandLog(page), "add_channel_members"),
     )
     .toBeGreaterThan(baselineAddCount);
+  // Publish-first: the message signs and renders while the deploy is still
+  // pending behind the injected delay.
+  await expect
+    .poll(async () => commandCount(await readCommandLog(page), "sign_event"))
+    .toBeGreaterThan(baselineSignCount);
   await expect
     .poll(async () =>
       commandCount(await readCommandLog(page), "start_managed_agent"),
