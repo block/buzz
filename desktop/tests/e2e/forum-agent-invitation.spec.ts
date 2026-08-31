@@ -193,7 +193,7 @@ for (const error of [
     await expect(dialog.getByText(error, { exact: true })).toBeVisible();
     await waitForAnimations(page);
     await page.screenshot({
-      path: `test-results/forum-error-${error.split(" ")[0]}.png`,
+      path: `test-results/forum-error-${error.split(" ")[0].replace(/[^a-zA-Z0-9_-]/g, "-")}.png`,
     });
     await expect(page.getByTestId("message-input")).toHaveText(
       "@RemoteScout hello",
