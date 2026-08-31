@@ -4,8 +4,7 @@ import type { SearchResult } from "@/features/search/ui/SearchResultItem";
 
 export function useSearchMenuKeyboardNavigation({
   activeResults,
-  hasLeadingAction,
-  onActivateLeadingAction,
+  onActivateCurrentScope,
   onOpenResult,
   onRemoveScope,
   query,
@@ -14,8 +13,7 @@ export function useSearchMenuKeyboardNavigation({
   setSelectedMenuIndex,
 }: {
   activeResults: SearchResult[];
-  hasLeadingAction: boolean;
-  onActivateLeadingAction: () => void;
+  onActivateCurrentScope?: () => void;
   onOpenResult: (result: SearchResult) => void;
   onRemoveScope: () => void;
   query: string;
@@ -23,7 +21,7 @@ export function useSearchMenuKeyboardNavigation({
   selectedMenuIndex: number;
   setSelectedMenuIndex: React.Dispatch<React.SetStateAction<number>>;
 }) {
-  const selectableCount = activeResults.length + (hasLeadingAction ? 1 : 0);
+  const selectableCount = activeResults.length;
 
   React.useEffect(() => {
     setSelectedMenuIndex((current) => {
@@ -41,6 +39,20 @@ export function useSearchMenuKeyboardNavigation({
 
   const handleDialogInputKeyDown = React.useCallback(
     (event: React.KeyboardEvent<HTMLInputElement>) => {
+      if (
+        event.key === "Tab" &&
+        !event.shiftKey &&
+        !event.altKey &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !scopeActive &&
+        onActivateCurrentScope
+      ) {
+        event.preventDefault();
+        onActivateCurrentScope();
+        return;
+      }
+
       if (event.key === "Backspace" && query.length === 0 && scopeActive) {
         event.preventDefault();
         onRemoveScope();
@@ -63,19 +75,13 @@ export function useSearchMenuKeyboardNavigation({
 
       if (event.key === "Enter" && !event.nativeEvent.isComposing) {
         event.preventDefault();
-        if (hasLeadingAction && selectedMenuIndex === 0) {
-          onActivateLeadingAction();
-          return;
-        }
-        const result =
-          activeResults[selectedMenuIndex - (hasLeadingAction ? 1 : 0)];
+        const result = activeResults[selectedMenuIndex];
         if (result) onOpenResult(result);
       }
     },
     [
       activeResults,
-      hasLeadingAction,
-      onActivateLeadingAction,
+      onActivateCurrentScope,
       onOpenResult,
       onRemoveScope,
       query.length,

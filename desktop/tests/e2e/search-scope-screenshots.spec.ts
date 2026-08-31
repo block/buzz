@@ -22,11 +22,11 @@ test("captures global and current-channel search scope states", async ({
   await page.keyboard.press("ControlOrMeta+k");
   const searchDialog = page.getByTestId("search-results");
   const scopeAction = page.getByTestId("search-current-channel-control");
-  await expect(scopeAction).toContainText("Search in");
-  await expect(scopeAction).toContainText("#general");
+  await expect(scopeAction).toContainText("Search channel");
+  await expect(scopeAction).toContainText("TAB");
   await waitForAnimations(page);
   await searchDialog.screenshot({
-    path: "test-results/search-scope/01-global-channel-scope-action.png",
+    path: "test-results/search-scope/01-global-channel-scope-shortcut.png",
   });
 
   await scopeAction.click();
@@ -48,7 +48,7 @@ test("captures global and current-channel search scope states", async ({
   await page.getByTestId("search-results-list").evaluate((element) => {
     element.scrollTop = 180;
   });
-  await expect(scopeAction).not.toBeInViewport();
+  await expect(scopeAction).toBeInViewport();
   await waitForAnimations(page);
   await searchDialog.screenshot({
     path: "test-results/search-scope/03-expanded-scrollable-results.png",
@@ -61,12 +61,10 @@ test("captures global and current-channel search scope states", async ({
     /#\/channels\/f48efb06-0c93-5025-aac9-2e646bb6bfa8$/,
   );
   await page.keyboard.press("ControlOrMeta+k");
-  await expect(scopeAction).toContainText("Search conversation with alice");
-  await expect(scopeAction).toContainText(
-    "Search messages in this conversation.",
-  );
+  await expect(scopeAction).toContainText("Search conversation");
+  await expect(scopeAction).toContainText("TAB");
   await waitForAnimations(page);
   await searchDialog.screenshot({
-    path: "test-results/search-scope/04-dm-conversation-scope-action.png",
+    path: "test-results/search-scope/04-dm-conversation-scope-shortcut.png",
   });
 });

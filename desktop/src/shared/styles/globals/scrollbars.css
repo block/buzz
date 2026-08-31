@@ -54,6 +54,27 @@
   border-radius: 999px;
 }
 
+/* Search results use sticky opaque section headers. Keep the scrollbar in a
+ * dedicated gutter so those headers stop at the content edge in WKWebView. */
+.buzz-search-scrollbar {
+  scrollbar-gutter: stable;
+}
+
+.buzz-search-scrollbar::-webkit-scrollbar {
+  width: 8px;
+}
+
+.buzz-search-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.buzz-search-scrollbar::-webkit-scrollbar-thumb {
+  background-clip: content-box;
+  background-color: hsl(var(--foreground) / 0.15);
+  border: 2px solid transparent;
+  border-radius: 999px;
+}
+
 /*
  * Main-content scroll areas that have sticky blurred chrome inside them.
  * Native overlay scrollbars paint UNDER composited descendants

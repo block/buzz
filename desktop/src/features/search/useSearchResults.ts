@@ -104,12 +104,14 @@ export function useSearchResults({
   channels: memberChannels,
   enabled,
   limit = 12,
+  prioritizedChannelId,
   scopeChannelId,
 }: {
   channelLabels?: Record<string, string>;
   channels: Channel[];
   enabled: boolean;
   limit?: number;
+  prioritizedChannelId?: string | null;
   scopeChannelId?: string | null;
 }) {
   const [query, setQuery] = React.useState("");
@@ -255,13 +257,40 @@ export function useSearchResults({
     unresolvedOperator: hasUnresolvedOperator,
     minimumQueryLength,
   });
+  const prioritizedChannelSearchQuery = useSearchMessagesQuery(ftsQuery, {
+    enabled:
+      enabled &&
+      !scopeChannelId &&
+      Boolean(prioritizedChannelId) &&
+      channelResolution.status === "none" &&
+      !hasUnresolvedOperator &&
+      !waitingOnFromResolution &&
+      ftsQuery.length >= minimumQueryLength,
+    limit,
+    channelId: prioritizedChannelId ?? undefined,
+    authors:
+      authorResolution.status === "resolved"
+        ? [authorResolution.value]
+        : undefined,
+    since: parsedQuery.since,
+    until: parsedQuery.until,
+    unresolvedOperator: hasUnresolvedOperator,
+    minimumQueryLength,
+  });
 
   const messageResults = React.useMemo(() => {
     if (hasUnresolvedOperator) {
       return [];
     }
-    return dedupeSearchHits(searchQuery.data?.hits ?? []);
-  }, [hasUnresolvedOperator, searchQuery.data?.hits]);
+    return dedupeSearchHits([
+      ...(prioritizedChannelSearchQuery.data?.hits ?? []),
+      ...(searchQuery.data?.hits ?? []),
+    ]);
+  }, [
+    hasUnresolvedOperator,
+    prioritizedChannelSearchQuery.data?.hits,
+    searchQuery.data?.hits,
+  ]);
   const channelResults = React.useMemo(() => {
     if (scopeChannelId || ftsQuery.length < MIN_SEARCH_QUERY_LENGTH) {
       return [];
@@ -498,6 +527,7 @@ export function useSearchResults({
     isWaitingOnFromResolution: waitingOnFromResolution,
     messageResults,
     query,
+    prioritizedChannelSearchQuery,
     resultProfiles: resultProfilesQuery.data?.profiles,
     results,
     searchQuery,

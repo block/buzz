@@ -26,7 +26,9 @@ export function getChannelScopeLabel(
 }
 
 type SearchDialogInputRowProps = {
+  currentScopeActionLabel?: string;
   inputRef: React.RefObject<HTMLInputElement | null>;
+  onActivateCurrentScope?: () => void;
   onChange: (query: string) => void;
   onKeyDown: React.KeyboardEventHandler<HTMLInputElement>;
   onRemoveScope: () => void;
@@ -35,7 +37,9 @@ type SearchDialogInputRowProps = {
 };
 
 export function SearchDialogInputRow({
+  currentScopeActionLabel,
   inputRef,
+  onActivateCurrentScope,
   onChange,
   onKeyDown,
   onRemoveScope,
@@ -86,60 +90,20 @@ export function SearchDialogInputRow({
           value={query}
         />
       </div>
-      <kbd className="shrink-0 rounded border border-border/70 bg-muted/70 px-1.5 py-0.5 text-2xs text-muted-foreground">
-        ESC
-      </kbd>
-    </div>
-  );
-}
-
-type CurrentChannelSearchActionProps = {
-  channelLabel: string;
-  channelType: Channel["channelType"];
-  isSelected: boolean;
-  onActivate: () => void;
-  onMouseEnter: () => void;
-};
-
-export function CurrentChannelSearchAction({
-  channelLabel,
-  channelType,
-  isSelected,
-  onActivate,
-  onMouseEnter,
-}: CurrentChannelSearchActionProps) {
-  const isDirectMessage = channelType === "dm";
-
-  return (
-    <div className="px-3 py-3.5">
-      <button
-        aria-selected={isSelected}
-        className={`flex w-full items-center gap-4 rounded-lg border border-border/75 px-3 py-3 text-left transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring ${
-          isSelected ? "bg-muted/55" : "bg-muted/30 hover:bg-muted/55"
-        }`}
-        data-search-result-index="0"
-        data-testid="search-current-channel-control"
-        onClick={onActivate}
-        onMouseEnter={onMouseEnter}
-        role="option"
-        type="button"
-      >
-        <span className="flex min-w-0 items-center gap-2">
-          <Search className="h-3.5 w-3.5 shrink-0" />
-          <span
-            className="min-w-0 truncate text-sm text-muted-foreground"
-            data-testid="search-current-scope-label"
-          >
-            {isDirectMessage ? "Search conversation with " : "Search in "}
-            <span className="font-medium text-foreground">{channelLabel}</span>
-          </span>
-        </span>
-        <span className="ml-auto shrink-0 text-xs text-muted-foreground/70">
-          {isDirectMessage
-            ? "Search messages in this conversation."
-            : "Search messages in this channel"}
-        </span>
-      </button>
+      {currentScopeActionLabel && onActivateCurrentScope && !scopeLabel ? (
+        <button
+          aria-label={`${currentScopeActionLabel} (Tab)`}
+          className="flex shrink-0 items-center gap-2 rounded-md px-1.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+          data-testid="search-current-channel-control"
+          onClick={onActivateCurrentScope}
+          type="button"
+        >
+          <span>{currentScopeActionLabel}</span>
+          <kbd className="rounded border border-border/70 bg-muted/70 px-1.5 py-0.5 text-2xs text-muted-foreground">
+            TAB
+          </kbd>
+        </button>
+      ) : null}
     </div>
   );
 }
