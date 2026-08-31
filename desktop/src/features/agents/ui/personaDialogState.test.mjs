@@ -88,6 +88,7 @@ test("duplicatePersonaDialogState copies persona fields into a new draft", () =>
   assert.deepEqual(state.initialValues, {
     displayName: "Solo copy",
     avatarUrl: "avatar://solo",
+    description: undefined,
     systemPrompt: "Be direct.",
     runtime: "provider-a",
     model: "model-a",
@@ -145,6 +146,7 @@ test("editPersonaDialogState preserves the persona id for updates", () => {
     id: "persona-2",
     displayName: "Kit",
     avatarUrl: "",
+    description: undefined,
     systemPrompt: "Keep it weird.",
     runtime: undefined,
     model: undefined,

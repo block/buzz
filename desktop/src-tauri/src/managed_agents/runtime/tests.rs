@@ -265,7 +265,6 @@ fn build_env_rejects_empty_allowlist_in_allowlist_mode() {
 }
 
 // ── persona fixture helpers ─────────────────────────────────────────
-
 fn persona_with_provider(
     id: &str,
     prompt: &str,
@@ -273,6 +272,7 @@ fn persona_with_provider(
     provider: Option<&str>,
 ) -> crate::managed_agents::AgentDefinition {
     crate::managed_agents::AgentDefinition {
+        description: None,
         id: id.to_string(),
         display_name: id.to_string(),
         avatar_url: None,

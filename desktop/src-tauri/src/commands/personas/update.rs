@@ -9,7 +9,8 @@ use crate::{
     managed_agents::{
         apply_persona_behavior, effective_agent_command, load_managed_agents, load_personas,
         managed_agent_avatar_url, save_managed_agents, save_personas, try_regenerate_nest,
-        validate_agent_definition_text, AgentDefinition, ManagedAgentRecord, UpdatePersonaRequest,
+        validate_agent_definition_text, validate_agent_description_text, AgentDefinition,
+        ManagedAgentRecord, UpdatePersonaRequest,
     },
     util::now_iso,
 };
@@ -54,8 +55,16 @@ fn propagate_persona_name_rename(
     renamed
 }
 
-/// Profile sync params collected under the store lock for async relay publish.
-type ProfileSyncParams = Vec<(nostr::Keys, String, String, Option<String>, Option<String>)>;
+/// Profile sync params collected under the store lock for async relay publish:
+/// (agent keys, relay url, display name, avatar url, kind:0 about, auth tag).
+type ProfileSyncParams = Vec<(
+    nostr::Keys,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+)>;
 
 #[tauri::command]
 pub async fn update_persona(
@@ -96,6 +105,8 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let display_name = trim_required(&input.display_name, "Display name")?;
             let system_prompt = input.system_prompt.clone();
             validate_agent_definition_text(&display_name, &system_prompt)?;
+            let description = trim_optional(input.description);
+            validate_agent_description_text(description.as_deref())?;
             let avatar_url = trim_optional(input.avatar_url);
             let runtime = trim_optional(input.runtime);
             let model = trim_optional(input.model);
@@ -116,9 +127,17 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let avatar_changed = persona.avatar_url != avatar_url;
             let name_changed = persona.display_name != display_name;
             let old_display_name = persona.display_name.clone();
+            // The kind:0 `about` is the authored description, so a
+            // description edit changes what should be published.
+            let old_about =
+                crate::managed_agents::effective_agent_description(persona.description.as_deref());
+            let new_about =
+                crate::managed_agents::effective_agent_description(description.as_deref());
+            let about_changed = old_about != new_about;
 
             persona.display_name = display_name;
             persona.avatar_url = avatar_url;
+            persona.description = description;
             persona.system_prompt = system_prompt;
             persona.runtime = runtime;
             persona.model = model;
@@ -142,9 +161,12 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let retained = retain(&app, &state, &result)?;
             try_regenerate_nest(&app);
 
-            // If the avatar or display_name changed, propagate to linked agent
-            // records and collect relay profile sync params for the async phase.
-            let sync_params: ProfileSyncParams = if avatar_changed || name_changed {
+            // If the avatar, display_name, or effective description changed,
+            // propagate to linked agent records and collect relay profile sync
+            // params for the async phase. An about-only change touches no
+            // record bytes but still republishes each linked kind:0 profile.
+            let sync_params: ProfileSyncParams = if avatar_changed || name_changed || about_changed
+            {
                 let mut records = load_managed_agents(&app)?;
                 let mut params: ProfileSyncParams = Vec::new();
                 let mut agents_modified = false;
@@ -189,8 +211,8 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                         record_changed = true;
                     }
 
-                    if record_changed {
-                        agents_modified = true;
+                    agents_modified = agents_modified || record_changed;
+                    if record_changed || about_changed {
                         if let Ok(agent_keys) = nostr::Keys::parse(&record.private_key_nsec) {
                             let relay_url = crate::relay::effective_agent_relay_url(
                                 &record.relay_url,
@@ -201,6 +223,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                                 relay_url,
                                 record.name.clone(),
                                 record.avatar_url.clone(),
+                                new_about.clone(),
                                 record.auth_tag.clone(),
                             ));
                         }
@@ -231,19 +254,23 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
 
-    // Phase 2: await relay profile sync for linked agents whose avatar or
-    // display_name was just updated. We await (rather than fire-and-forget)
+    // Phase 2: await relay profile sync for linked agents whose avatar,
+    // display_name, or effective description (kind:0 about) was just
+    // updated. We await (rather than fire-and-forget)
     // so the frontend cache invalidation that follows the mutation settlement
     // sees the fresh relay profile. Best-effort — failures are logged, not surfaced.
     if !profile_sync_params.is_empty() {
         let state = app.state::<AppState>();
-        for (agent_keys, relay_url, display_name, avatar_url, auth_tag) in profile_sync_params {
+        for (agent_keys, relay_url, display_name, avatar_url, about, auth_tag) in
+            profile_sync_params
+        {
             if let Err(e) = crate::relay::sync_managed_agent_profile(
                 &state,
                 &relay_url,
                 &agent_keys,
                 &display_name,
                 avatar_url.as_deref(),
+                about.as_deref(),
                 auth_tag.as_deref(),
             )
             .await

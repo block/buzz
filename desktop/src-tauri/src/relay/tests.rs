@@ -569,7 +569,7 @@ fn make_valid_auth_tag(agent_keys: &nostr::Keys) -> String {
 fn profile_event_with_valid_auth_tag() {
     let agent_keys = nostr::Keys::generate();
     let tag_json = make_valid_auth_tag(&agent_keys);
-    let event = build_profile_event(&agent_keys, "TestBot", None, Some(&tag_json))
+    let event = build_profile_event(&agent_keys, "TestBot", None, None, Some(&tag_json))
         .expect("should succeed with a valid auth tag");
 
     // Exactly one "auth" tag must be present.
@@ -587,7 +587,7 @@ fn profile_event_with_valid_auth_tag() {
 #[test]
 fn profile_event_without_auth_tag() {
     let agent_keys = nostr::Keys::generate();
-    let event = build_profile_event(&agent_keys, "TestBot", None, None)
+    let event = build_profile_event(&agent_keys, "TestBot", None, None, None)
         .expect("should succeed without an auth tag");
 
     // No "auth" tags should be present.
@@ -602,11 +602,40 @@ fn profile_event_without_auth_tag() {
 }
 
 #[test]
+fn profile_event_includes_about_when_description_present() {
+    let agent_keys = nostr::Keys::generate();
+    let event = build_profile_event(
+        &agent_keys,
+        "TestBot",
+        None,
+        Some("A meticulous code reviewer."),
+        None,
+    )
+    .expect("should succeed with an about");
+    let content: serde_json::Value =
+        serde_json::from_str(&event.content).expect("kind:0 content is JSON");
+    assert_eq!(
+        content.get("about").and_then(|v| v.as_str()),
+        Some("A meticulous code reviewer.")
+    );
+}
+
+#[test]
+fn profile_event_omits_about_when_absent() {
+    let agent_keys = nostr::Keys::generate();
+    let event = build_profile_event(&agent_keys, "TestBot", None, None, None)
+        .expect("should succeed without an about");
+    let content: serde_json::Value =
+        serde_json::from_str(&event.content).expect("kind:0 content is JSON");
+    assert!(content.get("about").is_none());
+}
+
+#[test]
 fn profile_event_rejects_invalid_auth_tag() {
     let agent_keys = nostr::Keys::generate();
     // Structurally valid JSON array but with a bogus signature — verification must fail.
     let bad_json = format!(r#"["auth","{}","","{}"]"#, "a".repeat(64), "b".repeat(128));
-    let result = build_profile_event(&agent_keys, "TestBot", None, Some(&bad_json));
+    let result = build_profile_event(&agent_keys, "TestBot", None, None, Some(&bad_json));
     assert!(result.is_err(), "should reject an invalid auth tag");
     assert!(
         result.unwrap_err().contains("verification failed"),

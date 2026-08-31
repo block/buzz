@@ -10,6 +10,8 @@ export type RawPersona = {
   id: string;
   display_name: string;
   avatar_url: string | null;
+  /** Optional short, PUBLIC description (max 280 chars). */
+  description?: string | null;
   system_prompt: string;
   runtime?: string | null;
   model?: string | null;
@@ -40,6 +42,7 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
     id: persona.id,
     displayName: persona.display_name,
     avatarUrl: persona.avatar_url,
+    description: persona.description ?? null,
     systemPrompt: persona.system_prompt,
     runtime: persona.runtime ?? null,
     model: persona.model ?? null,
@@ -64,6 +67,18 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
   };
 }
 
+/**
+ * Normalize a dialog description value for the wire: trimmed, with
+ * empty/whitespace-only (and absent) collapsing to null so the backend
+ * stores "no description" rather than an empty string.
+ */
+function normalizeDescription(
+  description: string | null | undefined,
+): string | null {
+  const trimmed = description?.trim() ?? "";
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 export async function listPersonas(): Promise<AgentPersona[]> {
   return (await invokeTauri<RawPersona[]>("list_personas")).map(fromRawPersona);
 }
@@ -76,6 +91,7 @@ export async function createPersona(
       input: {
         displayName: input.displayName,
         avatarUrl: input.avatarUrl,
+        description: normalizeDescription(input.description),
         systemPrompt: input.systemPrompt,
         runtime: input.runtime,
         model: input.model,
@@ -95,6 +111,7 @@ function updatePersonaPayload(input: UpdatePersonaInput) {
     id: input.id,
     displayName: input.displayName,
     avatarUrl: input.avatarUrl,
+    description: normalizeDescription(input.description),
     systemPrompt: input.systemPrompt,
     runtime: input.runtime,
     model: input.model,

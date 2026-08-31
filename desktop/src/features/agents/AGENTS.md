@@ -236,6 +236,28 @@ with a TypeScript lookup table or an id comparison in a component.
    mid-conversation effort control without a plan ruling. The archived live-effort
    machinery lives on `archive/claude-config-gaps-live-effort` for reference only.
 
+15. **The persona `description` is public display metadata.** It is optional,
+   capped at 280 characters, and validated through the shared visible-text
+   policy (`validate_agent_description_text` in `definition_validation.rs`)
+   at create/update and at the untrusted catalog parser — rejected, never
+   stripped. It is deliberately EXCLUDED from `persona_content_hash`
+   (`description_change_does_not_change_content_hash`), so a description-only
+   edit never flips the restart badge on linked instances. Only the AUTHORED
+   description exists — there is deliberately no derived/generated fallback;
+   a blank description publishes an empty kind:0 `about`, exactly as before
+   the field existed. The trim/empty resolution exists twice and must stay in
+   sync (port changes in the same PR): `lib/agentDescription.ts`
+   (`effectiveAgentDescription`) feeds display surfaces, and its Rust twin
+   (`managed_agents/agent_description.rs`, `effective_agent_description` /
+   `record_effective_description`) feeds the publish path, where
+   `profile_needs_sync` compares `about` (None == empty) so description edits
+   reconcile instead of being clobbered. The agents-page card face shows the
+   authored description as its second line, falling back to the model label
+   when none exists (`UnifiedAgentsSection.tsx` composes it;
+   `AgentIdentityCard` takes a presentational `subtitle`). The dialog field
+   lives in `ui/AgentDescriptionField.tsx` (`AgentIdentityFields`), not
+   inline in the over-1000-line dialogs.
+
 12. **Owner-only builds constrain managed runtimes, not relay-agent mentions.**
     The compiled owner-only capability applies when Desktop starts or deploys a
     managed agent. Independently operated relay agents with NIP-OA ownership
@@ -289,6 +311,8 @@ with a TypeScript lookup table or an id comparison in a component.
   acceptance coverage for readiness, failure states, defaults, session-draft
   restoration, zero-write Skip, Next save failure/retry, navigation, and
   successful-empty vs failed optional-model discovery.
+- `lib/agentDescription.test.mjs` — authored-description resolution: trim,
+  blank/missing → null.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 - Rust: persona sharing/retention tests pin relay+owner scoping, durable
   enqueue errors, relay rejection/unavailability, and accepted publication.
