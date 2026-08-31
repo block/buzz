@@ -7,14 +7,7 @@ import {
   KIND_AGENT_MEDIA_SESSION_STARTED,
 } from "@/shared/constants/kinds";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import {
-  type AgentMediaSession,
-  type AgentMediaSessionEnd,
-  endRetiresSession,
-  isSessionExpired,
-  parseAgentMediaSession,
-  parseAgentMediaSessionEnd,
-} from "./agentMediaSession";
+import { type AgentMediaSession, foldLiveSessions } from "./agentMediaSession";
 
 /**
  * Ceiling on an expiry wake-up.
@@ -27,26 +20,61 @@ import {
 const MAX_EXPIRY_TIMER_MS = 2 ** 31 - 1;
 
 /**
+ * One shared empty result, so "nothing live" is always the same reference.
+ *
+ * A fresh `[]` per mount or per reset would undo the identity preservation
+ * `foldLiveSessions` exists for: every consumer memo keyed on the list would
+ * recompute, and a channel with no session would churn as loudly as one with.
+ */
+const NO_SESSIONS: readonly AgentMediaSession[] = [];
+
+/**
+ * How far back the backfill looks for a session that could still be live.
+ *
+ * A start cannot outlive the relay's cap on `expires_at`, which is one hour
+ * past its `created_at`, so anything older than that is provably dead and
+ * asking for it only spends the page on corpses. Doubled deliberately: a client
+ * whose window is shorter than the relay's cap stops discovering live sessions
+ * on join, and it fails silently, so the slack absorbs that cap growing before
+ * this constant catches up with it.
+ */
+const HISTORY_WINDOW_SECS = 2 * 60 * 60;
+
+/**
+ * Page size for that backfill.
+ *
+ * The window above should be what bounds discovery, not the page. A relay
+ * returns the *newest* matching events, so too small a page silently drops the
+ * oldest still-live start as soon as a channel produces enough lifecycle
+ * events — at the previous 100 that took only fifty sessions in an hour.
+ *
+ * This is still a cap, so saturation is reported rather than passed over in
+ * silence. The durable fix is one replaceable event per agent instead of a
+ * growing log, which is a wire change rather than a bigger number here.
+ */
+const HISTORY_LIMIT = 500;
+
+/**
  * Live agent media sessions for a channel, newest first.
  *
- * Reconstructs from the full event history on every arrival rather than
- * mutating incrementally — the same choice `HuddleIndicator` makes, and for the
- * same reason: lifecycle events are rare, replay on reconnect is common, and a
- * fold over everything seen is correct regardless of arrival order. An end
- * event that arrives before its start still retires that start.
+ * The fold itself is `foldLiveSessions` — pure, and identity-preserving for a
+ * session that has not changed. That property is load-bearing: read its doc
+ * before altering how this hook publishes its result, because an open call is
+ * torn down and rejoined whenever the selected session's object changes.
  *
- * A session leaves the list two ways: an end event its owner is entitled to
- * publish, or its own announced expiry passing. The second exists because the
- * first may never happen — an agent that crashes publishes no 48201.
+ * This hook owns the parts a pure fold cannot: the subscription, the
+ * accumulated event set, and a wake-up for the one way a session can leave the
+ * list without any event arriving — its announced expiry passing.
  */
 export function useAgentMediaSessions(
   channelId: string | null,
-): AgentMediaSession[] {
-  const [sessions, setSessions] = React.useState<AgentMediaSession[]>([]);
+): readonly AgentMediaSession[] {
+  const [sessions, setSessions] =
+    React.useState<readonly AgentMediaSession[]>(NO_SESSIONS);
 
   React.useEffect(() => {
     if (!channelId) {
-      setSessions([]);
+      setSessions(NO_SESSIONS);
       return;
     }
 
@@ -54,38 +82,23 @@ export function useAgentMediaSessions(
     let cleanup: (() => void) | null = null;
     let expiryTimer: ReturnType<typeof setTimeout> | null = null;
     const seen = new Map<string, RelayEvent>();
+    // The previous fold, held here rather than read back from state: each
+    // arrival is its own React commit, and a fold must build on the objects the
+    // last one produced for their identity to survive.
+    let live: readonly AgentMediaSession[] = NO_SESSIONS;
 
     function reconstruct() {
-      const started: AgentMediaSession[] = [];
-      const ends: AgentMediaSessionEnd[] = [];
-
-      for (const event of seen.values()) {
-        if (event.kind === KIND_AGENT_MEDIA_SESSION_STARTED) {
-          const session = parseAgentMediaSession(event);
-          if (session) started.push(session);
-          continue;
-        }
-        if (event.kind === KIND_AGENT_MEDIA_SESSION_ENDED) {
-          const end = parseAgentMediaSessionEnd(event);
-          if (end) ends.push(end);
-        }
-      }
-
-      const nowSeconds = Math.floor(Date.now() / 1000);
-      const live = started
-        .filter(
-          (session) =>
-            // Check the ender's standing rather than matching on the event id
-            // alone: without it any member could retire another agent's live
-            // card by publishing a 48201 that names its start.
-            !ends.some((end) => endRetiresSession(end, session)) &&
-            !isSessionExpired(session, nowSeconds),
-        )
-        .sort((a, b) => b.startedAt - a.startedAt);
-
+      const next = foldLiveSessions(
+        seen.values(),
+        live,
+        Math.floor(Date.now() / 1000),
+      );
       if (disposed) return;
-      setSessions(live);
-      scheduleNextExpiry(live);
+      live = next;
+      // An unchanged fold returns the same array, so React bails out here
+      // rather than re-rendering every consumer.
+      setSessions(next);
+      scheduleNextExpiry(next);
     }
 
     /**
@@ -95,12 +108,12 @@ export function useAgentMediaSessions(
      * to react to, so on a quiet channel the card would stay on screen until
      * something unrelated arrived.
      */
-    function scheduleNextExpiry(live: AgentMediaSession[]) {
+    function scheduleNextExpiry(current: readonly AgentMediaSession[]) {
       if (expiryTimer !== null) clearTimeout(expiryTimer);
       expiryTimer = null;
-      if (live.length === 0) return;
+      if (current.length === 0) return;
 
-      const soonest = Math.min(...live.map((session) => session.expiresAt));
+      const soonest = Math.min(...current.map((session) => session.expiresAt));
       // A second past the boundary rather than on it, so the re-run sees the
       // expiry as passed under either rounding of the clock.
       const delayMs = Math.min(
@@ -109,6 +122,11 @@ export function useAgentMediaSessions(
       );
       expiryTimer = setTimeout(reconstruct, delayMs);
     }
+
+    // Counted until readiness only, so it measures the stored backfill rather
+    // than the live tail that follows it.
+    let backfilled = 0;
+    let backfillComplete = false;
 
     relayClient
       .subscribeLive(
@@ -123,14 +141,31 @@ export function useAgentMediaSessions(
             KIND_AGENT_MEDIA_SESSION_ENDED,
           ],
           "#h": [channelId],
-          limit: 100,
+          // Ask for the events that can still describe a live session, rather
+          // than for a fixed number of the most recent ones. An end always
+          // follows the start it closes, so bounding the window by a start's
+          // maximum lifetime keeps both halves of every pair that matters.
+          since: Math.floor(Date.now() / 1000) - HISTORY_WINDOW_SECS,
+          limit: HISTORY_LIMIT,
         },
         (event: RelayEvent) => {
           if (disposed) return;
+          if (!backfillComplete) backfilled += 1;
           // Dedup by event id — reconnect replays history.
           if (seen.has(event.id)) return;
           seen.set(event.id, event);
           reconstruct();
+        },
+        (readiness) => {
+          backfillComplete = true;
+          if (disposed || backfilled < HISTORY_LIMIT) return;
+          // Saturated: the relay had at least a full page inside the window, so
+          // the oldest live session in this channel may simply not have been
+          // sent. Silence here would read as "nothing else is live".
+          console.warn(
+            "[useAgentMediaSessions] lifecycle backfill filled its page; an older live session may be missing",
+            { channelId, limit: HISTORY_LIMIT, readiness },
+          );
         },
       )
       .then((dispose) => {
@@ -152,7 +187,7 @@ export function useAgentMediaSessions(
       disposed = true;
       if (expiryTimer !== null) clearTimeout(expiryTimer);
       cleanup?.();
-      setSessions([]);
+      setSessions(NO_SESSIONS);
     };
   }, [channelId]);
 
@@ -171,6 +206,8 @@ export function useAgentMediaSession(
     // normalized) but callers pass an agent record's pubkey, which may carry
     // mixed case. An unnormalized compare silently never matches.
     const wanted = normalizePubkey(agentPubkey);
+    // `find` returns the fold's own object, so the identity `useAgentMediaRoom`
+    // depends on is passed through rather than rebuilt here.
     return sessions.find((session) => session.agentPubkey === wanted) ?? null;
   }, [sessions, agentPubkey]);
 }

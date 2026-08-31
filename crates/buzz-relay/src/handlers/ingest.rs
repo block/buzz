@@ -93,6 +93,16 @@ const MAX_MEDIA_SESSION_CONTENT_BYTES: usize = 8 * 1024;
 /// best. New providers are added here deliberately.
 const KNOWN_MEDIA_PROVIDERS: &[&str] = &["livekit"];
 
+/// Schemes a media transport URL may use.
+///
+/// A client hands `connect.url` straight to its provider SDK, so the same
+/// reasoning as `token_endpoint` applies: a world-readable channel event must
+/// not be able to name `javascript:`, `data:` or `file:`. LiveKit's own client
+/// accepts the websocket and the http form and converts between them, so both
+/// are admissible, and the unencrypted variants stay in so a self-hosted
+/// gateway can be reached on a LAN.
+const MEDIA_TRANSPORT_SCHEMES: &[&str] = &["wss://", "ws://", "https://", "http://"];
+
 /// Collect the pubkeys named by `p` tags.
 fn p_tag_pubkeys(event: &Event) -> Vec<String> {
     event
@@ -254,9 +264,44 @@ fn validate_agent_media_session_shape(
             "invalid: unknown agent media session provider".into(),
         ));
     }
-    if !body.get("connect").is_some_and(|v| v.is_object()) {
+    // `connect` carries the transport, so an announcement whose transport is
+    // unusable is not an announcement at all: every client can do nothing but
+    // drop it, silently, after the relay has already fanned it out to the whole
+    // channel. Both fields are required non-empty for that reason, matching
+    // what the desktop's `parseAgentMediaSession` refuses to render. Checking
+    // only that `connect` was an object let `{}` through, and a stored, valid,
+    // unjoinable session reports nothing anywhere.
+    let connect = body
+        .get("connect")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            IngestError::Rejected("invalid: agent media session must carry a connect object".into())
+        })?;
+    let url = connect
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if url.is_empty() {
         return Err(IngestError::Rejected(
-            "invalid: agent media session must carry a connect object".into(),
+            "invalid: agent media session connect.url must be a non-empty string".into(),
+        ));
+    }
+    if !MEDIA_TRANSPORT_SCHEMES
+        .iter()
+        .any(|scheme| url.starts_with(scheme))
+    {
+        return Err(IngestError::Rejected(
+            "invalid: agent media session connect.url must be ws(s) or http(s)".into(),
+        ));
+    }
+    if connect
+        .get("room")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .is_empty()
+    {
+        return Err(IngestError::Rejected(
+            "invalid: agent media session connect.room must be a non-empty string".into(),
         ));
     }
     // Viewers fetch a short-lived credential from `token_endpoint`, so a scheme
@@ -264,6 +309,12 @@ fn validate_agent_media_session_shape(
     // channel event a vector for whatever the client's URL handler does with
     // `file:`, `data:` or `javascript:`. https is expected in production; plain
     // http stays admissible so a self-hosted gateway can be reached on a LAN.
+    //
+    // Presence stays optional, unlike the `connect` fields above, and the line
+    // between them is whether the failure is silent: a viewer that finds no
+    // endpoint is told so in the panel, and a later provider may carry its
+    // credential some other way, so this is a client-side dead end rather than
+    // an event the relay should refuse to store.
     if let Some(endpoint) = body.get("token_endpoint") {
         let endpoint = endpoint.as_str().ok_or_else(|| {
             IngestError::Rejected(
@@ -5976,6 +6027,12 @@ mod postgres_tests {
         )
     }
 
+    /// A start body carrying `connect` verbatim, valid in every other respect.
+    fn livekit_body_with_connect(connect: &str) -> String {
+        let expires_at = nostr::Timestamp::now().as_secs() as i64 + 600;
+        format!(r#"{{"v":1,"provider":"livekit","connect":{connect},"expires_at":{expires_at}}}"#)
+    }
+
     const RELAY_KEY: [u8; 32] = [7u8; 32];
 
     #[test]
@@ -5985,6 +6042,100 @@ mod postgres_tests {
             &keys,
             KIND_AGENT_MEDIA_SESSION_STARTED,
             &livekit_body(),
+            vec![],
+        );
+
+        assert!(validate_agent_media_session_shape(
+            &RELAY_KEY,
+            &event,
+            KIND_AGENT_MEDIA_SESSION_STARTED
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn media_session_start_rejects_an_unusable_connect_object() {
+        // Every one of these used to be accepted: `connect` was checked for
+        // being an object and nothing further. The relay then stored and fanned
+        // out a session no client could join, and nothing reported it — the
+        // desktop's own parse drops such an announcement silently, by design.
+        let keys = nostr::Keys::generate();
+        for connect in [
+            r#"{}"#,
+            r#"{"room":"r"}"#,
+            r#"{"url":"wss://x"}"#,
+            r#"{"url":"","room":"r"}"#,
+            r#"{"url":"wss://x","room":""}"#,
+            r#"{"url":42,"room":"r"}"#,
+            r#"{"url":"wss://x","room":7}"#,
+            // The scheme guard `token_endpoint` already had, which `connect.url`
+            // did not — and it is `connect.url` that a client dials.
+            r#"{"url":"javascript:alert(1)","room":"r"}"#,
+            r#"{"url":"file:///etc/passwd","room":"r"}"#,
+            r#"{"url":"data:text/html,x","room":"r"}"#,
+        ] {
+            let event = media_session_event(
+                &keys,
+                KIND_AGENT_MEDIA_SESSION_STARTED,
+                &livekit_body_with_connect(connect),
+                vec![],
+            );
+
+            assert!(
+                validate_agent_media_session_shape(
+                    &RELAY_KEY,
+                    &event,
+                    KIND_AGENT_MEDIA_SESSION_STARTED
+                )
+                .is_err(),
+                "connect {connect} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn media_session_start_accepts_every_transport_a_client_can_dial() {
+        // The allowlist must not be narrower than the SDK: LiveKit's client
+        // takes the websocket and the http form and converts between them, and
+        // a self-hosted gateway on a LAN has no certificate.
+        let keys = nostr::Keys::generate();
+        for connect in [
+            r#"{"url":"wss://x.livekit.cloud","room":"r"}"#,
+            r#"{"url":"ws://127.0.0.1:7880","room":"r"}"#,
+            r#"{"url":"https://x.livekit.cloud","room":"r"}"#,
+            r#"{"url":"http://127.0.0.1:7880","room":"r"}"#,
+        ] {
+            let event = media_session_event(
+                &keys,
+                KIND_AGENT_MEDIA_SESSION_STARTED,
+                &livekit_body_with_connect(connect),
+                vec![],
+            );
+
+            assert!(
+                validate_agent_media_session_shape(
+                    &RELAY_KEY,
+                    &event,
+                    KIND_AGENT_MEDIA_SESSION_STARTED
+                )
+                .is_ok(),
+                "connect {connect} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn media_session_start_accepts_an_announcement_with_no_token_endpoint() {
+        // Deliberate, and the counterpart to the `connect` rules above. A
+        // viewer that finds no endpoint is told so in the panel, so this fails
+        // loudly at the client; an unusable `connect` fails silently, which is
+        // what the relay refuses to store. A later provider may also carry its
+        // credential some other way.
+        let keys = nostr::Keys::generate();
+        let event = media_session_event(
+            &keys,
+            KIND_AGENT_MEDIA_SESSION_STARTED,
+            &livekit_body_with_connect(r#"{"url":"wss://x","room":"r"}"#),
             vec![],
         );
 
@@ -6153,8 +6304,12 @@ mod postgres_tests {
     fn media_session_content_exactly_at_the_cap_is_admissible() {
         let keys = nostr::Keys::generate();
         let expires_at = nostr::Timestamp::now().as_secs() as i64 + 600;
-        let prefix =
-            format!(r#"{{"provider":"livekit","connect":{{}},"expires_at":{expires_at},"pad":""#);
+        // A usable `connect`, not `{}`: the boundary this pins is the content
+        // size, and a body the validator rejects for another reason would pass
+        // this test whatever the cap did.
+        let prefix = format!(
+            r#"{{"provider":"livekit","connect":{{"url":"wss://x","room":"r"}},"expires_at":{expires_at},"pad":""#
+        );
         let suffix = r#""}"#;
         let pad = "x".repeat(MAX_MEDIA_SESSION_CONTENT_BYTES - prefix.len() - suffix.len());
         let body = format!("{prefix}{pad}{suffix}");

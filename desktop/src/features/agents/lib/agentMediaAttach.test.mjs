@@ -6,6 +6,17 @@
  * play from two independent clocks. LiveKit's `attach` merges tracks into the
  * element's existing `MediaStream`, so one element is one clock. These pin
  * "both tracks, one element" so the drift cannot come back quietly.
+ *
+ * What they do not pin, stated plainly because the gap is easy to miss: the
+ * element below is a stand-in and both attachers are spies, so LiveKit never
+ * runs. The SDK behaviour that caused the original silence — `attachToElement`
+ * setting `element.muted` from the stream's own audio-track count — is
+ * unverified here, as is everything in `useAgentMediaRoom` and
+ * `AgentMediaSurface`: autoplay recovery, teardown, microphone state,
+ * reconnection. Pinning any of it needs a real media element and the real SDK,
+ * which the desktop unit lane (node, no DOM) cannot give and the mock-bridge
+ * Playwright lane has no room to join. So the rule is pinned; the SDK's own
+ * muting is covered only by the live run that exposed it.
  */
 
 import assert from "node:assert/strict";

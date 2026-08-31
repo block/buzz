@@ -108,6 +108,12 @@ async function fetchViewerToken(session: AgentMediaSession): Promise<string> {
  * and silently hot-miking someone is not acceptable. Disconnects on unmount and
  * on session change — leaving the room open would keep a WebRTC connection (and
  * the provider's meter) running behind a closed panel.
+ *
+ * The identity of `session` is part of the contract, not only its contents: the
+ * effect below re-runs whenever the object changes, and re-running means
+ * disconnect, another viewer token and a fresh join. Pass the object
+ * `foldLiveSessions` produced — which is what `useAgentMediaSession` returns —
+ * never one re-derived per render.
  */
 export function useAgentMediaRoom(
   session: AgentMediaSession | null,

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   endRetiresSession,
+  foldLiveSessions,
   isSessionExpired,
   parseAgentMediaSession,
   parseAgentMediaSessionEnd,
@@ -364,7 +365,8 @@ test("trackBelongsToSessionAgent refuses a foreign identity when the announcemen
 });
 
 test("trackBelongsToSessionAgent counts each kind against its own declaration", () => {
-  // An announcement may grant audio to a participant that publishes no face.
+  // An announcement may name a face publisher and give the voice to somebody
+  // else entirely.
   const session = sessionWith([
     { pubkey: AGENT, tracks: ["avatar_video"] },
     { pubkey: OTHER, tracks: ["audio"] },
@@ -372,11 +374,191 @@ test("trackBelongsToSessionAgent counts each kind against its own declaration", 
   assert.equal(
     trackBelongsToSessionAgent(session, "unnamed", "video"),
     true,
-    "one declared avatar publisher",
+    "one declared avatar publisher, and it is the agent",
   );
+  // The one declared voice is somebody else's. That is not an ambiguity to
+  // resolve in the agent's favour: the announcement says outright that this
+  // session's audio is not the agent's.
   assert.equal(
     trackBelongsToSessionAgent(session, "unnamed", "audio"),
-    true,
-    "one declared audio publisher, even though it is not the agent's own entry",
+    false,
+    "the sole declared audio publisher is not the agent",
   );
+});
+
+test("trackBelongsToSessionAgent refuses a viewer that joined under its own pubkey", () => {
+  // The case that actually occurs, and the reason a declaration alone cannot
+  // decide this. The gateway joins a viewer as `identity = <viewer pubkey>`,
+  // and a v1 announcement grants viewers a microphone. Two members open one
+  // session, the second unmutes, and without this check its voice replaces the
+  // agent's for the first — under the agent's face.
+  const session = sessionWith(SOLE_AVATAR);
+  for (const kind of ["video", "audio"]) {
+    assert.equal(trackBelongsToSessionAgent(session, OTHER, kind), false);
+    assert.equal(
+      trackBelongsToSessionAgent(session, OTHER.toUpperCase(), kind),
+      false,
+      "identity case must not defeat the check",
+    );
+    assert.equal(
+      trackBelongsToSessionAgent(session, `viewer-${OTHER}`, kind),
+      false,
+      "a pubkey anywhere in the identity names that participant",
+    );
+  }
+});
+
+test("trackBelongsToSessionAgent trusts the agent's own identity over an ambiguous declaration", () => {
+  // Rule order: an identity naming the agent settles it, so a room with
+  // several declared voices still plays the one that proved whose it is.
+  const session = sessionWith([
+    { pubkey: AGENT, tracks: ["avatar_video", "audio"] },
+    { pubkey: OTHER, tracks: ["audio"] },
+  ]);
+  assert.equal(
+    trackBelongsToSessionAgent(session, `anam-avatar-${AGENT}`, "audio"),
+    true,
+  );
+});
+
+// -- foldLiveSessions -----------------------------------------------------
+//
+// Provenance: this fold used to live inside the hook and reparsed every event
+// on every arrival, so each live session got a fresh object each time.
+// `useAgentMediaRoom` keys a whole WebRTC connection on that object — so
+// another agent going live dropped an open call, and every replayed history
+// event cost its own viewer token request. These pin the identity contract that
+// fixed it, which no type can express.
+
+const START_A = "1".repeat(64);
+const START_B = "2".repeat(64);
+const NONE = [];
+
+/** A 48200 that is distinct from the others by construction. */
+function start({ id, pubkey = AGENT, createdAt = CREATED_AT }) {
+  return announcement({
+    id,
+    pubkey,
+    created_at: createdAt,
+    content: JSON.stringify({
+      v: 1,
+      provider: "livekit",
+      connect: { url: "wss://example.livekit.cloud", room: id },
+      participants: [{ pubkey, tracks: ["avatar_video", "audio"] }],
+      expires_at: createdAt + 600,
+    }),
+  });
+}
+
+/** A 48201 closing `startId`, signed by `signer`. */
+function end({ startId, signer = AGENT }) {
+  return {
+    id: `d${startId.slice(1)}`,
+    pubkey: signer,
+    kind: 48201,
+    created_at: CREATED_AT + 10,
+    tags: [
+      ["h", CHANNEL],
+      ["e", startId],
+    ],
+    content: "",
+  };
+}
+
+test("foldLiveSessions returns the previous array when nothing changed", () => {
+  const events = [start({ id: START_A })];
+  const first = foldLiveSessions(events, NONE, CREATED_AT);
+  assert.equal(first.length, 1);
+  assert.ok(
+    Object.is(foldLiveSessions(events, first, CREATED_AT), first),
+    "an unchanged fold must not re-render every consumer",
+  );
+});
+
+test("foldLiveSessions keeps a live session's object when another arrives", () => {
+  // The regression this exists for. An unrelated agent going live must not
+  // rebuild the session being watched, or the open call is torn down and
+  // rejoined for someone else's announcement.
+  const a = start({ id: START_A });
+  const first = foldLiveSessions([a], NONE, CREATED_AT);
+  const second = foldLiveSessions(
+    [a, start({ id: START_B, pubkey: OTHER, createdAt: CREATED_AT + 5 })],
+    first,
+    CREATED_AT,
+  );
+  assert.equal(second.length, 2);
+  assert.ok(
+    !Object.is(second, first),
+    "the set changed, so the array must too",
+  );
+  assert.ok(
+    Object.is(
+      second.find((session) => session.eventId === START_A),
+      first[0],
+    ),
+    "the watched session must still be the same object",
+  );
+});
+
+test("foldLiveSessions orders newest first", () => {
+  const live = foldLiveSessions(
+    [
+      start({ id: START_A }),
+      start({ id: START_B, pubkey: OTHER, createdAt: CREATED_AT + 5 }),
+    ],
+    NONE,
+    CREATED_AT,
+  );
+  assert.deepEqual(
+    live.map((session) => session.eventId),
+    [START_B, START_A],
+  );
+});
+
+test("foldLiveSessions drops a session its owner ended", () => {
+  const a = start({ id: START_A });
+  const first = foldLiveSessions([a], NONE, CREATED_AT);
+  const second = foldLiveSessions(
+    [a, end({ startId: START_A })],
+    first,
+    CREATED_AT,
+  );
+  assert.deepEqual(second, []);
+  assert.ok(!Object.is(second, first));
+});
+
+test("foldLiveSessions honours an end that arrived before its start", () => {
+  // Replay order is not causal order, which is the whole reason this refolds
+  // rather than updating incrementally.
+  const live = foldLiveSessions(
+    [end({ startId: START_A }), start({ id: START_A })],
+    NONE,
+    CREATED_AT,
+  );
+  assert.deepEqual(live, []);
+});
+
+test("foldLiveSessions keeps a session a third party tried to end", () => {
+  const live = foldLiveSessions(
+    [start({ id: START_A }), end({ startId: START_A, signer: OTHER })],
+    NONE,
+    CREATED_AT,
+  );
+  assert.equal(live.length, 1);
+});
+
+test("foldLiveSessions drops a session past its expiry", () => {
+  const live = foldLiveSessions(
+    [start({ id: START_A })],
+    NONE,
+    CREATED_AT + 600,
+  );
+  assert.deepEqual(live, []);
+});
+
+test("foldLiveSessions does not resurrect a session the events no longer carry", () => {
+  // `previous` is a source of objects, never of membership.
+  const first = foldLiveSessions([start({ id: START_A })], NONE, CREATED_AT);
+  assert.equal(first.length, 1);
+  assert.deepEqual(foldLiveSessions([], first, CREATED_AT), []);
 });

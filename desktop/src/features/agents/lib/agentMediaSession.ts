@@ -1,4 +1,8 @@
 import type { RelayEvent } from "@/shared/api/types";
+import {
+  KIND_AGENT_MEDIA_SESSION_ENDED,
+  KIND_AGENT_MEDIA_SESSION_STARTED,
+} from "@/shared/constants/kinds";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 /**
@@ -241,23 +245,42 @@ export function isSessionExpired(
 }
 
 /**
+ * A 64-char lowercase-hex run inside a provider identity.
+ *
+ * Every identity this room mints for a *person* is exactly one of these: the
+ * gateway joins a viewer under its own Buzz pubkey. An identity carrying a
+ * pubkey is therefore naming a specific participant, and the test below is
+ * reached only once that pubkey is known not to be the agent's.
+ */
+const PUBKEY_IN_IDENTITY = /[0-9a-f]{64}/;
+
+/**
  * Whether a track published by `participantIdentity` is this session's agent's.
  *
  * Called for every subscribed track, because only the announcing agent's face
- * and voice belong in its panel. A room may carry other publishers once
- * sessions go multi-party, and rendering the wrong face — or playing the wrong
- * voice under the right one — is worse than rendering nothing.
+ * and voice belong in its panel. Getting this wrong is not a cosmetic slip: the
+ * room hook holds one audio track, so admitting somebody else's voice *detaches
+ * the agent's*. One member unmuting would silence the agent for another and
+ * speak under its face.
  *
- * Two ways to qualify, in order:
+ * Three rules, in order:
  *
- * 1. The provider identity contains the agent's hex pubkey. This is what a
- *    gateway is expected to do, and it is unambiguous.
- * 2. Failing that, the announcement declares exactly one publisher of this
- *    track kind. Then a single track of that kind cannot be anyone else's, and
- *    refusing it would strand v1 on an identity convention the wire format
- *    never actually promised.
+ * 1. The provider identity contains the agent's hex pubkey. Unambiguous, and
+ *    the only rule that proves anything about who actually published.
+ * 2. Otherwise, an identity carrying some *other* pubkey is refused outright.
+ *    Viewers join as their own pubkey and a v1 announcement grants them a
+ *    microphone, so this is the case that genuinely occurs.
+ * 3. Only then may the announcement's declaration settle it: exactly one
+ *    declared publisher of this track kind, and that publisher is the agent.
  *
- * Audio is checked the same way as video and against its own declaration: an
+ * Rule 3 cannot be dropped in favour of rule 1, tempting as that is. No gateway
+ * is obliged to put a pubkey in its provider identity, and the one this was
+ * built against does not — the Anam avatar worker joins under an identity of
+ * Anam's choosing, and the gateway's `agent_token` helper, whose docstring
+ * calls the identity contract load-bearing, has no callers. Requiring rule 1
+ * would leave every session today faceless.
+ *
+ * Audio is checked against its own declaration rather than video's: an
  * announcement may name one avatar publisher and several audio ones, and the
  * agent's face arriving unambiguously says nothing about whose voice this is.
  */
@@ -267,12 +290,102 @@ export function trackBelongsToSessionAgent(
   kind: "audio" | "video",
 ): boolean {
   // `session.agentPubkey` is normalized at parse time; the identity is not.
-  if (participantIdentity.toLowerCase().includes(session.agentPubkey)) {
-    return true;
-  }
+  const identity = participantIdentity.toLowerCase();
+  if (identity.includes(session.agentPubkey)) return true;
+  if (PUBKEY_IN_IDENTITY.test(identity)) return false;
+
   const declared: MediaTrackKind = kind === "video" ? "avatar_video" : "audio";
-  return (
-    session.participants.filter((entry) => entry.tracks.includes(declared))
-      .length === 1
+  const publishers = session.participants.filter((entry) =>
+    entry.tracks.includes(declared),
   );
+  // The sole declared publisher has to be the agent. Counting alone admits an
+  // announcement naming somebody else as the only voice — which is not an
+  // ambiguity to resolve in the agent's favour, but a statement that the voice
+  // is not the agent's.
+  return (
+    publishers.length === 1 && publishers[0].pubkey === session.agentPubkey
+  );
+}
+
+/**
+ * Whether two folds produced the same live set, element identity included.
+ *
+ * Elements are compared by reference, which is exactly the question: the fold
+ * reuses a previously parsed session for an unchanged event, so a differing
+ * reference means the content differed too.
+ */
+function sessionsUnchanged(
+  a: readonly AgentMediaSession[],
+  b: readonly AgentMediaSession[],
+): boolean {
+  if (a.length !== b.length) return false;
+  for (let index = 0; index < a.length; index += 1) {
+    if (!Object.is(a[index], b[index])) return false;
+  }
+  return true;
+}
+
+/**
+ * Fold lifecycle events into a channel's live sessions, newest first.
+ *
+ * A fold over everything seen rather than an incremental update: lifecycle
+ * events are rare, replay on reconnect is common, and refolding is correct
+ * regardless of arrival order — an end that arrives before its start still
+ * retires that start. A session leaves the set two ways, an end event its owner
+ * was entitled to publish, or its own announced expiry passing. The second
+ * exists because the first may never happen: an agent that crashes publishes no
+ * 48201.
+ *
+ * **Identity-preserving, and that is a correctness requirement rather than an
+ * optimisation.** `useAgentMediaRoom` keys a whole WebRTC connection on the
+ * session object, so handing it a fresh object for an unchanged session tears
+ * the call down, fetches another viewer token and rejoins. Refolding on every
+ * arrival used to do exactly that: an unrelated agent starting or ending a
+ * session — or any expiry firing — interrupted an open call, and each replayed
+ * history event cost its own token request.
+ *
+ * Two guarantees carry that. A 48200 is immutable, so a session already parsed
+ * under an event id can only parse to the same value and the object from
+ * `previous` is reused. And when the outcome matches `previous` entirely,
+ * `previous` itself is returned, so `setState` bails out instead of
+ * re-rendering every consumer.
+ */
+export function foldLiveSessions(
+  events: Iterable<RelayEvent>,
+  previous: readonly AgentMediaSession[],
+  nowSeconds: number,
+): readonly AgentMediaSession[] {
+  const started: AgentMediaSession[] = [];
+  const ends: AgentMediaSessionEnd[] = [];
+  const parsed = new Map(previous.map((session) => [session.eventId, session]));
+
+  for (const event of events) {
+    if (event.kind === KIND_AGENT_MEDIA_SESSION_STARTED) {
+      const already = parsed.get(event.id);
+      if (already) {
+        started.push(already);
+        continue;
+      }
+      const session = parseAgentMediaSession(event);
+      if (session) started.push(session);
+      continue;
+    }
+    if (event.kind === KIND_AGENT_MEDIA_SESSION_ENDED) {
+      const end = parseAgentMediaSessionEnd(event);
+      if (end) ends.push(end);
+    }
+  }
+
+  const live = started
+    .filter(
+      (session) =>
+        // Check the ender's standing rather than matching on the event id
+        // alone: without it any member could retire another agent's live card
+        // by publishing a 48201 that names its start.
+        !ends.some((end) => endRetiresSession(end, session)) &&
+        !isSessionExpired(session, nowSeconds),
+    )
+    .sort((a, b) => b.startedAt - a.startedAt);
+
+  return sessionsUnchanged(previous, live) ? previous : live;
 }
