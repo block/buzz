@@ -55,17 +55,28 @@ pub(crate) async fn enforce_http_admission(
     }
 }
 
+/// Outcome of bridge authentication.
+#[derive(Debug)]
+pub(crate) struct BridgeAuth {
+    /// The authenticated public key.
+    pub pubkey: nostr::PublicKey,
+    /// Event ID used for replay detection. Zero hash in X-Pubkey dev mode,
+    /// where there is no signed event and so no replay concern.
+    pub event_id_bytes: [u8; 32],
+    /// `created_at` of the NIP-98 request event, when one authenticated this
+    /// request. `None` in X-Pubkey dev mode: nothing was signed, so there is no
+    /// timestamp a NIP-OA attestation's bounds could be judged against.
+    pub created_at: Option<u64>,
+}
+
 /// Verify bridge auth: NIP-98 (production) or X-Pubkey (dev mode).
-///
-/// Returns the authenticated public key and an event ID for replay detection.
-/// For X-Pubkey dev mode, the event ID is a zero hash (no replay concern).
 pub(crate) fn verify_bridge_auth(
     headers: &HeaderMap,
     method: &str,
     url: &str,
     body: Option<&[u8]>,
     require_auth_token: bool,
-) -> Result<(nostr::PublicKey, [u8; 32]), (StatusCode, Json<Value>)> {
+) -> Result<BridgeAuth, (StatusCode, Json<Value>)> {
     verify_bridge_auth_with_options(headers, method, url, body, require_auth_token, false)
 }
 
@@ -76,7 +87,7 @@ pub(crate) fn verify_bridge_auth_with_options(
     body: Option<&[u8]>,
     require_auth_token: bool,
     require_payload: bool,
-) -> Result<(nostr::PublicKey, [u8; 32]), (StatusCode, Json<Value>)> {
+) -> Result<BridgeAuth, (StatusCode, Json<Value>)> {
     // Try NIP-98 first (Authorization: Nostr <base64>)
     if let Some(auth_str) = headers
         .get("authorization")
@@ -111,7 +122,11 @@ pub(crate) fn verify_bridge_auth_with_options(
         let pubkey = buzz_auth::verify_nip98_event(&event_json, url, method, body)
             .map_err(|e| api_error(StatusCode::UNAUTHORIZED, &format!("NIP-98: {e}")))?;
 
-        return Ok((pubkey, event_id_bytes));
+        return Ok(BridgeAuth {
+            pubkey,
+            event_id_bytes,
+            created_at: Some(event.created_at.as_secs()),
+        });
     }
 
     // Dev-mode fallback: X-Pubkey header (only when require_auth_token is false)
@@ -120,7 +135,11 @@ pub(crate) fn verify_bridge_auth_with_options(
             let pubkey = nostr::PublicKey::from_hex(hex_val)
                 .map_err(|_| api_error(StatusCode::UNAUTHORIZED, "invalid X-Pubkey hex"))?;
             // Zero event ID — no replay detection needed for dev mode
-            return Ok((pubkey, [0u8; 32]));
+            return Ok(BridgeAuth {
+                pubkey,
+                event_id_bytes: [0u8; 32],
+                created_at: None,
+            });
         }
     }
 
@@ -723,7 +742,11 @@ pub async fn submit_event(
         })?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/events");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let BridgeAuth {
+        pubkey,
+        event_id_bytes,
+        created_at: auth_event_created_at,
+    } = verify_bridge_auth(
         &headers,
         "POST",
         &url,
@@ -736,8 +759,16 @@ pub async fn submit_event(
     // runs inside the helper.  The thin wrapper here owns the single terminal
     // attribution line so it fires for every outcome, including admission/
     // replay/membership failures that previously returned before any log fired.
-    let outcome =
-        submit_event_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
+    let outcome = submit_event_authed(
+        &state,
+        &tenant,
+        &headers,
+        &body,
+        pubkey,
+        event_id_bytes,
+        auth_event_created_at,
+    )
+    .await;
 
     match &outcome {
         SubmitOutcome::Ok { accepted, kind, .. } => {
@@ -846,6 +877,7 @@ async fn submit_event_authed(
     body: &[u8],
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
+    auth_event_created_at: Option<u64>,
 ) -> SubmitOutcome {
     // Admission and replay checks fire before body parse — a 429 or replay
     // reject on a malformed body must still be attributed.
@@ -894,16 +926,27 @@ async fn submit_event_authed(
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        auth_event_created_at,
     )
     .await
     {
-        Ok(owner) => owner.or_else(|| {
-            if !state.config.require_relay_membership {
-                super::relay_members::extract_nip_oa_owner(&pubkey_bytes, auth_tag)
-            } else {
-                None
+        // Without a NIP-98 request event there is no signed timestamp to judge
+        // the attestation's time bounds against (X-Pubkey dev auth), so no
+        // ownership is recorded rather than treating the tag as unbounded.
+        Ok(owner) => match auth_event_created_at {
+            Some(created_at) => {
+                super::relay_members::resolve_nip_oa_owner(
+                    state,
+                    tenant.community(),
+                    owner,
+                    &pubkey_bytes,
+                    auth_tag,
+                    created_at,
+                )
+                .await
             }
-        }),
+            None => None,
+        },
         Err(e) => {
             return SubmitOutcome::Err {
                 status: e.0,
@@ -994,7 +1037,12 @@ pub async fn query_events(
         })?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/query");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let BridgeAuth {
+        pubkey,
+        event_id_bytes,
+        created_at,
+        ..
+    } = verify_bridge_auth(
         &headers,
         "POST",
         &url,
@@ -1007,8 +1055,16 @@ pub async fn query_events(
     // helper.  The single terminal attribution line fires here from the Result
     // so every outcome — including admission/replay/membership failures that
     // previously returned before any log — is attributed.
-    let result =
-        query_events_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
+    let result = query_events_authed(
+        &state,
+        &tenant,
+        &headers,
+        &body,
+        pubkey,
+        event_id_bytes,
+        created_at,
+    )
+    .await;
     match &result {
         Ok(Json(Value::Array(events))) => {
             tracing::info!(
@@ -1044,6 +1100,7 @@ async fn query_events_authed(
     body: &[u8],
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
+    auth_event_created_at: Option<u64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     enforce_http_admission(state, tenant, &pubkey).await?;
     check_nip98_replay(state, tenant, event_id_bytes).await?;
@@ -1055,6 +1112,7 @@ async fn query_events_authed(
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        auth_event_created_at,
     )
     .await?;
 
@@ -1523,7 +1581,12 @@ pub async fn count_events(
         })?;
 
     let url = nip98_expected_url(&state.config.relay_url, &tenant, "/count");
-    let (pubkey, event_id_bytes) = verify_bridge_auth(
+    let BridgeAuth {
+        pubkey,
+        event_id_bytes,
+        created_at,
+        ..
+    } = verify_bridge_auth(
         &headers,
         "POST",
         &url,
@@ -1536,8 +1599,16 @@ pub async fn count_events(
     // helper.  The single terminal attribution line fires here from the Result
     // so every outcome — including admission/replay/membership failures that
     // previously returned before any log — is attributed.
-    let result =
-        count_events_authed(&state, &tenant, &headers, &body, pubkey, event_id_bytes).await;
+    let result = count_events_authed(
+        &state,
+        &tenant,
+        &headers,
+        &body,
+        pubkey,
+        event_id_bytes,
+        created_at,
+    )
+    .await;
     match &result {
         Ok(Json(value)) => {
             let count = value.get("count").and_then(Value::as_u64);
@@ -1571,6 +1642,7 @@ async fn count_events_authed(
     body: &[u8],
     pubkey: nostr::PublicKey,
     event_id_bytes: [u8; 32],
+    auth_event_created_at: Option<u64>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     enforce_http_admission(state, tenant, &pubkey).await?;
     check_nip98_replay(state, tenant, event_id_bytes).await?;
@@ -1582,6 +1654,7 @@ async fn count_events_authed(
         tenant.community(),
         &pubkey_bytes,
         auth_tag,
+        auth_event_created_at,
     )
     .await?;
 
@@ -2309,8 +2382,11 @@ async fn authorize_moderation_read(
         _ => path.to_string(),
     };
     let url = nip98_expected_url(&state.config.relay_url, &tenant, &path_with_query);
-    let (pubkey, event_id_bytes) =
-        verify_bridge_auth(headers, "GET", &url, None, state.config.require_auth_token)?;
+    let BridgeAuth {
+        pubkey,
+        event_id_bytes,
+        ..
+    } = verify_bridge_auth(headers, "GET", &url, None, state.config.require_auth_token)?;
     check_nip98_replay(state, &tenant, event_id_bytes).await?;
     let pubkey_bytes = pubkey.to_bytes().to_vec();
 
@@ -2921,7 +2997,7 @@ mod tests {
         let tenant_a = fresh_tenant("host-a.example");
         let expected_url = nip98_expected_url(config_relay_url, &tenant_a, "/events");
 
-        let (pubkey, _event_id_bytes) =
+        let BridgeAuth { pubkey, .. } =
             verify_bridge_auth(&headers, "POST", &expected_url, Some(b""), true)
                 .expect("matching-host NIP-98 event must verify");
         assert_eq!(
@@ -2970,7 +3046,7 @@ mod tests {
             Some("limit=20&status=open"),
         );
 
-        let (pubkey, _event_id_bytes) =
+        let BridgeAuth { pubkey, .. } =
             verify_bridge_auth(&headers, "GET", &expected_url, None, true)
                 .expect("query-bearing moderation read must verify against the same query");
         assert_eq!(pubkey, keys.public_key());
@@ -3027,7 +3103,7 @@ mod tests {
             Some("limit=20"),
         );
 
-        let (pubkey, _event_id_bytes) =
+        let BridgeAuth { pubkey, .. } =
             verify_bridge_auth(&headers, "GET", &expected_url, None, true)
                 .expect("audit query-bearing read must verify");
         assert_eq!(pubkey, keys.public_key());
@@ -3052,7 +3128,7 @@ mod tests {
         );
         assert_eq!(expected_url, "https://host-a.example/moderation/restricted");
 
-        let (pubkey, _event_id_bytes) =
+        let BridgeAuth { pubkey, .. } =
             verify_bridge_auth(&headers, "GET", &expected_url, None, true)
                 .expect("query-less restricted read must verify against the bare path");
         assert_eq!(pubkey, keys.public_key());
@@ -4151,6 +4227,421 @@ mod tests {
         assert!(
             log.contains(&pubkey_hex[..16]),
             "attribution line must carry the pubkey;\nlog:\n{log}"
+        );
+    }
+    // ── NIP-OA owner materialization over the real HTTP path ────────────────
+    //
+    // These enter at `submit_event_authed`, the authenticated core of
+    // `POST /events`: everything outside it is NIP-98 verification and the
+    // attribution log, and everything the owner path touches — the membership
+    // gate, `resolve_nip_oa_owner`, `materialize_nip_oa_owner` — is inside.
+    // Reverting the production call site makes the first test below fail,
+    // which the previous pure unit tests did not.
+    //
+    // `#[ignore]`d because they need Postgres and Redis; CI selects them by
+    // name (`test(/nip_oa_owner_/)`), since no job runs this crate's default
+    // test set.
+
+    /// These tests are `#[ignore]`d and run only when explicitly selected, so a
+    /// silent skip is never what the caller wanted: it turns "the database was
+    /// missing" into a passing run. Fail loudly instead — this is the same
+    /// false-green shape the tests themselves exist to rule out.
+    fn require_infra<T>(value: Option<T>) -> T {
+        value.expect(
+            "NIP-OA owner tests need Postgres and Redis (DATABASE_URL / REDIS_URL); \
+             refusing to pass without them",
+        )
+    }
+
+    async fn nip_oa_test_state() -> Option<(Arc<AppState>, sqlx::PgPool)> {
+        let mut config = crate::config::Config::from_env().ok()?;
+        // The regression is closed-relay-only: on an open relay the owner was
+        // always recorded.
+        config.require_relay_membership = true;
+        let pool = sqlx::PgPool::connect(&config.database_url).await.ok()?;
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .ok()?;
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .ok()?,
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).ok()?;
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            Keys::generate(),
+            media_storage,
+        );
+        Some((Arc::new(state), pool))
+    }
+
+    async fn seed_community(pool: &sqlx::PgPool) -> TenantContext {
+        let id = uuid::Uuid::new_v4();
+        let host = format!("nip-oa-{}.example", id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(&host)
+            .execute(pool)
+            .await
+            .expect("insert test community");
+        TenantContext::resolved(buzz_core::CommunityId::from_uuid(id), host)
+    }
+
+    /// A signed event for the request body. Its ingest outcome is irrelevant:
+    /// owner materialization happens before ingest, so the assertion holds
+    /// whether or not the event itself is accepted.
+    fn body_event(keys: &Keys) -> Vec<u8> {
+        let event = EventBuilder::new(Kind::TextNote, "nip-oa owner materialization probe")
+            .sign_with_keys(keys)
+            .expect("sign body event");
+        serde_json::to_vec(&event).expect("serialize body event")
+    }
+
+    fn auth_tag_headers(tag_json: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-auth-tag", tag_json.parse().expect("header value"));
+        headers
+    }
+
+    async fn stored_owner(
+        state: &AppState,
+        tenant: &TenantContext,
+        agent: &nostr::PublicKey,
+    ) -> Option<Vec<u8>> {
+        state
+            .db
+            .get_agent_channel_policy(tenant.community(), agent.as_bytes())
+            .await
+            .expect("read agent policy")
+            .and_then(|(_, owner)| owner)
+    }
+
+    /// Run one `POST /events` submission as `agent`, presenting `tag_json`.
+    ///
+    /// Panics if the submit fails before reaching owner materialization.
+    /// Admission and the NIP-98 replay guard run first and both fail closed on
+    /// a Redis blip, which short-circuits the request; without this check that
+    /// shows up downstream as "the owner was not recorded" and reads exactly
+    /// like a product bug instead of the infrastructure failure it is.
+    async fn submit_with_tag(
+        state: &Arc<AppState>,
+        tenant: &TenantContext,
+        agent: &Keys,
+        tag_json: Option<&str>,
+        auth_event_created_at: u64,
+    ) {
+        let headers = match tag_json {
+            Some(tag) => auth_tag_headers(tag),
+            None => HeaderMap::new(),
+        };
+        let outcome = submit_event_authed(
+            state,
+            tenant,
+            &headers,
+            &body_event(agent),
+            agent.public_key(),
+            fresh_nip98_event_id_bytes(),
+            Some(auth_event_created_at),
+        )
+        .await;
+        if let SubmitOutcome::Err { status, .. } = &outcome {
+            panic!(
+                "submit failed before owner materialization (status {status}) — \
+                 infrastructure, not the owner path"
+            );
+        }
+    }
+
+    /// Drive the complete NIP-98 `POST /events` boundary through the axum
+    /// router. Unlike `submit_with_tag`, this makes the production wrapper
+    /// authenticate the signed request and carry its timestamp into the
+    /// ownership policy.
+    async fn post_events_with_nip98_tag(
+        state: &Arc<AppState>,
+        tenant: &TenantContext,
+        agent: &Keys,
+        tag_json: &str,
+        auth_event_created_at: u64,
+    ) -> StatusCode {
+        use axum::body::Body;
+        use axum::http::{header, Request};
+        use tower::ServiceExt;
+
+        let body = body_event(agent);
+        let url = nip98_expected_url(&state.config.relay_url, tenant, "/events");
+        let auth_event = EventBuilder::new(Kind::HttpAuth, "")
+            .tags([
+                Tag::parse(["u", url.as_str()]).expect("u tag"),
+                Tag::parse(["method", "POST"]).expect("method tag"),
+            ])
+            .custom_created_at(nostr::Timestamp::from(auth_event_created_at))
+            .sign_with_keys(agent)
+            .expect("sign NIP-98 event");
+        let auth_event_json = serde_json::to_string(&auth_event).expect("serialize auth event");
+        let mut headers = nip98_auth_headers(&auth_event_json);
+        headers.insert(
+            header::HOST,
+            tenant.host().parse().expect("valid tenant host header"),
+        );
+        headers.insert("x-auth-tag", tag_json.parse().expect("header value"));
+
+        let mut request = Request::builder()
+            .method("POST")
+            .uri("/events")
+            .body(Body::from(body))
+            .expect("build request");
+        *request.headers_mut() = headers;
+
+        crate::router::build_router(state.clone())
+            .oneshot(request)
+            .await
+            .expect("router oneshot")
+            .status()
+    }
+
+    /// The regression itself: a direct relay member on a closed relay presents
+    /// a valid attestation, and the owner is recorded. Before the fix this
+    /// silently resolved to no owner, so `owner_only` policies had nothing to
+    /// match and observer frames were refused.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn nip_oa_owner_http_records_owner_for_direct_member() {
+        let (state, pool) = require_infra(nip_oa_test_state().await);
+        let tenant = seed_community(&pool).await;
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+
+        for pubkey in [agent.public_key(), owner.public_key()] {
+            state
+                .db
+                .add_relay_member(tenant.community(), &pubkey.to_hex(), "member", None)
+                .await
+                .expect("add relay member");
+        }
+
+        let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+            .expect("compute auth tag");
+        submit_with_tag(&state, &tenant, &agent, Some(&tag), 1_000).await;
+
+        assert_eq!(
+            stored_owner(&state, &tenant, &agent.public_key()).await,
+            Some(owner.public_key().to_bytes().to_vec()),
+            "a direct member's verified owner must be recorded on a closed relay",
+        );
+    }
+
+    /// The outer HTTP regression boundary: the router must authenticate a real
+    /// NIP-98 request and preserve its signed timestamp through `submit_event`
+    /// into owner materialization. Supplying `None` at that handoff makes this
+    /// assertion fail while the inner-path test above remains green.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn nip_oa_owner_http_outer_nip98_records_owner_for_direct_member() {
+        let (state, pool) = require_infra(nip_oa_test_state().await);
+        let tenant = seed_community(&pool).await;
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+
+        for pubkey in [agent.public_key(), owner.public_key()] {
+            state
+                .db
+                .add_relay_member(tenant.community(), &pubkey.to_hex(), "member", None)
+                .await
+                .expect("add relay member");
+        }
+
+        let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+            .expect("compute auth tag");
+        let status = post_events_with_nip98_tag(
+            &state,
+            &tenant,
+            &agent,
+            &tag,
+            nostr::Timestamp::now().as_secs(),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "real POST /events must succeed");
+        assert_eq!(
+            stored_owner(&state, &tenant, &agent.public_key()).await,
+            Some(owner.public_key().to_bytes().to_vec()),
+            "the outer NIP-98 wrapper must carry its signed timestamp into owner materialization",
+        );
+    }
+
+    /// A member cannot mint a throwaway keypair, attest itself, and have that
+    /// key trusted: the resolved owner selects the agent rate class and is
+    /// first-write-wins, so an untrusted key must never reach the record.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn nip_oa_owner_http_refuses_an_owner_that_is_not_a_relay_member() {
+        let (state, pool) = require_infra(nip_oa_test_state().await);
+        let tenant = seed_community(&pool).await;
+        let agent = Keys::generate();
+        let stranger = Keys::generate();
+
+        state
+            .db
+            .add_relay_member(
+                tenant.community(),
+                &agent.public_key().to_hex(),
+                "member",
+                None,
+            )
+            .await
+            .expect("add relay member");
+
+        let tag = buzz_sdk::nip_oa::compute_auth_tag(&stranger, &agent.public_key(), "")
+            .expect("compute auth tag");
+        submit_with_tag(&state, &tenant, &agent, Some(&tag), 1_000).await;
+
+        assert_eq!(
+            stored_owner(&state, &tenant, &agent.public_key()).await,
+            None,
+            "a non-member owner must not be recorded on a closed relay",
+        );
+    }
+
+    /// A signature that verifies is not a credential that is valid: an expired
+    /// attestation must not materialize, or expiry means nothing.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn nip_oa_owner_http_refuses_an_expired_attestation() {
+        let (state, pool) = require_infra(nip_oa_test_state().await);
+        let tenant = seed_community(&pool).await;
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+
+        for pubkey in [agent.public_key(), owner.public_key()] {
+            state
+                .db
+                .add_relay_member(tenant.community(), &pubkey.to_hex(), "member", None)
+                .await
+                .expect("add relay member");
+        }
+
+        let expired =
+            buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "created_at<1000")
+                .expect("compute auth tag");
+        // Auth event is at the bound, which is outside it — bounds are strict.
+        submit_with_tag(&state, &tenant, &agent, Some(&expired), 1_000).await;
+
+        assert_eq!(
+            stored_owner(&state, &tenant, &agent.public_key()).await,
+            None,
+            "an expired attestation must not be materialized",
+        );
+
+        // Same tag, inside its window: proves the refusal above is the time
+        // bound and not some unrelated rejection.
+        submit_with_tag(&state, &tenant, &agent, Some(&expired), 999).await;
+        assert_eq!(
+            stored_owner(&state, &tenant, &agent.public_key()).await,
+            Some(owner.public_key().to_bytes().to_vec()),
+            "the same attestation inside its window must be recorded",
+        );
+    }
+
+    /// The real NIP-98 wrapper must apply strict attestation bounds to the
+    /// timestamp it verified. The inside-window control proves the expired
+    /// refusal is caused by the bound rather than a broken outer request.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn nip_oa_owner_http_outer_nip98_refuses_expired_attestation() {
+        let (state, pool) = require_infra(nip_oa_test_state().await);
+        let tenant = seed_community(&pool).await;
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+
+        for pubkey in [agent.public_key(), owner.public_key()] {
+            state
+                .db
+                .add_relay_member(tenant.community(), &pubkey.to_hex(), "member", None)
+                .await
+                .expect("add relay member");
+        }
+
+        let auth_event_created_at = nostr::Timestamp::now().as_secs();
+        let tag = buzz_sdk::nip_oa::compute_auth_tag(
+            &owner,
+            &agent.public_key(),
+            &format!("created_at<{auth_event_created_at}"),
+        )
+        .expect("compute auth tag");
+        let expired_status =
+            post_events_with_nip98_tag(&state, &tenant, &agent, &tag, auth_event_created_at).await;
+
+        assert_eq!(
+            expired_status,
+            StatusCode::OK,
+            "expired ownership metadata must not reject the otherwise valid event",
+        );
+        assert_eq!(
+            stored_owner(&state, &tenant, &agent.public_key()).await,
+            None,
+            "an attestation at its strict upper bound must not materialize through the outer wrapper",
+        );
+
+        let inside_status = post_events_with_nip98_tag(
+            &state,
+            &tenant,
+            &agent,
+            &tag,
+            auth_event_created_at.saturating_sub(1),
+        )
+        .await;
+        assert_eq!(
+            inside_status,
+            StatusCode::OK,
+            "the same attestation inside its window must reach owner materialization",
+        );
+        assert_eq!(
+            stored_owner(&state, &tenant, &agent.public_key()).await,
+            Some(owner.public_key().to_bytes().to_vec()),
+            "the inside-window control must prove the expired refusal is not vacuous",
+        );
+    }
+
+    /// Membership alone never invents an owner.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn nip_oa_owner_http_without_a_tag_records_nothing() {
+        let (state, pool) = require_infra(nip_oa_test_state().await);
+        let tenant = seed_community(&pool).await;
+        let agent = Keys::generate();
+
+        state
+            .db
+            .add_relay_member(
+                tenant.community(),
+                &agent.public_key().to_hex(),
+                "member",
+                None,
+            )
+            .await
+            .expect("add relay member");
+
+        submit_with_tag(&state, &tenant, &agent, None, 1_000).await;
+
+        assert_eq!(
+            stored_owner(&state, &tenant, &agent.public_key()).await,
+            None,
         );
     }
 }

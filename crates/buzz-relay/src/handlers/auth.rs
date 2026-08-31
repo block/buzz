@@ -2,9 +2,14 @@
 //!
 //! Relay membership enforcement uses the shared
 //! [`crate::api::relay_members::enforce_relay_membership`] helper, which supports
-//! NIP-OA owner-delegation fallback on closed relays. On open relays, the auth
-//! handler calls [`crate::api::relay_members::extract_nip_oa_owner`] directly to
-//! extract the owner pubkey for agent→owner backfill (observer frame auth).
+//! NIP-OA owner-delegation fallback on closed relays. The owner recorded for
+//! agent→owner backfill (observer frame auth, agent rate class) is then resolved
+//! with [`crate::api::relay_members::resolve_nip_oa_owner`], which keeps the
+//! delegated owner when membership came through one and otherwise verifies the
+//! presented tag — including for a direct member, whose attestation was
+//! previously dropped. On a closed relay the claimed owner must itself be a
+//! relay member, and the tag's time bounds are enforced against this AUTH
+//! event's `created_at`.
 //!
 //! For WebSocket auth, the NIP-OA `auth` tag is extracted from the signed AUTH
 //! event itself (the tag is integrity-protected by the event signature).
@@ -76,6 +81,10 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
     // The tag is integrity-protected by the event's Schnorr signature — if
     // tampered, NIP-42 verification will fail before we ever inspect it.
     let auth_tag_json = extract_auth_tag_json(&event);
+    // Captured before `verify_auth_event` consumes the event. The NIP-OA tag
+    // rides inside this AUTH event and is integrity-protected by its signature,
+    // so this is the timestamp the attestation's time bounds are judged against.
+    let auth_event_created_at = event.created_at.as_secs();
 
     let relay_url =
         crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, &conn.tenant);
@@ -219,6 +228,7 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 conn.tenant.community(),
                 pubkey.as_bytes(),
                 auth_tag_json.as_deref(),
+                Some(auth_event_created_at),
             )
             .await
             {
@@ -237,20 +247,23 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 }
             };
 
-            // Open relay NIP-OA backfill: extract owner for agent→owner DB mapping
-            // (needed for observer frame auth). Only runs on open relays — on closed
-            // relays, enforce_relay_membership already handles NIP-OA delegation.
-            // No feature flag needed: NIP-OA is cryptographically self-proving.
-            let nip_oa_owner = nip_oa_owner.or_else(|| {
-                if !state.config.require_relay_membership && auth_tag_json.is_some() {
-                    crate::api::relay_members::extract_nip_oa_owner(
-                        pubkey.as_bytes(),
-                        auth_tag_json.as_deref(),
-                    )
-                } else {
-                    None
-                }
-            });
+            // NIP-OA backfill: resolve the owner for the agent→owner DB mapping
+            // (needed for observer frame auth and for the agent rate class).
+            // `enforce_relay_membership` reports an owner only when membership was
+            // granted *through* it, so a direct member's tag is resolved here —
+            // on closed relays too, subject to the owner itself being a relay
+            // member. The tag's time bounds are judged against this AUTH event's
+            // `created_at`: the tag is carried inside it and integrity-protected
+            // by its signature, so it is the artifact the attestation authorized.
+            let nip_oa_owner = crate::api::relay_members::resolve_nip_oa_owner(
+                &state,
+                conn.tenant.community(),
+                nip_oa_owner,
+                pubkey.as_bytes(),
+                auth_tag_json.as_deref(),
+                auth_event_created_at,
+            )
+            .await;
 
             // Stash NIP-OA owner on the auth context only after the shared
             // backfill confirms the first-write-wins relationship.
@@ -346,5 +359,349 @@ mod tests {
             Tag::parse(["auth", b.as_str(), "", sig.as_str()]).unwrap(),
         ]);
         assert_eq!(extract_auth_tag_json(&event), None);
+    }
+    // ── NIP-OA owner materialization over the real NIP-42 path ──────────────
+    //
+    // These drive `handle_auth` itself, so reverting its production call site
+    // makes the first one fail. `#[ignore]`d — they need Postgres and Redis,
+    // and CI selects them by name (`test(/nip_oa_owner_/)`).
+
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicU8;
+    use std::sync::Arc;
+    use tokio::sync::{mpsc, Mutex, RwLock};
+    use tokio_util::sync::CancellationToken;
+    use uuid::Uuid;
+
+    use crate::connection::{AuthState, ConnectionState};
+    use crate::state::AppState;
+    use buzz_core::tenant::TenantContext;
+
+    /// See the note on `require_infra` in `api::bridge::tests`: an `#[ignore]`d
+    /// test that was explicitly selected must never pass by skipping.
+    fn require_infra<T>(value: Option<T>) -> T {
+        value.expect(
+            "NIP-OA owner tests need Postgres and Redis (DATABASE_URL / REDIS_URL); \
+             refusing to pass without them",
+        )
+    }
+
+    async fn ws_test_state() -> Option<(Arc<AppState>, sqlx::PgPool)> {
+        ws_test_state_with(|_| {}).await
+    }
+
+    /// `ws_test_state`, but lets a test adjust the config before the relay is
+    /// built — `allow_nip_oa_auth` defaults to **false**, so a test that needs
+    /// the delegated-admission branch must turn it on or it will pass for the
+    /// wrong reason.
+    async fn ws_test_state_with(
+        adjust: impl FnOnce(&mut crate::config::Config),
+    ) -> Option<(Arc<AppState>, sqlx::PgPool)> {
+        let mut config = crate::config::Config::from_env().ok()?;
+        config.require_relay_membership = true;
+        adjust(&mut config);
+        let pool = sqlx::PgPool::connect(&config.database_url).await.ok()?;
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .ok()?;
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .ok()?,
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).ok()?;
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            Keys::generate(),
+            media_storage,
+        );
+        Some((Arc::new(state), pool))
+    }
+
+    async fn ws_seed_community(pool: &sqlx::PgPool) -> TenantContext {
+        let id = Uuid::new_v4();
+        let host = format!("nip-oa-ws-{}.example", id.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(&host)
+            .execute(pool)
+            .await
+            .expect("insert test community");
+        TenantContext::resolved(buzz_core::CommunityId::from_uuid(id), host)
+    }
+
+    /// A pending connection ready to receive AUTH, plus its challenge.
+    fn pending_conn(tenant: &TenantContext) -> (Arc<ConnectionState>, String) {
+        let challenge = buzz_auth::generate_challenge();
+        let (send_tx, _send_rx) = mpsc::channel(16);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(16);
+        let conn = Arc::new(ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: tenant.clone(),
+            remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
+            auth_state: RwLock::new(AuthState::Pending {
+                challenge: challenge.clone(),
+            }),
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            send_tx,
+            ctrl_tx,
+            cancel: CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        });
+        (conn, challenge)
+    }
+
+    /// Sign a NIP-42 AUTH event for `state`'s relay URL, carrying `tag_json`
+    /// as an `auth` tag, stamped at `created_at`.
+    fn auth_event(
+        state: &AppState,
+        tenant: &TenantContext,
+        agent: &Keys,
+        challenge: &str,
+        tag_json: Option<&str>,
+        created_at: u64,
+    ) -> nostr::Event {
+        let relay_url =
+            crate::api::bridge::nip42_expected_relay_url(&state.config.relay_url, tenant);
+        let url = nostr::RelayUrl::parse(&relay_url).expect("relay url");
+        let mut builder = EventBuilder::auth(challenge, url);
+        if let Some(tag) = tag_json {
+            let parts: Vec<String> = serde_json::from_str(tag).expect("auth tag json");
+            builder = builder.tags([Tag::parse(parts).expect("auth tag")]);
+        }
+        builder
+            .custom_created_at(nostr::Timestamp::from(created_at))
+            .sign_with_keys(agent)
+            .expect("sign auth event")
+    }
+
+    /// NIP-42 rejects a stale AUTH event, so these tests stamp at the real
+    /// clock and express the tag's bounds relative to it — which is also how a
+    /// live deployment presents an expiring credential.
+    fn now_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_secs()
+    }
+
+    async fn ws_stored_owner(
+        state: &AppState,
+        tenant: &TenantContext,
+        agent: &nostr::PublicKey,
+    ) -> Option<Vec<u8>> {
+        state
+            .db
+            .get_agent_channel_policy(tenant.community(), agent.as_bytes())
+            .await
+            .expect("read agent policy")
+            .and_then(|(_, owner)| owner)
+    }
+
+    /// The regression on the WebSocket path: a direct member authenticating
+    /// with a valid attestation gets its owner recorded *and* carried onto the
+    /// live auth context, which is what observer-frame authorization and the
+    /// agent rate class both read.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn nip_oa_owner_ws_records_owner_and_sets_auth_context() {
+        let (state, pool) = require_infra(ws_test_state().await);
+        let tenant = ws_seed_community(&pool).await;
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+
+        for pubkey in [agent.public_key(), owner.public_key()] {
+            state
+                .db
+                .add_relay_member(tenant.community(), &pubkey.to_hex(), "member", None)
+                .await
+                .expect("add relay member");
+        }
+
+        let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "")
+            .expect("compute auth tag");
+        let (conn, challenge) = pending_conn(&tenant);
+        let event = auth_event(&state, &tenant, &agent, &challenge, Some(&tag), now_secs());
+
+        super::handle_auth(event, Arc::clone(&conn), Arc::clone(&state)).await;
+
+        assert_eq!(
+            ws_stored_owner(&state, &tenant, &agent.public_key()).await,
+            Some(owner.public_key().to_bytes().to_vec()),
+            "NIP-42 auth by a direct member must record its verified owner",
+        );
+
+        let auth_state = conn.auth_state.read().await;
+        match &*auth_state {
+            AuthState::Authenticated(ctx) => assert_eq!(
+                ctx.agent_owner_pubkey,
+                Some(owner.public_key()),
+                "the live auth context must carry the owner",
+            ),
+            other => panic!("expected authenticated connection, got {other:?}"),
+        }
+    }
+
+    /// An expired attestation authenticates the agent but confers nothing:
+    /// no ownership record, and no owner on the session, so the connection
+    /// cannot be classified into the agent rate tier.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn nip_oa_owner_ws_refuses_an_expired_attestation() {
+        let (state, pool) = require_infra(ws_test_state().await);
+        let tenant = ws_seed_community(&pool).await;
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+
+        for pubkey in [agent.public_key(), owner.public_key()] {
+            state
+                .db
+                .add_relay_member(tenant.community(), &pubkey.to_hex(), "member", None)
+                .await
+                .expect("add relay member");
+        }
+
+        let now = now_secs();
+        // Bound sits at the AUTH event's own timestamp; bounds are strict, so
+        // the credential is one second past expiry.
+        let expired = buzz_sdk::nip_oa::compute_auth_tag(
+            &owner,
+            &agent.public_key(),
+            &format!("created_at<{now}"),
+        )
+        .expect("compute auth tag");
+        let (conn, challenge) = pending_conn(&tenant);
+        let event = auth_event(&state, &tenant, &agent, &challenge, Some(&expired), now);
+
+        super::handle_auth(event, Arc::clone(&conn), Arc::clone(&state)).await;
+
+        assert_eq!(
+            ws_stored_owner(&state, &tenant, &agent.public_key()).await,
+            None,
+            "an expired attestation must not be materialized",
+        );
+
+        let auth_state = conn.auth_state.read().await;
+        match &*auth_state {
+            AuthState::Authenticated(ctx) => assert_eq!(
+                ctx.agent_owner_pubkey, None,
+                "an expired attestation must not classify the session as an agent",
+            ),
+            other => panic!("expected authenticated connection, got {other:?}"),
+        }
+    }
+
+    /// A non-member owner is not trusted on a closed relay, so nothing is
+    /// recorded and the session stays unclassified.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn nip_oa_owner_ws_refuses_an_owner_that_is_not_a_relay_member() {
+        let (state, pool) = require_infra(ws_test_state().await);
+        let tenant = ws_seed_community(&pool).await;
+        let agent = Keys::generate();
+        let stranger = Keys::generate();
+
+        state
+            .db
+            .add_relay_member(
+                tenant.community(),
+                &agent.public_key().to_hex(),
+                "member",
+                None,
+            )
+            .await
+            .expect("add relay member");
+
+        let tag = buzz_sdk::nip_oa::compute_auth_tag(&stranger, &agent.public_key(), "")
+            .expect("compute auth tag");
+        let (conn, challenge) = pending_conn(&tenant);
+        let event = auth_event(&state, &tenant, &agent, &challenge, Some(&tag), now_secs());
+
+        super::handle_auth(event, Arc::clone(&conn), Arc::clone(&state)).await;
+
+        assert_eq!(
+            ws_stored_owner(&state, &tenant, &agent.public_key()).await,
+            None,
+            "a non-member owner must not be recorded on a closed relay",
+        );
+    }
+
+    /// Delegated *admission* must honour the credential's window, not just
+    /// materialization.
+    ///
+    /// The sibling expiry test enrols the agent directly, so admission never
+    /// consults the tag and it can only prove an expired credential confers no
+    /// ownership. Here the agent is **not** a relay member and reaches the relay
+    /// solely through its member owner, so the tag is the whole basis for
+    /// access. NIP-AA Step 4 requires the `created_at` clauses to be evaluated
+    /// against the AUTH event's signed `created_at`; without that, a once-valid
+    /// capability reconnects forever while the owner stays enrolled.
+    ///
+    /// The unbounded case is a **positive control, not decoration**: it proves
+    /// the delegated branch is actually reached under this config. Without it
+    /// the two denials also pass when delegation is disabled outright — which is
+    /// exactly how an earlier draft of this test passed against the unfixed
+    /// code.
+    #[tokio::test]
+    #[ignore = "requires Postgres and Redis"]
+    async fn nip_oa_delegated_admission_refuses_credentials_outside_their_window() {
+        // Bounds are strict, so an AUTH event stamped exactly at the boundary
+        // satisfies neither clause.
+        for (label, conditions, admits) in [
+            ("unbounded (positive control)", String::new(), true),
+            ("expired", "created_at<{now}".to_string(), false),
+            ("not yet valid", "created_at>{now}".to_string(), false),
+        ] {
+            let (state, pool) =
+                require_infra(ws_test_state_with(|config| config.allow_nip_oa_auth = true).await);
+            let tenant = ws_seed_community(&pool).await;
+            let agent = Keys::generate();
+            let owner = Keys::generate();
+
+            // Only the owner is enrolled: admission can come from the tag alone.
+            state
+                .db
+                .add_relay_member(
+                    tenant.community(),
+                    &owner.public_key().to_hex(),
+                    "member",
+                    None,
+                )
+                .await
+                .expect("add relay member");
+
+            let now = now_secs();
+            let conditions = conditions.replace("{now}", &now.to_string());
+            let tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), &conditions)
+                .expect("compute auth tag");
+            let (conn, challenge) = pending_conn(&tenant);
+            let event = auth_event(&state, &tenant, &agent, &challenge, Some(&tag), now);
+
+            super::handle_auth(event, Arc::clone(&conn), Arc::clone(&state)).await;
+
+            let auth_state = conn.auth_state.read().await;
+            let authenticated = matches!(&*auth_state, AuthState::Authenticated(_));
+            assert_eq!(
+                authenticated, admits,
+                "{label}: a non-member agent reaching a closed relay through its \
+                 member owner must be admitted only inside the attested window",
+            );
+        }
     }
 }
