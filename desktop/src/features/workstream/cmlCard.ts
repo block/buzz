@@ -90,7 +90,9 @@ function requireStringOrNull(
 ): string | null {
   const value = card[field];
   if (value !== null && typeof value !== "string") {
-    throw new Error(`WorkstreamCard: field "${field}" must be a string or null`);
+    throw new Error(
+      `WorkstreamCard: field "${field}" must be a string or null`,
+    );
   }
   return value;
 }
@@ -99,11 +101,7 @@ function requireCount(card: Record<string, unknown>, field: string): number {
   const value = card[field];
   // The contract says unsigned integer; reject non-numbers, non-integers,
   // NaN, and negatives. Never coerce (a string "0" is a wrong primitive).
-  if (
-    typeof value !== "number" ||
-    !Number.isInteger(value) ||
-    value < 0
-  ) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0) {
     throw new Error(
       `WorkstreamCard: field "${field}" must be a non-negative integer`,
     );
@@ -227,7 +225,9 @@ export function assertNoSensitiveLeak(card: WorkstreamCard): void {
       );
     }
     if (IPV4_PATTERN.test(value)) {
-      throw new Error(`WorkstreamCard: field "${field}" leaks a raw IPv4 address`);
+      throw new Error(
+        `WorkstreamCard: field "${field}" leaks a raw IPv4 address`,
+      );
     }
     if (FULL_SHA_PATTERN.test(value)) {
       throw new Error(
