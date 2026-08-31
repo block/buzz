@@ -624,8 +624,38 @@ test("team cards use the thread-style overlapping avatar stack", async ({
   );
   expect(boxes[1]?.left).toBeLessThan(boxes[0]?.right ?? 0);
   expect(boxes[2]?.left).toBeLessThan(boxes[1]?.right ?? 0);
-  await expect(avatars.first()).not.toHaveCSS("mask-image", "none");
-  await expect(avatars.last()).toHaveCSS("mask-image", "none");
+  const overlapStyles = await avatars.evaluateAll((elements) =>
+    elements.map((element) => {
+      const styles = getComputedStyle(element);
+      const outline = getComputedStyle(element, "::before");
+      return {
+        maskImage: styles.maskImage,
+        outlineBackground: outline.backgroundColor,
+        outlineBorderRadius: outline.borderRadius,
+        outlineInset: outline.inset,
+      };
+    }),
+  );
+  expect(overlapStyles).toEqual([
+    {
+      maskImage: "none",
+      outlineBackground: "rgb(255, 255, 255)",
+      outlineBorderRadius: "calc(30% + 2px)",
+      outlineInset: "-2px",
+    },
+    {
+      maskImage: "none",
+      outlineBackground: "rgb(255, 255, 255)",
+      outlineBorderRadius: "calc(30% + 2px)",
+      outlineInset: "-2px",
+    },
+    {
+      maskImage: "none",
+      outlineBackground: "rgb(255, 255, 255)",
+      outlineBorderRadius: "calc(30% + 2px)",
+      outlineInset: "-2px",
+    },
+  ]);
   const avatarSurfaceStyles = await avatars
     .locator(":scope > *")
     .evaluateAll((elements) =>

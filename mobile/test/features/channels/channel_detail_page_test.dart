@@ -477,6 +477,47 @@ void main() {
   });
 
   group('ChannelDetailPage', () {
+    testWidgets(
+      'bot-role author avatars stay squircles in channel and thread',
+      (tester) async {
+        final message = _textMsg(
+          id: 'bot-message',
+          pubkey: 'bot',
+          content: 'Bot message',
+        );
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [message],
+            users: const {
+              'bot': UserProfile(pubkey: 'bot', displayName: 'Bot'),
+            },
+            loadChannelBotPubkeys: () async => const {'bot'},
+            threadReplies: const {'bot-message': []},
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        AvatarImage avatarIn(Finder row) => tester.widget<AvatarImage>(
+          find.descendant(of: row, matching: find.byType(AvatarImage)),
+        );
+        expect(
+          avatarIn(
+            find.byKey(const ValueKey('message-row-bot-message')),
+          ).isAgent,
+          isTrue,
+        );
+
+        await tester.tap(find.byKey(const ValueKey('message-row-bot-message')));
+        await tester.pumpAndSettle();
+        expect(
+          avatarIn(
+            find.byKey(const ValueKey('thread-message-row-bot-message')),
+          ).isAgent,
+          isTrue,
+        );
+      },
+    );
+
     testWidgets('uses the shared 32px masked presence avatar in DM headers', (
       tester,
     ) async {
@@ -511,6 +552,17 @@ void main() {
       expect(avatar.geometry, AvatarBadgeMaskGeometry.presenceDot);
       expect(avatar.badge, isNotNull);
       expect(
+        tester
+            .widget<ClipRRect>(
+              find.descendant(
+                of: avatarFinder,
+                matching: find.byType(ClipRRect),
+              ),
+            )
+            .borderRadius,
+        BorderRadius.circular(16),
+      );
+      expect(
         find.descendant(of: avatarFinder, matching: find.byType(ClipPath)),
         findsOneWidget,
       );
@@ -526,6 +578,61 @@ void main() {
       expect(presence.style?.fontWeight, FontWeight.w400);
       expect(find.byTooltip('View members'), findsNothing);
       expect(find.byTooltip('Start Huddle'), findsOneWidget);
+    });
+
+    testWidgets('uses a fallback squircle for bot-role DM participants', (
+      tester,
+    ) async {
+      final dmChannel = Channel(
+        id: _channelId,
+        name: 'Bot DM',
+        channelType: 'dm',
+        visibility: 'private',
+        description: 'Direct message with a bot',
+        createdBy: 'self',
+        createdAt: DateTime(2025),
+        memberCount: 2,
+        participants: const ['Self', 'Bot'],
+        participantPubkeys: const ['self', 'bot'],
+        isMember: true,
+      );
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: const [],
+          channel: dmChannel,
+          loadChannelBotPubkeys: () async => const {'bot'},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final avatarFinder = find.byKey(const ValueKey('dm-header-avatar'));
+      expect(
+        tester
+            .widget<ClipRRect>(
+              find.descendant(
+                of: avatarFinder,
+                matching: find.byType(ClipRRect),
+              ),
+            )
+            .borderRadius,
+        BorderRadius.circular(9.6),
+      );
+      expect(
+        tester
+            .widget<AvatarImageContent>(
+              find.descendant(
+                of: avatarFinder,
+                matching: find.byType(AvatarImageContent),
+              ),
+            )
+            .imageUrl,
+        isNull,
+      );
+      expect(
+        find.descendant(of: avatarFinder, matching: find.byType(ClipPath)),
+        findsOneWidget,
+      );
     });
 
     testWidgets('hides the Huddle action in a one-to-one agent DM', (
@@ -560,6 +667,18 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      final avatarFinder = find.byKey(const ValueKey('dm-header-avatar'));
+      expect(
+        tester
+            .widget<ClipRRect>(
+              find.descendant(
+                of: avatarFinder,
+                matching: find.byType(ClipRRect),
+              ),
+            )
+            .borderRadius,
+        BorderRadius.circular(9.6),
+      );
       expect(find.byKey(const ValueKey('channel-huddle-button')), findsNothing);
       expect(find.byTooltip('Start Huddle'), findsNothing);
     });

@@ -8,10 +8,12 @@ import 'package:buzz/features/forum/forum_posts_view.dart';
 import 'package:buzz/features/forum/forum_provider.dart';
 import 'package:buzz/features/forum/forum_thread_page.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:buzz/shared/widgets/avatar_image.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const _channelId = 'forum-channel';
@@ -62,10 +64,12 @@ Widget _buildPostCard({
   VoidCallback? onTap,
   void Function(String)? onDelete,
   TextScaler textScaler = TextScaler.noScaling,
+  Set<String> knownAgentPubkeys = const {},
 }) {
   return ProviderScope(
     overrides: [
       userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(users)),
+      knownAgentPubkeysProvider.overrideWithValue(knownAgentPubkeys),
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
@@ -205,6 +209,38 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('abcdef12\u2026'), findsOneWidget);
+    });
+
+    testWidgets('uses directory classification for uncached author avatar', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildPostCard(
+          post: _makePost(pubkey: 'directory-agent'),
+          knownAgentPubkeys: const {'directory-agent'},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<AvatarImage>(find.byType(AvatarImage)).isAgent,
+        isTrue,
+      );
+    });
+
+    testWidgets('keeps human author avatar circular', (tester) async {
+      await tester.pumpWidget(
+        _buildPostCard(
+          post: _makePost(),
+          users: const {'alice': _aliceProfile},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<AvatarImage>(find.byType(AvatarImage)).isAgent,
+        isFalse,
+      );
     });
 
     testWidgets(

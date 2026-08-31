@@ -231,6 +231,12 @@ class _DmAppBarTitle extends ConsumerWidget {
     }
 
     final avatarUrl = profile?.avatarUrl;
+    final isAgent =
+        (otherPubkey != null &&
+            ref
+                .watch(agentMentionPubkeysProvider(channel.id))
+                .contains(otherPubkey)) ||
+        profile?.ownerPubkey != null;
     final animatedAvatar = parseAnimatedAvatarUrl(avatarUrl);
     final initial =
         profile?.initial ??
@@ -249,7 +255,10 @@ class _DmAppBarTitle extends ConsumerWidget {
           key: const ValueKey('dm-header-avatar'),
           size: _dmHeaderAvatarSize,
           geometry: AvatarBadgeMaskGeometry.presenceDot,
-          avatar: ClipOval(
+          avatar: ClipRRect(
+            borderRadius: BorderRadius.circular(
+              isAgent ? _dmHeaderAvatarSize * 0.3 : _dmHeaderAvatarSize / 2,
+            ),
             child: ColoredBox(
               color: animatedAvatar == null
                   ? context.colors.primaryContainer
