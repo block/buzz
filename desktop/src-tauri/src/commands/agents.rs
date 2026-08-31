@@ -817,7 +817,7 @@ pub async fn create_managed_agent(
                 build_deploy_payload(&app, &state, rec)?
             };
             match deploy_to_provider(
-                &app, &state, &pubkey, id, config, agent_json, None, None, None,
+                &app, &state, &pubkey, id, config, agent_json, None, None, None, None,
             )
             .await
             {
@@ -978,6 +978,9 @@ pub async fn start_managed_agent(
             // against the payload rebuilt after the deploy lock — the exact
             // payload invoked — so a switch racing the lock wait cannot deploy
             // the agent into the new tenant on behalf of a stale callback.
+            // The replay floor rides along so a publish-first mention send's
+            // remote harness replays past the already-published message, same
+            // as the local spawn path.
             deploy_to_provider(
                 &app,
                 &state,
@@ -988,6 +991,7 @@ pub async fn start_managed_agent(
                 cached_binary_path.as_deref(),
                 expected_relay_url.as_deref(),
                 expected_signer_pubkey.as_deref(),
+                replay_floor_unix,
             )
             .await?;
 

@@ -935,6 +935,13 @@ test("routes a managed relay-agent mention from an existing DM to the expanded c
   expect(sendCommands.map((entry) => entry.command)).not.toContain(
     "add_channel_members",
   );
+  // The awaited DM expansion is a relay round-trip between the
+  // pre-side-effect authorization pass and the publish, so the publish
+  // boundary re-validates instead of reusing the earlier pass.
+  expect(
+    sendCommands.filter((entry) => entry.command === "revalidate_relay_agents")
+      .length,
+  ).toBe(2);
 });
 
 test("does not reroute an expanded DM after the user navigates away", async ({

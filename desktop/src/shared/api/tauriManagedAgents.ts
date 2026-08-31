@@ -21,7 +21,8 @@ export async function startManagedAgent(
     /** Unix-seconds replay floor for a publish-first mention send: the
      * spawned harness's first REQ replays at least back to this moment, so
      * the already-published triggering message lands in its window however
-     * long the spawn takes. Local spawns only; provider deploys ignore it. */
+     * long the spawn takes. Local spawns receive it as process env; provider
+     * deploys carry it in the payload's launch.policy_env. */
     replayFloorUnix?: number;
   },
 ): Promise<ManagedAgent> {

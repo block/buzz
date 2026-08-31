@@ -33,6 +33,7 @@ const PROFILE_ONLY_AGENT_PUBKEY =
   "8f83d6b7f3d74f7d933ae3a54dd8c6cc85c7f98e531c16e5a827b953441a8d67";
 const OWNED_AGENT_PROFILE_PUBKEY =
   "1212121212121212121212121212121212121212121212121212121212121212";
+const HUDDLE_EPHEMERAL_CHANNEL_ID = "3f9f2c4e-8b7a-4b1c-9d2e-5a6f7c8d9e0f";
 const SYSTEM_MESSAGE_KIND = 40099;
 const DM_THREAD_AGENT_MENTION_ERROR_TEXT =
   "Agents must already be in a DM to be mentioned in its threads. Start a new conversation that includes the agent.";
@@ -1920,7 +1921,8 @@ test("relay-only allowlisted agents emit a p tag when sent", async ({
 
   const commands = await readCommandLog(page);
   // Exactly one targeted revalidation: the pre-side-effect pass doubles as the
-  // publish-boundary check on the immediate (no deferred upload/preview) path.
+  // publish-boundary check on the fast path — no deferred upload/preview and
+  // no relay-writing side effect (member agent, no DM expansion, no huddle).
   expect(commandCount(commands, "revalidate_relay_agents")).toBe(
     commandCount(baselineCommands, "revalidate_relay_agents") + 1,
   );
@@ -2145,6 +2147,175 @@ test("deferred-upload sends revalidate agent authorization at the publish bounda
     .poll(() => readOutgoingMentionPubkeys(page, outgoingContent))
     .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
   const commands = await readCommandLog(page);
+  expect(commandCount(commands, "revalidate_relay_agents")).toBe(
+    commandCount(baselineCommands, "revalidate_relay_agents") + 2,
+  );
+});
+
+test("sends that attach a mentioned agent revalidate at the publish boundary", async ({
+  page,
+}) => {
+  // The awaited membership write for a non-member managed agent is a relay
+  // round-trip between the pre-side-effect authorization pass and the publish
+  // — authorization revoked during that window must still strip the p tag.
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: OUT_OF_CHANNEL_MANAGED_AGENT_PUBKEY,
+        name: "fizz",
+        status: "running",
+        // Already matching the reusable-agent policy: no update_managed_agent
+        // write below, so the attach write alone re-opens the window.
+        respondTo: "owner-only",
+        respondToAllowlist: [],
+      },
+    ],
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock bridge is not installed.");
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels"],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+    },
+  );
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+  await expect(quinnRow).toBeVisible();
+  await quinnRow.click();
+  await page.keyboard.type("@fizz");
+  const fizzRow = autocomplete(page).locator("button", { hasText: "fizz" });
+  await expect(fizzRow).toBeVisible();
+  await expect(fizzRow.getByText("not in channel")).toBeVisible();
+  await fizzRow.click();
+  await page.keyboard.type("hello");
+  await expect(input).toHaveText("@quinn @fizz hello");
+
+  // Hold the attach's membership write open so the revocation below lands
+  // inside the pass-to-publish window.
+  await page.evaluate(() => {
+    window.__BUZZ_E2E__.mock ??= {};
+    window.__BUZZ_E2E__.mock.addChannelMembersDelayMs = 1_500;
+  });
+  const baselineCommands = await readCommandLog(page);
+  await page.getByTestId("send-message").click();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+
+  // Revoke quinn after the pre-side-effect pass has been admitted but while
+  // the attach still holds the publish open.
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "revalidate_relay_agents"),
+    )
+    .toBe(commandCount(baselineCommands, "revalidate_relay_agents") + 1);
+  await page.evaluate((pubkey) => {
+    window.__BUZZ_E2E__.mock ??= {};
+    window.__BUZZ_E2E__.mock.relayAgentRevalidationRevokedPubkeys = [pubkey];
+  }, ALLOWLIST_RELAY_AGENT_PUBKEY);
+
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@quinn @fizz hello"))
+    .not.toBeNull();
+  const outgoingPubkeys = await readOutgoingMentionPubkeys(
+    page,
+    "@quinn @fizz hello",
+  );
+  expect(outgoingPubkeys).toContain(OUT_OF_CHANNEL_MANAGED_AGENT_PUBKEY);
+  expect(outgoingPubkeys).not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  const commands = await readCommandLog(page);
+  expect(commandCount(commands, "revalidate_relay_agents")).toBe(
+    commandCount(baselineCommands, "revalidate_relay_agents") + 2,
+  );
+  // The policy already matched, so the second pass was owed to the membership
+  // write alone.
+  expect(commandCount(commands, "update_managed_agent")).toBe(
+    commandCount(baselineCommands, "update_managed_agent"),
+  );
+});
+
+test("sends that enroll agents into an active huddle revalidate at the publish boundary", async ({
+  page,
+}) => {
+  // With a huddle live on the channel, the awaited huddle enrollment is a
+  // relay round-trip between the authorization pass and the publish, so the
+  // publish boundary re-validates instead of reusing the earlier pass.
+  await installMockBridge(page, {
+    huddle: {
+      parentChannelId: GENERAL_CHANNEL_ID,
+      ephemeralChannelId: HUDDLE_EPHEMERAL_CHANNEL_ID,
+      members: [{ pubkey: TEST_IDENTITIES.tyler.pubkey, role: "member" }],
+    },
+    relayAgents: [
+      {
+        pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+        name: "quinn",
+        respondTo: "allowlist",
+        respondToAllowlist: [MOCK_VIEWER_PUBKEY],
+        channelNames: ["general"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock bridge is not installed.");
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels"],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+    },
+  );
+
+  const input = page.getByTestId("message-input");
+  await input.fill("@quinn");
+  const quinnRow = autocomplete(page).locator("button", { hasText: "quinn" });
+  await expect(quinnRow).toBeVisible();
+  await quinnRow.click();
+  await page.keyboard.type("hello");
+
+  const baselineCommands = await readCommandLog(page);
+  await page.getByTestId("send-message").click();
+
+  await expect
+    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
+    .toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  const commands = await readCommandLog(page);
+  expect(commandCount(commands, "sync_agents_to_active_huddle")).toBe(
+    commandCount(baselineCommands, "sync_agents_to_active_huddle") + 1,
+  );
   expect(commandCount(commands, "revalidate_relay_agents")).toBe(
     commandCount(baselineCommands, "revalidate_relay_agents") + 2,
   );
@@ -2644,6 +2815,7 @@ test("mentioning an in-channel provider managed agent publishes first and deploy
     "start_managed_agent",
   );
   const baselineSignCount = commandCount(baselineCommands, "sign_event");
+  const baselinePayloadCount = (await readCommandPayloadLog(page)).length;
   await page.getByTestId("send-message").click();
 
   // Publish-first: the message signs and renders while the deploy is still
@@ -2656,6 +2828,17 @@ test("mentioning an in-channel provider managed agent publishes first and deploy
       commandCount(await readCommandLog(page), "start_managed_agent"),
     )
     .toBeGreaterThan(baselineStartCount);
+
+  // The detached deploy carries the replay floor too — the backend threads it
+  // into the provider payload's launch.policy_env so the remote harness
+  // replays past the just-published message like a local spawn.
+  const startCall = (await readCommandPayloadLog(page))
+    .slice(baselinePayloadCount)
+    .find((entry) => entry.command === "start_managed_agent");
+  expect(
+    (startCall?.payload as { replayFloorUnix?: number } | undefined)
+      ?.replayFloorUnix,
+  ).toBeGreaterThan(0);
 
   const mentionChip = page
     .getByTestId("message-row")
