@@ -62,6 +62,10 @@ tracing-subscriber = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 
+# Durable session bindings (crate-local; workspace sqlx stays Postgres-only)
+rusqlite = { version = "0.37", features = ["bundled"] }
+async-trait = "0.1"
+
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 
@@ -79,3 +83,4 @@ nix = { version = "0.31", default-features = false, features = ["signal"] }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 httparse = "1"
+tempfile = "3"
