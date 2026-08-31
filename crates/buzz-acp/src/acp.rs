@@ -256,8 +256,10 @@ fn deep_merge(
 /// 3. **Parent-env precedence** — if `parent_codex_config` is `Some`, its keys are
 ///    deep-merged into the result (parent wins on colliding keys at every nesting level;
 ///    unrelated keys from either side survive).
-/// 4. **Forced overlay** — `sandbox_workspace_write.network_access = true` is applied
-///    last so relay access is guaranteed regardless of operator / persona config.
+/// 4. **Forced overlay** — generated Codex sandbox requirements are applied
+///    last: `sandbox_workspace_write.network_access = true`, plus any generated
+///    `sandbox_workspace_write.writable_roots` and `network.allow_unix_sockets`
+///    entries.
 ///
 /// When `has_generated_codex_config` is false, the function returns `None` and the
 /// caller handles any persona-supplied `CODEX_CONFIG` with ordinary operator-wins
@@ -267,7 +269,8 @@ fn deep_merge(
 ///
 /// Returns `Err(AcpError::Protocol)` when `has_generated_codex_config` is true and any
 /// `CODEX_CONFIG` value is not valid JSON or is not a JSON object, or when
-/// `sandbox_workspace_write` is present but not an object after all merges.
+/// `sandbox_workspace_write` is present but not an object after all merges, or
+/// when a forced string-array field has an incompatible shape.
 pub(crate) fn build_codex_config_env(
     extra_env: &[(String, String)],
     parent_codex_config: Option<&str>,
@@ -313,6 +316,25 @@ pub(crate) fn build_codex_config_env(
         }
     }
 
+    let generated_start_index = if parsed_entries.len() > 1 { 1 } else { 0 };
+    let mut generated_writable_roots = Vec::new();
+    let mut generated_unix_sockets = Vec::new();
+    for generated in &parsed_entries[generated_start_index..] {
+        push_unique_strings(
+            &mut generated_writable_roots,
+            nested_string_array(
+                generated,
+                "sandbox_workspace_write",
+                "writable_roots",
+                "generated",
+            )?,
+        );
+        push_unique_strings(
+            &mut generated_unix_sockets,
+            nested_string_array(generated, "network", "allow_unix_sockets", "generated")?,
+        );
+    }
+
     // Start from first entry, deep-merge remaining entries.
     let mut base = parsed_entries.remove(0);
     for overlay in parsed_entries {
@@ -355,7 +377,120 @@ pub(crate) fn build_codex_config_env(
         }
     }
 
+    force_string_array_entries(
+        &mut base,
+        "sandbox_workspace_write",
+        "writable_roots",
+        &generated_writable_roots,
+    )?;
+    force_string_array_entries(
+        &mut base,
+        "network",
+        "allow_unix_sockets",
+        &generated_unix_sockets,
+    )?;
+
     Ok(Some(serde_json::Value::Object(base).to_string()))
+}
+
+fn nested_string_array(
+    config: &serde_json::Map<String, serde_json::Value>,
+    section_key: &str,
+    array_key: &str,
+    source: &str,
+) -> Result<Vec<String>, AcpError> {
+    let Some(section) = config.get(section_key) else {
+        return Ok(Vec::new());
+    };
+    let serde_json::Value::Object(section) = section else {
+        return Err(AcpError::Protocol(format!(
+            "CODEX_CONFIG {source} {section_key} value is valid JSON but not an object"
+        )));
+    };
+    let Some(array) = section.get(array_key) else {
+        return Ok(Vec::new());
+    };
+    let serde_json::Value::Array(entries) = array else {
+        return Err(AcpError::Protocol(format!(
+            "CODEX_CONFIG {source} {section_key}.{array_key} is not an array"
+        )));
+    };
+
+    let mut out = Vec::new();
+    for entry in entries {
+        let Some(entry) = entry.as_str() else {
+            return Err(AcpError::Protocol(format!(
+                "CODEX_CONFIG {source} {section_key}.{array_key} contains a non-string entry"
+            )));
+        };
+        push_unique_string(&mut out, entry.to_string());
+    }
+    Ok(out)
+}
+
+fn force_string_array_entries(
+    config: &mut serde_json::Map<String, serde_json::Value>,
+    section_key: &str,
+    array_key: &str,
+    entries: &[String],
+) -> Result<(), AcpError> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    let section_entry = config
+        .entry(section_key.to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let section = match section_entry {
+        serde_json::Value::Object(section) => section,
+        other => {
+            return Err(AcpError::Protocol(format!(
+                "CODEX_CONFIG {section_key} is not an object (got {other}); \
+                 cannot set {array_key}"
+            )));
+        }
+    };
+    let array_entry = section
+        .entry(array_key.to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    let array = match array_entry {
+        serde_json::Value::Array(array) => array,
+        other => {
+            return Err(AcpError::Protocol(format!(
+                "CODEX_CONFIG {section_key}.{array_key} is not an array (got {other})"
+            )));
+        }
+    };
+
+    for entry in array.iter() {
+        if !entry.is_string() {
+            return Err(AcpError::Protocol(format!(
+                "CODEX_CONFIG {section_key}.{array_key} contains a non-string entry"
+            )));
+        }
+    }
+    for entry in entries {
+        if !array
+            .iter()
+            .any(|existing| existing.as_str() == Some(entry.as_str()))
+        {
+            array.push(serde_json::Value::String(entry.clone()));
+        }
+    }
+
+    Ok(())
+}
+
+fn push_unique_strings(out: &mut Vec<String>, entries: Vec<String>) {
+    for entry in entries {
+        push_unique_string(out, entry);
+    }
+}
+
+fn push_unique_string(out: &mut Vec<String>, entry: String) {
+    if !out.iter().any(|existing| existing == &entry) {
+        out.push(entry);
+    }
 }
 
 /// goose's non-standard mid-turn steer method. Requires `expectedRunId`, so it
@@ -4806,6 +4941,7 @@ mod tests {
     }
 
     const GENERATED: &str = r#"{"sandbox_workspace_write":{"network_access":true}}"#;
+    const GENERATED_WITH_SSH_GRANTS: &str = r#"{"network":{"allow_unix_sockets":["/tmp/ssh-agent"]},"sandbox_workspace_write":{"network_access":true,"writable_roots":["/tmp/ssh-agent"]}}"#;
 
     #[test]
     fn build_codex_config_env_returns_none_when_no_codex_config_in_extra_env() {
@@ -4979,6 +5115,49 @@ mod tests {
     }
 
     #[test]
+    fn build_codex_config_env_preserves_generated_ssh_grants_after_parent_merge() {
+        let extra = env(&[("CODEX_CONFIG", GENERATED_WITH_SSH_GRANTS)]);
+        let parent = r#"{"network":{"allow_unix_sockets":["/tmp/operator","/tmp/ssh-agent"]},"sandbox_workspace_write":{"network_access":false,"writable_roots":["/tmp/operator"]}}"#;
+        let merged = build_codex_config_env(&extra, Some(parent), true)
+            .unwrap()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+
+        assert_eq!(v["sandbox_workspace_write"]["network_access"], true);
+        assert_eq!(
+            v["sandbox_workspace_write"]["writable_roots"],
+            serde_json::json!(["/tmp/operator", "/tmp/ssh-agent"])
+        );
+        assert_eq!(
+            v["network"]["allow_unix_sockets"],
+            serde_json::json!(["/tmp/operator", "/tmp/ssh-agent"])
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_forces_generated_ssh_grants_with_persona_base() {
+        let persona = r#"{"sandbox_workspace_write":{"writable_roots":["/tmp/persona"]},"network":{"allow_unix_sockets":["/tmp/persona"]}}"#;
+        let extra = env(&[
+            ("CODEX_CONFIG", persona),
+            ("CODEX_CONFIG", GENERATED_WITH_SSH_GRANTS),
+        ]);
+        let parent = r#"{"sandbox_workspace_write":{"writable_roots":[]},"network":{"allow_unix_sockets":[]}}"#;
+        let merged = build_codex_config_env(&extra, Some(parent), true)
+            .unwrap()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+
+        assert_eq!(
+            v["sandbox_workspace_write"]["writable_roots"],
+            serde_json::json!(["/tmp/ssh-agent"])
+        );
+        assert_eq!(
+            v["network"]["allow_unix_sockets"],
+            serde_json::json!(["/tmp/ssh-agent"])
+        );
+    }
+
+    #[test]
     fn build_codex_config_env_errors_on_invalid_persona_json() {
         // Bad persona JSON + generated overlay, signal=true → parse error before merging.
         let extra = env(&[("CODEX_CONFIG", "not-json"), ("CODEX_CONFIG", GENERATED)]);
@@ -5025,6 +5204,34 @@ mod tests {
         assert!(
             msg.contains("sandbox_workspace_write"),
             "error must mention sandbox_workspace_write"
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_errors_on_non_array_writable_roots() {
+        let extra = env(&[("CODEX_CONFIG", GENERATED_WITH_SSH_GRANTS)]);
+        let parent = r#"{"sandbox_workspace_write":{"writable_roots":"bad"}}"#;
+        let result = build_codex_config_env(&extra, Some(parent), true);
+
+        assert!(result.is_err(), "non-array writable_roots must fail");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("writable_roots"),
+            "error must mention writable_roots"
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_errors_on_non_array_unix_sockets() {
+        let extra = env(&[("CODEX_CONFIG", GENERATED_WITH_SSH_GRANTS)]);
+        let parent = r#"{"network":{"allow_unix_sockets":"bad"}}"#;
+        let result = build_codex_config_env(&extra, Some(parent), true);
+
+        assert!(result.is_err(), "non-array allow_unix_sockets must fail");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("allow_unix_sockets"),
+            "error must mention allow_unix_sockets"
         );
     }
 }
