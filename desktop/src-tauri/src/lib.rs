@@ -555,6 +555,8 @@ pub fn run() {
             save_ncryptsec_copy,
             import_identity,
             persist_current_identity,
+            select_owner_attestation_request,
+            sign_owner_attestation_request,
             get_profile,
             update_profile,
             update_profile_at_relay,

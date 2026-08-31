@@ -1137,6 +1137,7 @@ dependencies = [
  "rodio",
  "rubato",
  "rusqlite",
+ "rustix 1.1.4",
  "rustls",
  "security-framework 3.7.0",
  "serde",
