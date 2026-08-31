@@ -277,6 +277,44 @@ fn unix_now_secs() -> u64 {
 }
 
 impl RestClient {
+    /// Fetch the relay's stable signing identity from its NIP-11 document.
+    ///
+    /// Relay-authored workflow messages are trusted only when their event
+    /// signer matches this key. Missing, malformed, or unavailable identity
+    /// data fails closed by returning an error/`None` to the caller.
+    pub async fn relay_self(&self) -> Result<Option<String>, RelayError> {
+        let url = format!("{}/info", self.base_url);
+        let response = tokio::time::timeout(
+            Duration::from_secs(5),
+            self.http
+                .get(&url)
+                .header(reqwest::header::ACCEPT, "application/nostr+json")
+                .send(),
+        )
+        .await
+        .map_err(|_| RelayError::Timeout)?
+        .map_err(|error| RelayError::Http(error.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(RelayError::Http(format!(
+                "GET /info returned HTTP {}",
+                response.status()
+            )));
+        }
+
+        let document: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|error| RelayError::Http(format!("invalid NIP-11 document: {error}")))?;
+        let Some(relay_self) = document.get("self").and_then(serde_json::Value::as_str) else {
+            return Ok(None);
+        };
+        let relay_self = nostr::PublicKey::from_hex(relay_self)
+            .map_err(|error| RelayError::Http(format!("invalid NIP-11 self pubkey: {error}")))?
+            .to_hex();
+        Ok(Some(relay_self))
+    }
+
     /// Sign a NIP-98 HTTP Auth event (kind:27235) for the given method/URL/body.
     ///
     /// Returns the `Authorization: Nostr <base64>` header value (without the
