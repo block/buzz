@@ -136,6 +136,7 @@ Controls which authors' events the harness forwards to the agent. Events from di
 | Flag | Env Var | Default | Description |
 |------|---------|---------|-------------|
 | `--respond-to` | `BUZZ_ACP_RESPOND_TO` | `owner-only` | Author gate mode: `owner-only`, `allowlist`, `anyone`, `nobody`. |
+| `--allow-external-dms` | `BUZZ_ACP_ALLOW_EXTERNAL_DMS` | `false` | Apply `respond-to` inside DMs, allowing non-owner DM participants when the selected mode admits them. |
 | `--respond-to-allowlist` | `BUZZ_ACP_RESPOND_TO_ALLOWLIST` | — | Comma-separated 64-char hex pubkeys (required when mode is `allowlist`). Owner is always implicitly included. |
 
 **Modes:**
@@ -146,6 +147,10 @@ Controls which authors' events the harness forwards to the agent. Events from di
 | `allowlist` | Forward events from the listed pubkeys plus the owner. |
 | `anyone` | Forward all events (no author filtering). |
 | `nobody` | Drop all inbound events. Agent only acts on heartbeat prompts. |
+
+DMs remain owner/sibling-only by default. Set `BUZZ_ACP_ALLOW_EXTERNAL_DMS=true`
+to apply the selected mode inside DMs; for example, combining it with `anyone`
+lets any community member who shares a DM with the agent prompt it.
 
 The gate applies to **all** inbound events — @mentions, DMs, thread replies, and any event delivered by the relay. Owner control commands are checked **before** the gate, so the owner can still manage the harness regardless of mode:
 

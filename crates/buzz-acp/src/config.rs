@@ -467,6 +467,11 @@ pub struct CliArgs {
     )]
     pub respond_to: RespondTo,
 
+    /// Allow the configured inbound author gate to apply inside direct messages.
+    /// By default DMs remain restricted to the owner and verified sibling agents.
+    #[arg(long, env = "BUZZ_ACP_ALLOW_EXTERNAL_DMS", default_value_t = false)]
+    pub allow_external_dms: bool,
+
     /// Comma-separated 64-char hex pubkeys for allowlist mode.
     /// Owner pubkey is always implicitly included.
     #[arg(long, env = "BUZZ_ACP_RESPOND_TO_ALLOWLIST", value_delimiter = ',')]
@@ -567,6 +572,8 @@ pub struct Config {
     pub permission_mode: PermissionMode,
     /// Inbound author gate mode.
     pub respond_to: RespondTo,
+    /// Whether non-owner authors admitted by `respond_to` may prompt the agent in DMs.
+    pub allow_external_dms: bool,
     /// Validated allowlist of pubkey hex strings (used when respond_to == Allowlist).
     pub respond_to_allowlist: HashSet<String>,
     /// Allowed `respond_to` modes. Empty = all modes allowed.
@@ -1132,6 +1139,7 @@ impl Config {
                 .and_then(sanitize_session_title),
             permission_mode: args.permission_mode,
             respond_to: args.respond_to,
+            allow_external_dms: args.allow_external_dms,
             respond_to_allowlist,
             allowed_respond_to,
             persona_env_vars,
@@ -1164,7 +1172,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {} allow_external_dms={}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1186,6 +1194,7 @@ impl Config {
             self.model.as_deref().unwrap_or("(agent default)"),
             self.permission_mode,
             respond_to_detail,
+            self.allow_external_dms,
             allowed_respond_to_detail,
         )
     }
@@ -1276,6 +1285,18 @@ pub fn resolve_channel_filters(
     discovered_channels: &[Uuid],
     rules: &[SubscriptionRule],
 ) -> HashMap<Uuid, ChannelFilter> {
+    resolve_channel_filters_with_dms(config, discovered_channels, rules, &HashSet::new())
+}
+
+/// Resolve startup filters while allowing explicitly enabled DMs to bypass a
+/// shared-channel pin. This keeps agents out of unrelated shared channels while
+/// still letting newly joined DM participants reach them.
+pub fn resolve_channel_filters_with_dms(
+    config: &Config,
+    discovered_channels: &[Uuid],
+    rules: &[SubscriptionRule],
+    dm_channels: &HashSet<Uuid>,
+) -> HashMap<Uuid, ChannelFilter> {
     use buzz_core::kind::{
         KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
     };
@@ -1285,6 +1306,14 @@ pub fn resolve_channel_filters(
             .iter()
             .filter_map(|s| s.parse::<Uuid>().ok())
             .filter(|id| discovered_channels.contains(id))
+            .chain(
+                discovered_channels
+                    .iter()
+                    .filter(|id| config.allow_external_dms && dm_channels.contains(id))
+                    .copied(),
+            )
+            .collect::<HashSet<_>>()
+            .into_iter()
             .collect()
     } else {
         discovered_channels.to_vec()
@@ -1366,17 +1395,18 @@ pub fn resolve_channel_filters(
 
 /// Resolve the subscription filter for a single dynamically-discovered channel.
 ///
-/// In Mentions/All mode, `channels_override` (--channels) is enforced — the agent
-/// won't subscribe to channels outside the operator's allowlist. In Config mode,
+/// In Mentions/All mode, `channels_override` (`--channels`) is enforced unless
+/// this is a DM and external DM access is explicitly enabled. In Config mode,
 /// `--channels` is ignored (per CLI contract) and rule-matching determines scope.
 ///
 /// Returns `None` when the channel is outside the agent's configured scope:
-/// - Mentions/All: channel not in `channels_override` (if set)
+/// - Mentions/All: channel not in `channels_override` (unless it is an opted-in DM)
 /// - Config: no subscription rules match the channel
 pub fn resolve_dynamic_channel_filter(
     config: &Config,
     channel_id: Uuid,
     rules: &[crate::filter::SubscriptionRule],
+    is_dm: bool,
 ) -> Option<ChannelFilter> {
     use buzz_core::kind::{
         KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
@@ -1391,7 +1421,7 @@ pub fn resolve_dynamic_channel_filter(
             let allowed = overrides
                 .iter()
                 .any(|s| s.parse::<Uuid>().ok() == Some(channel_id));
-            if !allowed {
+            if !allowed && !(config.allow_external_dms && is_dm) {
                 return None;
             }
         }
@@ -1505,6 +1535,7 @@ mod tests {
             session_title: None,
             permission_mode: PermissionMode::BypassPermissions,
             respond_to: RespondTo::Anyone,
+            allow_external_dms: false,
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
             persona_env_vars: vec![],
@@ -1848,6 +1879,35 @@ mod tests {
         assert!(result.contains_key(&ch_a));
         assert!(!result.contains_key(&ch_b));
         assert!(!result.contains_key(&ch_unknown));
+    }
+
+    #[test]
+    fn test_external_dm_opt_in_bypasses_shared_channel_override() {
+        let mut config = test_config(SubscribeMode::All);
+        config.allow_external_dms = true;
+        let pinned = Uuid::new_v4();
+        let dm = Uuid::new_v4();
+        let unrelated_shared = Uuid::new_v4();
+        config.channels_override = Some(vec![pinned.to_string()]);
+
+        let discovered = vec![pinned, dm, unrelated_shared];
+        let dm_channels = HashSet::from([dm]);
+        let result = resolve_channel_filters_with_dms(&config, &discovered, &[], &dm_channels);
+
+        assert!(result.contains_key(&pinned));
+        assert!(result.contains_key(&dm));
+        assert!(!result.contains_key(&unrelated_shared));
+    }
+
+    #[test]
+    fn test_dynamic_external_dm_bypasses_shared_channel_override() {
+        let mut config = test_config(SubscribeMode::All);
+        config.allow_external_dms = true;
+        config.channels_override = Some(vec![Uuid::new_v4().to_string()]);
+        let new_dm = Uuid::new_v4();
+
+        assert!(resolve_dynamic_channel_filter(&config, new_dm, &[], true).is_some());
+        assert!(resolve_dynamic_channel_filter(&config, new_dm, &[], false).is_none());
     }
 
     #[test]
@@ -2255,6 +2315,16 @@ channels = "ALL"
         let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool=true"]);
         assert!(args.is_err(), "bool flags do not take an explicit value");
         assert!(CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool"]).lazy_pool);
+    }
+
+    #[test]
+    fn external_dms_require_explicit_opt_in() {
+        let key = "0".repeat(64);
+        assert!(!CliArgs::parse_from(["buzz-acp", "--private-key", &key]).allow_external_dms);
+        assert!(
+            CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--allow-external-dms",])
+                .allow_external_dms
+        );
     }
 
     #[test]

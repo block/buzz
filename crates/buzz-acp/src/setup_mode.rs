@@ -359,12 +359,21 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
     );
 
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
+    let dm_channel_ids: std::collections::HashSet<Uuid> = channel_info_map
+        .iter()
+        .filter_map(|(id, info)| (info.channel_type == "dm").then_some(*id))
+        .collect();
 
     // Build subscription rules: mentions only (setup mode must not react to
     // every message in a channel).
     let rules = build_setup_subscription_rules(&config);
 
-    let channel_filters = crate::config::resolve_channel_filters(&config, &channel_ids, &rules);
+    let channel_filters = crate::config::resolve_channel_filters_with_dms(
+        &config,
+        &channel_ids,
+        &rules,
+        &dm_channel_ids,
+    );
 
     if channel_filters.is_empty() {
         tracing::warn!(
@@ -426,8 +435,8 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         }
 
         // Apply the same author gate as normal mode so the nudge only goes
-        // to authors the real agent would have answered. Same DM hardening:
-        // in DMs only owner/siblings get a nudge (fail-closed on unknown type).
+        // to authors the real agent would have answered. DM access remains
+        // owner/sibling-only unless the operator explicitly opted in.
         let author_hex = buzz_event.event.pubkey.to_hex();
         let is_dm = crate::is_dm_channel(buzz_event.channel_id, &channel_info).await;
         let allowed = author_allowed(
@@ -435,6 +444,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
             &config.respond_to_allowlist,
             &author_hex,
             is_dm,
+            config.allow_external_dms,
             &owner_cache,
             &rest_client,
         )
