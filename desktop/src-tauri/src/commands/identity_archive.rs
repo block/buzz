@@ -365,9 +365,13 @@ pub(crate) async fn fetch_relay_self_at(
     relay_url: &str,
 ) -> Result<Option<String>, String> {
     if let Some(cached) = cached_relay_self(state, relay_url) {
+        crate::send_perf::log("relay_self", "cache=hit");
         return Ok(Some(cached));
     }
 
+    // A miss fronts an agent revalidation pass with an uncached HTTP GET — the
+    // exact send-path cost the cache exists to remove, so log either outcome.
+    let fetch = crate::send_perf::Phase::start();
     let http_url = relay_http_base_url(relay_url);
     let response = state
         .http_client
@@ -376,6 +380,8 @@ pub(crate) async fn fetch_relay_self_at(
         .send()
         .await
         .map_err(|e| classify_request_error(&e))?;
+    let fetch_ms = fetch.ms();
+    crate::send_perf::log("relay_self", &format!("cache=miss fetch_ms={fetch_ms:.1}"));
 
     if !response.status().is_success() {
         return Ok(None);

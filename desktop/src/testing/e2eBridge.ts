@@ -11956,6 +11956,11 @@ export function maybeInstallE2eTauriMocks() {
         await emitMockHuddleState();
         return structuredClone(settings);
       }
+      // Fire-and-forget stderr mirror of the composer's `[send-perf]` summary.
+      // The real command only writes a log line, so the mock is a no-op — it
+      // exists so send specs do not trip the unsupported-command guard below.
+      case "log_send_perf":
+        return null;
       case "sync_agents_to_active_huddle": {
         const request = payload as {
           channelId?: string;

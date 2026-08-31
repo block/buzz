@@ -457,6 +457,10 @@ pub async fn send_channel_message(
 
     let mut resolved_root: Option<String> = None;
 
+    // Replies (`is_reply=true` below) resolve their thread root against the
+    // relay before the event can be built, so a "slow publish" may really be an
+    // extra read rather than the write.
+    let build = crate::send_perf::Phase::start();
     let builder = match kind_num {
         buzz_core_pkg::kind::KIND_FORUM_POST => events::build_forum_post(
             channel_uuid,
@@ -523,8 +527,18 @@ pub async fn send_channel_message(
     // Submit through the base resolved (and scope-checked) above and the
     // identity snapshotted (and signer-checked) above — a re-resolve or key
     // re-read here would reopen the mid-command switch window.
+    let build_ms = build.ms();
+    let submit = crate::send_perf::Phase::start();
     let (result, created_at) =
         submit_event_at_created_at(builder, &state, &relay_base, &signing_keys).await?;
+    crate::send_perf::log(
+        "send_channel_message",
+        &format!(
+            "kind={kind_num} is_reply={} build_ms={build_ms:.1} submit_ms={:.1}",
+            parent_event_id.is_some(),
+            submit.ms()
+        ),
+    );
 
     let depth = match (&parent_event_id, &resolved_root) {
         (None, _) => 0,
