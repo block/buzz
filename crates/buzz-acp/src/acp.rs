@@ -3491,6 +3491,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_new_full_sends_all_mcp_servers_on_repeated_sessions() {
+        let script = r#"
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+            read -t 2 REQ1
+            echo '{"jsonrpc":"2.0","id":1,"result":{"sessionId":"ses_one","_receivedRequest":'"$REQ1"'}}'
+            read -t 2 REQ2
+            echo '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"ses_two","_receivedRequest":'"$REQ2"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        client
+            .initialize()
+            .await
+            .expect("initialize should succeed");
+        let servers = vec![
+            McpServer {
+                name: "buzz-dev-mcp".into(),
+                command: "/opt/buzz-dev-mcp".into(),
+                args: vec![],
+                env: vec![EnvVar {
+                    name: "BUZZ_RELAY_URL".into(),
+                    value: "ws://localhost:3000".into(),
+                }],
+            },
+            McpServer {
+                name: "jira-hive".into(),
+                command: "/opt/jira-hive".into(),
+                args: vec!["--stdio".into()],
+                env: vec![EnvVar {
+                    name: "JIRA_SITE".into(),
+                    value: "https://example.test".into(),
+                }],
+            },
+        ];
+
+        for expected_session in ["ses_one", "ses_two"] {
+            let response = client
+                .session_new_full("/tmp", servers.clone(), None, None)
+                .await
+                .expect("session_new_full should succeed");
+            assert_eq!(response.session_id, expected_session);
+            let received = &response.raw["_receivedRequest"]["params"]["mcpServers"];
+            assert_eq!(received.as_array().map(Vec::len), Some(2));
+            assert_eq!(received[0]["name"], "buzz-dev-mcp");
+            assert_eq!(received[1]["name"], "jira-hive");
+            assert_eq!(received[1]["args"], serde_json::json!(["--stdio"]));
+            assert_eq!(received[1]["env"][0]["name"], "JIRA_SITE");
+        }
+    }
+
+    #[tokio::test]
     async fn goose_system_prompt_request_uses_set_contract() {
         let script = r#"
             read -t 2 REQ

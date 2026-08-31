@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "servers": [
+    {
+      "name": "atlassian-rovo",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote@0.8.3",
+        "https://mcp.atlassian.com/v1/mcp/authv2"
+      ],
+      "env": {}
+    }
+  ]
+}

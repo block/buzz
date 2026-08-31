@@ -111,6 +111,7 @@ All configuration is via environment variables (or CLI flags — every env var h
 | `BUZZ_ACP_AGENT_COMMAND` | no | `goose` | Agent binary to spawn. |
 | `BUZZ_ACP_AGENT_ARGS` | no | `acp` | Agent arguments (comma-separated). |
 | `BUZZ_ACP_MCP_COMMAND` | no | `""` (empty) | Path to an optional MCP server binary to provide to the agent subprocess. |
+| `BUZZ_ACP_MCP_CONFIG` | no | `""` (empty) | Absolute path to a version 1 JSON file defining additional stdio MCP servers. |
 | `BUZZ_ACP_IDLE_TIMEOUT` | no | `620` | Idle timeout: max seconds of silence before cancelling a turn. Resets on any agent stdout activity. |
 | `BUZZ_ACP_MAX_TURN_DURATION` | no | `7200` | Absolute wall-clock cap per turn (safety valve). |
 | `BUZZ_API_TOKEN` | no | — | API token (required if relay enforces token auth). |
@@ -118,6 +119,85 @@ All configuration is via environment variables (or CLI flags — every env var h
 **Note:** `BUZZ_ACP_AGENT_ARGS` splits on commas. For args with values, use: `-c,key="value"`.
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
+
+### Multiple MCP servers
+
+Use `--mcp-config <absolute-path>` or `BUZZ_ACP_MCP_CONFIG` to add named
+stdio MCP servers without replacing the companion configured by
+`BUZZ_ACP_MCP_COMMAND`:
+
+```json
+{
+  "version": 1,
+  "servers": [
+    {
+      "name": "jira-hive",
+      "transport": "stdio",
+      "command": "/opt/mcp/jira-hive",
+      "args": ["--stdio"],
+      "env": {
+        "JIRA_SITE": "https://example.test"
+      }
+    }
+  ]
+}
+```
+
+The legacy server remains first and keeps its existing privileged behavior: it
+receives the Buzz relay URL and Buzz identity credentials. Additional servers
+receive only the `env` entries declared for them. Buzz sends the merged list on
+every `session/new`; none of this configuration is added to the system prompt
+or persona.
+
+The file is strict and limited to 64 KiB and 16 total servers, including the
+legacy server. Names must be unique. Unreadable files, malformed JSON,
+unsupported versions, unknown fields, invalid entries, protected Buzz
+credentials, or name collisions stop startup. No server is silently dropped.
+
+On Unix, the file must be accessible only by its owner:
+
+```bash
+chmod 600 /absolute/path/to/mcp-servers.json
+```
+
+Buzz Desktop already applies environment precedence as global defaults,
+persona defaults, then per-agent overrides. Because `BUZZ_ACP_MCP_CONFIG` is a
+normal behavior setting, the same precedence selects the config path without a
+new Desktop setting. Keep real credentials in a local secret store and resolve
+them into a protected device-local launch file; do not put credentials in a
+persona, prompt, repository, or shared agent definition.
+
+#### Atlassian Rovo MCP
+
+Atlassian Rovo is a remote HTTP MCP server. A stdio-only agent can connect to
+it through Atlassian's documented `mcp-remote` bridge without adding a
+Jira-specific transport to buzz-acp. See
+[`examples/mcp-servers.atlassian-rovo.json`](examples/mcp-servers.atlassian-rovo.json):
+
+```json
+{
+  "version": 1,
+  "servers": [
+    {
+      "name": "atlassian-rovo",
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote@0.8.3",
+        "https://mcp.atlassian.com/v1/mcp/authv2"
+      ],
+      "env": {}
+    }
+  ]
+}
+```
+
+This example uses OAuth 2.1. The first connection opens Atlassian's consent
+flow, and `mcp-remote` keeps its OAuth state in the device user's local config.
+The MCP config contains no Jira credential. For unattended API-token use, keep
+the authorization header in a separate owner-only file or secret provider; do
+not add it to this JSON or an agent definition.
 
 ### Parallel Agents & Heartbeat
 

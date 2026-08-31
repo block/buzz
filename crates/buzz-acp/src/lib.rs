@@ -5031,60 +5031,82 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 }
 
 fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
-    if config.mcp_command.is_empty() {
-        return vec![];
+    let mut servers = Vec::with_capacity(
+        usize::from(!config.mcp_command.is_empty()) + config.configured_mcp_servers.len(),
+    );
+
+    if !config.mcp_command.is_empty() {
+        servers.push(McpServer {
+            name: config::legacy_mcp_server_name(&config.mcp_command),
+            command: config.mcp_command.clone(),
+            args: vec![],
+            env: {
+                let mut env = vec![
+                    EnvVar {
+                        name: "BUZZ_RELAY_URL".into(),
+                        value: config.relay_url.clone(),
+                    },
+                    EnvVar {
+                        name: "BUZZ_PRIVATE_KEY".into(),
+                        // bech32 encoding of a valid secret key is infallible.
+                        // Panic here is correct: injecting a bogus secret would cause
+                        // delayed, hard-to-diagnose agent failures downstream.
+                        value: config
+                            .keys
+                            .secret_key()
+                            .to_bech32()
+                            .expect("secret key bech32 encoding should never fail"),
+                    },
+                ];
+                // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
+                // so the MCP server can attach it to every signed event.
+                if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
+                    if !auth_tag.is_empty() {
+                        env.push(EnvVar {
+                            name: "BUZZ_AUTH_TAG".into(),
+                            value: auth_tag,
+                        });
+                    }
+                }
+                // Forward the agent's display name so dev-mcp can use it as the git
+                // author name instead of the raw npub. Read from the process env
+                // rather than Config: this is a pass-through of a contract owned
+                // upstream, and absent simply means dev-mcp falls back to the npub.
+                if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
+                    if !display_name.is_empty() {
+                        env.push(EnvVar {
+                            name: "BUZZ_ACP_DISPLAY_NAME".into(),
+                            value: display_name,
+                        });
+                    }
+                }
+                env
+            },
+        });
     }
-    vec![McpServer {
-        name: std::path::Path::new(&config.mcp_command)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("mcp")
-            .to_string(),
-        command: config.mcp_command.clone(),
-        args: vec![],
-        env: {
-            let mut env = vec![
-                EnvVar {
-                    name: "BUZZ_RELAY_URL".into(),
-                    value: config.relay_url.clone(),
-                },
-                EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    // bech32 encoding of a valid secret key is infallible.
-                    // Panic here is correct: injecting a bogus secret would cause
-                    // delayed, hard-to-diagnose agent failures downstream.
-                    value: config
-                        .keys
-                        .secret_key()
-                        .to_bech32()
-                        .expect("secret key bech32 encoding should never fail"),
-                },
-            ];
-            // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
-            // so the MCP server can attach it to every signed event.
-            if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-                if !auth_tag.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_AUTH_TAG".into(),
-                        value: auth_tag,
-                    });
-                }
-            }
-            // Forward the agent's display name so dev-mcp can use it as the git
-            // author name instead of the raw npub. Read from the process env
-            // rather than Config: this is a pass-through of a contract owned
-            // upstream, and absent simply means dev-mcp falls back to the npub.
-            if let Ok(display_name) = std::env::var("BUZZ_ACP_DISPLAY_NAME") {
-                if !display_name.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_ACP_DISPLAY_NAME".into(),
-                        value: display_name,
-                    });
-                }
-            }
-            env
-        },
-    }]
+
+    servers.extend(config.configured_mcp_servers.iter().map(|configured| {
+        let config::ConfiguredMcpServer::Stdio {
+            name,
+            command,
+            args,
+            env,
+        } = configured;
+        McpServer {
+            name: name.clone(),
+            command: command.clone(),
+            args: args.clone(),
+            env: env
+                .iter()
+                .map(|(name, value)| EnvVar {
+                    name: name.clone(),
+                    value: value.clone(),
+                })
+                .collect(),
+        }
+    }));
+
+    servers
 }
 
 #[cfg(test)]
@@ -6748,6 +6770,7 @@ mod observer_chunk_coalescer_tests {
 #[cfg(test)]
 mod build_mcp_servers_tests {
     use super::*;
+    use std::collections::BTreeMap;
     use std::sync::Mutex;
 
     /// Env-var-touching tests must run serially — env vars are process-global.
@@ -6760,6 +6783,7 @@ mod build_mcp_servers_tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
+            configured_mcp_servers: Vec::new(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -6798,6 +6822,23 @@ mod build_mcp_servers_tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+        }
+    }
+
+    fn configured_server(
+        name: &str,
+        command: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> config::ConfiguredMcpServer {
+        config::ConfiguredMcpServer::Stdio {
+            name: name.to_string(),
+            command: command.to_string(),
+            args: args.iter().map(|value| (*value).to_string()).collect(),
+            env: env
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+                .collect::<BTreeMap<_, _>>(),
         }
     }
 
@@ -6916,6 +6957,64 @@ mod build_mcp_servers_tests {
     }
 
     #[test]
+    fn legacy_server_stays_first_when_structured_servers_are_present() {
+        let mut config = test_config();
+        config.configured_mcp_servers = vec![
+            configured_server(
+                "jira-hive",
+                "/opt/mcp/jira-hive",
+                &["--stdio"],
+                &[("JIRA_SITE", "https://example.test")],
+            ),
+            configured_server("search", "search-mcp", &[], &[]),
+        ];
+
+        let servers = build_mcp_servers(&config);
+
+        assert_eq!(servers.len(), 3);
+        assert_eq!(servers[0].name, "test-mcp-server");
+        assert_eq!(servers[1].name, "jira-hive");
+        assert_eq!(servers[2].name, "search");
+        assert_eq!(servers[1].command, "/opt/mcp/jira-hive");
+        assert_eq!(servers[1].args, ["--stdio"]);
+    }
+
+    #[test]
+    fn structured_servers_receive_only_their_declared_environment() {
+        let mut config = test_config();
+        config.configured_mcp_servers = vec![configured_server(
+            "jira-hive",
+            "jira-hive-mcp",
+            &[],
+            &[("JIRA_SITE", "https://example.test")],
+        )];
+
+        let servers = build_mcp_servers(&config);
+        let external = &servers[1];
+
+        assert_eq!(external.env.len(), 1);
+        assert_eq!(external.env[0].name, "JIRA_SITE");
+        assert_eq!(external.env[0].value, "https://example.test");
+        assert!(!external.env.iter().any(|entry| matches!(
+            entry.name.as_str(),
+            "BUZZ_PRIVATE_KEY" | "BUZZ_AUTH_TAG" | "BUZZ_RELAY_URL"
+        )));
+    }
+
+    #[test]
+    fn structured_servers_work_without_the_legacy_server() {
+        let mut config = test_config();
+        config.mcp_command.clear();
+        config.configured_mcp_servers =
+            vec![configured_server("jira-hive", "jira-hive-mcp", &[], &[])];
+
+        let servers = build_mcp_servers(&config);
+
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "jira-hive");
+    }
+
+    #[test]
     fn absolute_path_mcp_command_uses_file_stem_as_name() {
         let mut config = test_config();
         config.mcp_command = "/opt/bin/my-mcp-server".into();
@@ -6984,6 +7083,7 @@ mod error_outcome_emission_tests {
             agent_command: "true".into(),
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
+            configured_mcp_servers: Vec::new(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
