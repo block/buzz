@@ -64,7 +64,7 @@ export function ChannelHero({
             </span>
           </span>
           <span
-            className="mt-1 line-clamp-2 max-w-full text-sm leading-5 text-muted-foreground/70"
+            className="mt-1 line-clamp-6 max-w-full whitespace-pre-line text-sm leading-5 text-muted-foreground/70"
             data-testid="channel-management-description"
           >
             {description}
@@ -80,7 +80,7 @@ export function ChannelHero({
           </h3>
           {description ? (
             <p
-              className="mt-1 line-clamp-2 max-w-full text-sm leading-5 text-muted-foreground/70"
+              className="mt-1 line-clamp-6 max-w-full whitespace-pre-line text-sm leading-5 text-muted-foreground/70"
               data-testid="channel-management-description"
             >
               {description}

@@ -737,7 +737,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
       final retrySeconds = parseRateLimitRetrySeconds(message);
       _rateLimitGate.activate(retrySeconds);
       final fallbackMs =
-          (retrySeconds != null && retrySeconds > 0
+          (retrySeconds != null
               ? min(retrySeconds, RelayRateLimitGate.maxRetrySeconds)
               : RelayRateLimitGate.defaultRetrySeconds) *
           1000;

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  getChannelIntroDescription,
   getChannelIntroKind,
   shouldPrioritizeIdleAuxiliary,
   shouldUseFocusIdleDrawer,
@@ -55,6 +56,19 @@ test("an explicit thread override keeps the idle panel in its own focus drawer",
       useSplitAuxiliaryPane: false,
     }),
     true,
+  );
+});
+
+test("channel intro shares description-over-purpose derivation with the header", () => {
+  assert.equal(
+    getChannelIntroDescription(
+      channel({
+        description: "Description paragraphs.\n\nKeep this structure.",
+        purpose: "Legacy purpose",
+        topic: "",
+      }),
+    ),
+    "Description paragraphs.\n\nKeep this structure.",
   );
 });
 

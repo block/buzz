@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test";
 
 test.beforeEach(async ({ page }) => {
+  // Every admin API call returns 200, so the probe resolves to disabled mode
+  // and the dashboard renders without a credential.
   await page.route("**/api/admin/v1/**", async (route) => {
     await route.fulfill({ contentType: "application/json", body: "[]" });
   });
@@ -369,16 +371,10 @@ test("feedback attachments render from imeta without raw markdown", async ({
   await expect(page.getByText("![image]", { exact: false })).toHaveCount(0);
   await expect(
     page.getByRole("img", { name: "screenshot.png" }),
-  ).toHaveAttribute(
-    "src",
-    `/api/admin/v1/feedback/${id}/attachments/${"a".repeat(64)}`,
-  );
+  ).toHaveAttribute("src", /^blob:/);
   await expect(
     page.getByRole("link", { name: /diagnostics.txt/ }),
-  ).toHaveAttribute(
-    "href",
-    `/api/admin/v1/feedback/${id}/attachments/${"b".repeat(64)}`,
-  );
+  ).toHaveAttribute("href", /^blob:/);
   const fileHeight = await page
     .locator(".file-attachment")
     .evaluate((element) => element.getBoundingClientRect().height);

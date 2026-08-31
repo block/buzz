@@ -1,5 +1,7 @@
+import { getChannelDetail } from "@/features/channels/lib/channelDescription";
 import { isEphemeralChannel } from "@/features/channels/lib/ephemeralChannel";
 import type { TimelineMessage } from "@/features/messages/types";
+import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
 import type { Channel } from "@/shared/api/types";
 import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 
@@ -57,12 +59,7 @@ export function getChannelIntroKind(
 }
 
 export function getChannelIntroDescription(channel: Channel): string | null {
-  return (
-    channel.topic?.trim() ||
-    channel.purpose?.trim() ||
-    channel.description?.trim() ||
-    null
-  );
+  return getChannelDetail(channel);
 }
 
 /** Whether a caller-owned auxiliary sheet should render ahead of a thread. */
@@ -109,4 +106,20 @@ export function mentionsKnownAgent(
   return mentionPubkeys.some((pubkey) =>
     knownAgentPubkeys.has(pubkey.toLowerCase()),
   );
+}
+
+export function selectThreadComposerBotTypingPubkeys(
+  entries: TypingIndicatorEntry[],
+  threadHeadId: string | null,
+) {
+  if (!threadHeadId) return [];
+  return entries
+    .filter((entry) => entry.threadHeadId === threadHeadId)
+    .map((entry) => entry.pubkey)
+    .filter(
+      (pubkey, index, all) =>
+        all.findIndex(
+          (candidate) => candidate.toLowerCase() === pubkey.toLowerCase(),
+        ) === index,
+    );
 }

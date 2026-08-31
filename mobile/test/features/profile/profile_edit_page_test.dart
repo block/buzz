@@ -234,6 +234,10 @@ void main() {
       'placeholder': 'Display name',
       'multiline': false,
       'brightness': 'dark',
+      'pageBackgroundArgb': AppTheme.dark().colorScheme.surfaceContainerHighest
+          .toARGB32(),
+      'containerBackgroundArgb': AppTheme.dark().colorScheme.surface.toARGB32(),
+      'containerCornerRadius': Radii.container,
       'allowUnchangedSubmission': false,
     });
     expect(notifier.savedDisplayNames, ['Alice Native']);
@@ -243,6 +247,8 @@ void main() {
   testWidgets('shows profile fields and saves each one from a sheet', (
     tester,
   ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    addTearDown(() => debugDefaultTargetPlatformOverride = null);
     final notifier = _FakeProfileNotifier();
     await tester.pumpWidget(
       WidgetHelpers.testable(
@@ -288,6 +294,7 @@ void main() {
     expect(notifier.savedDescriptions, [
       'Making collaboration feel effortless.',
     ]);
+    debugDefaultTargetPlatformOverride = null;
   });
 
   testWidgets('uses an icon-free grouped card with inset dividers', (
@@ -344,6 +351,19 @@ void main() {
     expect(find.text('Animated'), findsOneWidget);
     expect(find.text('Photo'), findsNothing);
     final modeControl = find.byKey(const ValueKey('avatar-mode-control'));
+    final modeIndicator = find.byKey(const ValueKey('avatar-mode-indicator'));
+    final controlRect = tester.getRect(modeControl);
+    final indicatorRect = tester.getRect(modeIndicator);
+    expect(indicatorRect.left - controlRect.left, Grid.quarter);
+    expect(indicatorRect.top - controlRect.top, Grid.quarter);
+    expect(controlRect.bottom - indicatorRect.bottom, Grid.quarter);
+    expect(
+      controlRect.width - Grid.quarter * 2,
+      closeTo(indicatorRect.width * 3, 0.01),
+    );
+    final indicatorDecoration =
+        tester.widget<DecoratedBox>(modeIndicator).decoration as BoxDecoration;
+    expect(indicatorDecoration.boxShadow, isNull);
     final preview = find.descendant(
       of: find.byKey(const ValueKey('avatar-editor-content')),
       matching: find.byType(AvatarImage),

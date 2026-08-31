@@ -8,21 +8,32 @@ class _CommunitySection extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final roleAsync = ref.watch(currentCommunityRoleProvider);
-    if (!roleAsync.hasError && !canManageCommunityInvites(roleAsync.value)) {
-      return const SizedBox.shrink();
-    }
+    final canInvite =
+        roleAsync.hasError || canManageCommunityInvites(roleAsync.value);
+    final preference = ref.watch(communityThemeProvider);
 
     return AppListCard(
       label: 'Community',
       verticalPadding: Grid.twelve,
       children: [
+        if (canInvite)
+          AppListRow(
+            icon: LucideIcons.userPlus,
+            title: 'Invite to community',
+            trailing: const _RowChevron(),
+            onTap: () => Navigator.of(
+              context,
+            ).push(MaterialPageRoute<void>(builder: invitePageBuilder)),
+          ),
         AppListRow(
-          icon: LucideIcons.userPlus,
-          title: 'Invite to community',
+          key: const ValueKey('community-theme-row'),
+          icon: LucideIcons.palette,
+          title: 'Theme',
+          value: themeSelectionLabel(preference.theme, preference.mode),
           trailing: const _RowChevron(),
-          onTap: () => Navigator.of(
-            context,
-          ).push(MaterialPageRoute<void>(builder: invitePageBuilder)),
+          onTap: () => Navigator.of(context).push(
+            MaterialPageRoute<void>(builder: (_) => const ThemePickerPage()),
+          ),
         ),
       ],
     );

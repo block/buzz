@@ -8,6 +8,17 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  Border sheetHeaderBorder(WidgetTester tester) {
+    final decoration =
+        tester
+                .widget<DecoratedBox>(
+                  find.byKey(const ValueKey('buzz-sheet-scroll-divider')),
+                )
+                .decoration
+            as BoxDecoration;
+    return decoration.border! as Border;
+  }
+
   testWidgets(
     'keeps an opaque Flutter surface when iOS native support is unavailable',
     (tester) async {
@@ -166,7 +177,7 @@ void main() {
     try {
       final darkTheme = AppTheme.dark();
       await tester.pumpWidget(themedSurface(darkTheme));
-      await tester.pump();
+      await tester.pumpAndSettle();
       tester.widget<UiKitView>(find.byType(UiKitView)).onPlatformViewCreated!(
         42,
       );
@@ -234,7 +245,13 @@ void main() {
                 onPressed: () => showBuzzModalBottomSheet<void>(
                   context: context,
                   title: 'Members',
-                  builder: (_) => const Text('Sheet body'),
+                  builder: (sheetContext) => ColoredBox(
+                    key: const ValueKey('sheet-container-surface'),
+                    color: Theme.of(
+                      sheetContext,
+                    ).colorScheme.surfaceContainerHighest,
+                    child: const Text('Sheet body'),
+                  ),
                 ),
                 child: const Text('Open sheet'),
               ),
@@ -255,7 +272,18 @@ void main() {
       );
       expect(
         nativeSurface.creationParams,
-        containsPair('color', lightColorScheme.surface.toARGB32()),
+        containsPair(
+          'color',
+          lightColorScheme.surfaceContainerHighest.toARGB32(),
+        ),
+      );
+      expect(
+        tester
+            .widget<ColoredBox>(
+              find.byKey(const ValueKey('sheet-container-surface')),
+            )
+            .color,
+        lightColorScheme.surface,
       );
       expect(nativeSurface.creationParams, isNot(contains('headerGradient')));
       expect(
@@ -335,7 +363,7 @@ void main() {
                 find.byKey(const ValueKey('buzz-sheet-surface')),
               )
               .color,
-          lightColorScheme.surface,
+          lightColorScheme.surfaceContainerHighest,
         );
         expect(
           tester.getTopLeft(find.text('Sheet body')).dy -
@@ -415,6 +443,126 @@ void main() {
       }
     },
   );
+
+  testWidgets('untitled Android sheets paint the utility route surface', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => FilledButton(
+                onPressed: () => showBuzzModalBottomSheet<void>(
+                  context: context,
+                  builder: (sheetContext) => ColoredBox(
+                    key: const ValueKey('untitled-sheet-container'),
+                    color: Theme.of(
+                      sheetContext,
+                    ).colorScheme.surfaceContainerHighest,
+                    child: const SizedBox(
+                      height: 80,
+                      child: Text('Sheet body'),
+                    ),
+                  ),
+                ),
+                child: const Text('Open sheet'),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Open sheet'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester.widget<BottomSheet>(find.byType(BottomSheet)).backgroundColor,
+        lightColorScheme.surfaceContainerHighest,
+      );
+      expect(
+        tester
+            .widget<ColoredBox>(
+              find.byKey(const ValueKey('untitled-sheet-container')),
+            )
+            .color,
+        lightColorScheme.surface,
+      );
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('sheet divider appears only when content scrolls under header', (
+    tester,
+  ) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    try {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.light(),
+          home: Scaffold(
+            body: Builder(
+              builder: (context) => FilledButton(
+                onPressed: () => showBuzzModalBottomSheet<void>(
+                  context: context,
+                  title: 'Theme',
+                  isScrollControlled: true,
+                  builder: (_) => SizedBox(
+                    height: 360,
+                    child: ListView.builder(
+                      key: const ValueKey('sheet-scroll-view'),
+                      itemCount: 30,
+                      itemBuilder: (_, index) =>
+                          SizedBox(height: 44, child: Text('Option $index')),
+                    ),
+                  ),
+                ),
+                child: const Text('Open sheet'),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Open sheet'));
+      await tester.pumpAndSettle();
+
+      expect(sheetHeaderBorder(tester).bottom.color.a, 0);
+
+      await tester.drag(
+        find.byKey(const ValueKey('sheet-scroll-view')),
+        const Offset(0, -100),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .state<ScrollableState>(
+              find.descendant(
+                of: find.byKey(const ValueKey('sheet-scroll-view')),
+                matching: find.byType(Scrollable),
+              ),
+            )
+            .position
+            .pixels,
+        greaterThan(0),
+      );
+      expect(sheetHeaderBorder(tester).bottom.color.a, greaterThan(0));
+
+      await tester.drag(
+        find.byKey(const ValueKey('sheet-scroll-view')),
+        const Offset(0, 500),
+      );
+      await tester.pumpAndSettle();
+
+      expect(sheetHeaderBorder(tester).bottom.color.a, 0);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 
   testWidgets('iOS paints the drag handle inside the concentric surface', (
     tester,

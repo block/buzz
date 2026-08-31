@@ -281,7 +281,7 @@ class _StatusInput extends ConsumerWidget {
         border: Border.all(
           color: context.colors.outlineVariant.withValues(alpha: 0.8),
         ),
-        borderRadius: BorderRadius.circular(Radii.card),
+        borderRadius: BorderRadius.circular(Radii.container),
       ),
       child: Row(
         children: [
@@ -294,7 +294,7 @@ class _StatusInput extends ConsumerWidget {
                   button: true,
                   label: 'Choose a status emoji',
                   child: InkWell(
-                    borderRadius: BorderRadius.circular(Radii.card),
+                    borderRadius: BorderRadius.circular(Radii.container),
                     onTap: enabled ? onChooseEmoji : null,
                     child: Center(child: _StatusEmojiPreview(emoji: emoji)),
                   ),

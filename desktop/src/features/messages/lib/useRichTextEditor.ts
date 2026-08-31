@@ -74,6 +74,8 @@ export type AutocompleteEdit = {
   insertText: string;
   /** Keep the current selection mapped through this edit instead of moving it to the insertion. */
   preserveSelection?: boolean;
+  /** Skip asynchronous DOM caret reassertion when focus may move elsewhere. */
+  reassertMentionCaret?: boolean;
   /**
    * When set, the replaced range becomes a CustomEmojiNode for this
    * shortcode (followed by `insertText`, which carries the trailing space)
@@ -162,6 +164,7 @@ export function useRichTextEditor({
   onLinkSelectionChange,
   onLinkShortcut,
 }: RichTextEditorOptions) {
+  const addressedAgentMentionNamesRef = React.useRef<readonly string[]>([]);
   const onUpdateRef = React.useRef(onUpdate);
   onUpdateRef.current = onUpdate;
 
@@ -648,10 +651,29 @@ export function useRichTextEditor({
     syncMentionHighlightFromProps(
       editor,
       mentionNames,
-      agentMentionNames,
+      [
+        ...new Set([
+          ...(agentMentionNames ?? []),
+          ...addressedAgentMentionNamesRef.current,
+        ]),
+      ],
       channelNames,
     );
   }, [editor, mentionNames, agentMentionNames, channelNames]);
+
+  const syncAddressedAgentMentionNames = React.useCallback(
+    (names: readonly string[]) => {
+      addressedAgentMentionNamesRef.current = names;
+      if (!editor) return;
+      syncMentionHighlightFromProps(
+        editor,
+        mentionNames,
+        [...new Set([...(agentMentionNames ?? []), ...names])],
+        channelNames,
+      );
+    },
+    [agentMentionNames, channelNames, editor, mentionNames],
+  );
 
   // Custom-emoji set changes: re-resolve the `src` attr on any existing
   // node in the doc (e.g. an emoji's image was just published).
@@ -777,6 +799,7 @@ export function useRichTextEditor({
       text: string,
       customEmojiShortcode?: string,
       preserveSelection = false,
+      reassertMentionCaret = !preserveSelection,
     ) => {
       if (!editor) return;
       const projection = buildPlainTextProjection(editor.state.doc);
@@ -825,7 +848,7 @@ export function useRichTextEditor({
       settleAutocompleteMentionInsert(editor, tr, text, !preserveSelection);
       editor.view.dispatch(tr);
       editor.view.focus();
-      if (!preserveSelection) reassertMentionCaretAfterFocus(editor.view);
+      if (reassertMentionCaret) reassertMentionCaretAfterFocus(editor.view);
     },
     [editor, customEmojiWiring.resolveUrl],
   );
@@ -917,6 +940,7 @@ export function useRichTextEditor({
     focusPreserve,
     getPlainTextAndCursor,
     replacePlainTextRange,
+    syncAddressedAgentMentionNames,
     getLinkSelectionInfo,
     applyLink,
     removeLink,

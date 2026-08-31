@@ -1722,7 +1722,7 @@ test("project overview presents collapsible context beside grouped activity", as
     page.getByTestId("projects-overview-context-panel"),
   ).toBeVisible();
   await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
-    "Projects",
+    "Activity",
   );
   expect(
     Math.round(
@@ -1757,7 +1757,7 @@ test("project overview presents collapsible context beside grouped activity", as
   await expect(
     page
       .getByTestId("projects-overview-context-panel")
-      .getByRole("heading", { name: "Activity" }),
+      .getByRole("heading", { level: 3, name: "Activity" }),
   ).toHaveCount(0);
   await expect(
     page
@@ -1932,7 +1932,7 @@ test("project overview presents collapsible context beside grouped activity", as
     page.getByTestId("projects-overview-context-panel"),
   ).toBeVisible();
   await expect(page.getByTestId("projects-overview-context-title")).toHaveText(
-    "Projects",
+    "Activity",
   );
   await expect(page.getByTestId("projects-overview-activity")).toHaveCount(0);
 
