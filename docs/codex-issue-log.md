@@ -122,3 +122,46 @@
 - 处理：LAN transport 的 AUTH 事件只把 canonical URL 的协议改为 `ws`，保留相同公网主机名和 Community 身份；公网 transport 继续使用原始 `wss`。手动检测结果现在区分 LAN 失败与公网回退失败，并显示 Relay 返回的具体错误。
 - 验证：AUTH URL 与入站缓冲测试 5/5、TypeScript、Biome、Tauri native WebSocket 9/9、Relay NIP-42 9/9 通过。对真实 `10.24.11.82:3000` 保持公网 Host 的 A/B 探测中，`wss://公网主机名` 返回 `auth-required: verification failed`，`ws://同一公网主机名` 返回认证成功，直接确认根因与修复方向。待生成标识测试包进行实机验证。
 - 版本/提交：`0.5.16` 本地发布；源代码提交见本次版本提交。
+
+## 2026-08-31：ngrok 公网入口达到额度且无法切回旧域名
+
+- 现象：当前公网入口 `content-swift-seemingly.ngrok-free.app` 返回 HTTP 403 / `ERR_NGROK_727`，用户希望切回此前的 `fairy-sigilistic-elizbeth.ngrok-free.dev`。
+- 诊断：当前 ngrok agent 在线，但账号已达到当月 HTTP 请求上限。旧域名返回 `ERR_NGROK_3200`；使用当前凭据启动旧域名时，ngrok 明确返回 `ERR_NGROK_320`，说明域名保留在另一个账号。切换前备份与当前 `ngrok.yml` 的 token 指纹一致，机器上没有保存可用于旧域名所属账号的另一套凭据。
+- 处理：保留现有 ngrok 配置和进程，未贸然覆盖 token 或切换域名。要恢复旧域名，需要先取得该域名所属账号的 authtoken；也可换用一个未超额账号的新域名。
+- 验证：本地 ngrok API 报告 agent `online`；当前入口稳定返回 `ERR_NGROK_727`，旧入口稳定返回离线错误，relay 本机及 LAN 服务不受影响。
+- 版本/提交：诊断时仓库为 `7bb6bc01`（`0.5.16`）。
+
+### 追加处理：恢复旧账号和旧域名
+
+- 用户重新配置旧域名所属账号的 authtoken 后，`buzz-ngrok.service` 成功启动，`fairy-sigilistic-elizbeth.ngrok-free.dev/_readiness` 返回 HTTP 200。
+- 将 Relay canonical URL 和 ACP 默认 URL 切回 `wss://fairy-sigilistic-elizbeth.ngrok-free.dev`，停止已超额的 `content-swift-seemingly.ngrok-free.app` 独立隧道，并完整重启 Relay。
+
+## 2026-08-31：公网 IP 直连被识别为未配置社区
+
+- 现象：客户端直连 `ws://121.192.177.100:3000` 时进入 Profile 创建流程，随后收到 `relay returned 404 Not Found: relay: no community is configured for this host`。
+- 定位：relay 使用请求 Host 选择社区；现有社区主 Host 是 `fairy-sigilistic-elizbeth.ngrok-free.dev`，数据库没有公网 IP 的 Host 别名。另，服务器实际网卡地址是 `121.192.177.100/26`，不是用户提到的 `121.192.177.119`；后者在本机端口探测中连接被拒绝。由于端口为 3000，实际 Host 需要匹配 `121.192.177.100:3000`。
+- 处理：将 `121.192.177.100` 和 `121.192.177.100:3000` 写入 `community_host_aliases`，均指向现有社区 `fairy-sigilistic-elizbeth.ngrok-free.dev`，不创建新社区、不迁移已有数据。
+- 验证：通过 `Host: 121.192.177.100:3000` 的本地 NIP-11 请求返回 HTTP 200；canonical 域名仍返回 HTTP 200。无需重启 relay，Host 别名查询为请求级数据库读取。
+- 版本/提交：运行时仓库为 `7bb6bc01`（`0.5.16`）。
+
+## 2026-08-31：同一 Relay 经不同 Host 进入后 Profile 和历史记录分裂
+
+- 现象：通过公网 IP 进入同一 relay 时要求重新建立 Profile，进入后看不到此前的频道和历史记录。
+- 定位：数据库中存在两个独立 Community：`content-swift-seemingly.ngrok-free.app` 有 2715 条事件、101 个用户和 27 个频道；后来恢复的 `fairy-sigilistic-elizbeth.ngrok-free.dev` 被启动流程创建为新 Community，只有 71 条事件、9 个用户和 3 个频道。IP Host 别名最初指向后者。同一用户公钥在历史 Community 有 318 条事件、在新 Community 只有 17 条，直接证明数据被 Host 边界分开，而不是客户端丢失历史。
+- 处理：保留两个 Community 的数据；将原 `fairy` 小 Community 改名为 `legacy-fairy-sigilistic-elizbeth.ngrok-free.dev`，将历史 `content-swift` Community 的主 Host 改为当前 `fairy` 域名，并把 `content-swift`、`121.192.177.100`、`121.192.177.100:3000`、`121.192.177.119`、`121.192.177.119:3000` 全部设为历史 Community 的别名。完整重启 relay 后，部署 Community 确认为历史 Community id `0a3b5be4-3092-4ac9-99a7-be8de0892bcb`。
+- 验证：canonical Host 和 IP Host 的本地 readiness 均返回 HTTP 200；relay 启动日志显示 `Deployment community ensured` 指向历史 Community。公网 ngrok transient unit 同时消失，因此补建持久化 `buzz-ngrok.service` 后单独验证公网入口。
+- 版本/提交：运行时仓库为 `7bb6bc01`（`0.5.16`）。
+
+## 2026-08-31：工作站绑定公网 IPv4 并保留内网连接
+
+- 现象：用户希望在保留内网地址 `10.24.11.82` 可连接的同时，为工作站绑定公网地址 `121.192.177.100/26`，公网网关为 `121.192.177.65`。
+- 定位：当前唯一有链路的网卡为 `ens1f3`，已有 `10.24.11.82/26` 和默认网关 `10.24.11.65`；其他网口均无载波。公网地址可作为同一网卡的第二地址，但两个网关不能直接并列为默认路由，应为公网源地址配置独立路由表和策略规则。
+- 处理：完成 NetworkManager 配置语法校验，方案为保留内网默认路由，增加公网地址、`table 177` 的公网直连/默认路由，以及 `from 121.192.177.100/32` 的策略规则。尝试修改现有连接时因当前会话没有管理员授权而返回 `Insufficient privileges`，未改变系统网络配置。
+- 验证：只读检查确认当前内网地址和路由保持不变；公网网关连通性尚未验证，需管理员应用配置后测试 ARP/ICMP 和实际服务端口。
+- 版本/提交：工作区 `Lin/develop`，未创建提交。
+
+### 追加验证
+
+- 用户已用管理员权限成功执行 NetworkManager 配置并重新应用到 `ens1f3`。
+- `10.24.11.82/26` 与 `121.192.177.100/26` 同时存在；`ip rule` 显示 `from 121.192.177.100 lookup 177`；公网流量解析为经 `121.192.177.65` 出口。
+- 公网网关 `121.192.177.65` ping 3/3 成功，延迟约 0.84–4.01 ms；内网默认路由未被替换。
