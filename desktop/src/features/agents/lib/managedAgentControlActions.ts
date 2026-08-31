@@ -3,6 +3,7 @@ import type {
   Channel,
   ManagedAgent,
   PresenceLookup,
+  PresenceStatus,
   RelayAgent,
 } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -35,9 +36,43 @@ export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
   return agent.status === "running" || agent.status === "deployed";
 }
 
-export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
+/**
+ * Whether this agent is actually alive right now — the live axis of
+ * runtime.rs's two-axis status model, as distinct from `isManagedAgentActive`
+ * (the control-plane axis: "the provider was invoked").
+ *
+ * For a provider-backed agent, `status` stays "deployed" forever once set —
+ * there is no v1 undeploy — so it never reflects a `!shutdown`. Real presence
+ * (online/away/offline) is the only live signal. When presence hasn't
+ * resolved yet (`undefined`/`null`, e.g. the presence query hasn't loaded),
+ * fall back to the control-plane status rather than flashing "offline".
+ *
+ * Local agents have no separate live axis: the local process IS the control
+ * plane, so `status` alone is authoritative and any unrelated presence value
+ * is ignored.
+ */
+export function isManagedAgentLive(
+  agent: Pick<ManagedAgent, "status" | "backend">,
+  presenceStatus?: PresenceStatus | null,
+): boolean {
+  if (agent.backend.type !== "provider") {
+    return isManagedAgentActive(agent);
+  }
+  if (presenceStatus === "online" || presenceStatus === "away") {
+    return true;
+  }
+  if (presenceStatus === "offline") {
+    return false;
+  }
+  return isManagedAgentActive(agent);
+}
+
+export function getManagedAgentPrimaryActionLabel(
+  agent: ManagedAgent,
+  presenceStatus?: PresenceStatus | null,
+) {
   if (agent.backend.type === "provider") {
-    return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";
+    return isManagedAgentLive(agent, presenceStatus) ? "Shutdown" : "Deploy";
   }
 
   if (isManagedAgentActive(agent)) {

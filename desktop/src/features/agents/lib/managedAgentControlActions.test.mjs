@@ -5,6 +5,7 @@ import {
   startManagedAgentWithRules,
   respawnManagedAgentWithRules,
   isManagedAgentActive,
+  isManagedAgentLive,
 } from "./managedAgentControlActions.ts";
 
 function agent(overrides = {}) {
@@ -206,4 +207,62 @@ test("isManagedAgentActive is false for a provider agent never deployed", () => 
 test("isManagedAgentActive is false for a stopped local agent", () => {
   const stoppedAgent = agent({ status: "stopped" });
   assert.equal(isManagedAgentActive(stoppedAgent), false);
+});
+
+// --- isManagedAgentLive: the live axis, distinct from control-plane status --
+//
+// runtime.rs's two-axis model names this explicitly: "deployed" (control
+// plane) tracks whether infrastructure exists; live presence (online/away/
+// offline) is "the real-time signal for whether the harness is connected".
+// The UI's primary Shutdown/Deploy toggle and its status dot must use the
+// LIVE axis for a provider agent — using control-plane status there (as
+// isManagedAgentActive alone does) is exactly the bug that left the button
+// and the dot stuck showing "online"/"Shutdown" forever after `!shutdown`,
+// even though the agent was actually offline.
+
+test("isManagedAgentLive is true for a provider agent with online presence", () => {
+  const providerAgent = agent({
+    status: "deployed",
+    backend: { type: "provider", id: "lxc", config: {} },
+  });
+  assert.equal(isManagedAgentLive(providerAgent, "online"), true);
+});
+
+test("isManagedAgentLive is true for a provider agent with away presence", () => {
+  const providerAgent = agent({
+    status: "deployed",
+    backend: { type: "provider", id: "lxc", config: {} },
+  });
+  assert.equal(isManagedAgentLive(providerAgent, "away"), true);
+});
+
+test("isManagedAgentLive is false for a deployed provider agent that is offline", () => {
+  // The exact bug: status stays "deployed" forever, but presence says offline.
+  const providerAgent = agent({
+    status: "deployed",
+    backend: { type: "provider", id: "lxc", config: {} },
+  });
+  assert.equal(isManagedAgentLive(providerAgent, "offline"), false);
+});
+
+test("isManagedAgentLive falls back to control-plane status when presence is unresolved", () => {
+  // Presence not loaded yet (undefined/null) must not flash "offline" —
+  // fall back to the prior, control-plane-only behavior.
+  const providerAgent = agent({
+    status: "deployed",
+    backend: { type: "provider", id: "lxc", config: {} },
+  });
+  assert.equal(isManagedAgentLive(providerAgent, undefined), true);
+  assert.equal(isManagedAgentLive(providerAgent, null), true);
+});
+
+test("isManagedAgentLive ignores presence for local agents", () => {
+  // Local agents have no separate live axis: the local process IS the truth,
+  // already fully captured by status. A stray/unrelated presence value for a
+  // local agent must not override that.
+  const localAgent = agent({ status: "running" });
+  assert.equal(isManagedAgentLive(localAgent, "offline"), true);
+
+  const stoppedLocalAgent = agent({ status: "stopped" });
+  assert.equal(isManagedAgentLive(stoppedLocalAgent, "online"), false);
 });
