@@ -15,6 +15,51 @@ function normalizeDisplayName(name: string): string {
   return name.trim().toLowerCase();
 }
 
+/** Keep a second same-name selection from rebinding text already in the draft. */
+export function selectedMentionLabel(
+  displayName: string,
+  pubkey: string,
+  selectedMentions: ReadonlyMap<string, string>,
+): string {
+  const bindings = new Map(
+    [...selectedMentions].map(([label, key]) => [
+      normalizeDisplayName(label),
+      key.toLowerCase(),
+    ]),
+  );
+  const conflicts = (label: string) => {
+    const existing = bindings.get(normalizeDisplayName(label));
+    return existing !== undefined && existing !== pubkey.toLowerCase();
+  };
+  if (!conflicts(displayName)) return displayName;
+  const qualified = `${displayName} (${pubkey.toLowerCase()})`;
+  let label = qualified;
+  let suffix = 2;
+  // A display name may itself look qualified. Never overwrite that binding.
+  while (conflicts(label)) label = `${qualified} ${suffix++}`;
+  return label;
+}
+
+/** Reserve each label before binding the next identity in a multi-agent selection. */
+export function selectedMentionLabels<
+  T extends { displayName: string; pubkey?: string },
+>(
+  selections: readonly T[],
+  selectedMentions: ReadonlyMap<string, string>,
+): T[] {
+  const bindings = new Map(selectedMentions);
+  return selections.map((selected) => {
+    if (!selected.pubkey) return selected;
+    const displayName = selectedMentionLabel(
+      selected.displayName,
+      selected.pubkey,
+      bindings,
+    );
+    bindings.set(displayName, selected.pubkey);
+    return { ...selected, displayName };
+  });
+}
+
 /**
  * Returns explicit selected mention pubkeys and manually typed channel-member
  * mentions. At each `@` offset, only the longest valid display name wins so a
@@ -71,10 +116,21 @@ export function extractMentionPubkeys({
     const longestNameLength = Math.max(
       ...matches.map((match) => match.displayName.length),
     );
-    for (const match of matches) {
-      if (match.pubkey && match.displayName.length === longestNameLength) {
-        winningPubkeys.add(match.pubkey);
-      }
+    const winners = matches.filter(
+      (match) => match.displayName.length === longestNameLength,
+    );
+    const identities = new Set(
+      winners.flatMap((match) =>
+        match.pubkey ? [match.pubkey.toLowerCase()] : [],
+      ),
+    );
+    if (identities.size > 1) {
+      throw new Error(
+        `The mention @${winners[0].displayName} is ambiguous. Choose a recipient from the mention picker.`,
+      );
+    }
+    for (const match of winners) {
+      if (match.pubkey) winningPubkeys.add(match.pubkey);
     }
   }
 

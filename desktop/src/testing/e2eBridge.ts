@@ -1207,6 +1207,11 @@ declare global {
       ownerPubkey: string;
       kind: number;
     }) => boolean;
+    /** Explicit presence evidence; independent of managed-agent runtime state. */
+    __BUZZ_E2E_EMIT_MOCK_PRESENCE__?: (input: {
+      pubkey: string;
+      status: PresenceStatus;
+    }) => void;
     __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
       channelName: string;
       content: string;
@@ -4094,6 +4099,14 @@ function syncMockRelayAgentsFromManagedAgents() {
     },
   );
 
+  // Owned discovery includes nonmembers, but membership must come from the
+  // actual roster, including additions and newly created DMs.
+  for (const agent of baseAgents) {
+    if (agent.owner_pubkey !== MOCK_IDENTITY_PUBKEY) continue;
+    const membership = getManagedAgentRelayMembership(agent.pubkey);
+    agent.channel_ids = membership.channelIds;
+    agent.channels = membership.channels;
+  }
   mockRelayAgents = [...baseAgents, ...managedAgentsAsRelay];
 }
 
@@ -11223,6 +11236,11 @@ export function maybeInstallE2eTauriMocks() {
     ownerPubkey,
     kind,
   }) => hasMockOwnerKindSubscription(ownerPubkey, kind);
+  window.__BUZZ_E2E_EMIT_MOCK_PRESENCE__ = ({ pubkey, status }) => {
+    const author = pubkey.toLowerCase();
+    setMockPresenceStatus(author, status);
+    emitMockGlobalEvent(createMockEvent(20001, status, [], author));
+  };
   window.__BUZZ_E2E_REPLACE_MOCK_TEAM_CATALOG_HEAD__ = (event) => {
     const dTag = event.tags.find((tag) => tag[0] === "d")?.[1];
     const existingIndex = mockTeamCatalogEvents.findIndex(
@@ -13111,7 +13129,9 @@ export function maybeInstallE2eTauriMocks() {
           (agent) =>
             requested.has(agent.pubkey.toLowerCase()) &&
             !revoked.has(agent.pubkey.toLowerCase()) &&
-            (!channelId || agent.channel_ids.includes(channelId)),
+            (!channelId ||
+              agent.channel_ids.includes(channelId) ||
+              agent.owner_pubkey === MOCK_IDENTITY_PUBKEY),
         );
       }
       case "list_personas":

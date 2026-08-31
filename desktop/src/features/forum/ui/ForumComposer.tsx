@@ -2,6 +2,7 @@ import * as React from "react";
 
 import { EditorContent } from "@tiptap/react";
 import { ChevronDown } from "lucide-react";
+import { toast } from "sonner";
 import { buildOutgoingMessage } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
@@ -20,6 +21,7 @@ import { useLinkEditor } from "@/features/messages/lib/useLinkEditor";
 import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
 import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
 import { MessageComposerToolbar } from "@/features/messages/ui/MessageComposerToolbar";
+import { NonMemberMentionDialog } from "@/features/messages/ui/NonMemberMentionDialog";
 import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -34,6 +36,7 @@ import { ForumComposerAutocompletes } from "./ForumComposerAutocompletes";
 import { ForumComposerCompactLayout } from "./ForumComposerCompactLayout";
 import { ForumComposerMediaStatus } from "./ForumComposerMediaStatus";
 import { useCompactComposerInteractions } from "./useCompactComposerInteractions";
+import { useForumMentionPreparation } from "./useForumMentionPreparation";
 
 export function ForumComposer({
   channelId = null,
@@ -73,6 +76,8 @@ export function ForumComposer({
   }, [compact]);
 
   const mentions = useMentions(channelId, members, profiles, { channelType });
+  const { prepareMentionPubkeys, nonMemberPromptProps } =
+    useForumMentionPreparation(channelId, channelType, mentions);
   const channelLinks = useChannelLinks();
   const media = useMediaUpload();
   const { handlePaperclipClick, handleToolbarMouseDown, shouldIgnoreBlur } =
@@ -239,9 +244,11 @@ export function ForumComposer({
       channelLinks.clearChannels();
       setIsEmojiPickerOpen(false);
       try {
-        const pubkeys = await mentions.revalidateMentionPubkeys(
+        const pubkeys = await prepareMentionPubkeys(
           mentions.extractMentionPubkeys(trimmed),
+          trimmed,
         );
+        if (pubkeys === null) return;
 
         // Reuse the shared send-path builder so forum/notes posts emit the same
         // body + imeta as chat: generic files become `[filename](url)` links with a
@@ -275,8 +282,10 @@ export function ForumComposer({
           media.setPendingImeta(savedImeta);
           if (compact) setIsCompactExpanded(true);
         }
-      } catch {
-        // Keep the draft intact when authorization refresh fails.
+      } catch (error) {
+        // Authorization and ambiguous-name failures must be visible, not a
+        // silent no-op. This path has not cleared the draft or its selections.
+        toast.error(error instanceof Error ? error.message : String(error));
       } finally {
         isSubmissionPendingRef.current = false;
         setIsSubmissionPending(false);
@@ -288,7 +297,7 @@ export function ForumComposer({
       media.setPendingImeta,
       mentions.cancelMentionAutocomplete,
       mentions.extractMentionPubkeys,
-      mentions.revalidateMentionPubkeys,
+      prepareMentionPubkeys,
       mentions.clearMentions,
       channelLinks.clearChannels,
       richText.clearContent,
@@ -631,6 +640,7 @@ export function ForumComposer({
           </>
         )}
       </form>
+      <NonMemberMentionDialog {...nonMemberPromptProps} />
       {!isSubmissionPending && linkEditor.card}
       {!isSubmissionPending && linkEditor.dialog}
     </>

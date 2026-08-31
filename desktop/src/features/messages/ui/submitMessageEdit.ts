@@ -1,3 +1,7 @@
+import {
+  AgentMentionAuthorizationError,
+  type MentionRevalidationOptions,
+} from "@/features/messages/lib/agentMentionRevalidation";
 import type { QueuedMediaAttachment } from "@/features/messages/lib/backgroundMediaUploadStore";
 import { enqueueBackgroundMediaUpload } from "@/features/messages/lib/backgroundMediaUploadStore";
 import { hasMention } from "@/features/messages/lib/hasMention";
@@ -40,7 +44,11 @@ type SubmitMessageEditOptions = Omit<
   ownerPubkey: string | null;
   restoreComposer: (draft: EditDraft) => void;
   restoreMentionRefs: (refs: DraftMentionRef[]) => void;
-  revalidateMentionPubkeys: (pubkeys: readonly string[]) => Promise<string[]>;
+  revalidateMentionPubkeys: (
+    pubkeys: readonly string[],
+    channelId?: string | null,
+    options?: MentionRevalidationOptions,
+  ) => Promise<string[]>;
   shouldRestoreComposer: () => boolean;
   setDeferredUploadPending: (isPending: boolean) => void;
   save: (
@@ -94,11 +102,17 @@ export async function submitMessageEdit({
       restoreMentionRefs(draft.mentionRefs);
     }
   };
-  const addedMentionPubkeys = diffAddedMentionPubkeys(
-    extractMentionPubkeys(originalContent),
-    extractMentionPubkeys(content),
-    ownerPubkey ?? "",
-  );
+  let addedMentionPubkeys: string[];
+  try {
+    addedMentionPubkeys = diffAddedMentionPubkeys(
+      extractMentionPubkeys(originalContent),
+      extractMentionPubkeys(content),
+      ownerPubkey ?? "",
+    );
+  } catch (error) {
+    setUploadError(error instanceof Error ? error.message : String(error));
+    return;
+  }
   const hasQueuedAttachments = draft.queuedAttachments.length > 0;
   if (hasQueuedAttachments) setDeferredUploadPending(true);
   clearComposer();
@@ -126,8 +140,15 @@ export async function submitMessageEdit({
       ],
     );
     if (signal?.aborted) return;
-    const revalidatedMentionPubkeys =
-      await revalidateMentionPubkeys(addedMentionPubkeys);
+    const revalidatedMentionPubkeys = await revalidateMentionPubkeys(
+      addedMentionPubkeys,
+      undefined,
+      {
+        intendedAgentPubkeys: draft.mentionRefs
+          .filter((ref) => ref.isAgent)
+          .map((ref) => ref.pubkey),
+      },
+    );
     if (signal?.aborted) return;
     await save(
       finalContent,
@@ -143,8 +164,10 @@ export async function submitMessageEdit({
       onComplete: async (uploaded, signal) => {
         try {
           await finishEdit(uploaded, signal);
-        } catch {
+        } catch (error) {
           restoreDraft();
+          if (error instanceof AgentMentionAuthorizationError)
+            setUploadError(error.message);
         } finally {
           setDeferredUploadPending(false);
         }
@@ -164,7 +187,9 @@ export async function submitMessageEdit({
 
   try {
     await finishEdit([]);
-  } catch {
+  } catch (error) {
     restoreDraft();
+    if (error instanceof AgentMentionAuthorizationError)
+      setUploadError(error.message);
   }
 }

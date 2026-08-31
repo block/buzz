@@ -1,3 +1,4 @@
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { ArrowUp, AtSign, X } from "lucide-react";
 import {
   AnimatePresence,
@@ -272,7 +273,8 @@ export function ComposerMentionButton({
                       </TooltipTrigger>
                       <TooltipContent>
                         Don't automatically mention {agent.displayName} in this
-                        conversation
+                        conversation{" "}
+                        <AgentManagementMarker pubkey={agent.pubkey} />
                       </TooltipContent>
                     </Tooltip>
                   ))}

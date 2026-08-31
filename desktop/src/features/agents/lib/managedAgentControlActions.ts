@@ -31,6 +31,7 @@ export type ManagedAgentActionResult = {
   noticeMessage?: string;
 };
 
+/** Lifecycle action routing only; deployed is a retained receipt, not presence. */
 export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
   return agent.status === "running" || agent.status === "deployed";
 }
@@ -133,7 +134,8 @@ export async function stopManagedAgentWithRules({
       agent.pubkey,
     ]);
     return {
-      noticeMessage: "Shutdown command sent. Agent will stop shortly.",
+      noticeMessage:
+        "Shutdown requested. This does not confirm the agent has stopped.",
     };
   }
 

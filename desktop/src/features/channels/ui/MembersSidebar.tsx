@@ -12,10 +12,8 @@ import {
   coalesceAgentAutocompleteCandidates,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
-  isAgentDirectoryReady,
   isAgentIdentityInAllowedList,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
-import { isOtherSetupAgent } from "@/features/agents/lib/otherSetupAgent";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useClassifiedMembers } from "@/features/channels/lib/useClassifiedMembers";
 import { formatMemberName } from "@/features/channels/lib/memberUtils";
@@ -184,9 +182,6 @@ export function MembersSidebar({
     managedAgentsQuery,
     relayAgentsQuery,
   } = useClassifiedMembers(rawMembers, currentPubkey);
-  const agentDirectoriesReady =
-    isAgentDirectoryReady(managedAgentsQuery) &&
-    isAgentDirectoryReady(relayAgentsQuery);
   const activeMembers = React.useMemo(
     () =>
       [...people, ...bots].sort((left, right) =>
@@ -332,7 +327,7 @@ export function MembersSidebar({
         displayName: agent.name,
         avatarUrl: null,
         nip05Handle: null,
-        ownerPubkey: null,
+        ownerPubkey: agent.ownerPubkey,
         isAgent: true,
       });
     }
@@ -617,16 +612,6 @@ export function MembersSidebar({
     const managedAgent = memberIsBot
       ? managedAgentByPubkey.get(normalizePubkey(member.pubkey))
       : undefined;
-    const showOtherSetupMarker =
-      memberIsBot &&
-      isOtherSetupAgent({
-        agentDirectoriesReady,
-        currentPubkey,
-        managedAgents: managedAgentsQuery.data ?? [],
-        profileOwnerPubkey: memberProfile?.ownerPubkey,
-        pubkey: member.pubkey,
-        relayAgents: relayAgentsQuery.data ?? [],
-      });
     const managedAgentRuntime =
       memberIsBot && relayUrl
         ? findManagedAgentRuntime(
@@ -686,7 +671,7 @@ export function MembersSidebar({
           memberPresenceQuery.data?.[member.pubkey.toLowerCase()] ?? null
         }
         profileAvatarUrl={memberProfile?.avatarUrl ?? null}
-        showOtherSetupMarker={showOtherSetupMarker}
+        profileOwnerPubkey={memberProfile?.ownerPubkey}
         viewerIsOwner={viewerIsOwner}
       />
     );

@@ -1,4 +1,5 @@
 import * as React from "react";
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
@@ -37,6 +38,10 @@ export function MessageAgentAddressPrefix({
                 interactive
               >
                 {label}
+                <AgentManagementMarker
+                  pubkey={pubkey}
+                  ownerPubkey={profile?.ownerPubkey}
+                />
               </InlineChip>
             </UserProfilePopover>{" "}
           </React.Fragment>

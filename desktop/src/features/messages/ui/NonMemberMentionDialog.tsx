@@ -16,7 +16,8 @@ type NonMemberMentionDialogProps = {
   isInvitePending: boolean;
   names: string[];
   onDismiss: () => void;
-  onDoNothing: () => void;
+  /** Omit when publication requires the intended recipients to be invited. */
+  onDoNothing?: () => void;
   onInvite: () => void;
   open: boolean;
 };
@@ -48,9 +49,13 @@ export function NonMemberMentionDialog({
           <AlertDialogDescription>
             {names.join(", ")} {names.length === 1 ? "is" : "are"} not in this
             channel.{" "}
-            {canInvite
-              ? "Invite them to the channel, or send without inviting them."
-              : `${PRIVATE_CHANNEL_ADD_DENIED_MESSAGE} You can still send without inviting them.`}
+            {onDoNothing
+              ? canInvite
+                ? "Invite them to the channel, or send without inviting them."
+                : `${PRIVATE_CHANNEL_ADD_DENIED_MESSAGE} You can still send without inviting them.`
+              : canInvite
+                ? "Invite them to the channel, or cancel to keep your draft."
+                : PRIVATE_CHANNEL_ADD_DENIED_MESSAGE}
           </AlertDialogDescription>
         </AlertDialogHeader>
         {error ? (
@@ -61,12 +66,16 @@ export function NonMemberMentionDialog({
         <AlertDialogFooter>
           <Button
             disabled={isInvitePending}
-            onClick={onDoNothing}
+            onClick={onDoNothing ?? onDismiss}
             size="sm"
             type="button"
             variant="outline"
           >
-            {canInvite ? "Do nothing" : "Send anyway"}
+            {onDoNothing
+              ? canInvite
+                ? "Do nothing"
+                : "Send anyway"
+              : "Cancel"}
           </Button>
           {canInvite ? (
             <Button

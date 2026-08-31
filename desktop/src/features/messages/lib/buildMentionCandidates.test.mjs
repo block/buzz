@@ -130,3 +130,48 @@ test("global search results join only while global search is enabled", () => {
   assert.equal(searched[0].displayName, "Dana");
   assert.equal(searched[0].isGlobalSearchResult, true);
 });
+
+test("local roster membership survives an unavailable relay directory", () => {
+  const [candidate] = buildMentionCandidates(
+    input({
+      relayAgentDirectoryReady: false,
+      members: [{ pubkey: AGENT_PUBKEY, displayName: "Scout", role: "bot" }],
+      managedAgentNamesByPubkey: new Map([[AGENT_PUBKEY, "Scout"]]),
+      managedAgents: [
+        { pubkey: AGENT_PUBKEY, name: "Scout", status: "running" },
+      ],
+      mentionableAgentPubkeys: new Set([AGENT_PUBKEY]),
+    }),
+  );
+  assert.equal(candidate.isMember, true);
+  assert.equal(candidate.isManagedAgent, true);
+});
+
+test("remote owned candidates survive unavailable local runtimes and same names remain distinct", () => {
+  const candidates = buildMentionCandidates(
+    input({
+      currentPubkey: MEMBER_PUBKEY,
+      managedAgentDirectoryReady: false,
+      members: [{ pubkey: AGENT_PUBKEY, displayName: "Scout", role: "member" }],
+      relayAgentNamesByPubkey: new Map([
+        [AGENT_PUBKEY, "Scout"],
+        [SEARCHED_PUBKEY, "Scout"],
+      ]),
+      relayAgents: [AGENT_PUBKEY, SEARCHED_PUBKEY].map((pubkey) => ({
+        pubkey,
+        name: "Scout",
+        ownerPubkey: MEMBER_PUBKEY,
+        status: "offline",
+      })),
+      mentionableAgentPubkeys: new Set([AGENT_PUBKEY, SEARCHED_PUBKEY]),
+    }),
+  );
+  assert.equal(candidates.length, 2);
+  assert.deepEqual(
+    candidates.map((c) => c.pubkey),
+    [AGENT_PUBKEY, SEARCHED_PUBKEY],
+  );
+  assert.equal(candidates[0].isMember, true);
+  assert.equal(candidates[0].isAgent, true);
+  assert.equal(candidates[0].ownerPubkey, MEMBER_PUBKEY);
+});

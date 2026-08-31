@@ -11,6 +11,7 @@ import {
 export function useDraftMentionRouting(params: {
   mentionMapRef: React.MutableRefObject<Map<string, string>>;
   personaMentionMapRef: React.MutableRefObject<Map<string, string>>;
+  selectedAgentPubkeysRef: React.MutableRefObject<Set<string>>;
   selectedAgentNamesRef: React.MutableRefObject<string[]>;
   cancelAutocomplete: () => void;
   setSelectedNames: (names: string[]) => void;
@@ -31,6 +32,11 @@ export function useDraftMentionRouting(params: {
   const restoreDraftMentionRefs = React.useCallback(
     (refs: readonly DraftMentionRef[]) => {
       params.cancelAutocomplete();
+      params.selectedAgentPubkeysRef.current = new Set(
+        refs
+          .filter((ref) => ref.isAgent)
+          .map((ref) => ref.pubkey.toLowerCase()),
+      );
       const { names, agentNames } = replaceWithDraftMentionRefs(
         refs,
         params.mentionMapRef.current,

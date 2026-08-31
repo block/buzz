@@ -200,7 +200,13 @@ with a TypeScript lookup table or an id comparison in a component.
    agent from Agents, a DM, or a channel must expose the same actions, tabs,
    fields, and profile-wide activity selection. Caller context may control the
    panel shell or return navigation, but must not filter or replace profile
-   content.
+   content. Explicit public-key targets are always exact, including stopped,
+   archived, and relay-only identities. Only explicit persona navigation may
+   select a representative or offer persona Start; a relay persona link cannot
+   borrow a local sibling's management controls. Availability dots read relay
+   presence, never a saved deployment receipt. Missing local management proves
+   only “Not managed on this device,” not hosting location. See
+   [the identity contract](../../../../docs/agent-profile-identity.md).
 14. **Thinking effort has two surfaces: a local-only WRITE control and a
    read-only two-facts DISPLAY.** The write control is `EffortPickerField`
    (`ui/EffortPickerField.tsx`), a self-contained section component mounted in
@@ -236,12 +242,16 @@ with a TypeScript lookup table or an id comparison in a component.
    mid-conversation effort control without a plan ruling. The archived live-effort
    machinery lives on `archive/claude-config-gaps-live-effort` for reference only.
 
-12. **Owner-only builds constrain managed runtimes, not relay-agent mentions.**
+16. **Owner-only builds constrain managed runtimes, not relay-agent mentions.**
     The compiled owner-only capability applies when Desktop starts or deploys a
     managed agent. Independently operated relay agents with NIP-OA ownership
     remain eligible in every build when their verified owner's signed
     `respond_to` policy admits the viewer and relay membership includes the
-    target channel. Marked builds require that verified owner coordinate but do
+    target channel at publication. Owned nonmember identities may be offered
+    during preparation; the existing authorized add flow must succeed before a
+    fresh target-membership/policy check permits publication. Selected recipients
+    that fail that check block sending and preserve the draft, rather than
+    silently becoming plain text. Marked builds require that verified owner coordinate but do
     not require it to equal the viewer; OSS builds retain compatibility with
     self-authored legacy directory records. Keep native discovery and send-time
     revalidation fail closed on invalid ownership or managed policy evidence,

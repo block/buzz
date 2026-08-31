@@ -14,6 +14,7 @@ use super::{agents_from_events, first_tag_value, profile_valid_oa_owner_pubkey, 
 pub fn managed_agent_pubkeys_from_events(events: &[Event]) -> std::collections::HashSet<String> {
     events
         .iter()
+        .filter(|event| event.kind == nostr::Kind::Custom(30177) && event.verify().is_ok())
         .filter_map(|event| first_tag_value(event, "d"))
         .filter_map(|pubkey| nostr::PublicKey::from_hex(pubkey).ok())
         .map(|pubkey| pubkey.to_hex())
@@ -40,6 +41,9 @@ fn relay_agents_from_legacy_events(events: &[Event]) -> Vec<RelayAgentInfo> {
     latest
         .into_values()
         .filter_map(|event| {
+            if event.kind != nostr::Kind::Custom(10100) || event.verify().is_err() {
+                return None;
+            }
             let value = agents_from_events(std::slice::from_ref(event));
             let mut agent: RelayAgentInfo =
                 serde_json::from_value(value.get("agents")?.as_array()?.first()?.clone()).ok()?;
@@ -96,6 +100,9 @@ pub fn verified_agent_owners_from_profiles(events: &[Event]) -> HashMap<String, 
     latest_profiles
         .into_iter()
         .filter_map(|(agent_pubkey, profile)| {
+            if profile.kind != nostr::Kind::Metadata || profile.verify().is_err() {
+                return None;
+            }
             profile_valid_oa_owner_pubkey(profile).map(|owner| (agent_pubkey, owner))
         })
         .collect()
@@ -126,6 +133,11 @@ fn latest_verified_managed_policies<'a>(
 }
 
 fn relay_agent_from_managed_policy(agent_pubkey: &str, event: &Event) -> Option<RelayAgentInfo> {
+    // Check the envelope as well as the declared author. Keep invalid latest
+    // coordinates reserved above so they cannot revive older legacy permissions.
+    if event.kind != nostr::Kind::Custom(30177) || event.verify().is_err() {
+        return None;
+    }
     let content = managed_agent_content_from_event(event).ok()?;
     Some(RelayAgentInfo {
         pubkey: agent_pubkey.to_string(),
@@ -157,28 +169,48 @@ pub fn relay_agents_from_managed_agent_events(
 }
 
 /// Build a pubkey-to-channel-id candidate map from relay-signed membership
-/// events. Only p-tags explicitly marked with the `bot` role are agents.
+/// events. Known agent identities need not have the cosmetic `bot` role;
+/// otherwise only explicit bot tags seed discovery.
 pub fn member_agent_channel_ids_from_events(
     events: &[Event],
     relay_pubkey: &str,
+    known_agent_pubkeys: &std::collections::HashSet<String>,
 ) -> HashMap<String, Vec<String>> {
-    let mut channel_ids: HashMap<String, BTreeSet<String>> = HashMap::new();
+    let mut latest: HashMap<String, &Event> = HashMap::new();
     for event in events {
-        if !event.pubkey.to_hex().eq_ignore_ascii_case(relay_pubkey) {
+        if event.kind != nostr::Kind::Custom(39002)
+            || !event.pubkey.to_hex().eq_ignore_ascii_case(relay_pubkey)
+            || event.verify().is_err()
+        {
             continue;
         }
         let Some(channel_id) = first_tag_value(event, "d") else {
             continue;
         };
+        if latest
+            .get(channel_id)
+            .is_none_or(|previous| event_is_newer(event, previous))
+        {
+            latest.insert(channel_id.to_string(), event);
+        }
+    }
+    let mut channel_ids: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for (channel_id, event) in latest {
         for tag in tags_named(event, "p") {
-            let (Some(pubkey), Some(role)) = (tag.get(1), tag.get(3)) else {
+            let Some(pubkey) = tag
+                .get(1)
+                .and_then(|key| nostr::PublicKey::from_hex(key).ok())
+            else {
                 continue;
             };
-            if role != "bot" || nostr::PublicKey::from_hex(pubkey).is_err() {
+            let pubkey = pubkey.to_hex();
+            if tag.get(3).map(String::as_str) != Some("bot")
+                && !known_agent_pubkeys.contains(&pubkey)
+            {
                 continue;
             }
             channel_ids
-                .entry(pubkey.clone())
+                .entry(pubkey)
                 .or_default()
                 .insert(channel_id.to_string());
         }

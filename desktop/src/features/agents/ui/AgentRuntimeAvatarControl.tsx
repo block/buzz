@@ -7,6 +7,11 @@ import {
   STATUS_DOT_MASK_CURVE,
 } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import {
+  getPresenceDotClassName,
+  getPresenceLabel,
+} from "@/features/presence/lib/presence";
+import type { PresenceStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Spinner } from "@/shared/ui/spinner";
 import { IdentityInitialsAvatar } from "./IdentityInitialsAvatar";
@@ -16,7 +21,9 @@ type AgentRuntimeAvatarControlProps = {
   avatarUrl?: string | null;
   errorLabel?: string | null;
   errorTestId?: string;
+  /** Lifecycle bookkeeping controls actions, not the availability dot. */
   isActive: boolean;
+  availability?: PresenceStatus;
   isRestarting?: boolean;
   isStarting: boolean;
   label: string;
@@ -128,6 +135,7 @@ const MASK_TRANSITION = {
 export function AgentRuntimeAvatarControl({
   activeTestId,
   avatarUrl,
+  availability,
   errorLabel,
   errorTestId,
   isActive,
@@ -151,32 +159,35 @@ export function AgentRuntimeAvatarControl({
         : "Start Agent";
   const actionText = isRestartAction ? "Restart" : "Start";
   const isPending = isStarting || isRestarting;
-  const showRunningDot = isActive && !isRestartAction;
+  const availabilityLabel = availability
+    ? getPresenceLabel(availability)
+    : "Availability unknown";
+  const showStatusDot = isActive && !isRestartAction;
   const hasError = !isActive && !isPending && Boolean(errorLabel);
   const errorActionLabel = `${label} has a runtime error. Open runtime details.`;
   const transition = shouldReduceMotion ? { duration: 0 } : MASK_TRANSITION;
   const actionBadge = isRestartAction
     ? RESTART_ACTION_BADGE
     : START_ACTION_BADGE;
-  const badge = showRunningDot
+  const badge = showStatusDot
     ? ACTIVE_BADGE
     : hasError
       ? ERROR_BADGE
       : actionBadge;
   const actionCutoutWidth =
-    showRunningDot || hasError ? undefined : actionBadge.cutoutWidth;
+    showStatusDot || hasError ? undefined : actionBadge.cutoutWidth;
 
   return (
     <MaskedAvatarBadgeFrame
       badge={
         <span className="grid h-full w-full place-items-center">
-          {showRunningDot ? (
+          {showStatusDot ? (
             <span
-              aria-label={`${label} is running`}
+              aria-label={`${label}: ${availabilityLabel}`}
               className="h-full w-full rounded-full"
               data-testid={activeTestId}
               role="img"
-              title={`${label} is running`}
+              title={`${label}: ${availabilityLabel}`}
             />
           ) : (
             <button
@@ -220,8 +231,10 @@ export function AgentRuntimeAvatarControl({
       badgeClassName={cn(
         "transition-colors ease-in-out",
         shouldReduceMotion ? "duration-0" : "duration-300",
-        showRunningDot
-          ? "bg-emerald-500"
+        showStatusDot
+          ? availability
+            ? getPresenceDotClassName(availability)
+            : "bg-muted-foreground/35"
           : hasError
             ? "bg-destructive"
             : isRestartAction
@@ -229,7 +242,7 @@ export function AgentRuntimeAvatarControl({
               : "bg-primary",
       )}
       className="h-24 w-24"
-      curve={showRunningDot ? STATUS_DOT_MASK_CURVE : ACTION_MASK_CURVE}
+      curve={showStatusDot ? STATUS_DOT_MASK_CURVE : ACTION_MASK_CURVE}
       cutout={badge.cutout}
       cutoutWidth={actionCutoutWidth}
       maskTransition={transition}

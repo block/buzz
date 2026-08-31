@@ -134,9 +134,25 @@ async fn list_relay_agents_for_selection(
         .await?
         .ok_or_else(|| "relay agent membership authority is unavailable".to_string())?;
 
-    // Membership is the authoritative and bounded candidate source. Only
-    // channels visible to this identity are read, and only bot-role p-tags can
-    // drive the downstream managed-policy and owner-profile lookups.
+    // Owned identities are relay state, even when this Desktop has never run
+    // them or they have not joined a channel yet. Owner-authored coordinates
+    // seed discovery only; the agent's signed NIP-OA profile still has to
+    // authenticate ownership below. Scope selection queries to the exact keys.
+    let mut owned_filter = serde_json::json!({
+        "kinds": [30177],
+        "authors": [&viewer_pubkey],
+    });
+    if let Some(requested_pubkeys) = requested_pubkeys {
+        owned_filter["#d"] = serde_json::json!(requested_pubkeys);
+    }
+    let owned_events = query_all_relay_pages(state, owned_filter)
+        .await
+        .map_err(|error| format!("relay owned-agent query failed: {error}"))?;
+    let owned_candidates = nostr_convert::managed_agent_pubkeys_from_events(&owned_events);
+
+    // Membership remains authoritative and visible only to this viewer.
+    // Known owned identities can have any membership role; other candidates
+    // must still have explicit bot-role evidence.
     let mut membership_filter = serde_json::json!({
         "kinds": [39002],
         "authors": [&relay_pubkey],
@@ -148,12 +164,21 @@ async fn list_relay_agents_for_selection(
     let membership_events = query_all_relay_pages(state, membership_filter)
         .await
         .map_err(|error| format!("relay agent channel-membership query failed: {error}"))?;
-    let mut member_agent_channel_ids =
-        nostr_convert::member_agent_channel_ids_from_events(&membership_events, &relay_pubkey);
+    let mut member_agent_channel_ids = nostr_convert::member_agent_channel_ids_from_events(
+        &membership_events,
+        &relay_pubkey,
+        &owned_candidates,
+    );
     if let Some(requested_pubkeys) = requested_pubkeys {
         member_agent_channel_ids.retain(|pubkey, _| requested_pubkeys.contains(pubkey));
     }
-    let candidate_pubkeys: Vec<String> = member_agent_channel_ids.keys().cloned().collect();
+    let candidate_pubkeys: Vec<String> = member_agent_channel_ids
+        .keys()
+        .cloned()
+        .chain(owned_candidates)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
     if candidate_pubkeys.is_empty() {
         return Ok(Vec::new());
     }
@@ -206,7 +231,10 @@ async fn list_relay_agents_for_selection(
         &mut agents,
         crate::managed_agents::owner_only_access_build(),
     );
-    agents.retain(|agent| member_agent_channel_ids.contains_key(&agent.pubkey));
+    agents.retain(|agent| {
+        member_agent_channel_ids.contains_key(&agent.pubkey)
+            || agent.owner_pubkey.as_deref() == Some(viewer_pubkey.as_str())
+    });
     for agent in &mut agents {
         agent.channel_ids = member_agent_channel_ids
             .get(&agent.pubkey)
@@ -568,3 +596,6 @@ mod real_relay_tests {
         assert_eq!(emitted_mentions, vec![agent.public_key().to_hex()]);
     }
 }
+
+#[cfg(test)]
+mod owned_tests;
