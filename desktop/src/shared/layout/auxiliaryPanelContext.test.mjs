@@ -177,6 +177,54 @@ test("AuxiliaryPanelHeader renders a generic close action from context", () => {
   assert.match(html, /data-testid="auxiliary-panel-close"/);
 });
 
+test("AuxiliaryPanelHeader adds its requested backdrop in docked mode", () => {
+  const html = render(
+    React.createElement(
+      AuxiliaryPanel,
+      {
+        header: React.createElement(
+          AuxiliaryPanelHeader,
+          { backdrop: true },
+          React.createElement(AuxiliaryPanelHeaderGroup, null, "Title"),
+        ),
+        layout: "split",
+        onClose: () => {},
+        widthPx: 420,
+      },
+      "Panel",
+    ),
+  );
+
+  assert.match(html, /data-testid="auxiliary-panel-header-backdrop"/);
+  assert.match(html, /pointer-events-none absolute inset-x-0 top-0 z-40 h-13/);
+});
+
+test("AuxiliaryPanelHeader honors an explicit transparent docked backdrop", () => {
+  const html = render(
+    React.createElement(
+      AuxiliaryPanel,
+      {
+        header: React.createElement(
+          AuxiliaryPanelHeader,
+          { backdrop: true, backdropSurface: "transparent" },
+          React.createElement(AuxiliaryPanelHeaderGroup, null, "Title"),
+        ),
+        layout: "split",
+        onClose: () => {},
+        transparentChrome: true,
+        widthPx: 420,
+      },
+      "Panel",
+    ),
+  );
+
+  assert.doesNotMatch(html, /data-testid="auxiliary-panel-header-backdrop"/);
+  assert.doesNotMatch(
+    html,
+    /pointer-events-none absolute inset-x-0 top-0 z-40 h-13/,
+  );
+});
+
 test("AuxiliaryPanelHeader keeps resize border in single-panel mode when requested", () => {
   const html = render(
     React.createElement(
