@@ -214,6 +214,10 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// Phase that exhausted the most recent non-prompt request budget.
+    /// Supervisors use this to distinguish a blocked stdin write from an agent
+    /// that accepted the request but did not complete the response in time.
+    last_request_timeout_site: Option<&'static str>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -563,6 +567,7 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            last_request_timeout_site: None,
         })
     }
 
@@ -587,6 +592,11 @@ impl AcpClient {
         self.observer_agent_index
     }
 
+    /// Return the phase that exhausted the latest request budget, if any.
+    pub fn last_request_timeout_site(&self) -> Option<&'static str> {
+        self.last_request_timeout_site
+    }
+
     /// Emit a semantic event to the local observer feed, if enabled.
     pub fn observe(&self, kind: impl Into<String>, payload: serde_json::Value) {
         if let Some(observer) = &self.observer {
@@ -609,10 +619,24 @@ impl AcpClient {
     /// arm can choose [`ACP_STEER_METHOD`] for adapters that implement it.
     /// Parsed here rather than at each call site so no caller can forget it.
     pub async fn initialize(&mut self) -> Result<serde_json::Value, AcpError> {
+        self.initialize_with_timeout(Self::REQUEST_TIMEOUT).await
+    }
+
+    /// Send `initialize` with a caller-selected handshake budget.
+    ///
+    /// Initialization can legitimately include vendor CLI and MCP-server cold
+    /// starts, so supervisors may allow it more time without weakening the
+    /// ordinary non-prompt RPC timeout used by `session/new` and control calls.
+    pub async fn initialize_with_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, AcpError> {
         // Requesting version 2 is an intentional temporary pin — we are squatting
         // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
         let params = build_initialize_params();
-        let result = self.send_request("initialize", params).await?;
+        let result = self
+            .send_request_with_timeout("initialize", params, timeout, true)
+            .await?;
         self.steering_supported = result
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
@@ -1098,6 +1122,17 @@ impl AcpClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, AcpError> {
+        self.send_request_with_timeout(method, params, Self::REQUEST_TIMEOUT, false)
+            .await
+    }
+
+    async fn send_request_with_timeout(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: std::time::Duration,
+        total_budget: bool,
+    ) -> Result<serde_json::Value, AcpError> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -1110,18 +1145,40 @@ impl AcpClient {
 
         tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
 
-        // Wrap write + read in a single timeout so a hung agent can't block forever.
-        // We cannot use an async block that borrows `self` mutably across two awaits
-        // inside timeout(), so we sequence them with early-return on timeout.
-        let timeout = Self::REQUEST_TIMEOUT;
+        // Initialize keeps one wall-clock budget across both phases. A fresh
+        // full timeout for the read after a slow write would silently make its
+        // configured deadline as large as 2x the advertised value. Ordinary
+        // RPCs retain their historical per-phase behavior below.
+        self.last_request_timeout_site = None;
+        let request_started = tokio::time::Instant::now();
         match tokio::time::timeout(timeout, self.write_ndjson(&msg)).await {
-            Ok(result) => result?,
-            Err(_) => return Err(AcpError::Timeout(timeout)),
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                if matches!(&error, AcpError::WriteTimeout(_)) {
+                    self.last_request_timeout_site = Some("stdin_write");
+                }
+                return Err(error);
+            }
+            Err(_) => {
+                self.last_request_timeout_site = Some("stdin_write_budget");
+                return Err(AcpError::Timeout(timeout));
+            }
         }
 
-        match tokio::time::timeout(timeout, self.read_until_response(id)).await {
+        let remaining = if total_budget {
+            timeout.saturating_sub(request_started.elapsed())
+        } else {
+            // Preserve the historical ordinary-RPC behavior: the response gets
+            // the full 60-second REQUEST_TIMEOUT after the independently
+            // bounded stdin write. Only initialize opts into one total budget.
+            timeout
+        };
+        match tokio::time::timeout(remaining, self.read_until_response(id)).await {
             Ok(result) => result,
-            Err(_) => Err(AcpError::Timeout(timeout)),
+            Err(_) => {
+                self.last_request_timeout_site = Some("agent_response");
+                Err(AcpError::Timeout(timeout))
+            }
         }
     }
 
@@ -3027,6 +3084,49 @@ mod tests {
         AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
             .await
             .expect("failed to spawn test script")
+    }
+
+    #[test]
+    fn ordinary_non_prompt_request_timeout_remains_sixty_seconds() {
+        assert_eq!(
+            AcpClient::REQUEST_TIMEOUT,
+            std::time::Duration::from_secs(60),
+            "session/new and other ordinary RPCs must keep their existing stuck-agent deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn initialize_uses_its_caller_selected_budget() {
+        let mut client = spawn_script(
+            r#"read -t 2 _init
+sleep 0.075
+echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":2,"agentInfo":{"name":"slow-init"}}}'
+sleep 1"#,
+        )
+        .await;
+
+        let result = client
+            .initialize_with_timeout(std::time::Duration::from_millis(250))
+            .await;
+        assert!(
+            result.is_ok(),
+            "slow initialize should fit its dedicated budget: {result:?}"
+        );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn initialize_reports_its_dedicated_timeout_value() {
+        let mut client = spawn_script("read -t 2 _init; sleep 1").await;
+        let budget = std::time::Duration::from_millis(50);
+
+        let result = client.initialize_with_timeout(budget).await;
+        assert!(
+            matches!(result, Err(AcpError::Timeout(value)) if value == budget),
+            "initialize should report its own budget, got {result:?}"
+        );
+        assert_eq!(client.last_request_timeout_site(), Some("agent_response"));
+        client.shutdown().await;
     }
 
     #[cfg(unix)]

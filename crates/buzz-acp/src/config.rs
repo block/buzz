@@ -26,6 +26,18 @@ use crate::filter::SubscriptionRule;
 /// Override via `--idle-timeout` / `BUZZ_ACP_IDLE_TIMEOUT`.
 pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
 
+/// Default ACP initialize budget. Kept at the historical 60 seconds when the
+/// harness is launched directly; managed Desktop launches opt into a larger
+/// budget explicitly so standalone behavior does not change silently.
+pub(crate) const DEFAULT_INIT_TIMEOUT_SECS: u64 = 60;
+
+/// Direct harness launches preserve the historical single-attempt behavior.
+/// Supervisors that can surface lifecycle state may opt into bounded retries.
+pub(crate) const DEFAULT_INIT_RETRIES: u32 = 0;
+
+/// Delay before retrying a timed-out single-agent initialization.
+pub(crate) const DEFAULT_INIT_RETRY_BACKOFF_MILLIS: u64 = 1_000;
+
 /// Default absolute wall-clock cap per agent turn (2 hours).
 /// Override via `--max-turn-duration` / `BUZZ_ACP_MAX_TURN_DURATION`.
 pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
@@ -271,6 +283,28 @@ pub struct CliArgs {
     /// Resets on any agent stdout activity.
     #[arg(long, env = "BUZZ_ACP_IDLE_TIMEOUT")]
     pub idle_timeout: Option<u64>,
+
+    /// Maximum seconds for the ACP initialize handshake only.
+    #[arg(long, env = "BUZZ_ACP_INIT_TIMEOUT")]
+    pub init_timeout: Option<u64>,
+
+    /// Retries after a timed-out single-agent initialize attempt.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_INIT_RETRIES",
+        default_value_t = DEFAULT_INIT_RETRIES,
+        value_parser = clap::value_parser!(u32).range(0..=3)
+    )]
+    pub init_retries: u32,
+
+    /// Initial retry backoff in milliseconds (doubles per retry).
+    #[arg(
+        long,
+        env = "BUZZ_ACP_INIT_RETRY_BACKOFF_MS",
+        default_value_t = DEFAULT_INIT_RETRY_BACKOFF_MILLIS,
+        value_parser = clap::value_parser!(u64).range(1..=60_000)
+    )]
+    pub init_retry_backoff_ms: u64,
 
     /// Absolute wall-clock cap per turn (safety valve).
     #[arg(long, env = "BUZZ_ACP_MAX_TURN_DURATION", default_value_t = DEFAULT_MAX_TURN_DURATION_SECS)]
@@ -522,6 +556,9 @@ pub struct Config {
     pub agent_args: Vec<String>,
     pub mcp_command: String,
     pub idle_timeout_secs: u64,
+    pub init_timeout_secs: u64,
+    pub init_retries: u32,
+    pub init_retry_backoff_ms: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
     pub heartbeat_interval_secs: u64,
@@ -1021,6 +1058,15 @@ impl Config {
             }
         };
 
+        let init_timeout_secs = match args.init_timeout {
+            Some(0) => {
+                tracing::warn!("initialize timeout of 0 is invalid — using 1s minimum");
+                1
+            }
+            Some(value) => value,
+            None => DEFAULT_INIT_TIMEOUT_SECS,
+        };
+
         // idle_timeout must be strictly less than max_turn_duration. If idle_timeout
         // >= max_turn_duration, the absolute wall-clock cap would fire before the idle
         // timeout ever could, making idle_timeout a dead letter.
@@ -1098,6 +1144,9 @@ impl Config {
             agent_args,
             mcp_command: args.mcp_command,
             idle_timeout_secs,
+            init_timeout_secs,
+            init_retries: args.init_retries,
+            init_retry_backoff_ms: args.init_retry_backoff_ms,
             max_turn_duration_secs,
             agents: args.agents,
             heartbeat_interval_secs: heartbeat_interval,
@@ -1164,12 +1213,15 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} init_timeout={}s init_retries={} init_retry_backoff={}ms idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
             self.agent_args.join(" "),
             self.mcp_command,
+            self.init_timeout_secs,
+            self.init_retries,
+            self.init_retry_backoff_ms,
             self.idle_timeout_secs,
             self.max_turn_duration_secs,
             self.agents,
@@ -1479,6 +1531,9 @@ mod tests {
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
+            init_timeout_secs: DEFAULT_INIT_TIMEOUT_SECS,
+            init_retries: DEFAULT_INIT_RETRIES,
+            init_retry_backoff_ms: DEFAULT_INIT_RETRY_BACKOFF_MILLIS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
             heartbeat_interval_secs: 0,
@@ -2225,6 +2280,33 @@ channels = "ALL"
             "120",
         ]);
         assert_eq!(configured.exit_after_inactivity, 120);
+    }
+
+    #[test]
+    fn initialize_policy_defaults_remain_backward_compatible_and_accept_overrides() {
+        let key = "0".repeat(64);
+        let default = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert_eq!(default.init_timeout, None);
+        assert_eq!(default.init_retries, DEFAULT_INIT_RETRIES);
+        assert_eq!(
+            default.init_retry_backoff_ms,
+            DEFAULT_INIT_RETRY_BACKOFF_MILLIS
+        );
+
+        let configured = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--init-timeout",
+            "300",
+            "--init-retries",
+            "2",
+            "--init-retry-backoff-ms",
+            "2500",
+        ]);
+        assert_eq!(configured.init_timeout, Some(300));
+        assert_eq!(configured.init_retries, 2);
+        assert_eq!(configured.init_retry_backoff_ms, 2_500);
     }
 
     #[test]

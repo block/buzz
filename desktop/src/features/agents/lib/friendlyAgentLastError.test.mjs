@@ -5,9 +5,26 @@ import {
   friendlyAgentLastError,
   friendlyTurnErrorCopy,
   CLI_ACP_INTERNAL_ERROR_COPY,
+  AGENT_INIT_TIMEOUT_COPY,
   MODEL_NOT_FOUND_COPY,
   RELAY_MESH_DENIED_COPY,
 } from "./friendlyAgentLastError.ts";
+
+test("outer initialize timeout is surfaced as an actionable startup error", () => {
+  assert.deepEqual(
+    friendlyAgentLastError("agent timed out during init (60s)"),
+    { severity: "generic", copy: AGENT_INIT_TIMEOUT_COPY },
+  );
+});
+
+test("inner initialize request timeout is surfaced as the same startup error", () => {
+  assert.deepEqual(
+    friendlyAgentLastError(
+      "agent initialize failed: Request timeout — agent did not respond within 60s",
+    ),
+    { severity: "generic", copy: AGENT_INIT_TIMEOUT_COPY },
+  );
+});
 
 test("null lastError → null", () => {
   assert.equal(friendlyAgentLastError(null), null);
