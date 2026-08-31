@@ -142,13 +142,15 @@ fn build_updated_repo_announcement(
         ))
     })?;
 
-    // Advance only the observed head. Using wall-clock time here would let a
-    // delayed writer leapfrog an intervening update and silently erase metadata.
-    let next_created_at = existing
+    // NIP-33 requires the replacement to advance the observed head, while the
+    // relay rejects events more than 15 minutes from its wall clock. Using the
+    // greater value keeps old repositories updateable without moving backwards.
+    let observed_next = existing
         .created_at
         .as_secs()
         .checked_add(1)
         .ok_or_else(|| CliError::Other("repository timestamp cannot be advanced".into()))?;
+    let next_created_at = Timestamp::now().as_secs().max(observed_next);
     buzz_sdk::build_repo_announcement_with_tags(repo_id, &existing.content, tags)
         .map_err(|error| CliError::Other(format!("failed to build repository update: {error}")))
         .map(|builder| builder.custom_created_at(Timestamp::from(next_created_at)))
@@ -518,7 +520,7 @@ mod tests {
         .expect("sign update");
 
         assert_eq!(updated.content, "repository content");
-        assert_eq!(updated.created_at.as_secs(), 101);
+        assert!(updated.created_at > existing.created_at);
         assert!(!updated
             .tags
             .iter()
@@ -557,6 +559,27 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn repository_update_refreshes_a_stale_timestamp() {
+        let stale_created_at = Timestamp::now().as_secs().saturating_sub(3_600);
+        let existing = signed_repo(vec![tag(&["d", "demo"])], "", stale_created_at);
+        let replacement = build_protection_tag("refs/heads/main", Some("admin"), true, true, true)
+            .expect("valid replacement");
+        let before = Timestamp::now().as_secs();
+
+        let updated = build_updated_repo_announcement(
+            &existing,
+            RepoChange::SetProtection(Box::new(replacement)),
+        )
+        .expect("build update")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign update");
+
+        let after = Timestamp::now().as_secs();
+        assert!(updated.created_at.as_secs() >= before);
+        assert!(updated.created_at.as_secs() <= after);
     }
 
     #[test]
@@ -712,7 +735,7 @@ mod tests {
                 .expect("sign bind update");
 
         assert_eq!(updated.content, "repository content");
-        assert_eq!(updated.created_at.as_secs(), 101);
+        assert!(updated.created_at > existing.created_at);
         // Exactly one binding remains, and it is the requested one.
         let bindings: Vec<_> = updated
             .tags
