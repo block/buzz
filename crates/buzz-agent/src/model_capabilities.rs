@@ -728,6 +728,7 @@ mod tests {
     Q::Vector { id: "dbv2-gemini-3-pro-image-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-gemini-3-pro-image", note: Some("Probes the Gemini 3 Pro Image endpoint record and label.") },
     Q::Vector { id: "dbv2-deepseek-v4-flash-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-deepseek-v4-flash-0731", note: Some("Probes the DeepSeek V4 Flash endpoint record and label.") },
     Q::Vector { id: "dbv2-deepseek-v4-pro-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-deepseek-v4-pro-0813", note: Some("Probes the DeepSeek V4 Pro endpoint record and label.") },
+    Q::Vector { id: "dbv2-glm-5-3-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-glm-5-3", note: Some("Probes the GLM-5.3 endpoint record and label.") },
     Q::Vector { id: "dbv2-glm-5-3-flash-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-glm-5-3-flash", note: Some("Probes the GLM-5.3 Flash endpoint record and label.") },
     Q::Vector { id: "dbv2-grok-4-6-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-grok-4-6", note: Some("Probes the Grok 4.6 endpoint record and label.") },
     Q::Vector { id: "dbv2-llama-4-maverick-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-llama-4-maverick", note: Some("Probes the Llama 4 Maverick endpoint record and label.") },
@@ -839,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn corpus_has_exactly_135_executable_vectors() {
+    fn corpus_has_exactly_136_executable_vectors() {
         // Locks the vector count so a silent INPUTS edit can't quietly drop
         // coverage; must equal the gate in the TS harness
         // (modelCapabilitiesCorpus.test.mjs).
@@ -848,7 +849,7 @@ mod tests {
             .filter(|q| matches!(q, Q::Vector { .. }))
             .count();
         assert_eq!(
-            vectors, 135,
+            vectors, 136,
             "corpus executable-vector count changed; update this gate deliberately"
         );
     }
@@ -1053,6 +1054,7 @@ mod tests {
                 "data_workflow_tools.goose.goose-deepseek-v4-flash-0731",
                 "DeepSeek V4 Flash",
             ),
+            ("data_workflow_tools.goose.goose-glm-5-3", "GLM-5.3"),
             (
                 "data_workflow_tools.goose.goose-glm-5-3-flash",
                 "GLM-5.3 Flash",

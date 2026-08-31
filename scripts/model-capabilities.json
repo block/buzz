@@ -1033,6 +1033,25 @@
     },
     {
       "provider": "databricks_v2",
+      "raw_model_id": "databricks-glm-5-3",
+      "registry_label": "GLM-5.3",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
       "raw_model_id": "databricks-glm-5-3-flash",
       "registry_label": "GLM-5.3 Flash",
       "thinking_mode": "none",

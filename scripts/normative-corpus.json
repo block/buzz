@@ -2402,6 +2402,27 @@
     }
   },
   {
+    "id": "dbv2-glm-5-3-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-glm-5-3",
+    "_note": "Probes the GLM-5.3 endpoint record and label.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": "GLM-5.3"
+    }
+  },
+  {
     "id": "dbv2-glm-5-3-flash-exact-record-probe",
     "provider": "databricks_v2",
     "raw_model_id": "databricks-glm-5-3-flash",
