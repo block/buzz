@@ -155,8 +155,14 @@ Additional rules:
 
 These rules distill the recurring findings from the last 25 PRs' review
 threads — 53% of substantive review findings were repeats of the clusters
-below, and reviewed PRs averaged ~5 review rounds. Apply them **before
-writing code**; each cites the PRs where reviewers litigated it.
+below, and reviewed PRs averaged ~5 review rounds. A second, independent
+mining pass over 71 agent-review rooms (303 findings, Aug 18–29) confirmed
+the same clusters and measured how often authors actually fix each class
+once flagged: test-seam binding and unbounded-resource findings were fixed
+**100%** of the time, swallowed-error findings **90%**, stale-state races
+**70%** — these are not style opinions, they are defects authors agree
+with on sight. Apply the rules **before writing code**; each cites the
+PRs where reviewers litigated it.
 
 1. **Every caught failure must leave a durable retry record or propagate.**
    Never catch-log-and-return-success (opt-out revocation permanently
@@ -208,6 +214,25 @@ writing code**; each cites the PRs where reviewers litigated it.
    back? A fence that permanently suppresses "jump to latest" after a
    bounded correction fails strands the user silently — two reviewers
    flagged this independently (PR #6807).
+
+7. **Audit assistive semantics on every new visual component.** The
+   agent-review lanes flagged accessibility defects on 44 findings across
+   the Aug 18–29 window — the second-largest cluster — and authors fixed
+   the concrete ones (duplicate VoiceOver stops on native controls,
+   actionable labels owned by two widgets at once, PR #6680; missing or
+   decorative-leaking semantics on new UI, PRs #6611, #6702, #6885, #6905,
+   #6908). New UI ships with: one owner per actionable label, no duplicate
+   screen-reader stops, and explicit semantics for every interactive
+   element. (PRs #6611, #6680, #6702, #6885, #6905, #6908, #6980)
+
+8. **Every input modality is a first-class seam.** Keyboard, pointer, and
+   hotkey paths must not silently diverge: `Shift+Space` treated as plain
+   `Space` because the guard omitted `shiftKey` (PR #6862), keyboard
+   ownership not released on blur, modifier keys dropped on the non-mouse
+   path (PRs #5958, #6793, #6860, #6908, #7006). When adding an input
+   handler, enumerate the modalities that can reach it and test the
+   non-primary ones — that's where the defects were. (PRs #5958, #5972,
+   #6793, #6860, #6862, #6908, #7006)
 
 ---
 
