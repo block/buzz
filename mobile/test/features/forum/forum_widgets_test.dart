@@ -125,11 +125,17 @@ Widget _buildThreadPage({
   bool isMember = true,
   bool isArchived = false,
   Map<String, UserProfile> users = const {},
+  Set<String> knownAgentPubkeys = const {},
+  Set<String> channelBotPubkeys = const {},
   TextScaler textScaler = TextScaler.noScaling,
 }) {
   return ProviderScope(
     overrides: [
       userCacheProvider.overrideWith(() => _FakeUserCacheNotifier(users)),
+      knownAgentPubkeysProvider.overrideWithValue(knownAgentPubkeys),
+      channelBotPubkeysProvider(
+        _channelId,
+      ).overrideWith((ref) async => channelBotPubkeys),
       profileProvider.overrideWith(() => _FakeProfileNotifier()),
       forumThreadProvider((
         channelId: _channelId,
@@ -570,6 +576,81 @@ void main() {
   });
 
   group('ForumThreadPage', () {
+    AvatarImage avatarIn(WidgetTester tester, Key key) =>
+        tester.widget<AvatarImage>(
+          find.descendant(
+            of: find.byKey(key),
+            matching: find.byType(AvatarImage),
+          ),
+        );
+
+    testWidgets(
+      'uses directory classification for an uncached original author',
+      (tester) async {
+        await tester.pumpWidget(
+          _buildThreadPage(
+            threadResponse: ForumThreadResponse(
+              post: _makePost(pubkey: 'directory-agent'),
+              replies: const [],
+              totalReplies: 0,
+            ),
+            knownAgentPubkeys: const {'directory-agent'},
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(
+          avatarIn(
+            tester,
+            const ValueKey('forum-original-avatar-post1'),
+          ).isAgent,
+          isTrue,
+        );
+      },
+    );
+
+    testWidgets('uses bot-role classification for an uncached reply author', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildThreadPage(
+          threadResponse: ForumThreadResponse(
+            post: _makePost(),
+            replies: const [
+              ThreadReply(
+                eventId: 'bot-reply',
+                pubkey: 'channel-bot',
+                content: 'Automated reply',
+                kind: 45003,
+                createdAt: 2000,
+                channelId: _channelId,
+                tags: [
+                  ['h', _channelId],
+                ],
+                depth: 1,
+              ),
+            ],
+            totalReplies: 1,
+          ),
+          users: const {'alice': _aliceProfile},
+          channelBotPubkeys: const {'channel-bot'},
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        avatarIn(
+          tester,
+          const ValueKey('forum-reply-avatar-bot-reply'),
+        ).isAgent,
+        isTrue,
+      );
+      expect(
+        avatarIn(tester, const ValueKey('forum-original-avatar-post1')).isAgent,
+        isFalse,
+      );
+    });
+
     testWidgets('shows original post and replies header', (tester) async {
       await tester.pumpWidget(
         _buildThreadPage(
