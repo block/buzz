@@ -148,8 +148,8 @@ pub mod relay_members {
 
     /// Extract NIP-OA owner from an auth tag without membership enforcement.
     ///
-    /// Used on open relays (`require_relay_membership = false`) to opportunistically
-    /// extract the owner pubkey for agent→owner backfill. The NIP-OA signature is
+    /// Used after membership has already been decided to opportunistically extract
+    /// the owner pubkey for agent→owner backfill. The NIP-OA signature is
     /// cryptographically self-proving, so no feature flag is needed — if the tag
     /// verifies, the owner relationship is authentic. Returns `None` if the tag
     /// is absent or invalid.
@@ -166,6 +166,20 @@ pub mod relay_members {
                 None
             }
         }
+    }
+
+    /// Preserve an owner found during delegated membership, or verify a supplied
+    /// NIP-OA tag when membership admitted the agent directly (or is disabled).
+    ///
+    /// Membership must be decided before calling this helper. It cannot grant
+    /// relay access; it only recovers the authenticated relationship needed for
+    /// first-write-wins owner-map materialization.
+    pub fn resolve_nip_oa_owner(
+        membership_owner: Option<nostr::PublicKey>,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+    ) -> Option<nostr::PublicKey> {
+        membership_owner.or_else(|| extract_nip_oa_owner(pubkey_bytes, auth_tag_header))
     }
 
     /// Persist a cryptographically verified NIP-OA agent→owner relationship.
@@ -274,6 +288,40 @@ pub mod relay_members {
             let result = extract_nip_oa_owner(&agent_pubkey.to_bytes(), Some("not valid json"));
 
             assert_eq!(result, None);
+        }
+
+        /// Direct relay membership must not suppress a valid NIP-OA relationship:
+        /// owner-gated events still need the agent→owner mapping materialized.
+        #[test]
+        fn direct_member_owner_is_recovered_after_membership() {
+            let owner_keys = Keys::generate();
+            let agent_keys = Keys::generate();
+            let agent_pubkey = agent_keys.public_key();
+            let tag_json = compute_auth_tag(&owner_keys, &agent_pubkey, "")
+                .expect("compute_auth_tag must succeed");
+
+            let result = resolve_nip_oa_owner(None, &agent_pubkey.to_bytes(), Some(&tag_json));
+
+            assert_eq!(result, Some(owner_keys.public_key()));
+        }
+
+        /// A membership-gate owner remains authoritative and does not get replaced
+        /// by a second supplied relationship.
+        #[test]
+        fn delegated_membership_owner_takes_precedence() {
+            let admitted_owner = Keys::generate().public_key();
+            let other_owner = Keys::generate();
+            let agent_pubkey = Keys::generate().public_key();
+            let tag_json = compute_auth_tag(&other_owner, &agent_pubkey, "")
+                .expect("compute_auth_tag must succeed");
+
+            let result = resolve_nip_oa_owner(
+                Some(admitted_owner),
+                &agent_pubkey.to_bytes(),
+                Some(&tag_json),
+            );
+
+            assert_eq!(result, Some(admitted_owner));
         }
     }
 }
