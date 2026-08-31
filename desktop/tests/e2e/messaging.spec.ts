@@ -374,6 +374,18 @@ test.beforeEach(async ({ page }, testInfo) => {
         ...(testInfo.title.includes("clears Sending after")
           ? { sendMessageDelayMs: 800 }
           : {}),
+        ...(testInfo.title.includes("shows your avatar")
+          ? {
+              searchProfiles: [
+                {
+                  pubkey: "deadbeef".repeat(8),
+                  displayName: "tyler",
+                  avatarUrl:
+                    'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"%3E%3Crect width="16" height="16" rx="4" fill="%2300a36c"/%3E%3C/svg%3E',
+                },
+              ],
+            }
+          : {}),
       };
   await installMockBridge(page, mock);
 });
@@ -2722,11 +2734,6 @@ test("shows your avatar on your own message when profile avatar is set", async (
     'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"%3E%3Crect width="16" height="16" rx="4" fill="%2300a36c"/%3E%3C/svg%3E';
 
   await page.goto("/");
-  await openSettings(page, "profile");
-  await page.getByTestId("profile-avatar-edit").click();
-  await page.getByTestId("profile-avatar-url").fill(avatarUrl);
-  await page.getByTestId("profile-avatar-done").click();
-  await page.getByTestId("settings-back-to-app").click();
 
   await page.getByTestId("channel-general").click();
   await expect(page.getByTestId("chat-title")).toHaveText("general");

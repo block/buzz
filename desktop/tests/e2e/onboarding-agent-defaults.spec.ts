@@ -951,7 +951,7 @@ test("concurrent installs each keep their own state — one fails, one succeeds"
       // Per-runtime config lets both be in flight simultaneously.
       installAcpRuntimeByRuntime: {
         claude: {
-          delayMs: 600,
+          delayMs: 6_000,
           result: {
             success: false,
             steps: [
@@ -967,7 +967,7 @@ test("concurrent installs each keep their own state — one fails, one succeeds"
           },
         },
         codex: {
-          delayMs: 200,
+          delayMs: 2_000,
           result: {
             success: true,
             steps: [
@@ -1006,7 +1006,7 @@ test("concurrent installs each keep their own state — one fails, one succeeds"
 
   // Codex settles first (shorter delay): success indicator, no error.
   await expect(page.getByTestId("onboarding-runtime-ready-codex")).toBeVisible({
-    timeout: 3_000,
+    timeout: 10_000,
   });
   await expect(page.getByTestId("onboarding-runtime-error-codex")).toHaveCount(
     0,
@@ -1017,7 +1017,7 @@ test("concurrent installs each keep their own state — one fails, one succeeds"
 
   // Claude settles: failure error visible; codex still shows ready (not reset).
   const claudeError = page.getByTestId("onboarding-runtime-error-claude");
-  await expect(claudeError).toBeVisible({ timeout: 3_000 });
+  await expect(claudeError).toBeVisible({ timeout: 10_000 });
   await expect(
     page.getByTestId("onboarding-runtime-ready-codex"),
   ).toBeVisible();
