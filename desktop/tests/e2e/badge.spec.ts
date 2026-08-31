@@ -279,7 +279,7 @@ test("dark mode keeps selected labels regular and channel-level unread labels bo
   });
 });
 
-test("offscreen top-level unread shows the primary sidebar arrow", async ({
+test("offscreen top-level unread shows the secondary sidebar arrow", async ({
   page,
 }) => {
   await page.setViewportSize({ width: 1280, height: 360 });
@@ -319,7 +319,7 @@ test("offscreen top-level unread shows the primary sidebar arrow", async ({
 
   const activityArrow = page.getByTestId("sidebar-more-unread-above");
   await expect(activityArrow).toBeVisible();
-  await expect(activityArrow).toHaveClass(/bg-primary/);
+  await expect(activityArrow).not.toHaveClass(/bg-primary/);
   await activityArrow.click();
   await expect(page.getByTestId("channel-random")).toBeInViewport();
   await waitForAnimations(page);
