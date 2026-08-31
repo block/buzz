@@ -50,10 +50,31 @@ pub mod relay_members {
         OpenRelay,
         /// Caller is directly present in `relay_members`.
         Member,
+        /// Caller is directly present in `relay_members` *and* presented a valid
+        /// NIP-OA auth tag naming an owner that is also a relay member.
+        ///
+        /// Distinct from [`Self::ViaOwner`]: membership does not depend on the
+        /// owner here, it is already established. The relationship is carried
+        /// out of the check so it can still be recorded.
+        MemberWithOwner(nostr::PublicKey),
         /// Caller is admitted through a NIP-OA owner that is a relay member.
         ViaOwner(nostr::PublicKey),
         /// Caller is not admitted.
         Denied,
+    }
+
+    impl MembershipDecision {
+        /// The NIP-OA owner proved during the check, if any.
+        ///
+        /// Deliberately independent of *why* the caller was admitted: both a
+        /// delegated agent and a direct member can prove an owner, and the
+        /// relationship is worth recording either way.
+        pub fn nip_oa_owner(&self) -> Option<nostr::PublicKey> {
+            match self {
+                Self::ViaOwner(owner) | Self::MemberWithOwner(owner) => Some(*owner),
+                Self::OpenRelay | Self::Member | Self::Denied => None,
+            }
+        }
     }
 
     /// Check relay membership without committing to an HTTP response shape.
@@ -76,53 +97,104 @@ pub mod relay_members {
             .is_relay_member(community, &pubkey_hex)
             .await
             .map_err(|e| format!("relay membership check failed: {e}"))?;
+        // A direct member still has its NIP-OA owner resolved. Membership is
+        // already settled, but the agent→owner relationship is not, and this is
+        // the only point where the auth tag is examined. Returning plain
+        // `Member` here discards a proof the agent did present — so an agent
+        // registered as a relay member in its own right never gets an owner
+        // recorded, and every owner-gated feature silently fails for it.
+        //
+        // The visible symptom is kind 24200 observer frames: the relay gates
+        // them on `users.agent_owner_pubkey` and rejects all of them, so Buzz
+        // Desktop's ACP activity tab stays empty for a working agent while the
+        // harness reports `relay observer enabled`. Desktop-managed agents are
+        // unaffected because they are minted with an owner rather than added to
+        // `relay_members`.
         if is_member {
-            return Ok(MembershipDecision::Member);
+            let owner =
+                resolve_nip_oa_owner(state, community, pubkey_bytes, auth_tag_header, &pubkey_hex)
+                    .await?;
+            return Ok(match owner {
+                Some(owner) => MembershipDecision::MemberWithOwner(owner),
+                None => MembershipDecision::Member,
+            });
         }
 
-        if state.config.allow_nip_oa_auth {
-            if let Some(tag_json) = auth_tag_header {
-                let agent_pubkey = nostr::PublicKey::from_slice(pubkey_bytes)
-                    .map_err(|e| format!("invalid agent pubkey for NIP-OA check: {e}"))?;
-
-                match buzz_sdk::nip_oa::verify_auth_tag(tag_json, &agent_pubkey) {
-                    Ok(owner_pubkey) => {
-                        let owner_hex = owner_pubkey.to_hex();
-                        let owner_is_member = state
-                            .db
-                            .is_relay_member(community, &owner_hex)
-                            .await
-                            .map_err(|e| format!("relay membership check (owner) failed: {e}"))?;
-                        if owner_is_member {
-                            debug!(
-                                agent = %pubkey_hex,
-                                owner = %owner_hex,
-                                "NIP-OA membership granted via owner"
-                            );
-                            return Ok(MembershipDecision::ViaOwner(owner_pubkey));
-                        }
-                    }
-                    Err(e) => {
-                        info!(agent = %pubkey_hex, "NIP-OA auth tag invalid: {e}");
-                    }
-                }
-            }
+        if let Some(owner_pubkey) =
+            resolve_nip_oa_owner(state, community, pubkey_bytes, auth_tag_header, &pubkey_hex)
+                .await?
+        {
+            debug!(
+                agent = %pubkey_hex,
+                owner = %owner_pubkey.to_hex(),
+                "NIP-OA membership granted via owner"
+            );
+            return Ok(MembershipDecision::ViaOwner(owner_pubkey));
         }
 
         Ok(MembershipDecision::Denied)
     }
 
+    /// Resolve the NIP-OA owner named by an auth tag.
+    ///
+    /// Returns `Ok(None)` — never an error — when NIP-OA auth is disabled, no
+    /// tag was presented, the tag does not verify, or the named owner is not
+    /// itself a relay member. Only a malformed caller pubkey or a failed DB
+    /// lookup is an error.
+    ///
+    /// The owner-is-member requirement is inherited from the delegation path
+    /// rather than newly imposed: on a closed relay, recording an owner that
+    /// cannot itself connect would hand agent-management authority to a
+    /// non-member.
+    async fn resolve_nip_oa_owner(
+        state: &AppState,
+        community: CommunityId,
+        pubkey_bytes: &[u8],
+        auth_tag_header: Option<&str>,
+        pubkey_hex: &str,
+    ) -> Result<Option<nostr::PublicKey>, String> {
+        if !state.config.allow_nip_oa_auth {
+            return Ok(None);
+        }
+        // Costs nothing for ordinary clients: only agents send an auth tag, so
+        // the extra owner lookup below never runs for a human's connection.
+        let Some(tag_json) = auth_tag_header else {
+            return Ok(None);
+        };
+
+        let agent_pubkey = nostr::PublicKey::from_slice(pubkey_bytes)
+            .map_err(|e| format!("invalid agent pubkey for NIP-OA check: {e}"))?;
+
+        let owner_pubkey = match buzz_sdk::nip_oa::verify_auth_tag(tag_json, &agent_pubkey) {
+            Ok(owner_pubkey) => owner_pubkey,
+            Err(e) => {
+                info!(agent = %pubkey_hex, "NIP-OA auth tag invalid: {e}");
+                return Ok(None);
+            }
+        };
+
+        let owner_is_member = state
+            .db
+            .is_relay_member(community, &owner_pubkey.to_hex())
+            .await
+            .map_err(|e| format!("relay membership check (owner) failed: {e}"))?;
+
+        Ok(owner_is_member.then_some(owner_pubkey))
+    }
+
     /// Enforce relay membership for a pubkey, with NIP-OA agent delegation fallback.
     ///
-    /// Returns `Ok(Some(owner_pubkey))` when the agent is not a direct member but
-    /// its NIP-OA owner *is* — access is granted via delegation.
+    /// Returns `Ok(Some(owner_pubkey))` whenever a NIP-OA owner was proved,
+    /// whether or not membership depended on it: for an agent admitted *by*
+    /// delegation, and for a direct member that also carries a valid auth tag.
+    /// Callers use it to record the agent→owner relationship, which is needed
+    /// in both cases.
     ///
     /// On open relays (`require_relay_membership = false`), returns `Ok(None)`
     /// immediately — no membership check is performed. Callers that need NIP-OA
     /// owner extraction on open relays should call [`extract_nip_oa_owner`] directly.
     ///
-    /// Returns `Ok(None)` when the caller is a direct member (closed relay) or when
-    /// no NIP-OA tag is present/applicable (open relay without auth tag).
+    /// Returns `Ok(None)` when no NIP-OA tag is present or applicable.
     pub async fn enforce_relay_membership(
         state: &AppState,
         community: CommunityId,
@@ -130,8 +202,12 @@ pub mod relay_members {
         auth_tag_header: Option<&str>,
     ) -> Result<Option<nostr::PublicKey>, (StatusCode, Json<serde_json::Value>)> {
         match check_relay_membership(state, community, pubkey_bytes, auth_tag_header).await {
-            Ok(MembershipDecision::OpenRelay) | Ok(MembershipDecision::Member) => Ok(None),
-            Ok(MembershipDecision::ViaOwner(owner)) => Ok(Some(owner)),
+            Ok(
+                decision @ (MembershipDecision::OpenRelay
+                | MembershipDecision::Member
+                | MembershipDecision::MemberWithOwner(_)
+                | MembershipDecision::ViaOwner(_)),
+            ) => Ok(decision.nip_oa_owner()),
             Ok(MembershipDecision::Denied) => Err((
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({
@@ -274,6 +350,41 @@ pub mod relay_members {
             let result = extract_nip_oa_owner(&agent_pubkey.to_bytes(), Some("not valid json"));
 
             assert_eq!(result, None);
+        }
+
+        /// A direct member that proved an owner must surface it. This is the
+        /// regression: returning a plain `Member` here drops the relationship,
+        /// and an agent registered as a relay member in its own right then
+        /// never gets `users.agent_owner_pubkey` written — which silently
+        /// disables observer frames and every other owner-gated feature.
+        #[test]
+        fn member_with_owner_surfaces_the_owner() {
+            let owner = Keys::generate().public_key();
+
+            assert_eq!(
+                MembershipDecision::MemberWithOwner(owner).nip_oa_owner(),
+                Some(owner)
+            );
+        }
+
+        /// Delegation keeps surfacing the owner exactly as before.
+        #[test]
+        fn via_owner_surfaces_the_owner() {
+            let owner = Keys::generate().public_key();
+
+            assert_eq!(
+                MembershipDecision::ViaOwner(owner).nip_oa_owner(),
+                Some(owner)
+            );
+        }
+
+        /// Admission without a proved owner surfaces nothing — a member that
+        /// sent no auth tag must not acquire one.
+        #[test]
+        fn admission_without_proof_surfaces_no_owner() {
+            assert_eq!(MembershipDecision::Member.nip_oa_owner(), None);
+            assert_eq!(MembershipDecision::OpenRelay.nip_oa_owner(), None);
+            assert_eq!(MembershipDecision::Denied.nip_oa_owner(), None);
         }
     }
 }
