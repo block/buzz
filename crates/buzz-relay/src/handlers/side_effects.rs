@@ -905,6 +905,11 @@ pub fn emit_live_thread_summary(
     });
 }
 
+fn membership_transition_tag(transition_id: Uuid) -> anyhow::Result<Tag> {
+    Tag::parse(["transition", &transition_id.to_string()])
+        .map_err(|e| anyhow::anyhow!("failed to build transition tag: {e}"))
+}
+
 /// Emit a relay-signed membership notification event stored globally (channel_id = None).
 ///
 /// kind:44100 = member added, kind:44101 = member removed.
@@ -926,6 +931,7 @@ pub async fn emit_membership_notification(
         .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?;
     let h_tag = Tag::parse(["h", &channel_id_str])
         .map_err(|e| anyhow::anyhow!("failed to build h tag: {e}"))?;
+    let transition_tag = membership_transition_tag(Uuid::new_v4())?;
 
     let event_type = match notification_kind {
         KIND_MEMBER_ADDED_NOTIFICATION => "member_added",
@@ -945,32 +951,11 @@ pub async fn emit_membership_notification(
     .to_string();
 
     // A member can be removed and restored in the same second as the original
-    // add. Because these relay-signed notifications otherwise have identical
-    // kind, content, tags, and timestamp, Nostr gives them the same event id and
-    // `insert_event` suppresses the recovery fan-out as a duplicate. Advance
-    // past the latest notification for this target/channel pair so every real
-    // membership transition remains observable by live clients.
-    let now = nostr::Timestamp::now().as_secs();
-    let previous = state
-        .db
-        .query_events(&buzz_db::event::EventQuery {
-            kinds: Some(vec![notification_kind as i32]),
-            pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
-            p_tag_hex: Some(target_hex.clone()),
-            custom_tag: Some(("h".to_owned(), channel_id_str.clone())),
-            limit: Some(1),
-            global_only: true,
-            ..buzz_db::event::EventQuery::for_community(tenant.community())
-        })
-        .await?;
-    let created_at = previous
-        .first()
-        .map(|event| (event.event.created_at.as_secs() + 1).max(now))
-        .unwrap_or(now);
-
+    // add. Give every actual transition a collision-resistant tag so concurrent
+    // emitters cannot sign the same Nostr event and suppress one fan-out as a
+    // duplicate.
     let event = EventBuilder::new(Kind::Custom(notification_kind as u16), content)
-        .tags([p_tag, h_tag])
-        .custom_created_at(nostr::Timestamp::from(created_at))
+        .tags([p_tag, h_tag, transition_tag])
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign membership notification: {e}"))?;
 
@@ -3757,6 +3742,31 @@ pub async fn publish_nipia_unarchived(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn membership_transition_tag_changes_same_second_event_identity() {
+        let keys = nostr::Keys::generate();
+        let timestamp = nostr::Timestamp::from(1_700_000_000);
+        let base_tags = || {
+            vec![
+                Tag::parse(["p", &"01".repeat(32)]).expect("p tag"),
+                Tag::parse(["h", &Uuid::nil().to_string()]).expect("h tag"),
+            ]
+        };
+        let build = |transition_id| {
+            let mut tags = base_tags();
+            tags.push(membership_transition_tag(transition_id).expect("transition tag"));
+            EventBuilder::new(Kind::Custom(KIND_MEMBER_ADDED_NOTIFICATION as u16), "same")
+                .tags(tags)
+                .custom_created_at(timestamp)
+                .sign_with_keys(&keys)
+                .expect("sign notification")
+        };
+
+        let first = build(Uuid::from_u128(1));
+        let second = build(Uuid::from_u128(2));
+        assert_ne!(first.id, second.id);
+    }
 
     #[test]
     fn group_members_snapshot_keeps_members_past_one_thousand() {

@@ -33,6 +33,13 @@ use super::side_effects::{
     emit_membership_notification, emit_system_message, publish_dm_visibility_snapshot,
 };
 
+fn map_open_dm_error(error: DbError) -> IngestError {
+    match error {
+        DbError::AccessDenied(message) => IngestError::Rejected(format!("restricted: {message}")),
+        other => IngestError::Internal(format!("error: db open_dm: {other}")),
+    }
+}
+
 /// Route a command-kind event to the appropriate handler.
 pub async fn handle_command(
     tenant: &TenantContext,
@@ -350,7 +357,7 @@ async fn handle_dm_open(
         .db
         .open_dm(tenant.community(), &all_refs, &self_bytes)
         .await
-        .map_err(|e| IngestError::Internal(format!("error: db open_dm: {e}")))?;
+        .map_err(map_open_dm_error)?;
     let channel = opened.channel;
     let was_created = opened.was_created;
     let restored_participants = opened.restored_participants;
@@ -524,7 +531,7 @@ async fn handle_dm_add_member(
         .db
         .open_dm(tenant.community(), &all_refs, &self_bytes)
         .await
-        .map_err(|e| IngestError::Internal(format!("error: db open_dm: {e}")))?;
+        .map_err(map_open_dm_error)?;
     let new_channel = opened.channel;
     let was_created = opened.was_created;
     let restored_participants = opened.restored_participants;
@@ -1394,6 +1401,16 @@ async fn resume_workflow_after_approval(
 mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+    #[test]
+    fn open_dm_access_denied_maps_to_restricted_client_error() {
+        let mapped = map_open_dm_error(DbError::AccessDenied("removed participant".to_string()));
+
+        assert!(matches!(
+            mapped,
+            IngestError::Rejected(message) if message == "restricted: removed participant"
+        ));
+    }
 
     async fn persistence_test_context() -> (buzz_db::Db, TenantContext) {
         let url = std::env::var("BUZZ_TEST_DATABASE_URL")
