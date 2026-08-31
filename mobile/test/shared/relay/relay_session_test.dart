@@ -998,6 +998,49 @@ void main() {
     expect(disposeTimer.isActive, isFalse);
   });
 
+  test('rate-limited OK=false fails the publish and arms the gate', () async {
+    final gateTimers = <_ManualTimer>[];
+    final gate = RelayRateLimitGate(
+      timerFactory: (duration, callback) {
+        final timer = _ManualTimer(duration, callback);
+        gateTimers.add(timer);
+        return timer;
+      },
+    );
+    final session = RelaySessionNotifier(rateLimitGate: gate);
+    session.debugAttachSocketForTest(_RecordingRelaySocket());
+    final event = NostrEvent(
+      id: 'e1',
+      pubkey: '',
+      createdAt: 0,
+      kind: 9,
+      tags: const [],
+      content: 'hi',
+      sig: '',
+    );
+
+    final publish = session.publish(event);
+    session.debugHandleMessage([
+      'OK',
+      'e1',
+      false,
+      'rate-limited: quota exceeded; retry in 4s',
+    ]);
+
+    await expectLater(
+      publish,
+      throwsA(
+        isA<Exception>().having(
+          (error) => error.toString(),
+          'message',
+          contains('rate-limited: quota exceeded'),
+        ),
+      ),
+    );
+    expect(gate.isActive, isTrue);
+    expect(gateTimers.single.duration, const Duration(seconds: 4));
+  });
+
   test('rate-limited live CLOSED honours the gate floor', () async {
     final retryTimers = <_ManualTimer>[];
     final gateTimers = <_ManualTimer>[];

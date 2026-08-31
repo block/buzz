@@ -145,6 +145,19 @@ void main() {
     expect(timers.single.isActive, isFalse);
     expect(gate.isActive, isFalse);
   });
+
+  test('activateIfRateLimited arms only on a back-pressure message', () {
+    final gate = RelayRateLimitGate(
+      now: () => DateTime.utc(2026),
+      timerFactory: (duration, callback) => _ManualTimer(duration, callback),
+    );
+
+    gate.activateIfRateLimited('restricted: not a channel member');
+    expect(gate.isActive, isFalse);
+
+    gate.activateIfRateLimited('rate-limited: quota exceeded; retry in 3s');
+    expect(gate.remainingMs(), 3000);
+  });
 }
 
 class _ManualTimer implements Timer {

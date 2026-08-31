@@ -206,11 +206,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     }
     if (decoded is! Map<String, dynamic>) return;
     final message = decoded['error'];
-    if (message is! String ||
-        classifyRelayClosed(message) != RelayClosedClass.rateLimited) {
-      return;
-    }
-    _rateLimitGate.activate(parseRateLimitRetrySeconds(message));
+    if (message is String) _rateLimitGate.activateIfRateLimited(message);
   }
 
   /// Fetch historical events matching [filter]. Sends REQ, collects events
@@ -700,9 +696,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
     final historySub = _historySubscriptions.remove(subId);
     if (historySub != null) {
-      if (closedClass == RelayClosedClass.rateLimited) {
-        _rateLimitGate.activate(parseRateLimitRetrySeconds(message));
-      }
+      _rateLimitGate.activateIfRateLimited(message);
       historySub.timeout.cancel();
       if (!historySub.completer.isCompleted) {
         historySub.completer.completeError(Exception(message));
@@ -824,6 +818,8 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         );
       }
     } else {
+      // Back-pressure refusal: arm the gate so concurrent requests back off.
+      _rateLimitGate.activateIfRateLimited(message);
       if (!pending.completer.isCompleted) {
         pending.completer.completeError(
           Exception(message.isNotEmpty ? message : 'Event rejected'),

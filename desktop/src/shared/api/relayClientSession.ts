@@ -38,6 +38,7 @@ import {
 } from "@/shared/api/relayClosedRecovery";
 import { getChannelReconnectRepairEvents } from "@/shared/api/channelReconnectRepair";
 import { replayLiveSubscriptions } from "@/shared/api/relayReconnectReplay";
+import { handlePublishOk } from "@/shared/api/relayPublishRecovery";
 import {
   activateRateLimit,
   parseRateLimitHint,
@@ -911,19 +912,13 @@ export class RelayClient {
       return;
     }
 
-    const pendingEvent = this.pendingEvents.get(eventId);
-    if (!pendingEvent) {
-      return;
-    }
-
-    window.clearTimeout(pendingEvent.timeout);
-    this.pendingEvents.delete(eventId);
-
-    if (success) {
-      pendingEvent.resolve(pendingEvent.event);
-    } else {
-      pendingEvent.reject(new Error(message || "Relay rejected the event."));
-    }
+    handlePublishOk({
+      pendingEvents: this.pendingEvents,
+      eventId,
+      success,
+      message,
+      sendEvent: (event) => this.sendRaw(["EVENT", event]),
+    });
   }
 
   private hasLiveSubscriptions() {

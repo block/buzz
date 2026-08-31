@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'relay_closed_policy.dart';
+
 /// Creates a timer used by [RelayRateLimitGate].
 typedef RelayTimerFactory =
     Timer Function(Duration duration, void Function() callback);
@@ -57,6 +59,13 @@ class RelayRateLimitGate {
     _timer?.cancel();
     _completer ??= Completer<void>();
     _timer = _timerFactory(duration, _expire);
+  }
+
+  /// Arms the gate from any relay refusal (`CLOSED`, `OK false`, HTTP error)
+  /// whose message classifies as back-pressure; a no-op otherwise.
+  void activateIfRateLimited(String message) {
+    if (classifyRelayClosed(message) != RelayClosedClass.rateLimited) return;
+    activate(parseRateLimitRetrySeconds(message));
   }
 
   /// Resolves when the active rate-limit window expires.

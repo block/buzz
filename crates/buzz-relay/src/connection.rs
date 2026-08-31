@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use buzz_auth::{generate_challenge, AuthContext, LimitType};
 use buzz_core::tenant::TenantContext;
-use nostr::Filter;
+use nostr::{Event, Filter};
 
 use crate::handlers;
 use crate::protocol::{ClientMessage, RelayMessage};
@@ -571,7 +571,8 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
             let permit = match state.handler_semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
-                    conn.send(RelayMessage::notice(
+                    conn.send(request_rejection_message(
+                        RejectionTarget::Event(&event),
                         "rate-limited: too many concurrent requests",
                     ));
                     return;
@@ -600,7 +601,7 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                 Ok(p) => p,
                 Err(_) => {
                     conn.send(request_rejection_message(
-                        Some(&sub_id),
+                        RejectionTarget::Subscription(&sub_id),
                         "rate-limited: too many concurrent requests",
                     ));
                     return;
@@ -642,10 +643,24 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
     }
 }
 
-fn request_rejection_message(sub_id: Option<&str>, reason: &str) -> String {
-    match sub_id {
-        Some(sub_id) => RelayMessage::closed(sub_id, reason),
-        None => RelayMessage::notice(reason),
+/// Which client-side frame a rejection is correlated with.
+///
+/// A publisher waits on `OK <event_id>` and a subscriber waits on
+/// `CLOSED <sub_id>`; an uncorrelated `NOTICE` leaves the client hanging
+/// until its own timeout fires.
+#[derive(Debug, Clone, Copy)]
+enum RejectionTarget<'a> {
+    Event(&'a Event),
+    Subscription(&'a str),
+    /// COUNT has no correlated rejection frame; fall back to NOTICE.
+    Uncorrelated,
+}
+
+fn request_rejection_message(target: RejectionTarget<'_>, reason: &str) -> String {
+    match target {
+        RejectionTarget::Event(event) => RelayMessage::ok(&event.id.to_hex(), false, reason),
+        RejectionTarget::Subscription(sub_id) => RelayMessage::closed(sub_id, reason),
+        RejectionTarget::Uncorrelated => RelayMessage::notice(reason),
     }
 }
 
@@ -679,11 +694,12 @@ async fn enforce_ws_admission(
         ws_limit,
     )
     .await;
-    let sub_id = match msg {
-        ClientMessage::Req { sub_id, .. } => Some(sub_id.as_str()),
-        _ => None,
+    let target = match msg {
+        ClientMessage::Event(event) => RejectionTarget::Event(event),
+        ClientMessage::Req { sub_id, .. } => RejectionTarget::Subscription(sub_id),
+        _ => RejectionTarget::Uncorrelated,
     };
-    if !send_admission_result(conn, ws_result, sub_id) {
+    if !send_admission_result(conn, ws_result, target) {
         return false;
     }
 
@@ -702,7 +718,7 @@ async fn enforce_ws_admission(
             message_limit,
         )
         .await;
-        if !send_admission_result(conn, message_result, None) {
+        if !send_admission_result(conn, message_result, target) {
             return false;
         }
     }
@@ -713,14 +729,14 @@ async fn enforce_ws_admission(
 fn send_admission_result(
     conn: &ConnectionState,
     result: Result<(), crate::admission::AdmissionError>,
-    sub_id: Option<&str>,
+    target: RejectionTarget<'_>,
 ) -> bool {
     match result {
         Ok(()) => true,
         Err(crate::admission::AdmissionError::Exceeded { reset_in_secs }) => {
             metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "quota").increment(1);
             conn.send(request_rejection_message(
-                sub_id,
+                target,
                 &format!("rate-limited: quota exceeded; retry in {reset_in_secs}s"),
             ));
             false
@@ -728,7 +744,7 @@ fn send_admission_result(
         Err(crate::admission::AdmissionError::Unavailable) => {
             metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "unavailable").increment(1);
             conn.send(request_rejection_message(
-                sub_id,
+                target,
                 "rate-limited: shared admission unavailable",
             ));
             false
@@ -835,16 +851,29 @@ mod tests {
     }
 
     #[test]
-    fn req_rejections_are_subscription_scoped() {
+    fn rejections_are_correlated_with_the_rejected_frame() {
         let reason = "rate-limited: too many concurrent requests";
-        let closed: serde_json::Value =
-            serde_json::from_str(&request_rejection_message(Some("history-123"), reason))
-                .expect("parse CLOSED");
-        assert_eq!(closed, serde_json::json!(["CLOSED", "history-123", reason]));
+        let parse = |target| -> serde_json::Value {
+            serde_json::from_str(&request_rejection_message(target, reason)).expect("parse frame")
+        };
 
-        let notice: serde_json::Value =
-            serde_json::from_str(&request_rejection_message(None, reason)).expect("parse NOTICE");
-        assert_eq!(notice, serde_json::json!(["NOTICE", reason]));
+        // A rejected EVENT must settle the publisher's pending OK, not leave
+        // it waiting on the publish timeout.
+        let event = nostr::EventBuilder::text_note("hi")
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign event");
+        assert_eq!(
+            parse(RejectionTarget::Event(&event)),
+            serde_json::json!(["OK", event.id.to_hex(), false, reason])
+        );
+        assert_eq!(
+            parse(RejectionTarget::Subscription("history-123")),
+            serde_json::json!(["CLOSED", "history-123", reason])
+        );
+        assert_eq!(
+            parse(RejectionTarget::Uncorrelated),
+            serde_json::json!(["NOTICE", reason])
+        );
     }
 
     #[tokio::test]

@@ -98,6 +98,8 @@ export type PendingEvent = {
   resolve: (event: RelayEvent) => void;
   reject: (error: Error) => void;
   timeout: number;
+  /** Set once the EVENT has been re-sent after a `rate-limited:` refusal. */
+  retriedAfterRateLimit?: boolean;
 };
 
 export type RelaySubscription =

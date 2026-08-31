@@ -1292,6 +1292,19 @@ impl BgState {
         while let Some(event) = self.observer_in_flight.pop_back() {
             self.gated_observer_pending.push_front(event);
         }
+        self.trim_gated_observer_pending();
+    }
+
+    /// Restore one observer write the relay refused with `OK false
+    /// rate-limited:` — correlated by id, so only that frame is retried.
+    fn requeue_observer_frame(&mut self, event_id: &str) {
+        if let Some(event) = self.take_observer_in_flight(event_id) {
+            self.gated_observer_pending.push_front(event);
+            self.trim_gated_observer_pending();
+        }
+    }
+
+    fn trim_gated_observer_pending(&mut self) {
         while self.gated_observer_pending.len() > GATED_OBSERVER_QUEUE_CAP {
             self.gated_observer_pending.pop_front();
             self.gated_observer_dropped += 1;
@@ -1311,13 +1324,15 @@ impl BgState {
     }
 
     fn acknowledge_observer_frame(&mut self, event_id: &str) {
-        if let Some(index) = self
+        self.take_observer_in_flight(event_id);
+    }
+
+    fn take_observer_in_flight(&mut self, event_id: &str) -> Option<Box<Event>> {
+        let index = self
             .observer_in_flight
             .iter()
-            .position(|event| event.id.to_hex() == event_id)
-        {
-            self.observer_in_flight.remove(index);
-        }
+            .position(|event| event.id.to_hex() == event_id)?;
+        self.observer_in_flight.remove(index)
     }
 }
 
@@ -2449,6 +2464,22 @@ async fn handle_ws_message(
                         // AUTH OK with accepted=false means auth was rejected.
                         warn!("mid-session AUTH rejected (event {event_id}): {message} — triggering reconnect");
                         return false;
+                    }
+                    if !accepted && message.starts_with("rate-limited:") {
+                        // The relay refused this EVENT for back-pressure. Arm the
+                        // gate and put the frame (if it was a durable observer
+                        // write) back at the head of the paced drain.
+                        let secs = parse_rate_limit_retry_secs(&message).unwrap_or(0);
+                        let deadline = state.set_rate_limit_gate(secs);
+                        state.requeue_observer_frame(&event_id);
+                        warn!(
+                            "event {event_id} rate-limited — gate armed until ~{:.1}s from now",
+                            deadline
+                                .checked_duration_since(tokio::time::Instant::now())
+                                .unwrap_or_default()
+                                .as_secs_f64()
+                        );
+                        return true;
                     }
                     state.acknowledge_observer_frame(&event_id);
                     debug!("OK for event {event_id}: accepted={accepted} message={message}");
@@ -6083,6 +6114,37 @@ mod tests {
             .collect();
         assert_eq!(ids, [rejected.id, later.id]);
         assert!(state.observer_in_flight.is_empty());
+    }
+
+    #[test]
+    fn rate_limited_ok_requeues_only_the_refused_frame() {
+        let mut state = BgState::new();
+        let keys = Keys::generate();
+        let still_in_flight = make_observer_frame(&keys);
+        let refused = make_observer_frame(&keys);
+        let later = make_observer_frame(&keys);
+
+        state.track_observer_in_flight(Box::new(still_in_flight.clone()));
+        state.track_observer_in_flight(Box::new(refused.clone()));
+        state.park_gated_observer_frame(Box::new(later.clone()));
+        state.requeue_observer_frame(&refused.id.to_hex());
+
+        let pending: Vec<_> = state
+            .gated_observer_pending
+            .iter()
+            .map(|event| event.id)
+            .collect();
+        assert_eq!(
+            pending,
+            [refused.id, later.id],
+            "refused frame drains first"
+        );
+        let in_flight: Vec<_> = state.observer_in_flight.iter().map(|e| e.id).collect();
+        assert_eq!(
+            in_flight,
+            [still_in_flight.id],
+            "unrefused frame keeps waiting for OK"
+        );
     }
 
     /// The parked-frame queue is bounded: overflow evicts the oldest frame and
