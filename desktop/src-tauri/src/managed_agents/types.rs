@@ -373,9 +373,11 @@ pub struct ManagedAgentRecord {
     /// from `AgentDefinition.display_name` (unified agent model, Phase 1A).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    /// Optional short, PUBLIC agent description absorbed from
-    /// `AgentDefinition.description`. Display metadata only (never
-    /// spawn-relevant, never part of the persona content hash).
+    /// Optional short, PUBLIC agent description. Keyless definition records
+    /// carry the authored value; persona-linked instances leave it absent and
+    /// resolve through their definition so a second copy cannot drift.
+    /// Display metadata only (never spawn-relevant, never part of the persona
+    /// content hash).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Stable definition slug — the former `AgentDefinition.id`. Key-less

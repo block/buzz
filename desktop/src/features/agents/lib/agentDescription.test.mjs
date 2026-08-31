@@ -1,7 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { effectiveAgentDescription } from "./agentDescription.ts";
+import {
+  agentDescriptionCharacterCount,
+  clampAgentDescription,
+  effectiveAgentDescription,
+} from "./agentDescription.ts";
+
+test("description character count matches Rust Unicode scalar counting", () => {
+  assert.equal(agentDescriptionCharacterCount("a🐝é"), 3);
+  assert.equal(agentDescriptionCharacterCount("🐝".repeat(280)), 280);
+});
+
+test("description clamp preserves a useful prefix for over-cap pastes", () => {
+  assert.equal(clampAgentDescription("a".repeat(300)), "a".repeat(280));
+  assert.equal(
+    clampAgentDescription(`${"a".repeat(279)}🐝extra`),
+    `${"a".repeat(279)}🐝`,
+  );
+});
 
 test("an authored description wins", () => {
   assert.equal(

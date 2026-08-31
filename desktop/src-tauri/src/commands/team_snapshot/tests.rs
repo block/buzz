@@ -55,7 +55,7 @@ fn snapshot(members: Vec<AgentSnapshot>) -> TeamSnapshot {
 fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
     let definitions = vec![
         AgentDefinition {
-            description: None,
+            description: Some("A careful reviewer.".to_string()),
             id: "alice".to_string(),
             display_name: "Alice".to_string(),
             avatar_url: None,
@@ -138,6 +138,11 @@ fn team_export_round_trip_preserves_team_and_excludes_member_memory() {
     assert_eq!(decoded.team.description.as_deref(), Some("Reviews changes"));
     assert_eq!(decoded.team.instructions.as_deref(), Some("Be thorough."));
     assert_eq!(decoded.members.len(), 2);
+    assert_eq!(
+        decoded.members[0].profile.about.as_deref(),
+        Some("A careful reviewer.")
+    );
+    assert_eq!(decoded.members[1].profile.about, None);
     assert!(decoded.members.iter().all(|member| {
         member.memory.level == MemoryLevel::None && member.memory.entries.is_empty()
     }));
@@ -302,6 +307,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
 #[test]
 fn team_import_definitions_are_built_for_all_members() {
     let mut memory_bearing = member("Alice");
+    memory_bearing.profile.about = Some("  A careful reviewer.  ".to_string());
     memory_bearing.memory = AgentSnapshotMemory {
         level: MemoryLevel::Everything,
         entries: vec![AgentSnapshotMemoryEntry {
@@ -341,6 +347,11 @@ fn team_import_definitions_are_built_for_all_members() {
             && definition.respond_to_allowlist.is_empty()
     }));
     assert_eq!(definitions[0].system_prompt, "Alice prompt");
+    assert_eq!(
+        definitions[0].description.as_deref(),
+        Some("A careful reviewer.")
+    );
+    assert_eq!(definitions[1].description, None);
 }
 
 #[test]

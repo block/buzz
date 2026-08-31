@@ -41,7 +41,7 @@ pub(crate) struct ProfileReconcileData {
     /// relay profile has been corrupted.
     pub(crate) persona_id: Option<String>,
     /// Expected kind:0 `about` — the agent's effective public description
-    /// (authored else derived; see
+    /// (owner-authored when present; see
     /// `managed_agents::record_effective_description`). `None` publishes an
     /// about-less profile.
     pub(crate) about: Option<String>,
@@ -347,7 +347,7 @@ pub(crate) async fn publish_agent_profile_with_about(
 }
 
 /// Publish a fresh persona-backed agent's kind:0 profile, computing the
-/// effective public `about` (authored else derived) from the persona itself.
+/// effective public `about` from the persona itself.
 /// Shared by flows in files at the size ratchet (snapshot import).
 pub(crate) async fn publish_persona_profile(
     state: &AppState,

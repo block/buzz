@@ -1,6 +1,10 @@
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
-import { MAX_AGENT_DESCRIPTION_CHARS } from "../lib/agentDescription";
+import {
+  agentDescriptionCharacterCount,
+  clampAgentDescription,
+  MAX_AGENT_DESCRIPTION_CHARS,
+} from "../lib/agentDescription";
 import {
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
@@ -22,8 +26,8 @@ type AgentIdentityFieldsProps = {
  * The persona dialog's identity block: the required "Agent name" input and
  * the optional public "Description" input directly beneath it.
  *
- * The hard 280-char cap is enforced via `maxLength`, with a live counter
- * once the value approaches the limit.
+ * The hard 280-Unicode-scalar cap mirrors Rust's `chars().count()`, with a
+ * live counter once the value approaches the limit.
  */
 export function AgentIdentityFields({
   displayName,
@@ -33,8 +37,9 @@ export function AgentIdentityFields({
   disabled,
 }: AgentIdentityFieldsProps) {
   const placeholder = "What this agent does, in a sentence";
+  const descriptionLength = agentDescriptionCharacterCount(description);
   const showCounter =
-    description.length >= MAX_AGENT_DESCRIPTION_CHARS - COUNTER_VISIBLE_WITHIN;
+    descriptionLength >= MAX_AGENT_DESCRIPTION_CHARS - COUNTER_VISIBLE_WITHIN;
 
   return (
     <>
@@ -87,8 +92,9 @@ export function AgentIdentityFields({
             )}
             disabled={disabled}
             id="persona-description"
-            maxLength={MAX_AGENT_DESCRIPTION_CHARS}
-            onChange={(event) => onDescriptionChange(event.target.value)}
+            onChange={(event) =>
+              onDescriptionChange(clampAgentDescription(event.target.value))
+            }
             placeholder={placeholder}
             value={description}
           />
@@ -99,7 +105,7 @@ export function AgentIdentityFields({
           </p>
           {showCounter ? (
             <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
-              {description.length}/{MAX_AGENT_DESCRIPTION_CHARS}
+              {descriptionLength}/{MAX_AGENT_DESCRIPTION_CHARS}
             </span>
           ) : null}
         </div>

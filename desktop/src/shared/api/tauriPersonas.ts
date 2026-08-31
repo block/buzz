@@ -68,15 +68,19 @@ export function fromRawPersona(persona: RawPersona): AgentPersona {
 }
 
 /**
- * Normalize a dialog description value for the wire: trimmed, with
- * empty/whitespace-only (and absent) collapsing to null so the backend
- * stores "no description" rather than an empty string.
+ * Normalize only the unambiguous empty/absent cases for the wire. The trusted
+ * Rust boundary validates the authored bytes before applying trim/empty
+ * storage normalization.
  */
 function normalizeDescription(
   description: string | null | undefined,
 ): string | null {
-  const trimmed = description?.trim() ?? "";
-  return trimmed.length > 0 ? trimmed : null;
+  if (description === null || description === undefined || description === "") {
+    return null;
+  }
+  // Preserve the authored bytes for the Rust boundary to validate. Trimming
+  // here could turn a prohibited edge control into apparently valid text.
+  return description;
 }
 
 export async function listPersonas(): Promise<AgentPersona[]> {

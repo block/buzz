@@ -91,6 +91,17 @@ fn make_instance(pubkey: &str, persona_id: &str) -> ManagedAgentRecord {
     }
 }
 
+#[test]
+fn linked_instance_snapshot_materializes_the_definition_description() {
+    let mut definition = make_definition("reviewer");
+    definition.description = Some("Reviews changes.".to_string());
+    let mut instance = make_instance("agent-pubkey", "reviewer");
+
+    materialize_snapshot_description(&mut instance, false, std::slice::from_ref(&definition));
+
+    assert_eq!(instance.description, definition.description);
+}
+
 /// Build a minimal valid AgentSnapshot for import tests.
 fn make_snapshot(
     memory_level: MemoryLevel,

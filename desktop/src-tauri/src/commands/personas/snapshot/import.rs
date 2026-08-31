@@ -562,7 +562,9 @@ pub async fn confirm_agent_snapshot_import(
             id: persona_id.clone(),
             display_name: display_name.clone(),
             avatar_url: effective_avatar.clone(),
-            description: None,
+            description: crate::managed_agents::effective_agent_description(
+                snapshot.profile.about.as_deref(),
+            ),
             system_prompt: snapshot
                 .definition
                 .system_prompt
@@ -598,6 +600,9 @@ pub async fn confirm_agent_snapshot_import(
             pubkey: pubkey.clone(),
             name: display_name.clone(),
             display_name: None,
+            // Linked definitions remain the sole description authority. Do
+            // not persist a second instance copy that can go stale after an
+            // edit or survive a later definition deletion.
             description: None,
             slug: None,
             persona_id: Some(persona_id.clone()),

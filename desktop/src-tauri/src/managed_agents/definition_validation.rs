@@ -283,8 +283,13 @@ mod tests {
     #[test]
     fn description_rejects_invisible_bidi_and_control_characters() {
         for character in ['\u{200B}', '\u{202E}', '\u{2066}', '\0', '\r', '\u{0007}'] {
-            let description = format!("A helpful{character}agent");
-            assert!(validate_agent_description_text(Some(&description)).is_err());
+            for description in [
+                format!("A helpful{character}agent"),
+                format!("{character}A helpful agent"),
+                format!("A helpful agent{character}"),
+            ] {
+                assert!(validate_agent_description_text(Some(&description)).is_err());
+            }
         }
     }
 

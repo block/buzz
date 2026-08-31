@@ -24,16 +24,18 @@ pub(crate) fn effective_agent_description(description: Option<&str>) -> Option<S
 ///
 /// A persona-linked instance publishes its linked definition's authored
 /// description — the definition is the authority for identity metadata,
-/// matching how the card face resolves it. A definition-less instance falls
-/// back to its own record field.
+/// matching how the card face resolves it. A missing linked definition yields
+/// no description rather than reviving a stale instance copy. Only a
+/// definition-less instance falls back to its own record field.
 pub(crate) fn record_effective_description(
     record: &ManagedAgentRecord,
     personas: &[AgentDefinition],
 ) -> Option<String> {
     if let Some(persona_id) = record.persona_id.as_deref() {
-        if let Some(persona) = personas.iter().find(|persona| persona.id == persona_id) {
-            return effective_agent_description(persona.description.as_deref());
-        }
+        return personas
+            .iter()
+            .find(|persona| persona.id == persona_id)
+            .and_then(|persona| effective_agent_description(persona.description.as_deref()));
     }
     effective_agent_description(record.description.as_deref())
 }
@@ -139,12 +141,9 @@ mod tests {
     }
 
     #[test]
-    fn dangling_persona_link_falls_back_to_the_record_description() {
-        let record = record_with(Some("Record description."), Some("missing"));
-        assert_eq!(
-            record_effective_description(&record, &[]).as_deref(),
-            Some("Record description.")
-        );
+    fn dangling_persona_link_does_not_revive_a_stale_record_description() {
+        let record = record_with(Some("Stale imported description."), Some("missing"));
+        assert_eq!(record_effective_description(&record, &[]), None);
     }
 
     #[test]

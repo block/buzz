@@ -739,8 +739,7 @@ pub async fn create_managed_agent(
         // before any .await — owner-authored, every agent (Will's ruling: no
         // is_builtin/persona-membership gate).
         retain_managed_agent_pending(&app, &state, record);
-        // Effective public description for the kind:0 `about` (authored else
-        // derived from the definition prompt).
+        // Effective owner-authored description for the kind:0 `about`.
         let profile_about = crate::managed_agents::record_effective_description(record, &personas);
         (
             summarize_from_disk(&app, record, &runtimes)?,

@@ -10,8 +10,7 @@ export type AgentPersona = {
   /**
    * Optional short, PUBLIC description (max 280 chars), shown on the agent's
    * card and profile. Excluded from the persona content hash (no restart
-   * badge). Null = unauthored; `features/agents/lib/agentDescription.ts`
-   * derives a display-time fallback.
+   * badge). Null means no owner-authored description.
    */
   description: string | null;
   systemPrompt: string;

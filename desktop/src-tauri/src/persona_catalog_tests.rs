@@ -129,9 +129,18 @@ fn parser_rejects_malformed_and_invisible_definition_text() {
     }
     // A description that violates the shared visible-text policy or the
     // 280-char cap rejects the whole entry — never silently stripped.
-    for bad_description in ["hidden\u{200b}text".to_string(), "a".repeat(281)] {
+    for bad_description in [
+        "hidden\u{200b}text".to_string(),
+        "description\n".to_string(),
+        "a".repeat(281),
+    ] {
         let mut content = valid_content("Reviewer");
         content["description"] = json!(bad_description);
+        assert!(parse_agent(&content.to_string()).is_none());
+    }
+    for malformed_description in [json!(7), json!([]), json!({})] {
+        let mut content = valid_content("Reviewer");
+        content["description"] = malformed_description;
         assert!(parse_agent(&content.to_string()).is_none());
     }
     let mut content = valid_content("Reviewer");

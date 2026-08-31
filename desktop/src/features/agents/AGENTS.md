@@ -239,26 +239,32 @@ with a TypeScript lookup table or an id comparison in a component.
 15. **The persona `description` is public display metadata.** It is optional,
    capped at 280 characters, and validated through the shared visible-text
    policy (`validate_agent_description_text` in `definition_validation.rs`)
-   at create/update and at the untrusted catalog parser — rejected, never
-   stripped. It is deliberately EXCLUDED from `persona_content_hash`
+   on the raw authored bytes at create/update, snapshot import, publication,
+   inbound sync, and the untrusted catalog parser — rejected, never stripped.
+   It is deliberately EXCLUDED from `persona_content_hash`
    (`description_change_does_not_change_content_hash`), so a description-only
    edit never flips the restart badge on linked instances. Only the AUTHORED
    description exists — there is deliberately no derived/generated fallback;
    a blank description publishes an empty kind:0 `about`, exactly as before
-   the field existed. The trim/empty resolution exists twice and must stay in
+   the field existed. Agent and team snapshots carry the authored description
+   in the member profile's `about` and validate it before import. The trim/empty
+   resolution exists twice and must stay in
    sync (port changes in the same PR): `lib/agentDescription.ts`
    (`effectiveAgentDescription`) feeds display surfaces, and its Rust twin
    (`managed_agents/agent_description.rs`, `effective_agent_description` /
    `record_effective_description`) feeds the publish path, where
    `profile_needs_sync` compares `about` (None == empty) so description edits
-   reconcile instead of being clobbered. The agents-page card face shows the
+   reconcile instead of being clobbered. Persona-linked instances do not own a
+   second description copy; snapshot export materializes the definition value
+   only into the portable snapshot, and a dangling link resolves no description
+   rather than reviving stale instance metadata. The agents-page card face shows the
    authored description as its second line, falling back to the model label
    when none exists (`UnifiedAgentsSection.tsx` composes it;
    `AgentIdentityCard` takes a presentational `subtitle`). The dialog field
    lives in `ui/AgentDescriptionField.tsx` (`AgentIdentityFields`), not
    inline in the over-1000-line dialogs.
 
-12. **Owner-only builds constrain managed runtimes, not relay-agent mentions.**
+16. **Owner-only builds constrain managed runtimes, not relay-agent mentions.**
     The compiled owner-only capability applies when Desktop starts or deploys a
     managed agent. Independently operated relay agents with NIP-OA ownership
     remain eligible in every build when their verified owner's signed
@@ -272,7 +278,7 @@ with a TypeScript lookup table or an id comparison in a component.
     refresh only local persona/team/managed-agent caches; they must never
     invalidate the remote relay directory.
 
-15. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. UC FQNs are catalog data and always use the MLflow Chat Completions route, regardless of family-looking text in their components.
+17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. UC FQNs are catalog data and always use the MLflow Chat Completions route, regardless of family-looking text in their components.
 
 ## The tests that enforce this
 

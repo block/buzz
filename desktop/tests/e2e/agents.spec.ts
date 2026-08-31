@@ -309,6 +309,7 @@ test("built-in persona edits persist", async ({ page }) => {
 
   const dialog = page.getByTestId("persona-dialog");
   await dialog.getByLabel("Agent name").fill("My Fizz");
+  await dialog.getByLabel("Description").fill("Helps teams ship reliably.");
   await dialog.getByLabel("Agent instruction").fill("User-edited instructions");
   await dialog.getByRole("button", { name: "Save changes" }).click();
 
@@ -316,13 +317,22 @@ test("built-in persona edits persist", async ({ page }) => {
   await expect(page.getByTestId("agents-library-personas")).toContainText(
     "My Fizz",
   );
+  await expect(
+    page.getByTestId("persona-agent-row-builtin:fizz"),
+  ).toContainText("Helps teams ship reliably.");
   const personas = await invokeTauri<
-    Array<{ id: string; display_name: string; system_prompt: string }>
+    Array<{
+      id: string;
+      display_name: string;
+      description: string | null;
+      system_prompt: string;
+    }>
   >(page, "list_personas");
   expect(
     personas.find((persona) => persona.id === "builtin:fizz"),
   ).toMatchObject({
     display_name: "My Fizz",
+    description: "Helps teams ship reliably.",
     system_prompt: "User-edited instructions",
   });
 });

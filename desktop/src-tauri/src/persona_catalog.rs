@@ -229,8 +229,13 @@ fn parse_agent(content: &str) -> Option<CatalogAgentProjection> {
     // Untrusted boundary: a description that fails the shared 280-char +
     // visible-text policy rejects the whole entry rather than being stripped,
     // matching how the other definition fields are handled.
-    let description = optional_string(object.get("description"));
-    validate_agent_description_text(description.as_deref()).ok()?;
+    let raw_description = match object.get("description") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => return None,
+    };
+    validate_agent_description_text(raw_description.as_deref()).ok()?;
+    let description = raw_description.filter(|value| !value.trim().is_empty());
 
     let respond_to = match object.get("respond_to").and_then(Value::as_str) {
         Some("allowlist") => Some("owner-only".to_string()),

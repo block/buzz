@@ -9,13 +9,12 @@ use crate::{
     managed_agents::{
         apply_persona_behavior, effective_agent_command, load_managed_agents, load_personas,
         managed_agent_avatar_url, save_managed_agents, save_personas, try_regenerate_nest,
-        validate_agent_definition_text, validate_agent_description_text, AgentDefinition,
-        ManagedAgentRecord, UpdatePersonaRequest,
+        validate_agent_definition_text, AgentDefinition, ManagedAgentRecord, UpdatePersonaRequest,
     },
     util::now_iso,
 };
 
-use super::{pending, retain_persona_pending, trim_optional, trim_required};
+use super::{normalize_description, pending, retain_persona_pending, trim_optional, trim_required};
 
 #[cfg(test)]
 mod name_propagation_tests;
@@ -53,6 +52,62 @@ fn propagate_persona_name_rename(
         renamed.push(record.pubkey.clone());
     }
     renamed
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LinkedProfileUpdate {
+    /// Whether this update changed bytes in the managed-agent record.
+    record_changed: bool,
+    /// Whether this instance needs a complete kind:0 replacement event.
+    profile_sync_required: bool,
+    /// Avatar to publish with the complete kind:0 replacement event.
+    profile_avatar: Option<String>,
+}
+
+/// Apply the persisted portion of a persona identity edit to one linked
+/// instance and resolve the avatar for the complete kind:0 replacement.
+///
+/// Description-only edits deliberately leave the record unchanged, but still
+/// need a non-empty avatar projection for legacy records whose `avatar_url`
+/// has not yet been backfilled. The persona avatar is authoritative there;
+/// the effective command icon is the final fallback.
+fn prepare_linked_profile_update(
+    record: &mut ManagedAgentRecord,
+    persona: &AgentDefinition,
+    renamed: bool,
+    avatar_changed: bool,
+    about_changed: bool,
+) -> LinkedProfileUpdate {
+    let mut record_changed = renamed;
+    if avatar_changed {
+        let effective_cmd = effective_agent_command(
+            record.persona_id.as_deref(),
+            std::slice::from_ref(persona),
+            record.agent_command_override.as_deref(),
+        );
+        record.avatar_url = persona
+            .avatar_url
+            .clone()
+            .or_else(|| managed_agent_avatar_url(&effective_cmd));
+        record_changed = true;
+    }
+
+    let effective_cmd = effective_agent_command(
+        record.persona_id.as_deref(),
+        std::slice::from_ref(persona),
+        record.agent_command_override.as_deref(),
+    );
+    let profile_avatar = record
+        .avatar_url
+        .clone()
+        .or_else(|| persona.avatar_url.clone())
+        .or_else(|| managed_agent_avatar_url(&effective_cmd));
+
+    LinkedProfileUpdate {
+        record_changed,
+        profile_sync_required: record_changed || about_changed,
+        profile_avatar,
+    }
 }
 
 /// Profile sync params collected under the store lock for async relay publish:
@@ -105,8 +160,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let display_name = trim_required(&input.display_name, "Display name")?;
             let system_prompt = input.system_prompt.clone();
             validate_agent_definition_text(&display_name, &system_prompt)?;
-            let description = trim_optional(input.description);
-            validate_agent_description_text(description.as_deref())?;
+            let description = normalize_description(input.description)?;
             let avatar_url = trim_optional(input.avatar_url);
             let runtime = trim_optional(input.runtime);
             let model = trim_optional(input.model);
@@ -191,28 +245,17 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                     if record.persona_id.as_deref() != Some(&result.id) {
                         continue;
                     }
-                    let mut record_changed = renamed.contains(&record.pubkey);
+                    let was_renamed = renamed.contains(&record.pubkey);
+                    let update = prepare_linked_profile_update(
+                        record,
+                        &result,
+                        was_renamed,
+                        avatar_changed,
+                        about_changed,
+                    );
 
-                    if avatar_changed {
-                        // Update the persisted avatar so reconciliation on next
-                        // start agrees with what we're about to publish.
-                        // When the persona avatar is cleared, fall back to the
-                        // command-default icon so the record never stores `None`
-                        // (which reconcile_agent_profile treats as "un-migrated").
-                        let effective_cmd = effective_agent_command(
-                            record.persona_id.as_deref(),
-                            std::slice::from_ref(&result),
-                            record.agent_command_override.as_deref(),
-                        );
-                        record.avatar_url = result
-                            .avatar_url
-                            .clone()
-                            .or_else(|| managed_agent_avatar_url(&effective_cmd));
-                        record_changed = true;
-                    }
-
-                    agents_modified = agents_modified || record_changed;
-                    if record_changed || about_changed {
+                    agents_modified = agents_modified || update.record_changed;
+                    if update.profile_sync_required {
                         if let Ok(agent_keys) = nostr::Keys::parse(&record.private_key_nsec) {
                             let relay_url = crate::relay::effective_agent_relay_url(
                                 &record.relay_url,
@@ -222,7 +265,7 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
                                 agent_keys,
                                 relay_url,
                                 record.name.clone(),
-                                record.avatar_url.clone(),
+                                update.profile_avatar,
                                 new_about.clone(),
                                 record.auth_tag.clone(),
                             ));

@@ -13,7 +13,7 @@ type AgentIdentityCardProps = {
   label: string;
   /**
    * Second line under the agent name: the effective description when one
-   * resolves (authored else derived — see `lib/agentDescription.ts`),
+   * resolves (owner-authored — see `lib/agentDescription.ts`),
    * otherwise the model label. Callers compose the fallback.
    */
   subtitle?: string | null;
