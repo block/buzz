@@ -46,8 +46,14 @@ export function useAppShellLifecycleEffects({
   // Composer's onDrop fires first (React synthetic before window bubble).
   React.useEffect(() => {
     function preventNavigation(e: DragEvent) {
-      if (e.dataTransfer?.types.includes("Files")) {
+      const types = Array.from(e.dataTransfer?.types ?? []);
+      if (types.includes("Files") || types.includes("text/uri-list")) {
         e.preventDefault();
+        try {
+          if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+        } catch {
+          // WebKitGTK may freeze dropEffect; preventDefault still matters.
+        }
       }
     }
     window.addEventListener("dragover", preventNavigation);

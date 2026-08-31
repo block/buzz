@@ -46,6 +46,23 @@ export async function releaseMediaUpload(progressId: string): Promise<void> {
 }
 
 /**
+ * Upload files the user dropped from the OS file manager.
+ *
+ * Used when the webview populates path/`file://` text instead of `File`
+ * objects (common on Linux WebKitGTK). Paths are opened in Rust through the
+ * same TOCTOU-safe pipeline as the paperclip picker.
+ */
+export async function uploadDroppedMedia(
+  paths: string[],
+  progressId?: string,
+): Promise<BlobDescriptor[]> {
+  return invokeTauri<BlobDescriptor[]>("upload_dropped_media", {
+    paths,
+    progressId: progressId ?? null,
+  });
+}
+
+/**
  * Open a native single-file picker constrained to images and upload the
  * chosen file. Non-image files are rejected in Rust (via MIME sniffing)
  * before the bytes leave the client, so discarded/non-image selections never

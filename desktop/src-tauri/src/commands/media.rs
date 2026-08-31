@@ -703,6 +703,54 @@ pub async fn pick_and_upload_image(
     Ok(Some(descriptor))
 }
 
+const MAX_DROPPED_FILES: usize = 32;
+
+fn validate_dropped_path(raw: &str) -> Result<std::path::PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("empty dropped path".to_string());
+    }
+    let path = std::path::PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err("dropped path must be absolute".to_string());
+    }
+    let meta = std::fs::metadata(&path).map_err(|e| format!("cannot read dropped file: {e}"))?;
+    if !meta.is_file() {
+        return Err("dropped path must be a regular file".to_string());
+    }
+    Ok(path)
+}
+
+/// Upload files dropped from the OS file manager onto the composer.
+///
+/// Linux WebKitGTK often delivers `file://` URIs / absolute paths instead of
+/// `File` objects. The renderer recovers those paths and this command opens
+/// them through the same TOCTOU-safe pipeline as [`pick_and_upload_media`].
+/// User-initiated: the user dropped the files onto Buzz.
+#[tauri::command]
+pub async fn upload_dropped_media(
+    paths: Vec<String>,
+    progress_id: Option<String>,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<BlobDescriptor>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    if paths.len() > MAX_DROPPED_FILES {
+        return Err(format!("too many dropped files (max {MAX_DROPPED_FILES})"));
+    }
+
+    let mut descriptors = Vec::with_capacity(paths.len());
+    for raw in paths {
+        let path = validate_dropped_path(&raw)?;
+        let progress = progress_id.clone().map(|id| (app.clone(), id));
+        let descriptor = process_picked_path(path, &state, false, progress).await?;
+        descriptors.push(descriptor);
+    }
+    Ok(descriptors)
+}
+
 pub(super) async fn upload_media_bytes_inner(
     data: Vec<u8>,
     filename: Option<String>,
@@ -980,6 +1028,29 @@ mod tests {
         assert!(!should_retry_legacy_upload(
             reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
         ));
+    }
+
+    #[test]
+    fn test_validate_dropped_path_rejects_relative_and_empty() {
+        assert!(validate_dropped_path("").is_err());
+        assert!(validate_dropped_path("photo.png").is_err());
+        assert!(validate_dropped_path("./photo.png").is_err());
+    }
+
+    #[test]
+    fn test_validate_dropped_path_rejects_missing_and_directory() {
+        assert!(validate_dropped_path("/no/such/buzz-drop-test-file").is_err());
+        assert!(validate_dropped_path(std::env::temp_dir().to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn test_validate_dropped_path_accepts_regular_file() {
+        let path =
+            std::env::temp_dir().join(format!("buzz-drop-validate-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"ok").unwrap();
+        let result = validate_dropped_path(path.to_str().unwrap());
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_ok());
     }
 
     #[test]

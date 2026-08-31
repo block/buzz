@@ -5,8 +5,20 @@ import {
   pickAndUploadMedia,
   uploadMediaBytes,
 } from "@/shared/api/tauri";
-import { uploadMediaFile } from "@/shared/api/tauriMedia";
+import { uploadDroppedMedia, uploadMediaFile } from "@/shared/api/tauriMedia";
 import type { QueuedMediaAttachment } from "./backgroundMediaUploadStore";
+import {
+  basenameFromPath,
+  extractDroppedFilePayload,
+  isOsFileDrag,
+  markOsFileDragOver,
+} from "./droppedFiles";
+import {
+  consumeDropPaths,
+  ensureOsDropListener,
+  noteOsFileDropTarget,
+  takePendingOsDropPaths,
+} from "./osFileDropBus";
 import { applyImetaUpdate, compactImetaSlots } from "./imetaSlots";
 import { useFilePicker } from "./useFilePicker";
 import { isVideoFile, videoMimeForFile } from "./videoFileType";
@@ -50,10 +62,11 @@ function uploadProgressId(previewId: number): string {
   return `composer-upload-${previewId}`;
 }
 
-/** True when the drag payload contains files (not plain text or URLs). */
-function isFileDrag(event: React.DragEvent<HTMLElement>): boolean {
-  return event.dataTransfer?.types.includes("Files") ?? false;
-}
+type ComposerFileDropEvent = {
+  dataTransfer: DataTransfer | null;
+  preventDefault: () => void;
+  stopPropagation: () => void;
+};
 
 function waitForMediaEvent(
   element: HTMLMediaElement,
@@ -235,6 +248,9 @@ export function useMediaUpload({
 
   // ── Drag-over visual indicator state ───────────────────────────────
   const [isDragOver, setIsDragOver] = React.useState(false);
+  React.useEffect(() => {
+    ensureOsDropListener();
+  }, []);
   /** Tracks nested dragenter/dragleave pairs so we only flip `isDragOver`
    *  when the pointer truly enters or leaves the drop target. */
   const dragDepthRef = React.useRef(0);
@@ -662,39 +678,82 @@ export function useMediaUpload({
     uploadFiles,
   ]);
 
+  const uploadDroppedPaths = React.useCallback(
+    (paths: string[]) => {
+      if (paths.length === 0) return;
+
+      setUploadingCount((count) => count + paths.length);
+      const baseIndex = reserveSlots(paths.length);
+      const epoch = uploadEpochRef.current;
+
+      for (let index = 0; index < paths.length; index++) {
+        const path = paths[index];
+        if (!path) continue;
+        const slotIndex = baseIndex + index;
+        const previewFile = new File([], basenameFromPath(path));
+        const previewId = reserveUploadingPreview(previewFile, slotIndex);
+        void (async () => {
+          try {
+            const [descriptor] = await uploadDroppedMedia(
+              [path],
+              uploadProgressId(previewId),
+            );
+            if (!descriptor) {
+              throw new Error("empty drop upload");
+            }
+            fillSlot(slotIndex, descriptor, previewId, epoch);
+          } catch (err) {
+            onUploadError(err, previewId);
+          }
+        })();
+      }
+    },
+    [fillSlot, onUploadError, reserveSlots, reserveUploadingPreview],
+  );
+
   const handleDrop = React.useCallback(
-    async (event: React.DragEvent<HTMLElement>) => {
+    async (event: ComposerFileDropEvent) => {
       event.preventDefault();
+      event.stopPropagation();
       dragDepthRef.current = 0;
       setIsDragOver(false);
-      const files = Array.from(event.dataTransfer.files);
-      if (files.length === 0) return;
+      const extracted = extractDroppedFilePayload(event.dataTransfer);
+      const files = extracted.files;
+      let paths = extracted.paths;
+      if (files.length === 0 && paths.length === 0) {
+        // WebKitGTK: HTML5 payload is empty; GTK `os-file-drop` has the paths.
+        paths = takePendingOsDropPaths();
+      } else {
+        paths = consumeDropPaths(paths);
+      }
+      if (files.length === 0 && paths.length === 0) return;
 
       // Accept any file. The Tauri layer and the relay enforce the deny-list
       // (active-content + executables) and size caps; everything else uploads.
-      const validFiles = files;
-
-      queueFiles(validFiles.filter(shouldQueueFile));
-      uploadFiles(validFiles.filter((file) => !shouldQueueFile(file)));
+      queueFiles(files.filter(shouldQueueFile));
+      uploadFiles(files.filter((file) => !shouldQueueFile(file)));
+      uploadDroppedPaths(paths);
     },
-    [queueFiles, shouldQueueFile, uploadFiles],
+    [queueFiles, shouldQueueFile, uploadDroppedPaths, uploadFiles],
   );
 
   const handleDragEnter = React.useCallback(
     (event: React.DragEvent<HTMLElement>) => {
-      if (!isFileDrag(event)) return;
+      if (!isOsFileDrag(event.dataTransfer)) return;
       event.preventDefault();
+      markOsFileDragOver(event.dataTransfer);
+      noteOsFileDropTarget(uploadDroppedPaths);
       dragDepthRef.current += 1;
       if (dragDepthRef.current === 1) {
         setIsDragOver(true);
       }
     },
-    [],
+    [uploadDroppedPaths],
   );
 
   const handleDragLeave = React.useCallback(
     (event: React.DragEvent<HTMLElement>) => {
-      if (!isFileDrag(event)) return;
+      if (!isOsFileDrag(event.dataTransfer)) return;
       event.preventDefault();
       dragDepthRef.current -= 1;
       if (dragDepthRef.current <= 0) {
@@ -707,7 +766,9 @@ export function useMediaUpload({
 
   const handleDragOver = React.useCallback(
     (event: React.DragEvent<HTMLElement>) => {
+      if (!isOsFileDrag(event.dataTransfer)) return;
       event.preventDefault();
+      markOsFileDragOver(event.dataTransfer);
     },
     [],
   );

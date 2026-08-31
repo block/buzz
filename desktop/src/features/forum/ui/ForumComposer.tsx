@@ -5,6 +5,10 @@ import { ChevronDown } from "lucide-react";
 import { buildOutgoingMessage } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
+import {
+  extractDroppedFilePayload,
+  isOsFileDrag,
+} from "@/features/messages/lib/droppedFiles";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { isMentionCodeContext } from "@/features/messages/lib/mentionCodeContext";
 import { useMentions } from "@/features/messages/lib/useMentions";
@@ -356,6 +360,8 @@ export function ForumComposer({
   // ── Media paste ─────────────────────────────────────────────────────
   const uploadFileRef = React.useRef(media.uploadFile);
   uploadFileRef.current = media.uploadFile;
+  const handleDropRef = React.useRef(media.handleDrop);
+  handleDropRef.current = media.handleDrop;
 
   React.useEffect(() => {
     if (!richText.editor) return;
@@ -363,6 +369,19 @@ export function ForumComposer({
     richText.editor.setOptions({
       editorProps: {
         ...richText.editor.options.editorProps,
+        handleDrop: (_view, event) => {
+          const dragEvent = event as DragEvent;
+          const payload = extractDroppedFilePayload(dragEvent.dataTransfer);
+          const isFileDrop =
+            isOsFileDrag(dragEvent.dataTransfer) ||
+            payload.files.length > 0 ||
+            payload.paths.length > 0;
+          if (!isFileDrop) return false;
+          dragEvent.preventDefault();
+          dragEvent.stopPropagation();
+          void handleDropRef.current(dragEvent);
+          return true;
+        },
         handlePaste: (_view, event) => {
           const items = Array.from(event.clipboardData?.items ?? []);
           // Any actual file pastes as an attachment; text/string items fall

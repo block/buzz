@@ -767,6 +767,9 @@ function MessageComposerImpl({
   );
   useComposerPasteHandler({
     editor: richText.editor,
+    onFileDrop: (event) => {
+      void media.handleDrop(event);
+    },
     scrollToBottom: scrollComposerToBottom,
     setPendingImeta: media.setPendingImeta,
     uploadFile: media.uploadFile,

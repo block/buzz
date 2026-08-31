@@ -14,6 +14,7 @@ mod identity_storage;
 mod initial_window;
 mod key_backup;
 mod link_preview_tags;
+mod linux_file_drop;
 mod linux_media;
 #[cfg(target_os = "macos")]
 mod macos_notifications;
@@ -152,6 +153,7 @@ pub fn run() {
                     // permission-request handler for getUserMedia; no-op
                     // on macOS/Windows.
                     linux_media::enable_media_capture(&webview);
+                    linux_file_drop::enable_os_file_drop(&webview);
 
                     // macOS applies the restored geometry asynchronously. Wait
                     // for several identical outer bounds and for React to
@@ -660,6 +662,7 @@ pub fn run() {
             upload_media,
             pick_and_upload_media,
             pick_and_upload_image,
+            upload_dropped_media,
             upload_media_bytes,
             upload_media_bytes_raw,
             cancel_media_upload,

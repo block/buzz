@@ -49,6 +49,9 @@ notify-rust = "4"
 # to the exact version wry links so both resolve to one webkit2gtk-sys and we
 # don't get duplicate symbols; bump in lockstep with wry.
 webkit2gtk = { version = "=2.0.2", features = ["v2_22"] }
+# Same gtk as wry/webkit2gtk. Used to read GNOME Files drop URIs from the
+# GTK widget because WebKitGTK leaves dataTransfer.files empty.
+gtk = "0.18"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "0.6", default-features = false, features = ["std"] }
