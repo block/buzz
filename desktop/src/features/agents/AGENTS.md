@@ -260,7 +260,10 @@ with a TypeScript lookup table or an id comparison in a component.
    rather than reviving stale instance metadata. The agents-page card face shows the
    authored description as its second line, falling back to the model label
    when none exists (`UnifiedAgentsSection.tsx` composes it;
-   `AgentIdentityCard` takes a presentational `subtitle`). The dialog field
+   `AgentIdentityCard` takes a presentational `subtitle`). The community catalog
+   shows the same authored description before consent: a clamped two-line list
+   subtitle for scanning and the full safely wrapped value in persona detail.
+   The dialog field
    lives in `ui/AgentDescriptionField.tsx` (`AgentIdentityFields`), not
    inline in the over-1000-line dialogs.
 
@@ -317,6 +320,9 @@ with a TypeScript lookup table or an id comparison in a component.
   acceptance coverage for readiness, failure states, defaults, session-draft
   restoration, zero-write Skip, Next save failure/retry, navigation, and
   successful-empty vs failed optional-model discovery.
+- `desktop/tests/e2e/agents.spec.ts` — community catalog descriptions remain
+  visible in the list and full detail before Add agent, including long
+  unbroken Unicode text without horizontal overflow.
 - `lib/agentDescription.test.mjs` — authored-description resolution: trim,
   blank/missing → null.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.

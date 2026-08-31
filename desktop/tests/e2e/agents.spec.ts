@@ -20,6 +20,7 @@ function createCatalogEvent(input: {
   createdAt?: number;
   shared?: boolean;
   avatarUrl?: string;
+  description?: string;
 }): RelayEvent {
   const ownerPrivateKey =
     input.ownerPrivateKey ??
@@ -43,6 +44,7 @@ function createCatalogEvent(input: {
         display_name: input.displayName,
         system_prompt: input.systemPrompt,
         avatar_url: input.avatarUrl ?? null,
+        description: input.description ?? null,
         runtime: null,
         model: null,
         provider: null,
@@ -846,34 +848,55 @@ test("agent catalog chooser order stays stable when selection changes", async ({
   expect(await getCatalogOrder(page)).toEqual(before);
 });
 
-test("catalog detail pane shows the full persona details", async ({ page }) => {
-  const personaId = "custom:researcher";
-  await seedActiveIdentity(page, TEST_IDENTITIES.tyler);
+test("catalog detail pane shows the full persona details before Add agent", async ({
+  page,
+}) => {
+  const personaId = "remote-researcher";
+  const remoteCatalogId = `catalog:${TEST_IDENTITIES.alice.pubkey}:${personaId}`;
+  const description = `Maps evidence across systems: ${"界".repeat(180)}`;
   await installMockBridge(page, {
-    personas: [
-      {
-        id: personaId,
-        displayName: "Researcher",
+    personaCatalogEvents: [
+      createCatalogEvent({
+        ownerPubkey: TEST_IDENTITIES.alice.pubkey,
+        sourcePersonaId: personaId,
+        displayName: "Alice’s Researcher",
+        description,
         systemPrompt: "Research the question and cite the evidence.",
-      },
+      }),
     ],
   });
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
-  await sharePersonaToCatalog(page, "Researcher");
   await openPersonaCatalog(page);
 
-  await selectCatalogPersona(page, personaId);
-  const useAgentTarget = page.getByTestId(
-    `community-catalog-use-agent-${personaId}`,
+  const catalogRow = page.getByTestId(
+    `community-catalog-agent-${remoteCatalogId}`,
   );
+  await expect(catalogRow).toContainText("Alice’s Researcher");
+  const rowDescription = page.getByTestId(
+    `community-catalog-agent-description-${remoteCatalogId}`,
+  );
+  await expect(rowDescription).toHaveText(description);
+  await expect(rowDescription).toHaveCSS("overflow", "hidden");
+  await catalogRow.click();
+
+  const useAgentTarget = page.getByTestId(
+    `community-catalog-use-agent-${remoteCatalogId}`,
+  );
+  const detailDescription = page.getByTestId("persona-catalog-description");
 
   await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
-    "Researcher",
+    "Alice’s Researcher",
   );
   await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
-    "Added by You",
+    "Added by alice",
   );
+  await expect(detailDescription).toHaveText(description);
+  const detailWidth = await detailDescription.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }));
+  expect(detailWidth.scrollWidth).toBeLessThanOrEqual(detailWidth.clientWidth);
   await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
     "Research the question and cite the evidence.",
   );
@@ -891,10 +914,10 @@ test("catalog detail pane shows the full persona details", async ({ page }) => {
   );
   await expect(useAgentTarget).toHaveAttribute(
     "aria-label",
-    "Researcher is already in My Agents",
+    "Add Alice’s Researcher from Community Catalog",
   );
-  await expect(useAgentTarget).toHaveText("Added to My Agents");
-  await expect(useAgentTarget).toBeDisabled();
+  await expect(useAgentTarget).toHaveText("Add agent");
+  await expect(useAgentTarget).toBeEnabled();
 });
 
 type AgentShareCommand = { command: string; payload: unknown };
