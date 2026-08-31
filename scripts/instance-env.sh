@@ -39,8 +39,13 @@ if git rev-parse --is-inside-work-tree &>/dev/null; then
     GIT_COMMON_DIR=$(git rev-parse --git-common-dir 2>/dev/null)
     if [[ -n "$GIT_COMMON_DIR" && "$GIT_DIR" != "$GIT_COMMON_DIR" ]]; then
         BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD)
-        export BUZZ_WORKTREE_LABEL="${BRANCH_NAME##*/}"
-        export BUZZ_INSTANCE_SLUG=$(echo "$BRANCH_NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//')
+        export BUZZ_WORKTREE_LABEL="${BUZZ_DEV_LABEL:-${BRANCH_NAME##*/}}"
+        INSTANCE_IDENTITY="${BUZZ_DEV_LABEL:-$BRANCH_NAME}"
+        export BUZZ_INSTANCE_SLUG=$(echo "$INSTANCE_IDENTITY" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//' | sed 's/-$//')
+        if [[ -z "$BUZZ_INSTANCE_SLUG" ]]; then
+            echo "BUZZ_DEV_LABEL must contain at least one letter or number" >&2
+            return 1 2>/dev/null || exit 1
+        fi
 
         # BUZZ_SHARE_IDENTITY=1: reuse the main dev checkout's Nostr key so
         # worktrees skip onboarding and share the same identity. The per-worktree
