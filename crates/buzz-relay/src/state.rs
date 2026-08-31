@@ -627,21 +627,20 @@ pub(crate) async fn run_registered_community_connection<
     cancel.cancel();
 }
 
-async fn revalidate_registered_communities<Check, CheckFuture>(
+async fn revalidate_registered_communities<Revalidate, RevalidateFuture>(
     registry: &CommunityConnectionRegistry,
-    mut check_active: Check,
+    mut revalidate: Revalidate,
 ) -> (usize, Vec<(CommunityId, buzz_db::DbError)>)
 where
-    Check: FnMut(CommunityId) -> CheckFuture,
-    CheckFuture: Future<Output = Result<bool, buzz_db::DbError>>,
+    Revalidate: FnMut(CommunityId) -> RevalidateFuture,
+    RevalidateFuture: Future<Output = Result<usize, buzz_db::DbError>>,
 {
     let communities = registry.bound_communities();
     let mut closed = 0;
     let mut failures = Vec::new();
     for community_id in communities {
-        match check_active(community_id).await {
-            Ok(false) => closed += registry.disconnect_community(community_id),
-            Ok(true) => {}
+        match revalidate(community_id).await {
+            Ok(disconnected) => closed += disconnected,
             Err(error) => failures.push((community_id, error)),
         }
     }
@@ -1990,11 +1989,19 @@ impl AppState {
     /// semantics: a pod that missed a successful publish eventually observes the
     /// archived row directly.
     pub async fn revalidate_live_communities(&self) -> usize {
-        let (closed, failures) =
-            revalidate_registered_communities(&self.community_connections, |community_id| {
-                self.db.is_community_active_for_maintenance(community_id)
-            })
-            .await;
+        let (closed, failures) = revalidate_registered_communities(
+            &self.community_connections,
+            |community_id| async move {
+                self.db
+                    .with_inactive_community_fence(community_id, || {
+                        self.community_connections
+                            .disconnect_community(community_id)
+                    })
+                    .await
+                    .map(|disconnected| disconnected.unwrap_or(0))
+            },
+        )
+        .await;
         for (community_id, error) in failures {
             tracing::warn!(%community_id, %error, "community lifecycle revalidation failed; retaining its sockets until next tick");
         }
@@ -3519,17 +3526,20 @@ pub(crate) mod tests {
             CommunityConnectionControl::new(cancel_c.clone()),
         );
 
-        let (closed, failures) =
-            revalidate_registered_communities(&registry, |community| async move {
+        let registry_for_revalidation = &registry;
+        let (closed, failures) = revalidate_registered_communities(&registry, |community| {
+            let registry = registry_for_revalidation;
+            async move {
                 if community == failed {
                     Err(buzz_db::DbError::InvalidData(
                         "injected lookup failure".into(),
                     ))
                 } else {
-                    Ok(false)
+                    Ok(registry.disconnect_community(community))
                 }
-            })
-            .await;
+            }
+        })
+        .await;
 
         assert_eq!(closed, 2);
         assert!(cancel_a.is_cancelled());
@@ -3541,6 +3551,46 @@ pub(crate) mod tests {
             registry.bound_communities(),
             HashSet::from([archived_a, failed, archived_c])
         );
+    }
+
+    #[tokio::test]
+    async fn periodic_revalidation_disconnects_inside_the_fenced_callback() {
+        let registry = CommunityConnectionRegistry::new();
+        let community = CommunityId::from_uuid(Uuid::from_u128(0xa));
+        let cancel = CancellationToken::new();
+        let _guard = registry.register(
+            Uuid::new_v4(),
+            community,
+            CommunityConnectionControl::new(cancel.clone()),
+        );
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let resume = Arc::new(tokio::sync::Notify::new());
+
+        let future = revalidate_registered_communities(&registry, |community_id| {
+            let entered = Arc::clone(&entered);
+            let resume = Arc::clone(&resume);
+            let registry = &registry;
+            async move {
+                entered.notify_one();
+                resume.notified().await;
+                Ok(registry.disconnect_community(community_id))
+            }
+        });
+        tokio::pin!(future);
+        tokio::select! {
+            _ = entered.notified() => {}
+            _ = &mut future => panic!("revalidation should be paused inside the fence"),
+        }
+        assert!(
+            !cancel.is_cancelled(),
+            "the helper must not disconnect outside the fenced callback"
+        );
+
+        resume.notify_one();
+        let (closed, failures) = future.await;
+        assert_eq!(closed, 1);
+        assert!(failures.is_empty());
+        assert!(cancel.is_cancelled());
     }
 
     #[test]

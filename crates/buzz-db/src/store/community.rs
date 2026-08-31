@@ -222,6 +222,41 @@ impl Db {
         Ok(Some(result))
     }
 
+    /// Runs `apply` while holding the community row lock only when the
+    /// community is not active.
+    ///
+    /// The row lock serializes the synchronous action with unarchive so a
+    /// periodic lifecycle revalidation cannot disconnect a community after it
+    /// has been restored. Missing community ids are also treated as inactive.
+    #[datastore_span(name = "with_inactive_community_fence", system = "postgresql")]
+    pub async fn with_inactive_community_fence<T>(
+        &self,
+        community_id: CommunityId,
+        apply: impl FnOnce() -> T,
+    ) -> Result<Option<T>> {
+        let mut tx = self.pool.begin().await?;
+        let active = sqlx::query_scalar::<_, bool>(
+            r#"SELECT archived_at IS NULL
+                      AND deleted_at IS NULL
+                      AND deletion_state = 'active'
+               FROM communities
+               WHERE id = $1
+               FOR UPDATE"#,
+        )
+        .bind(community_id.as_uuid())
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if active == Some(true) {
+            tx.rollback().await?;
+            return Ok(None);
+        }
+
+        let result = apply();
+        tx.commit().await?;
+        Ok(Some(result))
+    }
+
     /// Returns a community by host regardless of lifecycle state. Operator-plane only.
     #[datastore_span(
         name = "lookup_community_by_host_for_management",
@@ -812,6 +847,7 @@ mod postgres_tests {
             "lookup_community_by_host",
             "is_community_active",
             "with_community_archive_fence",
+            "with_inactive_community_fence",
             "lookup_community_by_host_for_management",
             "list_communities_owned_by",
             "lookup_community_host",
@@ -1109,6 +1145,84 @@ mod postgres_tests {
                 .expect("replacement archive fence"),
             Some("replacement")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires Postgres"]
+    async fn inactive_community_fence_holds_the_row_lock_through_disconnect() {
+        let db = setup_db().await;
+        let host = format!(
+            "inactive-community-fence-{}.example",
+            Uuid::new_v4().simple()
+        );
+        let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let created = db
+            .create_community_with_owner(&host, &owner)
+            .await
+            .expect("create community");
+        let CreateCommunityWithOwnerResult::Created(created) = created else {
+            panic!("expected new community");
+        };
+        db.archive_community_owned_by(&host, &owner, "protected.example")
+            .await
+            .expect("archive community")
+            .expect("owned community");
+
+        let fenced_db = db.clone();
+        let community_id = created.id;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let fence = tokio::spawn(async move {
+            fenced_db
+                .with_inactive_community_fence(community_id, move || {
+                    entered_tx.send(()).expect("report entered fence");
+                    release_rx.recv().expect("release fenced disconnect");
+                    "disconnected"
+                })
+                .await
+        });
+        entered_rx.await.expect("fence acquired row lock");
+
+        let mut contender = db.pool.begin().await.expect("begin lock contender");
+        sqlx::query("SET LOCAL lock_timeout = '100ms'")
+            .execute(&mut *contender)
+            .await
+            .expect("set contender lock timeout");
+        let lock_error = sqlx::query("UPDATE communities SET archived_at = NULL WHERE id = $1")
+            .bind(created.id.as_uuid())
+            .execute(&mut *contender)
+            .await
+            .expect_err("unarchive update must contend on the fenced row lock");
+        assert_eq!(
+            lock_error
+                .as_database_error()
+                .and_then(|error| error.code().map(|code| code.into_owned()))
+                .as_deref(),
+            Some("55P03"),
+            "the contender must fail specifically because the row lock is held"
+        );
+        contender
+            .rollback()
+            .await
+            .expect("roll back timed-out contender");
+
+        release_tx.send(()).expect("release fence");
+        assert_eq!(
+            fence
+                .await
+                .expect("fence task")
+                .expect("inactive community fence"),
+            Some("disconnected")
+        );
+        assert!(db
+            .unarchive_community_owned_by(&host, &owner)
+            .await
+            .expect("unarchive community")
+            .is_some());
+        assert!(db
+            .is_community_active(created.id)
+            .await
+            .expect("restored community state"));
     }
 
     #[tokio::test]
