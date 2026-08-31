@@ -108,6 +108,122 @@ async fn publish_presence(
     Ok(())
 }
 
+/// Whether the harness should publish a kind:10100 agent-profile discovery
+/// record. Opt-in via `BUZZ_ACP_PUBLISH_PROFILE=true` (or `1`) so existing
+/// deployments that do not want to advertise are unaffected.
+fn profile_publishing_enabled() -> bool {
+    matches!(
+        std::env::var("BUZZ_ACP_PUBLISH_PROFILE").ok().as_deref(),
+        Some("true") | Some("1")
+    )
+}
+
+/// Publish (or refresh) the agent's kind:10100 discovery record so external
+/// clients — notably Buzz Desktop — can find and `@mention` it.
+///
+/// Buzz Desktop's mention autocomplete only offers a relay agent in channels
+/// whose id appears in this record's `channel_ids`. Nothing else in the stack
+/// publishes the record, so an externally deployed agent must self-register and
+/// keep the channel list current as it joins/leaves channels.
+///
+/// kind:10100 is dual-purpose and REPLACEABLE (10000-19999): the relay's
+/// side effect requires a `channel_add_policy` field (it is rejected without
+/// one), while Desktop parses the remaining fields as the agent descriptor. So
+/// the content carries both concerns in a single event.
+///
+/// Routed through the durable HTTP `POST /events` path (`RestClient`), NOT the
+/// ephemeral WS publish path, which silently drops replaceable events when
+/// rate-gated.
+async fn publish_agent_profile(
+    rest: &relay::RestClient,
+    keys: &nostr::Keys,
+    channel_ids: &HashSet<Uuid>,
+    respond_to: &str,
+    respond_to_allowlist: &HashSet<String>,
+) -> Result<(), relay::RelayError> {
+    use buzz_core::kind::KIND_AGENT_PROFILE;
+    use nostr::{EventBuilder, Kind};
+
+    let name = std::env::var("BUZZ_ACP_DISPLAY_NAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| keys.public_key().to_hex());
+    // Relay requires this field; "anyone" lets teammates add the agent to their
+    // own channels. Override with BUZZ_ACP_CHANNEL_ADD_POLICY (anyone|owner_only|nobody).
+    let channel_add_policy = std::env::var("BUZZ_ACP_CHANNEL_ADD_POLICY")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "anyone".to_string());
+    let capabilities: Vec<String> = std::env::var("BUZZ_ACP_CAPABILITIES")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.split(',')
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let about = std::env::var("BUZZ_ACP_DISPLAY_ABOUT")
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    let content = build_agent_profile_content(
+        &name,
+        &channel_add_policy,
+        respond_to,
+        respond_to_allowlist,
+        channel_ids,
+        &capabilities,
+        about.as_deref(),
+    );
+
+    let event = EventBuilder::new(Kind::Custom(KIND_AGENT_PROFILE as u16), content)
+        .tags([])
+        .sign_with_keys(keys)
+        .map_err(|e| relay::RelayError::Http(format!("agent profile sign error: {e}")))?;
+    rest.submit_event(&event).await?;
+    Ok(())
+}
+
+/// Build the JSON content for a kind:10100 agent-profile event. Pure (no I/O)
+/// so the descriptor shape is unit-testable. `channel_add_policy` is mandatory
+/// (the relay rejects the event without it); the remaining fields are the
+/// descriptor Buzz Desktop parses.
+fn build_agent_profile_content(
+    name: &str,
+    channel_add_policy: &str,
+    respond_to: &str,
+    respond_to_allowlist: &HashSet<String>,
+    channel_ids: &HashSet<Uuid>,
+    capabilities: &[String],
+    about: Option<&str>,
+) -> String {
+    // Deterministic ordering keeps the replaceable event stable across
+    // republishes when the underlying sets are unchanged.
+    let mut channels: Vec<String> = channel_ids.iter().map(|u| u.to_string()).collect();
+    channels.sort();
+    let mut allowlist: Vec<String> = respond_to_allowlist.iter().cloned().collect();
+    allowlist.sort();
+
+    let mut content = serde_json::json!({
+        "channel_add_policy": channel_add_policy,
+        "name": name,
+        "display_name": name,
+        "agent_type": "agent",
+        "status": "online",
+        "respond_to": respond_to,
+        "respond_to_allowlist": allowlist,
+        "channel_ids": channels,
+        "channels": channels,
+        "capabilities": capabilities,
+    });
+    if let Some(about) = about {
+        content["about"] = serde_json::Value::String(about.to_string());
+    }
+    content.to_string()
+}
+
 fn emit_runtime_lifecycle(
     observer: Option<&observer::ObserverHandle>,
     start_nonce: &str,
@@ -1678,6 +1794,60 @@ fn idle_pool_sleep_due(
 }
 
 #[cfg(test)]
+mod agent_profile_tests {
+    use super::*;
+
+    #[test]
+    fn content_includes_required_channel_add_policy_and_descriptor() {
+        let ch: HashSet<Uuid> = [
+            Uuid::parse_str("2f21cbb0-e388-45f1-abf6-3ef5425d731e").unwrap(),
+            Uuid::parse_str("7ed03881-fcbf-4f1a-854b-24596a01c905").unwrap(),
+        ]
+        .into_iter()
+        .collect();
+        let allow: HashSet<String> = HashSet::new();
+        let json = build_agent_profile_content(
+            "selfpub-test",
+            "anyone",
+            "anyone",
+            &allow,
+            &ch,
+            &["shell".to_string(), "git".to_string()],
+            Some("hi"),
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // Relay hard-requires this field.
+        assert_eq!(v["channel_add_policy"], "anyone");
+        assert_eq!(v["name"], "selfpub-test");
+        assert_eq!(v["display_name"], "selfpub-test");
+        assert_eq!(v["agent_type"], "agent");
+        assert_eq!(v["respond_to"], "anyone");
+        assert_eq!(v["about"], "hi");
+        assert_eq!(v["channel_ids"].as_array().unwrap().len(), 2);
+        // channel_ids and channels are the same set, both sorted/deterministic.
+        assert_eq!(v["channel_ids"], v["channels"]);
+        assert_eq!(v["capabilities"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn content_is_stable_across_calls_for_same_input() {
+        let ch: HashSet<Uuid> = [
+            Uuid::parse_str("7ed03881-fcbf-4f1a-854b-24596a01c905").unwrap(),
+            Uuid::parse_str("2f21cbb0-e388-45f1-abf6-3ef5425d731e").unwrap(),
+        ]
+        .into_iter()
+        .collect();
+        let allow: HashSet<String> = HashSet::new();
+        let a = build_agent_profile_content("n", "anyone", "anyone", &allow, &ch, &[], None);
+        let b = build_agent_profile_content("n", "anyone", "anyone", &allow, &ch, &[], None);
+        assert_eq!(
+            a, b,
+            "sorted sets must produce identical replaceable content"
+        );
+    }
+}
+
+#[cfg(test)]
 mod inactivity_tests {
     use super::*;
 
@@ -2176,6 +2346,26 @@ async fn tokio_main() -> Result<()> {
         match publish_presence(&presence_publisher, &presence_keys, "online").await {
             Ok(_) => tracing::info!("presence set to online"),
             Err(e) => tracing::warn!("failed to set initial presence: {e}"),
+        }
+    }
+
+    // Advertise the agent for discovery/@mention in Buzz Desktop. Opt-in; the
+    // record's channel list is refreshed whenever membership changes below.
+    if profile_publishing_enabled() {
+        match publish_agent_profile(
+            &relay.rest_client(),
+            &config.keys,
+            &subscribed_channel_ids,
+            &config.respond_to.to_string(),
+            &config.respond_to_allowlist,
+        )
+        .await
+        {
+            Ok(_) => tracing::info!(
+                "published agent profile ({} channel(s))",
+                subscribed_channel_ids.len()
+            ),
+            Err(e) => tracing::warn!("failed to publish agent profile: {e}"),
         }
     }
 
@@ -2697,6 +2887,21 @@ async fn tokio_main() -> Result<()> {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
                                         } else {
                                             subscribed_channel_ids.insert(ch);
+                                            // Refresh the discovery record so Desktop can
+                                            // @mention the agent in this newly-joined channel.
+                                            if profile_publishing_enabled() {
+                                                if let Err(e) = publish_agent_profile(
+                                                    &relay.rest_client(),
+                                                    &config.keys,
+                                                    &subscribed_channel_ids,
+                                                    &config.respond_to.to_string(),
+                                                    &config.respond_to_allowlist,
+                                                )
+                                                .await
+                                                {
+                                                    tracing::warn!("failed to refresh agent profile after channel add: {e}");
+                                                }
+                                            }
                                         }
                                     } else {
                                         tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
@@ -2706,6 +2911,21 @@ async fn tokio_main() -> Result<()> {
                                     tracing::info!(channel_id = %ch, "membership notification: unsubscribing from channel");
                                     if let Err(e) = relay.unsubscribe_channel(ch).await {
                                         tracing::warn!("failed to unsubscribe from channel {ch}: {e}");
+                                    }
+                                    // Refresh the discovery record so the agent no longer
+                                    // advertises a channel it was removed from.
+                                    if profile_publishing_enabled() {
+                                        if let Err(e) = publish_agent_profile(
+                                            &relay.rest_client(),
+                                            &config.keys,
+                                            &subscribed_channel_ids,
+                                            &config.respond_to.to_string(),
+                                            &config.respond_to_allowlist,
+                                        )
+                                        .await
+                                        {
+                                            tracing::warn!("failed to refresh agent profile after channel remove: {e}");
+                                        }
                                     }
                                     // Drain queued events and invalidate sessions for the
                                     // removed channel. Events already in-flight will
