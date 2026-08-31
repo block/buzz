@@ -147,6 +147,10 @@ export function useChannelActivityTyping({
     botTypingEntries,
     channelAgentSessionAgents,
     humanTypingPubkeys,
+    // Handed back rather than subscribed to again by the caller: this hook
+    // already holds the channel's sessions, and every extra
+    // `useAgentMediaSessions` call is another relay REQ for the same filter.
+    mediaSessions,
     threadTypingPubkeys,
   };
 }

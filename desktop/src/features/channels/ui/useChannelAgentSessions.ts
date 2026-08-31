@@ -8,6 +8,8 @@ import type {
   RelayAgent,
 } from "@/shared/api/types";
 import { usePanelReturnTarget } from "@/shared/hooks/usePanelReturnTarget";
+import type { AgentMediaSession } from "@/features/agents/lib/agentMediaSession";
+import { useAutoOpenRequestedAgentMedia } from "@/features/agents/lib/useAutoOpenRequestedMedia";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import {
   channelBotMemberPubkeySet,
@@ -34,8 +36,11 @@ type UseChannelAgentSessionsOptions = {
   activeChannelId: string | null;
   agentsLoaded: boolean;
   channelMembers?: ChannelMember[];
+  currentPubkey?: string | null;
   handleOpenThread: (message: TimelineMessage) => void;
   managedAgents: ChannelAgentSessionAgent[];
+  /** Live media sessions for this channel, for the requester auto-open below. */
+  mediaSessions: readonly AgentMediaSession[];
   openAgentSessionPubkey: string | null;
   openThreadHeadId: string | null;
   profilePanelPubkey?: string | null;
@@ -220,8 +225,10 @@ export function useChannelAgentSessions({
   activeChannelId,
   agentsLoaded,
   channelMembers,
+  currentPubkey,
   handleOpenThread,
   managedAgents,
+  mediaSessions,
   openAgentSessionPubkey,
   openThreadHeadId,
   profilePanelPubkey = null,
@@ -299,6 +306,16 @@ export function useChannelAgentSessions({
       setThreadScrollTargetId,
     ],
   );
+
+  // A session this member's own mention started opens its panel here rather
+  // than leaving them hunting for the indicator. This hook already owns every
+  // other way a panel opens, so the automatic one belongs with them.
+  useAutoOpenRequestedAgentMedia({
+    currentPubkey,
+    openAgentSession,
+    panelOpen: openAgentSessionPubkey !== null,
+    sessions: mediaSessions,
+  });
 
   // Back restores the pane the Activity panel replaced; with no recorded
   // target (opened from the composer with no pane, or a direct/restored
