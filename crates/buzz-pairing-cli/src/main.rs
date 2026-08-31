@@ -3,9 +3,17 @@
 //! # Usage
 //!
 //! ```text
-//! buzz-pair source --relay wss://relay.example.com [--nsec nsec1...]
+//! buzz-pair source --relay wss://relay.example.com [--nsec nsec1...|--nsec -]
 //! buzz-pair target [--relay wss://relay.example.com]
 //! buzz-pair test-vectors
+//! ```
+//!
+//! `--nsec -` reads the key from the first line of stdin instead of argv, so it
+//! never lands in the world-readable `/proc/<pid>/cmdline`. Everything after
+//! that first line is still the session's stdin (the y/n SAS answer):
+//!
+//! ```text
+//! { printf '%s\n' "$nsec"; cat; } | buzz-pair source --nsec - --relay wss://...
 //! ```
 //!
 //! The `source` subcommand acts as the secret-holding device; `target` acts
@@ -50,7 +58,9 @@ enum Cmd {
         #[arg(long, default_value = "wss://relay.damus.io")]
         relay: String,
 
-        /// nsec (bech32) of the key to transfer. If omitted, generates a test key.
+        /// nsec (bech32) of the key to transfer, or '-' to read the nsec from
+        /// the first line of stdin (keeps the key out of argv, which is
+        /// world-readable in /proc/PID/cmdline). If omitted, generates a test key.
         #[arg(long)]
         nsec: Option<String>,
     },
@@ -578,12 +588,28 @@ fn parse_relay_event(text: &str, sub_id: &str) -> Option<Event> {
 ///
 /// If `nsec` is provided, parse it as bech32 and return the raw nsec string.
 /// Otherwise generate a fresh test key and return its nsec.
+///
+/// The literal `-` means "read the nsec from the first line of stdin", so the
+/// key never appears in argv.
 fn resolve_payload(nsec: Option<String>) -> Result<(Zeroizing<String>, PayloadType), CliError> {
     match nsec {
         Some(s) => {
+            // `--nsec -` takes the key from the first line of stdin. An argv
+            // element is world-readable in /proc/<pid>/cmdline for the whole
+            // life of the process, and a `source` session waits up to 120s for
+            // the target, so passing the key literally exposes it for that
+            // whole window. The read goes through the same buffered
+            // `io::stdin()` handle the SAS prompt uses, a line at a time, so
+            // the y/n answer is simply the next line.
+            let s = if s == "-" {
+                Zeroizing::new(read_line()?)
+            } else {
+                Zeroizing::new(s)
+            };
             // Validate it parses as a secret key.
-            let _sk = SecretKey::parse(&s).map_err(|e| CliError::InvalidNsec(e.to_string()))?;
-            Ok((Zeroizing::new(s), PayloadType::Nsec))
+            let _sk =
+                SecretKey::parse(s.as_str()).map_err(|e| CliError::InvalidNsec(e.to_string()))?;
+            Ok((s, PayloadType::Nsec))
         }
         None => {
             let keys = Keys::generate();
