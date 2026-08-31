@@ -746,7 +746,7 @@ test("agent defaults stays in the header without an actions menu", async ({
     defaultsDialog.getByTestId("global-agent-model"),
   ).toHaveAttribute("data-value", "gpt-5.5[high]");
   await expect(defaultsDialog.getByTestId("global-agent-model")).toContainText(
-    "gpt-5.5[high]",
+    "GPT-5.5 (high)",
   );
   await page.keyboard.press("Escape");
   await expect(defaultsDialog).toHaveCount(0);
