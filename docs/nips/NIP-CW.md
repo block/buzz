@@ -47,19 +47,21 @@ This document uses MUST, MUST NOT, SHOULD, MAY, and RECOMMENDED as defined in RF
 
 ## Request
 
-A window request is a standard filter plus extension fields, submitted wherever the relay accepts filters (for Buzz: the NIP-98-authenticated HTTP bridge `POST /query`):
+A window request is a standard filter plus extension fields, submitted wherever the relay accepts filters (for Buzz: the NIP-98-authenticated HTTP bridge `POST /query`). The request body is a JSON **array of filters**, as on a NIP-01 filter surface; the window filter below is one element of that array:
 
 ```jsonc
-{
-  "kinds": [9],                  // optional row-kind restriction
-  "#h": ["<channel-id>"],        // REQUIRED: exactly one channel
-  "limit": 50,                   // row budget (rows only, never overlays)
-  "top_level": true,             // selects the window path
-  "include_summaries": true,     // optional: kind:39005 overlays
-  "include_aux": true,           // optional: aux closure
-  "until": 1751500000,           // ┐ composite request cursor —
-  "before_id": "<64-hex id>"     // ┘ both or neither
-}
+[
+  {
+    "kinds": [9],                  // optional row-kind restriction
+    "#h": ["<channel-id>"],        // REQUIRED: exactly one channel
+    "limit": 50,                   // row budget (rows only, never overlays)
+    "top_level": true,             // selects the window path
+    "include_summaries": true,     // optional: kind:39005 overlays
+    "include_aux": true,           // optional: aux closure
+    "until": 1751500000,           // ┐ composite request cursor —
+    "before_id": "<64-hex id>"     // ┘ both or neither
+  }
+]
 ```
 
 - `top_level` — MUST be boolean `true` to select the window path. Any other value (absent, `false`, string, number) means the filter is served as a normal filter.
