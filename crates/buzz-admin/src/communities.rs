@@ -95,7 +95,10 @@ async fn archive(
         })?;
     let tenant = TenantContext::resolved(record.id, &record.host);
 
-    let (propagation, exit_code) = match publish_disconnect(&tenant).await {
+    let command = ConnControl::DisconnectCommunity {
+        archived_at: Some(record.archived_at),
+    };
+    let (propagation, exit_code) = match publish_disconnect(&tenant, &command).await {
         Ok(subscriber_count) => classify_archive_publication(subscriber_count),
         Err(error) => (
             ArchivePropagation::Pending(format!(
@@ -141,7 +144,7 @@ async fn unarchive(
     Ok(0)
 }
 
-async fn publish_disconnect(tenant: &TenantContext) -> Result<i64> {
+async fn publish_disconnect(tenant: &TenantContext, command: &ConnControl) -> Result<i64> {
     let redis_url = std::env::var("REDIS_URL").context("REDIS_URL is required")?;
     let redis_pool = deadpool_redis::Config::from_url(&redis_url)
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))
@@ -150,7 +153,7 @@ async fn publish_disconnect(tenant: &TenantContext) -> Result<i64> {
         .await
         .context("PubSub init failed")?;
     pubsub
-        .publish_conn_control(tenant, &ConnControl::DisconnectCommunity)
+        .publish_conn_control(tenant, command)
         .await
         .context("publishing DisconnectCommunity failed")
 }

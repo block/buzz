@@ -27,6 +27,7 @@ use buzz_pubsub::rate_limiter::RedisRateLimiter;
 use buzz_pubsub::{PubSubManager, RedisNip98ReplayGuard};
 use buzz_search::SearchService;
 use buzz_workflow::WorkflowEngine;
+use chrono::{DateTime, Utc};
 use deadpool_redis;
 
 use crate::audio::AudioRoomManager;
@@ -1960,14 +1961,25 @@ impl AppState {
     pub async fn disconnect_community_clusterwide(
         &self,
         tenant: &TenantContext,
-    ) -> Result<usize, buzz_pubsub::PubSubError> {
+        archived_at: DateTime<Utc>,
+    ) -> anyhow::Result<usize> {
         let closed = self
-            .community_connections
-            .disconnect_community(tenant.community());
+            .db
+            .with_community_archive_fence(tenant.community(), archived_at, || {
+                self.community_connections
+                    .disconnect_community(tenant.community())
+            })
+            .await?
+            .unwrap_or(0);
         self.community_disconnect_publish_attempts
             .fetch_add(1, Ordering::Relaxed);
         self.pubsub
-            .publish_conn_control(tenant, &ConnControl::DisconnectCommunity)
+            .publish_conn_control(
+                tenant,
+                &ConnControl::DisconnectCommunity {
+                    archived_at: Some(archived_at),
+                },
+            )
             .await?;
         Ok(closed)
     }
