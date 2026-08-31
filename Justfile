@@ -277,6 +277,59 @@ desktop-release-build target="aarch64-apple-darwin":
     pnpm install
     cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
 
+# Build a release Buzz.app from this checkout and launch it IN PLACE OF the
+# installed app. Release builds use the stock `xyz.block.buzz.app` identifier,
+# the `buzz-desktop` keyring, and the `~/.buzz` nest — so this opens with your
+# real identity, communities, and managed agents, just running your code.
+#
+# Every `tauri dev` recipe (`dev`, `staging`, `production`, `desktop-standalone`)
+# is a debug build and is hardwired to the dev stores (`app_state_keyring.rs`,
+# `managed_agents/nest.rs`, `scripts/instance-env.sh`); none of them can reach
+# prod state. This is the only recipe that does. Unsigned, macOS only, no mesh
+# (`just mesh=1 desktop-release-run` to include it). The installed Buzz is quit
+# first because tauri-plugin-single-instance would otherwise forward the launch
+# to it; reopen /Applications/Buzz.app when you're done testing.
+
+# Build an unsigned release Buzz.app from this checkout and run it with your installed app's identity, communities, and agents (macOS)
+desktop-release-run: _ensure-sidecar-stubs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        echo "desktop-release-run: macOS only (launches a .app bundle)" >&2
+        exit 1
+    fi
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
+    for bin in buzz-acp buzz-agent buzz-backend-kubernetes buzz-dev-mcp git-credential-nostr buzz; do
+        cp "${TARGET_DIR}/release/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        chmod 755 "desktop/src-tauri/binaries/${bin}-${TARGET}"
+    done
+    cd {{desktop_dir}}
+    [[ -d node_modules ]] || pnpm install
+    FEATURES=(); [[ -n "{{mesh}}" ]] && FEATURES=(--features mesh-llm)
+    # Must NOT pass --config: the stock tauri.conf.json identifier is what maps
+    # this build onto the installed app's state.
+    pnpm tauri build --no-sign --bundles app ${FEATURES[@]+"${FEATURES[@]}"}
+    APP="${TARGET_DIR}/release/bundle/macos/Buzz.app"
+    BUNDLE_ID=$(defaults read "$APP/Contents/Info.plist" CFBundleIdentifier)
+    if [[ "$BUNDLE_ID" != "xyz.block.buzz.app" ]]; then
+        echo "desktop-release-run: unexpected bundle identifier $BUNDLE_ID; refusing to launch" >&2
+        exit 1
+    fi
+    if pgrep -xq buzz-desktop; then
+        echo "Quitting the running Buzz so this build can own xyz.block.buzz.app ..."
+        osascript -e 'quit app id "xyz.block.buzz.app"' || true
+        for _ in $(seq 1 60); do pgrep -xq buzz-desktop || break; sleep 0.5; done
+        if pgrep -xq buzz-desktop; then
+            echo "desktop-release-run: Buzz is still running; quit it and re-run, or open $APP manually" >&2
+            exit 1
+        fi
+    fi
+    echo "Launching $APP ($(git rev-parse --short HEAD)) against your installed-app state"
+    open "$APP"
+
 # Run desktop checks suitable for CI / pre-push
 desktop-ci: desktop-check desktop-test desktop-tauri-fmt-check desktop-build desktop-tauri-check desktop-tauri-test
 
