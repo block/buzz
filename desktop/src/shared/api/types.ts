@@ -653,11 +653,9 @@ export type RuntimeConfigSurface = {
   /** B5/I-7: adapter-advertised option values for the `thought_level` option — the picker renders these instead of hardcoded values. */
   effortOptions?: AcpConfigOptionValue[];
 };
-
 export type UpdateManagedAgentInput = {
   pubkey: string;
-  /** Absent = don't touch. null = clear. Value = bind this singleton instance to one team. */
-  teamId?: string | null;
+  teamId?: string | null; // undefined: keep; null: clear; value: bind singleton to a team
   name?: string;
   model?: string | null;
   provider?: string | null;

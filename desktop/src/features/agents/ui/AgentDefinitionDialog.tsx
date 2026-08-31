@@ -1,5 +1,4 @@
 import * as React from "react";
-import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
 import type {
@@ -69,8 +68,9 @@ import {
 import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
+import { AgentAdvancedFieldsToggle } from "./AgentAdvancedFieldsToggle";
 import { AgentHarnessField } from "./AgentHarnessField";
-import { HermesProfileField } from "./HermesProfileField";
+import { useHermesProfileDefinitionBinding } from "./useHermesProfileDefinitionBinding";
 import {
   AgentAiConfigurationModeField,
   AgentCreateAiDefaultsSummary,
@@ -148,7 +148,6 @@ export function AgentDefinitionDialog({
   const [avatarUrl, setAvatarUrl] = React.useState("");
   const [systemPrompt, setSystemPrompt] = React.useState("");
   const [runtime, setRuntime] = React.useState("");
-  const [hermesProfile, setHermesProfile] = React.useState("");
   const [model, setModel] = React.useState("");
   const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
   const [provider, setProvider] = React.useState("");
@@ -192,6 +191,13 @@ export function AgentDefinitionDialog({
     [globalConfig.preferred_runtime, runtimes],
   );
   const isCreateMode = Boolean(initialValues && !("id" in initialValues));
+  const showHermesProfile =
+    isCreateMode && runtime === "hermes" && createRunOnLocal;
+  const hermesBinding = useHermesProfileDefinitionBinding(
+    showHermesProfile,
+    isPending,
+    open,
+  );
   const shouldReduceMotion = useReducedMotion();
   const initialModelProviderEditableWithoutRuntime = Boolean(
     initialValues &&
@@ -213,7 +219,6 @@ export function AgentDefinitionDialog({
     setAvatarUrl(initialValues.avatarUrl ?? "");
     setSystemPrompt(initialValues.systemPrompt);
     setRuntime(initialValues.runtime ?? "");
-    setHermesProfile("");
     setModel(initialValues.model ?? "");
     setIsCustomModelEditing(false);
     setProvider(initialValues.provider ?? "");
@@ -314,7 +319,6 @@ export function AgentDefinitionDialog({
       setAvatarUrl("");
       setSystemPrompt("");
       setRuntime("");
-      setHermesProfile("");
       setModel("");
       setIsCustomModelEditing(false);
       setProvider("");
@@ -393,10 +397,7 @@ export function AgentDefinitionDialog({
 
     await onSubmit(baseInput, {
       publishCatalogUpdates: false,
-      hermesProfile:
-        runtimeForSubmit === "hermes" && createRunOnLocal
-          ? hermesProfile
-          : undefined,
+      hermesProfile: hermesBinding.profileForSubmit,
     });
   }
 
@@ -512,12 +513,8 @@ export function AgentDefinitionDialog({
     (!isCreateMode || runtime.trim().length > 0) &&
     (!isCreateMode || selectedRuntimeIsAvailable) &&
     (!isCreateMode || !createSubmitBlocked) &&
-    (!isCreateMode ||
-      runtime !== "hermes" ||
-      !createRunOnLocal ||
-      hermesProfile.trim().length > 0) &&
-    // Crash-loop guard, create AND edit: an empty allowlist would crash
-    // every instance minted from this definition at startup.
+    hermesBinding.canSubmit &&
+    // Crash-loop guard: an empty allowlist would crash every new instance.
     personaBehaviorDraftValid(behaviorDraft) &&
     // D1: localModeSatisfied covers both missingNormalizedFields AND
     // missingEnvKeys — credential env keys now block submit, not just display.
@@ -947,13 +944,7 @@ export function AgentDefinitionDialog({
           ) : null}
         </div>
 
-        {isCreateMode && runtime === "hermes" && createRunOnLocal ? (
-          <HermesProfileField
-            disabled={isPending}
-            onValueChange={setHermesProfile}
-            value={hermesProfile}
-          />
-        ) : null}
+        {hermesBinding.field}
 
         <AgentDefaultsDialog
           onOpenChange={setAiDefaultsOpen}
@@ -968,32 +959,16 @@ export function AgentDefinitionDialog({
         />
 
         <div className="space-y-3">
-          <button
-            aria-expanded={showAdvancedFields}
-            className="inline-flex h-9 items-center gap-1.5 text-sm font-medium text-foreground transition-colors hover:text-foreground/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-            onClick={() => setShowAdvancedFields((current) => !current)}
-            type="button"
-          >
-            <span>Advanced</span>
-            {(isCreateMode && createSubmitBlocked) ||
-            localModeGate.missingEnvKeys.some((key) =>
-              advancedRequiredEnvKeys.includes(key),
-            ) ? (
-              <span
-                aria-hidden="true"
-                className="rounded-full bg-destructive/10 px-2 py-0.5 text-xs text-destructive"
-                data-testid="persona-advanced-required-badge"
-              >
-                Required
-              </span>
-            ) : null}
-            <ChevronDown
-              className={cn(
-                "h-4 w-4 text-muted-foreground transition-transform duration-150 ease-out",
-                showAdvancedFields && "rotate-180",
-              )}
-            />
-          </button>
+          <AgentAdvancedFieldsToggle
+            expanded={showAdvancedFields}
+            onToggle={() => setShowAdvancedFields((current) => !current)}
+            required={
+              (isCreateMode && createSubmitBlocked) ||
+              localModeGate.missingEnvKeys.some((key) =>
+                advancedRequiredEnvKeys.includes(key),
+              )
+            }
+          />
           <AnimatePresence initial={false}>
             {showAdvancedFields ? (
               <motion.div

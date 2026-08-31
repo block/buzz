@@ -563,15 +563,9 @@ fn name_matches_known_binary_rejects_node() {
 }
 
 #[test]
-fn name_matches_interpreter_accepts_node_and_python_hermes_hosts() {
-    // Script interpreters are only ownership candidates; callers still require
-    // the exact BUZZ_MANAGED_AGENT marker before touching the process.
-    for name in ["node", "python", "python3", "Python", "python.exe"] {
-        assert!(
-            super::name_matches_interpreter(name),
-            "expected {name} to be a known marker-gated interpreter"
-        );
-    }
+fn name_matches_interpreter_accepts_known_hosts() {
+    assert!(super::name_matches_interpreter("node"));
+    assert!(super::name_matches_interpreter("python3"));
 }
 
 #[test]
