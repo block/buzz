@@ -17,6 +17,8 @@ use crate::{
 use super::{pending, retain_persona_pending, trim_optional, trim_required};
 
 #[cfg(test)]
+mod behavior_cascade_tests;
+#[cfg(test)]
 mod name_propagation_tests;
 
 /// Return value of the `update_persona` command. Uses flatten so all
@@ -56,6 +58,154 @@ fn propagate_persona_name_rename(
 
 /// Profile sync params collected under the store lock for async relay publish.
 type ProfileSyncParams = Vec<(nostr::Keys, String, String, Option<String>, Option<String>)>;
+
+/// Propagate a persona definition's behavioral-group edit to linked agent
+/// instances. Discrimination rule (mirrors the pool-name rule in
+/// [`propagate_persona_name_rename`]): an instance whose `respond_to` AND
+/// `respond_to_allowlist` still equal the PRE-edit definition values was
+/// inheriting → it adopts the new definition value; an instance carrying a
+/// different value holds an explicit instance-level override → preserved.
+/// The allowlist is part of the discriminant because mode alone cannot
+/// express a same-mode allowlist pin: an instance pinned to `allowlist` +
+/// `[X]` under a definition also in `allowlist` would otherwise read as
+/// "still inheriting" and lose its pin. Every linked instance's
+/// definition-mirror fields (`definition_respond_to` &c.) refresh
+/// regardless, so future mint/inspect paths see the current definition bytes.
+///
+/// A definition sitting in `allowlist` with an empty allowlist is skipped
+/// (mirrors refresh, gates do not change): `resolve_mint_behavioral_defaults`
+/// and `apply_persona_behavior` both reject that state at mint, so the
+/// cascade must not manufacture a record neither of them would ever produce.
+/// Skip, don't fail — the definition state is reachable through the
+/// person-picker (mode persists, members don't; issue #2501 defect 1) and a
+/// hard error here would wedge every other edit on the persona.
+///
+/// Returns `true` when at least one linked record was touched (caller must
+/// persist the records store).
+/// What a behavior cascade did, so the caller can republish only what it
+/// must. `linked` means at least one record belongs to this persona (mirror
+/// fields always refresh); `adopted` names the records whose effective gate
+/// actually changed.
+#[derive(Debug, Default)]
+struct BehaviorCascade {
+    linked: bool,
+    adopted: Vec<String>,
+}
+
+fn propagate_persona_behavior(
+    records: &mut [ManagedAgentRecord],
+    persona_id: &str,
+    old_mode: crate::managed_agents::RespondTo,
+    old_allowlist: &[String],
+    persona: &AgentDefinition,
+) -> Result<BehaviorCascade, String> {
+    use crate::managed_agents::RespondTo;
+
+    // Parse before touching any record, so a bogus definition mode cannot
+    // half-apply mirror refreshes either (fail-loudly contract shared with
+    // `resolve_mint_behavioral_defaults`).
+    let new_mode = match persona.respond_to.as_deref() {
+        Some(wire) => RespondTo::parse_wire(wire)?,
+        None => RespondTo::default(),
+    };
+
+    // Effective allowlists as `apply_persona_behavior` stores them on
+    // records: non-allowlist modes store an empty list. Comparing against
+    // the definition's raw list would break inheritance detection whenever a
+    // non-allowlist definition carries residual allowlist entries, and
+    // writing the raw list would break the NEXT edit's detection the same
+    // way.
+    let inherited_allowlist: &[String] = if old_mode == RespondTo::Allowlist {
+        old_allowlist
+    } else {
+        &[]
+    };
+    let adopted_allowlist: &[String] = if new_mode == RespondTo::Allowlist {
+        &persona.respond_to_allowlist
+    } else {
+        &[]
+    };
+    let definition_adoptable =
+        new_mode != RespondTo::Allowlist || !persona.respond_to_allowlist.is_empty();
+
+    let mut outcome = BehaviorCascade::default();
+    for record in records.iter_mut() {
+        if record.persona_id.as_deref() != Some(persona_id) {
+            continue;
+        }
+        outcome.linked = true;
+
+        // Read the pre-fix marker BEFORE the mirror refresh overwrites it.
+        let mirrors_unset = record.definition_respond_to.is_none();
+
+        record.definition_respond_to = persona.respond_to.clone();
+        record.definition_respond_to_allowlist = persona.respond_to_allowlist.clone();
+        record.definition_parallelism = persona.parallelism;
+
+        // An instance minted before this cascade existed, against a
+        // definition already edited during the buggy era, matches neither the
+        // old mode nor the old allowlist -- so it reads as a deliberate pin
+        // and stays desynced forever. The mirror fields are written ONLY by
+        // this cascade, so an unset `definition_respond_to` is a reliable
+        // "pre-fix record" marker; combined with a gate still at the mint
+        // default it is inheritance, not a pin. A dialog pin is non-default
+        // by construction, and before this fix the dialog could not write an
+        // instance-level gate at all (that is defect 1 of #2501), so the
+        // default gate on a pre-fix record cannot be a deliberate choice.
+        // Reported with store bytes by @xtranger51 on #4115.
+        let pre_fix_default = mirrors_unset
+            && record.respond_to == RespondTo::default()
+            && record.respond_to_allowlist.is_empty();
+
+        let still_inheriting = pre_fix_default
+            || (record.respond_to == old_mode
+                && same_allowlist(&record.respond_to_allowlist, inherited_allowlist));
+
+        if still_inheriting {
+            // Parallelism is not part of the unsafe state. Adopting the
+            // respond_to gate from a definition sitting in Allowlist with an
+            // empty allowlist would cascade a state the mint path rejects, so
+            // that is gated -- but freezing an inheriting instance's pool
+            // width as a side effect of the same condition is a separate,
+            // unasked-for behaviour change, and `behavior_changed` fires on a
+            // parallelism-only edit (review on #4115).
+            if let Some(parallelism) = persona.parallelism {
+                record.parallelism = parallelism;
+            }
+
+            if definition_adoptable
+                && (record.respond_to != new_mode
+                    || record.respond_to_allowlist.as_slice() != adopted_allowlist)
+            {
+                // Adopt the new definition value as the instance's effective
+                // gate. `None` on the definition means "no explicit mode":
+                // the harness default (owner-only) applies.
+                record.respond_to = new_mode;
+                record.respond_to_allowlist = adopted_allowlist.to_vec();
+                outcome.adopted.push(record.pubkey.clone());
+            }
+        }
+    }
+    Ok(outcome)
+}
+
+/// Whether two allowlists hold the same principals.
+///
+/// Order-insensitive on purpose: nothing guarantees a stable ordering out of
+/// the person-picker, and a positional comparison reads an instance holding
+/// the same pubkeys in a different order as pinned -- silently stranding it
+/// on the old gate forever (review on #4115). Sorted rather than set-wise so
+/// a genuine duplicate still counts as a difference.
+fn same_allowlist(left: &[String], right: &[String]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut left: Vec<&str> = left.iter().map(String::as_str).collect();
+    let mut right: Vec<&str> = right.iter().map(String::as_str).collect();
+    left.sort_unstable();
+    right.sort_unstable();
+    left == right
+}
 
 #[tauri::command]
 pub async fn update_persona(
@@ -116,6 +266,14 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
             let avatar_changed = persona.avatar_url != avatar_url;
             let name_changed = persona.display_name != display_name;
             let old_display_name = persona.display_name.clone();
+            // Pre-edit behavioral signature — the definition value linked
+            // instances were minted against. Used post-save to cascade
+            // behavior edits ONLY to instances that were still inheriting
+            // (record.respond_to == pre-edit definition value), never to
+            // instances carrying an explicit instance-level override.
+            let old_respond_to = persona.respond_to.clone();
+            let old_respond_to_allowlist = persona.respond_to_allowlist.clone();
+            let old_parallelism = persona.parallelism;
 
             persona.display_name = display_name;
             persona.avatar_url = avatar_url;
@@ -138,6 +296,49 @@ pub(super) async fn update_persona_with<R: Send + 'static>(
 
             let result = persona.clone();
             save_personas(&app, &personas)?;
+
+            // Cascade behavior edits to linked instance records that were
+            // still inheriting the definition value. Discrimination rule
+            // (mirrors the pool-name rule for display_name): an instance
+            // whose record.respond_to already equals the OLD definition value
+            // was inheriting → adopt the new value + mirrors. An instance
+            // whose record.respond_to differs is an explicit override →
+            // preserve it; only the definition mirror fields refresh. The
+            // empty-allowlist-ignores-mode asymmetry in apply_persona_behavior
+            // (non-allowlist modes store an empty list) is preserved verbatim.
+            let behavior_changed = old_respond_to != result.respond_to
+                || old_respond_to_allowlist != result.respond_to_allowlist
+                || old_parallelism != result.parallelism;
+            if behavior_changed {
+                let mut records = load_managed_agents(&app)?;
+                let old_mode = old_respond_to
+                    .as_deref()
+                    .and_then(|wire| crate::managed_agents::RespondTo::parse_wire(wire).ok())
+                    .unwrap_or_default();
+                let cascade = propagate_persona_behavior(
+                    &mut records,
+                    &result.id,
+                    old_mode,
+                    &old_respond_to_allowlist,
+                    &result,
+                )?;
+                if cascade.linked {
+                    save_managed_agents(&app, &records)?;
+                    // The behavioral triple is part of the published kind:30177
+                    // projection (`agent_event_content`), so without this the
+                    // relay's retained record stays stale until the next boot
+                    // reconcile -- the same reason the rename cascade retains
+                    // (#2423). Mirror-only refreshes are excluded: they do not
+                    // change the projection, so retaining would be a no-op.
+                    // Reported by @xtranger51 on #4115.
+                    for record in records
+                        .iter()
+                        .filter(|r| cascade.adopted.contains(&r.pubkey))
+                    {
+                        crate::commands::agents::retain_managed_agent_pending(&app, &state, record);
+                    }
+                }
+            }
 
             let retained = retain(&app, &state, &result)?;
             try_regenerate_nest(&app);
