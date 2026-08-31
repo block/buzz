@@ -20,6 +20,7 @@ import { useLinkEditor } from "@/features/messages/lib/useLinkEditor";
 import { DropZoneOverlay } from "@/features/messages/ui/ComposerAttachments";
 import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
 import { MessageComposerToolbar } from "@/features/messages/ui/MessageComposerToolbar";
+import { NonMemberMentionDialog } from "@/features/messages/ui/NonMemberMentionDialog";
 import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -34,6 +35,7 @@ import { ForumComposerAutocompletes } from "./ForumComposerAutocompletes";
 import { ForumComposerCompactLayout } from "./ForumComposerCompactLayout";
 import { ForumComposerMediaStatus } from "./ForumComposerMediaStatus";
 import { useCompactComposerInteractions } from "./useCompactComposerInteractions";
+import { useForumMentionPreparation } from "./useForumMentionPreparation";
 
 export function ForumComposer({
   channelId = null,
@@ -73,6 +75,8 @@ export function ForumComposer({
   }, [compact]);
 
   const mentions = useMentions(channelId, members, profiles, { channelType });
+  const { prepareMentionPubkeys, nonMemberPromptProps } =
+    useForumMentionPreparation(channelId, channelType, mentions);
   const channelLinks = useChannelLinks();
   const media = useMediaUpload();
   const { handlePaperclipClick, handleToolbarMouseDown, shouldIgnoreBlur } =
@@ -245,9 +249,11 @@ export function ForumComposer({
         // A pasted mention's identity check can still be in flight; extracting
         // first would publish the label with no `p` tag. Bounded internally.
         await mentions.settlePendingMentionBindings();
-        const pubkeys = await mentions.revalidateMentionPubkeys(
+        const pubkeys = await prepareMentionPubkeys(
           mentions.extractMentionPubkeys(trimmed),
+          trimmed,
         );
+        if (pubkeys === null) return;
 
         // Reuse the shared send-path builder so forum/notes posts emit the same
         // body + imeta as chat: generic files become `[filename](url)` links with a
@@ -296,8 +302,8 @@ export function ForumComposer({
       media.setPendingImeta,
       mentions.cancelMentionAutocomplete,
       mentions.extractMentionPubkeys,
-      mentions.revalidateMentionPubkeys,
       mentions.settlePendingMentionBindings,
+      prepareMentionPubkeys,
       mentions.clearMentions,
       channelLinks.clearChannels,
       richText.clearContent,
@@ -649,6 +655,7 @@ export function ForumComposer({
           </>
         )}
       </form>
+      <NonMemberMentionDialog {...nonMemberPromptProps} />
       {!isSubmissionPending && linkEditor.card}
       {!isSubmissionPending && linkEditor.dialog}
     </>
