@@ -73,7 +73,7 @@ pub(crate) enum AcpAvailabilityStatus {
 use crate::{
     author_allowed,
     config::Config,
-    event_mentions_agent, filter,
+    event_author_for_gate, event_mentions_agent, filter,
     relay::{HarnessRelay, RelayEventPublisher},
 };
 
@@ -382,6 +382,21 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
 
     let publisher = relay.event_publisher();
     let rest_client = relay.rest_client();
+    let trusted_relay_pubkey = match rest_client.nip11_relay_pubkey().await {
+        Ok(Some(pubkey)) => Some(pubkey),
+        Ok(None) => {
+            tracing::warn!(
+                "setup-mode: NIP-11 did not advertise a valid relay identity — workflow delegated authorship disabled"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::warn!(
+                "setup-mode: failed to resolve NIP-11 relay identity: {error} — workflow delegated authorship disabled"
+            );
+            None
+        }
+    };
 
     let channel_info = crate::pool::ChannelInfoResolver::new(channel_info_map, rest_client.clone());
 
@@ -428,7 +443,7 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         // Apply the same author gate as normal mode so the nudge only goes
         // to authors the real agent would have answered. Same DM hardening:
         // in DMs only owner/siblings get a nudge (fail-closed on unknown type).
-        let author_hex = buzz_event.event.pubkey.to_hex();
+        let author_hex = event_author_for_gate(&buzz_event.event, trusted_relay_pubkey.as_deref());
         let is_dm = crate::is_dm_channel(buzz_event.channel_id, &channel_info).await;
         let allowed = author_allowed(
             &config.respond_to,
