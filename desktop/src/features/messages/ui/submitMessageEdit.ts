@@ -1,4 +1,8 @@
 import { snapshotUnresolvedEditMentionPubkeys } from "@/features/messages/lib/draftMentionRefs";
+import {
+  AgentMentionAuthorizationError,
+  type MentionRevalidationOptions,
+} from "@/features/messages/lib/agentMentionRevalidation";
 import type { QueuedMediaAttachment } from "@/features/messages/lib/backgroundMediaUploadStore";
 import { enqueueBackgroundMediaUpload } from "@/features/messages/lib/backgroundMediaUploadStore";
 import type { DraftMentionRef } from "@/features/messages/lib/useDrafts";
@@ -47,7 +51,11 @@ type SubmitMessageEditOptions = Omit<
   ownerPubkey: string | null;
   restoreComposer: (draft: EditDraft) => void;
   restoreMentionRefs: (refs: DraftMentionRef[]) => void;
-  revalidateMentionPubkeys: (pubkeys: readonly string[]) => Promise<string[]>;
+  revalidateMentionPubkeys: (
+    pubkeys: readonly string[],
+    channelId?: string | null,
+    options?: MentionRevalidationOptions,
+  ) => Promise<string[]>;
   shouldRestoreComposer: () => boolean;
   setDeferredUploadPending: (isPending: boolean) => void;
   save: (
@@ -141,8 +149,15 @@ export async function submitMessageEdit({
       ]),
     );
     if (signal?.aborted) return;
-    const revalidatedMentionPubkeys =
-      await revalidateMentionPubkeys(addedMentionPubkeys);
+    const revalidatedMentionPubkeys = await revalidateMentionPubkeys(
+      addedMentionPubkeys,
+      undefined,
+      {
+        intendedAgentPubkeys: draft.mentionRefs
+          .filter((ref) => ref.isAgent)
+          .map((ref) => ref.pubkey),
+      },
+    );
     if (signal?.aborted) return;
     const outgoingTags = mergeOutgoingTagsWithReferenceMentions(
       mergeOutgoingTags(
@@ -172,8 +187,10 @@ export async function submitMessageEdit({
       onComplete: async (uploaded, signal) => {
         try {
           await finishEdit(uploaded, signal);
-        } catch {
+        } catch (error) {
           restoreDraft();
+          if (error instanceof AgentMentionAuthorizationError)
+            setUploadError(error.message);
         } finally {
           setDeferredUploadPending(false);
         }
@@ -193,7 +210,9 @@ export async function submitMessageEdit({
 
   try {
     await finishEdit([]);
-  } catch {
+  } catch (error) {
     restoreDraft();
+    if (error instanceof AgentMentionAuthorizationError)
+      setUploadError(error.message);
   }
 }

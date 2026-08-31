@@ -15,6 +15,20 @@ test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
 
+test.afterEach(async ({ page }, testInfo) => {
+  if (testInfo.status !== testInfo.expectedStatus) {
+    await testInfo.attach("outgoing-diagnostic", {
+      body: JSON.stringify(
+        await page.evaluate(() => ({
+          events: window.__BUZZ_E2E_SIGNED_EVENTS__,
+          commands: window.__BUZZ_E2E_COMMAND_LOG__,
+        })),
+      ),
+      contentType: "application/json",
+    });
+  }
+});
+
 const IN_CHANNEL_MANAGED_AGENT_PUBKEY =
   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const OUT_OF_CHANNEL_MANAGED_AGENT_PUBKEY =
@@ -1858,6 +1872,25 @@ test("forum sends revalidate relay-agent authorization before signing", async ({
   await expect(page.getByTestId("chat-title")).toHaveText("watercooler");
   await page.getByRole("button", { name: "Start a new post..." }).click();
 
+  await page.evaluate(
+    async ({ channelId, pubkey }) => {
+      const invoke = window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock bridge is not installed.");
+      await invoke("add_channel_members", {
+        channelId,
+        pubkeys: [pubkey],
+        role: "bot",
+      });
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["channels", channelId, "members"],
+      });
+    },
+    {
+      channelId: "a27e1ee9-76a6-5bdf-a5d5-1d85610dad11",
+      pubkey: ALLOWLIST_RELAY_AGENT_PUBKEY,
+    },
+  );
+
   const input = page.getByTestId("message-input");
   await input.fill("@quinn");
   await page.getByTestId("mention-autocomplete").getByText("quinn").click();
@@ -1888,12 +1921,11 @@ test("forum sends revalidate relay-agent authorization before signing", async ({
   await expect(input).not.toContainText("later edit");
 
   const outgoingContent = `@quinn hello\n[forum-race.pdf](https://mock.relay/media/${"f".repeat(64)}.pdf)`;
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, outgoingContent))
-    .not.toBeNull();
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, outgoingContent))
-    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByText(/Could not authorize a mentioned agent/),
+  ).toBeVisible();
+  await expect(input).toContainText("@quinn hello");
+  expect(await readOutgoingMentionPubkeys(page, outgoingContent)).toBeNull();
 });
 
 test("managed agents use the channel roster for membership labels", async ({
@@ -2168,16 +2200,15 @@ test("targeted revocation before send causes no agent side effects", async ({
   const baselineCommands = await readCommandLog(page);
   await page.getByTestId("send-message").click();
 
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toBeNull();
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByText(/Could not authorize a mentioned agent/),
+  ).toBeVisible();
+  await expect(input).toHaveText("@quinn hello");
+  expect(await readOutgoingMentionPubkeys(page, "@quinn hello")).toBeNull();
   const commands = await readCommandLog(page);
   // Admission pass plus the unconditional publish-boundary pass.
   expect(commandCount(commands, "revalidate_relay_agents")).toBe(
-    commandCount(baselineCommands, "revalidate_relay_agents") + 2,
+    commandCount(baselineCommands, "revalidate_relay_agents") + 1,
   );
   expect(commandCount(commands, "list_relay_agents")).toBe(
     commandCount(baselineCommands, "list_relay_agents"),
@@ -2661,12 +2692,11 @@ test("selected relay agents revoked after the invite prompt cause no side effect
   const baselineCommands = await readCommandLog(page);
   await inviteButton.click();
 
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toBeNull();
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByText(/Could not authorize a mentioned agent/),
+  ).toBeVisible();
+  await expect(input).toHaveText("@quinn hello");
+  expect(await readOutgoingMentionPubkeys(page, "@quinn hello")).toBeNull();
   const commands = await readCommandLog(page);
   for (const command of [
     "add_channel_members",
@@ -2716,12 +2746,11 @@ test("selected relay agents revoked during send emit no p tag", async ({
     );
   });
 
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toBeNull();
-  await expect
-    .poll(() => readOutgoingMentionPubkeys(page, "@quinn hello"))
-    .not.toContain(ALLOWLIST_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByText(/Could not authorize a mentioned agent/),
+  ).toBeVisible();
+  await expect(input).toHaveText("@quinn hello");
+  expect(await readOutgoingMentionPubkeys(page, "@quinn hello")).toBeNull();
 });
 
 test("owner-only builds admit cross-owner relay agents authorized by allowlist", async ({

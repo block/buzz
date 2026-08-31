@@ -12,9 +12,7 @@ import {
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import type { MentionSuggestion } from "@/features/messages/ui/MentionAutocomplete";
 import {
-  filterAdmittedMentionPubkeys,
   filterCachedAgentSuggestions,
-  getAdmittedAgentPubkeys,
   getAgentIdentityPubkeys,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
@@ -190,15 +188,20 @@ export function useMentions(
     () =>
       getMentionableAgentPubkeys({
         currentPubkey,
+        phase: "prepare",
         eligibilityScope: mentionChannelId
           ? { type: "channel", channelId: mentionChannelId }
-          : { type: "managed-only" },
+          : options?.channelType === "dm"
+            ? { type: "owned", channelId }
+            : { type: "managed-only" },
         managedAgentPubkeys,
         relayAgents: relayAgentsQuery.data,
         sharedChannelIds,
       }),
     [
       currentPubkey,
+      channelId,
+      options?.channelType,
       managedAgentPubkeys,
       mentionChannelId,
       relayAgentsQuery.data,
@@ -296,10 +299,6 @@ export function useMentions(
       relayAgentNamesByPubkey,
       relayAgentsQuery.data,
     ],
-  );
-  const admittedAgentPubkeys = React.useMemo(
-    () => getAdmittedAgentPubkeys(mentionCandidates),
-    [mentionCandidates],
   );
   const mentionCandidatesWithTeams = React.useMemo(
     () => [
@@ -475,6 +474,7 @@ export function useMentions(
         appendUniqueName(current, trimmedName),
       );
       if (options?.isAgent) {
+        selectedAgentMentionPubkeysRef.current.add(normalizePubkey(pubkey));
         selectedAgentMentionNamesRef.current = appendUniqueName(
           selectedAgentMentionNamesRef.current,
           trimmedName,
@@ -754,16 +754,11 @@ export function useMentions(
         selectedDisplayNames: personaMentionMapRef.current.keys(),
         memberCandidates: mentionCandidates,
       });
-      return filterAdmittedMentionPubkeys(
-        extracted,
-        new Set([
-          ...agentIdentityPubkeys,
-          ...selectedAgentMentionPubkeysRef.current,
-        ]),
-        admittedAgentPubkeys,
-      );
+      // Selections are intent, not cached authorization. Never discard a
+      // selected key because a refresh removed it from the picker.
+      return extracted;
     },
-    [admittedAgentPubkeys, agentIdentityPubkeys, mentionCandidates],
+    [mentionCandidates],
   );
   const getSelectedAgentPubkeys = React.useRef(
     () => selectedAgentMentionPubkeysRef.current,
@@ -774,7 +769,9 @@ export function useMentions(
     currentPubkey,
     eligibilityScope: mentionChannelId
       ? { type: "channel", channelId: mentionChannelId }
-      : { type: "managed-only" },
+      : options?.channelType === "dm"
+        ? { type: "owned", channelId }
+        : { type: "managed-only" },
     sharedChannelIds,
     refetchManagedAgents: managedAgentsQuery.refetch,
   });
@@ -822,6 +819,7 @@ export function useMentions(
       mentionMapRef,
       personaMentionMapRef,
       selectedAgentNamesRef: selectedAgentMentionNamesRef,
+      selectedAgentPubkeysRef: selectedAgentMentionPubkeysRef,
       cancelAutocomplete: cancelMentionAutocomplete,
       setSelectedNames: setSelectedMentionNames,
       setSelectedAgentNames: setSelectedAgentMentionNames,

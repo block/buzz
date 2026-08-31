@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { snapshotDraftMentionRefs } from "../lib/draftMentionRefs.ts";
+import { AgentMentionAuthorizationError } from "../lib/agentMentionRevalidation.ts";
 import { submitMessageEdit } from "./submitMessageEdit.ts";
 
 const UNRESOLVED_USER = "b".repeat(64);
@@ -98,13 +99,16 @@ test("edit save revalidates added mentions immediately before save", async () =>
       content.includes("@Agent") ? [agent] : [],
     revalidateMentionPubkeys: async (pubkeys) => {
       calls.push(["revalidate", pubkeys]);
-      return [];
+      throw new AgentMentionAuthorizationError();
     },
+    restoreComposer: () => calls.push(["restore"]),
+    setUploadError: (error) => calls.push(["error", error]),
   });
 
   assert.deepEqual(calls, [
     ["revalidate", [agent]],
-    ["save", []],
+    ["restore"],
+    ["error", new AgentMentionAuthorizationError().message],
   ]);
 });
 
@@ -133,15 +137,18 @@ test("edit upload pause revalidates revoked mentions only after upload completes
     },
     revalidateMentionPubkeys: async (pubkeys) => {
       calls.push(["revalidate", pubkeys]);
-      return [];
+      throw new AgentMentionAuthorizationError();
     },
+    restoreComposer: () => calls.push(["restore"]),
+    setUploadError: (error) => calls.push(["error", error]),
   });
 
   assert.deepEqual(calls, []);
   await completeUpload();
   assert.deepEqual(calls, [
     ["revalidate", [agent]],
-    ["save", []],
+    ["restore"],
+    ["error", new AgentMentionAuthorizationError().message],
   ]);
 });
 

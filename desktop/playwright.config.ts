@@ -81,6 +81,7 @@ export default defineConfig({
         "**/mention-clipboard.spec.ts",
         "**/cloud-provenance.spec.ts",
         "**/mention-recipients.spec.ts",
+        "**/remote-owned-mentions.spec.ts",
         "**/team-mentions.spec.ts",
         "**/persistent-agent-audience.spec.ts",
         "**/relay-reconnect.spec.ts",

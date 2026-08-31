@@ -1,3 +1,4 @@
+import type { MentionRevalidationOptions } from "@/features/messages/lib/agentMentionRevalidation";
 import type { ManagedAgent } from "@/shared/api/types";
 import {
   type ImetaMedia,
@@ -169,4 +170,37 @@ export function isManagedAgentRunning(agent: ManagedAgent) {
 
 export function isProviderBackedAgent(agent: ManagedAgent) {
   return agent.backend.type === "provider";
+}
+
+/** Carry captured recipient identity through composer clearing and uploads. */
+export function mentionRevalidationOptions(
+  draft: Pick<
+    PendingNonMemberMentionSend,
+    "inlineAgentMentionPubkeys" | "addressedAgentPubkeys"
+  >,
+  phase: "prepare" | "publish",
+  preparedAgentPubkeys: readonly string[] = [],
+): MentionRevalidationOptions {
+  return {
+    phase,
+    intendedAgentPubkeys: uniqueNormalizedPubkeys([
+      ...draft.inlineAgentMentionPubkeys,
+      ...draft.addressedAgentPubkeys,
+      ...preparedAgentPubkeys,
+    ]),
+  };
+}
+
+/** Explicit Send without inviting retains nonmembers only as reference tags. */
+export function withoutInvitingRecipients(draft: PendingNonMemberMentionSend) {
+  const nonMemberPubkeys = new Set(draft.nonMemberPubkeys.map(normalizePubkey));
+  return {
+    mentionPubkeys: draft.mentionPubkeys.filter(
+      (pubkey) => !nonMemberPubkeys.has(normalizePubkey(pubkey)),
+    ),
+    outgoingTags: mergeOutgoingTagsWithReferenceMentions(
+      draft.outgoingTags,
+      nonMemberPubkeys,
+    ),
+  };
 }
