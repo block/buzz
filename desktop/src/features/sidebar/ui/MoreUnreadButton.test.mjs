@@ -7,6 +7,7 @@ import {
   canPreviewUnreadDm,
   MoreUnreadButton,
   preferredUnreadTarget,
+  sidebarOverflowTooltipLabel,
   unreadDmAccessibleLabel,
   visibleUnreadDmPreviews,
 } from "./MoreUnreadButton.tsx";
@@ -118,6 +119,7 @@ describe("MoreUnreadButton model", () => {
           preview("dm-three", "Group DM"),
           preview("dm-four", "Dana"),
         ],
+        emphasis: "primary",
         onClick() {},
         position: "bottom",
         targetChannelId: "dm-one",
@@ -154,5 +156,17 @@ describe("MoreUnreadButton model", () => {
       visibleUnreadDmPreviews(previews).map(({ channelId }) => channelId),
       ["dm-one", "dm-two"],
     );
+  });
+});
+
+describe("sidebar overflow tooltip", () => {
+  it("labels unread overflow without changing its unit", () => {
+    assert.equal(sidebarOverflowTooltipLabel(1, 0), "1 unread");
+    assert.equal(sidebarOverflowTooltipLabel(13, 0), "13 unreads");
+  });
+
+  it("adds a concise singular or plural mention breakdown", () => {
+    assert.equal(sidebarOverflowTooltipLabel(13, 1), "13 unreads (1 mention)");
+    assert.equal(sidebarOverflowTooltipLabel(13, 2), "13 unreads (2 mentions)");
   });
 });

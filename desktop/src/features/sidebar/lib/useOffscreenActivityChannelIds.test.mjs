@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { getOffscreenActivityChannelIds } from "./useOffscreenActivityChannelIds.ts";
-import { getSidebarActivityOverflowLabel } from "./useSidebarActivityOverflow.ts";
+import {
+  getOffscreenMentionCount,
+  getSidebarActivityOverflowLabel,
+  hasHighPriorityOverflow,
+} from "./useSidebarActivityOverflow.ts";
 
 test("keeps every unread channel navigable while adding working activity", () => {
   const activity = getOffscreenActivityChannelIds({
@@ -49,4 +53,35 @@ test("uses an activity-neutral overflow label when work contributes", () => {
     getSidebarActivityOverflowLabel({ activityCount: 1, messageCount: 1 }),
     undefined,
   );
+});
+
+test("counts offscreen mentions without treating unread DMs as mentions", () => {
+  const highPriority = new Set(["dm", "mention", "mention-without-count"]);
+  const dmChannels = new Set(["dm"]);
+  const counts = new Map([
+    ["dm", 3],
+    ["mention", 2],
+    ["channel", 8],
+  ]);
+
+  assert.equal(
+    getOffscreenMentionCount(
+      ["dm", "mention", "mention-without-count", "channel"],
+      dmChannels,
+      highPriority,
+      counts,
+    ),
+    2,
+  );
+});
+
+test("promotes only when the offscreen set includes actionable unread", () => {
+  const actionable = new Set(["dm", "mention"]);
+
+  assert.equal(
+    hasHighPriorityOverflow(["channel", "working"], actionable),
+    false,
+  );
+  assert.equal(hasHighPriorityOverflow(["channel", "dm"], actionable), true);
+  assert.equal(hasHighPriorityOverflow(["mention"], actionable), true);
 });
