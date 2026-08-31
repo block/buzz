@@ -1,5 +1,5 @@
 import { useSearch } from "@tanstack/react-router";
-import { Maximize2, Plus } from "lucide-react";
+import { ListTodo, Maximize2, Plus } from "lucide-react";
 import * as React from "react";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -15,6 +15,7 @@ import {
 } from "@/features/projects/lib/projectHomeWorkspaceSheet";
 import { ProjectSelectionProvider } from "@/features/projects/lib/useProjectSelection";
 import { useHealProjectHomeRepositories } from "@/features/projects/useHealProjectHomeRepositories";
+import { ChannelTaskList } from "@/features/tasks/ui/ChannelTaskList";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { RelayEvent } from "@/shared/api/types";
 import type { EntityLinkTab } from "@/shared/lib/entityLink";
@@ -107,6 +108,7 @@ export function ProjectChannelHome({
     messageId?: string;
   };
   const [summaryOpen, setSummaryOpen] = React.useState(true);
+  const [channelTasksOpen, setChannelTasksOpen] = React.useState(false);
   const [addRepositoryOpen, setAddRepositoryOpen] = React.useState(false);
   const [workspaceSheetTab, setWorkspaceSheetTab] =
     React.useState<ProjectHomeWorkspaceSheetTab | null>(null);
@@ -134,13 +136,14 @@ export function ProjectChannelHome({
     null;
   const workspaceSheetOpen =
     workspaceSheetTab != null && workspaceRepository != null;
-  const previousWorkspaceSheetOpenRef = React.useRef(workspaceSheetOpen);
-  const workspaceSheetVisibilityChanged =
-    previousWorkspaceSheetOpenRef.current !== workspaceSheetOpen;
+  const auxiliaryPanelOpen = channelTasksOpen || workspaceSheetOpen;
+  const previousAuxiliaryPanelOpenRef = React.useRef(auxiliaryPanelOpen);
+  const auxiliaryPanelVisibilityChanged =
+    previousAuxiliaryPanelOpenRef.current !== auxiliaryPanelOpen;
   React.useEffect(() => {
-    previousWorkspaceSheetOpenRef.current = workspaceSheetOpen;
-  }, [workspaceSheetOpen]);
-  const summaryVisible = summaryOpen && !workspaceSheetOpen;
+    previousAuxiliaryPanelOpenRef.current = auxiliaryPanelOpen;
+  }, [auxiliaryPanelOpen]);
+  const summaryVisible = summaryOpen && !auxiliaryPanelOpen;
 
   const openWorkspaceSheet = React.useCallback(
     (tab: ProjectHomeWorkspaceSheetTab, repositoryId?: string) => {
@@ -149,6 +152,7 @@ export function ProjectChannelHome({
       }
       setWorkspaceCreateAction(null);
       setWorkspaceDetail(null);
+      setChannelTasksOpen(false);
       setWorkspaceSheetTab((current) => (current === tab ? null : tab));
     },
     [],
@@ -158,6 +162,10 @@ export function ProjectChannelHome({
     setWorkspaceDetail(null);
     setWorkspaceSheetTab(null);
   }, []);
+  const closeAuxiliaryPanel = React.useCallback(() => {
+    setChannelTasksOpen(false);
+    closeWorkspaceSheet();
+  }, [closeWorkspaceSheet]);
   const handleOpenWorkspace = React.useCallback(
     (repositoryId: string, tab?: EntityLinkTab) => {
       if (!isProjectHomeWorkspaceSheetTab(tab)) {
@@ -239,10 +247,19 @@ export function ProjectChannelHome({
         tab={workspaceSheetTab}
       />
     ) : null;
+  const channelTaskPanel =
+    channelTasksOpen && homeChannel ? (
+      <div className="flex min-h-0 flex-col gap-3 py-3">
+        <p className="text-sm text-muted-foreground">
+          Tasks scoped to #{homeChannel.name}.
+        </p>
+        <ChannelTaskList channelId={homeChannel.id} />
+      </div>
+    ) : null;
 
   return (
     <ProjectSelectionProvider
-      resetKey={`${project.id}:${workspaceSheetTab ?? "home"}`}
+      resetKey={`${project.id}:${channelTasksOpen ? "channel-tasks" : (workspaceSheetTab ?? "home")}`}
     >
       <div
         className={cn(
@@ -264,23 +281,36 @@ export function ProjectChannelHome({
         >
           <ProjectDetailChrome
             actions={
-              <ProjectHomeHeaderToggle
-                label="Overview"
-                onClick={() => {
-                  if (workspaceSheetOpen) {
+              <>
+                <ProjectHomeHeaderToggle
+                  label="Overview"
+                  onClick={() => {
+                    if (auxiliaryPanelOpen) {
+                      closeAuxiliaryPanel();
+                      return;
+                    }
+                    setSummaryOpen((open) => !open);
+                  }}
+                  open={summaryVisible}
+                  testId="project-home-drawer-toggle"
+                >
+                  <DrawerPanelIcon
+                    className="-scale-x-100"
+                    side={summaryVisible ? "left" : "right"}
+                  />
+                </ProjectHomeHeaderToggle>
+                <ProjectHomeHeaderToggle
+                  label="Channel tasks"
+                  onClick={() => {
                     closeWorkspaceSheet();
-                    return;
-                  }
-                  setSummaryOpen((open) => !open);
-                }}
-                open={summaryVisible}
-                testId="project-home-drawer-toggle"
-              >
-                <DrawerPanelIcon
-                  className="-scale-x-100"
-                  side={summaryVisible ? "left" : "right"}
-                />
-              </ProjectHomeHeaderToggle>
+                    setChannelTasksOpen((open) => !open);
+                  }}
+                  open={channelTasksOpen}
+                  testId="project-home-channel-tasks-toggle"
+                >
+                  <ListTodo className="h-4 w-4" />
+                </ProjectHomeHeaderToggle>
+              </>
             }
             activeTabCrumb={null}
             activeWorkItemCrumb={null}
@@ -307,65 +337,75 @@ export function ProjectChannelHome({
                 }
                 currentIdentity={identityQuery.data}
                 currentProfile={profileQuery.data}
-                idleAuxiliaryPanel={workspaceSheet}
-                idleAuxiliaryHeaderActions={{
-                  actions: (
-                    <>
-                      {workspaceCreateAction ? (
-                        <Tooltip disableHoverableContent>
-                          <TooltipTrigger asChild>
-                            <Button
-                              aria-label={workspaceCreateAction.label}
-                              className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
-                              data-testid="project-home-workspace-sheet-create"
-                              disabled={workspaceCreateAction.disabled}
-                              onClick={workspaceCreateAction.onClick}
-                              size="icon"
-                              title={
-                                workspaceCreateAction.title ??
-                                workspaceCreateAction.label
-                              }
-                              type="button"
-                              variant="ghost"
-                            >
-                              <Plus className="h-4 w-4" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>
-                            {workspaceCreateAction.label}
-                          </TooltipContent>
-                        </Tooltip>
-                      ) : null}
-                      <Tooltip disableHoverableContent>
-                        <TooltipTrigger asChild>
-                          <Button
-                            aria-label={expandLabel}
-                            className="shrink-0"
-                            data-testid="project-home-workspace-sheet-expand"
-                            onClick={handleExpandWorkspace}
-                            size="icon"
-                            title={expandLabel}
-                            type="button"
-                            variant="ghost"
-                          >
-                            <Maximize2 />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>{expandLabel}</TooltipContent>
-                      </Tooltip>
-                    </>
-                  ),
-                  backLabel: workspaceDetail?.backLabel,
-                  onBack: workspaceDetail?.onBack,
-                }}
-                idleAuxiliaryOverridesThread={workspaceSheetOpen}
+                idleAuxiliaryPanel={
+                  channelTasksOpen ? channelTaskPanel : workspaceSheet
+                }
+                idleAuxiliaryHeaderActions={
+                  channelTasksOpen
+                    ? undefined
+                    : {
+                        actions: (
+                          <>
+                            {workspaceCreateAction ? (
+                              <Tooltip disableHoverableContent>
+                                <TooltipTrigger asChild>
+                                  <Button
+                                    aria-label={workspaceCreateAction.label}
+                                    className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
+                                    data-testid="project-home-workspace-sheet-create"
+                                    disabled={workspaceCreateAction.disabled}
+                                    onClick={workspaceCreateAction.onClick}
+                                    size="icon"
+                                    title={
+                                      workspaceCreateAction.title ??
+                                      workspaceCreateAction.label
+                                    }
+                                    type="button"
+                                    variant="ghost"
+                                  >
+                                    <Plus className="h-4 w-4" />
+                                  </Button>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                  {workspaceCreateAction.label}
+                                </TooltipContent>
+                              </Tooltip>
+                            ) : null}
+                            <Tooltip disableHoverableContent>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  aria-label={expandLabel}
+                                  className="shrink-0"
+                                  data-testid="project-home-workspace-sheet-expand"
+                                  onClick={handleExpandWorkspace}
+                                  size="icon"
+                                  title={expandLabel}
+                                  type="button"
+                                  variant="ghost"
+                                >
+                                  <Maximize2 />
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent>{expandLabel}</TooltipContent>
+                            </Tooltip>
+                          </>
+                        ),
+                        backLabel: workspaceDetail?.backLabel,
+                        onBack: workspaceDetail?.onBack,
+                      }
+                }
+                idleAuxiliaryOverridesThread={
+                  channelTasksOpen || workspaceSheetOpen
+                }
                 idleAuxiliaryTitle={
-                  workspaceSheetTab
-                    ? projectHomeWorkspaceSheetTitle(workspaceSheetTab)
-                    : ""
+                  channelTasksOpen
+                    ? "Channel tasks"
+                    : workspaceSheetTab
+                      ? projectHomeWorkspaceSheetTitle(workspaceSheetTab)
+                      : ""
                 }
                 onAddFiles={handleAddFiles}
-                onCloseIdleAuxiliaryPanel={closeWorkspaceSheet}
+                onCloseIdleAuxiliaryPanel={closeAuxiliaryPanel}
                 onCloseForumPost={ignoreForumPost}
                 onSelectForumPost={ignoreForumPostSelect}
                 selectedForumPostId={null}
@@ -396,7 +436,7 @@ export function ProjectChannelHome({
           projects={projects}
         />
         <ProjectContextRail
-          animateWidth={!workspaceSheetVisibilityChanged}
+          animateWidth={!auxiliaryPanelVisibilityChanged}
           open={summaryVisible}
           panelWidthPx={summaryWidth.widthPx}
           resizing={summaryWidth.isResizing}
