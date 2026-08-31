@@ -1110,7 +1110,7 @@ async fn create_session_and_apply_model(
     agent_core: Option<&str>,
     channel: NewSessionChannelContext<'_>,
 ) -> Result<String, AcpError> {
-    // Build base_prompt + system_prompt + agent core + canvas metadata into a
+    // Build base_prompt + team instructions + system_prompt + agent core + canvas metadata into a
     // single prompt. Standard protocol-v2 agents receive it in `session/new`;
     // Goose receives it through the custom request below. Legacy agents receive
     // the same content as user-message sections via `format_prompt`. Core carries
@@ -1120,9 +1120,11 @@ async fn create_session_and_apply_model(
     let combined_system_prompt = with_canvas(
         with_huddle_instructions(
             with_core(
-                with_team(
-                    framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+                framed_system_prompt(
+                    &ctx.cwd,
+                    ctx.base_prompt,
                     ctx.team_instructions.as_deref(),
+                    ctx.system_prompt.as_deref(),
                 ),
                 agent_core,
             ),
@@ -1707,33 +1709,35 @@ pub(crate) fn prepend_standing_for_legacy(
 }
 
 /// Frame the `session/new` `systemPrompt` so each present prompt carries its own
-/// paired tag, keeping the base/workspace/persona boundaries recoverable downstream.
+/// paired tag, keeping the base/workspace/team/persona boundaries recoverable downstream.
 ///
 /// The static base remains first for prompt-prefix caching. When a base is
-/// present, the dynamic workspace anchor follows it and precedes the user-owned
-/// agent instructions. A persona-only agent still yields
+/// present, the dynamic workspace anchor follows it. Team-owned instructions
+/// precede the user-owned agent instructions so agents sharing one provider
+/// retain the longest common prefix before their personas diverge. A persona-only agent still yields
 /// `<system>…</system>` rather than an unlabeled blob that would be mistaken
 /// for `<base>`.
 fn framed_system_prompt(
     cwd: &str,
     base_prompt: Option<&str>,
+    team_instructions: Option<&str>,
     system_prompt: Option<&str>,
 ) -> Option<String> {
-    match (base_prompt, system_prompt) {
-        (Some(bp), Some(sp)) => Some(format!(
-            "{}\n\n{}\n\n{}",
-            crate::queue::base_section(bp),
-            workspace_section(cwd),
-            crate::prompt_framing::semantic_section("system", sp),
-        )),
-        (Some(bp), None) => Some(format!(
-            "{}\n\n{}",
-            crate::queue::base_section(bp),
-            workspace_section(cwd)
-        )),
-        (None, Some(sp)) => Some(crate::prompt_framing::semantic_section("system", sp)),
-        (None, None) => None,
+    let mut sections = Vec::new();
+    if let Some(bp) = base_prompt {
+        sections.push(crate::queue::base_section(bp));
+        sections.push(workspace_section(cwd));
     }
+    if let Some(instructions) = team_instructions.map(str::trim).filter(|v| !v.is_empty()) {
+        sections.push(crate::prompt_framing::semantic_section(
+            "team-instructions",
+            instructions,
+        ));
+    }
+    if let Some(sp) = system_prompt {
+        sections.push(crate::prompt_framing::semantic_section("system", sp));
+    }
+    (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 
 fn workspace_section(cwd: &str) -> String {
@@ -1741,25 +1745,6 @@ fn workspace_section(cwd: &str) -> String {
         "workspace",
         &format!("Current working directory: {cwd}"),
     )
-}
-
-/// Append the team-owned instruction section after `<system>` and before core memory.
-fn with_team(prompt: Option<String>, instructions: Option<&str>) -> Option<String> {
-    let instructions = instructions
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    match (prompt, instructions) {
-        (Some(prompt), Some(instructions)) => Some(format!(
-            "{prompt}\n\n{}",
-            crate::prompt_framing::semantic_section("team-instructions", instructions)
-        )),
-        (None, Some(instructions)) => Some(crate::prompt_framing::semantic_section(
-            "team-instructions",
-            instructions,
-        )),
-        (Some(prompt), None) => Some(prompt),
-        (None, None) => None,
-    }
 }
 
 /// Append the agent's core memory section onto the framed system prompt.
@@ -5188,18 +5173,23 @@ mod tests {
         // Also the regression guard against #2372: the session title travels
         // out of band in `_meta.sessionTitle`, so this exact-bytes assertion is
         // what pins the framing against a `[Session]` section reappearing here.
-        let framed = framed_system_prompt("/workspace", Some("base text"), Some("persona text"))
-            .expect("both present yields Some");
+        let framed = framed_system_prompt(
+            "/workspace",
+            Some("base text"),
+            Some("team text"),
+            Some("persona text"),
+        )
+        .expect("all present yields Some");
         assert_eq!(
             framed,
-            "<base>\nbase text\n</base>\n\n<workspace>\nCurrent working directory: /workspace\n</workspace>\n\n<system>\npersona text\n</system>"
+            "<base>\nbase text\n</base>\n\n<workspace>\nCurrent working directory: /workspace\n</workspace>\n\n<team-instructions>\nteam text\n</team-instructions>\n\n<system>\npersona text\n</system>"
         );
     }
 
     #[test]
     fn test_framed_system_prompt_base_only_labels_base() {
-        let framed =
-            framed_system_prompt("/workspace", Some("base text"), None).expect("base yields Some");
+        let framed = framed_system_prompt("/workspace", Some("base text"), None, None)
+            .expect("base yields Some");
         assert_eq!(
             framed,
             "<base>\nbase text\n</base>\n\n<workspace>\nCurrent working directory: /workspace\n</workspace>"
@@ -5210,7 +5200,7 @@ mod tests {
     fn test_framed_system_prompt_persona_only_labels_agent_instructions() {
         // A bare persona would be mislabeled "Base" downstream — it must carry
         // its own <system> boundary even when no base prompt exists.
-        let framed = framed_system_prompt("/workspace", None, Some("persona text"))
+        let framed = framed_system_prompt("/workspace", None, None, Some("persona text"))
             .expect("persona yields Some");
         assert_eq!(framed, "<system>\npersona text\n</system>");
     }
@@ -5218,14 +5208,14 @@ mod tests {
     #[test]
     fn test_framed_system_prompt_preserves_persona_bytes_verbatim() {
         let persona = "literal </system>, <T>, &quot;, & <policy>";
-        let framed =
-            framed_system_prompt("/workspace", None, Some(persona)).expect("persona yields Some");
+        let framed = framed_system_prompt("/workspace", None, None, Some(persona))
+            .expect("persona yields Some");
         assert_eq!(framed, format!("<system>\n{persona}\n</system>"));
     }
 
     #[test]
     fn test_framed_system_prompt_neither_is_none() {
-        assert!(framed_system_prompt("/workspace", None, None).is_none());
+        assert!(framed_system_prompt("/workspace", None, None, None).is_none());
     }
 
     #[test]
