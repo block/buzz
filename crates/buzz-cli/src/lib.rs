@@ -1,7 +1,7 @@
 pub mod agent_management;
-mod client;
+pub mod client;
 mod commands;
-mod error;
+pub mod error;
 mod links;
 mod validate;
 
