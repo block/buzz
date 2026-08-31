@@ -8,6 +8,8 @@ import 'package:http/testing.dart' as http_testing;
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 import 'package:buzz/shared/auth/auth_provider.dart';
+import 'package:buzz/shared/community/community.dart';
+import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
 void main() {
@@ -1616,6 +1618,73 @@ void main() {
     sockets.last.disconnectWith(Exception('connection lost'));
     expect(session.state.reconnectAttempt, 2);
     expect(observed, hasLength(settled + 1));
+  });
+
+  test('an unchanged relay config does not replace the socket', () async {
+    // The production loop this pins. RelayConfigNotifier rebuilds whenever the
+    // active community re-emits, and reservePushLeaseGeneration saves the
+    // community on every publish attempt. Without RelayConfig value equality
+    // each rebuild produced a new-but-identical config, and
+    // RelaySessionNotifier.build() disposes its socket and reconnects — so the
+    // publish tore down the very session it was publishing over.
+    final sockets = <_ControlledRelaySocket>[];
+    final keychain = nostr.Keys.generate();
+    var relayUrl = 'https://relay.example';
+    final session = RelaySessionNotifier(
+      socketFactory:
+          ({
+            required wsUrl,
+            required nsec,
+            required onMessage,
+            required onConnected,
+            required onDisconnected,
+          }) {
+            final socket = _ControlledRelaySocket(
+              wsUrl: wsUrl,
+              nsec: nsec,
+              onMessage: onMessage,
+              onConnected: onConnected,
+              onDisconnected: onDisconnected,
+            );
+            sockets.add(socket);
+            return socket;
+          },
+    );
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => session),
+        authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
+        activeCommunityProvider.overrideWith(
+          (ref) async => Community(
+            id: 'community-1',
+            name: 'Buzz',
+            relayUrl: relayUrl,
+            nsec: keychain.nsec,
+            addedAt: DateTime.utc(2026, 8, 5),
+          ),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+    final subscription = container.listen(relaySessionProvider, (_, _) {});
+    addTearDown(subscription.close);
+    await container.read(activeCommunityProvider.future);
+    await Future<void>.delayed(Duration.zero);
+    expect(sockets, hasLength(1));
+
+    // Rebuild the config from an unchanged community: no new socket.
+    container.invalidate(activeCommunityProvider);
+    await container.read(activeCommunityProvider.future);
+    await Future<void>.delayed(Duration.zero);
+    expect(sockets, hasLength(1));
+
+    // A genuine relay change must still reconnect.
+    relayUrl = 'https://other.example';
+    container.invalidate(activeCommunityProvider);
+    await container.read(activeCommunityProvider.future);
+    await Future<void>.delayed(Duration.zero);
+    expect(sockets, hasLength(2));
   });
 }
 
