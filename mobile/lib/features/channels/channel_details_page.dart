@@ -672,6 +672,7 @@ class _ChannelMemberPreviewRow extends StatelessWidget {
         radius: 20,
         backgroundColor: context.colors.primaryContainer,
         fallback: Text(label.isEmpty ? '?' : label[0].toUpperCase()),
+        isAgent: member.isBot,
       ),
       title: Text.rich(
         TextSpan(

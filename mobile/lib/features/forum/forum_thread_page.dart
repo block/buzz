@@ -645,6 +645,7 @@ class _Avatar extends StatelessWidget {
           color: context.colors.onPrimaryContainer,
         ),
       ),
+      isAgent: profile?.ownerPubkey != null,
     );
   }
 }

@@ -45,6 +45,7 @@ export function ProfileIdentityButton({
         avatarUrl={avatarUrl}
         className={avatarClassName}
         displayName={label}
+        shape={isAgent ? "squircle" : "circle"}
         size={avatarSize}
       />
       {showLabel ? (

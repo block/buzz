@@ -261,6 +261,7 @@ export function PullRequestReviewersRow({
                     accent={candidate.isAgent}
                     avatarUrl={candidate.avatarUrl}
                     displayName={label}
+                    shape={candidate.isAgent ? "squircle" : "circle"}
                     size="xs"
                   />
                   <span className="min-w-0 flex-1">

@@ -1,6 +1,5 @@
 import { Search } from "lucide-react";
 import * as React from "react";
-
 import { resolveUserLabel } from "@/features/profile/lib/identity";
 import { getMinimumSearchQueryLength } from "@/features/search/hooks";
 import { parseSearchOperators } from "@/features/search/lib/parseSearchOperators";
@@ -30,7 +29,6 @@ import {
 } from "@/shared/ui/mentionChip";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-
 type TopbarSearchProps = {
   channelLabels?: Record<string, string>;
   channels: Channel[];
@@ -48,7 +46,6 @@ type TopbarSearchProps = {
   scopeFocusRequest?: number;
   variant?: "bar" | "icon";
 };
-
 const MAX_SEARCH_SUGGESTIONS = 4;
 const SEARCH_RESULT_LIMIT = 40;
 const SEARCH_SECTION_TITLE_CLASS =
@@ -61,23 +58,18 @@ const SEARCH_RESULT_SECTION_ORDER = [
   "messages",
   "actions",
 ] as const;
-
 type SearchResultSectionKey = (typeof SEARCH_RESULT_SECTION_ORDER)[number];
-
 type SearchResultSection = {
   key: SearchResultSectionKey;
   results: SearchResult[];
   title: string;
 };
-
 type SearchHitContextLabel = {
   channelLabel: string | null;
   text: string;
 };
-
 function formatRelativeTime(unixSeconds: number) {
   const diff = Math.floor(Date.now() / 1_000) - unixSeconds;
-
   if (diff < 60) {
     return "just now";
   }
@@ -736,6 +728,12 @@ export function TopbarSearch({
               pubkey: result.hit.pubkey,
               preferResolvedSelfLabel: true,
             })}
+            shape={
+              resultProfiles?.[result.hit.pubkey.toLowerCase()]?.isAgent ===
+              true
+                ? "squircle"
+                : "circle"
+            }
             size="md"
           />
         ) : result.kind === "user" ? (
@@ -743,6 +741,7 @@ export function TopbarSearch({
             avatarUrl={result.user.avatarUrl}
             className="h-7 w-7"
             displayName={userDisplayName ?? result.user.pubkey}
+            shape={result.user.isAgent ? "squircle" : "circle"}
             size="sm"
           />
         ) : (

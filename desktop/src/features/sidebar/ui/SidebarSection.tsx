@@ -153,6 +153,7 @@ function ChannelWorkingBadge({
 export type SidebarDmParticipant = {
   avatarUrl: string | null;
   label: string;
+  isAgent?: boolean;
   pubkey: string;
 };
 
@@ -197,6 +198,7 @@ function DmChannelIcon({
           geometry={DM_AVATAR_STATUS_GEOMETRY}
           iconClassName="h-3.5 w-3.5"
           label={primaryParticipant.label}
+          shape={primaryParticipant.isAgent ? "squircle" : "circle"}
           size={DM_AVATAR_SIZE}
           status={presenceStatus}
           statusTestId={`channel-presence-${channelName}`}

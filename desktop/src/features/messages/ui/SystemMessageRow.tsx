@@ -417,6 +417,12 @@ function MemberNamesInlineList({
                 {hiddenTargets.map((pubkey) => (
                   <div className="flex items-center gap-2" key={pubkey}>
                     <UserAvatar
+                      accent={isKnownAgentPubkey(
+                        pubkey,
+                        profiles,
+                        personaLookup,
+                        agentPubkeys,
+                      )}
                       avatarUrl={resolveAvatarUrl(pubkey, profiles)}
                       className="!h-5 !w-5 shrink-0 text-3xs"
                       displayName={resolveDisplayLabel(
@@ -424,6 +430,16 @@ function MemberNamesInlineList({
                         currentPubkey,
                         profiles,
                       )}
+                      shape={
+                        isKnownAgentPubkey(
+                          pubkey,
+                          profiles,
+                          personaLookup,
+                          agentPubkeys,
+                        )
+                          ? "squircle"
+                          : "circle"
+                      }
                     />
                     <span className="min-w-0 truncate">
                       {resolveDisplayLabel(pubkey, currentPubkey, profiles)}
@@ -865,7 +881,9 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
           <div className="flex justify-center">
             <div className="flex min-w-0 max-w-[min(40rem,80%)] items-center gap-2">
               <MembershipAvatarStack
+                agentPubkeys={agentPubkeys}
                 currentPubkey={currentPubkey}
+                personaLookup={personaLookup}
                 profiles={profiles}
                 pubkeys={membershipPubkeys}
               />

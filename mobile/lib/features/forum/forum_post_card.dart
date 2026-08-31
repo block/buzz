@@ -328,6 +328,7 @@ class _PostAvatar extends StatelessWidget {
           fontWeight: FontWeight.w600,
         ),
       ),
+      isAgent: profile?.ownerPubkey != null,
     );
   }
 }

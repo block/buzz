@@ -27,6 +27,7 @@ type ProfileAvatarProps = {
   iconClassName?: string;
   imageClassName?: string;
   plain?: boolean;
+  shape?: "circle" | "squircle";
   testId?: string;
   /**
    * Suppress every network image request for a publisher-controlled avatar
@@ -49,6 +50,7 @@ export function ProfileAvatar({
   iconClassName,
   imageClassName,
   plain = false,
+  shape = "circle",
   testId,
   untrusted = false,
 }: ProfileAvatarProps) {
@@ -94,6 +96,7 @@ export function ProfileAvatar({
     <Avatar
       className={cn(
         "shrink-0 text-primary shadow-xs",
+        shape === "squircle" && "rounded-[30%]",
         // Animated avatars carry their own backdrop disc and transparent
         // surroundings — any container fill would flatten the pop-out.
         plain || animated ? "bg-transparent shadow-none" : "bg-primary/20",

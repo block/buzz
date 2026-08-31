@@ -140,6 +140,7 @@ function RelayMemberRow({
           avatarUrl={profile?.avatarUrl ?? null}
           className="h-9 w-9 text-xs shadow-none"
           label={displayName}
+          shape={profile?.isAgent === true ? "squircle" : "circle"}
         />
       </UserProfilePopover>
       <div className="min-w-0 flex-1">

@@ -53,6 +53,7 @@ export function AgentIdentityCard({
                 className="h-full w-full border-[3px] border-background bg-muted shadow-none"
                 iconClassName="h-8 w-8"
                 label={label}
+                shape="squircle"
               />
             ) : (
               <IdentityInitialsAvatar

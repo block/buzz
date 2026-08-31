@@ -472,6 +472,7 @@ class _RowAvatar extends StatelessWidget {
           color: context.colors.onPrimaryContainer,
         ),
       ),
+      isAgent: profile?.ownerPubkey != null,
     );
   }
 }
