@@ -604,14 +604,36 @@ pub const KIND_HUDDLE_GUIDELINES: u32 = 48106;
 /// does not itself carry. The relay stores and fans out the announcement; the
 /// media itself never transits the relay.
 ///
-/// Channel-scoped via `h`. Only a registered agent may announce one, and
-/// ownership is the signature rather than a tag — an agent does not `p`-tag
-/// itself. An `e` tag references the message that triggered the session, so
-/// clients can anchor the session to it.
+/// Channel-scoped via `h`. Ownership is the signature rather than a tag — an
+/// agent does not `p`-tag itself. An `e` tag references the message that
+/// triggered the session, so clients can anchor the session to it.
+///
+/// **Only a registered agent may announce one**, and that is a stricter test
+/// than channel membership: the relay resolves an owner for the signing pubkey
+/// and refuses the announcement when there is none. A plain member cannot
+/// announce a session, and neither can an agent whose channel role merely says
+/// `bot` — the role and the registration are different facts. An external agent
+/// becomes registered by presenting a NIP-OA `auth` tag — an owner-signed
+/// attestation over the agent's own pubkey — inside its NIP-42 `AUTH` event,
+/// which the relay verifies and records. See
+/// `buzz_sdk::nip_oa::compute_auth_tag` for the construction; note that
+/// nothing in this repository mints such a tag outside of tests, so a gateway
+/// author has to build one.
 ///
 /// Content is a versioned JSON body naming the provider, its connection
 /// parameters, a token endpoint, the participant list, the track kinds a viewer
 /// may subscribe to or publish, and `expires_at`.
+///
+/// `token_endpoint` is fetched by clients rather than by the relay, so it
+/// carries one obligation the relay cannot check: it **must answer CORS
+/// preflight requests**. A viewer authenticates its token request with a NIP-98
+/// `Authorization` header, which is never a "simple" header, so the browser
+/// sends `OPTIONS` first and blocks the real request when that goes
+/// unanswered. The failure is worth stating because it misleads: the request
+/// never reaches the endpoint's handler, so the client reports an opaque
+/// network error and the gateway's own logs show only a rejected `OPTIONS` —
+/// which reads as unreachable rather than as misconfigured. The relay validates
+/// only that the scheme is http(s).
 ///
 /// `expires_at` is a unix timestamp after which clients stop rendering the
 /// session. It is a **presentation expiry, not a lease**: it reaps nothing on
