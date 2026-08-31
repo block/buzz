@@ -348,8 +348,15 @@ impl EventQueue {
         // Relay replay delivers stored events newest-first (`ORDER BY
         // created_at DESC`), but batch consumers — `format_prompt` scope and
         // reply-anchor selection — require the LAST event to be the newest.
-        // Stable sort: same-second events keep delivery order.
-        events.sort_by_key(|be| be.event.created_at);
+        // Same-second relay order is not authoritative, so use the signed event
+        // id as a deterministic tie-breaker. The exact order is later bound
+        // into the authenticated delivery id and reply anchor.
+        events.sort_by(|left, right| {
+            left.event
+                .created_at
+                .cmp(&right.event.created_at)
+                .then_with(|| left.event.id.to_hex().cmp(&right.event.id.to_hex()))
+        });
 
         // Remove the queue entry if now empty.
         if self.queues.get(&channel_id).is_some_and(|q| q.is_empty()) {
@@ -2135,9 +2142,9 @@ mod tests {
         let mut q = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
 
-        q.push(make_queued(ch, "msg1"));
-        q.push(make_queued(ch, "msg2"));
-        q.push(make_queued(ch, "msg3"));
+        q.push(make_queued_created_at(ch, "msg1", 1_000));
+        q.push(make_queued_created_at(ch, "msg2", 2_000));
+        q.push(make_queued_created_at(ch, "msg3", 3_000));
 
         assert_eq!(pending_count(&q), 3);
 
@@ -2179,6 +2186,24 @@ mod tests {
             prompt.contains(&format!("--reply-to {newest_id}")),
             "reply anchor must target the newest event; prompt was:\n{prompt}"
         );
+    }
+
+    #[test]
+    fn test_flush_orders_same_second_events_by_signed_id() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.push(make_queued_created_at(ch, "first arrival", 2_000));
+        q.push(make_queued_created_at(ch, "second arrival", 2_000));
+
+        let batch = q.flush_next().expect("should return batch");
+        let ids = batch
+            .events
+            .iter()
+            .map(|event| event.event.id.to_hex())
+            .collect::<Vec<_>>();
+        let mut expected = ids.clone();
+        expected.sort();
+        assert_eq!(ids, expected, "same-second ordering must be deterministic");
     }
 
     #[test]
@@ -2500,8 +2525,8 @@ mod tests {
     fn test_requeue_preserves_events() {
         let mut queue = EventQueue::new(DedupMode::Queue);
         let ch = Uuid::new_v4();
-        queue.push(make_queued(ch, "msg1"));
-        queue.push(make_queued(ch, "msg2"));
+        queue.push(make_queued_created_at(ch, "msg1", 1_000));
+        queue.push(make_queued_created_at(ch, "msg2", 2_000));
 
         let batch = queue.flush_next().unwrap();
         assert_eq!(batch.events.len(), 2);
@@ -5155,9 +5180,9 @@ mod tests {
 
         // Three events arrive in order: e1, e2 (already queued), then e3
         // (the latest mid-turn mention being steered).
-        let e1 = make_queued_at(ch, "e1", Duration::from_millis(30));
-        let e2 = make_queued_at(ch, "e2", Duration::from_millis(20));
-        let e3 = make_queued_at(ch, "e3", Duration::from_millis(10));
+        let e1 = make_queued_created_at(ch, "e1", 1_000);
+        let e2 = make_queued_created_at(ch, "e2", 2_000);
+        let e3 = make_queued_created_at(ch, "e3", 3_000);
         let e1_id = e1.event.id.to_hex();
         let e2_id = e2.event.id.to_hex();
         let e3_id = e3.event.id.to_hex();

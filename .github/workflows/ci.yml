@@ -382,6 +382,7 @@ jobs:
             --lib \
             --bin buzz-relay \
             --test e2e_event_reminder \
+            --test membership_revision_precondition \
             --archive-file target/ci/backend-integration-tests.tar.zst
       - name: Save relay artifacts cache
         # PR-scoped exact-source entries cannot warm main or other PRs and churn
@@ -783,6 +784,20 @@ jobs:
             --run-ignored ignored-only
         env:
           DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+      - name: Prepared-event membership-race test (H1)
+        # The prepared-publish vs membership-change race probe drives the
+        # relay's real ingest entry point against real Postgres and an
+        # advisory lock held by the test. #[ignore]d in the default suite
+        # behind an explicit BUZZ_TEST_DATABASE_URL, selected explicitly here
+        # — see crates/buzz-relay/tests/membership_revision_precondition.rs.
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and binary(membership_revision_precondition) and test(rejects_dm_publish_after_membership_changes)' \
+            --run-ignored ignored-only
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+          BUZZ_TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
       - name: NIP-ER reminder e2e
         # Feature e2e for NIP-ER (Event Reminders, kind:30300): write-path
         # validation, author-only read filtering, and scheduler delivery against

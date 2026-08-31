@@ -515,6 +515,12 @@ pub enum TimeoutKind {
 pub enum PromptOutcome {
     Ok(StopReason),
     Error(AcpError),
+    /// Authenticated reply publication failed due to a retryable network or
+    /// delivery-unknown outcome. The triggering batch may be retried.
+    TrustedPublishRetryable,
+    /// The authenticated response or durable record requires manual review.
+    /// The triggering batch must never be automatically retried.
+    TrustedPublishTerminal,
     /// Local relay state could not establish project authority. The ACP
     /// process is healthy; preserve the batch for bounded retry.
     ProjectContextIndeterminate(String),
@@ -736,8 +742,13 @@ pub struct PromptContext {
     /// `--no-memory` / `BUZZ_ACP_NO_MEMORY`.
     pub memory_enabled: bool,
     /// Harness identity string for NIP-AM `harness` field. Derived from the
-    /// configured `agent_command` at startup (e.g. `"goose"`, `"buzz-agent"`).
+    /// frozen executable/argument pair at startup (e.g. `"goose"`, `"gabe-acp"`).
     pub harness_name: String,
+    /// Startup-captured non-secret identity pin for the trusted Gabe harness.
+    /// Ordinary ACP runtimes leave this unset and retain legacy prompt framing.
+    pub managed_agent_pubkey_pin: Option<String>,
+    /// Host-only capability and publish inputs for the trusted adapter.
+    pub(crate) trusted_publish: Option<crate::config::TrustedPublishConfig>,
     /// Relay URL this harness is connected to. Rides in observer payloads that
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
@@ -2509,7 +2520,7 @@ pub async fn run_prompt_task(
             tracing::info!(
                 target: "pool::prompt",
                 channel = %b.channel_id,
-                command = %cmd,
+                command_bytes = cmd.len(),
                 "slash-command pass-through"
             );
         }
@@ -2568,6 +2579,33 @@ pub async fn run_prompt_task(
             .collect(),
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
+    let verified_prompt_params = match build_verified_buzz_prompt_params_for_batch(
+        batch.as_ref(),
+        &session_id,
+        &prompt_blocks,
+        &ctx,
+    )
+    .await
+    {
+        Ok(params) => params,
+        Err(error) => {
+            tracing::warn!(
+                target: "pool::prompt",
+                error_class = "buzz_envelope_rejected",
+                "trusted Buzz prompt envelope could not be built"
+            );
+            agent.state.invalidate(&source);
+            send_prompt_result(
+                &result_tx,
+                &turn_id,
+                agent,
+                source,
+                PromptOutcome::Error(error),
+                requeue_batch_if_queue(&ctx, batch),
+            );
+            return;
+        }
+    };
     let prompt_bytes: usize = prompt_blocks.iter().map(|block| block.len()).sum();
     let has_standing_context = match &source {
         PromptSource::Channel(_) => !standing.sections().is_empty(),
@@ -2612,10 +2650,9 @@ pub async fn run_prompt_task(
             // Heartbeat / non-cancellable path.
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_blocks_with_idle_timeout(
-                    &session_id,
-                    &prompt_blocks,
-                    ctx.idle_timeout,
+                result = send_prompt_with_optional_buzz_envelope(
+                    &mut agent.acp, &session_id, &prompt_blocks,
+                    verified_prompt_params.as_ref(), ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
             }
@@ -2623,10 +2660,9 @@ pub async fn run_prompt_task(
         Some(rx) => {
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_blocks_with_idle_timeout(
-                    &session_id,
-                    &prompt_blocks,
-                    ctx.idle_timeout,
+                result = send_prompt_with_optional_buzz_envelope(
+                    &mut agent.acp, &session_id, &prompt_blocks,
+                    verified_prompt_params.as_ref(), ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
                 mode = rx => {
@@ -2747,6 +2783,33 @@ pub async fn run_prompt_task(
                             );
                         }
                         log_stop_reason(&source, &StopReason::EndTurn);
+                        if let Some(prompt) = verified_prompt_params.as_ref() {
+                            let publish_result = match agent.acp.take_prompt_result() {
+                                Some(result) => {
+                                    verify_and_publish_trusted_reply(&ctx, prompt, result).await
+                                }
+                                None => Err(TrustedReplyFailure::Terminal),
+                            };
+                            if let Err(failure) = publish_result {
+                                agent.state.invalidate(&source);
+                                let outcome = trusted_publish_outcome(failure);
+                                let retry_batch = match failure {
+                                    TrustedReplyFailure::Retryable => {
+                                        requeue_batch_if_queue(&ctx, batch)
+                                    }
+                                    TrustedReplyFailure::Terminal => batch,
+                                };
+                                send_prompt_result(
+                                    &result_tx,
+                                    &turn_id,
+                                    agent,
+                                    source,
+                                    outcome,
+                                    retry_batch,
+                                );
+                                return;
+                            }
+                        }
                         if let PromptSource::Channel(cid) = &source {
                             let standing_sent = !agent.has_system_prompt_support();
                             record_channel_delivery_success(
@@ -2785,6 +2848,25 @@ pub async fn run_prompt_task(
             }
         }
     };
+
+    if prompt_result.is_ok() {
+        if let Some(prompt) = verified_prompt_params.as_ref() {
+            let publish_result = match agent.acp.take_prompt_result() {
+                Some(result) => verify_and_publish_trusted_reply(&ctx, prompt, result).await,
+                None => Err(TrustedReplyFailure::Terminal),
+            };
+            if let Err(failure) = publish_result {
+                agent.state.invalidate(&source);
+                let outcome = trusted_publish_outcome(failure);
+                let retry_batch = match failure {
+                    TrustedReplyFailure::Retryable => requeue_batch_if_queue(&ctx, batch),
+                    TrustedReplyFailure::Terminal => batch,
+                };
+                send_prompt_result(&result_tx, &turn_id, agent, source, outcome, retry_batch);
+                return;
+            }
+        }
+    }
 
     match prompt_result {
         Ok(stop_reason) => {
@@ -3075,8 +3157,18 @@ async fn fetch_channel_info_once(channel_id: Uuid, rest: &RestClient) -> Option<
     {
         Ok(Ok(json)) => {
             let events = json.as_array()?;
-            let ev = events.first()?;
-            let tags = ev.get("tags")?.as_array()?;
+            let event: nostr::Event = serde_json::from_value(events.first()?.clone()).ok()?;
+            event.verify().ok()?;
+            let channel_text = channel_id.to_string();
+            if !event.tags.iter().any(|tag| {
+                let values = tag.as_slice();
+                values.first().map(String::as_str) == Some("d")
+                    && values.get(1).map(String::as_str) == Some(channel_text.as_str())
+            }) {
+                return None;
+            }
+            let tag_values = serde_json::to_value(&event.tags).ok()?;
+            let tags = tag_values.as_array()?;
             let mut name = None;
             let mut description = None;
             for tag in tags {
@@ -3223,6 +3315,269 @@ fn huddle_instructions_from_query_response(
     }
     let content = event.content.trim();
     (!content.is_empty()).then(|| content.to_owned())
+}
+
+/// Fetch and verify the current replaceable membership event for one channel.
+/// The authenticated relay query supplies the authoritative snapshot; the
+/// embedded Nostr signature and channel `d` tag are still checked before use.
+async fn fetch_verified_channel_members(
+    channel_id: Uuid,
+    rest: &RestClient,
+) -> Result<Vec<(String, String)>, AcpError> {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let d_tag = SingleLetterTag::lowercase(Alphabet::D);
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_NIP29_GROUP_MEMBERS as u16,
+        ))
+        .custom_tags(d_tag, [channel_id.to_string()]);
+    let response = timeout(CONTEXT_FETCH_TIMEOUT, rest.query(&[filter]))
+        .await
+        .map_err(|_| AcpError::Protocol("Buzz membership lookup timed out".into()))?
+        .map_err(|_| AcpError::Protocol("Buzz membership lookup failed".into()))?;
+    let event_value = response
+        .as_array()
+        .and_then(|events| events.first())
+        .cloned()
+        .ok_or_else(|| AcpError::Protocol("Buzz membership snapshot is absent".into()))?;
+    let event: nostr::Event = serde_json::from_value(event_value)
+        .map_err(|_| AcpError::Protocol("Buzz membership snapshot is malformed".into()))?;
+    event
+        .verify()
+        .map_err(|_| AcpError::Protocol("Buzz membership signature is invalid".into()))?;
+
+    let channel_text = channel_id.to_string();
+    let has_channel = event.tags.iter().any(|tag| {
+        let values = tag.as_slice();
+        values.first().map(String::as_str) == Some("d")
+            && values.get(1).map(String::as_str) == Some(channel_text.as_str())
+    });
+    if !has_channel {
+        return Err(AcpError::Protocol(
+            "Buzz membership snapshot channel does not match".into(),
+        ));
+    }
+    let members = event
+        .tags
+        .iter()
+        .filter_map(|tag| {
+            let values = tag.as_slice();
+            if values.first().map(String::as_str) != Some("p") {
+                return None;
+            }
+            Some((values.get(1)?.clone(), values.get(3)?.clone()))
+        })
+        .collect::<Vec<_>>();
+    if members.is_empty() {
+        return Err(AcpError::Protocol(
+            "Buzz membership snapshot contains no members".into(),
+        ));
+    }
+    Ok(members)
+}
+
+async fn build_verified_buzz_prompt_params_for_batch(
+    batch: Option<&FlushBatch>,
+    session_id: &str,
+    prompt_blocks: &[&str],
+    ctx: &PromptContext,
+) -> Result<Option<VerifiedTrustedPrompt>, AcpError> {
+    let Some(batch) = batch else {
+        return Ok(None);
+    };
+    if ctx.harness_name != crate::config::TrustedOutboxHarness::Gabe.as_str()
+        && ctx.harness_name != crate::config::TrustedOutboxHarness::Stacy.as_str()
+    {
+        return Ok(None);
+    }
+    let pinned_agent = require_managed_agent_pin(ctx.managed_agent_pubkey_pin.as_deref())?;
+    let actual_agent = ctx.agent_keys.public_key().to_hex().to_ascii_lowercase();
+    if pinned_agent != actual_agent {
+        return Err(AcpError::Protocol(
+            "managed Buzz agent identity does not match the verified identity pin".into(),
+        ));
+    }
+    if !batch.cancelled_events.is_empty() {
+        return Err(AcpError::Protocol(
+            "trusted Buzz P0 deliveries require queue mode".into(),
+        ));
+    }
+    let channel_info = ctx
+        .channel_info
+        .resolve(batch.channel_id)
+        .await
+        .map_err(|_| AcpError::Protocol("Buzz project metadata is unavailable".into()))?
+        .ok_or_else(|| AcpError::Protocol("Buzz channel metadata is unavailable".into()))?;
+    let owner = ctx
+        .agent_owner_pubkey
+        .as_ref()
+        .ok_or_else(|| AcpError::Protocol("Buzz owner identity is unavailable".into()))?;
+    let members = fetch_verified_channel_members(batch.channel_id, &ctx.rest_client).await?;
+    if batch
+        .events
+        .iter()
+        .any(|batch_event| batch_event.event.kind.as_u16() != 9)
+    {
+        return Err(AcpError::Protocol(
+            "trusted Buzz deliveries accept only kind-9 chat events".into(),
+        ));
+    }
+    let mut events = batch
+        .events
+        .iter()
+        .map(|batch_event| batch_event.event.clone())
+        .collect::<Vec<_>>();
+    events.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.id.to_hex().cmp(&right.id.to_hex()))
+    });
+    let mut params = crate::buzz_envelope::build_verified_buzz_prompt_params(
+        crate::buzz_envelope::VerifiedBuzzPromptInput {
+            session_id,
+            prompt_blocks,
+            channel_id: &batch.channel_id.to_string(),
+            channel_type: &channel_info.channel_type,
+            owner_pubkey: &owner.to_hex(),
+            agent_keys: &ctx.agent_keys,
+            members: &members,
+            events: &events,
+        },
+    )
+    .map_err(|_| AcpError::Protocol("Buzz prompt envelope validation failed".into()))?;
+    let publish = ctx
+        .trusted_publish
+        .as_ref()
+        .ok_or_else(|| AcpError::Protocol("trusted Buzz capability is unavailable".into()))?;
+    let deployment_fingerprint = crate::config::revalidate_trusted_publish_runtime(publish.harness)
+        .map_err(|_| AcpError::Protocol("trusted Buzz runtime preflight failed".into()))?;
+    let now = unix_timestamp()?;
+    let turn = crate::trusted_transport::attach_request(&mut params, publish.capability_key, now)
+        .map_err(|_| {
+        AcpError::Protocol("Buzz transport request authentication failed".into())
+    })?;
+    Ok(Some(VerifiedTrustedPrompt {
+        params,
+        turn,
+        deployment_fingerprint,
+    }))
+}
+
+struct VerifiedTrustedPrompt {
+    params: serde_json::Value,
+    turn: crate::trusted_transport::TrustedTurn,
+    deployment_fingerprint: Option<[u8; 32]>,
+}
+
+fn unix_timestamp() -> Result<i64, AcpError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .map_err(|_| AcpError::Protocol("system clock is before the Unix epoch".into()))
+}
+
+async fn verify_and_publish_trusted_reply(
+    ctx: &PromptContext,
+    prompt: &VerifiedTrustedPrompt,
+    result: serde_json::Value,
+) -> Result<(), TrustedReplyFailure> {
+    let publish = ctx
+        .trusted_publish
+        .as_ref()
+        .ok_or(TrustedReplyFailure::Terminal)?;
+    let current_deployment = crate::config::revalidate_trusted_publish_runtime(publish.harness)
+        .map_err(|_| TrustedReplyFailure::Terminal)?;
+    if current_deployment != prompt.deployment_fingerprint {
+        return Err(TrustedReplyFailure::Terminal);
+    }
+    let reply = crate::trusted_transport::verify_response(&prompt.turn, &result)
+        .map_err(|_| TrustedReplyFailure::Terminal)?;
+    let out = publish
+        .outbox_dir
+        .join(format!("buzz-outbox-{}.json", prompt.turn.delivery_id));
+    buzz_cli::prepare_and_publish_reply(buzz_cli::DurableReplyRequest {
+        relay_url: &publish.relay_http_base,
+        keys: &ctx.agent_keys,
+        auth_tag: &publish.auth_tag,
+        channel: &prompt.turn.channel,
+        content: &reply.text,
+        reply_to: &prompt.turn.reply_to,
+        thread_root: &prompt.turn.thread_root,
+        execution_id: &prompt.turn.delivery_id,
+        mentions: std::slice::from_ref(&prompt.turn.owner_pubkey),
+        out: &out,
+    })
+    .await
+    .map_err(|error| {
+        if error.retryable() {
+            TrustedReplyFailure::Retryable
+        } else {
+            TrustedReplyFailure::Terminal
+        }
+    })?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrustedReplyFailure {
+    Retryable,
+    Terminal,
+}
+
+fn trusted_publish_outcome(failure: TrustedReplyFailure) -> PromptOutcome {
+    match failure {
+        TrustedReplyFailure::Retryable => PromptOutcome::TrustedPublishRetryable,
+        TrustedReplyFailure::Terminal => PromptOutcome::TrustedPublishTerminal,
+    }
+}
+
+fn require_managed_agent_pin(configured: Option<&str>) -> Result<String, AcpError> {
+    let normalized = configured
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| {
+            AcpError::Protocol(
+                "managed agent identity pin is required for trusted Buzz deliveries".into(),
+            )
+        })?;
+    nostr::PublicKey::from_hex(&normalized).map_err(|_| {
+        AcpError::Protocol(
+            "managed agent identity pin is malformed for trusted Buzz deliveries".into(),
+        )
+    })?;
+    Ok(normalized)
+}
+
+async fn send_prompt_with_optional_buzz_envelope(
+    acp: &mut AcpClient,
+    session_id: &str,
+    prompt_blocks: &[&str],
+    verified_params: Option<&VerifiedTrustedPrompt>,
+    idle_timeout: Duration,
+    max_duration: Duration,
+) -> Result<StopReason, AcpError> {
+    match verified_params {
+        Some(prompt) => {
+            acp.session_prompt_params_with_idle_timeout(
+                session_id,
+                prompt.params.clone(),
+                idle_timeout,
+                max_duration,
+            )
+            .await
+        }
+        None => {
+            acp.session_prompt_blocks_with_idle_timeout(
+                session_id,
+                prompt_blocks,
+                idle_timeout,
+                max_duration,
+            )
+            .await
+        }
+    }
 }
 
 /// Fetch the latest canvas event for `channel_id` and return a rendered
@@ -6226,15 +6581,11 @@ mod tests {
 
     #[tokio::test]
     async fn run_prompt_task_commits_standing_context_only_after_acp_success() {
-        let capture = std::env::temp_dir().join(format!(
-            "buzz-acp-standing-lifecycle-{}.ndjson",
-            Uuid::new_v4()
-        ));
-        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let capture_name = format!("buzz-acp-standing-lifecycle-{}.ndjson", Uuid::new_v4());
         let script = format!(
             r#"count=0
 while IFS= read -r line; do
-  printf '%s\n' "$line" >> '{quoted_capture}'
+  printf '%s\n' "$line" >> "$TMPDIR/{capture_name}"
   count=$((count + 1))
   if [ "$count" -eq 1 ]; then
     printf '%s\n' '{{"jsonrpc":"2.0","id":0,"error":{{"code":-32000,"message":"retry me"}}}}'
@@ -6243,9 +6594,13 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false, &[])
             .await
             .expect("spawn lifecycle ACP script");
+        let capture = acp
+            .ordinary_scratch_path()
+            .expect("ordinary ACP scratch")
+            .join(&capture_name);
         let mut agent = OwnedAgent {
             index: 0,
             acp,
@@ -6293,14 +6648,13 @@ done"#
             );
             agent = result.agent;
         }
+        let captured = std::fs::read_to_string(&capture).expect("read captured ACP requests");
         agent.acp.shutdown().await;
 
-        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&capture)
-            .expect("read captured ACP requests")
+        let requests: Vec<serde_json::Value> = captured
             .lines()
             .map(|line| serde_json::from_str(line).expect("captured request is JSON"))
             .collect();
-        std::fs::remove_file(&capture).expect("remove ACP capture");
         assert_eq!(requests.len(), 3);
         let prompt_text = |index: usize| {
             requests[index]["params"]["prompt"][0]["text"]
@@ -6325,15 +6679,14 @@ done"#
 
     #[tokio::test]
     async fn channel_prompt_commits_delivery_state_only_after_acp_success() {
-        let capture = std::env::temp_dir().join(format!(
+        let capture_name = format!(
             "buzz-acp-channel-delivery-lifecycle-{}.ndjson",
             Uuid::new_v4()
-        ));
-        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        );
         let script = format!(
             r#"count=0
 while IFS= read -r line; do
-  printf '%s\n' "$line" >> '{quoted_capture}'
+  printf '%s\n' "$line" >> "$TMPDIR/{capture_name}"
   count=$((count + 1))
   if [ "$count" -eq 1 ]; then
     printf '%s\n' '{{"jsonrpc":"2.0","id":0,"error":{{"code":-32000,"message":"retry me"}}}}'
@@ -6342,9 +6695,13 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false, &[])
             .await
             .expect("spawn channel lifecycle ACP script");
+        let capture = acp
+            .ordinary_scratch_path()
+            .expect("ordinary ACP scratch")
+            .join(&capture_name);
         let channel_id = Uuid::new_v4();
         let mut agent = OwnedAgent {
             index: 0,
@@ -6420,14 +6777,13 @@ done"#
             );
             agent = result.agent;
         }
+        let captured = std::fs::read_to_string(&capture).expect("read captured ACP requests");
         agent.acp.shutdown().await;
 
-        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&capture)
-            .expect("read captured ACP requests")
+        let requests: Vec<serde_json::Value> = captured
             .lines()
             .map(|line| serde_json::from_str(line).expect("captured request is JSON"))
             .collect();
-        std::fs::remove_file(&capture).expect("remove ACP capture");
         let prompt_text = |index: usize| {
             requests[index]["params"]["prompt"][0]["text"]
                 .as_str()
@@ -6505,22 +6861,22 @@ done"#
             }
         });
 
-        let capture = std::env::temp_dir().join(format!(
-            "buzz-acp-merged-delivery-wire-{}.ndjson",
-            Uuid::new_v4()
-        ));
-        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let capture_name = format!("buzz-acp-merged-delivery-wire-{}.ndjson", Uuid::new_v4());
         let script = format!(
             r#"count=0
 while IFS= read -r line; do
-  printf '%s\n' "$line" >> '{quoted_capture}'
+  printf '%s\n' "$line" >> "$TMPDIR/{capture_name}"
   printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$count,\"result\":{{\"stopReason\":\"end_turn\"}}}}"
   count=$((count + 1))
 done"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false, &[])
             .await
             .expect("spawn wire-capture ACP");
+        let capture = acp
+            .ordinary_scratch_path()
+            .expect("ordinary ACP scratch")
+            .join(&capture_name);
         let mut agent = OwnedAgent {
             index: 0,
             acp,
@@ -6587,15 +6943,14 @@ done"#
         let delivery = &agent.state.deliveries[&channel_id];
         assert!(delivery.delivered_event_ids.contains(&carry_over_id));
         assert!(delivery.delivered_event_ids.contains(&new_event_id));
+        let captured = std::fs::read_to_string(&capture).expect("read captured prompts");
         agent.acp.shutdown().await;
         server.abort();
 
-        let requests: Vec<serde_json::Value> = std::fs::read_to_string(&capture)
-            .expect("read captured prompts")
+        let requests: Vec<serde_json::Value> = captured
             .lines()
             .map(|line| serde_json::from_str(line).expect("captured prompt JSON"))
             .collect();
-        std::fs::remove_file(&capture).expect("remove prompt capture");
         assert_eq!(requests.len(), 2);
         let wire = |index: usize| {
             requests[index]["params"]["prompt"]
@@ -6661,19 +7016,19 @@ done"#
             }
         });
 
-        let capture = std::env::temp_dir().join(format!(
-            "buzz-acp-late-steer-wire-{}.ndjson",
-            Uuid::new_v4()
-        ));
-        let quoted_capture = capture.to_string_lossy().replace('\'', "'\\''");
+        let capture_name = format!("buzz-acp-late-steer-wire-{}.ndjson", Uuid::new_v4());
         let script = format!(
             r#"IFS= read -r line
-printf '%s\n' "$line" > '{quoted_capture}'
+printf '%s\n' "$line" > "$TMPDIR/{capture_name}"
 printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false, &[])
             .await
             .expect("spawn wire-capture ACP");
+        let capture = acp
+            .ordinary_scratch_path()
+            .expect("ordinary ACP scratch")
+            .join(&capture_name);
         let mut agent = OwnedAgent {
             index: 0,
             acp,
@@ -6744,13 +7099,12 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             result.outcome,
             PromptOutcome::Ok(StopReason::EndTurn)
         ));
+        let captured = std::fs::read_to_string(&capture).expect("read captured prompt");
         result.agent.acp.shutdown().await;
         server.abort();
 
         let request: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&capture).expect("read captured prompt"))
-                .expect("captured prompt JSON");
-        std::fs::remove_file(&capture).expect("remove prompt capture");
+            serde_json::from_str(&captured).expect("captured prompt JSON");
         let wire = request["params"]["prompt"]
             .as_array()
             .expect("prompt blocks")
@@ -7195,6 +7549,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => "Timeout(Hard)",
             PromptOutcome::CancelDrainTimeout(_) => "CancelDrainTimeout",
             PromptOutcome::Error(_) => "Error",
+            PromptOutcome::TrustedPublishRetryable => "TrustedPublishRetryable",
+            PromptOutcome::TrustedPublishTerminal => "TrustedPublishTerminal",
             PromptOutcome::ProjectContextIndeterminate(_) => "ProjectContextIndeterminate",
             PromptOutcome::Cancelled => "Cancelled",
             PromptOutcome::Ok(_) => "Ok",
@@ -7202,6 +7558,18 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
         assert_eq!(
             label, expected,
             "got outcome shape {label}, want {expected}"
+        );
+    }
+
+    #[test]
+    fn trusted_publish_failures_have_distinct_retry_fates() {
+        assert_outcome_matches(
+            &trusted_publish_outcome(TrustedReplyFailure::Retryable),
+            "TrustedPublishRetryable",
+        );
+        assert_outcome_matches(
+            &trusted_publish_outcome(TrustedReplyFailure::Terminal),
+            "TrustedPublishTerminal",
         );
     }
 
@@ -7674,6 +8042,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             &["-c".to_string(), "sleep 10".to_string()],
             &[],
             false,
+            &[],
         )
         .await
         .expect("failed to spawn test agent");
@@ -7735,6 +8104,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             &["-c".to_string(), "sleep 10".to_string()],
             &[],
             false,
+            &[],
         )
         .await
         .expect("failed to spawn test agent");
@@ -8235,6 +8605,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
             harness_name: "goose".to_string(),
+            managed_agent_pubkey_pin: None,
+            trusted_publish: None,
             relay_url: "ws://127.0.0.1:3000".to_string(),
         }
     }
@@ -8657,9 +9029,133 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
     }
 
     fn channel_metadata_response(id: Uuid, tags: &[[&str; 2]]) -> serde_json::Value {
-        let mut event_tags = vec![json!(["d", id.to_string()])];
-        event_tags.extend(tags.iter().map(|[k, v]| json!([k, v])));
-        json!([{ "tags": event_tags }])
+        let id_text = id.to_string();
+        let mut event_tags =
+            vec![nostr::Tag::parse(["d", id_text.as_str()]).expect("metadata d tag")];
+        event_tags.extend(
+            tags.iter().map(|[key, value]| {
+                nostr::Tag::parse([*key, *value]).expect("metadata fixture tag")
+            }),
+        );
+        let event = nostr::EventBuilder::new(
+            nostr::Kind::Custom(buzz_core::kind::KIND_NIP29_GROUP_METADATA as u16),
+            "",
+        )
+        .tags(event_tags)
+        .sign_with_keys(&nostr::Keys::generate())
+        .expect("signed metadata fixture");
+        serde_json::to_value(vec![event]).expect("metadata response")
+    }
+
+    #[test]
+    fn trusted_buzz_delivery_requires_managed_agent_pin() {
+        let error = require_managed_agent_pin(None).expect_err("missing pin must fail closed");
+        assert!(matches!(
+            error,
+            AcpError::Protocol(message)
+                if message == "managed agent identity pin is required for trusted Buzz deliveries"
+        ));
+        let malformed = require_managed_agent_pin(Some("not-a-pubkey"))
+            .expect_err("malformed pin must fail closed");
+        assert!(matches!(
+            malformed,
+            AcpError::Protocol(message)
+                if message == "managed agent identity pin is malformed for trusted Buzz deliveries"
+        ));
+        let valid = Keys::generate().public_key().to_hex();
+        assert_eq!(
+            require_managed_agent_pin(Some(&format!(" {} ", valid.to_ascii_uppercase())))
+                .expect("configured pin"),
+            valid,
+        );
+    }
+
+    #[tokio::test]
+    async fn trusted_pin_failures_produce_no_prompt_envelope_while_ordinary_acp_is_unchanged() {
+        struct Case {
+            name: &'static str,
+            harness: &'static str,
+            pin: Option<String>,
+            expected_error: Option<&'static str>,
+        }
+
+        let channel_id = Uuid::new_v4();
+        let channel_text = channel_id.to_string();
+        let owner = Keys::generate();
+        let managed_agent = Keys::generate();
+        let mismatched_agent = Keys::generate().public_key().to_hex();
+        let cases = [
+            Case {
+                name: "ordinary legacy ACP",
+                harness: "goose",
+                pin: None,
+                expected_error: None,
+            },
+            Case {
+                name: "Gabe missing pin",
+                harness: crate::config::TrustedOutboxHarness::Gabe.as_str(),
+                pin: None,
+                expected_error: Some("managed agent identity pin is required"),
+            },
+            Case {
+                name: "Gabe malformed pin",
+                harness: crate::config::TrustedOutboxHarness::Gabe.as_str(),
+                pin: Some("not-a-pubkey".to_string()),
+                expected_error: Some("managed agent identity pin is malformed"),
+            },
+            Case {
+                name: "Gabe mismatched pin",
+                harness: crate::config::TrustedOutboxHarness::Gabe.as_str(),
+                pin: Some(mismatched_agent),
+                expected_error: Some("managed Buzz agent identity does not match"),
+            },
+            Case {
+                name: "Stacy missing pin",
+                harness: crate::config::TrustedOutboxHarness::Stacy.as_str(),
+                pin: None,
+                expected_error: Some("managed agent identity pin is required"),
+            },
+        ];
+
+        let event = EventBuilder::new(Kind::Custom(9), "pin policy prompt")
+            .tags([Tag::parse(["h", channel_text.as_str()]).expect("channel tag")])
+            .sign_with_keys(&owner)
+            .expect("signed owner event");
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: Vec::new(),
+            cancel_reason: None,
+        };
+
+        for case in cases {
+            let mut ctx = make_prompt_context_with_owner(&managed_agent, owner.public_key());
+            ctx.harness_name = case.harness.to_string();
+            ctx.managed_agent_pubkey_pin = case.pin;
+            let result = build_verified_buzz_prompt_params_for_batch(
+                Some(&batch),
+                "live-session",
+                &["pin policy prompt"],
+                &ctx,
+            )
+            .await;
+            match case.expected_error {
+                None => assert!(matches!(result, Ok(None)), "{} changed", case.name),
+                Some(expected) => assert!(
+                    matches!(
+                        &result,
+                        Err(AcpError::Protocol(message))
+                            if message.contains(expected)
+                    ),
+                    "{} must fail before producing ACP prompt params",
+                    case.name,
+                ),
+            }
+        }
     }
 
     #[tokio::test]
@@ -8850,7 +9346,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
   printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'
 done"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false)
+        let acp = AcpClient::spawn("bash", &["-c".into(), script], &[], false, &[])
             .await
             .expect("spawn wire-capture ACP");
         let agent = OwnedAgent {
@@ -9281,7 +9777,7 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false, &[])
             .await
             .expect("spawn effort ACP script")
     }
@@ -9452,7 +9948,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"sessionId":"sess-1","configO
 IFS= read -r _effort
 exit 0"#
         );
-        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false, &[])
             .await
             .expect("spawn transport-exit ACP script");
         let mut agent = effort_agent(acp, Some("high"));
@@ -9541,7 +10037,7 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false, &[])
             .await
             .expect("spawn switch ACP script")
     }
@@ -9837,7 +10333,7 @@ while IFS= read -r line; do
   fi
 done"#
         );
-        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false)
+        AcpClient::spawn("bash", &["-c".to_string(), script], &[], false, &[])
             .await
             .expect("spawn switch ACP script")
     }

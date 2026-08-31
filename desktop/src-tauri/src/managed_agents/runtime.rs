@@ -7,9 +7,8 @@ use super::agent_env::{build_buzz_agent_provider_defaults, idle_pool_sleep_env};
 use crate::{
     managed_agents::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
-        missing_command_message, normalize_agent_args, open_log_file, resolve_command,
-        spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentSummary,
+        normalize_agent_args, open_log_file, resolve_command, spawn_key_refusal, KnownAcpRuntime,
+        ManagedAgentPairRuntime, ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -19,7 +18,9 @@ mod path;
 pub(in crate::managed_agents) use path::build_augmented_path;
 pub(crate) use path::{compose_path_entries, should_skip_claude_executable, should_use_inherited};
 
-pub(crate) use super::access_policy::{build_respond_to_env_with_policy, RespondToEnv};
+pub(crate) use super::access_policy::build_respond_to_env;
+#[cfg(test)]
+use super::access_policy::build_respond_to_env_with_policy;
 
 mod metadata;
 pub(crate) use metadata::{
@@ -71,65 +72,20 @@ pub use lifecycle::{kill_stale_tracked_processes, sync_managed_agent_processes};
 mod spawn_key; // production spawn-key derivation + its regressions
 pub(crate) use spawn_key::bound_runtime_key;
 
-/// Classify an agent's persona against the live catalog for the Agents-menu
-/// drift indicator. Returns `(out_of_date, orphaned)`.
-///
-/// Drift basis is the RECORD's `persona_source_version`, never the engram:
-/// - persona_id set + persona present: out_of_date when the snapshot hash
-///   differs from the persona's current content hash.
-/// - persona_id set + persona gone: orphaned (no current hash to respawn into,
-///   so never out_of_date — we must not tell the user to respawn into nothing).
-/// - no persona_id: neither — a hand-built agent has no persona to drift from.
-fn persona_drift_state(
-    record: &ManagedAgentRecord,
-    personas: &[crate::managed_agents::types::AgentDefinition],
-) -> (bool, bool) {
-    let Some(persona_id) = record.persona_id.as_deref() else {
-        return (false, false);
-    };
-    let Some(persona) = personas.iter().find(|p| p.id == persona_id) else {
-        return (false, true);
-    };
-    let current = crate::managed_agents::persona_events::persona_content_hash(
-        &crate::managed_agents::persona_events::persona_event_content(persona),
-    );
-    let out_of_date = record
-        .persona_source_version
-        .as_deref()
-        .is_some_and(|pinned| pinned != current);
-    (out_of_date, false)
-}
+mod context_engine;
+use context_engine::{
+    apply_context_engine_identity, child_rust_log_filter, deliver_acp_credentials,
+    install_acp_credential_stdin, prepare_context_engine_launch, revalidate_trusted_buzz_acp,
+};
 
-/// Resolve the runtime-pair key this record maps to for the active
-/// workspace: always the active workspace relay (the legacy per-record relay
-/// pin is ignored — see `effective_agent_relay_url`). Returns `None` for
-/// records that cannot form a valid pair key yet (e.g. key-less agents that
-/// mint keys on first start).
-pub(crate) fn workspace_pair_key(
-    app: &AppHandle,
-    record: &ManagedAgentRecord,
-) -> Option<ManagedAgentRuntimeKey> {
-    use tauri::Manager;
-    let state = app.state::<crate::app_state::AppState>();
-    resolve_workspace_pair_key(
-        &record.pubkey,
-        &record.relay_url,
-        &crate::relay::relay_ws_url_with_override(&state),
-    )
-}
+mod ordinary_workspace;
+use ordinary_workspace::configure_outer_workdir;
 
-/// Pure core of [`workspace_pair_key`]: workspace-relay resolution (legacy
-/// record pins ignored) plus canonical key construction, kept `AppHandle`-free
-/// so summary/stop scoping semantics are unit-testable.
-pub(crate) fn resolve_workspace_pair_key(
-    pubkey: &str,
-    record_relay_url: &str,
-    workspace_relay_url: &str,
-) -> Option<ManagedAgentRuntimeKey> {
-    let effective_relay =
-        crate::relay::effective_agent_relay_url(record_relay_url, workspace_relay_url);
-    ManagedAgentRuntimeKey::new(pubkey.to_string(), &effective_relay).ok()
-}
+mod summary_helpers;
+use summary_helpers::persona_drift_state;
+#[cfg(test)]
+use summary_helpers::resolve_workspace_pair_key;
+pub(crate) use summary_helpers::workspace_pair_key;
 
 pub fn build_managed_agent_summary(
     app: &AppHandle,
@@ -353,26 +309,6 @@ pub fn find_managed_agent_mut<'a>(
         .ok_or_else(|| format!("agent {pubkey} not found"))
 }
 
-/// Pure decision function for the inbound author gate env vars.
-///
-/// Returns the env vars to **set** and the env vars to **remove**. Removal is
-/// belt-and-suspenders: an inherited parent env var must not leak into a
-/// child agent and silently change its security posture.
-///
-/// The `owner_hex` argument is the current workspace owner pubkey. It's used
-/// as a fallback for legacy records (`auth_tag.is_none()`) — without it, the
-/// harness's owner cache stays empty and `owner-only` / `allowlist` modes
-/// drop everything.
-///
-/// Returns `Err(...)` if the record's allowlist fails validation. The harness
-/// validates too, but doing it here means we never spawn a doomed process.
-pub(crate) fn build_respond_to_env(
-    record: &ManagedAgentRecord,
-    owner_hex: Option<&str>,
-) -> Result<RespondToEnv, String> {
-    build_respond_to_env_with_policy(record, owner_hex, super::owner_only())
-}
-
 pub(crate) fn configure_runtime_cli(
     command: &mut std::process::Command,
     runtime: Option<&KnownAcpRuntime>,
@@ -475,8 +411,6 @@ pub fn spawn_agent_child(
     let stderr = stdout
         .try_clone()
         .map_err(|error| format!("failed to clone log handle: {error}"))?;
-    let resolved_acp_command = resolve_command(&record.acp_command)
-        .ok_or_else(|| missing_command_message(&record.acp_command, "ACP harness command"))?;
     let effective_mcp_command = known_acp_runtime(effective_command)
         .and_then(|r| r.mcp_command)
         .unwrap_or("");
@@ -497,6 +431,14 @@ pub fn spawn_agent_child(
     let resolved_agent_command = resolve_command(effective_command)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
+    let (trusted_context_engine, resolved_acp_command, trusted_buzz_acp_identity) =
+        prepare_context_engine_launch(
+            &resolved_agent_command,
+            agent_args,
+            &record.acp_command,
+            resolve_command,
+        )?;
+    let secure_context_engine_credentials = trusted_context_engine.is_some();
 
     // The caller supplies the explicit canonical pair relay. This is the only
     // relay this child may connect to, regardless of the record/workspace default.
@@ -520,9 +462,11 @@ pub fn spawn_agent_child(
     );
 
     let mut command = std::process::Command::new(&resolved_acp_command);
-    if let Some(home) = super::default_agent_workdir() {
-        command.current_dir(home);
-    }
+    configure_outer_workdir(
+        &mut command,
+        secure_context_engine_credentials,
+        &record.pubkey,
+    )?;
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::from(stdout));
     command.stderr(std::process::Stdio::from(stderr));
@@ -530,7 +474,9 @@ pub fn spawn_agent_child(
         command.env("PATH", path);
     }
     command.env("RUST_LOG", child_rust_log_filter());
-    command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
+    if !secure_context_engine_credentials {
+        command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
+    }
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_IDLE_POOL_SLEEP", idle_pool_sleep_env(lazy));
@@ -679,7 +625,14 @@ pub fn spawn_agent_child(
     }
     let acp_n = super::acp_agents_value(effective_command, record.parallelism);
     command.env("BUZZ_ACP_AGENTS", acp_n);
-    command.env("BUZZ_ACP_MULTIPLE_EVENT_HANDLING", "steer");
+    command.env(
+        "BUZZ_ACP_MULTIPLE_EVENT_HANDLING",
+        if secure_context_engine_credentials {
+            "queue"
+        } else {
+            "steer"
+        },
+    );
     command.env("BUZZ_ACP_DEDUP", "queue");
     if let Some(meta) = runtime_meta {
         for (key, value) in meta.default_env {
@@ -757,10 +710,17 @@ pub fn spawn_agent_child(
     command.env_remove("BUZZ_ACP_PRIVATE_KEY");
     command.env_remove("BUZZ_ACP_API_TOKEN");
     command.env_remove("BUZZ_API_TOKEN");
+    command.env_remove("BUZZ_ACP_CREDENTIAL_STDIN");
 
-    if let Some(ref auth_tag) = record.auth_tag {
-        command.env("BUZZ_AUTH_TAG", auth_tag);
+    if !secure_context_engine_credentials {
+        if let Some(ref auth_tag) = record.auth_tag {
+            command.env("BUZZ_AUTH_TAG", auth_tag);
+        } else {
+            command.env_remove("BUZZ_AUTH_TAG");
+        }
     } else {
+        // The one-shot inherited socket is installed immediately before spawn.
+        // Clear ambient values here as defense in depth until then.
         command.env_remove("BUZZ_AUTH_TAG");
     }
 
@@ -783,7 +743,9 @@ pub fn spawn_agent_child(
     if let Some(cred_helper) = resolve_command("git-credential-nostr") {
         let relay_http_url = crate::relay::relay_http_base_url(&effective_relay_url);
 
-        command.env("NOSTR_PRIVATE_KEY", &record.private_key_nsec);
+        if !secure_context_engine_credentials {
+            command.env("NOSTR_PRIVATE_KEY", &record.private_key_nsec);
+        }
         command.env("GIT_TERMINAL_PROMPT", "0");
         command.env("GIT_CONFIG_COUNT", "2");
         command.env(
@@ -809,6 +771,16 @@ pub fn spawn_agent_child(
     for (key, value) in &descriptor.env {
         command.env(key, value);
     }
+    // These four identity pins are Desktop-owned. Remove every ambient or
+    // persisted value, then inject only the pair that matches the validated
+    // trusted adapter. This makes the first Save self-bootstrapping without
+    // allowing a Gabe record to impersonate Stacy (or vice versa).
+    apply_context_engine_identity(
+        &mut command,
+        trusted_context_engine,
+        &record.pubkey,
+        owner_hex,
+    )?;
 
     // B5: carry persisted effort; harness resolves thought_level configId at first session.
     // Written AFTER descriptor.env so the canonical persisted value wins over any
@@ -864,6 +836,16 @@ pub fn spawn_agent_child(
         },
     );
 
+    let credential_payload = if secure_context_engine_credentials {
+        Some(install_acp_credential_stdin(
+            &mut command,
+            &record.private_key_nsec,
+            record.auth_tag.as_deref(),
+        )?)
+    } else {
+        None
+    };
+
     // Spawn the harness in its own process group so we can kill the entire
     // tree (harness + MCP servers + agent subprocesses) on shutdown.
     #[cfg(unix)]
@@ -881,13 +863,27 @@ pub fn spawn_agent_child(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let child = command.spawn().map_err(|error| {
+    if let Some(identity) = trusted_buzz_acp_identity {
+        revalidate_trusted_buzz_acp(&resolved_acp_command, identity)?;
+    }
+    let mut child = command.spawn().map_err(|error| {
         format!(
             "failed to spawn `{}` for agent {}: {error}",
             resolved_acp_command.display(),
             record.name
         )
     })?;
+
+    if let Some(payload) = credential_payload {
+        if let Err(error) = deliver_acp_credentials(&mut child, &payload) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "failed to deliver protected credentials to ACP harness for agent {}: {error}",
+                record.name
+            ));
+        }
+    }
 
     // Stamp the adapter availability for runtimes with a version gate (codex
     // only). The summary builder compares this against the current cached value
@@ -926,14 +922,6 @@ pub fn spawn_agent_child(
         adapter_availability: spawned_adapter_availability,
         start_nonce,
     })
-}
-
-fn child_rust_log_filter() -> String {
-    match std::env::var("RUST_LOG") {
-        Ok(existing) if existing.contains("buzz_acp") => existing,
-        Ok(existing) if !existing.trim().is_empty() => format!("{existing},buzz_acp=info"),
-        _ => "buzz_acp=info".to_string(),
-    }
 }
 
 /// Spawn (or adopt) the runtime pair for `record` on the caller's bound

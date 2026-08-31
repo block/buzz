@@ -18,9 +18,136 @@ use crate::usage::{
     PromptResponseUsage, StandardAdapterKind, StandardUsageTracker, TurnUsage, UsageTracker,
 };
 
+/// Identity and relay credentials inherited by the outer `buzz-acp` process.
+/// They are removed from every ACP child. Trusted children receive only the
+/// separately validated non-secret identity and runtime allowlist below.
+pub(crate) const CHILD_CREDENTIAL_ENV_TO_SCRUB: &[&str] = &[
+    "BUZZ_PRIVATE_KEY",
+    "NOSTR_PRIVATE_KEY",
+    "BUZZ_AUTH_TAG",
+    "BUZZ_API_TOKEN",
+    "BUZZ_ACP_PRIVATE_KEY",
+    "BUZZ_ACP_API_TOKEN",
+    "BUZZ_ACP_CREDENTIAL_STDIN",
+    "BUZZ_ACP_CHILD_WORKSPACE",
+    "BUZZ_ACP_CHILD_SCRATCH",
+    "BUZZ_RELAY_URL",
+    "BUZZ_AGENT_PUBKEY",
+    "BUZZ_ACP_AGENT_OWNER",
+    "BUZZ_CONTEXT_ENGINE_ADAPTER_CAPABILITY",
+    "BUZZ_CONTEXT_ENGINE_ADAPTER_CAPABILITY_FIFO",
+    "BUZZ_CONTEXT_ENGINE_ADAPTER_CAPABILITY_FIFO_OWNER_UID",
+];
+
+/// Secret-bearing entries erased from the outer harness after Config owns
+/// validated copies. Identity pins and relay routing remain because trusted
+/// spawn revalidation deliberately compares them at every launch.
+pub(crate) const PARENT_CREDENTIAL_ENV_TO_SCRUB: &[&str] = &[
+    "BUZZ_PRIVATE_KEY",
+    "NOSTR_PRIVATE_KEY",
+    "BUZZ_AUTH_TAG",
+    "BUZZ_API_TOKEN",
+    "BUZZ_ACP_PRIVATE_KEY",
+    "BUZZ_ACP_API_TOKEN",
+    "BUZZ_ACP_CREDENTIAL_STDIN",
+    "BUZZ_CONTEXT_ENGINE_ADAPTER_CAPABILITY",
+];
+
+/// Ambient values that are non-secret process plumbing. Every ACP child starts
+/// from an empty environment; credentials must be explicitly assigned to that
+/// managed harness instead of leaking from the Desktop/buzz-acp parent.
+const ORDINARY_CHILD_AMBIENT_ENV_ALLOWLIST: &[&str] = &[
+    "HOME", "PATH", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "SHELL", "USER", "LOGNAME",
+];
+
+/// Narrow allowlist that a fully validated trusted harness may receive back.
+/// `NOSTR_PRIVATE_KEY` and API tokens are deliberately scrub-only: the trusted
+/// outbox uses the dedicated Buzz credentials and must never inherit aliases.
+pub(crate) const TRUSTED_CHILD_ENV_KEYS: &[&str] = &[
+    "BUZZ_AGENT_PUBKEY",
+    "BUZZ_ACP_AGENT_OWNER",
+    "BUZZ_GABE_AGENT_PUBKEY",
+    "BUZZ_GABE_OWNER_PUBKEY",
+    "BUZZ_STACY_AGENT_PUBKEY",
+    "BUZZ_STACY_OWNER_PUBKEY",
+    "CONTEXT_ENGINE_BASE_URL",
+    "BUZZ_ACP_SESSION_PREFIX",
+];
+
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
+/// Child diagnostics are line-oriented and intentionally much smaller than ACP
+/// protocol frames. Oversized lines are dropped without copying their content.
+const MAX_CHILD_STDERR_LINE_SIZE: usize = 64 * 1024;
+const LOG_HASH_DOMAIN: &[u8] = b"buzz-acp-log-redaction-v1\0";
+
+fn redacted_log_hash(class: &str, value: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(LOG_HASH_DOMAIN);
+    hasher.update(class.as_bytes());
+    hasher.update([0]);
+    hasher.update(value.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn safe_acp_method(value: Option<&str>) -> &'static str {
+    match value {
+        None => "response",
+        Some("initialize") => "initialize",
+        Some("session/new") => "session/new",
+        Some("session/prompt") => "session/prompt",
+        Some("session/cancel") => "session/cancel",
+        Some("session/update") => "session/update",
+        Some("session/request_permission") => "session/request_permission",
+        Some("_goose/unstable/session/update") => "goose_session_update",
+        Some("_goose/unstable/session/steer") => "goose_session_steer",
+        Some("_session/steering") => "session_steering",
+        Some(_) => "unknown",
+    }
+}
+
+fn safe_update_type(value: &str) -> &'static str {
+    match value {
+        "agent_message_chunk" => "agent_message_chunk",
+        "tool_call" => "tool_call",
+        "tool_call_update" => "tool_call_update",
+        "plan" => "plan",
+        "agent_thought_chunk" => "agent_thought_chunk",
+        "available_commands_update" => "available_commands_update",
+        "session_info_update" => "session_info_update",
+        "usage_update" => "usage_update",
+        "keepalive" => "keepalive",
+        _ => "unknown",
+    }
+}
+
+fn safe_tool_kind(value: &str) -> &'static str {
+    match value {
+        "read" => "read",
+        "edit" => "edit",
+        "delete" => "delete",
+        "move" => "move",
+        "search" => "search",
+        "execute" => "execute",
+        "think" => "think",
+        "fetch" => "fetch",
+        "other" => "other",
+        _ => "unknown",
+    }
+}
+
+fn safe_tool_status(value: &str) -> &'static str {
+    match value {
+        "pending" => "pending",
+        "in_progress" => "in_progress",
+        "completed" => "completed",
+        "failed" => "failed",
+        _ => "unknown",
+    }
+}
 
 /// An MCP server configuration passed to `session/new`.
 ///
@@ -111,15 +238,12 @@ pub enum AcpError {
 }
 
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
-/// preserving the numeric code. When the `message` field is missing or
-/// non-string, fall back to the full JSON object so provider-specific
-/// detail (e.g. a `data` field) is not lost.
+/// preserving only the numeric code. Provider error text/data is deliberately
+/// replaced at this boundary so upstream bodies cannot reach logs or observer
+/// frames through a later `Display` call.
 fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
     let code = error.get("code").and_then(|c| c.as_i64()).unwrap_or(-32000);
-    let message = match error.get("message").and_then(|m| m.as_str()) {
-        Some(m) => m.to_string(),
-        None => error.to_string(),
-    };
+    let message = "agent returned a redacted JSON-RPC error".to_string();
     AcpError::AgentError { code, message }
 }
 
@@ -141,12 +265,23 @@ fn build_initialize_params() -> serde_json::Value {
 pub struct AcpClient {
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
+    /// True only when Buzz created a child-owned process group. Trusted
+    /// adapters deliberately inherit the outer Desktop/buzz-acp group.
+    isolated_process_group: bool,
+    /// Per-child private scratch root authorized by the ordinary Seatbelt
+    /// profile. Trusted adapters do not use one.
+    ordinary_scratch: Option<std::path::PathBuf>,
+    /// Only harness-created temporary scratches are deleted on drop. A
+    /// Desktop-managed persistent scratch belongs to Desktop/Nest lifecycle.
+    remove_ordinary_scratch_on_drop: bool,
     /// Write end of the agent's stdin pipe.
     stdin: ChildStdin,
     /// Framed reader over the agent's stdout pipe (line-oriented, bounded).
     /// Uses `LinesCodec::new_with_max_length` to enforce MAX_LINE_SIZE at the
     /// read level — prevents OOM from rogue agents writing infinite non-newline bytes.
     reader: FramedRead<ChildStdout, LinesCodec>,
+    /// Background drain for redacted child stderr diagnostics.
+    stderr_task: Option<tokio::task::JoinHandle<()>>,
     /// Monotonically increasing JSON-RPC request id counter.
     /// Harness-generated IDs are always numeric.
     next_id: u64,
@@ -214,6 +349,314 @@ pub struct AcpClient {
     standard_usage: StandardUsageTracker,
     /// Known adapter identity for prompt-response usage mapping.
     standard_adapter: Option<StandardAdapterKind>,
+    /// Raw result of the most recently completed prompt, consumed by the
+    /// authenticated trusted-transport supervisor.
+    last_prompt_result: Option<serde_json::Value>,
+}
+
+const ORDINARY_CHILD_SANDBOX_PROFILE: &str = r#"(version 1)
+(allow default)
+; Reads fail closed globally. The only user-controlled trees visible to an
+; ordinary child are its exact runtime, its own scratch directory, and a
+; positively authenticated registered worktree. In particular, never grant
+; the whole Buzz RUNTIME tree: it also contains Stacy credentials and state.
+(deny file-read-data
+  (require-all
+    (vnode-type REGULAR-FILE)
+    (require-not
+      (require-any
+      (literal "/dev/null")
+      (subpath "/dev")
+      (subpath "/System")
+      (subpath "/usr")
+      (subpath "/bin")
+      (subpath "/sbin")
+      (subpath "/Library/Apple/usr/lib")
+      (subpath "/Library/Developer/CommandLineTools/usr/lib")
+      (subpath "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework")
+      (subpath "/Applications/Buzz.app/Contents/MacOS")
+      (subpath "/Applications/Buzz.app/Contents/Frameworks")
+      (subpath "/Applications/Buzz.app/Contents/Resources")
+      (literal "/private/etc/hosts")
+      (literal "/private/etc/resolv.conf")
+      (subpath "/private/etc/ssl")
+      (literal "/private/var/run/resolv.conf")
+      (subpath "/private/var/db/timezone")
+      __BUZZ_CHILD_SCRATCH_RULES__
+      __BUZZ_CHILD_WORKSPACE_RULE__
+        __BUZZ_CHILD_COMMAND_RULES__))))
+; Immutable Context Engine runtimes are never part of an ordinary agent's
+; workspace, even though the Buzz Nest itself is the managed working directory.
+(deny file-read-data
+  (require-any
+    (literal "/Users/gabriel/.buzz/RUNTIME")
+    (subpath "/Users/gabriel/.buzz/RUNTIME")))
+(deny file-write*
+  (require-not
+    (require-any
+      (literal "/dev/null")
+      __BUZZ_CHILD_SCRATCH_RULES__
+      __BUZZ_CHILD_WORKSPACE_RULE__)))
+(deny file-write*
+  (require-any
+    (literal "/Users/gabriel/.buzz/RUNTIME")
+    (subpath "/Users/gabriel/.buzz/RUNTIME")))
+(deny file-write-unlink
+  (literal "/Users/gabriel/.buzz")
+  (literal "/Users/gabriel/.buzz/RUNTIME")
+  (literal "/Users/gabriel/.buzz/REPOS")
+  (literal "/Users/gabriel/.buzz/REPOS/buzz")
+  (literal "/Users/gabriel/.openclaw")
+  (literal "/Users/gabriel/.openclaw/credentials")
+  (literal "/Users/gabriel/.openclaw/.git")
+  (literal "/Users/gabriel/stacy")
+  (literal "/Users/gabriel/Library")
+  (literal "/Users/gabriel/Library/Keychains")
+  (literal "/Users/gabriel/.docker")
+  (literal "/Users/gabriel/.cargo")
+  (literal "/Users/gabriel/.config")
+  (literal "/Users/gabriel/.config/git"))
+(deny process-exec
+  __BUZZ_CHILD_SCRATCH_RULES__
+  __BUZZ_CHILD_WORKSPACE_RULE__
+  (literal "/usr/bin/security")
+  (literal "/bin/launchctl")
+  (literal "/usr/bin/crontab")
+  (literal "/usr/bin/at")
+  (literal "/usr/bin/open")
+  (literal "/usr/bin/osascript"))
+(deny appleevent-send)
+; ACP is stdio-only. Deny every outbound Unix-domain socket so file-read
+; permissions can never be confused with Docker/launchd daemon isolation.
+(deny network-outbound (remote unix-socket))
+; Python and Node both require limited self-process and read-only sysctl
+; queries during startup. Broad denials SIGTRAP those runtimes before ACP
+; initialize; credential containment is provided by env_clear and path denies.
+(deny mach-lookup
+  (global-name "com.apple.securityd")
+  (global-name "com.apple.SecurityServer")
+  (global-name-regex #"^com\.apple\.xpc\.launchd(\.|$)")
+  (global-name-regex #"^com\.apple\.(coreservices\.launchservicesd|lsd)(\.|$)")
+  (global-name-regex #"^com\.apple\.(backgroundtaskmanagement|servicemanagement)"))"#;
+
+fn sandbox_literal(path: &std::path::Path) -> String {
+    path.to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+}
+
+fn registered_worktree_root(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut candidate = start.canonicalize().ok()?;
+    loop {
+        let dot_git = candidate.join(".git");
+        if let Ok(metadata) = std::fs::symlink_metadata(&dot_git) {
+            if metadata.file_type().is_symlink() || !owned_git_metadata(&metadata) {
+                return None;
+            }
+            if metadata.is_dir() {
+                let head = dot_git.join("HEAD");
+                let head_metadata = std::fs::symlink_metadata(&head).ok()?;
+                if !head_metadata.is_file()
+                    || head_metadata.file_type().is_symlink()
+                    || !owned_git_metadata(&head_metadata)
+                    || dot_git.canonicalize().ok()? != dot_git
+                {
+                    return None;
+                }
+                return Some(candidate);
+            }
+            if !metadata.is_file() {
+                return None;
+            }
+            let marker = std::fs::read_to_string(&dot_git).ok()?;
+            if marker.len() > 4096 {
+                return None;
+            }
+            let git_dir = marker.strip_prefix("gitdir: ")?.trim();
+            let git_dir = std::path::Path::new(git_dir).canonicalize().ok()?;
+            let git_dir_metadata = std::fs::symlink_metadata(&git_dir).ok()?;
+            if !git_dir_metadata.is_dir()
+                || git_dir_metadata.file_type().is_symlink()
+                || !owned_git_metadata(&git_dir_metadata)
+                || git_dir.parent()?.file_name()? != std::ffi::OsStr::new("worktrees")
+                || git_dir.parent()?.parent()?.file_name()? != std::ffi::OsStr::new(".git")
+            {
+                return None;
+            }
+            let registered_marker = std::fs::read_to_string(git_dir.join("gitdir")).ok()?;
+            let registered = std::path::Path::new(registered_marker.trim())
+                .canonicalize()
+                .ok()?;
+            return (registered == dot_git.canonicalize().ok()?).then_some(candidate);
+        }
+        if !candidate.pop() {
+            return None;
+        }
+    }
+}
+
+#[cfg(unix)]
+fn owned_git_metadata(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let owner = std::env::current_exe()
+        .ok()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|metadata| metadata.uid());
+    owner == Some(metadata.uid()) && metadata.mode() & 0o022 == 0
+}
+
+#[cfg(not(unix))]
+fn owned_git_metadata(_metadata: &std::fs::Metadata) -> bool {
+    true
+}
+
+fn validated_managed_scratch_at(
+    current: &std::path::Path,
+    explicit: &std::path::Path,
+) -> Result<std::path::PathBuf, AcpError> {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if !explicit.is_absolute() {
+        return Err(AcpError::Protocol(
+            "ordinary child scratch is not absolute".to_string(),
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(explicit).map_err(AcpError::Io)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AcpError::Protocol(
+            "ordinary child scratch is not a real directory".to_string(),
+        ));
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o7777 != 0o700 {
+        return Err(AcpError::Protocol(
+            "ordinary child scratch must have mode 0700".to_string(),
+        ));
+    }
+    let explicit = explicit.canonicalize().map_err(AcpError::Io)?;
+    let current = current.canonicalize().map_err(AcpError::Io)?;
+    if explicit != current {
+        return Err(AcpError::Protocol(
+            "ordinary child scratch does not match the outer harness directory".to_string(),
+        ));
+    }
+    let parent = explicit.parent();
+    let scratch_root = parent.and_then(std::path::Path::parent);
+    let nest_root = scratch_root.and_then(std::path::Path::parent);
+    if parent.and_then(std::path::Path::file_name) != Some(std::ffi::OsStr::new("managed-agents"))
+        || scratch_root.and_then(std::path::Path::file_name)
+            != Some(std::ffi::OsStr::new(".scratch"))
+        || !matches!(
+            nest_root.and_then(std::path::Path::file_name),
+            Some(name) if name == ".buzz" || name == ".buzz-dev"
+        )
+    {
+        return Err(AcpError::Protocol(
+            "ordinary child scratch is outside the managed Buzz scratch root".to_string(),
+        ));
+    }
+    Ok(explicit)
+}
+
+fn resolve_command_path(command: &str) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(command);
+    if path.components().count() > 1 {
+        return path.canonicalize().ok();
+    }
+    std::env::var_os("PATH").and_then(|value| {
+        std::env::split_paths(&value)
+            .map(|directory| directory.join(command))
+            .find(|candidate| candidate.is_file())
+            .and_then(|candidate| candidate.canonicalize().ok())
+    })
+}
+
+fn sandbox_path_rules(path: &std::path::Path, include_subpath: bool) -> String {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let mut rules = vec![format!("(literal \"{}\")", sandbox_literal(&canonical))];
+    if include_subpath {
+        rules.push(format!("(subpath \"{}\")", sandbox_literal(&canonical)));
+    }
+    rules.join("\n      ")
+}
+
+fn command_read_rules(command: &str) -> String {
+    let Some(path) = resolve_command_path(command) else {
+        return "(literal \"/dev/null\")".to_string();
+    };
+    let text = path.to_string_lossy();
+    let runtime_root =
+        if let Some(suffix) = text.strip_prefix("/Users/gabriel/.nvm/versions/node/") {
+            suffix.split('/').next().map(|version| {
+                std::path::PathBuf::from("/Users/gabriel/.nvm/versions/node").join(version)
+            })
+        } else if let Some(suffix) = text.strip_prefix("/Users/gabriel/.local/share/uv/tools/") {
+            suffix.split('/').next().map(|tool| {
+                std::path::PathBuf::from("/Users/gabriel/.local/share/uv/tools").join(tool)
+            })
+        } else {
+            None
+        };
+    let mut rules = vec![sandbox_path_rules(&path, false)];
+    if let Some(root) = runtime_root {
+        rules.push(sandbox_path_rules(&root, true));
+    }
+    rules.join("\n      ")
+}
+
+fn ordinary_child_sandbox_profile(
+    scratch: &std::path::Path,
+    workspace: Option<&std::path::Path>,
+    command: &str,
+) -> String {
+    let scratch_rules = sandbox_path_rules(scratch, true);
+    let workspace_rule = workspace
+        .map(|path| sandbox_path_rules(path, true))
+        .unwrap_or_else(|| "(literal \"/dev/null\")".to_string());
+    ORDINARY_CHILD_SANDBOX_PROFILE
+        .replace("__BUZZ_CHILD_SCRATCH_RULES__", &scratch_rules)
+        .replace("__BUZZ_CHILD_WORKSPACE_RULE__", &workspace_rule)
+        .replace("__BUZZ_CHILD_COMMAND_RULES__", &command_read_rules(command))
+}
+
+fn create_ordinary_child_scratch() -> std::io::Result<std::path::PathBuf> {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    let parent = std::env::temp_dir().canonicalize()?;
+    let path = parent.join(format!("buzz-acp-child-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&path)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+    Ok(path)
+}
+
+fn child_command_spec(
+    command: &str,
+    args: &[String],
+    trusted: bool,
+    ordinary_scratch: Option<&std::path::Path>,
+    ordinary_workspace: Option<&std::path::Path>,
+) -> Result<(String, Vec<String>), AcpError> {
+    #[cfg(target_os = "macos")]
+    if !trusted {
+        let scratch = ordinary_scratch.ok_or_else(|| {
+            AcpError::Protocol("ordinary child scratch was unavailable before spawn".to_string())
+        })?;
+        let profile = ordinary_child_sandbox_profile(scratch, ordinary_workspace, command);
+        let mut wrapped = vec!["-p".to_string(), profile, command.to_string()];
+        wrapped.extend(args.iter().cloned());
+        return Ok(("/usr/bin/sandbox-exec".to_string(), wrapped));
+    }
+    let _ = trusted;
+    let _ = ordinary_scratch;
+    let _ = ordinary_workspace;
+    Ok((command.to_string(), args.to_vec()))
+}
+
+fn uses_isolated_process_group(trusted: bool) -> bool {
+    !trusted
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -414,24 +857,30 @@ fn build_client_capabilities() -> serde_json::Value {
 }
 
 impl AcpClient {
+    #[cfg(test)]
+    pub(crate) fn ordinary_scratch_path(&self) -> Option<&std::path::Path> {
+        self.ordinary_scratch.as_deref()
+    }
+
     /// Kill the agent subprocess and wait for it to exit (no zombies).
     ///
     /// `Drop` only calls `start_kill()` (sends SIGKILL but doesn't reap).
     /// Call this when you need guaranteed cleanup — e.g., in `run_models`
     /// before process exit.
     pub async fn shutdown(&mut self) {
-        // Kill the entire process group when possible. The child was spawned
-        // with process_group(0), so its PID == its PGID. Killing the group
-        // ensures subprocesses (MCP servers, tool processes) are cleaned up
-        // rather than orphaned to init.
-        //
-        // Falls back to start_kill() (direct child only) on non-Unix or if
-        // the child has been polled to completion (id() returns None).
-        match self.child.id() {
-            Some(pid) if kill_process_group(pid) => {}
-            _ => {
-                let _ = self.child.start_kill();
+        // Ordinary children own a process group, so kill it to include their
+        // tools and MCP subprocesses. Trusted adapters inherit the outer group
+        // so Desktop Stop reaches both processes; local shutdown must target
+        // only the adapter and must never signal the outer group.
+        if self.isolated_process_group {
+            match self.child.id() {
+                Some(pid) if kill_process_group(pid) => {}
+                _ => {
+                    let _ = self.child.start_kill();
+                }
             }
+        } else {
+            let _ = self.child.start_kill();
         }
         // Bounded wait: if the child doesn't exit within 5s after SIGKILL,
         // give up and let Drop/OS handle it. An unbounded wait here would
@@ -440,6 +889,14 @@ impl AcpClient {
             Ok(Ok(_)) => {}
             Ok(Err(e)) => tracing::debug!("child wait error after kill: {e}"),
             Err(_) => tracing::warn!("child did not exit within 5s after SIGKILL — abandoning"),
+        }
+        if let Some(mut stderr_task) = self.stderr_task.take() {
+            if tokio::time::timeout(std::time::Duration::from_secs(1), &mut stderr_task)
+                .await
+                .is_err()
+            {
+                stderr_task.abort();
+            }
         }
     }
 
@@ -456,22 +913,148 @@ impl AcpClient {
         args: &[String],
         extra_env: &[(String, String)],
         has_generated_codex_config: bool,
+        trusted_child_env: &[(String, String)],
     ) -> Result<Self, AcpError> {
         use std::process::Stdio;
 
-        let mut cmd = tokio::process::Command::new(command);
-        cmd.args(args)
+        struct ScratchGuard {
+            path: Option<std::path::PathBuf>,
+            remove_on_drop: bool,
+        }
+        impl Drop for ScratchGuard {
+            fn drop(&mut self) {
+                if self.remove_on_drop {
+                    let Some(path) = self.path.take() else {
+                        return;
+                    };
+                    let _ = std::fs::remove_dir_all(path);
+                }
+            }
+        }
+
+        let trusted_validation = if trusted_child_env.is_empty() {
+            None
+        } else {
+            Some(
+                crate::config::revalidate_trusted_child_env(command, args, trusted_child_env)
+                    .map_err(|reason| {
+                        AcpError::Protocol(format!("trusted harness revalidation failed: {reason}"))
+                    })?,
+            )
+        };
+        let validated_trusted_env = trusted_validation
+            .as_ref()
+            .map(|validation| validation.env.as_slice())
+            .unwrap_or_default();
+        let trusted_spawn = trusted_validation.is_some();
+
+        let current = std::env::current_dir().map_err(AcpError::Io)?;
+        let explicit_scratch = std::env::var_os("BUZZ_ACP_CHILD_SCRATCH");
+        let explicit_workspace = std::env::var_os("BUZZ_ACP_CHILD_WORKSPACE");
+        let ordinary_workspace = if trusted_spawn || explicit_scratch.is_some() {
+            None
+        } else {
+            let registered = registered_worktree_root(&current);
+            if let Some(explicit) = explicit_workspace.as_deref() {
+                let explicit = std::path::Path::new(explicit)
+                    .canonicalize()
+                    .map_err(AcpError::Io)?;
+                if registered.as_deref() != Some(explicit.as_path()) {
+                    return Err(AcpError::Protocol(
+                        "ordinary child workspace is not the registered outer worktree".to_string(),
+                    ));
+                }
+            }
+            registered
+        };
+        if !trusted_spawn && explicit_scratch.is_none() && ordinary_workspace.is_none() {
+            return Err(AcpError::Protocol(
+                "ordinary child requires a managed scratch or approved registered worktree"
+                    .to_string(),
+            ));
+        }
+        let (scratch_path, remove_on_drop) = if trusted_spawn {
+            (None, false)
+        } else if let Some(path) = explicit_scratch.as_deref() {
+            (
+                Some(validated_managed_scratch_at(
+                    &current,
+                    std::path::Path::new(path),
+                )?),
+                false,
+            )
+        } else {
+            (
+                Some(create_ordinary_child_scratch().map_err(AcpError::Io)?),
+                true,
+            )
+        };
+        let mut ordinary_scratch = ScratchGuard {
+            path: scratch_path,
+            remove_on_drop,
+        };
+        let ordinary_workdir = if trusted_spawn {
+            None
+        } else {
+            Some(
+                ordinary_workspace
+                    .as_deref()
+                    .or(ordinary_scratch.path.as_deref())
+                    .ok_or_else(|| {
+                        AcpError::Protocol(
+                            "ordinary child has no bounded working directory".to_string(),
+                        )
+                    })?,
+            )
+        };
+        let (spawn_command, spawn_args) = child_command_spec(
+            command,
+            args,
+            trusted_spawn,
+            ordinary_scratch.path.as_deref(),
+            ordinary_workspace.as_deref(),
+        )?;
+        let mut cmd = tokio::process::Command::new(spawn_command);
+        if let Some(directory) = ordinary_workdir {
+            cmd.current_dir(directory);
+        }
+        // The effective executable includes its loader/interpreter environment.
+        // Rebuild every launch from an empty environment so unrelated ambient
+        // provider, GitHub, cloud, loader, and Docker credentials cannot reach
+        // a child. Ordinary harnesses get only non-secret process plumbing plus
+        // their explicitly assigned persona environment below.
+        cmd.env_clear();
+        if !trusted_spawn {
+            for key in ORDINARY_CHILD_AMBIENT_ENV_ALLOWLIST {
+                if let Some(value) = std::env::var_os(key) {
+                    cmd.env(key, value);
+                }
+            }
+            if let Some(path) = &ordinary_scratch.path {
+                cmd.env("TMPDIR", path);
+            }
+        }
+        cmd.args(spawn_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // Inherit stderr so agent logs are visible in the harness terminal.
-            .stderr(Stdio::inherit())
+            // Drain child diagnostics through the redaction boundary below.
+            .stderr(Stdio::piped())
             // Ensure the child is killed when the AcpClient is dropped (best-effort).
             // Callers MUST still call shutdown().await for guaranteed cleanup.
             .kill_on_drop(true);
 
+        // The Desktop launches buzz-acp with the managed identity's signing
+        // credentials. Child processes inherit the parent environment unless
+        // they are removed explicitly, so scrub them before applying any
+        // runtime/persona environment. A trusted custom harness receives an
+        // authoritative, separately validated set below.
+        for key in CHILD_CREDENTIAL_ENV_TO_SCRUB {
+            cmd.env_remove(key);
+        }
+
         // Per-persona env vars (e.g., GOOSE_PROVIDER, BUZZ_AGENT_PROVIDER).
-        // For most keys, operator precedence wins: skip injection if already set
-        // in the parent environment.
+        // The parent environment was cleared above, so these explicit values
+        // are the only persona configuration an ordinary child receives.
         //
         // CODEX_CONFIG is handled specially via build_codex_config_env:
         //   • has_generated_codex_config=true: merge all CODEX_CONFIG entries + parent
@@ -494,33 +1077,53 @@ impl AcpClient {
         let codex_merge_active = codex_config_value.is_some();
 
         // Per-runtime environment defaults (e.g. Hermes MCP-startup isolation).
-        // Applied first so both persona `extra_env` (below, via `Command::env`
-        // key replacement) and inherited parent env (via the parent-presence
-        // check) override them.
-        for &(key, value) in crate::config::default_agent_env(command) {
-            if std::env::var_os(key).is_none() {
+        // Applied first so persona `extra_env` below can override them.
+        if !trusted_spawn {
+            for &(key, value) in crate::config::default_agent_env(command) {
                 cmd.env(key, value);
             }
         }
 
         for (key, value) in extra_env {
+            if trusted_spawn {
+                continue;
+            }
+            if CHILD_CREDENTIAL_ENV_TO_SCRUB
+                .iter()
+                .any(|reserved| reserved.eq_ignore_ascii_case(key))
+            {
+                continue;
+            }
             if key == "CODEX_CONFIG" && codex_merge_active {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;
             }
-            if std::env::var_os(key).is_none() {
-                cmd.env(key, value);
+            cmd.env(key, value);
+        }
+        if !trusted_spawn {
+            if let Some(merged) = codex_config_value {
+                cmd.env("CODEX_CONFIG", merged);
             }
         }
-        if let Some(merged) = codex_config_value {
-            cmd.env("CODEX_CONFIG", merged);
+        for (key, value) in validated_trusted_env {
+            if TRUSTED_CHILD_ENV_KEYS
+                .iter()
+                .any(|reserved| reserved.eq_ignore_ascii_case(key))
+            {
+                // Trusted values are authoritative. Ambient/operator values
+                // were removed above and must never win by inheritance.
+                cmd.env(key, value);
+            }
         }
 
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
         // to the harness's own process group on Unix.
         // tokio::process::Command::process_group is a stable tokio API (no extra imports needed).
+        let isolated_process_group = uses_isolated_process_group(trusted_spawn);
         #[cfg(unix)]
-        cmd.process_group(0);
+        if isolated_process_group {
+            cmd.process_group(0);
+        }
 
         // Suppress the console window that Windows otherwise allocates for every
         // console-subsystem child process spawned from a GUI/non-console parent.
@@ -534,6 +1137,20 @@ impl AcpClient {
                 "codex" | "codex-acp" => Some(StandardAdapterKind::Codex),
                 _ => None,
             };
+        if let Some(initial) = &trusted_validation {
+            let final_validation =
+                crate::config::revalidate_trusted_child_env(command, args, trusted_child_env)
+                    .map_err(|reason| {
+                        AcpError::Protocol(format!(
+                            "trusted harness final revalidation failed: {reason}"
+                        ))
+                    })?;
+            if &final_validation != initial {
+                return Err(AcpError::Protocol(
+                    "trusted harness artifact identity changed before spawn".to_string(),
+                ));
+            }
+        }
         let mut child = cmd.spawn()?;
 
         let stdin = child
@@ -544,11 +1161,61 @@ impl AcpClient {
             .stdout
             .take()
             .ok_or_else(|| AcpError::Protocol("failed to open agent stdout".into()))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| AcpError::Protocol("failed to open agent stderr".into()))?;
+        let stderr_dispatch = tracing::dispatcher::get_default(|dispatch| dispatch.clone());
+        let stderr_task = tokio::spawn(async move {
+            let mut reader = FramedRead::new(
+                stderr,
+                LinesCodec::new_with_max_length(MAX_CHILD_STDERR_LINE_SIZE),
+            );
+            while let Some(line) = reader.next().await {
+                match line {
+                    Ok(line) => {
+                        let line_bytes = line.len();
+                        let line_hash = redacted_log_hash("child_stderr", &line);
+                        tracing::dispatcher::with_default(&stderr_dispatch, || {
+                            tracing::debug!(
+                                target: "acp::child_stderr",
+                                line_bytes,
+                                line_hash,
+                                "agent child stderr line"
+                            );
+                        });
+                    }
+                    Err(LinesCodecError::MaxLineLengthExceeded) => {
+                        tracing::dispatcher::with_default(&stderr_dispatch, || {
+                            tracing::warn!(
+                                target: "acp::child_stderr",
+                                error_class = "line_too_long",
+                                "agent child stderr line discarded"
+                            );
+                        });
+                    }
+                    Err(_) => {
+                        tracing::dispatcher::with_default(&stderr_dispatch, || {
+                            tracing::warn!(
+                                target: "acp::child_stderr",
+                                error_class = "read_error",
+                                "agent child stderr drain stopped"
+                            );
+                        });
+                        break;
+                    }
+                }
+            }
+        });
 
         Ok(Self {
             child,
+            isolated_process_group,
+            ordinary_scratch: ordinary_scratch.path.take(),
+            remove_ordinary_scratch_on_drop: ordinary_scratch.remove_on_drop,
             stdin,
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
+            stderr_task: Some(stderr_task),
             next_id: 0,
             pending_permission_id: None,
             permission_responded: false,
@@ -563,6 +1230,7 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             standard_usage: StandardUsageTracker::default(),
             standard_adapter,
+            last_prompt_result: None,
         })
     }
 
@@ -599,6 +1267,29 @@ impl AcpClient {
         }
     }
 
+    fn observe_acp_frame(&self, kind: &'static str, frame: &serde_json::Value) {
+        let raw_method = frame.get("method").and_then(serde_json::Value::as_str);
+        let raw_update_type = frame
+            .pointer("/params/update/sessionUpdate")
+            .and_then(serde_json::Value::as_str);
+        let content_bytes = frame
+            .pointer("/params/update/content/text")
+            .and_then(serde_json::Value::as_str)
+            .map(str::len);
+        self.observe(
+            kind,
+            serde_json::json!({
+                "method": safe_acp_method(raw_method),
+                "methodHash": raw_method.map(|value| redacted_log_hash("method", value)),
+                "hasId": frame.get("id").is_some(),
+                "updateType": raw_update_type.map(safe_update_type),
+                "updateTypeHash": raw_update_type
+                    .map(|value| redacted_log_hash("update_type", value)),
+                "contentBytes": content_bytes,
+            }),
+        );
+    }
+
     /// Send the `initialize` request and return the agent's response result value.
     ///
     /// Must be called exactly once, before any other ACP method.
@@ -617,7 +1308,11 @@ impl AcpClient {
             .pointer("/_meta/steering/supported")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        tracing::debug!(target: "acp::init", "initialize response: {result}");
+        tracing::debug!(
+            target: "acp::init",
+            steering_supported = self.steering_supported,
+            "ACP initialize completed"
+        );
         Ok(result)
     }
 
@@ -782,6 +1477,20 @@ impl AcpClient {
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
         let params = build_prompt_params(session_id, prompt_blocks);
+        self.session_prompt_params_with_idle_timeout(session_id, params, idle_timeout, max_duration)
+            .await
+    }
+
+    /// Send pre-built `session/prompt` params with the standard idle and hard
+    /// deadlines. The trusted Buzz envelope path uses this after adding
+    /// `_meta.buzz`; ordinary prompts continue through the block helper above.
+    pub async fn session_prompt_params_with_idle_timeout(
+        &mut self,
+        session_id: &str,
+        params: serde_json::Value,
+        idle_timeout: std::time::Duration,
+        max_duration: std::time::Duration,
+    ) -> Result<StopReason, AcpError> {
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
 
@@ -792,6 +1501,7 @@ impl AcpClient {
         self.standard_usage.begin_turn(session_id);
 
         self.last_prompt_id = Some(self.next_id);
+        self.last_prompt_result = None;
         let id = self.next_id;
         self.next_id += 1;
 
@@ -802,7 +1512,14 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        let prompt_block_count = msg["params"]["prompt"].as_array().map_or(0, Vec::len);
+        tracing::debug!(
+            target: "acp::wire",
+            method = "session/prompt",
+            request_id = id,
+            prompt_block_count,
+            "outbound ACP request"
+        );
         if let Err(e) = self.write_ndjson(&msg).await {
             self.last_prompt_id = None;
             self.current_hard_deadline = None;
@@ -888,6 +1605,11 @@ impl AcpClient {
         let goose_usage = self.goose_usage.take();
         let standard_usage = self.standard_usage.take();
         goose_usage.or(standard_usage)
+    }
+
+    /// Consume the raw result of the most recently completed ACP prompt.
+    pub(crate) fn take_prompt_result(&mut self) -> Option<serde_json::Value> {
+        self.last_prompt_result.take()
     }
 
     /// Notify the usage tracker that buzz-acp just spawned a new session.
@@ -1077,7 +1799,7 @@ impl AcpClient {
         .await
         .map_err(|_| AcpError::WriteTimeout(WRITE_TIMEOUT))?
         .map_err(AcpError::Io)?;
-        self.observe("acp_write", value.clone());
+        self.observe_acp_frame("acp_write", value);
         Ok(())
     }
 
@@ -1108,7 +1830,12 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        tracing::debug!(
+            target: "acp::wire",
+            method,
+            request_id = id,
+            "outbound ACP request"
+        );
 
         // Wrap write + read in a single timeout so a hung agent can't block forever.
         // We cannot use an async block that borrows `self` mutably across two awaits
@@ -1173,7 +1900,11 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ (notification) {}", &serde_json::to_string(&msg).unwrap_or_default());
+        tracing::debug!(
+            target: "acp::wire",
+            method,
+            "outbound ACP notification"
+        );
         self.write_ndjson(&msg).await?;
         Ok(())
     }
@@ -1214,27 +1945,36 @@ impl AcpClient {
                 continue;
             }
 
-            // Only log and reset idle after we have a valid non-empty line.
-            tracing::debug!(target: "acp::wire", "← {trimmed}");
-
             let msg: serde_json::Value = match serde_json::from_str(trimmed) {
                 Ok(v) => v,
                 Err(e) => {
                     self.observe(
                         "acp_parse_error",
                         serde_json::json!({
-                            "line": trimmed,
-                            "error": e.to_string(),
+                            "errorClass": "invalid_json",
+                            "lineBytes": trimmed.len(),
                         }),
                     );
                     tracing::warn!(
                         target: "acp::wire",
-                        "failed to parse line as JSON: {e} — skipping"
+                        error_class = "invalid_json",
+                        line_bytes = trimmed.len(),
+                        line = e.line(),
+                        column = e.column(),
+                        "failed to parse inbound ACP frame"
                     );
                     continue;
                 }
             };
-            self.observe("acp_read", msg.clone());
+            let raw_method = msg.get("method").and_then(serde_json::Value::as_str);
+            tracing::debug!(
+                target: "acp::wire",
+                method = safe_acp_method(raw_method),
+                method_hash = redacted_log_hash("method", raw_method.unwrap_or("response")),
+                has_id = msg.get("id").is_some(),
+                "inbound ACP frame"
+            );
+            self.observe_acp_frame("acp_read", &msg);
 
             // Check if this is a response to our expected request (has matching id
             // AND no `method` field — a `method` field means it's an agent-initiated
@@ -1274,7 +2014,12 @@ impl AcpClient {
                             // agent process is dead and continuing would hang.
                             self.write_ndjson(&err_resp).await?;
                         }
-                        tracing::debug!(target: "acp::wire", "ignoring unknown method: {other}");
+                        tracing::debug!(
+                            target: "acp::wire",
+                            method = "unknown",
+                            method_hash = redacted_log_hash("method", other),
+                            "ignoring unknown ACP method"
+                        );
                     }
                 }
             }
@@ -1461,8 +2206,9 @@ impl AcpClient {
                             });
                             tracing::debug!(
                                 target: "acp::wire",
-                                "→ {}",
-                                serde_json::to_string(&msg).unwrap_or_default()
+                                method,
+                                request_id = id,
+                                "outbound ACP steer request"
                             );
                             match self.write_ndjson(&msg).await {
                                 Ok(()) => {
@@ -1538,26 +2284,36 @@ impl AcpClient {
                         continue;
                     }
 
-                    tracing::debug!(target: "acp::wire", "← {trimmed}");
-
                     let msg: serde_json::Value = match serde_json::from_str(trimmed) {
                         Ok(v) => v,
                         Err(e) => {
                             self.observe(
                                 "acp_parse_error",
                                 serde_json::json!({
-                                    "line": trimmed,
-                                    "error": e.to_string(),
+                                    "errorClass": "invalid_json",
+                                    "lineBytes": trimmed.len(),
                                 }),
                             );
                             tracing::warn!(
                                 target: "acp::wire",
-                                "failed to parse line as JSON: {e} — skipping"
+                                error_class = "invalid_json",
+                                line_bytes = trimmed.len(),
+                                line = e.line(),
+                                column = e.column(),
+                                "failed to parse inbound ACP frame"
                             );
                             continue;
                         }
                     };
-                    self.observe("acp_read", msg.clone());
+                    let raw_method = msg.get("method").and_then(serde_json::Value::as_str);
+                    tracing::debug!(
+                        target: "acp::wire",
+                        method = safe_acp_method(raw_method),
+                        method_hash = redacted_log_hash("method", raw_method.unwrap_or("response")),
+                        has_id = msg.get("id").is_some(),
+                        "inbound ACP frame"
+                    );
+                    self.observe_acp_frame("acp_read", &msg);
 
                     let activity_now = Instant::now();
                     idle_deadline = activity_now + idle_timeout;
@@ -1583,7 +2339,8 @@ impl AcpClient {
                                             .get("code")
                                             .and_then(|c| c.as_i64())
                                             .unwrap_or(-1);
-                                        let message = error.to_string();
+                                        let message =
+                                            "agent returned a redacted steer error".to_string();
                                         crate::pool::SteerAck::Err(
                                             crate::pool::SteerError::AgentError { code, message },
                                         )
@@ -1722,7 +2479,12 @@ impl AcpClient {
                                     // agent process is dead and continuing would hang.
                                     self.write_ndjson(&err_resp).await?;
                                 }
-                                tracing::debug!(target: "acp::wire", "ignoring unknown method: {other}");
+                                tracing::debug!(
+                                    target: "acp::wire",
+                                    method = "unknown",
+                                    method_hash = redacted_log_hash("method", other),
+                                    "ignoring unknown ACP method"
+                                );
                             }
                         }
                     }
@@ -1754,9 +2516,8 @@ impl AcpClient {
 
         match update_type {
             "agent_message_chunk" => {
-                if let Some(text) = update["content"]["text"].as_str() {
-                    tracing::info!(target: "acp::stream", "{text}");
-                }
+                let bytes = update["content"]["text"].as_str().map_or(0, str::len);
+                tracing::debug!(target: "acp::stream", bytes, "agent message chunk");
                 false
             }
             "tool_call" => {
@@ -1768,7 +2529,14 @@ impl AcpClient {
                     .get("kind")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
+                tracing::info!(
+                    target: "acp::tool",
+                    title_bytes = title.len(),
+                    title_hash = redacted_log_hash("tool_title", title),
+                    kind = safe_tool_kind(kind),
+                    kind_hash = redacted_log_hash("tool_kind", kind),
+                    "tool call started"
+                );
                 true
             }
             "tool_call_update" => {
@@ -1777,7 +2545,13 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
                 let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("?");
-                tracing::info!(target: "acp::tool", "tool_call_update: {tool_id} → {status}");
+                tracing::info!(
+                    target: "acp::tool",
+                    tool_id_hash = redacted_log_hash("tool_id", tool_id),
+                    status = safe_tool_status(status),
+                    status_hash = redacted_log_hash("tool_status", status),
+                    "tool call updated"
+                );
                 false
             }
             "plan" => {
@@ -1785,23 +2559,19 @@ impl AcpClient {
                 false
             }
             "agent_thought_chunk" => {
-                if let Some(text) = update["content"]["text"].as_str() {
-                    tracing::debug!(target: "acp::thought", "{text}");
-                }
+                let bytes = update["content"]["text"].as_str().map_or(0, str::len);
+                tracing::debug!(target: "acp::thought", bytes, "agent thought chunk");
                 false
             }
             "available_commands_update" => {
                 // Advertised slash commands (ACP slash-commands extension).
-                // Logged for observability; UI surfacing is a follow-up.
-                let names: Vec<&str> = update["availableCommands"]
-                    .as_array()
-                    .map(|cmds| cmds.iter().filter_map(|c| c["name"].as_str()).collect())
-                    .unwrap_or_default();
+                // Only the bounded count is observable; command names are
+                // agent-controlled content and stay behind the redaction boundary.
+                let command_count = update["availableCommands"].as_array().map_or(0, Vec::len);
                 tracing::info!(
                     target: "acp::update",
-                    "available_commands_update: {} commands [{}]",
-                    names.len(),
-                    names.join(", ")
+                    command_count,
+                    "available commands updated"
                 );
                 false
             }
@@ -1824,7 +2594,8 @@ impl AcpClient {
                         Some(serde_json::Value::String(run_id)) => {
                             tracing::debug!(
                                 target: "acp::update",
-                                "session_info_update: activeRunId={run_id}"
+                                run_id_hash = redacted_log_hash("active_run_id", run_id),
+                                "session active run updated"
                             );
                             self.active_run_id = Some(run_id.clone());
                         }
@@ -1847,7 +2618,12 @@ impl AcpClient {
             }
             "keepalive" => false,
             other => {
-                tracing::debug!(target: "acp::update", "session/update: {other}");
+                tracing::debug!(
+                    target: "acp::update",
+                    update_type = safe_update_type(other),
+                    update_type_hash = redacted_log_hash("update_type", other),
+                    "unknown session update"
+                );
                 false
             }
         }
@@ -2015,6 +2791,7 @@ impl AcpClient {
         result: &serde_json::Value,
     ) -> Result<StopReason, AcpError> {
         let stop_reason = self.parse_stop_reason(result)?;
+        self.last_prompt_result = Some(result.clone());
         if let Some(adapter) = self.standard_adapter {
             match serde_json::from_value::<PromptResponseUsage>(result["usage"].clone()) {
                 Ok(usage) => self
@@ -2296,24 +3073,36 @@ pub fn model_in_catalog(
 
 impl Drop for AcpClient {
     fn drop(&mut self) {
-        // Best-effort SIGKILL + reap. We cannot `await` in Drop (sync context).
-        // Kill the process group when possible so subprocesses don't leak.
-        // Callers SHOULD still call `shutdown().await` for guaranteed reaping.
-        match self.child.id() {
-            Some(pid) if kill_process_group(pid) => {}
-            _ => {
-                let _ = self.child.start_kill();
+        if let Some(stderr_task) = self.stderr_task.take() {
+            stderr_task.abort();
+        }
+        // Best-effort SIGKILL + reap. Only ordinary children own the PGID
+        // matching their PID. Trusted adapters share the outer process group
+        // and are always killed directly here.
+        if self.isolated_process_group {
+            match self.child.id() {
+                Some(pid) if kill_process_group(pid) => {}
+                _ => {
+                    let _ = self.child.start_kill();
+                }
             }
+        } else {
+            let _ = self.child.start_kill();
         }
         // Non-blocking reap attempt — prevents zombie accumulation in the
         // common case where SIGKILL takes effect before Drop returns.
         let _ = self.child.try_wait();
+        if self.remove_ordinary_scratch_on_drop {
+            if let Some(path) = self.ordinary_scratch.take() {
+                let _ = std::fs::remove_dir_all(path);
+            }
+        }
     }
 }
 
 /// Send SIGKILL to an entire process group. Returns `true` if the signal was sent.
 ///
-/// The child is spawned with `process_group(0)`, so its PID equals its PGID.
+/// Ordinary children are spawned with `process_group(0)`, so PID equals PGID.
 /// Killing the group ensures subprocesses (MCP servers, tool processes) are
 /// cleaned up rather than orphaned to init on repeated crash-recovery cycles.
 ///
@@ -3024,9 +3813,590 @@ mod tests {
     }
 
     async fn spawn_script(script: &str) -> AcpClient {
-        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false, &[])
             .await
             .expect("failed to spawn test script")
+    }
+
+    #[test]
+    fn trusted_adapter_inherits_outer_process_group() {
+        assert!(!uses_isolated_process_group(true));
+        assert!(uses_isolated_process_group(false));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_stop_kills_outer_and_trusted_nested_worker_before_publish() {
+        use nix::errno::Errno;
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+        use std::os::unix::process::CommandExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "buzz-acp-stop-group-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).expect("create stop test directory");
+        let sentinel = directory.join("published");
+        let child_pid_path = directory.join("child.pid");
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "(/bin/sh -c 'sleep 1; printf published > \"$1\"' sh \"$1\") & echo $! > \"$2\"; wait",
+                "sh",
+                sentinel.to_str().expect("sentinel path is UTF-8"),
+                child_pid_path.to_str().expect("pid path is UTF-8"),
+            ])
+            .process_group(0);
+        let mut outer = command.spawn().expect("spawn outer Desktop process group");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !child_pid_path.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let child_pid: i32 = std::fs::read_to_string(&child_pid_path)
+            .expect("trusted child pid must be captured")
+            .trim()
+            .parse()
+            .expect("trusted child pid must be numeric");
+
+        assert!(
+            kill_process_group(outer.id()),
+            "Desktop group kill must succeed"
+        );
+        let status = outer.wait().expect("reap outer process");
+        assert!(!status.success(), "outer process must be killed by Stop");
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        assert!(
+            !sentinel.exists(),
+            "trusted nested worker must not publish after Desktop Stop"
+        );
+        assert_eq!(
+            kill(Pid::from_raw(child_pid), None),
+            Err(Errno::ESRCH),
+            "trusted nested worker must no longer exist"
+        );
+        std::fs::remove_dir_all(directory).expect("remove stop test directory");
+    }
+
+    #[test]
+    fn ordinary_child_sandbox_is_global_read_deny_with_bounded_grants() {
+        for required in [
+            "(deny file-read-data",
+            "(require-not",
+            "__BUZZ_CHILD_SCRATCH_RULES__",
+            "__BUZZ_CHILD_WORKSPACE_RULE__",
+            "__BUZZ_CHILD_COMMAND_RULES__",
+            "/usr/bin/security",
+            "/bin/launchctl",
+            "/usr/bin/crontab",
+            "/usr/bin/open",
+            "/usr/bin/osascript",
+            "com.apple.securityd",
+            "com.apple.SecurityServer",
+        ] {
+            assert!(ORDINARY_CHILD_SANDBOX_PROFILE.contains(required));
+        }
+        assert!(ORDINARY_CHILD_SANDBOX_PROFILE.contains(
+            "(deny file-read-data\n  (require-any\n    (literal \"/Users/gabriel/.buzz/RUNTIME\")"
+        ));
+        #[cfg(target_os = "macos")]
+        {
+            let scratch = std::path::Path::new("/private/tmp/buzz-acp-profile-test");
+            let (program, args) =
+                child_command_spec("/usr/bin/true", &[], false, Some(scratch), None)
+                    .expect("ordinary command spec");
+            assert_eq!(program, "/usr/bin/sandbox-exec");
+            assert_eq!(args.first().map(String::as_str), Some("-p"));
+            let (program, args) = child_command_spec("/usr/bin/true", &[], true, None, None)
+                .expect("trusted command spec");
+            assert_eq!(program, "/usr/bin/true");
+            assert!(args.is_empty());
+        }
+    }
+
+    #[test]
+    fn managed_scratch_must_be_private_and_match_the_outer_harness_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "buzz-acp-managed-scratch-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let current = root
+            .join(".buzz")
+            .join(".scratch")
+            .join("managed-agents")
+            .join("ab".repeat(32));
+        let other = current.with_file_name("cd".repeat(32));
+        std::fs::create_dir_all(&current).expect("create current scratch fixture");
+        std::fs::create_dir(&other).expect("create other scratch fixture");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o700))
+                .expect("secure current scratch fixture");
+            std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o700))
+                .expect("secure other scratch fixture");
+        }
+        assert_eq!(
+            validated_managed_scratch_at(&current, &current).expect("matching Desktop scratch"),
+            current.canonicalize().expect("canonical current fixture")
+        );
+        assert!(validated_managed_scratch_at(&current, &other).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&current, std::fs::Permissions::from_mode(0o755))
+                .expect("weaken scratch fixture");
+            assert!(validated_managed_scratch_at(&current, &current).is_err());
+        }
+        std::fs::remove_dir_all(root).expect("remove scratch fixture");
+    }
+
+    #[test]
+    fn ordinary_workspace_authenticates_standard_and_linked_git_worktrees() {
+        let root = std::env::temp_dir().join(format!(
+            "buzz-acp-git-workspaces-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir(&root).expect("create git workspace root");
+        let root = root.canonicalize().expect("canonical git workspace root");
+        let main = root.join("main");
+        std::fs::create_dir_all(main.join(".git/worktrees/linked"))
+            .expect("create standard checkout metadata");
+        std::fs::write(main.join(".git/HEAD"), b"ref: refs/heads/main\n")
+            .expect("write standard checkout HEAD");
+        assert_eq!(registered_worktree_root(&main), Some(main.clone()));
+
+        let linked = root.join("linked");
+        std::fs::create_dir(&linked).expect("create linked worktree");
+        let linked_marker = linked.join(".git");
+        let git_dir = main.join(".git/worktrees/linked");
+        std::fs::write(&linked_marker, format!("gitdir: {}\n", git_dir.display()))
+            .expect("write linked worktree marker");
+        std::fs::write(
+            git_dir.join("gitdir"),
+            format!("{}\n", linked_marker.display()),
+        )
+        .expect("write linked worktree backlink");
+        assert_eq!(registered_worktree_root(&linked), Some(linked.clone()));
+
+        std::fs::write(git_dir.join("gitdir"), b"/unregistered/.git\n")
+            .expect("forge linked worktree backlink");
+        assert!(registered_worktree_root(&linked).is_none());
+        std::fs::remove_dir_all(root).expect("remove git workspace fixture");
+    }
+
+    #[test]
+    fn ordinary_profile_does_not_grant_broad_user_mutable_dependency_trees() {
+        let profile = ordinary_child_sandbox_profile(
+            std::path::Path::new("/private/tmp/buzz-acp-profile-test"),
+            None,
+            "/usr/bin/python3",
+        );
+        for forbidden in [
+            "(subpath \"/Library\")",
+            "(subpath \"/private/etc\")",
+            "(subpath \"/opt/homebrew\")",
+            "(subpath \"/Applications/Buzz.app\")",
+        ] {
+            assert!(
+                !profile.contains(forbidden),
+                "broad grant survived: {forbidden}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_child_sandbox_denies_sibling_temp_secret_and_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let parent = std::env::temp_dir().join(format!(
+            "buzz-acp-read-boundary-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let scratch = parent.join("scratch");
+        let secret = parent.join("sibling-secret");
+        let link = scratch.join("escape");
+        std::fs::create_dir_all(&scratch).expect("create scratch");
+        std::fs::write(&secret, b"ORDINARY_CHILD_SECRET_CANARY").expect("write sibling secret");
+        symlink(&secret, &link).expect("create escape symlink");
+        let profile = ordinary_child_sandbox_profile(&scratch, None, "/bin/cat");
+
+        for target in [&secret, &link] {
+            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", &profile, "/bin/cat"])
+                .arg(target)
+                .output()
+                .expect("run sandboxed read probe");
+            assert!(!output.status.success());
+            assert!(
+                !String::from_utf8_lossy(&output.stdout).contains("ORDINARY_CHILD_SECRET_CANARY")
+            );
+        }
+        std::fs::remove_dir_all(parent).expect("remove read-boundary fixture");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_child_sandbox_denies_unreviewed_private_etc_sibling() {
+        let excluded = std::path::Path::new("/private/etc/shells");
+        if !excluded.is_file() {
+            return;
+        }
+        let baseline = std::fs::read(excluded).expect("baseline can read excluded sibling");
+        assert!(!baseline.is_empty());
+        let scratch = std::env::temp_dir().join(format!(
+            "buzz-acp-private-etc-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir(&scratch).expect("create private-etc scratch");
+        let profile = ordinary_child_sandbox_profile(&scratch, None, "/bin/cat");
+        let output = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile, "/bin/cat"])
+            .arg(excluded)
+            .output()
+            .expect("run excluded private-etc read probe");
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        std::fs::remove_dir_all(scratch).expect("remove private-etc scratch");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_child_sandbox_cannot_execute_a_copied_binary_from_scratch() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let parent = std::env::temp_dir().join(format!(
+            "buzz-acp-exec-boundary-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let scratch = parent.join("scratch");
+        let copied_shell = scratch.join("copied-shell");
+        let sentinel = scratch.join("copied-binary-ran");
+        std::fs::create_dir_all(&scratch).expect("create exec-boundary scratch");
+        std::fs::copy("/bin/sh", &copied_shell).expect("copy executable into scratch");
+        std::fs::set_permissions(&copied_shell, std::fs::Permissions::from_mode(0o700))
+            .expect("make copied executable runnable");
+        let profile = ordinary_child_sandbox_profile(&scratch, None, "/bin/sh");
+        let output = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile])
+            .arg(&copied_shell)
+            .args(["-c", &format!("/usr/bin/touch {}", sentinel.display())])
+            .output()
+            .expect("run copied-binary probe");
+        assert!(!output.status.success());
+        assert!(!sentinel.exists());
+        std::fs::remove_dir_all(parent).expect("remove exec-boundary fixture");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_child_sandbox_starts_representative_runtimes() {
+        let scratch = std::env::temp_dir().join(format!(
+            "buzz-acp-runtime-start-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir(&scratch).expect("create runtime scratch");
+        for command in [
+            "/usr/bin/python3",
+            "/Users/gabriel/.nvm/versions/node/v24.13.1/bin/node",
+        ] {
+            if !std::path::Path::new(command).is_file() {
+                continue;
+            }
+            let profile = ordinary_child_sandbox_profile(&scratch, None, command);
+            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args(["-p", &profile, command, "--version"])
+                .current_dir(&scratch)
+                .output()
+                .expect("run sandboxed runtime startup");
+            assert!(
+                output.status.success(),
+                "sandboxed runtime {command} failed: status={} stdout={} stderr={} profile={profile}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::fs::remove_dir_all(scratch).expect("remove runtime scratch");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_child_sandbox_cannot_execute_keychain_client() {
+        let profile = ordinary_child_sandbox_profile(
+            std::path::Path::new("/private/tmp/buzz-acp-keychain-test"),
+            None,
+            "/usr/bin/security",
+        );
+        let output = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args([
+                "-p",
+                &profile,
+                "/usr/bin/security",
+                "find-generic-password",
+                "-s",
+                "buzz-acp-sandbox-nonexistent-probe",
+            ])
+            .output()
+            .expect("run sandboxed Keychain probe");
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        assert!(
+            stderr.contains("not permitted") || stderr.contains("deny"),
+            "sandbox must deny execution before Keychain lookup"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "Keychain probe must emit no value"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_child_sandbox_cannot_escape_via_launchctl() {
+        let profile = ordinary_child_sandbox_profile(
+            std::path::Path::new("/private/tmp/buzz-acp-launchctl-test"),
+            None,
+            "/bin/launchctl",
+        );
+        let uid = std::process::Command::new("/usr/bin/id")
+            .arg("-u")
+            .output()
+            .expect("read current uid");
+        assert!(uid.status.success());
+        let domain = format!("gui/{}", String::from_utf8_lossy(&uid.stdout).trim());
+        let output = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile, "/bin/launchctl", "print-disabled", &domain])
+            .output()
+            .expect("run sandboxed launchctl probe");
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        assert!(
+            stderr.contains("not permitted") || stderr.contains("deny"),
+            "sandbox must deny launchctl execution before it can reuse bootstrap rights"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_child_sandbox_cannot_reach_launchservices_over_mach() {
+        const PROBE: &str = "import ctypes,sys\nlib=ctypes.CDLL(None)\nport=ctypes.c_uint()\nbootstrap=ctypes.c_uint.in_dll(lib,'bootstrap_port').value\nstatus=lib.bootstrap_look_up(bootstrap,b'com.apple.coreservices.launchservicesd',ctypes.byref(port))\nprint(status)\nsys.exit(0 if status == int(sys.argv[1]) else 1)";
+        let baseline = std::process::Command::new("/usr/bin/python3")
+            .args(["-c", PROBE, "0"])
+            .output()
+            .expect("run baseline LaunchServices lookup");
+        assert!(
+            baseline.status.success(),
+            "LaunchServices baseline must be reachable: stdout={} stderr={}",
+            String::from_utf8_lossy(&baseline.stdout),
+            String::from_utf8_lossy(&baseline.stderr)
+        );
+
+        let scratch = std::env::temp_dir().join(format!(
+            "buzz-acp-mach-deny-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir(&scratch).expect("create Mach lookup scratch");
+        let profile = ordinary_child_sandbox_profile(&scratch, None, "/usr/bin/python3");
+        let sandboxed = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile, "/usr/bin/python3", "-c", PROBE, "1100"])
+            .current_dir(&scratch)
+            .output()
+            .expect("run sandboxed LaunchServices lookup");
+        assert!(
+            sandboxed.status.success(),
+            "sandbox must return BOOTSTRAP_NOT_PRIVILEGED: stdout={} stderr={}",
+            String::from_utf8_lossy(&sandboxed.stdout),
+            String::from_utf8_lossy(&sandboxed.stderr)
+        );
+        std::fs::remove_dir_all(scratch).expect("remove Mach lookup scratch");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_child_sandbox_cannot_connect_to_unix_sockets() {
+        use std::os::unix::net::UnixListener;
+
+        struct DirectoryGuard(std::path::PathBuf);
+        impl Drop for DirectoryGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let directory = DirectoryGuard(
+            std::path::PathBuf::from("/private/tmp")
+                .join(format!("buzz-acp-sock-{}", uuid::Uuid::new_v4().simple())),
+        );
+        std::fs::create_dir(&directory.0).expect("create private socket fixture");
+        let socket = directory.0.join("daemon.sock");
+        let _listener = UnixListener::bind(&socket).expect("bind fixture Unix socket");
+        let scratch = directory.0.join("scratch");
+        std::fs::create_dir(&scratch).expect("create child scratch");
+        let profile = ordinary_child_sandbox_profile(&scratch, None, "/usr/bin/python3");
+        let output = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args([
+                "-p",
+                &profile,
+                "/usr/bin/python3",
+                "-c",
+                "import socket,sys; s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])",
+            ])
+            .arg(&socket)
+            .output()
+            .expect("run sandboxed Unix-socket probe");
+        assert!(
+            !output.status.success(),
+            "ordinary ACP child unexpectedly connected to a Unix-domain daemon"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_child_sandbox_cannot_open_installer_for_write() {
+        let profile = ordinary_child_sandbox_profile(
+            std::path::Path::new("/private/tmp/buzz-acp-installer-test"),
+            None,
+            "/usr/bin/ruby",
+        );
+        let installer =
+            "/Users/gabriel/.buzz/REPOS/buzz/scripts/install-context-engine-runtimes.sh";
+        if std::path::Path::new(installer).exists() {
+            let output = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args([
+                    "-p",
+                    &profile,
+                    "/usr/bin/ruby",
+                    "-e",
+                    "File.open(ARGV.fetch(0), File::WRONLY) {}",
+                    installer,
+                ])
+                .output()
+                .expect("run canonical installer write-open probe");
+            assert!(
+                !output.status.success(),
+                "sandbox unexpectedly authorized a write handle to the canonical installer"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_sandbox_blocks_nested_ancestor_rename() {
+        let root =
+            std::env::temp_dir().join(format!("buzz-acp-ancestor-rename-{}", std::process::id()));
+        let scratch = std::env::temp_dir().join(format!(
+            "buzz-acp-ancestor-rename-scratch-{}",
+            std::process::id()
+        ));
+        let intermediate = root.join("intermediate");
+        let moved = root.join("moved");
+        std::fs::create_dir_all(intermediate.join("protected")).expect("create rename fixture");
+        std::fs::create_dir(&scratch).expect("create rename scratch");
+        let profile = ordinary_child_sandbox_profile(&scratch, None, "/bin/mv");
+        let output = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args([
+                "-p",
+                &profile,
+                "/bin/mv",
+                intermediate.to_str().expect("fixture path is UTF-8"),
+                moved.to_str().expect("fixture path is UTF-8"),
+            ])
+            .output()
+            .expect("run nested ancestor rename probe");
+        assert!(!output.status.success());
+        assert!(intermediate.is_dir());
+        assert!(!moved.exists());
+        std::fs::remove_dir_all(root).expect("remove rename fixture");
+        std::fs::remove_dir_all(scratch).expect("remove rename scratch");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_child_sandbox_allows_only_reviewed_scratch_writes() {
+        let scratch = std::path::PathBuf::from("/private/tmp")
+            .join(format!("buzz-acp-sandbox-write-{}", std::process::id()));
+        let sibling = std::path::PathBuf::from("/private/tmp")
+            .join(format!("buzz-acp-sandbox-sibling-{}", std::process::id()));
+        std::fs::create_dir(&scratch).expect("create private scratch probe");
+        std::fs::create_dir(&sibling).expect("create sibling scratch probe");
+        let path = scratch.join("allowed");
+        let sibling_path = sibling.join("denied");
+        let profile = ordinary_child_sandbox_profile(&scratch, None, "/usr/bin/touch");
+        let output = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args([
+                "-p",
+                &profile,
+                "/usr/bin/touch",
+                path.to_str().expect("scratch path is UTF-8"),
+            ])
+            .output()
+            .expect("run reviewed scratch write probe");
+        assert!(
+            output.status.success(),
+            "reviewed scratch root must remain writable: status={} stdout={} stderr={} profile={profile}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let sibling_output = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args([
+                "-p",
+                &profile,
+                "/usr/bin/touch",
+                sibling_path.to_str().expect("sibling path is UTF-8"),
+            ])
+            .output()
+            .expect("run sibling scratch write probe");
+        assert!(
+            !sibling_output.status.success() && !sibling_path.exists(),
+            "ordinary child must not write a sibling worker's scratch root"
+        );
+        std::fs::remove_dir_all(scratch).expect("remove scratch probe");
+        std::fs::remove_dir_all(sibling).expect("remove sibling scratch probe");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ordinary_child_sandbox_cannot_chmod_a_scratch_ancestor() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let parent = std::env::temp_dir().join(format!(
+            "buzz-acp-parent-mode-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let scratch = parent.join("scratch");
+        std::fs::create_dir_all(&scratch).expect("create ancestor mode fixture");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700))
+            .expect("secure ancestor fixture");
+        let profile = ordinary_child_sandbox_profile(&scratch, None, "/bin/chmod");
+        let output = std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile, "/bin/chmod", "777"])
+            .arg(&parent)
+            .output()
+            .expect("run sandboxed ancestor chmod probe");
+        assert!(!output.status.success());
+        assert_eq!(
+            parent
+                .metadata()
+                .expect("ancestor metadata")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o700
+        );
+        std::fs::remove_dir_all(parent).expect("remove ancestor mode fixture");
     }
 
     #[cfg(unix)]
@@ -3047,7 +4417,7 @@ mod tests {
             .permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&path, permissions).expect("chmod fake adapter");
-        let client = AcpClient::spawn(path.to_str().expect("utf8 path"), &[], &[], false)
+        let client = AcpClient::spawn(path.to_str().expect("utf8 path"), &[], &[], false, &[])
             .await
             .expect("spawn named fake adapter");
         (client, dir)
@@ -3061,6 +4431,7 @@ mod tests {
         file_name: &str,
         var: &str,
         extra_env: &[(String, String)],
+        trusted_child_env: &[(String, String)],
     ) -> String {
         use std::os::unix::fs::PermissionsExt;
 
@@ -3081,6 +4452,7 @@ mod tests {
             &[],
             extra_env,
             false,
+            trusted_child_env,
         )
         .await
         .expect("spawn env probe script");
@@ -3102,27 +4474,71 @@ mod tests {
     #[tokio::test]
     async fn spawn_applies_runtime_env_defaults_with_extra_env_precedence() {
         const VAR: &str = "HERMES_ACP_SKIP_CONFIGURED_MCP";
-        if std::env::var_os(VAR).is_some() {
-            // Inherited parent values win over both layers; the default and
-            // override behavior below is unobservable in such an environment.
-            return;
-        }
-
         assert_eq!(
-            spawn_named_and_read_child_env("hermes-acp", VAR, &[]).await,
+            spawn_named_and_read_child_env("hermes-acp", VAR, &[], &[]).await,
             "1",
             "Hermes spawns must default {VAR}=1"
         );
         assert_eq!(
-            spawn_named_and_read_child_env("hermes-acp", VAR, &[(VAR.into(), "0".into())]).await,
+            spawn_named_and_read_child_env("hermes-acp", VAR, &[(VAR.into(), "0".into())], &[],)
+                .await,
             "0",
             "an explicit extra_env entry must override the runtime default"
         );
         assert_eq!(
-            spawn_named_and_read_child_env("other-agent", VAR, &[]).await,
+            spawn_named_and_read_child_env("other-agent", VAR, &[], &[]).await,
             "<unset>",
             "non-Hermes spawns must not receive Hermes defaults"
         );
+    }
+
+    /// A caller cannot turn an arbitrary command into a credential-bearing
+    /// child merely by supplying the trusted environment shape.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_rejects_credentials_without_a_frozen_harness() {
+        let trusted_env = TRUSTED_CHILD_ENV_KEYS
+            .iter()
+            .map(|key| ((*key).to_string(), format!("trusted-{key}")))
+            .collect::<Vec<_>>();
+        let result = AcpClient::spawn(
+            "/bin/sh",
+            &["-c".into(), "exit 0".into()],
+            &[],
+            false,
+            &trusted_env,
+        )
+        .await;
+        match result {
+            Err(AcpError::Protocol(message)) => {
+                assert!(message.contains("trusted harness revalidation failed"));
+            }
+            Err(other) => panic!("unexpected error: {other}"),
+            Ok(mut client) => {
+                client.shutdown().await;
+                panic!("unvalidated command received trusted credentials");
+            }
+        }
+    }
+
+    /// Security-critical negative control: reserved credentials are removed
+    /// from both inherited parent state and ordinary persona environment.
+    /// Run this test with hostile values exported in the cargo command to prove
+    /// the real spawned-child inheritance seam is scrubbed.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_scrubs_reserved_credentials_from_untrusted_child_env() {
+        let forged_extra_env = CHILD_CREDENTIAL_ENV_TO_SCRUB
+            .iter()
+            .map(|key| ((*key).to_string(), format!("forged-{key}")))
+            .collect::<Vec<_>>();
+        for key in CHILD_CREDENTIAL_ENV_TO_SCRUB {
+            assert_eq!(
+                spawn_named_and_read_child_env("probe", key, &forged_extra_env, &[]).await,
+                "<unset>",
+                "ordinary child must not receive reserved credential {key}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3717,7 +5133,7 @@ mod tests {
     /// which is fine — these tests don't read from the agent, they just
     /// feed JSON into the parser.
     async fn spawn_inert_client() -> AcpClient {
-        AcpClient::spawn("cat", &[], &[], false)
+        AcpClient::spawn("cat", &[], &[], false, &[])
             .await
             .expect("spawn cat as inert client")
     }
@@ -4041,10 +5457,14 @@ mod tests {
         capture_path: &std::path::Path,
         response: &str,
     ) -> AcpClient {
+        let capture_name = capture_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("capture filename is UTF-8");
         let script = format!(
-            "read -r line; printf '%s' \"$line\" > {capture}; \
+            "read -r line; printf '%s' \"$line\" > \"$TMPDIR/{capture}\"; \
              printf '%s\\n' '{response}'; sleep 10",
-            capture = capture_path.display(),
+            capture = capture_name,
             response = response,
         );
         spawn_script(&script).await
@@ -4085,7 +5505,17 @@ mod tests {
         let ack = ack_rx
             .await
             .expect("ack oneshot must have received a SteerAck");
-        (std::fs::read_to_string(capture_path).ok(), ack)
+        let actual_capture = client
+            .ordinary_scratch_path()
+            .map(|scratch| {
+                scratch.join(
+                    capture_path
+                        .file_name()
+                        .expect("capture path has a filename"),
+                )
+            })
+            .unwrap_or_else(|| capture_path.to_path_buf());
+        (std::fs::read_to_string(actual_capture).ok(), ack)
     }
 
     /// Unique temp path for one test's captured request bytes.
@@ -4768,29 +6198,26 @@ mod tests {
     }
 
     #[test]
-    fn agent_error_from_json_falls_back_to_full_json_when_message_missing() {
-        // Errors without a string `message` field (e.g. only a `data` field) must
-        // not be silently truncated to "unknown error" — the full JSON is preserved.
+    fn agent_error_from_json_redacts_data_when_message_missing() {
         let error = serde_json::json!({"code": -32000, "data": "quota exceeded"});
         match super::agent_error_from_json(&error) {
             AcpError::AgentError { code, message } => {
                 assert_eq!(code, -32000);
-                assert!(
-                    message.contains("quota exceeded"),
-                    "expected full JSON in message, got: {message}"
-                );
+                assert_eq!(message, "agent returned a redacted JSON-RPC error");
+                assert!(!message.contains("quota exceeded"));
             }
             other => panic!("expected AgentError, got {other:?}"),
         }
     }
 
     #[test]
-    fn agent_error_from_json_uses_message_field_when_present() {
+    fn agent_error_from_json_redacts_message_field_when_present() {
         let error = serde_json::json!({"code": -32001, "message": "auth denied"});
         match super::agent_error_from_json(&error) {
             AcpError::AgentError { code, message } => {
                 assert_eq!(code, -32001);
-                assert_eq!(message, "auth denied");
+                assert_eq!(message, "agent returned a redacted JSON-RPC error");
+                assert!(!message.contains("auth denied"));
             }
             other => panic!("expected AgentError, got {other:?}"),
         }

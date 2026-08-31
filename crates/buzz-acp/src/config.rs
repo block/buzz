@@ -4,11 +4,13 @@
 //! Config file (TOML) for complex subscription rules.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use clap::ValueEnum;
 use nostr::Keys;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
@@ -34,6 +36,24 @@ pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 /// meaningless and risks arithmetic overflow when deriving the in-flight
 /// deadline (`max_turn_duration + IN_FLIGHT_DEADLINE_BUFFER_SECS`).
 pub(crate) const MAX_TURN_DURATION_CEILING_SECS: u64 = 604_800;
+
+/// Maximum serialized credential envelope accepted from the Desktop's
+/// inherited socket. The actual nsec + NIP-OA tag is far smaller; this bound
+/// prevents a compromised launcher from forcing an unbounded startup read.
+const MAX_CREDENTIAL_ENVELOPE_BYTES: u64 = 16 * 1024;
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartupCredentialEnvelope {
+    private_key: String,
+    #[serde(default)]
+    auth_tag: Option<String>,
+}
+
+struct StartupCredentials {
+    private_key: String,
+    auth_tag: Option<String>,
+}
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -246,8 +266,24 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "ws://localhost:3000")]
     pub relay_url: String,
 
-    #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
+    #[arg(
+        long,
+        env = "BUZZ_PRIVATE_KEY",
+        hide_env_values = true,
+        default_value = ""
+    )]
     pub private_key: String,
+
+    /// Read a one-shot Desktop credential envelope from this process's stdin.
+    /// The flag is non-secret; the signing material never enters argv or the
+    /// launch environment.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_CREDENTIAL_STDIN",
+        hide = true,
+        hide_env_values = true
+    )]
+    pub credential_stdin: bool,
 
     /// Agent owner pubkey (64-char hex). Used for --respond-to=owner-only gate.
     #[arg(long, env = "BUZZ_ACP_AGENT_OWNER")]
@@ -514,9 +550,12 @@ pub struct ChannelFilter {
     pub require_mention: bool,
 }
 
-#[derive(Debug)]
 pub struct Config {
     pub keys: Keys,
+    /// Raw owner attestation retained only by the trusted outer harness. It is
+    /// sourced from one-shot credential stdin for Desktop-managed Context
+    /// Engine launches and is never copied into an ACP child environment.
+    pub(crate) owner_auth_tag: Option<String>,
     pub relay_url: String,
     pub agent_command: String,
     pub agent_args: Vec<String>,
@@ -574,6 +613,16 @@ pub struct Config {
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
     /// Populated from persona pack resolution. Empty when no pack is configured.
     pub persona_env_vars: Vec<(String, String)>,
+    /// Non-secret identity/runtime variables for a fully validated trusted
+    /// harness. Signing, authorization, relay, and capability material stays
+    /// in the outer buzz-acp process.
+    pub trusted_child_env: Vec<(String, String)>,
+    /// Host-only capability and relay inputs for authenticated reply publish.
+    /// Never copied into the ACP child environment.
+    pub(crate) trusted_publish: Option<TrustedPublishConfig>,
+    /// Fully validated managed outbox harness. `None` means the configured
+    /// child is ordinary and cannot receive a verified Buzz delivery envelope.
+    pub(crate) trusted_outbox_harness: Option<TrustedOutboxHarness>,
     /// Whether `codex_network_env()` successfully injected a `CODEX_CONFIG` entry into
     /// `persona_env_vars`.  When true, `AcpClient::spawn` merges all `CODEX_CONFIG` entries
     /// and forces `sandbox_workspace_write.network_access = true` via `build_codex_config_env`.
@@ -728,6 +777,1406 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
         .collect()
 }
 
+/// Managed runtimes that may receive authenticated Buzz envelopes.
+/// Classification is based on exact command, arguments, artifact bytes and
+/// identity pins -- never a user-controlled display name or basename.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrustedOutboxHarness {
+    Gabe,
+    Stacy,
+}
+
+#[derive(Clone)]
+pub(crate) struct TrustedPublishConfig {
+    pub harness: TrustedOutboxHarness,
+    pub capability_key: [u8; 32],
+    pub auth_tag: String,
+    pub relay_http_base: String,
+    pub outbox_dir: PathBuf,
+}
+
+impl TrustedOutboxHarness {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Gabe => "gabe-acp",
+            Self::Stacy => "stacy-acp",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TrustedArtifactSpec {
+    path: &'static str,
+    sha256: &'static str,
+    executable: bool,
+    immutable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrustedArtifactIdentity {
+    path: &'static str,
+    len: u64,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TrustedChildValidation {
+    pub(crate) env: Vec<(String, String)>,
+    pub(crate) artifacts: Vec<TrustedArtifactIdentity>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TrustedDeploymentSpec {
+    receipt_path: &'static str,
+    lifecycle_state_path: &'static str,
+    docker_socket: &'static str,
+    project: &'static str,
+    agent_container: &'static str,
+    agent_service: &'static str,
+    dashboard_container: &'static str,
+    dashboard_service: &'static str,
+}
+
+#[derive(Debug)]
+struct TrustedHarnessSpec {
+    harness: TrustedOutboxHarness,
+    command: &'static str,
+    args: &'static [&'static str],
+    artifacts: &'static [TrustedArtifactSpec],
+    agent_pin_env: &'static str,
+    owner_pin_env: &'static str,
+    runtime_env: &'static [(&'static str, &'static str)],
+    capability_home: Option<&'static str>,
+    outbox_dir: &'static str,
+    health_addr: Option<&'static str>,
+    deployment: Option<TrustedDeploymentSpec>,
+}
+
+const GABE_NODE_PATH: &str = "/Users/gabriel/.buzz/RUNTIME/trusted-node/d36b3d980963d44bd2c5e844fac4cfeee26a167b744287a4e74a9575af9d0559/node";
+const GABE_NODE_SHA256: &str = "d36b3d980963d44bd2c5e844fac4cfeee26a167b744287a4e74a9575af9d0559";
+const GABE_ADAPTER_SHA256: &str =
+    "96a8efaf20cbc1cb92fb2ae2eca5a0bdefabba42f9cd6e2ca21299c724bd7c5c";
+const GABE_ADAPTER_PATH: &str = "/Users/gabriel/.buzz/RUNTIME/context-engine/96a8efaf20cbc1cb92fb2ae2eca5a0bdefabba42f9cd6e2ca21299c724bd7c5c/scripts/gabe-acp.mjs";
+const STACY_ADAPTER_PATH: &str = "/Users/gabriel/.buzz/RUNTIME/stacy-context-engine/96a8efaf20cbc1cb92fb2ae2eca5a0bdefabba42f9cd6e2ca21299c724bd7c5c/scripts/gabe-acp.mjs";
+
+const GABE_ARGS: &[&str] = &[GABE_ADAPTER_PATH];
+const STACY_ARGS: &[&str] = &[STACY_ADAPTER_PATH];
+const GABE_ARTIFACTS: &[TrustedArtifactSpec] = &[
+    TrustedArtifactSpec {
+        path: GABE_NODE_PATH,
+        sha256: GABE_NODE_SHA256,
+        executable: true,
+        immutable: true,
+    },
+    TrustedArtifactSpec {
+        path: GABE_ADAPTER_PATH,
+        sha256: GABE_ADAPTER_SHA256,
+        executable: false,
+        immutable: true,
+    },
+];
+const STACY_ARTIFACTS: &[TrustedArtifactSpec] = &[
+    TrustedArtifactSpec {
+        path: GABE_NODE_PATH,
+        sha256: GABE_NODE_SHA256,
+        executable: true,
+        immutable: true,
+    },
+    TrustedArtifactSpec {
+        path: STACY_ADAPTER_PATH,
+        sha256: GABE_ADAPTER_SHA256,
+        executable: false,
+        immutable: true,
+    },
+];
+const GABE_RUNTIME_ENV: &[(&str, &str)] = &[
+    ("CONTEXT_ENGINE_BASE_URL", "http://127.0.0.1:18790"),
+    ("BUZZ_ACP_SESSION_PREFIX", "gabe"),
+];
+const STACY_RUNTIME_ENV: &[(&str, &str)] = &[
+    ("CONTEXT_ENGINE_BASE_URL", "http://127.0.0.1:18803"),
+    ("BUZZ_ACP_SESSION_PREFIX", "stacy"),
+];
+const STACY_DEPLOYMENT: TrustedDeploymentSpec = TrustedDeploymentSpec {
+    receipt_path: "/Users/gabriel/.buzz/RUNTIME/stacy-context-engine/home/deployment-receipt.json",
+    lifecycle_state_path:
+        "/Users/gabriel/.buzz/RUNTIME/stacy-context-engine/home/deployment-control/lifecycle-state",
+    docker_socket: "/Users/gabriel/.docker/run/docker.sock",
+    project: "stacy",
+    agent_container: "stacy-agent",
+    agent_service: "stacy",
+    dashboard_container: "stacy-dashboard",
+    dashboard_service: "stacy-dashboard",
+};
+const INSTALL_RECEIPTS_ROOT: &str = "/Users/gabriel/.buzz/RUNTIME/deployment-receipts";
+const GABE_HARNESS_SPEC: TrustedHarnessSpec = TrustedHarnessSpec {
+    harness: TrustedOutboxHarness::Gabe,
+    command: GABE_NODE_PATH,
+    args: GABE_ARGS,
+    artifacts: GABE_ARTIFACTS,
+    agent_pin_env: "BUZZ_GABE_AGENT_PUBKEY",
+    owner_pin_env: "BUZZ_GABE_OWNER_PUBKEY",
+    runtime_env: GABE_RUNTIME_ENV,
+    capability_home: Some("/Users/gabriel/.openclaw"),
+    outbox_dir: "/Users/gabriel/.openclaw/state/context-engine-buzz/prepared",
+    health_addr: Some("127.0.0.1:18790"),
+    deployment: None,
+};
+const STACY_HARNESS_SPEC: TrustedHarnessSpec = TrustedHarnessSpec {
+    harness: TrustedOutboxHarness::Stacy,
+    command: GABE_NODE_PATH,
+    args: STACY_ARGS,
+    artifacts: STACY_ARTIFACTS,
+    agent_pin_env: "BUZZ_STACY_AGENT_PUBKEY",
+    owner_pin_env: "BUZZ_STACY_OWNER_PUBKEY",
+    runtime_env: STACY_RUNTIME_ENV,
+    capability_home: Some("/Users/gabriel/.buzz/RUNTIME/stacy-context-engine/home"),
+    outbox_dir:
+        "/Users/gabriel/.buzz/RUNTIME/stacy-context-engine/home/state/context-engine-buzz/prepared",
+    health_addr: Some("127.0.0.1:18803"),
+    deployment: Some(STACY_DEPLOYMENT),
+};
+static TRUSTED_HARNESSES: &[TrustedHarnessSpec] = &[GABE_HARNESS_SPEC, STACY_HARNESS_SPEC];
+
+fn configured_trusted_harness(
+    command: &str,
+    args: &[String],
+) -> Option<&'static TrustedHarnessSpec> {
+    TRUSTED_HARNESSES.iter().find(|spec| {
+        command == spec.command
+            && args.len() == spec.args.len()
+            && args
+                .iter()
+                .map(String::as_str)
+                .eq(spec.args.iter().copied())
+    })
+}
+
+fn validate_trusted_artifact(spec: TrustedArtifactSpec) -> Result<TrustedArtifactIdentity, String> {
+    validate_trusted_artifact_at(spec, Path::new("/Users/gabriel/.buzz/RUNTIME"))
+}
+
+fn validate_trusted_artifact_at(
+    spec: TrustedArtifactSpec,
+    runtime_root: &Path,
+) -> Result<TrustedArtifactIdentity, String> {
+    use std::io::Read;
+
+    let path = Path::new(spec.path);
+    let before = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("cannot inspect artifact: {error}"))?;
+    if !before.file_type().is_file() || before.file_type().is_symlink() {
+        return Err("artifact is not a regular non-symlink file".into());
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("cannot canonicalize artifact: {error}"))?;
+    if canonical != path {
+        return Err("artifact path is not canonical".into());
+    }
+
+    let mut parent = path
+        .parent()
+        .ok_or_else(|| "artifact has no parent directory".to_string())?;
+    let ancestor_stop = if spec.immutable {
+        runtime_root
+    } else {
+        parent
+            .parent()
+            .ok_or_else(|| "artifact test parent chain is incomplete".to_string())?
+    };
+    let mut parents = Vec::new();
+    while parent != ancestor_stop {
+        if spec.immutable && !parent.starts_with(runtime_root) {
+            return Err("artifact escaped the trusted runtime root".into());
+        }
+        let metadata = std::fs::symlink_metadata(parent)
+            .map_err(|error| format!("cannot inspect artifact ancestor: {error}"))?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err("artifact ancestor is not a regular directory".into());
+        }
+        if parent
+            .canonicalize()
+            .map_err(|error| format!("cannot canonicalize artifact ancestor: {error}"))?
+            != parent
+        {
+            return Err("artifact ancestor path is not canonical".into());
+        }
+        parents.push(metadata);
+        parent = parent
+            .parent()
+            .ok_or_else(|| "artifact ancestor chain is incomplete".to_string())?;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let executable_owner = std::env::current_exe()
+            .and_then(std::fs::metadata)
+            .map_err(|error| format!("cannot inspect current executable: {error}"))?
+            .uid();
+        if before.uid() != executable_owner
+            || parents
+                .iter()
+                .any(|metadata| metadata.uid() != executable_owner)
+        {
+            return Err("artifact owner does not match the harness executable owner".into());
+        }
+        let expected_mode = if spec.executable { 0o555 } else { 0o444 };
+        if before.mode() & 0o777 != expected_mode {
+            return Err("artifact mode does not match the frozen read-only mode".into());
+        }
+        if parents
+            .iter()
+            .any(|metadata| metadata.mode() & 0o7777 != 0o555)
+        {
+            return Err("artifact ancestor directory is not read-only".into());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    if spec.immutable {
+        use std::os::macos::fs::MetadataExt;
+        const USER_IMMUTABLE: u32 = 0x0000_0002;
+        if before.st_flags() & USER_IMMUTABLE == 0
+            || parents
+                .iter()
+                .any(|metadata| metadata.st_flags() & USER_IMMUTABLE == 0)
+        {
+            return Err("artifact is not protected by the macOS uchg flag".into());
+        }
+    }
+
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|error| format!("cannot securely open artifact: {error}"))?
+    };
+    #[cfg(not(unix))]
+    let mut file =
+        std::fs::File::open(path).map_err(|error| format!("cannot open artifact: {error}"))?;
+    let opened = file
+        .metadata()
+        .map_err(|error| format!("cannot inspect opened artifact: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|error| format!("cannot read artifact: {error}"))?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let after = file
+        .metadata()
+        .map_err(|error| format!("cannot re-inspect artifact: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened.dev() != before.dev()
+            || opened.ino() != before.ino()
+            || after.dev() != opened.dev()
+            || after.ino() != opened.ino()
+            || after.len() != opened.len()
+        {
+            return Err("artifact changed during verification".into());
+        }
+    }
+    let actual_hash = hex::encode(hasher.finalize());
+    if actual_hash != spec.sha256 {
+        return Err("artifact digest does not match the frozen digest".into());
+    }
+    Ok(TrustedArtifactIdentity {
+        path: spec.path,
+        len: after.len(),
+        #[cfg(unix)]
+        dev: {
+            use std::os::unix::fs::MetadataExt as _;
+            after.dev()
+        },
+        #[cfg(unix)]
+        ino: {
+            use std::os::unix::fs::MetadataExt as _;
+            after.ino()
+        },
+    })
+}
+
+fn normalize_pubkey_pin(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    if value.len() != 64 || !value.chars().all(|character| character.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(value.to_ascii_lowercase())
+}
+
+fn decode_capability_key(value: &str) -> Result<[u8; 32], String> {
+    let suffix = value
+        .strip_prefix("buzz_cap_v1:")
+        .ok_or_else(|| "trusted capability is malformed".to_string())?;
+    if suffix.len() != 64
+        || !suffix
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("trusted capability is malformed".into());
+    }
+    let decoded = hex::decode(suffix).map_err(|_| "trusted capability is malformed".to_string())?;
+    decoded
+        .try_into()
+        .map_err(|_| "trusted capability is malformed".to_string())
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TrustedDeploymentReceipt {
+    version: u8,
+    project: String,
+    buzz_commit: String,
+    source_commit: String,
+    upstream_pin: String,
+    compose_sha256: String,
+    install_receipt_sha256: String,
+    deployment_generation: String,
+    lifecycle_generation: String,
+    stacy_container_id: String,
+    stacy_image_id: String,
+    dashboard_container_id: String,
+    dashboard_image_id: String,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TrustedInstallReceipt {
+    buzz_commit: String,
+    gabe_commit: String,
+    stacy_commit: String,
+    node_sha256: String,
+    buzz_acp_sha256: String,
+    adapter_sha256: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DockerContainerInspect {
+    id: String,
+    image: String,
+    state: DockerContainerState,
+    config: DockerContainerConfig,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DockerContainerState {
+    running: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct DockerContainerConfig {
+    labels: HashMap<String, String>,
+}
+
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_sha256_image_id(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|digest| is_lower_hex(digest, 64))
+}
+
+fn read_trusted_deployment_receipt(
+    spec: TrustedDeploymentSpec,
+) -> Result<TrustedDeploymentReceipt, String> {
+    use std::io::Read;
+
+    let path = Path::new(spec.receipt_path);
+    let before = std::fs::symlink_metadata(path)
+        .map_err(|_| "trusted deployment receipt is unavailable".to_string())?;
+    if !before.is_file() || before.file_type().is_symlink() || before.len() > 4096 {
+        return Err("trusted deployment receipt is unsafe".into());
+    }
+    let canonical = path
+        .canonicalize()
+        .map_err(|_| "trusted deployment receipt cannot be canonicalized".to_string())?;
+    if canonical != path {
+        return Err("trusted deployment receipt is not canonical".into());
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| "trusted deployment receipt has no parent".to_string())?;
+    let parent_metadata = std::fs::symlink_metadata(parent)
+        .map_err(|_| "trusted deployment receipt parent is unavailable".to_string())?;
+    if !parent_metadata.is_dir() || parent_metadata.file_type().is_symlink() {
+        return Err("trusted deployment receipt parent is unsafe".into());
+    }
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|_| "trusted deployment receipt parent cannot be canonicalized".to_string())?;
+    if canonical_parent != parent {
+        return Err("trusted deployment receipt parent is not canonical".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let executable_owner = std::env::current_exe()
+            .and_then(std::fs::metadata)
+            .map_err(|_| "cannot inspect harness owner".to_string())?
+            .uid();
+        if parent_metadata.uid() != executable_owner
+            || parent_metadata.mode() & 0o777 != 0o700
+            || before.uid() != executable_owner
+            || before.mode() & 0o777 != 0o600
+            || before.nlink() != 1
+        {
+            return Err("trusted deployment receipt ownership or mode is unsafe".into());
+        }
+    }
+
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|_| "trusted deployment receipt cannot be opened".to_string())?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::File::open(path)
+        .map_err(|_| "trusted deployment receipt cannot be opened".to_string())?;
+    let opened = file
+        .metadata()
+        .map_err(|_| "trusted deployment receipt cannot be inspected".to_string())?;
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(4097)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "trusted deployment receipt cannot be read".to_string())?;
+    if bytes.len() > 4096 {
+        return Err("trusted deployment receipt is too large".into());
+    }
+    let after = file
+        .metadata()
+        .map_err(|_| "trusted deployment receipt cannot be re-inspected".to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened.dev() != before.dev()
+            || opened.ino() != before.ino()
+            || after.dev() != opened.dev()
+            || after.ino() != opened.ino()
+            || after.len() != opened.len()
+            || after.mtime() != opened.mtime()
+            || after.mtime_nsec() != opened.mtime_nsec()
+        {
+            return Err("trusted deployment receipt changed during verification".into());
+        }
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|_| "trusted deployment receipt is malformed".to_string())
+}
+
+fn validate_trusted_lifecycle_state(
+    spec: TrustedDeploymentSpec,
+    receipt: &TrustedDeploymentReceipt,
+) -> Result<(), String> {
+    use std::io::Read;
+
+    let path = Path::new(spec.lifecycle_state_path);
+    let parent = path
+        .parent()
+        .ok_or_else(|| "trusted lifecycle state has no parent".to_string())?;
+    let parent_metadata = std::fs::symlink_metadata(parent)
+        .map_err(|_| "trusted lifecycle state parent is unavailable".to_string())?;
+    let before = std::fs::symlink_metadata(path)
+        .map_err(|_| "trusted lifecycle state is unavailable".to_string())?;
+    if !parent_metadata.is_dir()
+        || parent_metadata.file_type().is_symlink()
+        || !before.is_file()
+        || before.file_type().is_symlink()
+        || before.len() > 128
+    {
+        return Err("trusted lifecycle state is unsafe".into());
+    }
+    if parent
+        .canonicalize()
+        .map_err(|_| "trusted lifecycle state parent cannot be canonicalized".to_string())?
+        != parent
+        || path
+            .canonicalize()
+            .map_err(|_| "trusted lifecycle state cannot be canonicalized".to_string())?
+            != path
+    {
+        return Err("trusted lifecycle state path is not canonical".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let executable_owner = std::env::current_exe()
+            .and_then(std::fs::metadata)
+            .map_err(|_| "cannot inspect harness owner".to_string())?
+            .uid();
+        if parent_metadata.uid() != executable_owner
+            || parent_metadata.mode() & 0o777 != 0o700
+            || before.uid() != executable_owner
+            || before.mode() & 0o777 != 0o600
+            || before.nlink() != 1
+        {
+            return Err("trusted lifecycle state ownership or mode is unsafe".into());
+        }
+    }
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|_| "trusted lifecycle state cannot be opened".to_string())?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::File::open(path)
+        .map_err(|_| "trusted lifecycle state cannot be opened".to_string())?;
+    let opened = file
+        .metadata()
+        .map_err(|_| "trusted lifecycle state cannot be inspected".to_string())?;
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(129)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "trusted lifecycle state cannot be read".to_string())?;
+    let after = file
+        .metadata()
+        .map_err(|_| "trusted lifecycle state cannot be re-inspected".to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened.dev() != before.dev()
+            || opened.ino() != before.ino()
+            || after.dev() != opened.dev()
+            || after.ino() != opened.ino()
+            || after.len() != opened.len()
+            || after.mtime() != opened.mtime()
+            || after.mtime_nsec() != opened.mtime_nsec()
+        {
+            return Err("trusted lifecycle state changed during verification".into());
+        }
+    }
+    let expected = format!("{} up\n", receipt.lifecycle_generation);
+    if bytes != expected.as_bytes() {
+        return Err("trusted lifecycle state does not authorize this deployment".into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn inspect_docker_container(
+    socket_path: &str,
+    container: &str,
+) -> Result<DockerContainerInspect, String> {
+    use std::io::{Read, Write};
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    if container.is_empty()
+        || !container
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err("trusted deployment container name is invalid".into());
+    }
+    let socket = Path::new(socket_path);
+    let metadata = std::fs::symlink_metadata(socket)
+        .map_err(|_| "trusted Docker socket is unavailable".to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_socket() {
+        return Err("trusted Docker socket is unsafe".into());
+    }
+    let canonical = socket
+        .canonicalize()
+        .map_err(|_| "trusted Docker socket cannot be canonicalized".to_string())?;
+    if canonical != socket {
+        return Err("trusted Docker socket is not canonical".into());
+    }
+    let executable_owner = std::env::current_exe()
+        .and_then(std::fs::metadata)
+        .map_err(|_| "cannot inspect harness owner".to_string())?
+        .uid();
+    if metadata.uid() != executable_owner || metadata.mode() & 0o022 != 0 {
+        return Err("trusted Docker socket ownership or mode is unsafe".into());
+    }
+
+    let mut stream = UnixStream::connect(socket)
+        .map_err(|_| "trusted Docker socket cannot be reached".to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .map_err(|_| "cannot bound trusted Docker read".to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(3)))
+        .map_err(|_| "cannot bound trusted Docker write".to_string())?;
+    write!(
+        stream,
+        "GET /containers/{container}/json HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    )
+    .map_err(|_| "trusted Docker request failed".to_string())?;
+    let mut response = Vec::new();
+    (&mut stream)
+        .take(256 * 1024 + 1)
+        .read_to_end(&mut response)
+        .map_err(|_| "trusted Docker response failed".to_string())?;
+    if response.len() > 256 * 1024 {
+        return Err("trusted Docker response is too large".into());
+    }
+    let boundary = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| "trusted Docker response is malformed".to_string())?;
+    let head = std::str::from_utf8(&response[..boundary])
+        .map_err(|_| "trusted Docker response head is invalid".to_string())?;
+    let mut lines = head.split("\r\n");
+    let status = lines
+        .next()
+        .ok_or_else(|| "trusted Docker response status is absent".to_string())?;
+    if status != "HTTP/1.1 200 OK" && status != "HTTP/1.0 200 OK" {
+        return Err("trusted Docker container inspection was rejected".into());
+    }
+    let mut content_length = None;
+    let mut chunked = false;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            return Err("trusted Docker response header is malformed".into());
+        };
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            if !value.trim().eq_ignore_ascii_case("chunked") || chunked {
+                return Err("trusted Docker response encoding is unsupported".into());
+            }
+            chunked = true;
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            if content_length.is_some() {
+                return Err("trusted Docker response length is ambiguous".into());
+            }
+            content_length = Some(
+                value
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| "trusted Docker response length is invalid".to_string())?,
+            );
+        }
+    }
+    if chunked && content_length.is_some() {
+        return Err("trusted Docker response framing is ambiguous".into());
+    }
+    let wire_body = &response[boundary + 4..];
+    let decoded;
+    let body = if chunked {
+        decoded = decode_chunked_body(wire_body)?;
+        decoded.as_slice()
+    } else {
+        if content_length != Some(wire_body.len()) {
+            return Err("trusted Docker response length does not match".into());
+        }
+        wire_body
+    };
+    serde_json::from_slice(body)
+        .map_err(|_| "trusted Docker container inspection is malformed".to_string())
+}
+
+fn decode_chunked_body(input: &[u8]) -> Result<Vec<u8>, String> {
+    let mut remaining = input;
+    let mut decoded = Vec::new();
+    loop {
+        let line_end = remaining
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .ok_or_else(|| "trusted Docker chunk size is malformed".to_string())?;
+        let size_text = std::str::from_utf8(&remaining[..line_end])
+            .map_err(|_| "trusted Docker chunk size is invalid".to_string())?;
+        if size_text.is_empty()
+            || size_text.len() > 16
+            || !size_text.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err("trusted Docker chunk size is invalid".into());
+        }
+        let size = usize::from_str_radix(size_text, 16)
+            .map_err(|_| "trusted Docker chunk size is invalid".to_string())?;
+        remaining = &remaining[line_end + 2..];
+        if size == 0 {
+            if remaining != b"\r\n" {
+                return Err("trusted Docker chunk trailer is unsupported".into());
+            }
+            return Ok(decoded);
+        }
+        if size > 256 * 1024 - decoded.len()
+            || remaining.len() < size + 2
+            || &remaining[size..size + 2] != b"\r\n"
+        {
+            return Err("trusted Docker chunk body is invalid".into());
+        }
+        decoded.extend_from_slice(&remaining[..size]);
+        remaining = &remaining[size + 2..];
+    }
+}
+
+#[cfg(not(unix))]
+fn inspect_docker_container(
+    _socket_path: &str,
+    _container: &str,
+) -> Result<DockerContainerInspect, String> {
+    Err("trusted Docker inspection requires Unix domain sockets".into())
+}
+
+fn validate_deployed_container(
+    inspect: &DockerContainerInspect,
+    expected_container_id: &str,
+    expected_image_id: &str,
+    expected_service: &str,
+    spec: TrustedDeploymentSpec,
+    receipt: &TrustedDeploymentReceipt,
+) -> Result<(), String> {
+    if inspect.id != expected_container_id
+        || inspect.image != expected_image_id
+        || !inspect.state.running
+    {
+        return Err("trusted deployment container identity or state does not match".into());
+    }
+    let expected_labels = [
+        ("com.docker.compose.project", spec.project),
+        ("com.docker.compose.service", expected_service),
+        (
+            "com.johnpein.stacy.source-commit",
+            receipt.source_commit.as_str(),
+        ),
+        (
+            "com.johnpein.stacy.upstream-pin",
+            receipt.upstream_pin.as_str(),
+        ),
+        (
+            "com.johnpein.stacy.compose-sha256",
+            receipt.compose_sha256.as_str(),
+        ),
+        (
+            "com.johnpein.stacy.deployment-generation",
+            receipt.deployment_generation.as_str(),
+        ),
+    ];
+    if expected_labels.iter().any(|(name, expected)| {
+        inspect.config.labels.get(*name).map(String::as_str) != Some(*expected)
+    }) {
+        return Err("trusted deployment container labels do not match".into());
+    }
+    Ok(())
+}
+
+fn validate_trusted_install_receipt(
+    deployment: &TrustedDeploymentReceipt,
+) -> Result<[u8; 32], String> {
+    use std::io::Read;
+
+    let executable_hash = std::fs::read(std::env::current_exe().map_err(|_| {
+        "trusted install receipt cannot resolve the harness executable".to_string()
+    })?)
+    .map(|bytes| hex::encode(Sha256::digest(bytes)))
+    .map_err(|_| "trusted install receipt cannot hash the harness executable".to_string())?;
+    let root = Path::new(INSTALL_RECEIPTS_ROOT);
+    let root_metadata = std::fs::symlink_metadata(root)
+        .map_err(|_| "trusted install receipt root is unavailable".to_string())?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err("trusted install receipt root is unsafe".into());
+    }
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|_| "trusted install receipt root cannot be canonicalized".to_string())?;
+    if canonical_root != root {
+        return Err("trusted install receipt root is not canonical".into());
+    }
+    #[cfg(unix)]
+    let executable_owner = {
+        use std::os::unix::fs::MetadataExt;
+        let owner = std::env::current_exe()
+            .and_then(std::fs::metadata)
+            .map_err(|_| "cannot inspect harness owner".to_string())?
+            .uid();
+        if root_metadata.uid() != owner || root_metadata.mode() & 0o022 != 0 {
+            return Err("trusted install receipt root ownership or mode is unsafe".into());
+        }
+        owner
+    };
+
+    let directory = root.join(format!(
+        "{}-{}-{}",
+        deployment.buzz_commit, deployment.upstream_pin, deployment.source_commit
+    ));
+    let directory_metadata = std::fs::symlink_metadata(&directory)
+        .map_err(|_| "exact trusted install receipt directory is unavailable".to_string())?;
+    if !directory_metadata.is_dir() || directory_metadata.file_type().is_symlink() {
+        return Err("exact trusted install receipt directory is unsafe".into());
+    }
+    let canonical_directory = directory.canonicalize().map_err(|_| {
+        "exact trusted install receipt directory cannot be canonicalized".to_string()
+    })?;
+    if canonical_directory != directory {
+        return Err("exact trusted install receipt directory is not canonical".into());
+    }
+    let path = directory.join("context-engine-runtimes.json");
+    let before = std::fs::symlink_metadata(&path)
+        .map_err(|_| "exact trusted install receipt is unavailable".to_string())?;
+    if !before.is_file() || before.file_type().is_symlink() || before.len() > 4096 {
+        return Err("exact trusted install receipt is unsafe".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if directory_metadata.uid() != executable_owner
+            || before.uid() != executable_owner
+            || directory_metadata.mode() & 0o777 != 0o555
+            || before.mode() & 0o777 != 0o444
+            || before.nlink() != 1
+        {
+            return Err("exact trusted install receipt ownership or mode is unsafe".into());
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::macos::fs::MetadataExt;
+        const USER_IMMUTABLE: u32 = 0x0000_0002;
+        if directory_metadata.st_flags() & USER_IMMUTABLE == 0
+            || before.st_flags() & USER_IMMUTABLE == 0
+        {
+            return Err("exact trusted install receipt is not immutable".into());
+        }
+    }
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NOFOLLOW)
+            .open(&path)
+            .map_err(|_| "exact trusted install receipt cannot be opened".to_string())?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::File::open(&path)
+        .map_err(|_| "exact trusted install receipt cannot be opened".to_string())?;
+    let opened = file
+        .metadata()
+        .map_err(|_| "exact trusted install receipt cannot be inspected".to_string())?;
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(4097)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "exact trusted install receipt cannot be read".to_string())?;
+    if bytes.len() > 4096 {
+        return Err("exact trusted install receipt is too large".into());
+    }
+    let after = file
+        .metadata()
+        .map_err(|_| "exact trusted install receipt cannot be re-inspected".to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if opened.dev() != before.dev()
+            || opened.ino() != before.ino()
+            || after.dev() != opened.dev()
+            || after.ino() != opened.ino()
+            || after.len() != opened.len()
+        {
+            return Err("exact trusted install receipt changed during verification".into());
+        }
+    }
+    let receipt = serde_json::from_slice::<TrustedInstallReceipt>(&bytes)
+        .map_err(|_| "exact trusted install receipt is malformed".to_string())?;
+    if receipt.buzz_commit != deployment.buzz_commit
+        || receipt.gabe_commit != deployment.upstream_pin
+        || receipt.stacy_commit != deployment.source_commit
+        || receipt.node_sha256 != GABE_NODE_SHA256
+        || receipt.adapter_sha256 != GABE_ADAPTER_SHA256
+        || receipt.buzz_acp_sha256 != executable_hash
+    {
+        return Err("exact trusted install receipt does not authorize this deployment".into());
+    }
+    let actual_receipt_hash = hex::encode(Sha256::digest(&bytes));
+    if actual_receipt_hash != deployment.install_receipt_sha256 {
+        return Err("exact trusted install receipt digest does not match".into());
+    }
+    let canonical = serde_json::to_vec(&receipt)
+        .map_err(|_| "trusted install receipt cannot be canonicalized".to_string())?;
+    Ok(Sha256::digest(canonical).into())
+}
+
+fn validate_trusted_deployment(spec: TrustedDeploymentSpec) -> Result<[u8; 32], String> {
+    let receipt = read_trusted_deployment_receipt(spec)?;
+    if receipt.version != 3
+        || receipt.project != spec.project
+        || !is_lower_hex(&receipt.buzz_commit, 40)
+        || !is_lower_hex(&receipt.source_commit, 40)
+        || !is_lower_hex(&receipt.upstream_pin, 40)
+        || !is_lower_hex(&receipt.compose_sha256, 64)
+        || !is_lower_hex(&receipt.install_receipt_sha256, 64)
+        || !is_lower_hex(&receipt.deployment_generation, 64)
+        || !is_lower_hex(&receipt.lifecycle_generation, 64)
+        || !is_lower_hex(&receipt.stacy_container_id, 64)
+        || !is_sha256_image_id(&receipt.stacy_image_id)
+        || !is_lower_hex(&receipt.dashboard_container_id, 64)
+        || !is_sha256_image_id(&receipt.dashboard_image_id)
+    {
+        return Err("trusted deployment receipt values are invalid".into());
+    }
+    validate_trusted_lifecycle_state(spec, &receipt)?;
+    let install_fingerprint = validate_trusted_install_receipt(&receipt)?;
+    let agent = inspect_docker_container(spec.docker_socket, spec.agent_container)?;
+    validate_deployed_container(
+        &agent,
+        &receipt.stacy_container_id,
+        &receipt.stacy_image_id,
+        spec.agent_service,
+        spec,
+        &receipt,
+    )?;
+    let dashboard = inspect_docker_container(spec.docker_socket, spec.dashboard_container)?;
+    validate_deployed_container(
+        &dashboard,
+        &receipt.dashboard_container_id,
+        &receipt.dashboard_image_id,
+        spec.dashboard_service,
+        spec,
+        &receipt,
+    )?;
+    let canonical = serde_json::to_vec(&receipt)
+        .map_err(|_| "trusted deployment receipt cannot be canonicalized".to_string())?;
+    let mut hasher = Sha256::new();
+    hasher.update(install_fingerprint);
+    hasher.update(canonical);
+    Ok(hasher.finalize().into())
+}
+
+struct RuntimePreflight {
+    capability_key: Option<[u8; 32]>,
+    deployment_fingerprint: Option<[u8; 32]>,
+}
+
+fn validate_runtime_preflight(spec: &TrustedHarnessSpec) -> Result<RuntimePreflight, String> {
+    let mut capability_key = None;
+    if let Some(home) = spec.capability_home {
+        use std::io::Read;
+
+        let credentials = Path::new(home).join("credentials");
+        let capability = credentials.join("context-engine-buzz-adapter.cap");
+        let directory_metadata = std::fs::symlink_metadata(&credentials)
+            .map_err(|_| "trusted capability directory is unavailable".to_string())?;
+        if !directory_metadata.is_dir() || directory_metadata.file_type().is_symlink() {
+            return Err("trusted capability directory is unsafe".into());
+        }
+        let canonical_directory = credentials
+            .canonicalize()
+            .map_err(|_| "trusted capability directory cannot be canonicalized".to_string())?;
+        if canonical_directory != credentials {
+            return Err("trusted capability directory is not canonical".into());
+        }
+
+        let before = std::fs::symlink_metadata(&capability)
+            .map_err(|_| "trusted capability is unavailable".to_string())?;
+        if !before.is_file() || before.file_type().is_symlink() || before.len() > 256 {
+            return Err("trusted capability file is unsafe".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let executable_owner = std::env::current_exe()
+                .and_then(std::fs::metadata)
+                .map_err(|_| "cannot inspect harness owner".to_string())?
+                .uid();
+            if directory_metadata.uid() != executable_owner
+                || before.uid() != executable_owner
+                || directory_metadata.mode() & 0o777 != 0o700
+                || before.mode() & 0o777 != 0o600
+            {
+                return Err("trusted capability ownership or mode is unsafe".into());
+            }
+        }
+        #[cfg(unix)]
+        let mut file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_NOFOLLOW)
+                .open(&capability)
+                .map_err(|_| "trusted capability cannot be opened".to_string())?
+        };
+        #[cfg(not(unix))]
+        let mut file = std::fs::File::open(&capability)
+            .map_err(|_| "trusted capability cannot be opened".to_string())?;
+        let opened = file
+            .metadata()
+            .map_err(|_| "trusted capability cannot be inspected".to_string())?;
+        let mut value = String::new();
+        file.read_to_string(&mut value)
+            .map_err(|_| "trusted capability cannot be read".to_string())?;
+        let after = file
+            .metadata()
+            .map_err(|_| "trusted capability cannot be re-inspected".to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if opened.dev() != before.dev()
+                || opened.ino() != before.ino()
+                || after.dev() != opened.dev()
+                || after.ino() != opened.ino()
+                || after.len() != opened.len()
+            {
+                return Err("trusted capability changed during verification".into());
+            }
+        }
+        let value = value.strip_suffix('\n').unwrap_or(&value);
+        capability_key = Some(decode_capability_key(value)?);
+    }
+
+    if let Some(address) = spec.health_addr {
+        use std::io::{Read, Write};
+        use std::net::{SocketAddr, TcpStream};
+        use std::time::Duration;
+
+        let socket: SocketAddr = address
+            .parse()
+            .map_err(|_| "trusted health address is invalid".to_string())?;
+        let mut stream = TcpStream::connect_timeout(&socket, Duration::from_secs(3))
+            .map_err(|_| "trusted Context Engine is unreachable".to_string())?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .map_err(|_| "cannot bound trusted health read".to_string())?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .map_err(|_| "cannot bound trusted health write".to_string())?;
+        stream
+            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .map_err(|_| "trusted health request failed".to_string())?;
+        let mut response = [0u8; 512];
+        let count = stream
+            .read(&mut response)
+            .map_err(|_| "trusted health response failed".to_string())?;
+        let head = std::str::from_utf8(&response[..count])
+            .map_err(|_| "trusted health response is invalid".to_string())?;
+        if !head.starts_with("HTTP/1.1 200 ") && !head.starts_with("HTTP/1.0 200 ") {
+            return Err("trusted Context Engine health check rejected the runtime".into());
+        }
+    }
+
+    if !spec.outbox_dir.is_empty() {
+        let path = Path::new(spec.outbox_dir);
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|_| "trusted prepared-event directory is unavailable".to_string())?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err("trusted prepared-event directory is unsafe".into());
+        }
+        let canonical = path
+            .canonicalize()
+            .map_err(|_| "trusted prepared-event directory cannot be canonicalized".to_string())?;
+        if canonical != path {
+            return Err("trusted prepared-event directory is not canonical".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let executable_owner = std::env::current_exe()
+                .and_then(std::fs::metadata)
+                .map_err(|_| "cannot inspect harness owner".to_string())?
+                .uid();
+            if metadata.uid() != executable_owner || metadata.mode() & 0o777 != 0o700 {
+                return Err("trusted prepared-event directory ownership or mode is unsafe".into());
+            }
+        }
+    }
+
+    let deployment_fingerprint = spec
+        .deployment
+        .map(validate_trusted_deployment)
+        .transpose()?;
+
+    Ok(RuntimePreflight {
+        capability_key,
+        deployment_fingerprint,
+    })
+}
+
+struct TrustedHarnessCredentials {
+    harness: TrustedOutboxHarness,
+    child_env: Vec<(String, String)>,
+    publish: Option<TrustedPublishConfig>,
+}
+
+struct TrustedHarnessAuthority<'a> {
+    keys: &'a Keys,
+    auth_tag: Option<&'a str>,
+    relay_url: &'a str,
+    agent_pin: Option<&'a str>,
+    owner_pin: Option<&'a str>,
+}
+
+/// Convert buzz-acp's own relay URL into the `http(s)://` base the `buzz` CLI
+/// expects for its authenticated in-process relay queries and publishes.
+///
+/// buzz-acp connects to the relay over a WebSocket (`ws://` / `wss://`), but the
+/// durable prepared-event facade takes an `http(s)://` base. `wss://` maps to
+/// `https://`, `ws://` maps to
+/// `http://`, and an already-`http(s)://` URL passes through unchanged. Host,
+/// port, and path are preserved.
+///
+/// Returns `None` for an empty, unparseable, or non-ws/http URL so the caller
+/// emits no `BUZZ_RELAY_URL` at all rather than pointing the CLI at a broken
+/// value.
+fn relay_url_to_http_base(relay_url: &str) -> Option<String> {
+    let trimmed = relay_url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let http = if let Some(rest) = trimmed.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = trimmed.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+        trimmed.to_string()
+    } else {
+        // Unknown scheme (or scheme-less): don't guess — emit nothing.
+        return None;
+    };
+
+    // Guard against a scheme-only or otherwise unparseable value slipping
+    // through (e.g. `ws://` with no host). Only surface a URL with a real host.
+    match Url::parse(&http) {
+        Ok(parsed) if parsed.host_str().is_some() => Some(http),
+        _ => None,
+    }
+}
+
+/// Validate the complete managed-outbox trust boundary and, only on success,
+/// return the authoritative environment that `AcpClient::spawn` may restore
+/// after scrubbing ambient credentials.
+fn trusted_harness_credentials_for_spec(
+    spec: &TrustedHarnessSpec,
+    command: &str,
+    args: &[String],
+    authority: TrustedHarnessAuthority<'_>,
+) -> Result<TrustedHarnessCredentials, String> {
+    if command != spec.command
+        || args.len() != spec.args.len()
+        || !args
+            .iter()
+            .map(String::as_str)
+            .eq(spec.args.iter().copied())
+    {
+        return Err("command or arguments do not match the frozen harness".into());
+    }
+    for artifact in spec.artifacts {
+        validate_trusted_artifact(*artifact)?;
+    }
+
+    let agent_pubkey = authority.keys.public_key().to_hex().to_ascii_lowercase();
+    if normalize_pubkey_pin(authority.agent_pin).as_deref() != Some(agent_pubkey.as_str()) {
+        return Err("managed agent identity pin is absent or mismatched".into());
+    }
+
+    let auth_tag = authority
+        .auth_tag
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "owner auth tag is absent".to_string())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "system clock is before the Unix epoch".to_string())?
+        .as_secs();
+    let owner_pubkey =
+        buzz_sdk::nip_oa::verify_auth_tag_for_event(auth_tag, &authority.keys.public_key(), 9, now)
+            .map_err(|_| "owner auth tag is invalid".to_string())?
+            .to_hex()
+            .to_ascii_lowercase();
+    if normalize_pubkey_pin(authority.owner_pin).as_deref() != Some(owner_pubkey.as_str()) {
+        return Err("managed owner identity pin is absent or mismatched".into());
+    }
+
+    let relay_url = relay_url_to_http_base(authority.relay_url)
+        .ok_or_else(|| "relay URL cannot be converted to a trusted HTTP base".to_string())?;
+
+    let capability_key = validate_runtime_preflight(spec)?.capability_key;
+
+    let mut child_env = vec![
+        ("BUZZ_AGENT_PUBKEY".to_string(), agent_pubkey.clone()),
+        ("BUZZ_ACP_AGENT_OWNER".to_string(), owner_pubkey.clone()),
+        (spec.agent_pin_env.to_string(), agent_pubkey),
+        (spec.owner_pin_env.to_string(), owner_pubkey),
+    ];
+    child_env.extend(
+        spec.runtime_env
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string())),
+    );
+    Ok(TrustedHarnessCredentials {
+        harness: spec.harness,
+        child_env,
+        publish: capability_key.map(|capability_key| TrustedPublishConfig {
+            harness: spec.harness,
+            capability_key,
+            auth_tag: auth_tag.to_string(),
+            relay_http_base: relay_url,
+            outbox_dir: PathBuf::from(spec.outbox_dir),
+        }),
+    })
+}
+
+fn requested_trusted_harness(
+    command: &str,
+    args: &[String],
+) -> Result<Option<&'static TrustedHarnessSpec>, String> {
+    let pinned = TRUSTED_HARNESSES
+        .iter()
+        .filter(|spec| {
+            std::env::var_os(spec.agent_pin_env).is_some()
+                || std::env::var_os(spec.owner_pin_env).is_some()
+        })
+        .collect::<Vec<_>>();
+    if pinned.len() > 1 {
+        return Err("multiple managed outbox harness pin sets are present".into());
+    }
+    if let Some(spec) = pinned.first().copied() {
+        if configured_trusted_harness(command, args).map(|candidate| candidate.harness)
+            != Some(spec.harness)
+        {
+            return Err(format!(
+                "{} pins require its exact frozen command and arguments",
+                spec.harness.as_str()
+            ));
+        }
+        return Ok(Some(spec));
+    }
+    Ok(configured_trusted_harness(command, args))
+}
+
+fn trusted_harness_credentials(
+    command: &str,
+    args: &[String],
+    keys: &Keys,
+    auth_tag: Option<&str>,
+    relay_url: &str,
+) -> Result<Option<TrustedHarnessCredentials>, String> {
+    let Some(spec) = requested_trusted_harness(command, args)? else {
+        return Ok(None);
+    };
+    let agent_pin = std::env::var(spec.agent_pin_env).ok();
+    let owner_pin = std::env::var(spec.owner_pin_env).ok();
+    trusted_harness_credentials_for_spec(
+        spec,
+        command,
+        args,
+        TrustedHarnessAuthority {
+            keys,
+            auth_tag,
+            relay_url,
+            agent_pin: agent_pin.as_deref(),
+            owner_pin: owner_pin.as_deref(),
+        },
+    )
+    .map(Some)
+}
+
+/// Revalidate the frozen artifact and identity boundary immediately before a
+/// trusted spawn. Raw credentials cached in `Config` are inputs, never proof.
+pub(crate) fn revalidate_trusted_child_env(
+    command: &str,
+    args: &[String],
+    child_env: &[(String, String)],
+) -> Result<TrustedChildValidation, String> {
+    let spec = configured_trusted_harness(command, args)
+        .ok_or_else(|| "trusted credentials do not match a frozen harness".to_string())?;
+    let value = |name: &str| -> Result<&str, String> {
+        let mut values = child_env
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str());
+        let value = values
+            .next()
+            .ok_or_else(|| format!("trusted child environment is missing {name}"))?;
+        if values.next().is_some() {
+            return Err(format!("trusted child environment duplicates {name}"));
+        }
+        Ok(value)
+    };
+    if child_env.len() != spec.runtime_env.len() + 4
+        || child_env.iter().any(|(key, _)| {
+            !crate::acp::TRUSTED_CHILD_ENV_KEYS
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(key))
+        })
+    {
+        return Err("trusted child environment has unexpected keys".into());
+    }
+    let agent_pin = value("BUZZ_AGENT_PUBKEY")?;
+    let owner_pin = value("BUZZ_ACP_AGENT_OWNER")?;
+    let spec_agent_pin = value(spec.agent_pin_env)?;
+    let spec_owner_pin = value(spec.owner_pin_env)?;
+    if normalize_pubkey_pin(Some(agent_pin)).as_deref()
+        != normalize_pubkey_pin(Some(spec_agent_pin)).as_deref()
+        || normalize_pubkey_pin(Some(owner_pin)).as_deref()
+            != normalize_pubkey_pin(Some(spec_owner_pin)).as_deref()
+    {
+        return Err("trusted child identity aliases disagree".into());
+    }
+    for (key, expected) in spec.runtime_env {
+        if value(key)? != *expected {
+            return Err(format!("trusted child environment changed {key}"));
+        }
+    }
+    let current_agent_pin = std::env::var(spec.agent_pin_env).ok();
+    let current_owner_pin = std::env::var(spec.owner_pin_env).ok();
+    if normalize_pubkey_pin(current_agent_pin.as_deref()).as_deref()
+        != normalize_pubkey_pin(Some(agent_pin)).as_deref()
+        || normalize_pubkey_pin(current_owner_pin.as_deref()).as_deref()
+            != normalize_pubkey_pin(Some(owner_pin)).as_deref()
+    {
+        return Err("managed identity pins changed after startup".into());
+    }
+    let artifacts = spec
+        .artifacts
+        .iter()
+        .map(|artifact| validate_trusted_artifact(*artifact))
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_runtime_preflight(spec)?;
+    Ok(TrustedChildValidation {
+        env: child_env.to_vec(),
+        artifacts,
+    })
+}
+
+/// Revalidate the live host/runtime boundary at both trusted-delivery seams.
+/// The first call prevents dispatch to a replaced deployment; the second
+/// prevents publishing a response if the deployment changed during the turn.
+pub(crate) fn revalidate_trusted_publish_runtime(
+    harness: TrustedOutboxHarness,
+) -> Result<Option<[u8; 32]>, String> {
+    let spec = TRUSTED_HARNESSES
+        .iter()
+        .find(|spec| spec.harness == harness)
+        .ok_or_else(|| "trusted publish harness is not frozen".to_string())?;
+    for artifact in spec.artifacts {
+        let _ = validate_trusted_artifact(*artifact)?;
+    }
+    Ok(validate_runtime_preflight(spec)?.deployment_fingerprint)
+}
+
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
@@ -858,6 +2307,81 @@ pub fn propagate_legacy_env_vars() {
     }
 }
 
+fn read_startup_credential_envelope() -> Result<StartupCredentialEnvelope, ConfigError> {
+    decode_startup_credential_envelope(std::io::stdin().lock())
+}
+
+fn decode_startup_credential_envelope(
+    mut reader: impl Read,
+) -> Result<StartupCredentialEnvelope, ConfigError> {
+    let mut bytes = Vec::new();
+    reader
+        .by_ref()
+        .take(MAX_CREDENTIAL_ENVELOPE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(ConfigError::Io)?;
+    if bytes.len() as u64 > MAX_CREDENTIAL_ENVELOPE_BYTES {
+        return Err(ConfigError::ConfigFile(
+            "Desktop credential envelope exceeds 16 KiB".into(),
+        ));
+    }
+    serde_json::from_slice(&bytes).map_err(|error| {
+        ConfigError::ConfigFile(format!("invalid Desktop credential envelope: {error}"))
+    })
+}
+
+fn resolve_startup_credentials(
+    private_key: String,
+    credential_stdin: bool,
+    env_auth_tag: Option<String>,
+) -> Result<StartupCredentials, ConfigError> {
+    let credentials = if credential_stdin {
+        if !private_key.is_empty()
+            || env_auth_tag
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+        {
+            return Err(ConfigError::ConfigFile(
+                "Desktop credential stdin cannot be combined with BUZZ_PRIVATE_KEY, \
+                 --private-key, or BUZZ_AUTH_TAG"
+                    .into(),
+            ));
+        }
+        let envelope = read_startup_credential_envelope()?;
+        StartupCredentials {
+            private_key: envelope.private_key,
+            auth_tag: envelope.auth_tag.filter(|value| !value.is_empty()),
+        }
+    } else {
+        StartupCredentials {
+            private_key,
+            auth_tag: env_auth_tag.filter(|value| !value.is_empty()),
+        }
+    };
+
+    if credentials.private_key.is_empty() {
+        return Err(ConfigError::ConfigFile(
+            "missing signing key: set BUZZ_PRIVATE_KEY/--private-key or use Desktop credential stdin"
+                .into(),
+        ));
+    }
+    if credentials.private_key.len() > 256 {
+        return Err(ConfigError::ConfigFile(
+            "signing key in startup credentials exceeds 256 bytes".into(),
+        ));
+    }
+    if credentials
+        .auth_tag
+        .as_deref()
+        .is_some_and(|value| value.len() > 8 * 1024)
+    {
+        return Err(ConfigError::ConfigFile(
+            "owner auth tag in startup credentials exceeds 8 KiB".into(),
+        ));
+    }
+    Ok(credentials)
+}
+
 impl Config {
     pub fn from_cli() -> Result<Self, ConfigError> {
         // Legacy env-var propagation is intentionally NOT done here.
@@ -871,13 +2395,20 @@ impl Config {
     /// tests can construct `CliArgs` via `CliArgs::try_parse_from` and exercise the full
     /// validation path without going through process args.
     pub fn from_args(mut args: CliArgs) -> Result<Self, ConfigError> {
-        let keys = Keys::parse(&args.private_key)?;
+        let mut startup_credentials = resolve_startup_credentials(
+            std::mem::take(&mut args.private_key),
+            args.credential_stdin,
+            std::env::var("BUZZ_AUTH_TAG").ok(),
+        )?;
+        let keys = Keys::parse(&startup_credentials.private_key)?;
         // Best-effort zeroize: overwrite the raw private key string to reduce
         // exposure via core dumps or heap inspection (#41). Without the `zeroize`
         // crate we can only clear the String — the allocator may retain copies.
-        args.private_key
-            .replace_range(.., &"0".repeat(args.private_key.len()));
-        args.private_key.clear();
+        startup_credentials
+            .private_key
+            .replace_range(.., &"0".repeat(startup_credentials.private_key.len()));
+        startup_credentials.private_key.clear();
+        let owner_auth_tag = startup_credentials.auth_tag;
 
         let system_prompt = if let Some(text) = args.system_prompt {
             Some(text)
@@ -1089,10 +2620,32 @@ impl Config {
                 false
             };
 
+        // The managed child receives only non-secret identity/runtime values
+        // after exact executable bytes, owner attestation, identity pins,
+        // capability, and Context Engine health all validate. Signing,
+        // authorization, relay, and capability values remain host-only.
+        let trusted_credentials = trusted_harness_credentials(
+            &agent_command,
+            &agent_args,
+            &keys,
+            owner_auth_tag.as_deref(),
+            &args.relay_url,
+        )
+        .map_err(ConfigError::ConfigFile)?;
+        let trusted_outbox_harness = trusted_credentials
+            .as_ref()
+            .map(|credentials| credentials.harness);
+        let trusted_child_env = trusted_credentials
+            .as_ref()
+            .map(|credentials| credentials.child_env.clone())
+            .unwrap_or_default();
+        let trusted_publish = trusted_credentials.and_then(|credentials| credentials.publish);
+
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
         let config = Config {
             keys,
+            owner_auth_tag,
             relay_url: args.relay_url,
             agent_command,
             agent_args,
@@ -1135,6 +2688,9 @@ impl Config {
             respond_to_allowlist,
             allowed_respond_to,
             persona_env_vars,
+            trusted_child_env,
+            trusted_publish,
+            trusted_outbox_harness,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
             exit_after_inactivity_secs: args.exit_after_inactivity,
@@ -1474,6 +3030,7 @@ mod tests {
     fn test_config(mode: SubscribeMode) -> Config {
         Config {
             keys: nostr::Keys::generate(),
+            owner_auth_tag: None,
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
@@ -1508,6 +3065,9 @@ mod tests {
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
             persona_env_vars: vec![],
+            trusted_child_env: vec![],
+            trusted_publish: None,
+            trusted_outbox_harness: None,
             has_generated_codex_config: false,
             relay_observer: false,
             exit_after_inactivity_secs: 0,
@@ -1673,6 +3233,42 @@ mod tests {
         assert_eq!(normalize_agent_command_identity("   "), "");
         assert_eq!(normalize_agent_command_identity("/"), "");
         assert_eq!(normalize_agent_command_identity("///"), "");
+    }
+
+    #[test]
+    fn recognizes_trusted_harness_only_from_exact_frozen_command_and_args() {
+        let gabe_args = vec![GABE_ADAPTER_PATH.to_string()];
+        let stacy_args = vec![STACY_ADAPTER_PATH.to_string()];
+        assert_eq!(
+            configured_trusted_harness(GABE_NODE_PATH, &gabe_args).map(|spec| spec.harness),
+            Some(TrustedOutboxHarness::Gabe),
+        );
+        assert_eq!(
+            configured_trusted_harness(GABE_NODE_PATH, &stacy_args).map(|spec| spec.harness),
+            Some(TrustedOutboxHarness::Stacy),
+        );
+        assert!(configured_trusted_harness("node", &gabe_args).is_none());
+        assert!(configured_trusted_harness(GABE_NODE_PATH, &["gabe-acp.mjs".into()]).is_none());
+        assert!(configured_trusted_harness(GABE_NODE_PATH, &["stacy-acp.mjs".into()]).is_none());
+    }
+
+    #[test]
+    fn capability_key_requires_exact_prefix_and_lowercase_32_byte_hex() {
+        let token = format!("buzz_cap_v1:{}", "ab".repeat(32));
+        assert_eq!(decode_capability_key(&token).unwrap(), [0xab; 32]);
+        assert!(decode_capability_key(&format!("buzz_cap_v1:{}", "AB".repeat(32))).is_err());
+        assert!(decode_capability_key(&format!("buzz_cap_v2:{}", "ab".repeat(32))).is_err());
+        assert!(decode_capability_key("buzz_cap_v1:00").is_err());
+    }
+
+    #[test]
+    fn managed_pubkey_pins_are_trimmed_and_case_normalized() {
+        let upper = "AB".repeat(32);
+        assert_eq!(
+            normalize_pubkey_pin(Some(&format!("  {upper}  "))),
+            Some("ab".repeat(32))
+        );
+        assert!(normalize_pubkey_pin(Some("not-a-pubkey")).is_none());
     }
 
     #[test]
@@ -2735,7 +4331,10 @@ channels = "ALL"
             result.is_err(),
             "anyone should be rejected when not in allowed set"
         );
-        let msg = result.unwrap_err().to_string();
+        let msg = match result {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("from_args unexpectedly accepted a disallowed response mode"),
+        };
         assert!(
             msg.contains("not permitted"),
             "error should mention 'not permitted': {msg}"
@@ -2762,7 +4361,10 @@ channels = "ALL"
     fn allowed_respond_to_rejects_invalid_mode_string() {
         let result = parse_allowed_respond_to(&["owner-only", "badvalue"]);
         assert!(result.is_err(), "invalid mode string should be rejected");
-        let msg = result.unwrap_err().to_string();
+        let msg = match result {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("from_args unexpectedly accepted a disallowed response mode"),
+        };
         assert!(
             msg.contains("invalid value in BUZZ_ACP_ALLOWED_RESPOND_TO"),
             "error should name the env var: {msg}"
@@ -2810,6 +4412,40 @@ channels = "ALL"
         "0000000000000000000000000000000000000000000000000000000000000001";
 
     #[test]
+    fn credential_stdin_envelope_is_strict_and_bounded() {
+        let encoded = serde_json::to_vec(&serde_json::json!({
+            "private_key": TEST_PRIVATE_KEY,
+            "auth_tag": "owner-attestation-canary"
+        }))
+        .expect("serialize credential fixture");
+        let envelope = decode_startup_credential_envelope(std::io::Cursor::new(encoded))
+            .expect("valid credential envelope");
+        assert_eq!(envelope.private_key, TEST_PRIVATE_KEY);
+        assert_eq!(
+            envelope.auth_tag.as_deref(),
+            Some("owner-attestation-canary")
+        );
+
+        let unknown = br#"{"private_key":"x","unexpected":true}"#;
+        assert!(decode_startup_credential_envelope(std::io::Cursor::new(unknown)).is_err());
+        let oversized = vec![b'x'; MAX_CREDENTIAL_ENVELOPE_BYTES as usize + 1];
+        assert!(decode_startup_credential_envelope(std::io::Cursor::new(oversized)).is_err());
+    }
+
+    #[test]
+    fn credential_stdin_rejects_mixed_environment_or_argv_secrets_before_reading() {
+        let mixed_key = resolve_startup_credentials(TEST_PRIVATE_KEY.into(), true, None)
+            .err()
+            .expect("credential stdin plus argv key must fail closed");
+        assert!(mixed_key.to_string().contains("cannot be combined"));
+
+        let mixed_auth = resolve_startup_credentials(String::new(), true, Some("tag".into()))
+            .err()
+            .expect("credential stdin plus auth env must fail closed");
+        assert!(mixed_auth.to_string().contains("cannot be combined"));
+    }
+
+    #[test]
     fn allowed_respond_to_full_path_rejects_disallowed_mode() {
         // --allowed-respond-to=owner-only,allowlist + --respond-to=anyone → ConfigError
         let args = CliArgs::try_parse_from([
@@ -2828,7 +4464,10 @@ channels = "ALL"
             result.is_err(),
             "from_args should reject respond_to=anyone when not in allowed set"
         );
-        let msg = result.unwrap_err().to_string();
+        let msg = match result {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("from_args unexpectedly accepted a disallowed response mode"),
+        };
         assert!(
             msg.contains("not permitted"),
             "error should mention 'not permitted': {msg}"
@@ -2856,7 +4495,7 @@ channels = "ALL"
 
         assert!(
             result.is_ok(),
-            "from_args should accept respond_to=owner-only when in allowed set: {result:?}"
+            "from_args should accept respond_to=owner-only when in allowed set"
         );
     }
 
@@ -2875,7 +4514,480 @@ channels = "ALL"
 
         assert!(
             result.is_ok(),
-            "from_args should accept any mode when allowed list is unset: {result:?}"
+            "from_args should accept any mode when allowed list is unset"
+        );
+    }
+
+    #[test]
+    fn ordinary_config_never_places_managed_identity_in_persona_env() {
+        let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", TEST_PRIVATE_KEY])
+            .expect("clap should parse args");
+        let config = Config::from_args(args).expect("valid config");
+        assert!(config.trusted_outbox_harness.is_none());
+        assert!(config.trusted_child_env.is_empty());
+        assert!(!config
+            .persona_env_vars
+            .iter()
+            .any(|(key, _)| key == "BUZZ_AGENT_PUBKEY"));
+    }
+
+    #[cfg(unix)]
+    fn temporary_trusted_spec() -> (TrustedHarnessSpec, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "buzz-acp-trusted-spec-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).expect("create trusted harness fixture");
+        let command = directory.join("trusted-adapter");
+        std::fs::write(&command, b"#!/bin/sh\nexit 0\n").expect("write trusted adapter");
+        let mut permissions = std::fs::metadata(&command)
+            .expect("stat trusted adapter")
+            .permissions();
+        permissions.set_mode(0o555);
+        std::fs::set_permissions(&command, permissions).expect("chmod trusted adapter");
+        let command = command.canonicalize().expect("canonical trusted adapter");
+
+        let mut directory_permissions = std::fs::metadata(&directory)
+            .expect("stat trusted harness fixture directory")
+            .permissions();
+        directory_permissions.set_mode(0o555);
+        std::fs::set_permissions(&directory, directory_permissions)
+            .expect("lock trusted harness fixture directory");
+
+        let command_text: &'static str =
+            Box::leak(command.to_string_lossy().into_owned().into_boxed_str());
+        let digest: &'static str = Box::leak(
+            hex::encode(Sha256::digest(
+                std::fs::read(&command).expect("read trusted adapter"),
+            ))
+            .into_boxed_str(),
+        );
+        let artifacts: &'static [TrustedArtifactSpec] = Box::leak(
+            vec![TrustedArtifactSpec {
+                path: command_text,
+                sha256: digest,
+                executable: true,
+                immutable: false,
+            }]
+            .into_boxed_slice(),
+        );
+        (
+            TrustedHarnessSpec {
+                harness: TrustedOutboxHarness::Gabe,
+                command: command_text,
+                args: &[],
+                artifacts,
+                agent_pin_env: "TEST_AGENT_PIN",
+                owner_pin_env: "TEST_OWNER_PIN",
+                runtime_env: &[],
+                capability_home: None,
+                outbox_dir: "",
+                health_addr: None,
+                deployment: None,
+            },
+            directory,
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_harness_requires_artifact_attestation_and_full_identity_chain() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (spec, directory) = temporary_trusted_spec();
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let auth_tag = buzz_sdk::nip_oa::compute_auth_tag(&owner, &agent.public_key(), "kind=9")
+            .expect("compute owner auth tag");
+        let agent_pin = agent.public_key().to_hex();
+        let owner_pin = owner.public_key().to_hex();
+        let args = Vec::<String>::new();
+
+        let credentials = trusted_harness_credentials_for_spec(
+            &spec,
+            spec.command,
+            &args,
+            TrustedHarnessAuthority {
+                keys: &agent,
+                auth_tag: Some(&auth_tag),
+                relay_url: "wss://project-gabe.communities.buzz.xyz",
+                agent_pin: Some(&agent_pin),
+                owner_pin: Some(&owner_pin),
+            },
+        )
+        .expect("fully attested harness should receive credentials");
+        for key in [
+            "BUZZ_AGENT_PUBKEY",
+            "BUZZ_ACP_AGENT_OWNER",
+            "TEST_AGENT_PIN",
+            "TEST_OWNER_PIN",
+        ] {
+            assert!(credentials.child_env.iter().any(|(name, _)| name == key));
+        }
+        for secret in ["BUZZ_PRIVATE_KEY", "BUZZ_AUTH_TAG", "BUZZ_RELAY_URL"] {
+            assert!(!credentials.child_env.iter().any(|(name, _)| name == secret));
+        }
+
+        for (name, auth, relay, agent_pin_value, owner_pin_value) in [
+            (
+                "missing auth",
+                None,
+                "wss://relay.example",
+                Some(agent_pin.as_str()),
+                Some(owner_pin.as_str()),
+            ),
+            (
+                "invalid auth",
+                Some("not-an-auth-tag"),
+                "wss://relay.example",
+                Some(agent_pin.as_str()),
+                Some(owner_pin.as_str()),
+            ),
+            (
+                "invalid relay",
+                Some(auth_tag.as_str()),
+                "ftp://relay.example",
+                Some(agent_pin.as_str()),
+                Some(owner_pin.as_str()),
+            ),
+            (
+                "wrong agent",
+                Some(auth_tag.as_str()),
+                "wss://relay.example",
+                Some(owner_pin.as_str()),
+                Some(owner_pin.as_str()),
+            ),
+            (
+                "wrong owner",
+                Some(auth_tag.as_str()),
+                "wss://relay.example",
+                Some(agent_pin.as_str()),
+                Some(agent_pin.as_str()),
+            ),
+        ] {
+            assert!(
+                trusted_harness_credentials_for_spec(
+                    &spec,
+                    spec.command,
+                    &args,
+                    TrustedHarnessAuthority {
+                        keys: &agent,
+                        auth_tag: auth,
+                        relay_url: relay,
+                        agent_pin: agent_pin_value,
+                        owner_pin: owner_pin_value,
+                    },
+                )
+                .is_err(),
+                "{name} must fail closed"
+            );
+        }
+
+        let mut permissions = std::fs::metadata(spec.command)
+            .expect("stat fixture before tamper")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(spec.command, permissions).expect("unlock fixture for tamper");
+        std::fs::write(spec.command, b"#!/bin/sh\nexit 7\n").expect("tamper fixture");
+        assert!(trusted_harness_credentials_for_spec(
+            &spec,
+            spec.command,
+            &args,
+            TrustedHarnessAuthority {
+                keys: &agent,
+                auth_tag: Some(&auth_tag),
+                relay_url: "wss://relay.example",
+                agent_pin: Some(&agent_pin),
+                owner_pin: Some(&owner_pin),
+            },
+        )
+        .is_err());
+        let mut directory_permissions = std::fs::metadata(&directory)
+            .expect("stat fixture directory before cleanup")
+            .permissions();
+        directory_permissions.set_mode(0o755);
+        std::fs::set_permissions(&directory, directory_permissions)
+            .expect("unlock fixture directory for cleanup");
+        std::fs::remove_dir_all(directory).expect("remove trusted harness fixture");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn trusted_artifact_namespace_blocks_ancestor_swap() {
+        use sha2::{Digest as _, Sha256};
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = std::env::temp_dir().join(format!(
+            "buzz-trusted-ancestor-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir(&root).expect("create trusted ancestor root");
+        let root = root
+            .canonicalize()
+            .expect("canonical trusted ancestor root");
+        let runtime_root = root.join("RUNTIME");
+        let namespace = runtime_root.join("context-engine");
+        let version = namespace.join("digest");
+        let scripts = version.join("scripts");
+        let artifact = scripts.join("gabe-acp.mjs");
+        std::fs::create_dir_all(&scripts).expect("create trusted ancestor fixture");
+        std::fs::write(&artifact, b"reviewed adapter").expect("write trusted artifact fixture");
+        std::fs::set_permissions(&artifact, std::fs::Permissions::from_mode(0o444))
+            .expect("freeze trusted artifact mode");
+        for directory in [&scripts, &version, &namespace] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o555))
+                .expect("freeze trusted ancestor mode");
+        }
+        let status = std::process::Command::new("/usr/bin/chflags")
+            .args(["-R", "uchg"])
+            .arg(&namespace)
+            .status()
+            .expect("freeze trusted ancestor fixture");
+        assert!(status.success());
+        let path: &'static str =
+            Box::leak(artifact.to_string_lossy().into_owned().into_boxed_str());
+        let digest: &'static str =
+            Box::leak(hex::encode(Sha256::digest(b"reviewed adapter")).into_boxed_str());
+        let spec = TrustedArtifactSpec {
+            path,
+            sha256: digest,
+            executable: false,
+            immutable: true,
+        };
+        validate_trusted_artifact_at(spec, &runtime_root)
+            .expect("fully frozen ancestor chain is trusted");
+
+        let displaced = runtime_root.join("displaced-context-engine");
+        assert!(
+            std::fs::rename(&namespace, &displaced).is_err(),
+            "uchg namespace must block an ancestor swap"
+        );
+        std::process::Command::new("/usr/bin/chflags")
+            .args(["-R", "nouchg"])
+            .arg(&namespace)
+            .status()
+            .expect("unfreeze trusted ancestor fixture");
+        std::fs::set_permissions(&namespace, std::fs::Permissions::from_mode(0o755))
+            .expect("open namespace for swap probe");
+        std::fs::rename(&namespace, &displaced).expect("unfrozen namespace can be displaced");
+        assert!(validate_trusted_artifact_at(spec, &runtime_root).is_err());
+        std::process::Command::new("/bin/chmod")
+            .args(["-R", "u+w"])
+            .arg(&displaced)
+            .status()
+            .expect("open displaced fixture for cleanup");
+        std::fs::remove_dir_all(root).expect("remove trusted ancestor fixture");
+    }
+
+    #[test]
+    fn stacy_deployment_receipt_requires_exact_install_and_generation_binding() {
+        let legacy = serde_json::json!({
+            "version": 1,
+            "project": "stacy",
+            "sourceCommit": "1".repeat(40),
+            "upstreamPin": "2".repeat(40),
+            "composeSha256": "3".repeat(64),
+            "stacyContainerId": "4".repeat(64),
+            "stacyImageId": format!("sha256:{}", "5".repeat(64)),
+            "dashboardContainerId": "6".repeat(64),
+            "dashboardImageId": format!("sha256:{}", "7".repeat(64)),
+        });
+        assert!(serde_json::from_value::<TrustedDeploymentReceipt>(legacy).is_err());
+
+        let bound = serde_json::json!({
+            "version": 3,
+            "project": "stacy",
+            "buzzCommit": "0".repeat(40),
+            "sourceCommit": "1".repeat(40),
+            "upstreamPin": "2".repeat(40),
+            "composeSha256": "3".repeat(64),
+            "installReceiptSha256": "8".repeat(64),
+            "deploymentGeneration": "9".repeat(64),
+            "lifecycleGeneration": "a".repeat(64),
+            "stacyContainerId": "4".repeat(64),
+            "stacyImageId": format!("sha256:{}", "5".repeat(64)),
+            "dashboardContainerId": "6".repeat(64),
+            "dashboardImageId": format!("sha256:{}", "7".repeat(64)),
+        });
+        let receipt = serde_json::from_value::<TrustedDeploymentReceipt>(bound)
+            .expect("fully bound receipt should parse");
+        assert_eq!(receipt.version, 3);
+        assert_eq!(receipt.deployment_generation, "9".repeat(64));
+        assert_eq!(receipt.lifecycle_generation, "a".repeat(64));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_lifecycle_state_authorizes_only_the_exact_up_generation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        struct RemoveFixture(PathBuf);
+        impl Drop for RemoveFixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let directory = PathBuf::from("/private/tmp")
+            .join(format!("buzz-lifecycle-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir(&directory).expect("create lifecycle fixture");
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("secure lifecycle directory");
+        let _cleanup = RemoveFixture(directory.clone());
+        let state = directory.join("lifecycle-state");
+        let generation = "a".repeat(64);
+        std::fs::write(&state, format!("{generation} up\n")).expect("write lifecycle state");
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o600))
+            .expect("secure lifecycle state");
+        let lifecycle_state_path: &'static str =
+            Box::leak(state.to_string_lossy().into_owned().into_boxed_str());
+        let spec = TrustedDeploymentSpec {
+            receipt_path: "/unused",
+            lifecycle_state_path,
+            docker_socket: "/unused",
+            project: "stacy",
+            agent_container: "stacy-agent",
+            agent_service: "stacy",
+            dashboard_container: "stacy-dashboard",
+            dashboard_service: "stacy-dashboard",
+        };
+        let receipt = TrustedDeploymentReceipt {
+            version: 3,
+            project: "stacy".into(),
+            buzz_commit: "0".repeat(40),
+            source_commit: "1".repeat(40),
+            upstream_pin: "2".repeat(40),
+            compose_sha256: "3".repeat(64),
+            install_receipt_sha256: "8".repeat(64),
+            deployment_generation: "9".repeat(64),
+            lifecycle_generation: generation.clone(),
+            stacy_container_id: "4".repeat(64),
+            stacy_image_id: format!("sha256:{}", "5".repeat(64)),
+            dashboard_container_id: "6".repeat(64),
+            dashboard_image_id: format!("sha256:{}", "7".repeat(64)),
+        };
+
+        validate_trusted_lifecycle_state(spec, &receipt)
+            .expect("exact up generation should authorize the deployment");
+        std::fs::write(&state, format!("{generation} stop\n")).expect("write stop lifecycle state");
+        assert!(validate_trusted_lifecycle_state(spec, &receipt).is_err());
+        std::fs::write(&state, format!("{} up\n", "b".repeat(64)))
+            .expect("write superseding lifecycle state");
+        assert!(validate_trusted_lifecycle_state(spec, &receipt).is_err());
+        std::fs::write(&state, format!("{generation} up\n")).expect("restore lifecycle state");
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o644))
+            .expect("weaken lifecycle state mode");
+        assert!(validate_trusted_lifecycle_state(spec, &receipt).is_err());
+    }
+
+    // --- relay_url_to_http_base tests ---
+
+    #[test]
+    fn relay_url_to_http_base_maps_ws_to_http() {
+        assert_eq!(
+            relay_url_to_http_base("ws://localhost:3000"),
+            Some("http://localhost:3000".to_string())
+        );
+    }
+
+    #[test]
+    fn relay_url_to_http_base_maps_wss_to_https() {
+        assert_eq!(
+            relay_url_to_http_base("wss://project-gabe.communities.buzz.xyz"),
+            Some("https://project-gabe.communities.buzz.xyz".to_string())
+        );
+    }
+
+    #[test]
+    fn relay_url_to_http_base_passes_through_http() {
+        assert_eq!(
+            relay_url_to_http_base("http://localhost:3000"),
+            Some("http://localhost:3000".to_string())
+        );
+    }
+
+    #[test]
+    fn relay_url_to_http_base_passes_through_https() {
+        assert_eq!(
+            relay_url_to_http_base("https://relay.example.com"),
+            Some("https://relay.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn relay_url_to_http_base_preserves_host_port_and_path() {
+        assert_eq!(
+            relay_url_to_http_base("wss://relay.example.com:8443/query"),
+            Some("https://relay.example.com:8443/query".to_string())
+        );
+        assert_eq!(
+            relay_url_to_http_base("ws://relay.example.com:8080/path"),
+            Some("http://relay.example.com:8080/path".to_string())
+        );
+    }
+
+    #[test]
+    fn relay_url_to_http_base_returns_none_for_empty_or_unparseable() {
+        assert_eq!(relay_url_to_http_base(""), None);
+        assert_eq!(relay_url_to_http_base("   "), None);
+        assert_eq!(relay_url_to_http_base("not-a-url"), None);
+        assert_eq!(relay_url_to_http_base("ftp://relay.example.com"), None);
+        // Scheme-only with no host must not slip through.
+        assert_eq!(relay_url_to_http_base("wss://"), None);
+    }
+
+    #[test]
+    fn from_args_withholds_credentials_from_legacy_gabe_basename_match() {
+        // A familiar interpreter and script basename are not trust evidence.
+        // Only the exact frozen absolute command, args, bytes, auth tag, and
+        // identity pins can populate trusted_child_env.
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--agent-command",
+            GABE_NODE_PATH,
+            "--agent-args",
+            "gabe-acp.mjs",
+        ])
+        .expect("clap should parse args");
+        let config = Config::from_args(args).expect("valid config");
+        assert!(config.trusted_child_env.is_empty());
+        assert!(config.trusted_outbox_harness.is_none());
+        assert!(!config.persona_env_vars.iter().any(|(key, _)| {
+            crate::acp::CHILD_CREDENTIAL_ENV_TO_SCRUB
+                .iter()
+                .any(|reserved| key.eq_ignore_ascii_case(reserved))
+        }));
+    }
+
+    #[test]
+    fn from_args_withholds_signing_key_from_default_harness() {
+        // Security-critical: the default (goose) harness must not carry the key.
+        let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", TEST_PRIVATE_KEY])
+            .expect("clap should parse args");
+        let config = Config::from_args(args).expect("valid config");
+        assert!(
+            !config
+                .persona_env_vars
+                .iter()
+                .any(|(key, _)| key == "BUZZ_PRIVATE_KEY"),
+            "default harness persona_env_vars must NOT carry the signing key: {:?}",
+            config.persona_env_vars
+        );
+        // Negative control: the relay URL is only forwarded to the trusted
+        // harness. The default (goose) harness must not carry it either.
+        assert!(
+            !config
+                .persona_env_vars
+                .iter()
+                .any(|(key, _)| key == "BUZZ_RELAY_URL"),
+            "default harness persona_env_vars must NOT carry the relay URL: {:?}",
+            config.persona_env_vars
         );
     }
 
@@ -2895,7 +5007,7 @@ channels = "ALL"
 
         assert!(
             result.is_ok(),
-            "from_args should accept max_turn_duration at the ceiling: {result:?}"
+            "from_args should accept max_turn_duration at the ceiling"
         );
     }
 
@@ -2916,7 +5028,10 @@ channels = "ALL"
             result.is_err(),
             "from_args should reject max_turn_duration above the ceiling"
         );
-        let msg = result.unwrap_err().to_string();
+        let msg = match result {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("from_args unexpectedly accepted an excessive turn duration"),
+        };
         assert!(
             msg.contains("exceeds ceiling"),
             "error should mention 'exceeds ceiling': {msg}"

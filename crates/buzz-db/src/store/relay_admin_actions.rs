@@ -645,6 +645,11 @@ pub async fn execute_kick_with_marker(
         return Ok(KickWithMarkerResult::AlreadyMarked);
     }
 
+    // Serialize every membership writer with prepared-event admission. Without
+    // this exact shared lock, a kick can commit alongside a reply whose signed
+    // membership revision was read immediately before the revocation.
+    crate::channel::acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
+
     let kick = sqlx::query(
         r#"
         UPDATE channel_members

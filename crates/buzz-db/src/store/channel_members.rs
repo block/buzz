@@ -47,6 +47,16 @@ pub struct MemberRecord {
 /// `buzz_channel_ttl:`.
 const CHANNEL_MEMBERSHIP_LOCK_NAMESPACE: &str = "buzz_channel_membership:";
 
+/// Stable advisory-lock input shared by membership writes and prepared-event
+/// admission for one tenant-scoped channel.
+pub fn channel_membership_lock_key(community_id: CommunityId, channel_id: Uuid) -> String {
+    format!(
+        "{CHANNEL_MEMBERSHIP_LOCK_NAMESPACE}{}:{}",
+        community_id.as_uuid(),
+        channel_id
+    )
+}
+
 /// Verify that migration 0032's roster fence is active on the partitioned
 /// `events` parent and every attached partition.
 ///
@@ -173,7 +183,7 @@ pub async fn verify_channel_roster_fence_behavior(pool: &sqlx::PgPool) -> Result
 /// Take the per-channel membership lock. MUST be the first statement in the
 /// transaction that then reads roles/owner counts and writes membership, so the
 /// whole check-then-write sequence is atomic against a concurrent one.
-async fn acquire_channel_membership_lock(
+pub(crate) async fn acquire_channel_membership_lock(
     tx: &mut Transaction<'_, Postgres>,
     community_id: CommunityId,
     channel_id: Uuid,
@@ -181,15 +191,104 @@ async fn acquire_channel_membership_lock(
     crate::observability::observe_advisory_lock(
         crate::observability::LockType::Membership,
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(format!(
-                "{CHANNEL_MEMBERSHIP_LOCK_NAMESPACE}{}:{}",
-                community_id.as_uuid(),
-                channel_id
-            ))
+            .bind(channel_membership_lock_key(community_id, channel_id))
             .execute(&mut **tx),
     )
     .await?;
     Ok(())
+}
+
+/// Compute the frozen v1 membership revision while the caller holds the
+/// per-channel membership advisory transaction lock.
+pub(crate) async fn membership_revision_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+) -> Result<String> {
+    let rows = sqlx::query(
+        "SELECT pubkey, role::text AS role FROM channel_members \
+         WHERE community_id = $1 AND channel_id = $2 AND removed_at IS NULL \
+         ORDER BY pubkey ASC",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    let members = rows
+        .into_iter()
+        .map(|row| {
+            let pubkey: Vec<u8> = row.try_get("pubkey")?;
+            let role: String = row.try_get("role")?;
+            Ok((pubkey, role))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    membership_revision(channel_id, &members)
+}
+
+/// Compute the public v1 membership revision from a caller-sorted or unsorted
+/// active membership snapshot.
+pub fn membership_revision(channel_id: Uuid, members: &[(Vec<u8>, String)]) -> Result<String> {
+    use sha2::{Digest, Sha256};
+
+    let mut members = members.to_vec();
+    members.sort_by(|left, right| left.0.cmp(&right.0));
+    let members = members
+        .into_iter()
+        .map(|(pubkey, role)| {
+            if pubkey.len() != 32 || !matches!(role.as_str(), "owner" | "admin" | "member") {
+                return Err(DbError::InvalidData(
+                    "prepared DM membership contains an invalid pubkey or non-wire role".into(),
+                ));
+            }
+            Ok(serde_json::json!({"pubkey": hex::encode(pubkey), "role": role}))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let value = serde_json::json!({
+        "version": 1,
+        "channelId": channel_id.to_string(),
+        "members": members,
+    });
+    let canonical = canonical_membership_json(&value)?;
+    Ok(format!(
+        "v1:{}",
+        hex::encode(Sha256::digest(canonical.as_bytes()))
+    ))
+}
+
+fn canonical_membership_json(value: &serde_json::Value) -> Result<String> {
+    use serde_json::Value;
+    match value {
+        Value::Null => Ok("null".into()),
+        Value::Bool(value) => Ok(value.to_string()),
+        Value::Number(value) if value.is_i64() || value.is_u64() => Ok(value.to_string()),
+        Value::Number(_) => Err(DbError::InvalidData(
+            "membership revision cannot contain floating-point numbers".into(),
+        )),
+        Value::String(value) => Ok(serde_json::to_string(value)?),
+        Value::Array(values) => Ok(format!(
+            "[{}]",
+            values
+                .iter()
+                .map(canonical_membership_json)
+                .collect::<Result<Vec<_>>>()?
+                .join(",")
+        )),
+        Value::Object(values) => {
+            let mut keys = values.keys().collect::<Vec<_>>();
+            keys.sort_by(|left, right| left.encode_utf16().cmp(right.encode_utf16()));
+            let fields = keys
+                .into_iter()
+                .map(|key| {
+                    Ok(format!(
+                        "{}:{}",
+                        serde_json::to_string(key)?,
+                        canonical_membership_json(&values[key])?
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(format!("{{{}}}", fields.join(",")))
+        }
+    }
 }
 
 /// An active member roster captured while holding the channel's membership

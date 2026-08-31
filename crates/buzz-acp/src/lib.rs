@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 mod acp;
+mod buzz_envelope;
 mod config;
 mod engram_fetch;
 mod filter;
@@ -12,9 +13,17 @@ mod prompt_project;
 mod queue;
 mod relay;
 mod setup_mode;
+mod trusted_transport;
 mod usage;
 
 pub use usage::TurnUsage;
+
+/// Build verified ACP prompt parameters for Buzz transport integration tests
+/// and protocol adapters.
+pub use buzz_envelope::{
+    build_verified_buzz_prompt_params as build_verified_buzz_prompt_params_for_test,
+    VerifiedBuzzPromptInput,
+};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -37,7 +46,7 @@ use config::{
 };
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
-use nostr::{PublicKey, ToBech32};
+use nostr::PublicKey;
 use pool::{
     AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
     PromptResult, PromptSource, SessionState, TimeoutKind,
@@ -135,23 +144,23 @@ fn emit_runtime_lifecycle(
 /// Resolve the agent's owner pubkey at startup.
 ///
 /// Priority:
-/// 1. `BUZZ_AUTH_TAG` env var — NIP-OA attestation signed by the owner.
+/// 1. The startup NIP-OA attestation signed by the owner. Desktop-managed
+///    launches receive it over inherited credential stdin; manual CLI
+///    launches may still source it from `BUZZ_AUTH_TAG` during config parsing.
 ///    Verified against the agent's own pubkey to extract the owner pubkey.
 /// 2. `--agent-owner` CLI flag / `BUZZ_ACP_AGENT_OWNER` env var.
 fn resolve_agent_owner(config: &Config) -> Option<String> {
-    // Try BUZZ_AUTH_TAG first (NIP-OA attestation).
-    if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-        if !auth_tag.is_empty() {
-            let agent_pk = config.keys.public_key();
-            match buzz_sdk::nip_oa::verify_auth_tag(&auth_tag, &agent_pk) {
-                Ok(owner_pk) => {
-                    let owner_hex = owner_pk.to_hex().to_ascii_lowercase();
-                    tracing::info!("owner resolved from BUZZ_AUTH_TAG: {owner_hex}");
-                    return Some(owner_hex);
-                }
-                Err(e) => {
-                    tracing::warn!("BUZZ_AUTH_TAG verification failed: {e} — falling back");
-                }
+    // Try the startup NIP-OA attestation first.
+    if let Some(auth_tag) = config.owner_auth_tag.as_deref() {
+        let agent_pk = config.keys.public_key();
+        match buzz_sdk::nip_oa::verify_auth_tag(auth_tag, &agent_pk) {
+            Ok(owner_pk) => {
+                let owner_hex = owner_pk.to_hex().to_ascii_lowercase();
+                tracing::info!("owner resolved from startup auth tag: {owner_hex}");
+                return Some(owner_hex);
+            }
+            Err(e) => {
+                tracing::warn!("startup auth tag verification failed: {e} — falling back");
             }
         }
     }
@@ -1937,10 +1946,19 @@ async fn tokio_main() -> Result<()> {
         return run_authenticate(args).await;
     }
 
+    // Network-stack TRACE events can contain complete WebSocket/HTTP frames,
+    // including signed message bodies and authorization material. Keep those
+    // crates disabled even when an operator enables broad `RUST_LOG=trace`;
+    // Buzz's own structured trace events remain available.
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("buzz_acp=info"))
+        .add_directive("tungstenite=off".parse()?)
+        .add_directive("tokio_tungstenite=off".parse()?)
+        .add_directive("hyper=off".parse()?)
+        .add_directive("hyper_util=off".parse()?)
+        .add_directive("reqwest=off".parse()?);
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("buzz_acp=info")),
-        )
+        .with_env_filter(filter)
         .compact()
         .init();
 
@@ -1956,6 +1974,20 @@ async fn tokio_main() -> Result<()> {
     {
         tracing::info!("buzz-acp: setup payload present, entering setup-listener mode");
         return setup_mode::run_setup_listener(config, payload).await;
+    }
+
+    // Resolve every credential-bearing value before any ACP child exists.
+    // Desktop-managed Context Engine launches deliver these values through an
+    // inherited stdin, so they never enter macOS's launch-time argv/env
+    // snapshot. Clearing legacy env inputs still reduces accidental forwarding
+    // for manual CLI launches, but cannot retroactively erase that snapshot.
+    let relay_auth_tag: Option<nostr::Tag> = config
+        .owner_auth_tag
+        .as_deref()
+        .and_then(|value| buzz_sdk::nip_oa::parse_auth_tag(value).ok());
+    let startup_owner: Option<String> = resolve_agent_owner(&config);
+    for key in acp::PARENT_CREDENTIAL_ENV_TO_SCRUB {
+        std::env::remove_var(key);
     }
 
     tracing::info!("buzz-acp starting: {}", config.summary());
@@ -1998,12 +2030,6 @@ async fn tokio_main() -> Result<()> {
 
     let pubkey_hex = config.keys.public_key().to_hex();
 
-    // Parse BUZZ_AUTH_TAG into a nostr::Tag for NIP-OA relay membership delegation.
-    let relay_auth_tag: Option<nostr::Tag> = std::env::var("BUZZ_AUTH_TAG")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .and_then(|s| buzz_sdk::nip_oa::parse_auth_tag(&s).ok());
-
     let mut relay =
         HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
             .await
@@ -2019,6 +2045,24 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("connected to relay at {}", config.relay_url);
 
+    // A crash can land after a reply was signed+fsynced but before relay
+    // acknowledgement. Reconcile the trusted outbox before subscribing to new
+    // work so no prepared response can be stranded behind later deliveries.
+    if let Some(publish) = &config.trusted_publish {
+        let receipt = buzz_cli::replay_prepared_replies(buzz_cli::ReplayPreparedRequest {
+            relay_url: &publish.relay_http_base,
+            keys: &config.keys,
+            auth_tag: &publish.auth_tag,
+            outbox_dir: &publish.outbox_dir,
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("trusted Buzz outbox reconciliation failed: {error}"))?;
+        tracing::info!(
+            reconciled = receipt.reconciled,
+            "trusted Buzz outbox reconciled before subscription"
+        );
+    }
+
     relay
         .subscribe_membership_notifications()
         .await
@@ -2029,7 +2073,6 @@ async fn tokio_main() -> Result<()> {
     let presence_keys = config.keys.clone();
 
     // Priority: BUZZ_AUTH_TAG (NIP-OA attestation) → --agent-owner flag.
-    let startup_owner: Option<String> = resolve_agent_owner(&config);
     if let Some(ref owner) = startup_owner {
         tracing::info!("agent owner: {owner}");
     } else {
@@ -2192,6 +2235,14 @@ async fn tokio_main() -> Result<()> {
 
     let base_prompt_content = config.base_prompt_content.take();
     let cwd = current_working_directory()?;
+    let harness_name = config
+        .trusted_outbox_harness
+        .map(crate::config::TrustedOutboxHarness::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::config::normalize_agent_command_identity(&config.agent_command));
+    let managed_agent_pubkey_pin = config
+        .trusted_outbox_harness
+        .map(|_| config.keys.public_key().to_hex());
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -2221,7 +2272,9 @@ async fn tokio_main() -> Result<()> {
             .as_deref()
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
-        harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
+        harness_name,
+        managed_agent_pubkey_pin,
+        trusted_publish: config.trusted_publish.clone(),
         relay_url: config.relay_url.clone(),
     });
 
@@ -2459,11 +2512,14 @@ async fn tokio_main() -> Result<()> {
                 let cmd = config.agent_command.clone();
                 let args = config.agent_args.clone();
                 let env = config.persona_env_vars.clone();
+                let trusted_env = config.trusted_child_env.clone();
                 let has_codex = config.has_generated_codex_config;
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
+                    let result =
+                        spawn_and_init(&cmd, &args, &env, has_codex, &trusted_env, idx, observer)
+                            .await;
                     guard.send(result);
                 });
             }
@@ -3412,17 +3468,24 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    // Drain wake tasks gracefully rather than aborting: an in-flight
-    // initialize_agent_pool observes the shutdown watch at its biased per-slot
-    // select and reaps its partially-spawned agents itself. `shutdown()` here
-    // would abort the task mid-init and drop those AcpClients via best-effort
-    // Drop — the exact zombie class the eager path's spawn-outside-the-timeout
-    // comment exists to prevent. Fire the watch first so exits that bypass the
-    // signal handlers (result channel closed, LoopAction::Exit) cancel the wake
-    // just as promptly. Timeout is a backstop for a slot stuck outside the
-    // select (e.g. in spawn); only then do we fall back to aborting.
+    // Stop means stop: first signal every initializer, then immediately abort
+    // active prompt/respawn tasks. Dropping AcpClient synchronously SIGKILLs an
+    // ordinary child's whole process group, so Desktop's one-second escalation
+    // cannot leave tool or MCP grandchildren behind.
     let _ = shutdown_tx.send(());
-    let wake_drain = tokio::time::timeout(Duration::from_secs(30), async {
+    respawn_tasks.shutdown().await;
+    while let Ok(rr) = respawn_rx.try_recv() {
+        if let Ok((mut acp, _, _)) = rr.result {
+            acp.shutdown().await;
+            tracing::debug!(agent = rr.index, "reaped respawned agent on shutdown");
+        }
+    }
+    shutdown_agent_pool(&mut pool).await;
+
+    // Give a watch-aware initializer one short opportunity to return a fully
+    // owned pool for explicit reaping. If it is stuck, aborting drops any local
+    // AcpClient and its process group before Desktop escalates the outer group.
+    let wake_drain = tokio::time::timeout(Duration::from_millis(500), async {
         while wake_tasks.join_next().await.is_some() {}
     })
     .await;
@@ -3436,74 +3499,7 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    tracing::info!("shutdown: waiting for in-flight prompts");
-    // 30 s is generous for in-flight prompts to be cancelled; using
-    // max_turn_duration here would cause Ctrl+C to hang for up to an hour.
-    let grace = Duration::from_secs(30);
-    // Best-effort drain of both join_set and result_rx during the grace period.
-    // Tasks that finish normally send their OwnedAgent through result_rx — we
-    // explicitly shut them down here to reap child processes. If the grace
-    // period expires, remaining tasks are aborted and fall back to
-    // AcpClient::Drop (start_kill + try_wait — best-effort, not guaranteed).
-    let (rx_ref, js_ref) = pool.rx_and_join_set();
-    let shutdown_result = tokio::time::timeout(grace, async {
-        loop {
-            tokio::select! {
-                result = js_ref.join_next() => {
-                    match result {
-                        Some(Err(e)) => tracing::warn!("task error during shutdown: {e}"),
-                        Some(Ok(())) => {}
-                        None => break, // join_set empty
-                    }
-                }
-                maybe_result = rx_ref.recv() => {
-                    if let Some(mut pr) = maybe_result {
-                        let idx = pr.agent.index;
-                        pr.agent.acp.shutdown().await;
-                        tracing::debug!(agent = idx, "reaped checked-out agent on shutdown");
-                    }
-                    // If None, channel closed — tasks are done.
-                }
-            }
-        }
-    })
-    .await;
-    if shutdown_result.is_err() {
-        tracing::warn!("grace period expired, aborting remaining tasks");
-        pool.join_set.shutdown().await;
-    }
-    // Drain any remaining results that arrived after join_set drained but
-    // before tasks were aborted.
-    while let Ok(mut pr) = pool.result_rx_try_recv() {
-        let idx = pr.agent.index;
-        pr.agent.acp.shutdown().await;
-        tracing::debug!(agent = idx, "reaped late-arriving agent on shutdown");
-    }
-    // Explicitly shut down idle agents still sitting in their slots.
-    for slot in pool.agents_mut().iter_mut() {
-        if let Some(agent) = slot.take() {
-            let idx = agent.index;
-            let mut acp = agent.acp;
-            acp.shutdown().await;
-            tracing::debug!(agent = idx, "reaped idle agent on shutdown");
-        }
-    }
     drop(pool);
-
-    // Abort any in-flight respawn tasks. They may be sleeping in backoff or
-    // running spawn_and_init — either way, we don't want them spawning new
-    // children after the main loop has exited. RespawnGuard::Drop sends a
-    // failure result for aborted tasks, so respawn_in_flight is cleared.
-    respawn_tasks.shutdown().await;
-
-    // Drain any respawn results that completed before the abort. Explicitly
-    // shut down returned agents instead of relying on AcpClient::Drop.
-    while let Ok(rr) = respawn_rx.try_recv() {
-        if let Ok((mut acp, _, _)) = rr.result {
-            acp.shutdown().await;
-            tracing::debug!(agent = rr.index, "reaped respawned agent on shutdown");
-        }
-    }
 
     // Cancel any in-flight presence heartbeat before sending offline.
     if let Some(h) = presence_task.take() {
@@ -4006,6 +4002,15 @@ fn handle_prompt_result(
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
+            } else if matches!(&result.outcome, PromptOutcome::TrustedPublishTerminal) {
+                tracing::error!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "trusted reply requires manual review — automatic retry stopped"
+                );
+                let content = "⚠️ I generated a reply but could not safely publish it. Automatic retry was stopped; manual review is required."
+                    .to_string();
+                spawn_failure_notice(rest_client, &batch, content);
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -4015,6 +4020,12 @@ fn handle_prompt_result(
                     PromptOutcome::AgentExited => "the agent process exited".to_string(),
                     PromptOutcome::Error(e) => format!("{e}"),
                     PromptOutcome::ProjectContextIndeterminate(reason) => reason.clone(),
+                    PromptOutcome::TrustedPublishRetryable => {
+                        "durable reply delivery is temporarily unknown".to_string()
+                    }
+                    PromptOutcome::TrustedPublishTerminal => {
+                        "durable reply requires manual review".to_string()
+                    }
                     _ => "repeated failures".to_string(),
                 };
                 let content = format!(
@@ -4047,6 +4058,8 @@ fn handle_prompt_result(
     let outcome_label = match &result.outcome {
         PromptOutcome::Ok(_) => "ok",
         PromptOutcome::Error(_) => "error",
+        PromptOutcome::TrustedPublishRetryable => "trusted_publish_retryable",
+        PromptOutcome::TrustedPublishTerminal => "trusted_publish_terminal",
         PromptOutcome::ProjectContextIndeterminate(_) => "project_context_indeterminate",
         PromptOutcome::Timeout(TimeoutKind::Idle) => "idle_timeout",
         PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => "hard_timeout",
@@ -4219,6 +4232,30 @@ fn handle_prompt_result(
             emit_turn_error(&reason, None);
             pool.return_agent(result.agent);
         }
+        PromptOutcome::TrustedPublishRetryable => {
+            tracing::warn!(
+                agent = agent_index,
+                outcome = outcome_label,
+                "trusted reply publish is retryable"
+            );
+            emit_turn_error(
+                "Durable reply delivery is temporarily unknown; retry scheduled.",
+                None,
+            );
+            pool.return_agent(result.agent);
+        }
+        PromptOutcome::TrustedPublishTerminal => {
+            tracing::error!(
+                agent = agent_index,
+                outcome = outcome_label,
+                "trusted reply publish requires manual review"
+            );
+            emit_turn_error(
+                "Durable reply was not published; automatic retry stopped for manual review.",
+                None,
+            );
+            pool.return_agent(result.agent);
+        }
         PromptOutcome::Error(ref e) => {
             let is_transport_error = matches!(
                 e,
@@ -4362,13 +4399,14 @@ fn recover_panicked_agent(
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
+    let trusted_env = config.trusted_child_env.clone();
     let has_codex = config.has_generated_codex_config;
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
+        let result = spawn_and_init(&cmd, &args, &env, has_codex, &trusted_env, i, observer).await;
         guard.send(result);
     });
 }
@@ -4589,6 +4627,7 @@ fn spawn_respawn_task(
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
+    let trusted_env = config.trusted_child_env.clone();
     let has_codex = config.has_generated_codex_config;
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
@@ -4601,7 +4640,8 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
+        let result =
+            spawn_and_init(&cmd, &args, &env, has_codex, &trusted_env, index, observer).await;
         guard.send(result);
     });
 
@@ -4644,6 +4684,7 @@ struct PoolStartup {
     command: String,
     args: Vec<String>,
     extra_env: Vec<(String, String)>,
+    trusted_child_env: Vec<(String, String)>,
     has_generated_codex_config: bool,
     model: Option<String>,
     effort_level: Option<String>,
@@ -4657,6 +4698,7 @@ impl PoolStartup {
             command: config.agent_command.clone(),
             args: config.agent_args.clone(),
             extra_env: config.persona_env_vars.clone(),
+            trusted_child_env: config.trusted_child_env.clone(),
             has_generated_codex_config: config.has_generated_codex_config,
             model: config.model.clone(),
             effort_level: config.effort_level.clone(),
@@ -4678,6 +4720,7 @@ async fn initialize_agent_pool(
             &startup.args,
             &startup.extra_env,
             startup.has_generated_codex_config,
+            &startup.trusted_child_env,
         )
         .await;
         match spawn_result {
@@ -4781,12 +4824,19 @@ async fn spawn_and_init(
     args: &[String],
     extra_env: &[(String, String)],
     has_generated_codex_config: bool,
+    trusted_child_env: &[(String, String)],
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, String)> {
-    let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
+    let mut acp = AcpClient::spawn(
+        command,
+        args,
+        extra_env,
+        has_generated_codex_config,
+        trusted_child_env,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
     acp.set_observer(observer, agent_index);
 
     match acp.initialize().await {
@@ -4815,7 +4865,7 @@ async fn spawn_and_init(
 
 async fn spawn_auth_client(agent: &AuthAgentArgs) -> Result<AcpClient, acp::AcpError> {
     let agent_args = config::normalize_agent_args(&agent.agent_command, agent.agent_args.clone());
-    AcpClient::spawn(&agent.agent_command, &agent_args, &[], false).await
+    AcpClient::spawn(&agent.agent_command, &agent_args, &[], false, &[]).await
 }
 
 fn extract_auth_methods(init_result: &serde_json::Value) -> Vec<serde_json::Value> {
@@ -4942,7 +4992,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     // Spawn outside the timeout so we always own the child for cleanup.
     // `models` subcommand doesn't use persona packs — no extra env, no codex config.
     let mut client =
-        match AcpClient::spawn(&args.agent.agent_command, &agent_args, &[], false).await {
+        match AcpClient::spawn(&args.agent.agent_command, &agent_args, &[], false, &[]).await {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("error: failed to spawn agent: {e}");
@@ -5079,33 +5129,14 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
         command: config.mcp_command.clone(),
         args: vec![],
         env: {
-            let mut env = vec![
-                EnvVar {
-                    name: "BUZZ_RELAY_URL".into(),
-                    value: config.relay_url.clone(),
-                },
-                EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    // bech32 encoding of a valid secret key is infallible.
-                    // Panic here is correct: injecting a bogus secret would cause
-                    // delayed, hard-to-diagnose agent failures downstream.
-                    value: config
-                        .keys
-                        .secret_key()
-                        .to_bech32()
-                        .expect("secret key bech32 encoding should never fail"),
-                },
-            ];
-            // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
-            // so the MCP server can attach it to every signed event.
-            if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-                if !auth_tag.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_AUTH_TAG".into(),
-                        value: auth_tag,
-                    });
-                }
-            }
+            // `session/new` is visible to the ACP child. Never serialize raw
+            // signing material or owner credentials into MCP configuration:
+            // a hostile child could read the JSON without spawning the MCP
+            // server. Relay location and display identity are non-secret.
+            let mut env = vec![EnvVar {
+                name: "BUZZ_RELAY_URL".into(),
+                value: config.relay_url.clone(),
+            }];
             // Forward the agent's display name so dev-mcp can use it as the git
             // author name instead of the raw npub. Read from the process env
             // rather than Config: this is a pass-through of a contract owned
@@ -5693,9 +5724,21 @@ mod author_gate_tests {
         use std::sync::atomic::Ordering;
 
         let id = Uuid::new_v4();
-        let response = serde_json::json!([{
-            "tags": [["d", id.to_string()], ["name", "DM"], ["t", "dm"]]
-        }]);
+        let id_text = id.to_string();
+        let response = {
+            let event = nostr::EventBuilder::new(
+                nostr::Kind::Custom(buzz_core::kind::KIND_NIP29_GROUP_METADATA as u16),
+                "",
+            )
+            .tags([
+                nostr::Tag::parse(["d", id_text.as_str()]).expect("d tag"),
+                nostr::Tag::parse(["name", "DM"]).expect("name tag"),
+                nostr::Tag::parse(["t", "dm"]).expect("type tag"),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("signed metadata fixture");
+            serde_json::to_value(vec![event]).expect("metadata response")
+        };
         let (resolver, requests, server) = lazy_resolver_with_response(response).await;
 
         assert!(is_dm_channel(id, &resolver).await);
@@ -6792,6 +6835,7 @@ mod build_mcp_servers_tests {
     fn test_config() -> Config {
         Config {
             keys: nostr::Keys::generate(),
+            owner_auth_tag: None,
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
@@ -6826,6 +6870,9 @@ mod build_mcp_servers_tests {
             respond_to_allowlist: std::collections::HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
+            trusted_child_env: vec![],
+            trusted_publish: None,
+            trusted_outbox_harness: None,
             has_generated_codex_config: false,
             relay_observer: false,
             exit_after_inactivity_secs: 0,
@@ -6838,7 +6885,7 @@ mod build_mcp_servers_tests {
     }
 
     #[test]
-    fn session_new_mcp_server_has_required_fields() {
+    fn session_new_mcp_server_exposes_only_non_secret_fields() {
         let config = test_config();
         let servers = build_mcp_servers(&config);
         assert_eq!(servers.len(), 1);
@@ -6850,14 +6897,16 @@ mod build_mcp_servers_tests {
             names.contains(&"BUZZ_RELAY_URL"),
             "missing BUZZ_RELAY_URL; got {names:?}"
         );
-        assert!(
-            names.contains(&"BUZZ_PRIVATE_KEY"),
-            "missing BUZZ_PRIVATE_KEY; got {names:?}"
-        );
+        for forbidden in ["BUZZ_PRIVATE_KEY", "NOSTR_PRIVATE_KEY", "BUZZ_AUTH_TAG"] {
+            assert!(
+                !names.contains(&forbidden),
+                "session/new must not disclose {forbidden}; got {names:?}"
+            );
+        }
     }
 
     #[test]
-    fn session_new_mcp_server_forwards_buzz_auth_tag() {
+    fn session_new_mcp_server_never_forwards_buzz_auth_tag() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("BUZZ_AUTH_TAG", "test-attestation-tag");
         let config = test_config();
@@ -6867,23 +6916,9 @@ mod build_mcp_servers_tests {
         let server = &servers[0];
         let auth_tag_env = server.env.iter().find(|e| e.name == "BUZZ_AUTH_TAG");
         assert!(
-            auth_tag_env.is_some(),
-            "BUZZ_AUTH_TAG should be forwarded when set"
+            auth_tag_env.is_none(),
+            "BUZZ_AUTH_TAG must remain outside the ACP-visible MCP envelope"
         );
-        assert_eq!(auth_tag_env.unwrap().value, "test-attestation-tag");
-    }
-
-    #[test]
-    fn session_new_mcp_server_skips_empty_buzz_auth_tag() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        std::env::set_var("BUZZ_AUTH_TAG", "");
-        let config = test_config();
-        let servers = build_mcp_servers(&config);
-        std::env::remove_var("BUZZ_AUTH_TAG");
-
-        let server = &servers[0];
-        let has_auth_tag = server.env.iter().any(|e| e.name == "BUZZ_AUTH_TAG");
-        assert!(!has_auth_tag, "empty BUZZ_AUTH_TAG should not be forwarded");
     }
 
     #[test]
@@ -7013,6 +7048,7 @@ mod error_outcome_emission_tests {
     fn test_config() -> Config {
         Config {
             keys: nostr::Keys::generate(),
+            owner_auth_tag: None,
             relay_url: "ws://localhost:3000".into(),
             // `true` exits cleanly, so the async respawn fails fast and
             // harmlessly off the JoinSet — irrelevant to the synchronous
@@ -7050,6 +7086,9 @@ mod error_outcome_emission_tests {
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: vec![],
             persona_env_vars: vec![],
+            trusted_child_env: vec![],
+            trusted_publish: None,
+            trusted_outbox_harness: None,
             has_generated_codex_config: false,
             relay_observer: false,
             exit_after_inactivity_secs: 0,
@@ -7083,7 +7122,7 @@ mod error_outcome_emission_tests {
     async fn dummy_agent(index: usize) -> OwnedAgent {
         OwnedAgent {
             index,
-            acp: AcpClient::spawn("cat", &[], &[], false)
+            acp: AcpClient::spawn("cat", &[], &[], false, &[])
                 .await
                 .expect("spawn cat as inert agent"),
             state: Default::default(),
@@ -7532,6 +7571,18 @@ mod error_outcome_emission_tests {
         );
     }
 
+    #[tokio::test]
+    async fn trusted_publish_fates_emit_exactly_one_redacted_feed_event() {
+        assert_eq!(
+            turn_errors_emitted_for(PromptOutcome::TrustedPublishRetryable).await,
+            1
+        );
+        assert_eq!(
+            turn_errors_emitted_for(PromptOutcome::TrustedPublishTerminal).await,
+            1
+        );
+    }
+
     /// idle_timeout outcome_label is "idle_timeout"; hard_timeout is "hard_timeout".
     #[tokio::test]
     async fn timeout_outcome_labels_differ() {
@@ -7709,6 +7760,24 @@ mod error_outcome_emission_tests {
         assert_eq!(
             idle_events, 1,
             "idle timeout must preserve the event for retry"
+        );
+
+        let retryable_batch = make_batch();
+        let (retryable_channels, retryable_events) =
+            run(PromptOutcome::TrustedPublishRetryable, retryable_batch).await;
+        assert_eq!(retryable_channels, 1);
+        assert_eq!(
+            retryable_events, 1,
+            "retryable delivery must preserve the event"
+        );
+
+        let terminal_batch = make_batch();
+        let (terminal_channels, terminal_events) =
+            run(PromptOutcome::TrustedPublishTerminal, terminal_batch).await;
+        assert_eq!(terminal_channels, 0);
+        assert_eq!(
+            terminal_events, 0,
+            "manual-review delivery must never enter the automatic retry queue"
         );
     }
 

@@ -315,11 +315,13 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
 
     let pubkey_hex = config.keys.public_key().to_hex();
 
-    // Parse BUZZ_AUTH_TAG for relay membership / NIP-OA.
-    let relay_auth_tag: Option<nostr::Tag> = std::env::var("BUZZ_AUTH_TAG")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .and_then(|s| buzz_sdk::nip_oa::parse_auth_tag(&s).ok());
+    // Parse the already-resolved startup attestation for relay membership /
+    // NIP-OA. Desktop-managed launches receive it over the inherited
+    // credential stdin, never through their launch environment.
+    let relay_auth_tag: Option<nostr::Tag> = config
+        .owner_auth_tag
+        .as_deref()
+        .and_then(|value| buzz_sdk::nip_oa::parse_auth_tag(value).ok());
 
     let startup_watermark: u64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

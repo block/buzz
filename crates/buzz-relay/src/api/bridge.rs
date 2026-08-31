@@ -920,6 +920,7 @@ async fn submit_event_authed(
         pubkey,
         scopes: buzz_auth::Scope::all_known(), // Pure Nostr: full scopes, channel access via membership
         auth_method: crate::handlers::ingest::HttpAuthMethod::Nip98,
+        nip_oa_owner,
     };
 
     match crate::handlers::ingest::ingest_event(state, tenant, event, auth).await {

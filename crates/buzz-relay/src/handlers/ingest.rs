@@ -157,6 +157,40 @@ fn validate_custom_emoji_tags(event: &Event) -> Result<(), IngestError> {
     Ok(())
 }
 
+fn prepared_membership_revision(event: &Event) -> Result<Option<&str>, IngestError> {
+    let revision_tags = event
+        .tags
+        .iter()
+        .filter(|tag| {
+            let values = tag.as_slice();
+            values.first().map(String::as_str) == Some("buzz_membership_revision")
+        })
+        .collect::<Vec<_>>();
+    if revision_tags.is_empty() {
+        return Ok(None);
+    }
+    if event.kind.as_u16() != KIND_STREAM_MESSAGE as u16
+        || revision_tags.len() != 1
+        || revision_tags[0].as_slice().len() != 2
+    {
+        return Err(IngestError::Rejected(
+            "invalid: membership revision is allowed exactly once on kind 9".into(),
+        ));
+    }
+    let revision = &revision_tags[0].as_slice()[1];
+    let Some(hex) = revision.strip_prefix("v1:") else {
+        return Err(IngestError::Rejected(
+            "invalid: membership revision must use v1".into(),
+        ));
+    };
+    if hex.len() != 64 || !hex.chars().all(|character| character.is_ascii_hexdigit()) {
+        return Err(IngestError::Rejected(
+            "invalid: membership revision digest must be 64 hex characters".into(),
+        ));
+    }
+    Ok(Some(revision))
+}
+
 fn validate_reaction_emoji(event: &Event, emoji: &str) -> Result<(), IngestError> {
     let emoji_char_count = emoji.chars().count();
     if emoji_char_count <= 64 {
@@ -213,6 +247,8 @@ pub enum IngestAuth {
         channel_ids: Option<Vec<Uuid>>,
         /// WebSocket connection identifier.
         conn_id: Uuid,
+        /// Owner proven by NIP-OA at connection authentication, if any.
+        nip_oa_owner: Option<nostr::PublicKey>,
     },
     /// HTTP bridge authenticated request (NIP-98 or dev X-Pubkey).
     Http {
@@ -222,6 +258,8 @@ pub enum IngestAuth {
         scopes: Vec<Scope>,
         /// How the HTTP request was authenticated.
         auth_method: HttpAuthMethod,
+        /// Owner proven by the request's NIP-OA header, if any.
+        nip_oa_owner: Option<nostr::PublicKey>,
     },
 }
 
@@ -270,6 +308,58 @@ impl IngestAuth {
     pub fn is_http(&self) -> bool {
         matches!(self, Self::Http { .. })
     }
+
+    fn nip_oa_owner(&self) -> Option<&nostr::PublicKey> {
+        match self {
+            Self::Nip42 { nip_oa_owner, .. } | Self::Http { nip_oa_owner, .. } => {
+                nip_oa_owner.as_ref()
+            }
+        }
+    }
+}
+
+fn validate_nip_oa_event_authorization(
+    event: &Event,
+    auth: &IngestAuth,
+) -> Result<(), IngestError> {
+    let mut tags = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("auth"));
+    let first = tags.next();
+    if tags.next().is_some() {
+        return Err(IngestError::AuthFailed(
+            "invalid: multiple NIP-OA auth tags".into(),
+        ));
+    }
+    let Some(tag) = first else {
+        if auth.nip_oa_owner().is_some() {
+            return Err(IngestError::AuthFailed(
+                "invalid: delegated event is missing NIP-OA auth".into(),
+            ));
+        }
+        return Ok(());
+    };
+    let tag_json = serde_json::to_string(tag.as_slice())
+        .map_err(|_| IngestError::AuthFailed("invalid: NIP-OA auth tag encoding".into()))?;
+    let owner = buzz_sdk::nip_oa::verify_auth_tag_for_event(
+        &tag_json,
+        &event.pubkey,
+        event.kind.as_u16(),
+        event.created_at.as_secs(),
+    )
+    .map_err(|_| {
+        IngestError::AuthFailed("invalid: NIP-OA conditions do not authorize this event".into())
+    })?;
+    if auth
+        .nip_oa_owner()
+        .is_some_and(|expected| expected != &owner)
+    {
+        return Err(IngestError::AuthFailed(
+            "invalid: event NIP-OA owner does not match authenticated owner".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn emit_product_feedback_success(
@@ -2230,6 +2320,8 @@ async fn ingest_event_inner(
         ));
     }
 
+    validate_nip_oa_event_authorization(&event, &auth)?;
+
     const MAX_EVENT_CONTENT_BYTES: usize = 256 * 1024; // 256 KB
     if event.content.len() > MAX_EVENT_CONTENT_BYTES {
         return Err(IngestError::Rejected(format!(
@@ -2238,6 +2330,7 @@ async fn ingest_event_inner(
             event.content.len()
         )));
     }
+    let prepared_revision = prepared_membership_revision(&event)?;
 
     let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
     if event.pubkey != *auth.pubkey() && !is_gift_wrap {
@@ -3155,16 +3248,37 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Internal(format!("error: {e}")))?
     } else {
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
-        match state
-            .db
-            .insert_event_with_thread_metadata(
-                tenant.community(),
-                &event,
-                channel_id,
-                thread_params,
-            )
-            .await
-        {
+        let insert_result = match (prepared_revision, channel_id) {
+            (Some(revision), Some(channel_id)) => {
+                state
+                    .db
+                    .insert_prepared_event_with_thread_metadata(
+                        tenant.community(),
+                        &event,
+                        channel_id,
+                        thread_params,
+                        revision,
+                    )
+                    .await
+            }
+            (Some(_), None) => {
+                return Err(IngestError::Rejected(
+                    "invalid: prepared event requires a channel".into(),
+                ));
+            }
+            (None, _) => {
+                state
+                    .db
+                    .insert_event_with_thread_metadata(
+                        tenant.community(),
+                        &event,
+                        channel_id,
+                        thread_params,
+                    )
+                    .await
+            }
+        };
+        match insert_result {
             Ok(result) => result,
             Err(e) => {
                 // Compensate: if we pre-created a channel for kind:9007,
@@ -3182,6 +3296,13 @@ async fn ingest_event_inner(
                 return Err(match e {
                     buzz_db::DbError::AuthEventRejected => {
                         IngestError::Rejected("invalid: AUTH events cannot be stored".into())
+                    }
+                    buzz_db::DbError::AccessDenied(reason)
+                        if reason == "channel membership revision mismatch" =>
+                    {
+                        IngestError::Rejected(
+                            "restricted: channel membership changed after reply preparation".into(),
+                        )
                     }
                     other => IngestError::Internal(format!("error: database error: {other}")),
                 });
@@ -3619,6 +3740,7 @@ mod tests {
             pubkey: keys.public_key(),
             scopes: vec![Scope::MessagesWrite],
             auth_method: HttpAuthMethod::Nip98,
+            nip_oa_owner: None,
         };
         let tracer = Arc::new(VecTracer::default());
         let abstract_state = state_for_request(&tenant, auth.pubkey());
@@ -4033,6 +4155,7 @@ mod tests {
             scopes: vec![],
             channel_ids: None,
             conn_id: Uuid::new_v4(),
+            nip_oa_owner: None,
         };
 
         assert_ne!(principal.public_key(), envelope_signer.public_key());
@@ -4050,6 +4173,7 @@ mod tests {
             pubkey: keys.public_key(),
             scopes: vec![],
             auth_method: HttpAuthMethod::Nip98,
+            nip_oa_owner: None,
         };
         assert!(
             http_auth.is_http(),
@@ -4066,6 +4190,7 @@ mod tests {
             scopes: vec![],
             channel_ids: None,
             conn_id: uuid::Uuid::new_v4(),
+            nip_oa_owner: None,
         };
         assert!(
             !ws_auth.is_http(),
