@@ -2420,6 +2420,28 @@ function resetMockRelayAgents(config?: E2eConfig) {
       respond_to: seed.respondTo ?? "owner-only",
       respond_to_allowlist: seed.respondToAllowlist ?? [],
     });
+
+    // A relay-agent seed that names real channels represents a bot that is
+    // an actual member of those channels — e.g. another identity's agent
+    // added as a bot member of a shared channel — not just a
+    // relay-directory listing. Mirror resetMockManagedAgents's membership
+    // push (below) so specs can exercise the cross-owner "bot member of a
+    // shared channel" case without also declaring the agent as locally
+    // managed.
+    for (const channel of channels) {
+      if (channel.members.some((member) => member.pubkey === seed.pubkey)) {
+        continue;
+      }
+      channel.members.push({
+        pubkey: seed.pubkey,
+        role: "bot",
+        is_agent: true,
+        joined_at: new Date().toISOString(),
+        display_name: seed.name,
+      });
+      syncMockChannel(channel);
+      touchMockChannel(channel);
+    }
   }
 }
 
@@ -3723,7 +3745,7 @@ function initializeMockHuddle(
 const openedExternalUrls: string[] = [];
 const defaultMockRelayAgents: RawRelayAgent[] = [
   {
-    pubkey: ALICE_PUBKEY,
+    pubkey: "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
     name: "alice",
     agent_type: "goose",
     channels: ["general", "agents"],
@@ -3737,7 +3759,7 @@ const defaultMockRelayAgents: RawRelayAgent[] = [
     respond_to_allowlist: [],
   },
   {
-    pubkey: CHARLIE_PUBKEY,
+    pubkey: "5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c",
     name: "charlie",
     agent_type: "codex",
     channels: ["general"],
