@@ -1181,6 +1181,42 @@ pub(crate) fn format_event_block(
     block
 }
 
+/// Format an event and retain the reply destination that belongs to it.
+///
+/// A batch or mid-turn steer can contain several unrelated human messages.
+/// The turn-level `<context>` only describes the last event, so without this
+/// per-event route an agent can answer the newest thread and silently absorb
+/// earlier reply obligations. DMs deliberately keep their existing linear
+/// routing semantics and therefore do not get an event-level `--reply-to`.
+pub(crate) fn format_routed_event_block(
+    channel_id: Uuid,
+    channel_info: Option<&PromptChannelInfo>,
+    be: &BatchEvent,
+    profile_lookup: Option<&PromptProfileLookup>,
+    is_dm: bool,
+) -> String {
+    let mut block = format_event_block(channel_id, channel_info, be, profile_lookup);
+    if is_dm {
+        return block;
+    }
+
+    let sender_pubkey = be.event.pubkey.to_hex();
+    let thread_tags = parse_thread_tags(&be.event);
+    if let Some(anchor) = resolve_reply_anchor(
+        &sender_pubkey,
+        &thread_tags,
+        &be.event.id.to_hex(),
+        profile_lookup,
+    ) {
+        block.push_str(&format!(
+            "\nReply routing: If this human event requires a response, send it with \
+             `--reply-to {anchor}`. This destination belongs to this event; a reply \
+             sent only under another event does not close it."
+        ));
+    }
+    block
+}
+
 /// Append a reply instruction when the agent is responding to a thread event.
 ///
 /// Tells the agent to default to `--reply-to <event_id>` for ordinary replies
@@ -1874,7 +1910,13 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
                 "--- Event {} ({}) ---\n{}",
                 i + 1,
                 be.prompt_tag,
-                format_event_block(batch.channel_id, args.channel_info, be, args.profile_lookup)
+                format_routed_event_block(
+                    batch.channel_id,
+                    args.channel_info,
+                    be,
+                    args.profile_lookup,
+                    is_dm,
+                )
             ));
         }
         sections.push(crate::prompt_framing::semantic_section(
@@ -1892,11 +1934,12 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
                 &format!(
                     "--- Event 1 ({}) ---\n{}",
                     be.prompt_tag,
-                    format_event_block(
+                    format_routed_event_block(
                         batch.channel_id,
                         args.channel_info,
                         be,
-                        args.profile_lookup
+                        args.profile_lookup,
+                        is_dm,
                     )
                 ),
             )
@@ -1904,7 +1947,13 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
             crate::prompt_framing::semantic_section_with_attributes(
                 "buzz-event",
                 &[("type", be.prompt_tag.as_str())],
-                &format_event_block(batch.channel_id, args.channel_info, be, args.profile_lookup),
+                &format_routed_event_block(
+                    batch.channel_id,
+                    args.channel_info,
+                    be,
+                    args.profile_lookup,
+                    is_dm,
+                ),
             )
         }
     } else {
@@ -1917,7 +1966,13 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
                 "--- Event {} ({}) ---\n{}",
                 i + 1,
                 be.prompt_tag,
-                format_event_block(batch.channel_id, args.channel_info, be, args.profile_lookup)
+                format_routed_event_block(
+                    batch.channel_id,
+                    args.channel_info,
+                    be,
+                    args.profile_lookup,
+                    is_dm,
+                )
             ));
         }
         let count = batch.events.len().to_string();
@@ -2429,10 +2484,10 @@ mod tests {
     }
 
     /// Cross-thread steering: original work in thread A (cancelled), steering
-    /// message in thread B (new). Pins Perci's edge — the reply instruction
-    /// targets the *steering* message (the one the agent is responding to, where
-    /// the mentioner is waiting), while the steer framing still says "continue
-    /// your in-progress work." This is intended behavior, not a mismatch.
+    /// message in thread B (new). The turn-level reply instruction targets the
+    /// steering message, while each human event retains its own reply route in
+    /// the event block. This keeps the active turn in thread B without silently
+    /// absorbing the outstanding reply obligation in thread A.
     #[test]
     fn test_steer_cross_thread_reply_targets_steering_message() {
         let ch = Uuid::new_v4();
@@ -2476,18 +2531,27 @@ mod tests {
 
         let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
 
-        // Reply instruction points at the thread root of the steering message
-        // (thread_b), not the steering event's own id — this matches the
-        // human-aware reply anchoring from PR #1281: for human-facing turns in
-        // a thread, the anchor is always the thread root.
+        // The turn-level context points at the thread root of the steering
+        // message (thread_b), not the steering event's own id — this matches
+        // the human-aware reply anchoring from PR #1281: for human-facing turns
+        // in a thread, the anchor is always the thread root.
+        let turn_context = prompt
+            .split_once("</context>")
+            .map(|(context, _)| context)
+            .expect("steer prompt should contain a context section");
         assert!(
-            prompt.contains(&format!("--reply-to {thread_b}")),
+            turn_context.contains(&format!("--reply-to {thread_b}")),
             "reply instruction should target the steering thread root: {prompt}"
         );
         assert!(
-            !prompt.contains(&format!("--reply-to {thread_a}")),
-            "reply instruction must NOT target the original thread: {prompt}"
+            !turn_context.contains(&format!("--reply-to {thread_a}")),
+            "turn-level reply instruction must not target the original thread: {prompt}"
         );
+        // Both human events retain their own event-level routes so neither
+        // reply obligation is lost when the messages came from different
+        // threads.
+        assert!(prompt.contains(&format!("`--reply-to {thread_a}`")));
+        assert!(prompt.contains(&format!("`--reply-to {thread_b}`")));
         // Steer framing still frames the original as in-progress work to continue.
         assert!(prompt.contains("<what-you-were-working-on>"));
         assert!(prompt.contains("arrived while you were working"));
@@ -4254,6 +4318,117 @@ mod tests {
             prompt.contains(&format!("Event ID: {event_id}")),
             "prompt should contain the event ID"
         );
+    }
+
+    #[test]
+    fn test_batch_retains_each_human_events_reply_destination() {
+        let ch = Uuid::new_v4();
+        let first = make_event("first question");
+        let second = make_event("second question");
+        let first_id = first.id.to_hex();
+        let second_id = second.id.to_hex();
+        let profiles = HashMap::from([
+            (first.pubkey.to_hex(), profile(false)),
+            (second.pubkey.to_hex(), profile(false)),
+        ]);
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![
+                BatchEvent {
+                    event: first,
+                    prompt_tag: "mention".into(),
+                    received_at: Instant::now(),
+                },
+                BatchEvent {
+                    event: second,
+                    prompt_tag: "mention".into(),
+                    received_at: Instant::now(),
+                },
+            ],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                profile_lookup: Some(&profiles),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+
+        for event_id in [&first_id, &second_id] {
+            assert!(
+                prompt.contains(&format!(
+                    "Reply routing: If this human event requires a response, send it with \
+                     `--reply-to {event_id}`"
+                )),
+                "every batched human event must retain its own reply destination"
+            );
+        }
+    }
+
+    #[test]
+    fn test_routed_event_block_uses_thread_root() {
+        let ch = Uuid::new_v4();
+        let root = "a".repeat(64);
+        let parent = "b".repeat(64);
+        let event = make_event_with_tags(
+            "thread question",
+            vec![
+                vec!["e".into(), root.clone(), "".into(), "root".into()],
+                vec!["e".into(), parent, "".into(), "reply".into()],
+            ],
+        );
+        let profiles = HashMap::from([(event.pubkey.to_hex(), profile(false))]);
+        let block = format_routed_event_block(
+            ch,
+            None,
+            &BatchEvent {
+                event,
+                prompt_tag: "mention".into(),
+                received_at: Instant::now(),
+            },
+            Some(&profiles),
+            false,
+        );
+
+        assert!(block.contains(&format!("`--reply-to {root}`")));
+    }
+
+    #[test]
+    fn test_routed_event_block_skips_agent_only_and_dm_events() {
+        let ch = Uuid::new_v4();
+        let agent_event = make_event("agent coordination");
+        let profiles = HashMap::from([(agent_event.pubkey.to_hex(), profile(true))]);
+        let agent_block = format_routed_event_block(
+            ch,
+            None,
+            &BatchEvent {
+                event: agent_event,
+                prompt_tag: "mention".into(),
+                received_at: Instant::now(),
+            },
+            Some(&profiles),
+            false,
+        );
+        assert!(!agent_block.contains("Reply routing:"));
+
+        let dm_event = make_event("dm question");
+        let dm_profiles = HashMap::from([(dm_event.pubkey.to_hex(), profile(false))]);
+        let dm_block = format_routed_event_block(
+            ch,
+            None,
+            &BatchEvent {
+                event: dm_event,
+                prompt_tag: "dm".into(),
+                received_at: Instant::now(),
+            },
+            Some(&dm_profiles),
+            true,
+        );
+        assert!(!dm_block.contains("Reply routing:"));
     }
 
     #[test]
