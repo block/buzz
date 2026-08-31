@@ -83,6 +83,56 @@ test("same-relay ingress resumes rather than replacing progress", () => {
   assert.equal(resumed.inviteCode, "new-code");
 });
 
+test("membership-recovery redeem re-enters claiming on the resumed transaction", () => {
+  const storage = createMemoryStorage();
+  const first = startCommunityOnboarding(
+    { source: "first-community", relayUrl: "wss://relay.example" },
+    storage,
+    new Date("2026-08-02T00:00:00Z"),
+  );
+  // The relay denies membership while the profile step is saving, so the
+  // transaction is parked on "profile" when the user pastes an invite.
+  const denied = updateCommunityOnboardingTransaction(
+    first,
+    { stage: "profile" },
+    storage,
+    new Date("2026-08-02T00:01:00Z"),
+  );
+  const redeemed = startCommunityOnboarding(
+    {
+      source: "membership-recovery",
+      relayUrl: "wss://relay.example",
+      inviteCode: "v2.some-invite-code",
+    },
+    storage,
+    new Date("2026-08-02T00:02:00Z"),
+  );
+  assert.equal(redeemed.id, denied.id);
+  assert.equal(redeemed.stage, "claiming");
+  assert.equal(redeemed.inviteCode, "v2.some-invite-code");
+});
+
+test("membership-recovery without a code leaves the stage alone", () => {
+  const storage = createMemoryStorage();
+  const first = startCommunityOnboarding(
+    { source: "first-community", relayUrl: "wss://relay.example" },
+    storage,
+    new Date("2026-08-02T00:00:00Z"),
+  );
+  updateCommunityOnboardingTransaction(
+    first,
+    { stage: "profile" },
+    storage,
+    new Date("2026-08-02T00:01:00Z"),
+  );
+  const resumed = startCommunityOnboarding(
+    { source: "membership-recovery", relayUrl: "wss://relay.example" },
+    storage,
+    new Date("2026-08-02T00:02:00Z"),
+  );
+  assert.equal(resumed.stage, "profile");
+});
+
 test("stale asynchronous updates cannot mutate a replacement transaction", () => {
   const storage = createMemoryStorage();
   const original = startCommunityOnboarding(
