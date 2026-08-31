@@ -1,4 +1,5 @@
 pub mod agent_management;
+pub mod backend;
 mod client;
 mod commands;
 mod error;
@@ -90,12 +91,39 @@ struct Cli {
     #[arg(long, env = "BUZZ_AUTH_TAG", hide_env_values = true)]
     auth_tag: Option<String>,
 
+    /// Backend: 'local' (hold the key, talk to the relay — today's behaviour) or
+    /// 'broker' (keyless — route every operation through a broker host, no nsec
+    /// and no relay route on this box). Explicit, so a mis-provisioned broker
+    /// fails closed to local rather than silently.
+    #[arg(long, value_enum, env = "BUZZ_AGENT_MODE", default_value = "local")]
+    agent_mode: AgentMode,
+
+    /// Broker base URL. Required when --agent-mode=broker; ignored otherwise.
+    #[arg(long, env = "BUZZ_BROKER_URL")]
+    broker_url: Option<String>,
+
+    /// Broker bearer credential. Required when --agent-mode=broker; ignored
+    /// otherwise. The credential is this box's whole authority — no key is read.
+    #[arg(long, env = "BUZZ_BROKER_CREDENTIAL", hide_env_values = true)]
+    broker_credential: Option<String>,
+
     /// Output format: 'json' (default, full fields) or 'compact' (reduced fields).
     #[arg(long, value_enum, default_value = "json")]
     format: OutputFormat,
 
     #[command(subcommand)]
     command: Cmd,
+}
+
+/// Which [`backend::Backend`] the CLI runs against — the "mode" toggle.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum AgentMode {
+    /// Hold the key, sign locally, talk to the relay. Today's behaviour.
+    #[value(name = "local")]
+    Local,
+    /// Keyless: route every operation through a broker host.
+    #[value(name = "broker")]
+    Broker,
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -479,6 +507,9 @@ pub enum MessagesCmd {
         /// Comma-separated event kinds to filter (e.g. 1,1984)
         #[arg(long)]
         kinds: Option<String>,
+        /// Only messages mentioning this agent — the wake path.
+        #[arg(long, default_value_t = false)]
+        mentions_only: bool,
     },
     /// Get the containing thread for a message or Buzz message link
     #[command(
@@ -746,6 +777,9 @@ pub enum ReactionsCmd {
         /// Image URL for a custom emoji reaction; when set, content becomes `:shortcode:`
         #[arg(long = "emoji-url")]
         emoji_url: Option<String>,
+        /// Channel UUID — required in keyless mode (the host scopes the reaction to it)
+        #[arg(long)]
+        channel: Option<String>,
     },
     /// Remove an emoji reaction from a message
     Remove {
@@ -1799,6 +1833,8 @@ pub enum MediaCmd {
 /// Subcommands for `buzz mem`.
 #[derive(Subcommand)]
 pub enum MemCmd {
+    /// Derive and print the encrypted-memory address for a slug as JSON
+    Address { slug: String },
     /// List non-tombstoned memory entries
     Ls {
         /// Owner pubkey (hex). Overrides BUZZ_AUTH_TAG.
@@ -2028,12 +2064,18 @@ fn normalize_auth_tag_input(input: &str) -> String {
 async fn run(cli: Cli) -> Result<(), CliError> {
     let relay_url = client::normalize_relay_url(&cli.relay);
 
-    // Pack commands are local-only — no relay connection needed.
+    // Pack commands are local-only — no relay connection needed, and mode-agnostic.
     if let Cmd::Pack(ref sub) = cli.command {
         return match sub {
             PackCmd::Validate { path } => commands::pack::cmd_validate(path),
             PackCmd::Inspect { path } => commands::pack::cmd_inspect(path),
         };
+    }
+
+    // Keyless mode diverges before any key is read: authority is the broker
+    // credential, and no `BuzzClient` is constructed on this box.
+    if let AgentMode::Broker = cli.agent_mode {
+        return run_broker(cli).await;
     }
 
     // Auth: private key is required for all relay operations.
@@ -2099,10 +2141,74 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     }
 }
 
+/// Keyless dispatch: build a broker [`backend::Backend`] from the provisioned
+/// endpoint + credential and run the operation through it. No key is read and no
+/// relay is touched here — the host performs every relay-facing step.
+///
+/// The first slice covers the wake→reply loop only: `messages get` (optionally
+/// `--mentions-only`) and `messages send`/reply. Every other command needs the
+/// local backend and is refused with a pointer back to it.
+async fn run_broker(cli: Cli) -> Result<(), CliError> {
+    // Fail closed on the keyless invariant: a key present on the box contradicts
+    // broker mode, and silently ignoring it would let a misprovisioned "keyless"
+    // agent run with an nsec sitting right there.
+    if broker_private_key_present(cli.private_key.as_deref()) {
+        return Err(CliError::Usage(
+            "broker mode is keyless — don't supply a private key. Unset --private-key / \
+             BUZZ_PRIVATE_KEY to run keyless, or use --agent-mode=local to sign with it."
+                .into(),
+        ));
+    }
+
+    let base_url = cli.broker_url.ok_or_else(|| {
+        CliError::Usage(
+            "--broker-url (BUZZ_BROKER_URL) is required when --agent-mode=broker".into(),
+        )
+    })?;
+    let credential = cli.broker_credential.ok_or_else(|| {
+        CliError::Auth(
+            "--broker-credential (BUZZ_BROKER_CREDENTIAL) is required when --agent-mode=broker"
+                .into(),
+        )
+    })?;
+    let backend = backend::Backend::broker(base_url, credential)?;
+
+    match cli.command {
+        Cmd::Messages(sub) => commands::messages::dispatch_broker(sub, &backend).await,
+        Cmd::Reactions(sub) => commands::reactions::dispatch_broker(sub, &backend).await,
+        Cmd::Users(sub) => commands::users::dispatch_broker(sub, &backend).await,
+        Cmd::Mem(sub) => commands::mem::dispatch_broker(sub, &backend).await,
+        _ => Err(CliError::Usage(
+            "keyless (broker) mode currently supports messages, reactions, profile/presence updates, and \
+             broker-backed memory get/set/address/hash. Other commands need the local backend — \
+             unset --agent-mode or set it to 'local'"
+                .into(),
+        )),
+    }
+}
+
+/// Whether broker provisioning contains actual key material.
+///
+/// Clap represents a present-but-empty environment variable as `Some("")`.
+/// Treat that exact tombstone as absent so a parent process can scrub an
+/// inherited key without breaking broker mode; every non-empty value still
+/// fails closed.
+fn broker_private_key_present(private_key: Option<&str>) -> bool {
+    private_key.is_some_and(|value| !value.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn broker_key_guard_treats_only_an_empty_tombstone_as_absent() {
+        assert!(!broker_private_key_present(None));
+        assert!(!broker_private_key_present(Some("")));
+        assert!(broker_private_key_present(Some(" ")));
+        assert!(broker_private_key_present(Some("nsec1secret")));
+    }
 
     /// Raw shorthand `[auth,hex,,hex]` normalizes to strict JSON; the empty
     /// conditions field becomes `""`.

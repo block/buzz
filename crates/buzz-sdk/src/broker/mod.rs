@@ -330,8 +330,9 @@ impl ValidatedRequest {
 /// This is what [`BrokerClient::send`] takes, so the retry contract is
 /// structural: every attempt sends `body` verbatim, and no implementation gets
 /// the chance to reserialize. The typed request is deliberately not exposed —
-/// only the correlation metadata ([`Self::request_id`], [`Self::action`]) an
-/// implementation legitimately needs.
+/// only the correlation and transport-bound metadata ([`Self::request_id`],
+/// [`Self::action`], [`Self::channel_read_limit`]) an implementation
+/// legitimately needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedRequest {
     request: BrokerRequest,
@@ -355,6 +356,19 @@ impl PreparedRequest {
     #[must_use]
     pub fn action(&self) -> Action {
         self.request.action()
+    }
+
+    /// Effective page size for a `channel.read`, or `None` for other actions.
+    ///
+    /// Transports use this validated value to bound response buffering before
+    /// parsing. An omitted wire limit has already acquired the protocol
+    /// default through [`ChannelReadArgs::effective_limit`].
+    #[must_use]
+    pub fn channel_read_limit(&self) -> Option<u32> {
+        match &self.request.action {
+            ActionArgs::ChannelRead(args) => Some(args.effective_limit()),
+            _ => None,
+        }
     }
 }
 

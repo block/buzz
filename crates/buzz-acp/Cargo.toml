@@ -19,6 +19,7 @@ path = "src/main.rs"
 # Internal
 buzz-core = { workspace = true }
 buzz-sdk = { workspace = true }
+buzz-broker-client = { workspace = true }
 buzz-persona = { path = "../buzz-persona" }
 
 # Nostr
@@ -77,5 +78,6 @@ evalexpr = { workspace = true }
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 
 [dev-dependencies]
+axum = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 httparse = "1"

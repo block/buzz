@@ -1,0 +1,19 @@
+[package]
+name = "buzz-broker-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared HTTP transport for the Buzz agent broker"
+
+[dependencies]
+buzz-sdk = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+nostr = { workspace = true }

@@ -1,6 +1,7 @@
 //! `buzz mem` — agent-side engram management (NIP-AE).
 //!
 //! Subcommands:
+//! - `buzz mem address <slug>`        — print the encrypted-memory address
 //! - `buzz mem ls`                   — list non-tombstoned memories
 //! - `buzz mem get <slug>`            — print the value to stdout
 //! - `buzz mem hash <slug>`           — print sha256(value) hex
@@ -23,14 +24,19 @@ use buzz_core::engram::{
     self, conversation_key, d_tag, normalize_slug, select_head, validate_and_decrypt, Body, Listing,
 };
 use buzz_core::kind::KIND_AGENT_ENGRAM;
+use buzz_sdk::broker::{StorageAddressArgs, StorageGetArgs, StoragePutArgs};
 use nostr::PublicKey;
 
+use crate::backend::{AgentBackend, Backend};
 use crate::client::BuzzClient;
 use crate::error::CliError;
 
 /// Resolve the agent's owner pubkey: explicit `--owner` flag wins, otherwise
 /// fall back to the NIP-OA `auth_tag` (which carries owner pubkey in slot 1).
-fn resolve_owner(client: &BuzzClient, owner_flag: Option<&str>) -> Result<PublicKey, CliError> {
+pub(crate) fn resolve_owner(
+    client: &BuzzClient,
+    owner_flag: Option<&str>,
+) -> Result<PublicKey, CliError> {
     if let Some(s) = owner_flag {
         return PublicKey::from_hex(s)
             .map_err(|e| CliError::Usage(format!("--owner must be a 64-hex pubkey: {e}")));
@@ -83,6 +89,26 @@ fn now_secs() -> u64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// `buzz mem address <slug>` — print the NIP-AE event coordinates as JSON.
+pub fn cmd_address(client: &BuzzClient, raw_slug: &str) -> Result<(), CliError> {
+    let slug =
+        normalize_slug(raw_slug).map_err(|e| CliError::Usage(format!("invalid slug: {e}")))?;
+    let owner = resolve_owner(client, None)?;
+    let conversation_key = conversation_key(client.keys().secret_key(), &owner);
+    let address = buzz_sdk::broker::StorageAddress {
+        author_pubkey: buzz_sdk::broker::PubkeyHex::try_from(client.keys().public_key().to_hex())
+            .map_err(|e| CliError::Other(format!("agent pubkey: {e}")))?,
+        kind: KIND_AGENT_ENGRAM,
+        d_tag: d_tag(&conversation_key, &slug),
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&address)
+            .map_err(|e| CliError::Other(format!("serialize outcome: {e}")))?
+    );
+    Ok(())
 }
 
 /// Submit a signed engram event and confirm the relay treated it as
@@ -737,6 +763,7 @@ pub async fn cmd_rm(
 pub async fn dispatch(cmd: crate::MemCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::MemCmd;
     match cmd {
+        MemCmd::Address { slug } => cmd_address(client, &slug),
         MemCmd::Ls { owner, agent, json } => {
             cmd_ls(client, owner.as_deref(), agent.as_deref(), json).await
         }
@@ -774,6 +801,111 @@ pub async fn dispatch(cmd: crate::MemCmd, client: &BuzzClient) -> Result<(), Cli
             .await
         }
         MemCmd::Rm { slug, owner } => cmd_rm(client, &slug, owner.as_deref()).await,
+    }
+}
+
+async fn broker_value(backend: &Backend, slug: String) -> Result<String, CliError> {
+    backend
+        .storage_get(StorageGetArgs { slug: slug.clone() })
+        .await?
+        .value
+        .ok_or_else(|| CliError::NotFound(format!("not found: {slug}")))
+}
+
+/// Keyless (broker) dispatch. The host owns encryption, signing, and relay
+/// publication; the CLI sees only slug-addressed plaintext records.
+pub async fn dispatch_broker(cmd: crate::MemCmd, backend: &Backend) -> Result<(), CliError> {
+    use crate::MemCmd;
+    match cmd {
+        MemCmd::Address { slug } => {
+            let slug =
+                normalize_slug(&slug).map_err(|e| CliError::Usage(format!("invalid slug: {e}")))?;
+            let address = backend.storage_address(StorageAddressArgs { slug }).await?;
+            println!(
+                "{}",
+                serde_json::to_string(&address)
+                    .map_err(|e| CliError::Other(format!("serialize outcome: {e}")))?
+            );
+            Ok(())
+        }
+        MemCmd::Get { slug, owner, agent } => {
+            if owner.is_some() || agent.is_some() {
+                return Err(CliError::Usage(
+                    "--owner/--agent are unavailable in broker mode; identity is credential-bound"
+                        .into(),
+                ));
+            }
+            let slug = normalize_slug(&slug)
+                .map_err(|e| CliError::Usage(format!("invalid slug: {e}")))?;
+            use std::io::Write;
+            std::io::stdout()
+                .write_all(broker_value(backend, slug).await?.as_bytes())
+                .map_err(|e| CliError::Other(e.to_string()))
+        }
+        MemCmd::Hash { slug, owner, agent } => {
+            if owner.is_some() || agent.is_some() {
+                return Err(CliError::Usage(
+                    "--owner/--agent are unavailable in broker mode; identity is credential-bound"
+                        .into(),
+                ));
+            }
+            let slug = normalize_slug(&slug)
+                .map_err(|e| CliError::Usage(format!("invalid slug: {e}")))?;
+            println!("{}", sha256_hex(&broker_value(backend, slug).await?));
+            Ok(())
+        }
+        MemCmd::Set {
+            slug,
+            value,
+            owner,
+            allow_empty,
+        } => {
+            if owner.is_some() {
+                return Err(CliError::Usage(
+                    "--owner is unavailable in broker mode; identity is credential-bound".into(),
+                ));
+            }
+            let slug = normalize_slug(&slug)
+                .map_err(|e| CliError::Usage(format!("invalid slug: {e}")))?;
+            let value = if value == "-" {
+                let mut input = String::new();
+                std::io::stdin()
+                    .take((engram::NIP44_PLAINTEXT_MAX + 1) as u64)
+                    .read_to_string(&mut input)
+                    .map_err(|e| CliError::Other(format!("stdin read failed: {e}")))?;
+                input
+            } else {
+                value
+            };
+            if value.is_empty() {
+                let detail = if allow_empty {
+                    "the broker storage contract does not support empty records"
+                } else {
+                    "refusing to write an empty broker record"
+                };
+                return Err(CliError::Usage(detail.into()));
+            }
+            let published = backend
+                .storage_put(StoragePutArgs { slug: slug.clone(), value })
+                .await?;
+            eprintln!(
+                "wrote {slug} (event {}, created_at {})",
+                published.event_id, published.created_at
+            );
+            Ok(())
+        }
+        MemCmd::Ls { .. } => Err(CliError::Usage(
+            "'mem ls' is unavailable in broker mode because the contract has no storage listing action"
+                .into(),
+        )),
+        MemCmd::Patch { .. } => Err(CliError::Usage(
+            "'mem patch' is not yet wired to broker read-modify-write; use mem get/hash/set"
+                .into(),
+        )),
+        MemCmd::Rm { .. } => Err(CliError::Usage(
+            "'mem rm' is unavailable because the broker contract has no delete/tombstone action"
+                .into(),
+        )),
     }
 }
 

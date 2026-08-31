@@ -2459,6 +2459,29 @@ fn a_page_is_bounded_and_its_cursor_opaque() {
     };
     assert!(page(vec![], None).is_ok());
     assert!(page(vec![signed_message(&signer)], Some("c1")).is_ok());
+    let escaped = BrokerMessage(
+        EventBuilder::new(
+            Kind::Custom(9),
+            "\u{001b}".repeat(actions::MAX_CONTENT_BYTES),
+        )
+        .tags([Tag::parse(["h", CHANNEL]).unwrap()])
+        .sign_with_keys(&signer)
+        .unwrap(),
+    );
+    assert!(page(vec![escaped], None).is_ok());
+    let oversized_content = BrokerMessage(
+        EventBuilder::new(Kind::Custom(9), "x".repeat(actions::MAX_CONTENT_BYTES + 1))
+            .sign_with_keys(&signer)
+            .unwrap(),
+    );
+    assert!(page(vec![oversized_content], None).is_err());
+    let oversized_tags = BrokerMessage(
+        EventBuilder::new(Kind::Custom(9), "hello")
+            .tags([Tag::parse(["x", &"\"".repeat(actions::MAX_ENCODED_MESSAGE_BYTES)]).unwrap()])
+            .sign_with_keys(&signer)
+            .unwrap(),
+    );
+    assert!(page(vec![oversized_tags], None).is_err());
     assert!(page(vec![], Some("")).is_err());
     assert!(page(vec![], Some("has space")).is_err());
     assert!(page(

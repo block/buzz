@@ -11,6 +11,7 @@ mod prompt_framing;
 mod prompt_project;
 mod queue;
 mod relay;
+mod runtime_transport;
 mod setup_mode;
 mod usage;
 
@@ -32,7 +33,7 @@ use buzz_core::observer::{
 };
 use clap::Parser;
 use config::{
-    AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, ModelsArgs,
+    AgentMode, AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, ModelsArgs,
     MultipleEventHandling, RespondTo, SubscribeMode,
 };
 use filter::SubscriptionRule;
@@ -45,6 +46,7 @@ use pool::{
 use pool_lifecycle::PoolLifecycle;
 use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
+use runtime_transport::RuntimeTransport;
 use tokio::sync::{mpsc, watch};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
@@ -82,30 +84,6 @@ fn current_working_directory() -> Result<String> {
         cwd.display()
     );
     Ok(cwd.to_string_lossy().into_owned())
-}
-
-/// Publish a kind:20001 presence update event via the WebSocket connection.
-///
-/// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
-/// updates must be routed through the WS path.
-///
-/// Content is a bare status string (`"online"`, `"away"`, `"offline"`) matching
-/// the desktop client's format. The relay stores this in Redis and synthesizes
-/// it back on presence queries.
-async fn publish_presence(
-    publisher: &relay::RelayEventPublisher,
-    keys: &nostr::Keys,
-    status: &str,
-) -> Result<(), relay::RelayError> {
-    use buzz_core::kind::KIND_PRESENCE_UPDATE;
-    use nostr::{EventBuilder, Kind};
-
-    let event = EventBuilder::new(Kind::Custom(KIND_PRESENCE_UPDATE as u16), status)
-        .tags([])
-        .sign_with_keys(keys)
-        .map_err(|e| relay::RelayError::Http(format!("presence sign error: {e}")))?;
-    publisher.publish_event(event).await?;
-    Ok(())
 }
 
 fn emit_runtime_lifecycle(
@@ -549,6 +527,28 @@ impl ObserverPublishQueue {
     /// Pending coalesced chunks are flushed into the queue first, so a
     /// publish slot never leaves merged chunk text stranded behind the tick.
     fn next_frame(&mut self) -> Option<observer::ObserverEvent> {
+        self.next_frame_fitting(
+            |_| {},
+            |frame| serialized_len(frame) <= OBSERVER_MAX_PLAINTEXT_LEN,
+        )
+    }
+
+    /// Pack one frame against the broker action's encoded argument budget.
+    /// Individual oversized events may be elided, but a batch that only
+    /// overflows because of the broker's outer JSON escaping is split and its
+    /// overflow remains queued for the next publish slot.
+    fn next_broker_frame(&mut self) -> Option<observer::ObserverEvent> {
+        self.next_frame_fitting(
+            fit_broker_observer_event_to_budget,
+            broker_observer_event_fits,
+        )
+    }
+
+    fn next_frame_fitting(
+        &mut self,
+        mut fit_single: impl FnMut(&mut observer::ObserverEvent),
+        frame_fits: impl Fn(&observer::ObserverEvent) -> bool,
+    ) -> Option<observer::ObserverEvent> {
         for (source_events, ready) in self.coalescer.flush() {
             self.enqueue(source_events, ready);
         }
@@ -558,18 +558,21 @@ impl ObserverPublishQueue {
         let mut kept: VecDeque<(usize, u64, observer::ObserverEvent)> =
             VecDeque::with_capacity(self.events.len());
         let mut gathering = true;
-        while let Some((bytes, source_events, event)) = self.events.pop_front() {
+        while let Some((old_bytes, source_events, mut event)) = self.events.pop_front() {
+            fit_single(&mut event);
+            let bytes = serialized_len(&event);
+            self.pending_bytes = self.pending_bytes - old_bytes + bytes;
             if gathering && event.channel_id == channel {
                 picked.push(event);
-                if picked.len() > 1
-                    && serialized_len(&batch_envelope(&picked)) > OBSERVER_MAX_PLAINTEXT_LEN
-                {
+                let candidate = seal_batch(picked.clone());
+                if picked.len() > 1 && !frame_fits(&candidate) {
                     // Frame full: the overflow event stays queued and leads
                     // its channel's next slot.
                     let event = picked.pop().expect("len > 1");
                     kept.push_back((bytes, source_events, event));
                     gathering = false;
                 } else {
+                    debug_assert!(frame_fits(&candidate));
                     self.pending_bytes -= bytes;
                 }
             } else {
@@ -643,6 +646,68 @@ fn spawn_relay_observer_publisher(
             owner_pubkey,
         )
         .await;
+    })
+}
+
+fn spawn_broker_observer_publisher(
+    observer: observer::ObserverHandle,
+    broker: runtime_transport::BrokerActions,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut rx = observer.subscribe();
+        let snapshot = observer.snapshot();
+        let mut queue = ObserverPublishQueue::default();
+        let max_snapshot_seq = snapshot.iter().map(|event| event.seq).max().unwrap_or(0);
+        for event in snapshot {
+            queue.ingest(event);
+        }
+
+        let mut publish_tick = tokio::time::interval_at(
+            tokio::time::Instant::now() + OBSERVER_PUBLISH_TICK,
+            OBSERVER_PUBLISH_TICK,
+        );
+        publish_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut closed = false;
+        loop {
+            tokio::select! {
+                result = rx.recv(), if !closed => match result {
+                    Ok(event) if event.seq > max_snapshot_seq => queue.ingest(event),
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                        tracing::warn!(dropped = count, "broker observer publisher lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => closed = true,
+                },
+                _ = publish_tick.tick() => {
+                    if let Some(event) = queue.next_broker_frame() {
+                        match serde_json::to_string(&event) {
+                            Ok(payload) => {
+                                let frame = buzz_sdk::broker::ObserverFrame {
+                                    kind: event.kind.clone(),
+                                    payload,
+                                };
+                                match broker.observer_emit(vec![frame]).await {
+                                    Ok(receipt) if receipt.accepted == 1 => {}
+                                    Ok(receipt) => tracing::warn!(
+                                        accepted = receipt.accepted,
+                                        "broker did not accept the observer frame"
+                                    ),
+                                    Err(error) => tracing::warn!(
+                                        "broker observer frame dropped: {error}"
+                                    ),
+                                }
+                            }
+                            Err(error) => tracing::warn!(
+                                "failed to serialize broker observer frame: {error}"
+                            ),
+                        }
+                    }
+                    if closed && queue.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
     })
 }
 
@@ -908,7 +973,38 @@ const OBSERVER_LEAF_RETAIN_BYTES: usize = 3_000;
 /// are out of this change's scope (buzz-core stays untouched). The clean `&mut`
 /// signature with one cheap redundant serialize is the deliberate tradeoff.
 fn fit_observer_event_to_budget(event: &mut observer::ObserverEvent) {
-    if serialized_len(event) <= OBSERVER_MAX_PLAINTEXT_LEN {
+    fit_observer_event_until(event, |event| {
+        serialized_len(event) <= OBSERVER_MAX_PLAINTEXT_LEN
+    });
+}
+
+/// Trim an observer event until its serialized payload also fits inside the
+/// complete broker `observer.emit` argument after JSON string escaping.
+fn fit_broker_observer_event_to_budget(event: &mut observer::ObserverEvent) {
+    fit_observer_event_until(event, broker_observer_event_fits);
+}
+
+fn broker_observer_event_fits(event: &observer::ObserverEvent) -> bool {
+    let Ok(payload) = serde_json::to_string(event) else {
+        return false;
+    };
+    buzz_sdk::broker::ObserverEmitArgs {
+        frames: vec![buzz_sdk::broker::ObserverFrame {
+            kind: event.kind.clone(),
+            payload,
+        }],
+    }
+    .validated()
+    .is_ok()
+}
+
+/// Apply the common deterministic elision algorithm until `fits` accepts the
+/// complete destination-specific envelope.
+fn fit_observer_event_until(
+    event: &mut observer::ObserverEvent,
+    fits: impl Fn(&observer::ObserverEvent) -> bool,
+) {
+    if fits(event) {
         return;
     }
 
@@ -924,7 +1020,7 @@ fn fit_observer_event_to_budget(event: &mut observer::ObserverEvent) {
     // never be re-elided, so the loop is bounded by the leaf count.
     while let Some(leaf) = largest_shrinkable_leaf(&mut event.payload) {
         elide_leaf(leaf);
-        if serialized_len(event) <= OBSERVER_MAX_PLAINTEXT_LEN {
+        if fits(event) {
             return;
         }
     }
@@ -935,6 +1031,10 @@ fn fit_observer_event_to_budget(event: &mut observer::ObserverEvent) {
         "elided": format!("{} payload too large", event.kind),
         "originalBytes": original_payload_bytes,
     });
+    debug_assert!(
+        fits(event),
+        "observer elision stub must fit its destination"
+    );
 }
 
 fn serialized_len(event: &observer::ObserverEvent) -> usize {
@@ -1954,6 +2054,10 @@ async fn tokio_main() -> Result<()> {
     if let Some(payload) = setup_mode::SetupPayload::from_env()
         .map_err(|e| anyhow::anyhow!("setup payload error: {e}"))?
     {
+        ensure!(
+            config.agent_mode == AgentMode::Local,
+            "setup-listener mode is not available in keyless broker mode"
+        );
         tracing::info!("buzz-acp: setup payload present, entering setup-listener mode");
         return setup_mode::run_setup_listener(config, payload).await;
     }
@@ -1996,18 +2100,50 @@ async fn tokio_main() -> Result<()> {
         .unwrap_or_default()
         .as_secs();
 
-    let pubkey_hex = config.keys.public_key().to_hex();
+    let local_pubkey_hex = config.keys.public_key().to_hex();
 
     // Parse BUZZ_AUTH_TAG into a nostr::Tag for NIP-OA relay membership delegation.
-    let relay_auth_tag: Option<nostr::Tag> = std::env::var("BUZZ_AUTH_TAG")
-        .ok()
+    let relay_auth_tag: Option<nostr::Tag> = (config.agent_mode == AgentMode::Local)
+        .then(|| std::env::var("BUZZ_AUTH_TAG").ok())
+        .flatten()
         .filter(|s| !s.is_empty())
         .and_then(|s| buzz_sdk::nip_oa::parse_auth_tag(&s).ok());
 
-    let mut relay =
-        HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
+    let (mut relay, pubkey_hex) = match config.agent_mode {
+        AgentMode::Local => {
+            let relay = HarnessRelay::connect(
+                &config.relay_url,
+                &config.keys,
+                &local_pubkey_hex,
+                relay_auth_tag,
+            )
             .await
             .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
+            (RuntimeTransport::local(relay), local_pubkey_hex)
+        }
+        AgentMode::Broker => {
+            let broker = config
+                .broker
+                .as_ref()
+                .expect("broker config validated for broker mode");
+            let channel_ids = config
+                .channels_override
+                .as_ref()
+                .expect("channels validated for broker mode")
+                .iter()
+                .map(|channel| Uuid::parse_str(channel).expect("channel validated"))
+                .collect();
+            RuntimeTransport::broker(
+                broker.base_url.clone(),
+                broker.credential.clone(),
+                channel_ids,
+                broker.poll_interval,
+                config.keys.clone(),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("broker connect error: {e}"))?
+        }
+    };
 
     // Tell the relay background task the watermark so it can use
     // `since = watermark - 5s` on the first REQ instead of `since=now`.
@@ -2017,19 +2153,30 @@ async fn tokio_main() -> Result<()> {
         tracing::warn!("failed to set startup watermark: {e}");
     }
 
-    tracing::info!("connected to relay at {}", config.relay_url);
+    match config.agent_mode {
+        AgentMode::Local => tracing::info!("connected to relay at {}", config.relay_url),
+        AgentMode::Broker => tracing::info!("connected to broker as {pubkey_hex}"),
+    }
 
     relay
         .subscribe_membership_notifications()
         .await
         .map_err(|e| anyhow::anyhow!("membership notification subscribe error: {e}"))?;
-    tracing::info!("subscribed to membership notifications");
+    match config.agent_mode {
+        AgentMode::Local => tracing::info!("subscribed to membership notifications"),
+        AgentMode::Broker => tracing::info!(
+            "broker contract has no membership notifications; using configured channels"
+        ),
+    }
 
-    let presence_publisher = relay.event_publisher();
-    let presence_keys = config.keys.clone();
+    let signal_publisher = relay.signal_publisher(config.keys.clone());
+    let broker_actions = relay.broker_actions();
 
     // Priority: BUZZ_AUTH_TAG (NIP-OA attestation) → --agent-owner flag.
-    let startup_owner: Option<String> = resolve_agent_owner(&config);
+    let startup_owner: Option<String> = match config.agent_mode {
+        AgentMode::Local => resolve_agent_owner(&config),
+        AgentMode::Broker => config.agent_owner.clone(),
+    };
     if let Some(ref owner) = startup_owner {
         tracing::info!("agent owner: {owner}");
     } else {
@@ -2059,8 +2206,14 @@ async fn tokio_main() -> Result<()> {
     let mut relay_observer_control_rx = None;
     let mut relay_observer_publisher_task = None;
     let mut relay_observer_publisher = None;
+    let mut broker_observer_publisher = None;
     if config.relay_observer {
-        if let (Some(observer), Some(owner_pubkey_hex)) =
+        if config.agent_mode == AgentMode::Broker {
+            if let (Some(observer), Some(actions)) = (observer.clone(), broker_actions.clone()) {
+                broker_observer_publisher = Some((observer, actions));
+                tracing::info!("broker observer enabled");
+            }
+        } else if let (Some(observer), Some(owner_pubkey_hex)) =
             (observer.clone(), owner_cache.pubkey.clone())
         {
             match PublicKey::from_hex(&owner_pubkey_hex) {
@@ -2163,6 +2316,9 @@ async fn tokio_main() -> Result<()> {
             owner,
         ));
     }
+    if let Some((observer, actions)) = broker_observer_publisher.take() {
+        relay_observer_publisher_task = Some(spawn_broker_observer_publisher(observer, actions));
+    }
 
     let runtime_start_nonce = std::env::var("BUZZ_MANAGED_AGENT_START_NONCE").unwrap_or_default();
     let dedup_mode = config.dedup_mode;
@@ -2173,7 +2329,10 @@ async fn tokio_main() -> Result<()> {
     // connected. Publishing after channel subscriptions gives desktop callers
     // a durable readiness boundary before they send a startup mention.
     if config.presence_enabled {
-        match publish_presence(&presence_publisher, &presence_keys, "online").await {
+        match signal_publisher
+            .presence_set(buzz_core::presence::PresenceStatus::Online)
+            .await
+        {
             Ok(_) => tracing::info!("presence set to online"),
             Err(e) => tracing::warn!("failed to set initial presence: {e}"),
         }
@@ -2192,6 +2351,10 @@ async fn tokio_main() -> Result<()> {
 
     let base_prompt_content = config.base_prompt_content.take();
     let cwd = current_working_directory()?;
+    let channel_info = match config.agent_mode {
+        AgentMode::Local => pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
+        AgentMode::Broker => pool::ChannelInfoResolver::without_fallback(channel_info_map),
+    };
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -2211,15 +2374,21 @@ async fn tokio_main() -> Result<()> {
         },
         heartbeat_prompt: config.heartbeat_prompt.clone(),
         cwd,
+        relay_features_enabled: config.agent_mode == AgentMode::Local,
+        broker_actions,
         rest_client: relay.rest_client(),
-        channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
+        channel_info,
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
         permission_mode: config.permission_mode,
         agent_keys: config.keys.clone(),
-        agent_owner_pubkey: startup_owner
-            .as_deref()
-            .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
+        agent_owner_pubkey: (config.agent_mode == AgentMode::Local)
+            .then(|| {
+                startup_owner
+                    .as_deref()
+                    .and_then(|hex| nostr::PublicKey::from_hex(hex).ok())
+            })
+            .flatten(),
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
@@ -2930,7 +3099,7 @@ async fn tokio_main() -> Result<()> {
                             // Fire-and-forget: on rare fast-failure paths the
                             // guard's cleanup may race with this add, leaving a
                             // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
-                            if accepted {
+                            if accepted && config.agent_mode == AgentMode::Local {
                                 let rc = ctx.rest_client.clone();
                                 let eid = event_id_hex.clone();
                                 tokio::spawn(async move {
@@ -3105,10 +3274,12 @@ async fn tokio_main() -> Result<()> {
                     if let Some(h) = presence_task.take() {
                         h.abort();
                     }
-                    let pp = presence_publisher.clone();
-                    let pk = presence_keys.clone();
+                    let signals = signal_publisher.clone();
                     presence_task = Some(tokio::spawn(async move {
-                        if let Err(e) = publish_presence(&pp, &pk, "online").await {
+                        if let Err(e) = signals
+                            .presence_set(buzz_core::presence::PresenceStatus::Online)
+                            .await
+                        {
                             tracing::warn!("presence heartbeat failed: {e}");
                         }
                     }));
@@ -3121,19 +3292,28 @@ async fn tokio_main() -> Result<()> {
                     }
                 } => {
                     let _ = result_rx;
-                    // Use try_publish (non-blocking) for typing indicators —
-                    // they're ephemeral and must not block the main loop during
-                    // relay reconnection (#35).
+                    // Signals are ephemeral. Publish each on a detached task so
+                    // a slow relay or broker never stalls the main event loop.
                     for (&ch, thread_tags) in &typing_channels {
-                        if let Ok(event) = relay.build_typing_event(
-                            ch,
-                            thread_tags.root_event_id.as_deref(),
-                            thread_tags.parent_event_id.as_deref(),
-                        ) {
-                            if let Err(e) = relay.try_publish_event(event) {
-                                tracing::debug!("typing indicator dropped for {ch}: {e}");
+                        let signals = signal_publisher.clone();
+                        let root = thread_tags.root_event_id.clone();
+                        let parent = thread_tags.parent_event_id.clone();
+                        tokio::spawn(async move {
+                            match tokio::time::timeout(
+                                Duration::from_secs(2),
+                                signals.typing_set(ch, root, parent),
+                            )
+                            .await
+                            {
+                                Ok(Ok(())) => {}
+                                Ok(Err(e)) => tracing::debug!(
+                                    "typing indicator dropped for {ch}: {e}"
+                                ),
+                                Err(_) => tracing::debug!(
+                                    "typing indicator timed out for {ch}"
+                                ),
                             }
-                        }
+                        });
                     }
                     None
                 }
@@ -3161,7 +3341,7 @@ async fn tokio_main() -> Result<()> {
                     &respawn_tx,
                     &mut respawn_tasks,
                     observer.clone(),
-                    Some(&ctx.rest_client),
+                    (config.agent_mode == AgentMode::Local).then_some(&ctx.rest_client),
                 ) == LoopAction::Exit
                 {
                     break;
@@ -3514,7 +3694,7 @@ async fn tokio_main() -> Result<()> {
     if config.presence_enabled {
         match tokio::time::timeout(
             Duration::from_secs(2),
-            publish_presence(&presence_publisher, &presence_keys, "offline"),
+            signal_publisher.presence_set(buzz_core::presence::PresenceStatus::Offline),
         )
         .await
         {
@@ -5079,31 +5259,65 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
         command: config.mcp_command.clone(),
         args: vec![],
         env: {
-            let mut env = vec![
-                EnvVar {
-                    name: "BUZZ_RELAY_URL".into(),
-                    value: config.relay_url.clone(),
-                },
-                EnvVar {
-                    name: "BUZZ_PRIVATE_KEY".into(),
-                    // bech32 encoding of a valid secret key is infallible.
-                    // Panic here is correct: injecting a bogus secret would cause
-                    // delayed, hard-to-diagnose agent failures downstream.
-                    value: config
-                        .keys
-                        .secret_key()
-                        .to_bech32()
-                        .expect("secret key bech32 encoding should never fail"),
-                },
-            ];
+            let mut env = match config.agent_mode {
+                AgentMode::Local => vec![
+                    EnvVar {
+                        name: "BUZZ_AGENT_MODE".into(),
+                        value: "local".into(),
+                    },
+                    EnvVar {
+                        name: "BUZZ_BROKER_URL".into(),
+                        value: String::new(),
+                    },
+                    EnvVar {
+                        name: "BUZZ_BROKER_CREDENTIAL".into(),
+                        value: String::new(),
+                    },
+                    EnvVar {
+                        name: "BUZZ_RELAY_URL".into(),
+                        value: config.relay_url.clone(),
+                    },
+                    EnvVar {
+                        name: "BUZZ_PRIVATE_KEY".into(),
+                        // bech32 encoding of a valid secret key is infallible.
+                        value: config
+                            .keys
+                            .secret_key()
+                            .to_bech32()
+                            .expect("secret key bech32 encoding should never fail"),
+                    },
+                ],
+                AgentMode::Broker => {
+                    let broker = config
+                        .broker
+                        .as_ref()
+                        .expect("broker config validated for broker mode");
+                    vec![
+                        EnvVar {
+                            name: "BUZZ_AGENT_MODE".into(),
+                            value: "broker".into(),
+                        },
+                        EnvVar {
+                            name: "BUZZ_BROKER_URL".into(),
+                            value: broker.base_url.clone(),
+                        },
+                        EnvVar {
+                            name: "BUZZ_BROKER_CREDENTIAL".into(),
+                            value: broker.credential.clone(),
+                        },
+                    ]
+                }
+            };
             // Forward BUZZ_AUTH_TAG (NIP-OA owner attestation credential)
             // so the MCP server can attach it to every signed event.
-            if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
-                if !auth_tag.is_empty() {
-                    env.push(EnvVar {
-                        name: "BUZZ_AUTH_TAG".into(),
-                        value: auth_tag,
-                    });
+            if config.agent_mode == AgentMode::Local {
+                if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
+                    if !auth_tag.is_empty() {
+                        env.push(EnvVar {
+                            name: "BUZZ_AUTH_TAG".into(),
+                            value: auth_tag,
+                        });
+                    }
                 }
             }
             // Forward the agent's display name so dev-mcp can use it as the git
@@ -6114,6 +6328,41 @@ mod observer_publish_queue_tests {
         );
     }
 
+    /// A broker frame has another JSON layer around the observer payload.
+    /// Many individually small, quote-heavy events can fit the relay
+    /// plaintext limit as one batch while exceeding the encoded broker action
+    /// limit. The overflow must remain queued, not collapse the whole batch to
+    /// an elision stub.
+    #[test]
+    fn broker_batches_split_before_outer_json_overflow_without_losing_events() {
+        let mut queue = queue_of(
+            (1..=31)
+                .map(|seq| {
+                    let mut e = event(seq, "tool_call", Some("chan-a"));
+                    e.payload = serde_json::json!({ "body": "\"".repeat(900) });
+                    e
+                })
+                .collect(),
+        );
+
+        let mut frames = Vec::new();
+        while !queue.is_empty() {
+            frames.push(queue.next_broker_frame().expect("queue not empty"));
+        }
+
+        assert!(frames.len() > 1, "outer encoding must split this batch");
+        assert!(frames.iter().all(broker_observer_event_fits));
+        assert!(
+            frames
+                .iter()
+                .all(|frame| !serde_json::to_string(frame).unwrap().contains("[elided")),
+            "small source events must not be elided"
+        );
+        let published: Vec<u64> = frames.iter().flat_map(frame_seqs).collect();
+        assert_eq!(published, (1..=31).collect::<Vec<_>>());
+        assert_eq!(queue.dropped_events, 0);
+    }
+
     /// The queue preserves the coalescer's ordering rule: a non-chunk event
     /// force-flushes pending chunk text ahead of itself, so merged chunks can
     /// never leapfrog a tool call that arrived after them.
@@ -6792,6 +7041,8 @@ mod build_mcp_servers_tests {
     fn test_config() -> Config {
         Config {
             keys: nostr::Keys::generate(),
+            agent_mode: config::AgentMode::Local,
+            broker: None,
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
@@ -6854,6 +7105,28 @@ mod build_mcp_servers_tests {
             names.contains(&"BUZZ_PRIVATE_KEY"),
             "missing BUZZ_PRIVATE_KEY; got {names:?}"
         );
+    }
+
+    #[test]
+    fn broker_mcp_server_receives_only_broker_credentials() {
+        let mut config = test_config();
+        config.agent_mode = config::AgentMode::Broker;
+        config.broker = Some(config::BrokerConfig {
+            base_url: "http://127.0.0.1:8787".into(),
+            credential: "broker-token".into(),
+            relay_url: "wss://relay.example".into(),
+            poll_interval: std::time::Duration::from_secs(1),
+        });
+
+        let servers = build_mcp_servers(&config);
+        let server = &servers[0];
+        let names: Vec<&str> = server.env.iter().map(|env| env.name.as_str()).collect();
+        assert!(names.contains(&"BUZZ_AGENT_MODE"));
+        assert!(names.contains(&"BUZZ_BROKER_URL"));
+        assert!(names.contains(&"BUZZ_BROKER_CREDENTIAL"));
+        assert!(!names.contains(&"BUZZ_RELAY_URL"));
+        assert!(!names.contains(&"BUZZ_PRIVATE_KEY"));
+        assert!(!names.contains(&"BUZZ_AUTH_TAG"));
     }
 
     #[test]
@@ -7013,6 +7286,8 @@ mod error_outcome_emission_tests {
     fn test_config() -> Config {
         Config {
             keys: nostr::Keys::generate(),
+            agent_mode: config::AgentMode::Local,
+            broker: None,
             relay_url: "ws://localhost:3000".into(),
             // `true` exits cleanly, so the async respawn fails fast and
             // harmlessly off the JoinSet — irrelevant to the synchronous
@@ -8619,6 +8894,29 @@ mod observer_payload_trim_tests {
             before,
             "under-budget frame must not be mutated"
         );
+    }
+
+    #[test]
+    fn test_broker_frame_accounts_for_outer_json_escaping() {
+        let mut event = event_with_payload(
+            "acp_write",
+            serde_json::json!({ "body": "\"".repeat(30_000) }),
+        );
+        assert!(
+            serialized(&event).len() <= OBSERVER_MAX_PLAINTEXT_LEN,
+            "inner observer plaintext fits before broker wrapping"
+        );
+        assert!(
+            !broker_observer_event_fits(&event),
+            "outer broker JSON escaping must be part of the bound"
+        );
+
+        fit_broker_observer_event_to_budget(&mut event);
+
+        assert!(broker_observer_event_fits(&event));
+        assert!(event.payload["body"]
+            .as_str()
+            .is_some_and(|body| body.contains("…[elided")));
     }
 
     #[test]

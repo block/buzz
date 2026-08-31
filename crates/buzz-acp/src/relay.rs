@@ -118,7 +118,6 @@ use std::time::Instant;
 
 use buzz_core::kind::{
     KIND_AGENT_OBSERVER_FRAME, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
-    KIND_TYPING_INDICATOR,
 };
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
@@ -658,6 +657,24 @@ impl RelayEventPublisher {
             .map_err(|_| RelayError::ConnectionClosed)
     }
 
+    /// Best-effort publish for ephemeral signals. Drops immediately when the
+    /// relay command queue is unavailable or full.
+    pub fn try_publish_event(&self, event: Event) -> Result<(), RelayError> {
+        self.cmd_tx
+            .try_send(RelayCommand::PublishEvent {
+                event: Box::new(event),
+            })
+            .map_err(|_| RelayError::ConnectionClosed)
+    }
+
+    /// A publisher with no relay behind it. Retained as a fail-closed sentinel
+    /// for any relay-only path accidentally reached in broker mode.
+    pub(crate) fn disabled() -> Self {
+        let (cmd_tx, cmd_rx) = mpsc::channel(1);
+        drop(cmd_rx);
+        Self { cmd_tx }
+    }
+
     /// Test-only publisher pair: published events are forwarded to the
     /// returned receiver instead of a live relay socket.
     #[cfg(test)]
@@ -914,48 +931,6 @@ impl HarnessRelay {
             })
             .await
             .map_err(|_| RelayError::ConnectionClosed)
-    }
-
-    /// Fire-and-forget publish — uses `try_send` so it never blocks the caller.
-    ///
-    /// Suitable for ephemeral commands like typing indicators where dropping
-    /// the event on a full command channel is acceptable.
-    pub fn try_publish_event(&self, event: Event) -> Result<(), RelayError> {
-        self.cmd_tx
-            .try_send(RelayCommand::PublishEvent {
-                event: Box::new(event),
-            })
-            .map_err(|_| RelayError::ConnectionClosed)
-    }
-
-    /// Build a typing indicator event (kind:20002) for a channel.
-    pub fn build_typing_event(
-        &self,
-        channel_id: Uuid,
-        root_event_id: Option<&str>,
-        parent_event_id: Option<&str>,
-    ) -> Result<Event, RelayError> {
-        let h_tag = Tag::parse(["h", &channel_id.to_string()])
-            .map_err(|e| RelayError::AuthFailed(e.to_string()))?;
-        let mut tags = vec![h_tag];
-        if let Some(parent) = parent_event_id {
-            if let Some(root) = root_event_id {
-                if root != parent {
-                    tags.push(
-                        Tag::parse(["e", root, "", "root"])
-                            .map_err(|e| RelayError::AuthFailed(e.to_string()))?,
-                    );
-                }
-            }
-            tags.push(
-                Tag::parse(["e", parent, "", "reply"])
-                    .map_err(|e| RelayError::AuthFailed(e.to_string()))?,
-            );
-        }
-        let event = EventBuilder::new(Kind::Custom(KIND_TYPING_INDICATOR as u16), "")
-            .tags(tags)
-            .sign_with_keys(&self.keys)?;
-        Ok(event)
     }
 
     /// Pins the floor `since` for membership notification replay.
@@ -5962,10 +5937,13 @@ mod tests {
         );
 
         // Typing indicator while gated: still dropped, not parked.
-        let typing = EventBuilder::new(Kind::Custom(KIND_TYPING_INDICATOR as u16), "")
-            .tags([Tag::parse(["h", &Uuid::new_v4().to_string()]).unwrap()])
-            .sign_with_keys(&keys)
-            .expect("sign typing indicator");
+        let typing = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_TYPING_INDICATOR as u16),
+            "",
+        )
+        .tags([Tag::parse(["h", &Uuid::new_v4().to_string()]).unwrap()])
+        .sign_with_keys(&keys)
+        .expect("sign typing indicator");
         let ok = execute_connected_command(
             &mut client,
             &mut state,

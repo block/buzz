@@ -1,7 +1,9 @@
+use buzz_sdk::broker::{ChannelReadArgs, MessagePostArgs, MessageReplyArgs, PubkeyHex};
 use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
 use nostr::PublicKey;
 use uuid::Uuid;
 
+use crate::backend::{AgentBackend, Backend};
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::{
@@ -353,6 +355,7 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_get_messages(
     client: &BuzzClient,
     channel_id: &str,
@@ -360,6 +363,7 @@ pub async fn cmd_get_messages(
     before: Option<i64>,
     since: Option<i64>,
     kinds: Option<&str>,
+    mentions_only: bool,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     validate_uuid(channel_id)?;
@@ -377,6 +381,11 @@ pub async fn cmd_get_messages(
         if !kind_list.is_empty() {
             filter["kinds"] = serde_json::json!(kind_list);
         }
+    }
+
+    // The wake path: narrow to events tagging this agent.
+    if mentions_only {
+        filter["#p"] = serde_json::json!([client.keys().public_key().to_hex()]);
     }
 
     if let Some(b) = before {
@@ -902,6 +911,118 @@ pub async fn cmd_vote_on_post(
     Ok(())
 }
 
+/// Keyless dispatch for the message slice: map CLI arguments straight onto the
+/// broker's contract args and run them through the [`Backend`]. No relay-reads
+/// happen here — the host derives the thread root and applies policy. The rich
+/// local extras (auto `@mention` resolution, file upload, forum kinds, broadcast,
+/// time/kind windowing) are relay-coupled or unmodeled by the contract, so they
+/// are refused rather than silently dropped.
+pub async fn dispatch_broker(cmd: crate::MessagesCmd, backend: &Backend) -> Result<(), CliError> {
+    use crate::MessagesCmd;
+    match cmd {
+        MessagesCmd::Send {
+            channel,
+            content,
+            kind,
+            reply_to,
+            broadcast,
+            files,
+            mentions,
+        } => {
+            if !files.is_empty() {
+                return Err(CliError::Usage(
+                    "--file is not supported in keyless mode yet (slice)".into(),
+                ));
+            }
+            if broadcast {
+                return Err(CliError::Usage(
+                    "--broadcast is not supported in keyless mode".into(),
+                ));
+            }
+            if let Some(k) = kind {
+                if k != 9 {
+                    return Err(CliError::Usage(format!(
+                        "--kind {k} is not supported in keyless mode (slice); only kind 9"
+                    )));
+                }
+            }
+            let content = read_or_stdin(&content)?;
+            validate_content_size(&content)?;
+            let mentions = parse_broker_mentions(&mentions)?;
+            let published = if let Some(reply_to_event_id) = reply_to {
+                backend
+                    .message_reply(MessageReplyArgs {
+                        channel_id: channel,
+                        reply_to_event_id,
+                        content,
+                        mentions,
+                    })
+                    .await?
+            } else {
+                backend
+                    .message_post(MessagePostArgs {
+                        channel_id: channel,
+                        content,
+                        mentions,
+                    })
+                    .await?
+            };
+            println!(
+                "{}",
+                serde_json::to_string(&published)
+                    .map_err(|e| CliError::Other(format!("serialize outcome: {e}")))?
+            );
+            Ok(())
+        }
+        MessagesCmd::Get {
+            channel,
+            limit,
+            before,
+            since,
+            kinds,
+            mentions_only,
+        } => {
+            if before.is_some() || since.is_some() || kinds.is_some() {
+                return Err(CliError::Usage(
+                    "--before/--since/--kinds are not supported in keyless mode; the host owns \
+                     windowing (only the first --limit window is exposed by this CLI slice)"
+                        .into(),
+                ));
+            }
+            let args = ChannelReadArgs {
+                channel_id: channel,
+                mentions_only,
+                limit,
+                ..ChannelReadArgs::default()
+            };
+            let page = backend.channel_read(args).await?;
+            println!(
+                "{}",
+                serde_json::to_string(&page)
+                    .map_err(|e| CliError::Other(format!("serialize page: {e}")))?
+            );
+            Ok(())
+        }
+        _ => Err(CliError::Usage(
+            "keyless (broker) mode currently supports only 'messages get' and 'messages send'"
+                .into(),
+        )),
+    }
+}
+
+/// Parse CLI `--mention` values (hex or npub) into contract pubkeys.
+fn parse_broker_mentions(values: &[String]) -> Result<Vec<PubkeyHex>, CliError> {
+    values
+        .iter()
+        .map(|m| {
+            let pk = PublicKey::parse(m.trim())
+                .map_err(|e| CliError::Usage(format!("invalid --mention '{m}': {e}")))?;
+            PubkeyHex::parse(pk.to_hex())
+                .map_err(|e| CliError::Usage(format!("invalid --mention '{m}': {e}")))
+        })
+        .collect()
+}
+
 pub async fn dispatch(
     cmd: crate::MessagesCmd,
     client: &BuzzClient,
@@ -987,6 +1108,7 @@ pub async fn dispatch(
             before,
             since,
             kinds,
+            mentions_only,
         } => {
             cmd_get_messages(
                 client,
@@ -995,6 +1117,7 @@ pub async fn dispatch(
                 before,
                 since,
                 kinds.as_deref(),
+                mentions_only,
                 format,
             )
             .await

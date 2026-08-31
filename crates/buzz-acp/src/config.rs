@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use clap::ValueEnum;
-use nostr::Keys;
+use nostr::{Keys, PublicKey};
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
@@ -52,6 +52,37 @@ pub enum SubscribeMode {
     Mentions,
     All,
     Config,
+}
+
+/// Runtime substrate for inbound work and agent CLI operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AgentMode {
+    /// Hold the agent key and connect directly to the relay.
+    Local,
+    /// Hold only a broker credential; no agent key or relay route.
+    Broker,
+}
+
+/// Keyless broker provisioning. The credential is redacted from `Debug`.
+#[derive(Clone)]
+pub struct BrokerConfig {
+    pub base_url: String,
+    pub credential: String,
+    /// Canonical relay identity for observer/runtime pairing. The harness does
+    /// not connect to this URL in broker mode.
+    pub relay_url: String,
+    pub poll_interval: std::time::Duration,
+}
+
+impl std::fmt::Debug for BrokerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrokerConfig")
+            .field("base_url", &self.base_url)
+            .field("credential", &"<redacted>")
+            .field("relay_url", &self.relay_url)
+            .field("poll_interval", &self.poll_interval)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -246,8 +277,28 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_RELAY_URL", default_value = "ws://localhost:3000")]
     pub relay_url: String,
 
+    /// Runtime substrate. Broker mode rejects a private key and requires the
+    /// broker URL, credential, and explicit channel list.
+    #[arg(long, env = "BUZZ_AGENT_MODE", default_value = "local")]
+    pub agent_mode: AgentMode,
+
     #[arg(long, env = "BUZZ_PRIVATE_KEY", hide_env_values = true)]
-    pub private_key: String,
+    pub private_key: Option<String>,
+
+    #[arg(long, env = "BUZZ_BROKER_URL")]
+    pub broker_url: Option<String>,
+
+    #[arg(long, env = "BUZZ_BROKER_CREDENTIAL", hide_env_values = true)]
+    pub broker_credential: Option<String>,
+
+    /// Relay identity behind the broker, used only for observer/runtime
+    /// pairing. Broker mode never opens a connection to this URL.
+    #[arg(long, env = "BUZZ_BROKER_RELAY_URL")]
+    pub broker_relay_url: Option<String>,
+
+    /// Delay between broker polling sweeps in keyless mode.
+    #[arg(long, env = "BUZZ_BROKER_POLL_INTERVAL_MS", default_value_t = 1000)]
+    pub broker_poll_interval_ms: u64,
 
     /// Agent owner pubkey (64-char hex). Used for --respond-to=owner-only gate.
     #[arg(long, env = "BUZZ_ACP_AGENT_OWNER")]
@@ -517,6 +568,8 @@ pub struct ChannelFilter {
 #[derive(Debug)]
 pub struct Config {
     pub keys: Keys,
+    pub agent_mode: AgentMode,
+    pub broker: Option<BrokerConfig>,
     pub relay_url: String,
     pub agent_command: String,
     pub agent_args: Vec<String>,
@@ -761,10 +814,11 @@ pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'sta
 ///
 /// Codex sandboxes MCP subprocesses (including `buzz-cli`) behind a Seatbelt sandbox
 /// that blocks all outbound network by default. Without this env var, `buzz-cli`
-/// requests are blocked before they can reach the relay WebSocket.
+/// requests are blocked before they can reach the selected runtime endpoint (the
+/// relay locally, or the broker in keyless mode).
 ///
 /// Returns `Some(("CODEX_CONFIG", "{\"sandbox_workspace_write\":{\"network_access\":true}}"))` for
-/// Codex agents, or `None` for non-Codex agents or when the relay URL cannot be parsed.
+/// Codex agents, or `None` for non-Codex agents or when the endpoint URL cannot be parsed.
 ///
 /// The env var is forwarded by the `@agentclientprotocol/codex-acp` adapter (1.x) as a
 /// session-level config override (via `CODEX_CONFIG` → `thread/start config`), which is
@@ -772,11 +826,11 @@ pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'sta
 /// That sets `NetworkSandboxPolicy::Enabled`, causing the Seatbelt policy to include
 /// `(allow network-outbound)` — full outbound TCP/TLS at the OS level.
 ///
-/// URL validation is preserved as a guard: injection is skipped when the relay URL cannot
+/// URL validation is preserved as a guard: injection is skipped when the endpoint URL cannot
 /// be parsed, avoiding accidental sandbox widening for malformed configs.
 ///
 /// Handles `ws://`, `wss://`, `http://`, and `https://` schemes.
-pub fn codex_network_env(agent_command: &str, relay_url: &str) -> Option<(String, String)> {
+pub fn codex_network_env(agent_command: &str, endpoint_url: &str) -> Option<(String, String)> {
     match normalize_agent_command_identity(agent_command).as_str() {
         "codex" | "codex-acp" => {}
         _ => return None,
@@ -784,19 +838,19 @@ pub fn codex_network_env(agent_command: &str, relay_url: &str) -> Option<(String
 
     // Validate the relay URL before injecting broader network access. On parse failure,
     // skip injection rather than panicking or widening the sandbox unconditionally.
-    let host = match Url::parse(relay_url) {
+    let host = match Url::parse(endpoint_url) {
         Ok(u) => match u.host_str() {
             Some(h) => h.to_owned(),
             None => {
                 tracing::warn!(
-                    relay_url,
-                    "codex network config: no host in relay URL — skipping injection"
+                    endpoint_url,
+                    "codex network config: no host in endpoint URL — skipping injection"
                 );
                 return None;
             }
         },
         Err(e) => {
-            tracing::warn!(relay_url, error = %e, "codex network config: failed to parse relay URL — skipping injection");
+            tracing::warn!(endpoint_url, error = %e, "codex network config: failed to parse endpoint URL — skipping injection");
             return None;
         }
     };
@@ -871,13 +925,105 @@ impl Config {
     /// tests can construct `CliArgs` via `CliArgs::try_parse_from` and exercise the full
     /// validation path without going through process args.
     pub fn from_args(mut args: CliArgs) -> Result<Self, ConfigError> {
-        let keys = Keys::parse(&args.private_key)?;
+        // Clap preserves an explicitly empty argument or environment variable as
+        // `Some("")`; normalize it to absence before applying mode-specific rules.
+        let mut private_key = args.private_key.take().filter(|key| !key.is_empty());
+        let broker = match args.agent_mode {
+            AgentMode::Local => None,
+            AgentMode::Broker => {
+                if private_key.is_some() {
+                    return Err(ConfigError::ConfigFile(
+                        "broker mode is keyless — unset BUZZ_PRIVATE_KEY / --private-key".into(),
+                    ));
+                }
+                let base_url = args.broker_url.take().ok_or_else(|| {
+                    ConfigError::ConfigFile(
+                        "BUZZ_BROKER_URL / --broker-url is required in broker mode".into(),
+                    )
+                })?;
+                let credential = args.broker_credential.take().ok_or_else(|| {
+                    ConfigError::ConfigFile(
+                        "BUZZ_BROKER_CREDENTIAL / --broker-credential is required in broker mode"
+                            .into(),
+                    )
+                })?;
+                let relay_url = args.broker_relay_url.take().ok_or_else(|| {
+                    ConfigError::ConfigFile(
+                        "BUZZ_BROKER_RELAY_URL / --broker-relay-url is required in broker mode"
+                            .into(),
+                    )
+                })?;
+                let relay_url = buzz_core::relay::normalize_relay_url(&relay_url).map_err(|error| {
+                    ConfigError::ConfigFile(format!(
+                        "invalid broker relay identity in BUZZ_BROKER_RELAY_URL / --broker-relay-url: {error}"
+                    ))
+                })?;
+                if args.broker_poll_interval_ms < 100 {
+                    return Err(ConfigError::ConfigFile(
+                        "broker poll interval must be at least 100ms".into(),
+                    ));
+                }
+                let channels = args.channels.as_ref().ok_or_else(|| {
+                    ConfigError::ConfigFile(
+                        "--channels / BUZZ_ACP_CHANNELS is required in broker mode; channel discovery is host-owned and not in the frozen contract"
+                            .into(),
+                    )
+                })?;
+                if channels.is_empty()
+                    || channels
+                        .iter()
+                        .any(|channel| Uuid::parse_str(channel).is_err())
+                {
+                    return Err(ConfigError::ConfigFile(
+                        "every broker-mode --channels entry must be a channel UUID".into(),
+                    ));
+                }
+                if args.respond_to != RespondTo::OwnerOnly {
+                    return Err(ConfigError::ConfigFile(
+                        "broker mode currently requires --respond-to owner-only because the frozen contract does not expose channel or sibling-profile metadata"
+                            .into(),
+                    ));
+                }
+                let owner = args.agent_owner.as_deref().ok_or_else(|| {
+                    ConfigError::ConfigFile(
+                        "--agent-owner / BUZZ_ACP_AGENT_OWNER is required in broker mode".into(),
+                    )
+                })?;
+                let owner = PublicKey::from_hex(owner.trim()).map_err(|error| {
+                    ConfigError::ConfigFile(format!(
+                        "broker-mode --agent-owner must be a 64-hex public key: {error}"
+                    ))
+                })?;
+                args.agent_owner = Some(owner.to_hex());
+                Some(BrokerConfig {
+                    base_url,
+                    credential,
+                    relay_url,
+                    poll_interval: std::time::Duration::from_millis(args.broker_poll_interval_ms),
+                })
+            }
+        };
+        let keys = match args.agent_mode {
+            AgentMode::Local => {
+                let private_key = private_key.as_deref().ok_or_else(|| {
+                    ConfigError::ConfigFile(
+                        "BUZZ_PRIVATE_KEY / --private-key is required in local mode".into(),
+                    )
+                })?;
+                Keys::parse(private_key)?
+            }
+            // Never used as the agent identity. A placeholder keeps the local
+            // runtime's concrete types intact while the broker path diverges
+            // before relay setup; it is never exported to subprocesses.
+            AgentMode::Broker => Keys::generate(),
+        };
         // Best-effort zeroize: overwrite the raw private key string to reduce
         // exposure via core dumps or heap inspection (#41). Without the `zeroize`
         // crate we can only clear the String — the allocator may retain copies.
-        args.private_key
-            .replace_range(.., &"0".repeat(args.private_key.len()));
-        args.private_key.clear();
+        if let Some(private_key) = private_key.as_mut() {
+            private_key.replace_range(.., &"0".repeat(private_key.len()));
+            private_key.clear();
+        }
 
         let system_prompt = if let Some(text) = args.system_prompt {
             Some(text)
@@ -1075,14 +1221,41 @@ impl Config {
 
         // Spawned desktop agents now carry a complete instance snapshot. Team
         // instructions arrive independently so they can be layered at runtime.
+        let relay_url = broker
+            .as_ref()
+            .map_or_else(|| args.relay_url.clone(), |broker| broker.relay_url.clone());
         let mut persona_env_vars = Vec::new();
+        match broker.as_ref() {
+            Some(broker) => persona_env_vars.extend([
+                ("BUZZ_AGENT_MODE".into(), "broker".into()),
+                ("BUZZ_BROKER_URL".into(), broker.base_url.clone()),
+                ("BUZZ_BROKER_CREDENTIAL".into(), broker.credential.clone()),
+                // Explicit tombstones keep inherited local credentials and
+                // routing out of the spawned agent process.
+                ("BUZZ_BROKER_RELAY_URL".into(), String::new()),
+                ("BUZZ_RELAY_URL".into(), String::new()),
+                ("BUZZ_PRIVATE_KEY".into(), String::new()),
+                ("BUZZ_AUTH_TAG".into(), String::new()),
+            ]),
+            None => persona_env_vars.extend([
+                ("BUZZ_AGENT_MODE".into(), "local".into()),
+                ("BUZZ_BROKER_URL".into(), String::new()),
+                ("BUZZ_BROKER_CREDENTIAL".into(), String::new()),
+                ("BUZZ_BROKER_RELAY_URL".into(), String::new()),
+                ("BUZZ_RELAY_URL".into(), relay_url.clone()),
+                ("BUZZ_PRIVATE_KEY".into(), keys.secret_key().to_secret_hex()),
+            ]),
+        }
         let model = args.model;
 
         // Inject CODEX_CONFIG so the @agentclientprotocol/codex-acp adapter (1.x)
         // opens the Seatbelt network sandbox for buzz-cli (an MCP subprocess). No-op
         // for non-Codex agents or unparseable relay URLs.
+        let network_url = broker
+            .as_ref()
+            .map_or(relay_url.as_str(), |broker| broker.base_url.as_str());
         let has_generated_codex_config =
-            if let Some(network_env) = codex_network_env(&agent_command, &args.relay_url) {
+            if let Some(network_env) = codex_network_env(&agent_command, network_url) {
                 persona_env_vars.push(network_env);
                 true
             } else {
@@ -1093,7 +1266,9 @@ impl Config {
 
         let config = Config {
             keys,
-            relay_url: args.relay_url,
+            agent_mode: args.agent_mode,
+            broker,
+            relay_url,
             agent_command,
             agent_args,
             mcp_command: args.mcp_command,
@@ -1119,7 +1294,11 @@ impl Config {
             channels_override: args.channels,
             no_mention_filter: args.no_mention_filter,
             config_path: args.config,
-            context_message_limit: args.context_message_limit,
+            context_message_limit: if args.agent_mode == AgentMode::Broker {
+                0
+            } else {
+                args.context_message_limit
+            },
             max_turns_per_session: args.max_turns_per_session,
             presence_enabled: !args.no_presence,
             typing_enabled: !args.no_typing,
@@ -1150,6 +1329,20 @@ impl Config {
 
     /// Human-readable summary (no secrets).
     pub fn summary(&self) -> String {
+        let transport_detail = match (&self.agent_mode, &self.broker) {
+            (AgentMode::Local, _) => format!(
+                "mode=local relay={} pubkey={}",
+                self.relay_url,
+                self.keys.public_key().to_hex()
+            ),
+            (AgentMode::Broker, Some(broker)) => format!(
+                "mode=broker broker={} relay_identity={} pubkey=(derived-at-connect)",
+                broker.base_url, broker.relay_url
+            ),
+            (AgentMode::Broker, None) => {
+                "mode=broker broker=(missing) pubkey=(derived-at-connect)".into()
+            }
+        };
         let respond_to_detail = match &self.respond_to {
             RespondTo::Allowlist => {
                 format!("respond_to=allowlist({})", self.respond_to_allowlist.len())
@@ -1164,9 +1357,8 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
-            self.relay_url,
-            self.keys.public_key().to_hex(),
+            "{} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            transport_detail,
             self.agent_command,
             self.agent_args.join(" "),
             self.mcp_command,
@@ -1474,6 +1666,8 @@ mod tests {
     fn test_config(mode: SubscribeMode) -> Config {
         Config {
             keys: nostr::Keys::generate(),
+            agent_mode: AgentMode::Local,
+            broker: None,
             relay_url: "ws://localhost:3000".into(),
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
@@ -1517,6 +1711,176 @@ mod tests {
             no_base_prompt: false,
             base_prompt_content: None,
         }
+    }
+
+    fn broker_args(extra: &[&str]) -> CliArgs {
+        const CHANNEL: &str = "5df7dfa8-e919-43df-8efd-f1dcb8af7071";
+        const OWNER: &str = "a02c4e0850e5e612b4ddf95dbe2f5c56467cf27c6552203bc833ff438fb31971";
+        let mut args = vec![
+            "buzz-acp",
+            "--agent-mode",
+            "broker",
+            "--private-key",
+            "",
+            "--broker-url",
+            "http://127.0.0.1:8787",
+            "--broker-credential",
+            "cred",
+            "--broker-relay-url",
+            "wss://relay.example",
+            "--channels",
+            CHANNEL,
+            "--agent-owner",
+            OWNER,
+        ];
+        args.extend_from_slice(extra);
+        CliArgs::parse_from(args)
+    }
+
+    #[test]
+    fn broker_mode_is_keyless_and_enables_broker_capabilities() {
+        let config = Config::from_args(broker_args(&[])).expect("valid broker config");
+
+        assert_eq!(config.agent_mode, AgentMode::Broker);
+        assert!(config.broker.is_some());
+        assert_eq!(config.relay_url, "wss://relay.example");
+        assert!(config.presence_enabled);
+        assert!(config.typing_enabled);
+        assert!(config.memory_enabled);
+        assert!(!config.relay_observer);
+        assert_eq!(config.context_message_limit, 0);
+        assert!(config
+            .persona_env_vars
+            .iter()
+            .any(|(name, value)| name == "BUZZ_AGENT_MODE" && value == "broker"));
+        assert!(config
+            .persona_env_vars
+            .iter()
+            .any(|(name, value)| name == "BUZZ_PRIVATE_KEY" && value.is_empty()));
+    }
+
+    #[test]
+    fn broker_mode_rejects_an_invalid_owner_pubkey() {
+        let mut args = broker_args(&[]);
+        args.agent_owner = Some("not-a-pubkey".into());
+        assert!(Config::from_args(args)
+            .expect_err("invalid owner must fail at startup")
+            .to_string()
+            .contains("64-hex"));
+    }
+
+    #[test]
+    fn explicit_local_mode_tombstones_inherited_broker_provisioning() {
+        let key = "1".repeat(64);
+        let args =
+            CliArgs::parse_from(["buzz-acp", "--agent-mode", "local", "--private-key", &key]);
+        let config = Config::from_args(args).expect("valid local config");
+        let value = |name: &str| {
+            config
+                .persona_env_vars
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(value("BUZZ_AGENT_MODE"), Some("local"));
+        assert_eq!(value("BUZZ_BROKER_URL"), Some(""));
+        assert_eq!(value("BUZZ_BROKER_CREDENTIAL"), Some(""));
+        assert!(value("BUZZ_PRIVATE_KEY").is_some_and(|value| !value.is_empty()));
+    }
+
+    #[test]
+    fn broker_mode_rejects_an_agent_private_key() {
+        let key = "1".repeat(64);
+        let mut args = broker_args(&[]);
+        args.private_key = Some(key);
+        let result = Config::from_args(args);
+
+        assert!(result
+            .expect_err("private key must fail closed")
+            .to_string()
+            .contains("keyless"));
+    }
+
+    #[test]
+    fn broker_mode_requires_an_explicit_relay_identity() {
+        let mut args = broker_args(&[]);
+        args.broker_relay_url = None;
+
+        assert!(Config::from_args(args)
+            .expect_err("broker relay identity must be required")
+            .to_string()
+            .contains("BUZZ_BROKER_RELAY_URL"));
+    }
+
+    #[test]
+    fn broker_mode_canonicalizes_relay_identity_without_forwarding_it() {
+        let mut args = broker_args(&[]);
+        args.broker_relay_url = Some("WSS://Relay.Example:443/".into());
+        let config = Config::from_args(args).expect("valid broker config");
+
+        assert_eq!(config.relay_url, "wss://relay.example");
+        assert!(config
+            .persona_env_vars
+            .iter()
+            .any(|(name, value)| name == "BUZZ_BROKER_RELAY_URL" && value.is_empty()));
+        assert!(config
+            .persona_env_vars
+            .iter()
+            .any(|(name, value)| name == "BUZZ_RELAY_URL" && value.is_empty()));
+    }
+
+    #[test]
+    fn broker_mode_rejects_invalid_relay_identity() {
+        let mut args = broker_args(&[]);
+        args.broker_relay_url = Some("https://relay.example".into());
+
+        let error = Config::from_args(args).expect_err("invalid relay identity should fail");
+        assert!(error.to_string().contains("scheme must be ws or wss"));
+    }
+
+    #[test]
+    fn local_mode_requires_a_private_key() {
+        let args = CliArgs::parse_from(["buzz-acp", "--agent-mode", "local"]);
+
+        assert!(Config::from_args(args)
+            .expect_err("local mode must require a private key")
+            .to_string()
+            .contains("required in local mode"));
+    }
+
+    #[test]
+    fn broker_mode_requires_explicit_channels() {
+        const OWNER: &str = "a02c4e0850e5e612b4ddf95dbe2f5c56467cf27c6552203bc833ff438fb31971";
+        let args = CliArgs::parse_from([
+            "buzz-acp",
+            "--agent-mode",
+            "broker",
+            "--private-key",
+            "",
+            "--broker-url",
+            "http://127.0.0.1:8787",
+            "--broker-credential",
+            "cred",
+            "--broker-relay-url",
+            "wss://relay.example",
+            "--agent-owner",
+            OWNER,
+        ]);
+
+        assert!(Config::from_args(args)
+            .expect_err("channels are required")
+            .to_string()
+            .contains("--channels"));
+    }
+
+    #[test]
+    fn broker_mode_requires_owner_only_author_gate() {
+        let result = Config::from_args(broker_args(&["--respond-to", "anyone"]));
+
+        assert!(result
+            .expect_err("broker mode must fail closed without channel metadata")
+            .to_string()
+            .contains("owner-only"));
     }
 
     fn make_rule(

@@ -43,6 +43,7 @@ chrono = { workspace = true }
 
 # Typed event builders for all write operations
 buzz-sdk = { workspace = true }
+buzz-broker-client = { workspace = true }
 buzz-core = { workspace = true }
 
 # Base64 encoding — NIP-98 event serialization for Authorization header

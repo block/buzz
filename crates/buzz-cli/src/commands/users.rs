@@ -1,6 +1,8 @@
 use buzz_core::kind::KIND_MANAGED_AGENT;
+use buzz_sdk::broker::ProfileSetArgs;
 use nostr::PublicKey;
 
+use crate::backend::{AgentBackend, Backend};
 use crate::client::{extract_d_tag, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::validate_hex64;
@@ -422,9 +424,68 @@ pub async fn cmd_set_profile(
     Ok(())
 }
 
+/// Keyless (broker) dispatch for profile and presence updates.
+pub async fn dispatch_broker(cmd: crate::UsersCmd, backend: &Backend) -> Result<(), CliError> {
+    use crate::UsersCmd;
+    match cmd {
+        UsersCmd::SetProfile {
+            name,
+            avatar,
+            about,
+            nip05,
+        } => {
+            if nip05.is_some() {
+                return Err(CliError::Usage(
+                    "--nip05 is not supported in keyless mode; the contract's profile.set carries \
+                     display name, about, and picture only"
+                        .into(),
+                ));
+            }
+            if name.is_none() && avatar.is_none() && about.is_none() {
+                return Err(CliError::Usage(
+                    "include at least one profile field to set (--name, --about, --avatar)".into(),
+                ));
+            }
+            let published = backend
+                .profile_set(ProfileSetArgs {
+                    display_name: name,
+                    about,
+                    picture: avatar,
+                })
+                .await?;
+            println!(
+                "{}",
+                serde_json::to_string(&published)
+                    .map_err(|e| CliError::Other(format!("serialize outcome: {e}")))?
+            );
+            Ok(())
+        }
+        UsersCmd::SetPresence { status } => {
+            let status = match status {
+                crate::PresenceStatus::Online => buzz_core::presence::PresenceStatus::Online,
+                crate::PresenceStatus::Away => buzz_core::presence::PresenceStatus::Away,
+                crate::PresenceStatus::Offline => buzz_core::presence::PresenceStatus::Offline,
+            };
+            let published = backend
+                .presence_set(buzz_sdk::broker::PresenceSetArgs { status })
+                .await?;
+            println!(
+                "{}",
+                serde_json::to_string(&published)
+                    .map_err(|e| CliError::Other(format!("serialize outcome: {e}")))?
+            );
+            Ok(())
+        }
+        _ => Err(CliError::Usage(
+            "keyless (broker) mode supports only 'users set-profile' and 'users set-presence' in this group"
+                .into(),
+        )),
+    }
+}
+
 /// Fetch the current user's profile metadata via POST /query (kind:0).
 /// Returns the parsed content JSON object, or an empty object if no profile exists.
-async fn fetch_current_profile(
+pub(crate) async fn fetch_current_profile(
     client: &BuzzClient,
 ) -> Result<serde_json::Map<String, serde_json::Value>, CliError> {
     let my_pk = client.keys().public_key().to_hex();

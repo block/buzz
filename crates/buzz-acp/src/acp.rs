@@ -241,6 +241,48 @@ fn deep_merge(
     }
 }
 
+const OBSERVER_REDACTED_ENV_VALUE: &str = "<redacted>";
+
+/// Return the ACP wire payload that observer telemetry may retain.
+///
+/// The actual request sent to the child keeps its original MCP environment;
+/// only the observer copy is redacted. Environment names remain visible for
+/// diagnostics, but values are treated as potentially sensitive and never
+/// enter telemetry.
+fn redact_acp_write_for_observer(value: &serde_json::Value) -> serde_json::Value {
+    let mut redacted = value.clone();
+    let Some(servers) = redacted
+        .pointer_mut("/params/mcpServers")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return redacted;
+    };
+
+    for server in servers {
+        let Some(env) = server
+            .get_mut("env")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for entry in env {
+            if let Some(value) = entry.get_mut("value") {
+                *value = serde_json::Value::String(OBSERVER_REDACTED_ENV_VALUE.into());
+            }
+        }
+    }
+    redacted
+}
+
+fn log_acp_write(value: &serde_json::Value) {
+    let diagnostic = redact_acp_write_for_observer(value);
+    tracing::debug!(
+        target: "acp::wire",
+        "→ {}",
+        serde_json::to_string(&diagnostic).unwrap_or_default()
+    );
+}
+
 /// Build the merged `CODEX_CONFIG` environment-variable value for a Codex agent spawn.
 ///
 /// Returns `Some(json_string)` when `has_generated_codex_config` is true (Buzz injected a
@@ -508,7 +550,22 @@ impl AcpClient {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;
             }
-            if std::env::var_os(key).is_none() {
+            // Substrate provisioning is a security boundary, not a persona
+            // preference. Broker mode must override inherited local relay/key
+            // values, including with empty tombstones.
+            let force_runtime_provisioning = matches!(
+                key.as_str(),
+                "BUZZ_AGENT_MODE"
+                    | "BUZZ_BROKER_URL"
+                    | "BUZZ_BROKER_CREDENTIAL"
+                    | "BUZZ_BROKER_RELAY_URL"
+                    | "BUZZ_RELAY_URL"
+                    | "BUZZ_PRIVATE_KEY"
+                    | "BUZZ_AUTH_TAG"
+            );
+            if force_runtime_provisioning && value.is_empty() {
+                cmd.env_remove(key);
+            } else if force_runtime_provisioning || std::env::var_os(key).is_none() {
                 cmd.env(key, value);
             }
         }
@@ -802,7 +859,6 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
         if let Err(e) = self.write_ndjson(&msg).await {
             self.last_prompt_id = None;
             self.current_hard_deadline = None;
@@ -1067,6 +1123,7 @@ impl AcpClient {
     /// (e.g., it's stuck or dead), the write would otherwise block forever.
     async fn write_ndjson(&mut self, value: &serde_json::Value) -> Result<(), AcpError> {
         const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+        log_acp_write(value);
         let line = serde_json::to_string(value)?;
         tokio::time::timeout(WRITE_TIMEOUT, async {
             self.stdin.write_all(line.as_bytes()).await?;
@@ -1077,7 +1134,7 @@ impl AcpClient {
         .await
         .map_err(|_| AcpError::WriteTimeout(WRITE_TIMEOUT))?
         .map_err(AcpError::Io)?;
-        self.observe("acp_write", value.clone());
+        self.observe("acp_write", redact_acp_write_for_observer(value));
         Ok(())
     }
 
@@ -1107,8 +1164,6 @@ impl AcpClient {
             "method": method,
             "params": params,
         });
-
-        tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
 
         // Wrap write + read in a single timeout so a hung agent can't block forever.
         // We cannot use an async block that borrows `self` mutably across two awaits
@@ -1173,7 +1228,6 @@ impl AcpClient {
             "params": params,
         });
 
-        tracing::debug!(target: "acp::wire", "→ (notification) {}", &serde_json::to_string(&msg).unwrap_or_default());
         self.write_ndjson(&msg).await?;
         Ok(())
     }
@@ -1459,11 +1513,6 @@ impl AcpClient {
                                 "method": method,
                                 "params": params,
                             });
-                            tracing::debug!(
-                                target: "acp::wire",
-                                "→ {}",
-                                serde_json::to_string(&msg).unwrap_or_default()
-                            );
                             match self.write_ndjson(&msg).await {
                                 Ok(()) => {
                                     pending_steer = Some((id, transport, req.ack_tx));
@@ -2352,6 +2401,30 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
 mod tests {
     use super::*;
 
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct CapturedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::writer::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturedLogWriter(self.0.clone())
+        }
+    }
+
     #[test]
     fn stop_reason_parses_all_known_values() {
         assert_eq!(StopReason::from_str("end_turn"), Some(StopReason::EndTurn));
@@ -2553,6 +2626,88 @@ mod tests {
             serialized["env"][0]["name"].as_str(),
             Some("BUZZ_RELAY_URL")
         );
+    }
+
+    #[test]
+    fn acp_write_observer_payload_redacts_mcp_credentials() {
+        let wire = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "session/new",
+            "params": {
+                "mcpServers": [{
+                    "name": "buzz-mcp",
+                    "command": "buzz-mcp",
+                    "args": [],
+                    "env": [
+                        {"name": "BUZZ_AGENT_MODE", "value": "broker"},
+                        {"name": "BUZZ_BROKER_URL", "value": "https://broker.example"},
+                        {"name": "BUZZ_BROKER_CREDENTIAL", "value": "broker-secret"},
+                        {"name": "BUZZ_PRIVATE_KEY", "value": "nsec-secret"},
+                        {"name": "BUZZ_AUTH_TAG", "value": "auth-secret"},
+                        {"name": "OPENAI_API_KEY", "value": "provider-secret"}
+                    ]
+                }]
+            }
+        });
+
+        let observed = redact_acp_write_for_observer(&wire);
+        let serialized = serde_json::to_string(&observed).unwrap();
+        for secret in [
+            "broker-secret",
+            "nsec-secret",
+            "auth-secret",
+            "provider-secret",
+        ] {
+            assert!(!serialized.contains(secret), "observer leaked {secret}");
+        }
+        assert_eq!(
+            observed["params"]["mcpServers"][0]["env"][0]["value"],
+            OBSERVER_REDACTED_ENV_VALUE
+        );
+        assert_eq!(
+            observed["params"]["mcpServers"][0]["env"][2]["value"],
+            OBSERVER_REDACTED_ENV_VALUE
+        );
+        assert_eq!(
+            wire["params"]["mcpServers"][0]["env"][2]["value"],
+            "broker-secret"
+        );
+    }
+
+    #[test]
+    fn session_new_wire_log_redacts_mcp_environment_values() {
+        let wire = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "session/new",
+            "params": {
+                "mcpServers": [{
+                    "name": "buzz-mcp",
+                    "command": "buzz-mcp",
+                    "args": [],
+                    "env": [{
+                        "name": "BUZZ_BROKER_CREDENTIAL",
+                        "value": "must-not-reach-the-wire-log"
+                    }]
+                }]
+            }
+        });
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || log_acp_write(&wire));
+
+        let captured = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+        assert!(captured.contains("session/new"));
+        assert!(captured.contains("BUZZ_BROKER_CREDENTIAL"));
+        assert!(captured.contains(OBSERVER_REDACTED_ENV_VALUE));
+        assert!(!captured.contains("must-not-reach-the-wire-log"));
     }
 
     #[test]
@@ -3093,6 +3248,80 @@ mod tests {
         client.shutdown().await;
         std::fs::remove_dir_all(&dir).expect("remove env probe dir");
         observed
+    }
+
+    /// Spawn a probe that distinguishes an absent variable from a present but
+    /// empty one. This pins broker tombstones to `env_remove`, not `KEY=`.
+    #[cfg(unix)]
+    async fn spawn_named_and_probe_child_env_presence(
+        file_name: &str,
+        var: &str,
+        extra_env: &[(String, String)],
+    ) -> String {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "buzz-acp-env-presence-probe-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("create env presence probe dir");
+        let path = dir.join(file_name);
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nif [ \"${{{var}+x}}\" = x ]; then printf 'set\\n'; else printf 'unset\\n'; fi\n"
+            ),
+        )
+        .expect("write env presence probe script");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("stat presence probe")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&path, permissions).expect("chmod presence probe");
+
+        let mut client = AcpClient::spawn(
+            path.to_str().expect("probe path is UTF-8"),
+            &[],
+            extra_env,
+            false,
+        )
+        .await
+        .expect("spawn env presence probe script");
+        let observed = client
+            .reader
+            .next()
+            .await
+            .expect("child produced no presence output")
+            .expect("child presence output was not readable");
+        client.shutdown().await;
+        std::fs::remove_dir_all(&dir).expect("remove env presence probe dir");
+        observed
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn empty_broker_tombstone_removes_inherited_key_from_child() {
+        let observed = spawn_named_and_probe_child_env_presence(
+            "goose",
+            "BUZZ_PRIVATE_KEY",
+            &[("BUZZ_PRIVATE_KEY".into(), String::new())],
+        )
+        .await;
+
+        assert_eq!(observed, "unset");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn empty_broker_relay_tombstone_removes_inherited_identity_from_child() {
+        let observed = spawn_named_and_probe_child_env_presence(
+            "goose",
+            "BUZZ_BROKER_RELAY_URL",
+            &[("BUZZ_BROKER_RELAY_URL".into(), String::new())],
+        )
+        .await;
+
+        assert_eq!(observed, "unset");
     }
 
     /// Buzz-owned Hermes processes get the configured-MCP isolation default,

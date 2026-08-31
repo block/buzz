@@ -830,7 +830,9 @@ name = "buzz-acp"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "base64 0.22.1",
+ "buzz-broker-client",
  "buzz-core",
  "buzz-persona",
  "buzz-sdk",
@@ -974,11 +976,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-broker-client"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "buzz-sdk",
+ "nostr 0.44.7",
+ "reqwest 0.13.4",
+ "serde_json",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "buzz-cli"
 version = "0.1.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "buzz-broker-client",
  "buzz-core",
  "buzz-persona",
  "buzz-sdk",

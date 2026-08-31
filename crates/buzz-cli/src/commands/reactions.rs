@@ -2,6 +2,9 @@ use std::collections::HashMap;
 
 use nostr::EventId;
 
+use buzz_sdk::broker::ReactionAddArgs;
+
+use crate::backend::{AgentBackend, Backend};
 use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::validate_hex64;
@@ -131,8 +134,52 @@ pub async fn dispatch(cmd: crate::ReactionsCmd, client: &BuzzClient) -> Result<(
             event,
             emoji,
             emoji_url,
+            channel: _, // relay-side reactions reference only the target event
         } => cmd_add_reaction(client, &event, &emoji, emoji_url.as_deref()).await,
         ReactionsCmd::Remove { event, emoji } => cmd_remove_reaction(client, &event, &emoji).await,
         ReactionsCmd::Get { event } => cmd_get_reactions(client, &event).await,
+    }
+}
+
+/// Keyless (broker) dispatch for the reactions group: `reactions add` only.
+pub async fn dispatch_broker(cmd: crate::ReactionsCmd, backend: &Backend) -> Result<(), CliError> {
+    use crate::ReactionsCmd;
+    match cmd {
+        ReactionsCmd::Add {
+            event,
+            emoji,
+            emoji_url,
+            channel,
+        } => {
+            if emoji_url.is_some() {
+                return Err(CliError::Usage(
+                    "--emoji-url is not supported in keyless mode; the contract's reaction.add \
+                     carries an emoji or a :shortcode: string and the host owns custom emoji"
+                        .into(),
+                ));
+            }
+            let channel_id = channel.ok_or_else(|| {
+                CliError::Usage(
+                    "--channel is required in keyless mode (the host scopes the reaction to it)"
+                        .into(),
+                )
+            })?;
+            let published = backend
+                .reaction_add(ReactionAddArgs {
+                    channel_id,
+                    target_event_id: event,
+                    reaction: emoji,
+                })
+                .await?;
+            println!(
+                "{}",
+                serde_json::to_string(&published)
+                    .map_err(|e| CliError::Other(format!("serialize outcome: {e}")))?
+            );
+            Ok(())
+        }
+        _ => Err(CliError::Usage(
+            "keyless (broker) mode supports only 'reactions add' in this group".into(),
+        )),
     }
 }

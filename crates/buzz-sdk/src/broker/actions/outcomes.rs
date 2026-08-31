@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     absent_or_valued, channel, channel_id, cursor, event_id, hex64_field, required, Action,
-    PubkeyHex, MAX_NAME_CHARS, MAX_PAGE_LIMIT,
+    PubkeyHex, MAX_CONTENT_BYTES, MAX_ENCODED_MESSAGE_BYTES, MAX_NAME_CHARS, MAX_PAGE_LIMIT,
 };
 use crate::SdkError;
 use nostr::{Event, EventId, Kind, PublicKey, Tags, Timestamp};
@@ -325,6 +325,22 @@ impl ActionOutcome {
                         "page holds {} messages, over the {MAX_PAGE_LIMIT} cap",
                         page.messages.len()
                     )));
+                }
+                for message in &page.messages {
+                    if message.0.content.len() > MAX_CONTENT_BYTES {
+                        return Err(SdkError::ContentTooLarge {
+                            max: MAX_CONTENT_BYTES,
+                            got: message.0.content.len(),
+                        });
+                    }
+                    let encoded_len = serde_json::to_vec(message)
+                        .map_err(|error| SdkError::InvalidInput(error.to_string()))?
+                        .len();
+                    if encoded_len > MAX_ENCODED_MESSAGE_BYTES {
+                        return Err(SdkError::InvalidInput(format!(
+                            "encoded channel message is {encoded_len} bytes, over the {MAX_ENCODED_MESSAGE_BYTES}-byte cap"
+                        )));
+                    }
                 }
                 page.next_cursor.as_deref().map(cursor).transpose()?;
             }

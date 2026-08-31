@@ -38,6 +38,15 @@ pub const MAX_ABOUT_CHARS: usize = 2_000;
 /// Maximum bytes of message content, matching the SDK's channel-message cap.
 pub const MAX_CONTENT_BYTES: usize = 64 * 1024;
 
+/// Maximum JSON-encoded bytes of one signed event returned by `channel.read`.
+///
+/// Content can expand by up to 6x under JSON escaping (`U+0000` through
+/// `U+001F`), and the returned event also carries its signed tags and fixed
+/// Nostr envelope. 512 KiB therefore admits a maximally escaped 64 KiB
+/// message with substantial tag headroom while keeping every accepted page
+/// bounded independently of the host implementation.
+pub const MAX_ENCODED_MESSAGE_BYTES: usize = 512 * 1024;
+
 /// Maximum characters in a reaction payload (emoji or `:shortcode:`).
 pub const MAX_EMOJI_CHARS: usize = 66;
 
