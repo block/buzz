@@ -32,6 +32,12 @@
       }
     },
     "apnsKey": false,
+    "podAnnotations": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
     "httpRoute": {
       "type": "object",
       "required": [
@@ -313,7 +319,7 @@
   ],
   "allOf": [
     {
-      "$comment": "Scraping opt-in is coupled: a PodMonitor and its scoped 8081 ingress must be enabled together, so we never render a scraper that cannot reach the port nor an ingress hole with no scraper.",
+      "$comment": "A PodMonitor requires scoped 8081 ingress. External scrapers such as Datadog may enable that ingress without rendering a PodMonitor.",
       "if": {
         "properties": {
           "podMonitor": {
@@ -353,49 +359,6 @@
         },
         "required": [
           "networkPolicy"
-        ]
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "networkPolicy": {
-            "properties": {
-              "monitoring": {
-                "properties": {
-                  "enabled": {
-                    "const": true
-                  }
-                },
-                "required": [
-                  "enabled"
-                ]
-              }
-            },
-            "required": [
-              "monitoring"
-            ]
-          }
-        },
-        "required": [
-          "networkPolicy"
-        ]
-      },
-      "then": {
-        "properties": {
-          "podMonitor": {
-            "properties": {
-              "enabled": {
-                "const": true
-              }
-            },
-            "required": [
-              "enabled"
-            ]
-          }
-        },
-        "required": [
-          "podMonitor"
         ]
       }
     }

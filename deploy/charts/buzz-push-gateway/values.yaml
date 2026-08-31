@@ -34,9 +34,11 @@ appAttestRoot:
   secretKey: app-attest-root.pem
 service:
   port: 8080
+podAnnotations: {}
 httpRoute:
   # Disabled by default so a generic install cannot claim an unattached route.
-  # Production enables this with an explicit Gateway parentRef.
+  # Enable only when this chart owns a Gateway API route. Environments with an
+  # existing ingress or service mesh route should keep this disabled.
   enabled: false
   parentRefs: []
   hostnames: [push.buzz.xyz]
@@ -60,8 +62,9 @@ networkPolicy:
     podSelector:
       k8s-app: kube-dns
   # Scoped ingress to the private metrics port (8081). Off by default so 8081
-  # has no pod ingress at all; enable only alongside podMonitor and name the
-  # scraper's namespace/pod so reachability stays narrow.
+  # has no pod ingress at all; enable alongside podMonitor or an external
+  # annotation-discovered scraper and name its namespace/pod so reachability
+  # stays narrow.
   monitoring:
     enabled: false
     namespaceSelector: {}
