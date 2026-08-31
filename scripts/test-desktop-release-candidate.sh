@@ -225,4 +225,6 @@ root_sha=$(git -C "$initial" rev-parse HEAD)
 grep -Fq "$root_sha" "$initial/CHANGELOG.md"
 rm -rf "$initial"
 
+"$repo_root/scripts/test-instance-env.sh"
+
 echo "desktop release candidate contract passed"
