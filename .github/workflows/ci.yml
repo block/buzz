@@ -687,6 +687,18 @@ jobs:
           VALUES ('00000000-0000-4000-8000-00000000c0de', 'localhost:3000')
           ON CONFLICT (lower(host)) DO NOTHING
           ;"
+      - name: Workflow message provenance tests
+        # The relay's workflow_sink suite is not selected by the infra-free
+        # unit job. Run both its pure tests and ignored PostgreSQL tests here so
+        # authored-template provenance cannot regress behind a green CI build.
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and test(/workflow_sink/)' \
+            --run-ignored all
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+          TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
       - name: Replaceable persistence PostgreSQL tests
         # Transaction, concurrency, and mention-index coverage for the
         # replaceable-event store seam. These tests require real Postgres and

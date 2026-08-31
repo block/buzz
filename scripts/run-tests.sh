@@ -120,6 +120,11 @@ run_unit_tests() {
   # `just test-unit` — the two lists must stay in step.
   run_test_step "buzz-agent unit tests" \
     cargo test -p buzz-agent --lib -- --nocapture
+
+  # ACP author-gate and queue tests are pure unit tests. Keep this fallback in
+  # step with `just test-unit`; ignored lifecycle tests run elsewhere.
+  run_test_step "buzz-acp unit tests" \
+    cargo test -p buzz-acp --lib -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------

@@ -147,6 +147,15 @@ Controls which authors' events the harness forwards to the agent. Events from di
 | `anyone` | Forward all events (no author filtering). |
 | `nobody` | Drop all inbound events. Agent only acts on heartbeat prompts. |
 
+Relay-signed workflow messages delegate to their recorded owner only when they
+explicitly target this agent with authenticated workflow-mention provenance.
+The owner tag means that owner scheduled the workflow; it does not claim that
+the owner authored every word after template rendering. ACP verifies the
+provenance against the relay's NIP-11 `self` key, then evaluates the owner under
+the same author policy as ordinary messages. Legacy workflow messages and
+workflow output without an explicit agent mention remain attributed to the relay
+signer. `nobody` remains absolute.
+
 The gate applies to **all** inbound events — @mentions, DMs, thread replies, and any event delivered by the relay. Owner control commands are checked **before** the gate, so the owner can still manage the harness regardless of mode:
 
 | Command | Effect |
