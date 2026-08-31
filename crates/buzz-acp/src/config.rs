@@ -890,6 +890,17 @@ fn safe_ssh_auth_sock_parent(socket: &Path, home: Option<&Path>) -> Option<Strin
         );
         return None;
     }
+    if !is_known_ssh_auth_sock_parent_shape(parent, &canonical_parent) {
+        tracing::warn!(
+            path = %parent.display(),
+            canonical_path = %canonical_parent.display(),
+            "dropping SSH_AUTH_SOCK parent from Codex sandbox config: path shape is not recognized"
+        );
+        return None;
+    }
+    if !ssh_auth_sock_parent_contains_only_socket(&canonical_parent, socket) {
+        return None;
+    }
 
     let normalized_parent = normalize_path_lexically(parent);
     match normalized_parent.to_str() {
@@ -907,6 +918,148 @@ fn safe_ssh_auth_sock_parent(socket: &Path, home: Option<&Path>) -> Option<Strin
 fn is_forbidden_ssh_auth_sock_parent(path: &Path, home: Option<&Path>) -> bool {
     is_filesystem_root_or_home_ancestor(path, home)
         || home.is_some_and(|home| paths_equal_lexically(path, &home.join(".ssh")))
+}
+
+fn is_known_ssh_auth_sock_parent_shape(parent: &Path, canonical_parent: &Path) -> bool {
+    [parent, canonical_parent]
+        .into_iter()
+        .map(normalize_path_lexically)
+        .any(|path| is_tmp_ssh_auth_sock_parent(&path) || is_macos_ssh_auth_sock_parent(&path))
+}
+
+fn is_tmp_ssh_auth_sock_parent(path: &Path) -> bool {
+    path_has_file_name_prefix(path, "ssh-")
+        && path
+            .parent()
+            .is_some_and(|parent| is_known_temp_root(parent))
+}
+
+fn is_macos_ssh_auth_sock_parent(path: &Path) -> bool {
+    path_has_file_name_prefix(path, "com.apple.launchd.")
+        && path.parent().is_some_and(|parent| {
+            paths_equal_lexically(parent, Path::new("/var/run"))
+                || paths_equal_lexically(parent, Path::new("/private/var/run"))
+                || is_known_temp_root(parent)
+        })
+}
+
+fn path_has_file_name_prefix(path: &Path, prefix: &str) -> bool {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|name| {
+            name.strip_prefix(prefix)
+                .is_some_and(|suffix| !suffix.is_empty())
+        })
+}
+
+fn is_known_temp_root(path: &Path) -> bool {
+    paths_equal_lexically(path, Path::new("/tmp"))
+        || paths_equal_lexically(path, Path::new("/private/tmp"))
+}
+
+fn ssh_auth_sock_parent_contains_only_socket(parent: &Path, socket: &Path) -> bool {
+    let Some(socket_file_name) = socket.file_name() else {
+        tracing::warn!(
+            path = %socket.display(),
+            "dropping SSH_AUTH_SOCK parent from Codex sandbox config: socket file name is missing"
+        );
+        return false;
+    };
+
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(
+                path = %parent.display(),
+                error = %error,
+                "dropping SSH_AUTH_SOCK parent from Codex sandbox config: parent directory is not readable"
+            );
+            return false;
+        }
+    };
+
+    let mut saw_socket = false;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(
+                    path = %parent.display(),
+                    error = %error,
+                    "dropping SSH_AUTH_SOCK parent from Codex sandbox config: parent directory entry is not readable"
+                );
+                return false;
+            }
+        };
+
+        let entry_file_name = entry.file_name();
+        if entry_file_name.as_os_str() != socket_file_name {
+            tracing::warn!(
+                path = %parent.display(),
+                entry = %entry.path().display(),
+                "dropping SSH_AUTH_SOCK parent from Codex sandbox config: parent directory contains another entry"
+            );
+            return false;
+        }
+        if !ssh_auth_sock_entry_is_socket(&entry) {
+            return false;
+        }
+        saw_socket = true;
+    }
+
+    if !saw_socket {
+        tracing::warn!(
+            path = %socket.display(),
+            "dropping SSH_AUTH_SOCK parent from Codex sandbox config: socket path is missing"
+        );
+    }
+    saw_socket
+}
+
+#[cfg(unix)]
+fn ssh_auth_sock_entry_is_socket(entry: &std::fs::DirEntry) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+
+    match entry.file_type() {
+        Ok(file_type) if file_type.is_socket() => true,
+        Ok(_) => {
+            tracing::warn!(
+                path = %entry.path().display(),
+                "dropping SSH_AUTH_SOCK parent from Codex sandbox config: socket path is not a Unix socket"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %entry.path().display(),
+                error = %error,
+                "dropping SSH_AUTH_SOCK parent from Codex sandbox config: socket metadata is not readable"
+            );
+            false
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn ssh_auth_sock_entry_is_socket(entry: &std::fs::DirEntry) -> bool {
+    match entry.file_type() {
+        Ok(file_type) if file_type.is_file() => true,
+        Ok(_) => {
+            tracing::warn!(
+                path = %entry.path().display(),
+                "dropping SSH_AUTH_SOCK parent from Codex sandbox config: socket path is not a file"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %entry.path().display(),
+                error = %error,
+                "dropping SSH_AUTH_SOCK parent from Codex sandbox config: socket metadata is not readable"
+            );
+            false
+        }
+    }
 }
 
 fn is_filesystem_root_or_home_ancestor(path: &Path, home: Option<&Path>) -> bool {
@@ -1857,6 +2010,29 @@ mod tests {
         ))
     }
 
+    fn codex_test_ssh_dir(name: &str) -> PathBuf {
+        PathBuf::from("/tmp").join(format!(
+            "ssh-buzz-acp-codex-config-{name}-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ))
+    }
+
+    fn codex_test_unrecognized_socket_dir() -> PathBuf {
+        PathBuf::from("/tmp").join(format!("bacp-{}", Uuid::new_v4().simple()))
+    }
+
+    #[cfg(unix)]
+    fn create_test_ssh_socket(socket: &Path) {
+        let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+        drop(listener);
+    }
+
+    #[cfg(not(unix))]
+    fn create_test_ssh_socket(socket: &Path) {
+        std::fs::write(socket, "").unwrap();
+    }
+
     #[test]
     fn codex_network_env_wss_url() {
         let result =
@@ -1945,10 +2121,11 @@ mod tests {
     #[test]
     fn codex_network_env_includes_safe_ssh_socket_parent() {
         let home = codex_test_dir("safe-home");
-        let socket_dir = codex_test_dir("ssh-agent");
+        let socket_dir = codex_test_ssh_dir("safe");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&socket_dir).unwrap();
         let socket = socket_dir.join("agent.sock");
+        create_test_ssh_socket(&socket);
 
         let (_, value) = codex_network_env_with_env(
             "codex-acp",
@@ -2003,6 +2180,57 @@ mod tests {
             "codex-acp",
             "wss://relay.example.com",
             Some(ssh_dir.join("agent.sock").as_os_str()),
+            Some(&home),
+        )
+        .expect("valid Codex runtime should receive generated config");
+        let json: serde_json::Value =
+            serde_json::from_str(&value).expect("generated config must be valid JSON");
+
+        assert!(json["sandbox_workspace_write"]
+            .get("writable_roots")
+            .is_none());
+        assert!(json.get("network").is_none());
+    }
+
+    #[test]
+    fn codex_network_env_omits_ssh_socket_parent_with_extra_entries() {
+        let home = codex_test_dir("extra-home");
+        let socket_dir = codex_test_ssh_dir("extra");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&socket_dir).unwrap();
+        let socket = socket_dir.join("agent.sock");
+        create_test_ssh_socket(&socket);
+        std::fs::write(socket_dir.join("other"), "").unwrap();
+
+        let (_, value) = codex_network_env_with_env(
+            "codex-acp",
+            "wss://relay.example.com",
+            Some(socket.as_os_str()),
+            Some(&home),
+        )
+        .expect("valid Codex runtime should receive generated config");
+        let json: serde_json::Value =
+            serde_json::from_str(&value).expect("generated config must be valid JSON");
+
+        assert!(json["sandbox_workspace_write"]
+            .get("writable_roots")
+            .is_none());
+        assert!(json.get("network").is_none());
+    }
+
+    #[test]
+    fn codex_network_env_omits_ssh_socket_parent_with_unrecognized_path_shape() {
+        let home = codex_test_dir("shape-home");
+        let socket_dir = codex_test_unrecognized_socket_dir();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&socket_dir).unwrap();
+        let socket = socket_dir.join("agent.sock");
+        create_test_ssh_socket(&socket);
+
+        let (_, value) = codex_network_env_with_env(
+            "codex-acp",
+            "wss://relay.example.com",
+            Some(socket.as_os_str()),
             Some(&home),
         )
         .expect("valid Codex runtime should receive generated config");
