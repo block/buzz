@@ -50,6 +50,7 @@ import { toast } from "sonner";
 import { MessageAgentOwner } from "./MessageAgentOwner";
 import {
   MessageAuthorText,
+  MessageAuthorIdentity,
   MessageHeaderRow,
   MessageMetaSegments,
 } from "./MessageHeader";
@@ -646,22 +647,14 @@ export const MessageRow = React.memo(
 
     const headerNode = isDisplayedAsContinuation ? null : (
       <MessageHeaderRow>
-        {message.pubkey ? (
-          <UserProfilePopover
-            pubkey={message.pubkey}
-            role={profilePopoverRole}
-            botIdenticonValue={message.author}
-          >
-            <button
-              className="truncate rounded leading-message-author focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-              type="button"
-            >
-              {authorNode}
-            </button>
-          </UserProfilePopover>
-        ) : (
-          authorNode
-        )}
+        <MessageAuthorIdentity
+          pubkey={message.pubkey}
+          ownerPubkey={message.ownerPubkey}
+          role={profilePopoverRole}
+          displayName={message.author}
+        >
+          {authorNode}
+        </MessageAuthorIdentity>
         {/* Author is not a segment: "Alice 9:53 AM" needs no divider. */}
         <MessageMetaSegments
           segments={[

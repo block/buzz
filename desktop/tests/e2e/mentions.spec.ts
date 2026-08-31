@@ -386,11 +386,11 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
   );
   await expect(relayProvenanceMarker).toHaveAttribute(
     "aria-label",
-    "From another Buzz setup",
+    "Not managed on this device",
   );
   await expect(relayProvenanceMarker).toHaveAttribute(
     "title",
-    "From another Buzz setup",
+    "Not managed on this device",
   );
   await expect(relayProvenanceMarker).toBeVisible();
   await expect(relayProvenanceMarker).toHaveText("");
@@ -465,7 +465,7 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
   ).toHaveCount(0);
   await expect(remoteSidebarMarker).toHaveAttribute(
     "aria-label",
-    "From another Buzz setup",
+    "Not managed on this device",
   );
   await expect(remoteSidebarMarker).toHaveText("");
   await expect(remoteSidebarMarker.locator("svg")).toBeVisible();

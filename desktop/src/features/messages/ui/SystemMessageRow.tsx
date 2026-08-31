@@ -1,3 +1,4 @@
+import { AgentManagementMarker } from "@/features/agents/ui/OtherSetupAgentMarker";
 import { SmilePlus } from "lucide-react";
 import * as React from "react";
 
@@ -285,6 +286,7 @@ function ProfileName({
       interactive={Boolean(pubkey)}
     >
       {children}
+      <AgentManagementMarker pubkey={pubkey} />
     </InlineChip>
   ) : (
     <span
@@ -295,6 +297,7 @@ function ProfileName({
       )}
     >
       {children}
+      <AgentManagementMarker pubkey={pubkey} />
     </span>
   );
 
@@ -914,6 +917,10 @@ export const SystemMessageRow = React.memo(function SystemMessageRow({
               <MessageAuthorText as="div" className="text-foreground">
                 {description.title}
               </MessageAuthorText>
+              <AgentManagementMarker
+                pubkey={displayedIdentityPubkey}
+                ownerPubkey={displayedOwnerPubkey}
+              />
               {displayedIdentityIsAgent ? (
                 <>
                   <MessageAgentOwner

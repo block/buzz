@@ -52,9 +52,8 @@ type MentionAutocompleteProps = {
 
 export function showMentionAgentProvenanceMarker(
   suggestion: MentionSuggestion,
-  hasNameCollision: boolean,
 ): boolean {
-  return hasNameCollision && suggestion.agentProvenance === "managed-elsewhere";
+  return suggestion.agentProvenance === "managed-elsewhere";
 }
 
 /** Focus the now-always-visible automatic-mentions switch. */
@@ -254,10 +253,8 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
               suggestion.displayName;
             const hasNameCollision =
               (nameCounts.get(suggestion.displayName.toLowerCase()) ?? 0) > 1;
-            const showAgentProvenanceMarker = showMentionAgentProvenanceMarker(
-              suggestion,
-              hasNameCollision,
-            );
+            const showAgentProvenanceMarker =
+              showMentionAgentProvenanceMarker(suggestion);
             const ownerLabel =
               hasNameCollision && suggestion.agentProvenance
                 ? null
