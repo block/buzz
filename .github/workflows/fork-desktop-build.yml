@@ -1,0 +1,92 @@
+name: Fork Desktop Build
+
+# Personal-fork CI/CD: builds an unsigned macOS desktop app from `main` and
+# publishes it as a rolling GitHub Release, so a new build is always one
+# `git push` away instead of a hand-run local script.
+#
+# Not the upstream release.yml: that pipeline is block/buzz-only (gated
+# `if: github.repository == 'block/buzz'`) and needs Block-internal signing
+# secrets (Tauri updater keys, Apple codesign/notarize OIDC role) this fork
+# does not have. This workflow mirrors macos-intel-canary.yml's proven
+# unsigned-build recipe instead, targeting the runner's native
+# aarch64-apple-darwin (Apple Silicon) rather than cross-compiling to Intel.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fork-desktop-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build unsigned macOS app
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+
+      - name: Install desktop dependencies
+        run: just desktop-install-ci
+
+      - name: Cache Cargo build
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            desktop/src-tauri/target
+            !desktop/src-tauri/target/**/release/bundle
+          key: fork-desktop-build-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            fork-desktop-build-${{ runner.os }}-
+
+      - name: Generate non-updating bundle config
+        run: |
+          cat > desktop/src-tauri/tauri.fork.conf.json <<'JSON'
+          {"bundle":{"createUpdaterArtifacts":false}}
+          JSON
+
+      - name: Build sidecars
+        run: |
+          cargo build --release -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          ./scripts/bundle-sidecars.sh
+
+      - name: Build unsigned app + DMG
+        run: cd desktop && pnpm tauri build --verbose --no-sign --bundles app,dmg --config src-tauri/tauri.fork.conf.json
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+          TAURI_BUNDLER_DMG_IGNORE_CI: "true"
+
+      - name: Locate fresh DMG
+        id: artifact
+        run: |
+          DMG=$(find desktop/src-tauri/target/release/bundle/dmg -name '*.dmg' -type f | head -1)
+          [[ -n "$DMG" ]] || { echo "::error::No DMG found"; exit 1; }
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+
+      - name: Publish rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DMG: ${{ steps.artifact.outputs.dmg }}
+        run: |
+          TAG="desktop-local-latest"
+          TITLE="Desktop (local build) — $(date -u +%Y-%m-%dT%H:%MZ) @ ${GITHUB_SHA::7}"
+          NOTES="Unsigned aarch64 build from \`main\`@${GITHUB_SHA}. Not notarized — first launch may need right-click → Open, or \`xattr -cr\` after download."
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TITLE" --notes "$NOTES"
+            gh release upload "$TAG" "$DMG" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" "$DMG" --repo "$GITHUB_REPOSITORY" \
+              --title "$TITLE" --notes "$NOTES" --latest
+          fi
