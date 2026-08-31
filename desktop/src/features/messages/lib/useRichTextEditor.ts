@@ -299,6 +299,48 @@ export function useRichTextEditor({
             };
           },
         }),
+        // Triple-click selects only the clicked *line* (the text between
+        // the nearest hard breaks), not the whole paragraph. Shift+Enter
+        // never starts a new paragraph — a multi-line typed message is one
+        // <p> containing inline <br> (hardBreak) nodes — so the browser's
+        // native "expand triple-click to nearest block" resolves to the
+        // entire message. Override it to match textarea/Slack-style
+        // per-line selection. Pasted multi-line text is unaffected: it
+        // parses into separate <p> nodes via TiptapMarkdown below, so the
+        // browser default already does the right thing there.
+        Extension.create({
+          name: "tripleClickSelectsLine",
+          addProseMirrorPlugins() {
+            return [
+              new Plugin({
+                props: {
+                  handleTripleClick(view, pos) {
+                    const $pos = view.state.doc.resolve(pos);
+                    if (!$pos.parent.inlineContent) return false;
+
+                    const { start, end } = hardBreakLineBounds($pos);
+                    const parentStart = $pos.start();
+                    const parentEnd = parentStart + $pos.parent.content.size;
+                    // No hard breaks in this block (e.g. a single-line
+                    // paragraph, a pasted block's own <p>, or a code
+                    // block) -> identical to the default paragraph-wide
+                    // selection. Let ProseMirror handle it natively.
+                    if (start === parentStart && end === parentEnd) {
+                      return false;
+                    }
+
+                    view.dispatch(
+                      view.state.tr.setSelection(
+                        TextSelection.create(view.state.doc, start, end),
+                      ),
+                    );
+                    return true;
+                  },
+                },
+              }),
+            ];
+          },
+        }),
         // Shift+Enter inside lists/blockquotes: split the node instead of
         // inserting a hard break so continuation lines keep their formatting.
         Extension.create({
