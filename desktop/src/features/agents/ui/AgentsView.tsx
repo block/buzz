@@ -468,7 +468,21 @@ export function AgentsView() {
               onOpenChange={(open) => {
                 if (!open) onRequestClose();
               }}
-              onSubmitDefinition={personas.handleSubmit}
+              onSubmitDefinition={(
+                input,
+                intent,
+                backendIntent,
+                runtimeBinding,
+              ) =>
+                personas.handleSubmit(
+                  input,
+                  intent,
+                  backendIntent,
+                  null,
+                  undefined,
+                  runtimeBinding,
+                )
+              }
               runtimes={personas.acpRuntimesQuery.data ?? []}
               runtimeCatalogStatus={
                 personas.acpRuntimesQuery.isLoading

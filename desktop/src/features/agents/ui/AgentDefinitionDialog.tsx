@@ -70,6 +70,7 @@ import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { AgentHarnessField } from "./AgentHarnessField";
+import { HermesProfileField } from "./HermesProfileField";
 import {
   AgentAiConfigurationModeField,
   AgentCreateAiDefaultsSummary,
@@ -111,12 +112,14 @@ type AgentDefinitionDialogProps = {
   /** Publishes saved changes when the edited agent is shared in the catalog. */
   publishCatalogUpdatesOnSave?: boolean;
   createRunSection?: React.ReactNode;
+  createRunOnLocal?: boolean;
   /** Extra create-mode submit gate (e.g. incomplete provider config). */
   createSubmitBlocked?: boolean;
 };
 
 export type AgentDefinitionSubmitOptions = {
   publishCatalogUpdates: boolean;
+  hermesProfile?: string;
 };
 
 export function AgentDefinitionDialog({
@@ -135,6 +138,7 @@ export function AgentDefinitionDialog({
   onSubmit,
   publishCatalogUpdatesOnSave = false,
   createRunSection,
+  createRunOnLocal = true,
   createSubmitBlocked = false,
 }: AgentDefinitionDialogProps) {
   const runtimesLoading = runtimeCatalogStatus === "loading";
@@ -144,6 +148,7 @@ export function AgentDefinitionDialog({
   const [avatarUrl, setAvatarUrl] = React.useState("");
   const [systemPrompt, setSystemPrompt] = React.useState("");
   const [runtime, setRuntime] = React.useState("");
+  const [hermesProfile, setHermesProfile] = React.useState("");
   const [model, setModel] = React.useState("");
   const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
   const [provider, setProvider] = React.useState("");
@@ -208,6 +213,7 @@ export function AgentDefinitionDialog({
     setAvatarUrl(initialValues.avatarUrl ?? "");
     setSystemPrompt(initialValues.systemPrompt);
     setRuntime(initialValues.runtime ?? "");
+    setHermesProfile("");
     setModel(initialValues.model ?? "");
     setIsCustomModelEditing(false);
     setProvider(initialValues.provider ?? "");
@@ -308,6 +314,7 @@ export function AgentDefinitionDialog({
       setAvatarUrl("");
       setSystemPrompt("");
       setRuntime("");
+      setHermesProfile("");
       setModel("");
       setIsCustomModelEditing(false);
       setProvider("");
@@ -384,7 +391,13 @@ export function AgentDefinitionDialog({
       return;
     }
 
-    await onSubmit(baseInput, { publishCatalogUpdates: false });
+    await onSubmit(baseInput, {
+      publishCatalogUpdates: false,
+      hermesProfile:
+        runtimeForSubmit === "hermes" && createRunOnLocal
+          ? hermesProfile
+          : undefined,
+    });
   }
 
   function handleSubmitForm(event: React.FormEvent<HTMLFormElement>) {
@@ -499,6 +512,10 @@ export function AgentDefinitionDialog({
     (!isCreateMode || runtime.trim().length > 0) &&
     (!isCreateMode || selectedRuntimeIsAvailable) &&
     (!isCreateMode || !createSubmitBlocked) &&
+    (!isCreateMode ||
+      runtime !== "hermes" ||
+      !createRunOnLocal ||
+      hermesProfile.trim().length > 0) &&
     // Crash-loop guard, create AND edit: an empty allowlist would crash
     // every instance minted from this definition at startup.
     personaBehaviorDraftValid(behaviorDraft) &&
@@ -929,6 +946,14 @@ export function AgentDefinitionDialog({
             />
           ) : null}
         </div>
+
+        {isCreateMode && runtime === "hermes" && createRunOnLocal ? (
+          <HermesProfileField
+            disabled={isPending}
+            onValueChange={setHermesProfile}
+            value={hermesProfile}
+          />
+        ) : null}
 
         <AgentDefaultsDialog
           onOpenChange={setAiDefaultsOpen}

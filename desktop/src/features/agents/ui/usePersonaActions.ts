@@ -62,6 +62,7 @@ import { resolveManagedAgentAvatarUrl } from "./managedAgentAvatar";
 import {
   buildInstanceInputForDefinition,
   type BackendIntent,
+  type RuntimeBindingIntent,
 } from "../lib/instanceInputForDefinition";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
@@ -182,6 +183,7 @@ export function usePersonaActions() {
     backendIntent?: BackendIntent | null,
     targetChannel?: Pick<Channel, "id" | "name"> | null,
     options?: { publishCatalogUpdates?: boolean },
+    runtimeBindingIntent?: RuntimeBindingIntent,
   ): Promise<boolean> {
     if (isPersonaSubmitPending) {
       return false;
@@ -246,6 +248,7 @@ export function usePersonaActions() {
           runtime,
           undefined,
           startIntent ?? undefined,
+          runtimeBindingIntent,
         );
 
         try {
