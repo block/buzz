@@ -10,7 +10,7 @@ import '../../shared/widgets/avatar_image.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/message_content.dart';
-import '../profile/user_cache_provider.dart';
+import '../../shared/profile/user_cache_provider.dart';
 import '../profile/user_profile_sheet.dart';
 import 'compose_note_page.dart';
 import 'pulse_actions.dart';

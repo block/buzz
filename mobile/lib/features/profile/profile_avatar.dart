@@ -1,14 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/animated_avatar.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/masked_avatar_badge.dart';
 import 'profile_provider.dart';
-import 'user_profile.dart';
+import '../../shared/profile/user_profile.dart';
 
 /// Matches desktop's sidebar profile card, whose avatar is 32px.
-const _avatarSize = 32.0;
+const _defaultAvatarSize = 32.0;
 
 /// The visible dot is smaller than the notch it sits in, so a ring of
 /// background separates it from the avatar. Desktop's `h-2 w-2` dot inside a
@@ -24,7 +25,15 @@ class ProfileAvatar extends ConsumerWidget {
   final VoidCallback? onTap;
   final bool showPresence;
 
-  const ProfileAvatar({super.key, this.onTap, this.showPresence = true});
+  /// The avatar diameter in logical pixels; defaults to the 32px desktop match.
+  final double size;
+
+  const ProfileAvatar({
+    super.key,
+    this.onTap,
+    this.showPresence = true,
+    this.size = _defaultAvatarSize,
+  });
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -45,7 +54,7 @@ class ProfileAvatar extends ConsumerWidget {
 
   Widget _buildPlaceholder(BuildContext context) {
     return CircleAvatar(
-      radius: _avatarSize / 2,
+      radius: size / 2,
       backgroundColor: context.colors.primaryContainer,
     );
   }
@@ -55,16 +64,20 @@ class ProfileAvatar extends ConsumerWidget {
     UserProfile? profile,
     String presence,
   ) {
+    final animatedAvatar = parseAnimatedAvatarUrl(profile?.avatarUrl);
     return GestureDetector(
       onTap: onTap,
       child: MaskedAvatarBadge(
-        size: _avatarSize,
+        size: size,
         geometry: AvatarBadgeMaskGeometry.presenceDot,
         avatar: ClipOval(
           child: ColoredBox(
-            color: context.colors.primaryContainer,
+            key: const ValueKey('profile-avatar-background'),
+            color: animatedAvatar == null
+                ? context.colors.primaryContainer
+                : Colors.transparent,
             child: AvatarImageContent(
-              imageUrl: profile?.avatarUrl,
+              imageUrl: animatedAvatar?.posterUrl ?? profile?.avatarUrl,
               fallback: Text(
                 profile?.initial ?? '?',
                 style: context.textTheme.labelMedium?.copyWith(

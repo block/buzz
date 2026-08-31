@@ -10,6 +10,9 @@ fn in_memory() -> Connection {
     conn.pragma_update(None, "journal_mode", "WAL").unwrap();
     conn.pragma_update(None, "busy_timeout", 5000).unwrap();
     conn.execute_batch(SCHEMA).unwrap();
+    // Match production `open_archive_db`: apply every schema migration (incl.
+    // M4) so tests run against the same shape production connections see.
+    apply_schema_migrations(&conn).unwrap();
     conn
 }
 
@@ -285,9 +288,13 @@ fn test_remove_owner_p_kind_noop_when_kind_absent() {
 #[test]
 fn test_upsert_archived_event_is_idempotent() {
     let conn = in_memory();
-    upsert_archived_event(&conn, "pk", "wss://r", "id1", 1, "author", 100, "{}", 200).unwrap();
-    // Second call must not error or duplicate.
-    upsert_archived_event(&conn, "pk", "wss://r", "id1", 1, "author", 100, "{}", 201).unwrap();
+    let first =
+        upsert_archived_event(&conn, "pk", "wss://r", "id1", 1, "author", 100, "{}", 200).unwrap();
+    assert!(first, "first insert of a new id must report newly-inserted");
+    // Second call must not error or duplicate, and must report false (no new row).
+    let second =
+        upsert_archived_event(&conn, "pk", "wss://r", "id1", 1, "author", 100, "{}", 201).unwrap();
+    assert!(!second, "duplicate insert must report NOT newly-inserted");
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM archived_events", [], |r| r.get(0))
         .unwrap();

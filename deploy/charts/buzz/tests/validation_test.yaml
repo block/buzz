@@ -2,6 +2,16 @@ suite: validation
 templates:
   - templates/deployment.yaml
 tests:
+  - it: rejects a malformed image digest
+    set:
+      relayUrl: wss://buzz.example.com
+      ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
+      externalPostgresql.url: postgres://u:p@h:5432/d
+      image.digest: sha256:not-a-digest
+    asserts:
+      - failedTemplate:
+          errorPattern: "image.digest: Does not match pattern"
+
   - it: fails when relayUrl is missing
     set:
       relayUrl: ""

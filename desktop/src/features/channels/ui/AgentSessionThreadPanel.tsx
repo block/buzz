@@ -60,7 +60,7 @@ import {
 import { useLoadArchivedObserverEvents } from "@/features/agents/ui/useObserverEvents";
 import { useLoadOlderOnScroll } from "@/features/messages/ui/useLoadOlderOnScroll";
 import type { ChannelAgentSessionAgent } from "./useChannelAgentSessions";
-import { useChannelsQuery } from "@/features/channels/hooks";
+import { useChannelReference } from "@/features/channels/openChannelDirectory";
 
 type AgentSessionThreadPanelProps = {
   agent: ChannelAgentSessionAgent;
@@ -218,22 +218,12 @@ export function AgentSessionThreadPanel({
   });
   // Scope label input: prefer the passed channel's name; when the pane is
   // channel-scoped without a full Channel object (#1380's channelId prop),
-  // resolve the name from the channels cache.
-  const channelsQuery = useChannelsQuery({
-    enabled: Boolean(sessionChannelId),
-  });
-  const scopeChannelName = React.useMemo(() => {
-    if (!sessionChannelId) {
-      return null;
-    }
-    if (channel && channel.id === sessionChannelId) {
-      return channel.name;
-    }
-    return (
-      channelsQuery.data?.find((entry) => entry.id === sessionChannelId)
-        ?.name ?? null
-    );
-  }, [channel, channelsQuery.data, sessionChannelId]);
+  // resolve that one id through the bounded reference query.
+  const referencedChannel = useChannelReference(sessionChannelId);
+  const scopeChannelName =
+    channel && channel.id === sessionChannelId
+      ? channel.name
+      : (referencedChannel?.name ?? null);
   const scopeLabel = sessionChannelId
     ? scopeChannelName
       ? `#${scopeChannelName}`

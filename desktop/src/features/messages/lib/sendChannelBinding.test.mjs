@@ -24,6 +24,7 @@ import test from "node:test";
 
 import {
   createOptimisticMessage,
+  resolveCachedReplyRootId,
   resolveEffectiveChannel,
   resolveSendChannel,
   resolveThreadReplyTarget,
@@ -321,4 +322,24 @@ test("resolveThreadReplyTarget_nullContext_noLiveRefs_returnsNull", () => {
   const result = resolveThreadReplyTarget(null, null, null);
 
   assert.strictEqual(result, null);
+});
+
+test("resolveCachedReplyRootId sends only roots proven by a cached parent", () => {
+  const rootId = "1".repeat(64);
+  const parentId = "2".repeat(64);
+  const parent = {
+    id: parentId,
+    pubkey: IDENTITY.pubkey,
+    kind: 9,
+    created_at: 1,
+    content: "parent",
+    tags: [
+      ["e", rootId, "", "root"],
+      ["e", rootId, "", "reply"],
+    ],
+    sig: "",
+  };
+
+  assert.equal(resolveCachedReplyRootId(parentId, [[], [parent]]), rootId);
+  assert.equal(resolveCachedReplyRootId(parentId, [[], []]), null);
 });

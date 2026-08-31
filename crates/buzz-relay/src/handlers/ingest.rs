@@ -28,12 +28,13 @@ use buzz_core::kind::{
     KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
     KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
     KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
-    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
-    KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
-    KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEAM_CATALOG, KIND_TEXT_NOTE,
-    KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER,
-    RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER, RELAY_ADMIN_SET_WORKSPACE_PROFILE,
+    KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
+    KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
+    KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
+    KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
+    KIND_TEAM_CATALOG, KIND_TEXT_NOTE, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+    RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE, RELAY_ADMIN_REMOVE_MEMBER,
+    RELAY_ADMIN_SET_WORKSPACE_PROFILE,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
@@ -48,6 +49,147 @@ use crate::conformance::{
     self as conf, channel_label, claimed_community_from_event, emit, msg_id_label,
     state_for_request, EmitGuard, TraceAction, Verdict,
 };
+
+fn huddle_backing_channel_id(event: &Event) -> Result<Uuid, IngestError> {
+    let content: serde_json::Value = serde_json::from_str(&event.content).map_err(|_| {
+        IngestError::Rejected("invalid: Huddle event content must be a JSON object".into())
+    })?;
+    let channel_id = content
+        .get("ephemeral_channel_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            IngestError::Rejected("invalid: Huddle event must name an ephemeral_channel_id".into())
+        })?;
+    channel_id.parse::<Uuid>().map_err(|_| {
+        IngestError::Rejected("invalid: Huddle ephemeral_channel_id must be a UUID".into())
+    })
+}
+
+fn map_huddle_backing_channel_error(error: buzz_db::DbError) -> IngestError {
+    match error {
+        buzz_db::DbError::ChannelNotFound(_) => {
+            IngestError::Rejected("invalid: Huddle backing channel not found".into())
+        }
+        error => IngestError::Internal(format!("error: loading Huddle backing channel: {error}")),
+    }
+}
+
+fn expected_huddle_backing_ttl(ephemeral_ttl_override: Option<i32>) -> i32 {
+    ephemeral_ttl_override.unwrap_or(3600)
+}
+
+async fn validate_huddle_lifecycle_event(
+    tenant: &TenantContext,
+    state: &AppState,
+    event: &Event,
+    kind: u32,
+) -> Result<(), IngestError> {
+    if kind != KIND_HUDDLE_STARTED && kind != KIND_HUDDLE_ENDED {
+        return Ok(());
+    }
+
+    let backing_channel_id = huddle_backing_channel_id(event)?;
+    let backing = state
+        .db
+        .get_channel(tenant.community(), backing_channel_id)
+        .await
+        .map_err(map_huddle_backing_channel_error)?;
+    let signer = event.pubkey.to_bytes();
+    let relay = state.relay_keypair.public_key().to_bytes();
+    let signer_created_backing = backing.created_by.as_slice() == signer.as_slice();
+
+    if kind == KIND_HUDDLE_STARTED {
+        let expected_ttl = expected_huddle_backing_ttl(state.config.ephemeral_ttl_override);
+        if !signer_created_backing
+            || backing.channel_type != "stream"
+            || backing.visibility != "private"
+            || backing.ttl_seconds != Some(expected_ttl)
+            || backing.archived_at.is_some()
+        {
+            return Err(IngestError::Rejected(
+                "invalid: Huddle start must reference the signer's active private ephemeral stream"
+                    .into(),
+            ));
+        }
+    } else {
+        if !signer_created_backing && signer.as_slice() != relay.as_slice() {
+            return Err(IngestError::Rejected(
+                "invalid: only the Huddle creator or relay may end it".into(),
+            ));
+        }
+        let parent_channel_id = extract_channel_id(event).ok_or_else(|| {
+            IngestError::Rejected("invalid: Huddle end must name its parent channel".into())
+        })?;
+        let linked = state
+            .db
+            .huddle_started_link_exists(
+                tenant.community(),
+                parent_channel_id,
+                backing_channel_id,
+                &backing.created_by,
+            )
+            .await
+            .map_err(|error| {
+                IngestError::Internal(format!("error: checking Huddle start linkage: {error}"))
+            })?;
+        if !linked {
+            return Err(IngestError::Rejected(
+                "invalid: Huddle end does not match a creator-signed start in this channel".into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_custom_emoji_tags(event: &Event) -> Result<(), IngestError> {
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.first().map(String::as_str) != Some("emoji") {
+            continue;
+        }
+        let shortcode = parts.get(1).ok_or_else(|| {
+            IngestError::Rejected("invalid: emoji tag must include a shortcode".into())
+        })?;
+        buzz_sdk::normalize_custom_emoji_shortcode(shortcode)
+            .map_err(|err| IngestError::Rejected(format!("invalid: {err}")))?;
+    }
+    Ok(())
+}
+
+fn validate_reaction_emoji(event: &Event, emoji: &str) -> Result<(), IngestError> {
+    let emoji_char_count = emoji.chars().count();
+    if emoji_char_count <= 64 {
+        return Ok(());
+    }
+
+    let Some(shortcode) = emoji
+        .strip_prefix(':')
+        .and_then(|value| value.strip_suffix(':'))
+    else {
+        return Err(IngestError::Rejected(format!(
+            "invalid: reaction emoji exceeds 64 characters (got {emoji_char_count})"
+        )));
+    };
+    let normalized = buzz_sdk::normalize_custom_emoji_shortcode(shortcode)
+        .map_err(|err| IngestError::Rejected(format!("invalid: {err}")))?;
+    if shortcode != normalized {
+        return Err(IngestError::Rejected(
+            "invalid: long custom emoji reaction shortcode must be canonical lowercase".into(),
+        ));
+    }
+    let has_matching_tag = event.tags.iter().any(|tag| {
+        let parts = tag.as_slice();
+        parts.first().map(String::as_str) == Some("emoji")
+            && parts.get(1).is_some_and(|value| value == shortcode)
+    });
+    if !has_matching_tag || emoji_char_count > buzz_sdk::MAX_CUSTOM_EMOJI_REACTION_LEN {
+        return Err(IngestError::Rejected(format!(
+            "invalid: reaction emoji exceeds 64 characters (got {emoji_char_count})"
+        )));
+    }
+    Ok(())
+}
 
 /// How the HTTP caller authenticated (for [`IngestAuth::Http`]).
 #[derive(Debug, Clone)]
@@ -162,6 +304,72 @@ pub fn reject_with_transport(transport: &'static str, reason: &'static str) {
     .increment(1);
 }
 
+fn valid_link_preview_text(value: &str, max: usize, allow_newlines: bool) -> bool {
+    value.len() <= max
+        && !value
+            .chars()
+            .any(|character| character.is_control() && !(allow_newlines && character == '\n'))
+}
+
+fn validate_link_preview_tags(event: &Event, media_base_url: &str) -> Result<(), String> {
+    const MAX_SNAPSHOTS: usize = 8;
+    const MAX_TITLE: usize = 300;
+    const MAX_SITE: usize = 100;
+    const MAX_DESCRIPTION: usize = 1000;
+
+    let mut count = 0;
+    let mut suppressed = false;
+    let mut seen = std::collections::HashSet::new();
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.first().map(String::as_str) != Some("link-preview") {
+            continue;
+        }
+        count += 1;
+        if parts == ["link-preview", "none"] {
+            if count > 1 {
+                return Err("link-preview suppression cannot include snapshots".into());
+            }
+            suppressed = true;
+            continue;
+        }
+        if suppressed
+            || count > MAX_SNAPSHOTS
+            || parts.len() != 11
+            || parts[1] != "snapshot"
+            || parts[2] != "1"
+        {
+            return Err("invalid link-preview snapshot tag".into());
+        }
+        let canonical =
+            url::Url::parse(&parts[3]).map_err(|_| "invalid link-preview canonical URL")?;
+        if canonical.scheme() != "https"
+            || !canonical.username().is_empty()
+            || canonical.password().is_some()
+            || canonical.fragment().is_some()
+            || !seen.insert(parts[3].clone())
+            || !event.content.contains(&parts[3])
+        {
+            return Err("invalid link-preview canonical URL".into());
+        }
+        for (value, max, allow_newlines) in [
+            (&parts[4], MAX_TITLE, false),
+            (&parts[5], MAX_SITE, false),
+            (&parts[6], MAX_DESCRIPTION, true),
+        ] {
+            if !valid_link_preview_text(value, max, allow_newlines) {
+                return Err("invalid link-preview snapshot text".into());
+            }
+        }
+        if !super::imeta::validate_local_image_media_pair(&parts[7], &parts[8], media_base_url)
+            || !super::imeta::validate_local_image_media_pair(&parts[9], &parts[10], media_base_url)
+        {
+            return Err("link-preview media must reference matching local image blobs".into());
+        }
+    }
+    Ok(())
+}
+
 /// Successful ingestion result.
 pub struct IngestResult {
     /// Hex-encoded event ID.
@@ -181,6 +389,24 @@ pub enum IngestError {
     AuthFailed(String),
     /// Server error — WS: OK false, HTTP: 500.
     Internal(String),
+}
+
+/// Map the durable community write-fence lookup onto the ingest error taxonomy.
+///
+/// An inactive community is an authorization decision and keeps the exact
+/// `restricted:` wire text the ephemeral path uses. A lookup outage is a
+/// server fault and fails closed as `error:`/500 — a Postgres blip can
+/// neither admit a write past the fence nor read as a client mistake.
+fn map_serving_fence_state(active: Result<bool, buzz_db::DbError>) -> Result<(), IngestError> {
+    match active {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(IngestError::Rejected(
+            "restricted: community writes are fenced".into(),
+        )),
+        Err(error) => Err(IngestError::Internal(format!(
+            "error: checking community write fence: {error}"
+        ))),
+    }
 }
 
 fn map_relay_admin_error(error: super::relay_admin::RelayAdminError) -> IngestError {
@@ -214,7 +440,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
         | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
-        | KIND_TEAM_CATALOG | super::push_lease::KIND_PUSH_LEASE => {
+        | KIND_PRIVATE_MANAGED_AGENT | KIND_TEAM_CATALOG | super::push_lease::KIND_PUSH_LEASE => {
             Ok(Scope::UsersWrite)
         }
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
@@ -427,6 +653,7 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // (pubkey, kind, d_tag). A stray `h` tag must not channel-scope them.
             | KIND_TEAM
             | KIND_MANAGED_AGENT
+            | KIND_PRIVATE_MANAGED_AGENT
             | KIND_TEAM_CATALOG
             // NIP-34: git events use `a` tags (repo reference), not `h` tags (channel scope).
             // Parameterized replaceable kinds are keyed by (pubkey, kind, d_tag).
@@ -589,32 +816,11 @@ pub(crate) async fn resolve_nip10_thread_meta(
     channel_id: Uuid,
     state: &AppState,
 ) -> Result<Option<ThreadMetadataOwned>, String> {
-    let mut root_hex: Option<String> = None;
-    let mut reply_hex: Option<String> = None;
+    let markers = buzz_core::nip10::parse_thread_markers(&event.tags);
 
-    for tag in event.tags.iter() {
-        let parts = tag.as_slice();
-        if parts.len() >= 4 && parts[0] == "e" {
-            let hex_val = &parts[1];
-            let marker = &parts[3];
-            if hex_val.len() == 64 && hex_val.chars().all(|c| c.is_ascii_hexdigit()) {
-                match marker.as_str() {
-                    "root" => root_hex = Some(hex_val.to_string()),
-                    "reply" => reply_hex = Some(hex_val.to_string()),
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    if root_hex.is_none() && reply_hex.is_none() {
-        return Ok(None);
-    }
-
-    let (root_hex, parent_hex) = match (root_hex, reply_hex) {
-        (Some(r), Some(p)) => (r, p),
-        (None, Some(p)) => (p.clone(), p),
-        (Some(_), None) | (None, None) => return Ok(None),
+    let (root_hex, parent_hex) = match markers.resolve() {
+        Some(pair) => pair,
+        None => return Ok(None),
     };
 
     let parent_bytes =
@@ -672,46 +878,18 @@ pub(crate) async fn resolve_nip10_thread_meta(
             (effective_root, root_ts, depth)
         }
         None => {
-            let parent_root = parent_event
-                .event
-                .tags
-                .iter()
-                .find_map(|t| {
-                    let parts = t.as_slice();
-                    if parts.len() >= 4 && parts[0] == "e" && parts[3] == "root" {
-                        hex::decode(&parts[1]).ok().filter(|b| b.len() == 32)
-                    } else {
-                        None
-                    }
-                })
-                .or_else(|| {
-                    parent_event.event.tags.iter().find_map(|t| {
-                        let parts = t.as_slice();
-                        if parts.len() >= 4 && parts[0] == "e" && parts[3] == "reply" {
-                            hex::decode(&parts[1]).ok().filter(|b| b.len() == 32)
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .unwrap_or_else(|| parent_bytes.clone());
+            let (parent_root, root_created, depth) = derive_ancestry_from_parent_tags(
+                community_id,
+                &parent_event.event,
+                &parent_bytes,
+                parent_created,
+                state,
+            )
+            .await;
 
             if client_root_bytes != parent_root {
                 return Err("root tag does not match thread ancestry".to_string());
             }
-            let depth = if parent_root == parent_bytes { 1 } else { 2 };
-            let root_created = if parent_root != parent_bytes {
-                if let Ok(Some(root_ev)) =
-                    state.db.get_event_by_id(community_id, &parent_root).await
-                {
-                    chrono::DateTime::from_timestamp(root_ev.event.created_at.as_secs() as i64, 0)
-                        .unwrap_or(parent_created)
-                } else {
-                    parent_created
-                }
-            } else {
-                parent_created
-            };
             (parent_root, root_created, depth)
         }
     };
@@ -735,6 +913,182 @@ pub(crate) async fn resolve_nip10_thread_meta(
         depth,
         broadcast,
     }))
+}
+
+/// Recover a reply's thread ancestry from its *parent's* NIP-10 tags when the
+/// parent has **no** `thread_metadata` row (legacy or not-yet-indexed events).
+///
+/// The parent's markers are first collapsed through `ThreadMarkers::resolve()`:
+/// a `root`+`reply` parent carries its marked root, a `reply`-only parent carries
+/// its reply target as root, and a root-only/malformed/unmarked parent is itself
+/// top-level and its own root. Depth is 1 when the parent is the root and 2
+/// otherwise — a reply to a nested-but-unindexed parent must not be mistaken for
+/// a top-level reply.
+///
+/// Shared by [`resolve_nip10_thread_meta`] (client path) and
+/// [`resolve_relay_reply_thread_meta`] (workflow path) so the two cannot
+/// diverge. Returns `(root_event_id, root_event_created_at, depth)`.
+async fn derive_ancestry_from_parent_tags(
+    community_id: CommunityId,
+    parent_event: &Event,
+    parent_bytes: &[u8],
+    parent_created: chrono::DateTime<Utc>,
+    state: &AppState,
+) -> (Vec<u8>, chrono::DateTime<Utc>, i32) {
+    let marked_ancestor = |id_hex: &str| hex::decode(id_hex).ok().filter(|b| b.len() == 32);
+    let markers = buzz_core::nip10::parse_thread_markers(&parent_event.tags);
+    let parent_root = markers
+        .resolve()
+        .map(|(root, _)| root)
+        .as_deref()
+        .and_then(marked_ancestor)
+        .unwrap_or_else(|| parent_bytes.to_vec());
+
+    if parent_root.as_slice() == parent_bytes {
+        (parent_root, parent_created, 1)
+    } else {
+        let root_created =
+            if let Ok(Some(root_ev)) = state.db.get_event_by_id(community_id, &parent_root).await {
+                chrono::DateTime::from_timestamp(root_ev.event.created_at.as_secs() as i64, 0)
+                    .unwrap_or(parent_created)
+            } else {
+                parent_created
+            };
+        (parent_root, root_created, 2)
+    }
+}
+
+/// Resolved thread ancestry for a relay-built reply (workflow path).
+///
+/// Carries the parent and root identifiers plus the reply's depth, so the
+/// caller can both emit matching NIP-10 `root`/`reply` tags and persist thread
+/// metadata for the signed reply event.
+pub(crate) struct ReplyAncestry {
+    pub parent_event_id: Vec<u8>,
+    pub parent_event_created_at: chrono::DateTime<Utc>,
+    pub root_event_id: Vec<u8>,
+    pub root_event_created_at: chrono::DateTime<Utc>,
+    pub depth: i32,
+}
+
+impl ReplyAncestry {
+    /// Root event ID as lowercase hex, for the NIP-10 `root` tag.
+    pub fn root_hex(&self) -> String {
+        hex::encode(&self.root_event_id)
+    }
+
+    /// Parent event ID as lowercase hex, for the NIP-10 `reply` tag.
+    pub fn parent_hex(&self) -> String {
+        hex::encode(&self.parent_event_id)
+    }
+
+    /// Build the DB thread-metadata params for the signed reply event.
+    pub fn into_thread_meta(
+        self,
+        reply_event_id: Vec<u8>,
+        reply_created_at: chrono::DateTime<Utc>,
+        channel_id: Uuid,
+    ) -> ThreadMetadataOwned {
+        ThreadMetadataOwned {
+            event_id: reply_event_id,
+            event_created_at: reply_created_at,
+            channel_id,
+            parent_event_id: self.parent_event_id,
+            parent_event_created_at: self.parent_event_created_at,
+            root_event_id: self.root_event_id,
+            root_event_created_at: self.root_event_created_at,
+            depth: self.depth,
+            broadcast: false,
+        }
+    }
+}
+
+/// Resolve thread ancestry for a reply built by the relay (workflow path).
+///
+/// Unlike [`resolve_nip10_thread_meta`], which validates client-supplied NIP-10
+/// `e` tags, this derives ancestry from a known `parent_hex` (the triggering
+/// event) and *computes* the correct root and depth. Enforces the same-channel
+/// invariant and the depth limit that the ingest path applies.
+pub(crate) async fn resolve_relay_reply_thread_meta(
+    community_id: CommunityId,
+    parent_hex: &str,
+    channel_id: Uuid,
+    state: &AppState,
+) -> Result<ReplyAncestry, String> {
+    let parent_bytes =
+        hex::decode(parent_hex).map_err(|_| "invalid parent event ID hex".to_string())?;
+
+    let (parent_event_result, parent_meta_result) = tokio::join!(
+        state.db.get_event_by_id(community_id, &parent_bytes),
+        state
+            .db
+            .get_thread_metadata_by_event(community_id, &parent_bytes),
+    );
+
+    let parent_event = parent_event_result
+        .map_err(|e| format!("db error looking up parent: {e}"))?
+        .ok_or_else(|| "reply parent not found".to_string())?;
+
+    match parent_event.channel_id {
+        Some(parent_ch) if parent_ch != channel_id => {
+            return Err("parent event belongs to a different channel".to_string());
+        }
+        None => return Err("parent event has no channel association".to_string()),
+        _ => {}
+    }
+
+    let parent_created =
+        chrono::DateTime::from_timestamp(parent_event.event.created_at.as_secs() as i64, 0)
+            .unwrap_or_else(Utc::now);
+
+    let parent_meta =
+        parent_meta_result.map_err(|e| format!("db error looking up thread metadata: {e}"))?;
+
+    // Root = parent's root if the parent is itself a reply, else the parent.
+    // Depth = parent depth + 1 (a direct reply to a top-level message is depth 1).
+    let (root_bytes, root_created, depth) = match parent_meta {
+        Some(meta) => {
+            let effective_root = meta.root_event_id.unwrap_or_else(|| parent_bytes.clone());
+            let root_ts = if effective_root == parent_bytes {
+                parent_created
+            } else if let Ok(Some(root_ev)) = state
+                .db
+                .get_event_by_id(community_id, &effective_root)
+                .await
+            {
+                chrono::DateTime::from_timestamp(root_ev.event.created_at.as_secs() as i64, 0)
+                    .unwrap_or(parent_created)
+            } else {
+                parent_created
+            };
+            (effective_root, root_ts, meta.depth + 1)
+        }
+        // No metadata row ⇒ recover the parent's ancestry from its own NIP-10
+        // tags. A marked (but not-yet-indexed) nested parent yields depth 2, not
+        // a false top-level depth 1.
+        None => {
+            derive_ancestry_from_parent_tags(
+                community_id,
+                &parent_event.event,
+                &parent_bytes,
+                parent_created,
+                state,
+            )
+            .await
+        }
+    };
+
+    if depth > 100 {
+        return Err("thread depth limit exceeded".to_string());
+    }
+
+    Ok(ReplyAncestry {
+        parent_event_id: parent_bytes,
+        parent_event_created_at: parent_created,
+        root_event_id: root_bytes,
+        root_event_created_at: root_created,
+        depth,
+    })
 }
 
 /// Count all `e` tags regardless of content validity.
@@ -1814,6 +2168,17 @@ async fn ingest_event_inner(
     let kind_u32 = event_kind_u32(&event);
     debug!(event_id = %event_id_hex, kind = kind_u32, "ingest_event");
 
+    // Durable community write fence: persistent ingest is a DB write the
+    // deletion engine cannot exclude via serving-write leases (those cover
+    // external side effects only), so the shared WS/HTTP seam must refuse
+    // writes once the community leaves the active lifecycle state. Row churn
+    // inside the remaining race window is swept by the destructive DB stage.
+    map_serving_fence_state(
+        buzz_deletion::store(&state.db)
+            .is_serving_active(tenant.community())
+            .await,
+    )?;
+
     if kind_u32 == KIND_AUTH {
         return Err(IngestError::Rejected(
             "invalid: AUTH events cannot be submitted".into(),
@@ -2287,6 +2652,8 @@ async fn ingest_event_inner(
         });
     }
 
+    validate_huddle_lifecycle_event(tenant, state, &event, kind_u32).await?;
+
     if crate::handlers::side_effects::is_admin_kind(kind_u32) {
         crate::handlers::side_effects::validate_admin_event(tenant, kind_u32, &event, state)
             .await
@@ -2596,6 +2963,13 @@ async fn ingest_event_inner(
         });
     }
 
+    let tenant_media_base =
+        crate::api::media::media_base_url_for_tenant(&state.config.relay_url, tenant.host());
+    if kind_u32 == KIND_STREAM_MESSAGE {
+        validate_link_preview_tags(&event, &tenant_media_base)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
     let imeta_tags: Vec<Vec<String>> = event
         .tags
         .iter()
@@ -2603,8 +2977,6 @@ async fn ingest_event_inner(
         .map(|t| t.as_slice().iter().map(|s| s.to_string()).collect())
         .collect();
     if !imeta_tags.is_empty() {
-        let tenant_media_base =
-            crate::api::media::media_base_url_for_tenant(&state.config.relay_url, tenant.host());
         crate::api::validate_imeta_tags(&imeta_tags, &tenant_media_base)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
         crate::api::verify_imeta_blobs(tenant, &imeta_tags, &state.media_storage)
@@ -2632,6 +3004,10 @@ async fn ingest_event_inner(
         return Err(IngestError::Rejected(
             "invalid: kind:0 content must be valid JSON".into(),
         ));
+    }
+
+    if kind_u32 == KIND_EMOJI_SET || kind_u32 == KIND_EMOJI_LIST {
+        validate_custom_emoji_tags(&event)?;
     }
 
     // Resolve the target reference, then use one DB transaction to upsert the
@@ -2672,17 +3048,7 @@ async fn ingest_event_inner(
             &event.content
         };
 
-        // Mirror the SDK's 64-character emoji limit server-side so raw clients
-        // cannot bypass it. Uses chars().count() (not byte len) to match the
-        // SDK's check_emoji_len, which also counts Unicode characters.
-        const MAX_REACTION_EMOJI_CHARS: usize = 64;
-        let emoji_char_count = emoji.chars().count();
-        if emoji_char_count > MAX_REACTION_EMOJI_CHARS {
-            return Err(IngestError::Rejected(format!(
-                "invalid: reaction emoji exceeds {} characters (got {})",
-                MAX_REACTION_EMOJI_CHARS, emoji_char_count
-            )));
-        }
+        validate_reaction_emoji(&event, emoji)?;
 
         // Atomically upsert the reaction row with this kind:7 event id, then store
         // the event in the same transaction. Ordering is load-bearing: active
@@ -2721,24 +3087,29 @@ async fn ingest_event_inner(
         };
 
         let pubkey_hex = auth.pubkey().to_hex();
-        // Spec WriteInsert (line 514) / WriteDuplicate (line 606): emit
-        // the abstract write action. The persist API returns
-        // `was_inserted` (true → Insert, false → Duplicate). This branch
-        // is the reaction path; channel_id is always Some here, so
-        // WriteInsertGlobal does not apply.
+        // Spec WriteInsert (line 514) / WriteDuplicate (line 606) /
+        // WriteInsertGlobal (line 559): emit the abstract write action. The
+        // persist API returns `was_inserted` (true → Insert/Global, false →
+        // Duplicate). Reactions on project events (issue/PR roots and their
+        // comments) carry no `h` tag, so `channel_id` can be `None` here —
+        // mirror the message write's three-way split instead of asserting a
+        // channel, which panicked the ingest worker on those events.
         let claimed = claimed_community_from_event(&event);
-        let action = if was_inserted {
-            TraceAction::WriteInsert {
+        let action = match (channel_id, was_inserted) {
+            (Some(ch), true) => TraceAction::WriteInsert {
                 msg_id: msg_id_label(event.id.as_bytes()),
-                channel: channel_label(channel_id.expect("reaction path has channel")),
+                channel: channel_label(ch),
                 claimed_community: claimed,
-            }
-        } else {
-            TraceAction::WriteDuplicate {
+            },
+            (Some(ch), false) => TraceAction::WriteDuplicate {
                 msg_id: msg_id_label(event.id.as_bytes()),
-                channel: channel_label(channel_id.expect("reaction path has channel")),
+                channel: channel_label(ch),
                 claimed_community: claimed,
-            }
+            },
+            (None, _) => TraceAction::WriteInsertGlobal {
+                msg_id: msg_id_label(event.id.as_bytes()),
+                claimed_community: claimed,
+            },
         };
         emit(tracer, action, state_for_request(tenant, auth.pubkey()));
         dispatch_persistent_event(
@@ -2916,6 +3287,139 @@ mod tests {
     };
     use nostr::{EventBuilder, Kind};
 
+    #[test]
+    fn missing_huddle_backing_channel_is_a_client_rejection() {
+        let channel_id = Uuid::new_v4();
+        assert!(matches!(
+            map_huddle_backing_channel_error(buzz_db::DbError::ChannelNotFound(channel_id)),
+            IngestError::Rejected(message) if message.contains("backing channel not found")
+        ));
+    }
+
+    #[test]
+    fn huddle_backing_channel_lookup_outage_is_internal() {
+        let error = sqlx::Error::Io(std::io::Error::other("database unavailable"));
+        assert!(matches!(
+            map_huddle_backing_channel_error(buzz_db::DbError::Sqlx(error)),
+            IngestError::Internal(message) if message.contains("loading Huddle backing channel")
+        ));
+    }
+
+    #[test]
+    fn huddle_backing_ttl_honors_the_ephemeral_override() {
+        assert_eq!(expected_huddle_backing_ttl(None), 3600);
+        assert_eq!(expected_huddle_backing_ttl(Some(60)), 60);
+    }
+
+    #[test]
+    fn huddle_lifecycle_requires_a_uuid_backing_channel() {
+        let event = EventBuilder::new(
+            Kind::Custom(KIND_HUDDLE_STARTED as u16),
+            r#"{"ephemeral_channel_id":"not-a-uuid"}"#,
+        )
+        .sign_with_keys(&nostr::Keys::generate())
+        .expect("sign Huddle event");
+
+        assert!(matches!(
+            huddle_backing_channel_id(&event),
+            Err(IngestError::Rejected(message)) if message.contains("must be a UUID")
+        ));
+    }
+
+    #[test]
+    fn huddle_lifecycle_extracts_the_backing_channel() {
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(
+            Kind::Custom(KIND_HUDDLE_ENDED as u16),
+            serde_json::json!({"ephemeral_channel_id": channel_id}).to_string(),
+        )
+        .sign_with_keys(&nostr::Keys::generate())
+        .expect("sign Huddle event");
+
+        assert_eq!(
+            huddle_backing_channel_id(&event).expect("channel id"),
+            channel_id
+        );
+    }
+
+    #[test]
+    fn reaction_validation_accepts_wrapped_max_shortcode() {
+        let shortcode = "a".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN);
+        let event = EventBuilder::new(Kind::Custom(KIND_REACTION as u16), format!(":{shortcode}:"))
+            .tags([
+                nostr::Tag::parse(["emoji", &shortcode, "https://example.com/max.png"])
+                    .expect("emoji tag"),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign reaction");
+
+        assert!(validate_reaction_emoji(&event, &event.content).is_ok());
+    }
+
+    #[test]
+    fn reaction_validation_rejects_mixed_case_max_shortcode() {
+        let shortcode = "Ab".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN / 2);
+        let event = EventBuilder::new(Kind::Custom(KIND_REACTION as u16), format!(":{shortcode}:"))
+            .tags([
+                nostr::Tag::parse(["emoji", &shortcode, "https://example.com/max.png"])
+                    .expect("emoji tag"),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign reaction");
+
+        assert!(matches!(
+            validate_reaction_emoji(&event, &event.content),
+            Err(IngestError::Rejected(_))
+        ));
+    }
+
+    #[test]
+    fn reaction_validation_rejects_case_mismatched_tag() {
+        let shortcode = "a".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN);
+        let uppercase_shortcode = shortcode.to_uppercase();
+        let event = EventBuilder::new(Kind::Custom(KIND_REACTION as u16), format!(":{shortcode}:"))
+            .tags([nostr::Tag::parse([
+                "emoji",
+                &uppercase_shortcode,
+                "https://example.com/max.png",
+            ])
+            .expect("emoji tag")])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign reaction");
+
+        assert!(matches!(
+            validate_reaction_emoji(&event, &event.content),
+            Err(IngestError::Rejected(_))
+        ));
+    }
+
+    #[test]
+    fn emoji_set_validation_enforces_shortcode_boundary() {
+        let max_shortcode = "a".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN);
+        let valid_event = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET as u16), "")
+            .tags([
+                nostr::Tag::parse(["emoji", &max_shortcode, "https://example.com/max.png"])
+                    .expect("emoji tag"),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign valid emoji set");
+        assert!(validate_custom_emoji_tags(&valid_event).is_ok());
+
+        let shortcode = "a".repeat(buzz_sdk::MAX_CUSTOM_EMOJI_SHORTCODE_LEN + 1);
+        let event = EventBuilder::new(Kind::Custom(KIND_EMOJI_SET as u16), "")
+            .tags([
+                nostr::Tag::parse(["emoji", &shortcode, "https://example.com/long.png"])
+                    .expect("emoji tag"),
+            ])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign emoji set");
+
+        assert!(matches!(
+            validate_custom_emoji_tags(&event),
+            Err(IngestError::Rejected(message)) if message.contains("exceeds 64 bytes")
+        ));
+    }
+
     /// A banned relay admin must be refused with the same wire prefix and
     /// transport status as every other durable-restriction refusal:
     /// `blocked:` and (via `bridge.rs`'s `AuthFailed` arm) HTTP 403 — never
@@ -2969,6 +3473,123 @@ mod tests {
             other => {
                 panic!("restriction DB failure must map to Internal (HTTP 500), got {other:?}")
             }
+        }
+    }
+
+    /// An active community passes the durable write fence untouched.
+    #[test]
+    fn serving_fence_active_community_admits_write() {
+        assert!(map_serving_fence_state(Ok(true)).is_ok());
+    }
+
+    /// A fenced/tombstoned/archived community is an authorization decision:
+    /// `restricted:` and (via `bridge.rs`) HTTP 400 — with the exact wire text
+    /// the ephemeral WS path uses, so clients see one refusal vocabulary.
+    #[test]
+    fn serving_fence_inactive_community_maps_to_restricted() {
+        match map_serving_fence_state(Ok(false)) {
+            Err(IngestError::Rejected(msg)) => {
+                assert_eq!(msg, "restricted: community writes are fenced");
+            }
+            other => panic!("fenced community must map to Rejected, got {other:?}"),
+        }
+    }
+
+    /// A fence-lookup outage is a server fault and must fail closed as
+    /// `error:`/500 — a Postgres blip can neither admit a write past the
+    /// fence nor be reported to an innocent client as a bad request.
+    #[test]
+    fn serving_fence_lookup_outage_fails_closed_as_internal() {
+        let outage = buzz_db::DbError::Sqlx(sqlx::Error::PoolTimedOut);
+        match map_serving_fence_state(Err(outage)) {
+            Err(IngestError::Internal(msg)) => {
+                assert!(
+                    msg.starts_with("error: "),
+                    "fence outages need the `error:` NIP-01 prefix, got {msg:?}"
+                );
+            }
+            other => panic!("fence lookup failure must map to Internal, got {other:?}"),
+        }
+    }
+
+    /// Production-path regression: the exact predicate `ingest_event_inner`
+    /// consults must admit writes while a community is active and refuse them
+    /// once the community deletion lifecycle fences it.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ingest_write_fence_follows_community_deletion_lifecycle() {
+        use buzz_db::deletion::{
+            FrozenInventory, KeyStreamDigest, PrefixManifest, StorageManifest,
+            DEFAULT_LEASE_DURATION,
+        };
+
+        let url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
+        let pool = sqlx::PgPool::connect(&url).await.expect("connect test DB");
+        let db = buzz_db::Db::from_pool(pool);
+        db.migrate().await.expect("migrate test DB");
+        let store = buzz_deletion::store(&db);
+
+        let host = format!("lane3-fence-{}.example", Uuid::new_v4().simple());
+        let community = db
+            .ensure_configured_community(&host)
+            .await
+            .expect("community")
+            .id;
+
+        assert!(
+            map_serving_fence_state(store.is_serving_active(community).await).is_ok(),
+            "active community must admit persistent ingest"
+        );
+
+        let submitted = store
+            .submit(
+                &host,
+                "test-operator",
+                Some("lane3 ingest fence regression"),
+            )
+            .await
+            .expect("submit");
+        let inventory = FrozenInventory {
+            schema: store
+                .inventory_schema(community)
+                .await
+                .expect("schema inventory"),
+            storage: StorageManifest {
+                version: 4,
+                prefixes: buzz_media::tenant_prefixes(*community.as_uuid())
+                    .into_iter()
+                    .map(|prefix| PrefixManifest {
+                        prefix,
+                        object_count: 0,
+                        total_bytes: 0,
+                        keys_digest: KeyStreamDigest::new().finish().0,
+                    })
+                    .collect(),
+            },
+        };
+        let request = store
+            .freeze_inventory(submitted.id, &inventory)
+            .await
+            .expect("freeze inventory");
+        store
+            .approve(request.id, "approver", None)
+            .await
+            .expect("approve");
+        let claim = store
+            .claim_specific(request.id, "executor", DEFAULT_LEASE_DURATION)
+            .await
+            .expect("claim")
+            .expect("won claim");
+        store.begin_quiescing(&claim.lease).await.expect("quiesce");
+        store.fence(&claim.lease).await.expect("fence");
+
+        match map_serving_fence_state(store.is_serving_active(community).await) {
+            Err(IngestError::Rejected(msg)) => {
+                assert_eq!(msg, "restricted: community writes are fenced");
+            }
+            other => panic!("fenced community must refuse persistent ingest, got {other:?}"),
         }
     }
 
@@ -3214,6 +3835,17 @@ mod tests {
                 "kind {kind} is both global-only and channel-scoped"
             );
         }
+    }
+
+    #[test]
+    fn private_managed_agent_kind_is_owner_scoped_global_user_data() {
+        let event = make_dummy_event();
+        assert_eq!(
+            required_scope_for_kind(KIND_PRIVATE_MANAGED_AGENT, &event),
+            Ok(Scope::UsersWrite)
+        );
+        assert!(is_global_only_kind(KIND_PRIVATE_MANAGED_AGENT));
+        assert!(!requires_h_channel_scope(KIND_PRIVATE_MANAGED_AGENT));
     }
 
     #[test]
@@ -3496,6 +4128,109 @@ mod tests {
             ],
         );
         assert!(validate_diff_event(&event).is_err());
+    }
+
+    #[test]
+    fn link_preview_suppression_accepts_blanket_marker() {
+        let event = make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "https://example.com",
+            &[&["link-preview", "none"]],
+        );
+
+        assert!(validate_link_preview_tags(&event, "https://media.example.com").is_ok());
+    }
+
+    #[test]
+    fn link_preview_suppression_rejects_duplicate_marker() {
+        let event = make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "https://example.com",
+            &[&["link-preview", "none"], &["link-preview", "none"]],
+        );
+
+        assert_eq!(
+            validate_link_preview_tags(&event, "https://media.example.com"),
+            Err("link-preview suppression cannot include snapshots".into())
+        );
+    }
+
+    #[test]
+    fn link_preview_suppression_rejects_mixed_snapshot_tags_in_either_order() {
+        let snapshot = [
+            "link-preview",
+            "snapshot",
+            "1",
+            "https://example.com",
+            "Example",
+            "Example",
+            "Description",
+            "",
+            "",
+            "",
+            "",
+        ];
+        for tags in [
+            vec![&["link-preview", "none"][..], &snapshot[..]],
+            vec![&snapshot[..], &["link-preview", "none"][..]],
+        ] {
+            let event = make_event_with_tags(KIND_STREAM_MESSAGE, "https://example.com", &tags);
+            assert!(validate_link_preview_tags(&event, "https://media.example.com").is_err());
+        }
+    }
+
+    fn make_link_preview_event(title: &str, site: &str, description: &str) -> Event {
+        make_event_with_tags(
+            KIND_STREAM_MESSAGE,
+            "https://example.com",
+            &[&[
+                "link-preview",
+                "snapshot",
+                "1",
+                "https://example.com",
+                title,
+                site,
+                description,
+                "",
+                "",
+                "",
+                "",
+            ]],
+        )
+    }
+
+    #[test]
+    fn link_preview_snapshot_accepts_description_newlines() {
+        let event = make_link_preview_event(
+            "Example title",
+            "Example site",
+            "First paragraph\n\nSecond paragraph",
+        );
+
+        assert!(validate_link_preview_tags(&event, "https://media.example.com").is_ok());
+    }
+
+    #[test]
+    fn link_preview_snapshot_rejects_title_and_site_newlines() {
+        for (title, site) in [
+            ("Example\ntitle", "Example site"),
+            ("Example title", "Example\nsite"),
+        ] {
+            let event = make_link_preview_event(title, site, "Description");
+            assert!(validate_link_preview_tags(&event, "https://media.example.com").is_err());
+        }
+    }
+
+    #[test]
+    fn link_preview_snapshot_rejects_non_newline_controls_in_all_text_fields() {
+        for (title, site, description) in [
+            ("Example\ttitle", "Example site", "Description"),
+            ("Example title", "Example\rsite", "Description"),
+            ("Example title", "Example site", "Unsafe\tdescription"),
+        ] {
+            let event = make_link_preview_event(title, site, description);
+            assert!(validate_link_preview_tags(&event, "https://media.example.com").is_err());
+        }
     }
 
     fn make_dummy_event() -> Event {

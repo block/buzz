@@ -32,7 +32,6 @@ async function openCreateDialog(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "Create agent" }).click();
   await page.locator("#persona-display-name").fill("Test Agent");
 }
 
@@ -213,32 +212,28 @@ test.describe("global agent config screenshots", () => {
 
     await openAiDefaultsSettings(page);
 
-    const harness = page.getByTestId("global-agent-default-harness");
+    const defaultsCard = page.locator(
+      '[data-testid="settings-global-agent-config"]:visible',
+    );
+    const harness = defaultsCard.getByTestId("global-agent-default-harness");
+    await expect(defaultsCard).toHaveCount(1);
     await expect(harness).toHaveText("Claude Code");
     await expect(page.getByText("Provider", { exact: true })).toHaveCount(0);
-    await expect(page.locator("#global-agent-model")).toBeVisible();
+    await expect(defaultsCard.locator("#global-agent-model")).toBeVisible();
 
-    // Make the form dirty, then return to Claude with no model override. The
-    // harness-native default keeps the now-actionable Save button enabled.
     await harness.press("Enter");
     await page.getByTestId("global-agent-default-harness-option-codex").click();
-    await harness.press("Enter");
-    await page
-      .getByTestId("global-agent-default-harness-option-claude")
-      .click();
-    await expect(page.getByTestId("global-agent-model")).toHaveText(
-      /Default model/,
+    await waitForAnimations(page);
+    const model = defaultsCard.locator(
+      '[data-testid="global-agent-model"]:visible',
     );
-    await expect(
-      page.getByRole("button", { name: "Save defaults" }),
-    ).toBeEnabled();
-
-    await harness.press("Enter");
-    await page.getByTestId("global-agent-default-harness-option-codex").click();
-    const model = page.getByTestId("global-agent-model");
+    await expect(model).toHaveCount(1);
     await model.click();
     await page.getByTestId("global-agent-model-option-gpt-5.5[high]").click();
-    await page.getByRole("button", { name: "Save defaults" }).click();
+    await defaultsCard
+      .getByRole("button", { name: "Save defaults" })
+      .filter({ visible: true })
+      .click();
 
     const saved = await page.evaluate(async () =>
       (
@@ -712,7 +707,6 @@ test.describe("global agent config screenshots", () => {
     await page.goto("/");
     await page.getByTestId("open-agents-view").click();
     await page.getByTestId("new-agent-card").click();
-    await page.getByRole("menuitem", { name: "Create agent" }).click();
 
     await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
       timeout: 10_000,
@@ -979,5 +973,45 @@ test.describe("global agent config screenshots", () => {
     await dialog.screenshot({
       path: `${SHOTS}/11-edit-runtime-less-provider-required-save-blocked.png`,
     });
+  });
+
+  // Will's exact stuck path: databricks_v2 global provider + saved global
+  // OPENAI_API_KEY.  The cue must be visible without opening Advanced; once
+  // Advanced is opened the annotation must appear on the matching row.
+  test("card-mint-key-cue-visible-and-annotation-in-advanced", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      globalAgentConfig: {
+        provider: "databricks_v2",
+        model: null,
+        preferred_runtime: "buzz-agent",
+        env_vars: { OPENAI_API_KEY: "sk-placeholder" },
+      },
+    });
+
+    await openAiDefaultsSettings(page);
+
+    const card = page.getByTestId("settings-global-agent-config");
+
+    // The cue must be visible without the user opening Advanced.
+    await expect(card.getByTestId("card-mint-key-cue")).toBeVisible();
+    await expect(card.getByTestId("card-mint-key-cue")).toContainText(
+      "OPENAI_API_KEY",
+    );
+    await expect(card.getByTestId("card-mint-key-cue")).toContainText(
+      "Advanced → Environment variables",
+    );
+
+    // Advanced is collapsed at this point.
+    const advancedToggle = card.getByTestId("global-agent-advanced-toggle");
+    await expect(advancedToggle).toHaveAttribute("aria-expanded", "false");
+
+    // Open Advanced — the OPENAI_API_KEY row's annotation must be visible.
+    await advancedToggle.click();
+    await expect(advancedToggle).toHaveAttribute("aria-expanded", "true");
+    await expect(
+      card.getByText("Used for minting agent trading cards"),
+    ).toBeVisible();
   });
 });

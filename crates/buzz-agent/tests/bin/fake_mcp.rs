@@ -12,6 +12,7 @@
 //!                              (use a large value, e.g. 999, to simulate hang)
 //!   FAKE_MCP_RESULT_SIZE=N   — `tools/call` returns an N-byte text result
 //!                              (default: the literal "ok"); grows history
+//!   FAKE_MCP_IMAGE_RESULT=1  — `tools/call` returns text plus a PNG image block
 //!   FAKE_MCP_PID_FILE=path   — write the child PID to `path` on startup
 //!                              (for tests that want to verify the child died)
 //!   FAKE_MCP_SPAWN_GRANDCHILD=1
@@ -22,6 +23,12 @@
 //!                              tree dies on timeout.
 //!   FAKE_MCP_GRANDCHILD_PID_FILE=path
 //!                            — path to write the grandchild PID to.
+//!   FAKE_MCP_CANCEL_LOG=path — append each `notifications/cancelled` frame to
+//!                              `path` (one JSON line per notification).
+//!   FAKE_MCP_CALL_LOG=path    — append the tool name of each `tools/call` to
+//!                              `path` (one name per line). Lets a test assert
+//!                              a tool was invoked exactly once, or never — the
+//!                              permission gate's core proof.
 //!   FAKE_MCP_STOP_HOOK=1     — expose a `_Stop` hook tool
 //!   FAKE_MCP_STOP_TEXT=text  — `_Stop` returns this text (default: "keep going")
 //!   FAKE_MCP_STOP_DELAY=N    — `_Stop` sleeps N seconds before replying
@@ -38,6 +45,11 @@
 //!                              `command` string. Lets a test drive the
 //!                              reply guard's recognition of a real,
 //!                              registered shell tool.
+//!   FAKE_MCP_NAMED_TOOLS=a,b — expose one no-arg tool per comma-separated bare
+//!                              name (each registered as `<server>__<name>`), in
+//!                              addition to any `FAKE_MCP_TOOL_COUNT` tools. Lets
+//!                              a test issue parallel calls to distinctly named
+//!                              tools and tell them apart in `FAKE_MCP_CALL_LOG`.
 
 use std::io::{BufRead, Write};
 
@@ -82,6 +94,7 @@ fn make_tools(
     include_stop_hook: bool,
     include_post_compact_hook: bool,
     include_shell_tool: bool,
+    named_tools: &[String],
 ) -> Vec<Value> {
     let mut tools: Vec<Value> = (0..count)
         .map(|i| {
@@ -92,6 +105,13 @@ fn make_tools(
             })
         })
         .collect();
+    for name in named_tools {
+        tools.push(json!({
+            "name": name,
+            "description": "named test tool",
+            "inputSchema": { "type": "object", "properties": {} },
+        }));
+    }
     if include_stop_hook {
         tools.push(json!({
             "name": "_Stop",
@@ -155,6 +175,14 @@ fn main() {
     let post_compact_hook = env_flag("FAKE_MCP_POSTCOMPACT_HOOK");
     let shell_tool = env_flag("FAKE_MCP_SHELL_TOOL");
     let post_compact_text = std::env::var("FAKE_MCP_POSTCOMPACT_TEXT").unwrap_or_default();
+    // One extra no-arg tool per comma-separated bare name.
+    let named_tools: Vec<String> = std::env::var("FAKE_MCP_NAMED_TOOLS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
 
     // Use a channel-based stdin reader so notifications (which carry no id)
     // are captured even while the main thread is sleeping during a tool call.
@@ -230,6 +258,7 @@ fn main() {
                             stop_hook,
                             post_compact_hook,
                             shell_tool,
+                            &named_tools,
                         )
                     }),
                 );
@@ -247,6 +276,21 @@ fn main() {
                     .and_then(|p| p.get("name"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
+                // Append every invoked tool name so a test can prove a call
+                // reached the server exactly once (or never). This fires for
+                // ALL tools/call, including `_Stop`/`_PostCompact` hooks, so a
+                // test can also prove hooks are NOT permission-gated by
+                // observing they still reach the server without an ask.
+                if let Ok(path) = std::env::var("FAKE_MCP_CALL_LOG") {
+                    use std::io::Write as _;
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)
+                    {
+                        let _ = writeln!(f, "{called_name}");
+                    }
+                }
                 // Optionally spawn a long-sleeping grandchild so the test
                 // can verify process-group killing reaches the whole tree.
                 if env_flag("FAKE_MCP_SPAWN_GRANDCHILD") {
@@ -300,10 +344,18 @@ fn main() {
                 } else {
                     "ok".to_owned()
                 };
+                let content = if env_flag("FAKE_MCP_IMAGE_RESULT") {
+                    json!([
+                        { "type": "text", "text": result_text },
+                        { "type": "image", "data": "aW1n", "mimeType": "image/png" },
+                    ])
+                } else {
+                    json!([{ "type": "text", "text": result_text }])
+                };
                 write_response(
                     id,
                     json!({
-                        "content": [{ "type": "text", "text": result_text }],
+                        "content": content,
                         "isError": false,
                     }),
                 );

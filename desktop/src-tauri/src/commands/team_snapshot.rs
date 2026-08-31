@@ -133,6 +133,7 @@ fn definition_from_snapshot(
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: Default::default(),
         respond_to,
         respond_to_allowlist: behavior.respond_to_allowlist,
@@ -172,6 +173,11 @@ pub(crate) fn build_import_team(
         persona_ids,
         instructions: snapshot.team.instructions.clone(),
         is_builtin: false,
+        // An imported team starts unshared; sharing is an explicit choice.
+        shared: false,
+        // A snapshot import is not a catalog add — there is no publication
+        // coordinate to point back to.
+        catalog_source: None,
         source_dir: None,
         is_symlink: false,
         symlink_target: None,
@@ -579,6 +585,7 @@ pub async fn confirm_team_snapshot_import(
             runtime_pid: None,
             backend: crate::managed_agents::BackendKind::Local,
             backend_agent_id: None,
+            provider_policy_pending: false,
             provider_binary_path: None,
             team_id: Some(imported_team.id.clone()),
             persona_team_dir: None,
@@ -605,10 +612,12 @@ pub async fn confirm_team_snapshot_import(
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
+            team_catalog_source: None,
             definition_respond_to: respond_to_wire.clone(),
             definition_respond_to_allowlist: definition.respond_to_allowlist.clone(),
             definition_parallelism: minted_parallelism,
             relay_mesh: None,
+            effort_level: None,
             runtime: member.definition.runtime.clone(),
             name_pool: member.definition.name_pool.clone(),
         };

@@ -63,6 +63,9 @@ fn agent(persona_id: &str, name: &str, respond_to: RespondTo) -> ManagedAgentRec
         definition_respond_to_allowlist: vec![],
         definition_parallelism: None,
         relay_mesh: None,
+        effort_level: None,
+        provider_policy_pending: false,
+        team_catalog_source: None,
     }
 }
 
@@ -92,6 +95,7 @@ fn persona(
         parallelism,
         created_at: String::new(),
         updated_at: String::new(),
+        team_catalog_source: None,
     }
 }
 

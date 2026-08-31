@@ -728,6 +728,27 @@ impl BuzzClient {
         self.query_pages(filter, None).await
     }
 
+    /// Query a filter exhaustively up to `max_events`.
+    ///
+    /// One extra event is requested so reaching the bound is reported as
+    /// truncation instead of being mistaken for authoritative absence.
+    pub async fn query_all_bounded(
+        &self,
+        filter: serde_json::Value,
+        max_events: u32,
+    ) -> Result<Vec<serde_json::Value>, CliError> {
+        let probe_limit = max_events
+            .checked_add(1)
+            .ok_or_else(|| CliError::Other("query bound is too large".into()))?;
+        let events = self.query_pages(filter, Some(probe_limit)).await?;
+        if events.len() > max_events as usize {
+            return Err(CliError::Other(format!(
+                "query exceeded the exhaustive {max_events}-event bound; narrow the query or retry"
+            )));
+        }
+        Ok(events)
+    }
+
     /// Sign an event builder verbatim: no NIP-OA auth-tag injection, and none
     /// of [`sign_event`]'s "callers must not add auth tags" enforcement.
     ///
@@ -1302,20 +1323,24 @@ fn to_ws_url(http_url: &str) -> String {
         .replace("http://", "ws://")
 }
 
-/// Normalize raw event JSON array into consistent shape.
-/// Each event becomes: {id, pubkey, kind, content, created_at, tags}
+/// Normalize raw event JSON array into the canonical Nostr event shape.
+/// String signatures are preserved; absent or non-string signatures remain absent.
 pub fn normalize_events(events: &[serde_json::Value]) -> String {
     let normalized: Vec<serde_json::Value> = events
         .iter()
         .map(|e| {
-            serde_json::json!({
+            let mut event = serde_json::json!({
                 "id": e.get("id").and_then(|v| v.as_str()).unwrap_or(""),
                 "pubkey": e.get("pubkey").and_then(|v| v.as_str()).unwrap_or(""),
                 "kind": e.get("kind").and_then(|v| v.as_u64()).unwrap_or(0),
                 "content": e.get("content").and_then(|v| v.as_str()).unwrap_or(""),
                 "created_at": e.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0),
                 "tags": e.get("tags").cloned().unwrap_or(serde_json::json!([])),
-            })
+            });
+            if let Some(sig) = e.get("sig").and_then(|v| v.as_str()) {
+                event["sig"] = serde_json::json!(sig);
+            }
+            event
         })
         .collect();
     serde_json::to_string(&normalized).unwrap_or_default()
@@ -1387,19 +1412,25 @@ pub fn extract_p_tags(event: &serde_json::Value) -> Vec<serde_json::Value> {
         .unwrap_or_default()
 }
 
-/// Return a create-command response with an entity ID injected.
-pub fn create_response_with_id(resp: &str, id_key: &str, id_val: &str) -> String {
+/// Return a create-command response, injecting the entity ID **only** when the
+/// relay accepted the event (`"accepted": true`). When the relay rejected the
+/// event, emitting the locally-computed link would be misleading — callers
+/// that copy or share the link would reference an event that was never stored.
+pub fn create_response_with_id_if_accepted(resp: &str, id_key: &str, id_val: &str) -> String {
     let mut v: serde_json::Value = serde_json::from_str(resp).unwrap_or(serde_json::json!({}));
-    v[id_key] = serde_json::json!(id_val);
-    if v.get("accepted").is_none() {
-        v["accepted"] = serde_json::json!(true);
+    let accepted = v.get("accepted").and_then(|a| a.as_bool()).unwrap_or(false);
+    if accepted {
+        v[id_key] = serde_json::json!(id_val);
     }
     v.to_string()
 }
 
 /// Print a create-command response, injecting the generated entity ID.
 pub fn print_create_response(resp: &str, id_key: &str, id_val: &str) {
-    println!("{}", create_response_with_id(resp, id_key, id_val));
+    println!(
+        "{}",
+        create_response_with_id_if_accepted(resp, id_key, id_val)
+    );
 }
 
 /// Extract a JSON field from relay write response messages shaped as
@@ -2297,9 +2328,42 @@ mod retry_policy_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_query_cursor, create_response_with_id, extract_relay_response_field, BuzzClient,
+        advance_query_cursor, create_response_with_id_if_accepted, extract_relay_response_field,
+        normalize_events, BuzzClient,
     };
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn normalize_events_preserves_the_complete_signed_event_shape() {
+        let signed_event = EventBuilder::new(Kind::TextNote, "signed content")
+            .tags([Tag::parse(["h", "channel-id"]).unwrap()])
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let mut event = serde_json::to_value(&signed_event).unwrap();
+        event["relay_internal"] = serde_json::json!("excluded");
+
+        let output: Vec<serde_json::Value> =
+            serde_json::from_str(&normalize_events(&[event])).unwrap();
+        let normalized = &output[0];
+        let round_tripped: nostr::Event = serde_json::from_value(normalized.clone()).unwrap();
+
+        assert_eq!(round_tripped, signed_event);
+        round_tripped.verify().unwrap();
+        assert!(normalized.get("sig").is_some());
+        assert!(normalized.get("relay_internal").is_none());
+    }
+
+    #[test]
+    fn normalize_events_omits_missing_or_non_string_signatures() {
+        let output: Vec<serde_json::Value> = serde_json::from_str(&normalize_events(&[
+            serde_json::json!({}),
+            serde_json::json!({"sig": 42}),
+        ]))
+        .unwrap();
+
+        assert!(output[0].get("sig").is_none());
+        assert!(output[1].get("sig").is_none());
+    }
 
     #[test]
     fn query_cursor_uses_last_events_composite_sort_key() {
@@ -2345,13 +2409,28 @@ mod tests {
     }
 
     #[test]
-    fn create_response_with_id_overrides_local_id_with_relay_id() {
+    fn create_response_with_id_if_accepted_injects_id_when_accepted() {
         let raw = r#"{"event_id":"abc","accepted":true,"message":"response:{\"workflow_id\":\"relay-id\"}"}"#;
-        let out = create_response_with_id(raw, "workflow_id", "relay-id");
+        let out = create_response_with_id_if_accepted(raw, "workflow_id", "relay-id");
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        // ID injected and original fields preserved when accepted.
         assert_eq!(v["workflow_id"].as_str(), Some("relay-id"));
         assert_eq!(v["event_id"].as_str(), Some("abc"));
         assert_eq!(v["accepted"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn create_response_with_id_if_accepted_omits_id_when_rejected() {
+        let raw = r#"{"event_id":"abc","accepted":false,"message":"duplicate"}"#;
+        let out = create_response_with_id_if_accepted(raw, "workflow_id", "local-id");
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        // ID must not be present when relay rejected the event; emitting a
+        // link to an event that was never stored would mislead callers.
+        assert!(
+            v.get("workflow_id").is_none(),
+            "link field must be absent on rejected create"
+        );
+        assert_eq!(v["accepted"].as_bool(), Some(false));
     }
 
     // --- (a) auth-suppression regression pair ---

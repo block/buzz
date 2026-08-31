@@ -1,7 +1,106 @@
-import type { DraftMentionRef } from "./useDrafts";
-
+import { hasMention } from "@/features/messages/lib/hasMention";
+import { imetaMediaFromTags } from "@/features/messages/lib/imetaMediaMarkdown";
+import { isThreadReply } from "@/features/messages/lib/threading";
+import type { DraftMentionRef } from "@/features/messages/lib/useDrafts";
+import type { TimelineMessage } from "@/features/messages/types";
+import type { MessageComposerEditTarget } from "@/features/messages/ui/MessageComposer.types";
+import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { hasMention } from "./hasMention";
+import {
+  getMentionTagPubkey,
+  resolveMentionProps,
+} from "@/shared/lib/resolveMentionNames";
+
+export function resolveEditMentionRefs(
+  content: string,
+  tags: string[][] | undefined,
+  profiles: UserProfileLookup | undefined,
+  isAgentPubkey: (pubkey: string) => boolean,
+): DraftMentionRef[] {
+  const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
+    tags,
+    profiles,
+  );
+  const refs = (mentionNames ?? [])
+    .filter((displayName) => hasMention(content, displayName))
+    .flatMap((displayName) => {
+      const pubkey = mentionPubkeysByName?.[displayName.toLowerCase()];
+      return pubkey
+        ? [
+            {
+              displayName,
+              pubkey,
+              isAgent: isAgentPubkey(normalizePubkey(pubkey)),
+            },
+          ]
+        : [];
+    });
+  return refs;
+}
+
+function unresolvedEditMentionPubkeys(
+  content: string,
+  tags: string[][] | undefined,
+  refs: readonly DraftMentionRef[],
+): string[] {
+  if (!content.includes("@")) {
+    return [];
+  }
+
+  const resolved = new Set(refs.map((ref) => normalizePubkey(ref.pubkey)));
+  return [
+    ...new Set(
+      (tags ?? [])
+        .map(getMentionTagPubkey)
+        .filter((pubkey): pubkey is string => Boolean(pubkey))
+        .map(normalizePubkey)
+        .filter((pubkey) => pubkey && !resolved.has(pubkey)),
+    ),
+  ];
+}
+
+export function buildEditMentionState(
+  content: string,
+  tags: string[][] | undefined,
+  profiles: UserProfileLookup | undefined,
+  isAgentPubkey: (pubkey: string) => boolean,
+): Pick<MessageComposerEditTarget, "mentionRefs" | "unresolvedMentionPubkeys"> {
+  const mentionRefs = resolveEditMentionRefs(
+    content,
+    tags,
+    profiles,
+    isAgentPubkey,
+  );
+  return {
+    mentionRefs,
+    unresolvedMentionPubkeys: unresolvedEditMentionPubkeys(
+      content,
+      tags,
+      mentionRefs,
+    ),
+  };
+}
+
+export function buildMessageComposerEditTarget(
+  message: TimelineMessage,
+  profiles: UserProfileLookup | undefined,
+  isAgentPubkey: (pubkey: string) => boolean,
+): MessageComposerEditTarget {
+  const mentionState = buildEditMentionState(
+    message.body,
+    message.tags,
+    profiles,
+    isAgentPubkey,
+  );
+  return {
+    author: message.author,
+    body: message.body,
+    id: message.id,
+    isThreadReply: isThreadReply(message.tags ?? []),
+    imetaMedia: imetaMediaFromTags(message.tags),
+    ...mentionState,
+  };
+}
 
 export function snapshotDraftMentionRefs(
   content: string,

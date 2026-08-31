@@ -30,7 +30,6 @@ type HuddleAttachmentProps = {
   channelId: string | null;
   className?: string;
   message: TimelineMessage;
-  onOpenThread?: (message: TimelineMessage) => void;
 };
 
 type HuddleLifecycleState = {
@@ -118,13 +117,18 @@ export function HuddleAttachment({
   channelId,
   className,
   message,
-  onOpenThread,
 }: HuddleAttachmentProps) {
   const ephemeralChannelId = React.useMemo(
     () => parseEphemeralChannelId(message.body),
     [message.body],
   );
-  const { activeEphemeralChannelId, isStarting, joinHuddle } = useHuddle();
+  const {
+    activeEphemeralChannelId,
+    isStarting,
+    joinHuddle,
+    showHuddleInMainApp,
+    viewHuddleChannel,
+  } = useHuddle();
   const queryClient = useQueryClient();
   const [isJoining, setIsJoining] = React.useState(false);
   const [lifecycleState, setLifecycleState] =
@@ -219,7 +223,7 @@ export function HuddleAttachment({
     if (!channelId || !ephemeralChannelId || isJoining || isStarting) return;
     setIsJoining(true);
     try {
-      await joinHuddle(channelId, ephemeralChannelId);
+      await joinHuddle(channelId, ephemeralChannelId, message.id);
       void queryClient.invalidateQueries({ queryKey: ["channels"] });
     } catch (error) {
       toast.error(formatHuddleActionError(error, "join"));
@@ -284,16 +288,22 @@ export function HuddleAttachment({
             <Headphones className="h-4 w-4" />
             {isJoining || isStarting ? "Joining" : "Join"}
           </AttachmentAction>
-        ) : onOpenThread ? (
+        ) : isCurrentHuddle || displayEnded ? (
           <AttachmentAction
-            aria-label="View huddle thread"
-            onClick={() => onOpenThread(message)}
+            aria-label="View huddle"
+            onClick={() => {
+              if (isCurrentHuddle) {
+                showHuddleInMainApp(ephemeralChannelId);
+                return;
+              }
+              viewHuddleChannel(ephemeralChannelId);
+            }}
             size="sm"
             type="button"
             variant="ghost"
           >
             <MessageSquareText className="h-4 w-4" />
-            View thread
+            View
           </AttachmentAction>
         ) : null}
       </AttachmentActions>

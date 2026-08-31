@@ -14,6 +14,24 @@ const sizeClasses: Record<UserAvatarSize, string> = {
   md: "h-9 w-9 text-xs",
 };
 
+const fallbackColorClasses = [
+  "bg-blue-500 text-white",
+  "bg-emerald-500 text-white",
+  "bg-amber-400 text-amber-950",
+  "bg-rose-500 text-white",
+  "bg-cyan-400 text-cyan-950",
+  "bg-violet-500 text-white",
+  "bg-orange-500 text-white",
+] as const;
+
+function fallbackColorClass(displayName: string) {
+  const hash = Array.from(displayName.trim().toLowerCase()).reduce(
+    (value, character) => (value * 31 + (character.codePointAt(0) ?? 0)) >>> 0,
+    0,
+  );
+  return fallbackColorClasses[hash % fallbackColorClasses.length];
+}
+
 type UserAvatarProps = {
   avatarUrl: string | null;
   displayName: string;
@@ -49,6 +67,7 @@ export function UserAvatar({
       // Animated avatars carry their own backdrop disc and transparent
       // surroundings — any container fill would flatten the pop-out.
       className={cn(sizeClasses[size], !animated && "shadow-xs", className)}
+      data-testid={testId}
       onMouseEnter={animated ? () => setIsHovered(true) : undefined}
       onMouseLeave={animated ? () => setIsHovered(false) : undefined}
     >
@@ -66,7 +85,7 @@ export function UserAvatar({
           "font-semibold",
           accent
             ? "bg-primary text-primary-foreground"
-            : "bg-secondary text-secondary-foreground",
+            : fallbackColorClass(displayName),
         )}
         data-testid={testId ? `${testId}-fallback` : undefined}
         delayMs={fallbackDelayMs}

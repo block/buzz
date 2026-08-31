@@ -7,6 +7,7 @@ import {
   countUnreadBadgeObservedEvents,
   countUnreadHighPriorityObservedEvents,
   countUnreadObservedEvents,
+  hasUnreadTopLevelObservedEvent,
   observedUnreadEventReadAt,
   recordObservedUnreadEvent,
 } from "./unreadChannelCounts.ts";
@@ -366,6 +367,30 @@ test("countUnreadObservedEvents_topLevelUsesChannelMarker", () => {
   ]);
 
   assert.equal(countUnreadObservedEvents(events, readAtFor(300, new Map())), 1);
+});
+
+test("hasUnreadTopLevelObservedEvent_ignoresUnreadThreadReplies", () => {
+  const events = new Map([
+    ["top-old", observed("top-old", 250)],
+    ["thread-new", observed("thread-new", 500, "root-1")],
+  ]);
+
+  assert.equal(
+    hasUnreadTopLevelObservedEvent(events, readAtFor(300, new Map())),
+    false,
+  );
+});
+
+test("hasUnreadTopLevelObservedEvent_detectsUnreadTopLevelMessage", () => {
+  const events = new Map([
+    ["top-new", observed("top-new", 350)],
+    ["thread-new", observed("thread-new", 500, "root-1")],
+  ]);
+
+  assert.equal(
+    hasUnreadTopLevelObservedEvent(events, readAtFor(300, new Map())),
+    true,
+  );
 });
 
 test("countUnreadBadgeObservedEvents_skipsBoldOnlyGeneralChannelItems", () => {
