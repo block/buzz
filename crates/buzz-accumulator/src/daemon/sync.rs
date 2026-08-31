@@ -205,7 +205,12 @@ async fn backfill(
     registry: &StatusRegistry,
 ) -> anyhow::Result<()> {
     let channels = store.channels().await?;
-    for ch in channels.iter().filter(|c| c.active && !c.backfill_done) {
+    for ch in channels.iter().filter(|c| c.active) {
+        if ch.backfill_done {
+            // Already complete in a prior run; reflect that in status.
+            registry.channel(&ch.id, |c| c.backfill = "done".into());
+            continue;
+        }
         let mut cursor = ch
             .backfill_cursor
             .unwrap_or_else(|| chrono::Utc::now().timestamp());
@@ -345,9 +350,8 @@ async fn live_tail(
     let channels = store.channels().await?;
     for ch in channels.iter().filter(|c| c.active) {
         tokio::time::sleep(REQ_PACING).await;
-        let since = store
-            .newest_ts(&ch.id)
-            .await?
+        let newest = store.newest_ts(&ch.id).await?;
+        let since = newest
             .unwrap_or(ch.discovered_at)
             .saturating_sub(SINCE_SKEW_SECS);
         conn.send_raw(&json!([
@@ -356,7 +360,14 @@ async fn live_tail(
             { "#h": [ch.id], "since": since }
         ]))
         .await?;
-        registry.channel(&ch.id, |c| c.live = true);
+        registry.channel(&ch.id, |c| {
+            c.live = true;
+            // Seed from the mirror so a resumed run shows real recency
+            // before the first live event lands.
+            if let Some(ts) = newest {
+                c.newest_ts = Some(c.newest_ts.unwrap_or(ts).max(ts));
+            }
+        });
     }
     tokio::time::sleep(REQ_PACING).await;
     conn.send_raw(&json!([
