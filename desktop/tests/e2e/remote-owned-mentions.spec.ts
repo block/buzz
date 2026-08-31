@@ -243,4 +243,3 @@ test("membership revoked at final publish keeps draft and emits no message", asy
   );
   expect(await sent(page)).toEqual([]);
 });
-
