@@ -80,7 +80,7 @@ We review as capacity allows — focused PRs that follow this guide move fastest
 
 | Tool | Version | Notes |
 |------|---------|-------|
-| Rust | 1.88+ | Install via [rustup](https://rustup.rs/) |
+| Rust | 1.95.0 (pinned) | Pinned via `rust-toolchain.toml` — [rustup](https://rustup.rs/) installs it automatically |
 | Node.js | 24+ | Required for desktop app commands and `just ci` |
 | pnpm | 10+ | Required for desktop app commands and `just ci` |
 | Flutter | 3.41+ | Required for mobile app — install via [flutter.dev](https://docs.flutter.dev/get-started/install) |
@@ -220,7 +220,6 @@ already running.
 End-to-end tests live in `crates/buzz-test-client/tests/`:
 
 - `e2e_relay.rs` — WebSocket relay tests
-- `e2e_mcp.rs` — MCP tool tests
 - `e2e_nostr_interop.rs` — Nostr protocol interoperability tests
 - `e2e_media.rs` — media upload/download tests
 - `e2e_media_extended.rs` — extended media tests (GIF, image processing)
