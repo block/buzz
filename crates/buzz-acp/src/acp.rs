@@ -8,6 +8,9 @@
 //! 4. [`AcpClient::session_prompt_with_idle_timeout`] — send prompt with idle/hard deadline, return stop reason
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
+use std::collections::HashSet;
+use std::path::{Component, Path, PathBuf};
+
 use futures_util::StreamExt;
 use tokio::io::AsyncWriteExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
@@ -243,44 +246,47 @@ fn deep_merge(
 
 /// Build the merged `CODEX_CONFIG` environment-variable value for a Codex agent spawn.
 ///
-/// Returns `Some(json_string)` when `has_generated_codex_config` is true (Buzz injected a
-/// `CODEX_CONFIG` entry via `codex_network_env()`), `None` otherwise.
+/// Returns `Some(json_string)` when Buzz produced a generated `CODEX_CONFIG` via
+/// `codex_network_env()`, `None` otherwise.
 ///
-/// # Merge contract (when `has_generated_codex_config` is true)
+/// # Merge contract (when `generated_codex_config` is `Some`)
 ///
-/// 1. **Persona base** — the first `CODEX_CONFIG` value in `extra_env` is taken as
-///    the base object (all keys preserved, recursively).  When there is no persona entry,
-///    the generated entry serves as the base.
-/// 2. **Generated overlay** — all subsequent `CODEX_CONFIG` entries are deep-merged into
-///    the base so unrelated nested persona keys survive.
+/// 1. **Persona base** — the first `CODEX_CONFIG` value in `extra_env` is taken
+///    as the base object (all keys preserved, recursively). Additional persona
+///    `CODEX_CONFIG` entries are merged in order.
+/// 2. **Generated overlay** — the explicit `generated_codex_config` value is
+///    deep-merged into the base so generated defaults apply without erasing
+///    unrelated persona keys. When there is no persona entry, the generated
+///    value serves as the base.
 /// 3. **Parent-env precedence** — if `parent_codex_config` is `Some`, its keys are
 ///    deep-merged into the result (parent wins on colliding keys at every nesting level;
 ///    unrelated keys from either side survive).
-/// 4. **Forced overlay** — generated Codex sandbox requirements are applied
-///    last: `sandbox_workspace_write.network_access = true`, plus any generated
-///    `sandbox_workspace_write.writable_roots` and `network.allow_unix_sockets`
-///    entries.
+/// 4. **Generated floor** — generated Codex sandbox requirements are applied
+///    last: `sandbox_workspace_write.network_access = true`, plus any
+///    generated `sandbox_workspace_write.writable_roots` and
+///    `network.allow_unix_sockets` entries. Parent/persona entries outside that
+///    generated floor are preserved.
 ///
-/// When `has_generated_codex_config` is false, the function returns `None` and the
-/// caller handles any persona-supplied `CODEX_CONFIG` with ordinary operator-wins
-/// semantics (no merging, no sandbox widening).
+/// When `generated_codex_config` is `None`, the function returns `None` and the
+/// caller handles any persona-supplied `CODEX_CONFIG` with ordinary
+/// operator-wins semantics.
 ///
 /// # Errors
 ///
-/// Returns `Err(AcpError::Protocol)` when `has_generated_codex_config` is true and any
-/// `CODEX_CONFIG` value is not valid JSON or is not a JSON object, or when
+/// Returns `Err(AcpError::Protocol)` when `generated_codex_config` is `Some`
+/// and any `CODEX_CONFIG` value is not valid JSON or is not a JSON object, or when
 /// `sandbox_workspace_write` is present but not an object after all merges, or
 /// when a forced string-array field has an incompatible shape.
 pub(crate) fn build_codex_config_env(
     extra_env: &[(String, String)],
     parent_codex_config: Option<&str>,
-    has_generated_codex_config: bool,
+    generated_codex_config: Option<&str>,
 ) -> Result<Option<String>, AcpError> {
-    // Without an explicit Buzz-generated overlay signal, skip the merge entirely.
+    // Without an explicit Buzz-generated overlay, skip the merge entirely.
     // Any persona CODEX_CONFIG is handled by the caller with operator-wins semantics.
-    if !has_generated_codex_config {
+    let Some(generated_raw) = generated_codex_config else {
         return Ok(None);
-    }
+    };
 
     // Collect all CODEX_CONFIG entries from extra_env in order.
     let codex_entries: Vec<&str> = extra_env
@@ -289,75 +295,40 @@ pub(crate) fn build_codex_config_env(
         .map(|(_, v)| v.as_str())
         .collect();
 
-    if codex_entries.is_empty() {
-        // has_generated_codex_config is true but no entry in extra_env — shouldn't
-        // happen in practice, but treat as no-op rather than panic.
-        return Ok(None);
-    }
-
-    // Parse all entries; first one is the persona base (or the generated entry if no
-    // persona CODEX_CONFIG was set), rest are additional generated entries.
+    // Parse persona entries independently from Buzz's generated value so the
+    // generated config cannot be confused with a positional `extra_env` entry.
     let mut parsed_entries: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
-    for (i, raw) in codex_entries.iter().enumerate() {
-        match serde_json::from_str::<serde_json::Value>(raw) {
-            Ok(serde_json::Value::Object(obj)) => parsed_entries.push(obj),
-            Ok(_) => {
-                let source = if i == 0 { "persona" } else { "generated" };
-                return Err(AcpError::Protocol(format!(
-                    "CODEX_CONFIG {source} value is valid JSON but not an object"
-                )));
-            }
-            Err(e) => {
-                let source = if i == 0 { "persona" } else { "generated" };
-                return Err(AcpError::Protocol(format!(
-                    "CODEX_CONFIG {source} value is not valid JSON: {e}"
-                )));
-            }
+    for raw in codex_entries {
+        parsed_entries.push(parse_codex_config_object(raw, "persona")?);
+    }
+    let generated = parse_codex_config_object(generated_raw, "generated")?;
+
+    let generated_writable_roots = nested_string_array(
+        &generated,
+        "sandbox_workspace_write",
+        "writable_roots",
+        "generated",
+    )?;
+    let generated_unix_sockets =
+        nested_string_array(&generated, "network", "allow_unix_sockets", "generated")?;
+
+    // Start from first persona entry when present, then merge remaining persona
+    // entries before applying the explicit generated overlay.
+    let mut base = if parsed_entries.is_empty() {
+        generated
+    } else {
+        let mut base = parsed_entries.remove(0);
+        for overlay in parsed_entries {
+            deep_merge(&mut base, overlay);
         }
-    }
-
-    let generated_start_index = if parsed_entries.len() > 1 { 1 } else { 0 };
-    let mut generated_writable_roots = Vec::new();
-    let mut generated_unix_sockets = Vec::new();
-    for generated in &parsed_entries[generated_start_index..] {
-        push_unique_strings(
-            &mut generated_writable_roots,
-            nested_string_array(
-                generated,
-                "sandbox_workspace_write",
-                "writable_roots",
-                "generated",
-            )?,
-        );
-        push_unique_strings(
-            &mut generated_unix_sockets,
-            nested_string_array(generated, "network", "allow_unix_sockets", "generated")?,
-        );
-    }
-
-    // Start from first entry, deep-merge remaining entries.
-    let mut base = parsed_entries.remove(0);
-    for overlay in parsed_entries {
-        deep_merge(&mut base, overlay);
-    }
+        deep_merge(&mut base, generated);
+        base
+    };
 
     // Deep-merge parent env (parent wins on colliding keys at every nesting level).
     if let Some(parent_raw) = parent_codex_config {
-        match serde_json::from_str::<serde_json::Value>(parent_raw) {
-            Ok(serde_json::Value::Object(parent_obj)) => {
-                deep_merge(&mut base, parent_obj);
-            }
-            Ok(_) => {
-                return Err(AcpError::Protocol(
-                    "CODEX_CONFIG in parent environment is valid JSON but not an object".into(),
-                ));
-            }
-            Err(e) => {
-                return Err(AcpError::Protocol(format!(
-                    "CODEX_CONFIG in parent environment is not valid JSON: {e}"
-                )));
-            }
-        }
+        let parent_obj = parse_codex_config_object(parent_raw, "in parent environment")?;
+        deep_merge(&mut base, parent_obj);
     }
 
     // Force sandbox_workspace_write.network_access = true (our invariant, always wins).
@@ -393,6 +364,21 @@ pub(crate) fn build_codex_config_env(
     Ok(Some(serde_json::Value::Object(base).to_string()))
 }
 
+fn parse_codex_config_object(
+    raw: &str,
+    source: &str,
+) -> Result<serde_json::Map<String, serde_json::Value>, AcpError> {
+    match serde_json::from_str::<serde_json::Value>(raw) {
+        Ok(serde_json::Value::Object(obj)) => Ok(obj),
+        Ok(_) => Err(AcpError::Protocol(format!(
+            "CODEX_CONFIG {source} value is valid JSON but not an object"
+        ))),
+        Err(e) => Err(AcpError::Protocol(format!(
+            "CODEX_CONFIG {source} value is not valid JSON: {e}"
+        ))),
+    }
+}
+
 fn nested_string_array(
     config: &serde_json::Map<String, serde_json::Value>,
     section_key: &str,
@@ -417,13 +403,14 @@ fn nested_string_array(
     };
 
     let mut out = Vec::new();
+    let mut seen = HashSet::new();
     for entry in entries {
         let Some(entry) = entry.as_str() else {
             return Err(AcpError::Protocol(format!(
                 "CODEX_CONFIG {source} {section_key}.{array_key} contains a non-string entry"
             )));
         };
-        push_unique_string(&mut out, entry.to_string());
+        push_unique_config_path(&mut out, &mut seen, entry);
     }
     Ok(out)
 }
@@ -434,7 +421,7 @@ fn force_string_array_entries(
     array_key: &str,
     entries: &[String],
 ) -> Result<(), AcpError> {
-    if entries.is_empty() {
+    if entries.is_empty() && !config.contains_key(section_key) {
         return Ok(());
     }
 
@@ -450,6 +437,9 @@ fn force_string_array_entries(
             )));
         }
     };
+    if entries.is_empty() && !section.contains_key(array_key) {
+        return Ok(());
+    }
     let array_entry = section
         .entry(array_key.to_string())
         .or_insert_with(|| serde_json::Value::Array(Vec::new()));
@@ -462,35 +452,43 @@ fn force_string_array_entries(
         }
     };
 
+    let mut merged = Vec::new();
+    let mut seen = HashSet::new();
     for entry in array.iter() {
-        if !entry.is_string() {
+        let Some(entry) = entry.as_str() else {
             return Err(AcpError::Protocol(format!(
                 "CODEX_CONFIG {section_key}.{array_key} contains a non-string entry"
             )));
-        }
+        };
+        push_unique_config_path(&mut merged, &mut seen, entry);
     }
     for entry in entries {
-        if !array
-            .iter()
-            .any(|existing| existing.as_str() == Some(entry.as_str()))
-        {
-            array.push(serde_json::Value::String(entry.clone()));
-        }
+        push_unique_config_path(&mut merged, &mut seen, entry);
     }
+    *array = merged.into_iter().map(serde_json::Value::String).collect();
 
     Ok(())
 }
 
-fn push_unique_strings(out: &mut Vec<String>, entries: Vec<String>) {
-    for entry in entries {
-        push_unique_string(out, entry);
+fn push_unique_config_path(out: &mut Vec<String>, seen: &mut HashSet<String>, entry: &str) {
+    let normalized = normalize_config_path_entry(entry);
+    if seen.insert(normalized.clone()) {
+        out.push(normalized);
     }
 }
 
-fn push_unique_string(out: &mut Vec<String>, entry: String) {
-    if !out.iter().any(|existing| existing == &entry) {
-        out.push(entry);
+fn normalize_config_path_entry(entry: &str) -> String {
+    let mut normalized = PathBuf::new();
+    for component in Path::new(entry).components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
     }
+    normalized.to_string_lossy().into_owned()
 }
 
 /// goose's non-standard mid-turn steer method. Requires `expectedRunId`, so it
@@ -580,17 +578,17 @@ impl AcpClient {
 
     /// Spawn the agent binary as a subprocess and connect to its stdio pipes.
     ///
-    /// `has_generated_codex_config` must be true when `codex_network_env()` successfully
-    /// injected a `CODEX_CONFIG` entry into `extra_env`.  The spawn path uses it to
-    /// trigger the recursive merge + forced `network_access=true` in
-    /// `build_codex_config_env`.  Pass `false` for test spawns and non-Codex agents.
+    /// `generated_codex_config` must contain the `codex_network_env()` JSON when
+    /// Buzz generated a Codex sandbox config. The spawn path uses it to trigger
+    /// the recursive merge + generated floor in `build_codex_config_env`. Pass
+    /// `None` for test spawns and non-Codex agents.
     ///
     /// After spawning, call [`initialize`](Self::initialize) before any other method.
     pub async fn spawn(
         command: &str,
         args: &[String],
         extra_env: &[(String, String)],
-        has_generated_codex_config: bool,
+        generated_codex_config: Option<&str>,
     ) -> Result<Self, AcpError> {
         use std::process::Stdio;
 
@@ -609,12 +607,11 @@ impl AcpClient {
         // in the parent environment.
         //
         // CODEX_CONFIG is handled specially via build_codex_config_env:
-        //   • has_generated_codex_config=true: merge all CODEX_CONFIG entries + parent
-        //     recursively and force network_access=true.
-        //   • has_generated_codex_config=false: return None; any persona-supplied
+        //   - generated_codex_config=Some: merge persona CODEX_CONFIG entries,
+        //     generated defaults, and parent recursively, then force the generated floor.
+        //   - generated_codex_config=None: return None; any persona-supplied
         //     CODEX_CONFIG falls through to the normal operator-wins loop below.
-        let has_codex_config = extra_env.iter().any(|(k, _)| k == "CODEX_CONFIG");
-        let parent_codex_config = if has_generated_codex_config && has_codex_config {
+        let parent_codex_config = if generated_codex_config.is_some() {
             std::env::var("CODEX_CONFIG").ok()
         } else {
             None
@@ -622,7 +619,7 @@ impl AcpClient {
         let codex_config_value = build_codex_config_env(
             extra_env,
             parent_codex_config.as_deref(),
-            has_generated_codex_config,
+            generated_codex_config,
         )?;
         // When the merge path was not taken (None returned), any persona CODEX_CONFIG
         // entry falls through to the standard operator-wins treatment below.
@@ -3159,7 +3156,7 @@ mod tests {
     }
 
     async fn spawn_script(script: &str) -> AcpClient {
-        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], None)
             .await
             .expect("failed to spawn test script")
     }
@@ -3182,7 +3179,7 @@ mod tests {
             .permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&path, permissions).expect("chmod fake adapter");
-        let client = AcpClient::spawn(path.to_str().expect("utf8 path"), &[], &[], false)
+        let client = AcpClient::spawn(path.to_str().expect("utf8 path"), &[], &[], None)
             .await
             .expect("spawn named fake adapter");
         (client, dir)
@@ -3215,7 +3212,7 @@ mod tests {
             path.to_str().expect("probe path is UTF-8"),
             &[],
             extra_env,
-            false,
+            None,
         )
         .await
         .expect("spawn env probe script");
@@ -3852,7 +3849,7 @@ mod tests {
     /// which is fine — these tests don't read from the agent, they just
     /// feed JSON into the parser.
     async fn spawn_inert_client() -> AcpClient {
-        AcpClient::spawn("cat", &[], &[], false)
+        AcpClient::spawn("cat", &[], &[], None)
             .await
             .expect("spawn cat as inert client")
     }
@@ -4941,13 +4938,13 @@ mod tests {
     }
 
     const GENERATED: &str = r#"{"sandbox_workspace_write":{"network_access":true}}"#;
-    const GENERATED_WITH_SSH_GRANTS: &str = r#"{"network":{"allow_unix_sockets":["/tmp/ssh-agent"]},"sandbox_workspace_write":{"network_access":true,"writable_roots":["/tmp/ssh-agent"]}}"#;
+    const GENERATED_WITH_SSH_SOCKET: &str = r#"{"network":{"allow_unix_sockets":["/tmp/ssh-agent"]},"sandbox_workspace_write":{"network_access":true}}"#;
 
     #[test]
-    fn build_codex_config_env_returns_none_when_no_codex_config_in_extra_env() {
-        // Non-Codex agents: extra_env has no CODEX_CONFIG → None regardless of signal.
+    fn build_codex_config_env_returns_none_when_no_generated_config() {
+        // Non-Codex agents: persona CODEX_CONFIG falls through to normal env handling.
         let extra = env(&[("GOOSE_PROVIDER", "openai")]);
-        let result = build_codex_config_env(&extra, None, false).unwrap();
+        let result = build_codex_config_env(&extra, None, None).unwrap();
         assert_eq!(
             result, None,
             "no CODEX_CONFIG in extra_env must return None"
@@ -4955,20 +4952,20 @@ mod tests {
     }
 
     #[test]
-    fn build_codex_config_env_generated_only_single_entry_with_signal_true_merges_with_parent() {
-        // No persona: Buzz injects one CODEX_CONFIG; signal=true.
+    fn build_codex_config_env_generated_only_merges_with_parent() {
+        // No persona: Buzz supplies one generated CODEX_CONFIG.
         // Parent may have its own CODEX_CONFIG — deep_merge applies, network_access forced.
-        let extra = env(&[("CODEX_CONFIG", GENERATED)]);
+        let extra = env(&[]);
         let parent =
             r#"{"some_operator_key":"val","sandbox_workspace_write":{"operator_key":"keep"}}"#;
-        let merged = build_codex_config_env(&extra, Some(parent), true)
+        let merged = build_codex_config_env(&extra, Some(parent), Some(GENERATED))
             .unwrap()
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
         // network_access forced true even though only one entry in extra_env.
         assert_eq!(
             v["sandbox_workspace_write"]["network_access"], true,
-            "network_access must be forced true with signal=true"
+            "network_access must be forced true with generated config"
         );
         // Operator key preserved via deep_merge.
         assert_eq!(
@@ -4982,15 +4979,15 @@ mod tests {
     }
 
     #[test]
-    fn build_codex_config_env_persona_only_signal_false_returns_none() {
-        // Persona set CODEX_CONFIG; Buzz did not inject a generated overlay (signal=false).
-        // Must return None — no merging, no sandbox widening.
+    fn build_codex_config_env_persona_only_without_generated_config_returns_none() {
+        // Persona set CODEX_CONFIG; Buzz did not produce a generated overlay.
+        // Must return None: no special merging.
         let persona = r#"{"some_feature":"on"}"#;
         let extra = env(&[("CODEX_CONFIG", persona)]);
-        let result = build_codex_config_env(&extra, None, false).unwrap();
+        let result = build_codex_config_env(&extra, None, None).unwrap();
         assert_eq!(
             result, None,
-            "persona-only CODEX_CONFIG with signal=false must return None"
+            "persona-only CODEX_CONFIG without generated config must return None"
         );
     }
 
@@ -4999,19 +4996,21 @@ mod tests {
         // Alias: same scenario as above, confirms the old count-based path no longer exists.
         let persona = r#"{"some_feature":"on"}"#;
         let extra = env(&[("CODEX_CONFIG", persona)]);
-        let result = build_codex_config_env(&extra, None, false).unwrap();
+        let result = build_codex_config_env(&extra, None, None).unwrap();
         assert_eq!(
             result, None,
-            "persona-only CODEX_CONFIG with signal=false must return None"
+            "persona-only CODEX_CONFIG without generated config must return None"
         );
     }
 
     #[test]
     fn build_codex_config_env_sets_network_access_from_scratch() {
-        // Persona + generated overlay, signal=true: network_access is forced true.
+        // Persona + generated overlay: network_access is forced true.
         let persona = r#"{}"#;
-        let extra = env(&[("CODEX_CONFIG", persona), ("CODEX_CONFIG", GENERATED)]);
-        let merged = build_codex_config_env(&extra, None, true).unwrap().unwrap();
+        let extra = env(&[("CODEX_CONFIG", persona)]);
+        let merged = build_codex_config_env(&extra, None, Some(GENERATED))
+            .unwrap()
+            .unwrap();
         let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
         assert_eq!(v["sandbox_workspace_write"]["network_access"], true);
     }
@@ -5021,9 +5020,10 @@ mod tests {
         // Persona has CODEX_CONFIG with unrelated keys; generated overlay must
         // force network_access=true without erasing persona keys.
         let persona_cfg = r#"{"some_feature":{"enabled":true}}"#;
-        // Config::from_args appends generated AFTER persona env vars.
-        let extra = env(&[("CODEX_CONFIG", persona_cfg), ("CODEX_CONFIG", GENERATED)]);
-        let merged = build_codex_config_env(&extra, None, true).unwrap().unwrap();
+        let extra = env(&[("CODEX_CONFIG", persona_cfg)]);
+        let merged = build_codex_config_env(&extra, None, Some(GENERATED))
+            .unwrap()
+            .unwrap();
         let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
         assert_eq!(
             v["some_feature"]["enabled"], true,
@@ -5042,9 +5042,9 @@ mod tests {
         // persona_only.  deep_merge must preserve both nested keys, and
         // network_access must be forced true last.
         let persona_cfg = r#"{"sandbox_workspace_write":{"persona_only":"keep_me"}}"#;
-        let extra = env(&[("CODEX_CONFIG", persona_cfg), ("CODEX_CONFIG", GENERATED)]);
+        let extra = env(&[("CODEX_CONFIG", persona_cfg)]);
         let parent = r#"{"sandbox_workspace_write":{"parent_only":"also_here"}}"#;
-        let merged = build_codex_config_env(&extra, Some(parent), true)
+        let merged = build_codex_config_env(&extra, Some(parent), Some(GENERATED))
             .unwrap()
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
@@ -5070,10 +5070,9 @@ mod tests {
         // Parent wins on collision; unrelated persona keys survive.
         // network_access is always forced true.
         let persona_cfg = r#"{"persona_key":"persona_val","shared_key":"persona_version"}"#;
-        // Config::from_args appends generated AFTER persona env vars.
-        let extra = env(&[("CODEX_CONFIG", persona_cfg), ("CODEX_CONFIG", GENERATED)]);
+        let extra = env(&[("CODEX_CONFIG", persona_cfg)]);
         let parent = r#"{"parent_key":"parent_val","shared_key":"parent_version"}"#;
-        let merged = build_codex_config_env(&extra, Some(parent), true)
+        let merged = build_codex_config_env(&extra, Some(parent), Some(GENERATED))
             .unwrap()
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
@@ -5101,10 +5100,10 @@ mod tests {
         // Parent env has sandbox_workspace_write with extra keys; after merge
         // those extra keys survive alongside network_access=true.
         let persona = r#"{}"#;
-        let extra = env(&[("CODEX_CONFIG", persona), ("CODEX_CONFIG", GENERATED)]);
+        let extra = env(&[("CODEX_CONFIG", persona)]);
         let parent =
             r#"{"sandbox_workspace_write":{"network_access":false,"other_sandbox_key":"val"}}"#;
-        let merged = build_codex_config_env(&extra, Some(parent), true)
+        let merged = build_codex_config_env(&extra, Some(parent), Some(GENERATED))
             .unwrap()
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
@@ -5115,10 +5114,10 @@ mod tests {
     }
 
     #[test]
-    fn build_codex_config_env_preserves_generated_ssh_grants_after_parent_merge() {
-        let extra = env(&[("CODEX_CONFIG", GENERATED_WITH_SSH_GRANTS)]);
+    fn build_codex_config_env_preserves_generated_ssh_socket_after_parent_merge() {
+        let extra = env(&[]);
         let parent = r#"{"network":{"allow_unix_sockets":["/tmp/operator","/tmp/ssh-agent"]},"sandbox_workspace_write":{"network_access":false,"writable_roots":["/tmp/operator"]}}"#;
-        let merged = build_codex_config_env(&extra, Some(parent), true)
+        let merged = build_codex_config_env(&extra, Some(parent), Some(GENERATED_WITH_SSH_SOCKET))
             .unwrap()
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
@@ -5126,7 +5125,7 @@ mod tests {
         assert_eq!(v["sandbox_workspace_write"]["network_access"], true);
         assert_eq!(
             v["sandbox_workspace_write"]["writable_roots"],
-            serde_json::json!(["/tmp/operator", "/tmp/ssh-agent"])
+            serde_json::json!(["/tmp/operator"])
         );
         assert_eq!(
             v["network"]["allow_unix_sockets"],
@@ -5135,21 +5134,18 @@ mod tests {
     }
 
     #[test]
-    fn build_codex_config_env_forces_generated_ssh_grants_with_persona_base() {
+    fn build_codex_config_env_forces_generated_ssh_socket_with_persona_base() {
         let persona = r#"{"sandbox_workspace_write":{"writable_roots":["/tmp/persona"]},"network":{"allow_unix_sockets":["/tmp/persona"]}}"#;
-        let extra = env(&[
-            ("CODEX_CONFIG", persona),
-            ("CODEX_CONFIG", GENERATED_WITH_SSH_GRANTS),
-        ]);
+        let extra = env(&[("CODEX_CONFIG", persona)]);
         let parent = r#"{"sandbox_workspace_write":{"writable_roots":[]},"network":{"allow_unix_sockets":[]}}"#;
-        let merged = build_codex_config_env(&extra, Some(parent), true)
+        let merged = build_codex_config_env(&extra, Some(parent), Some(GENERATED_WITH_SSH_SOCKET))
             .unwrap()
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
 
         assert_eq!(
             v["sandbox_workspace_write"]["writable_roots"],
-            serde_json::json!(["/tmp/ssh-agent"])
+            serde_json::json!([])
         );
         assert_eq!(
             v["network"]["allow_unix_sockets"],
@@ -5159,9 +5155,9 @@ mod tests {
 
     #[test]
     fn build_codex_config_env_errors_on_invalid_persona_json() {
-        // Bad persona JSON + generated overlay, signal=true → parse error before merging.
-        let extra = env(&[("CODEX_CONFIG", "not-json"), ("CODEX_CONFIG", GENERATED)]);
-        let result = build_codex_config_env(&extra, None, true);
+        // Bad persona JSON + generated overlay: parse error before merging.
+        let extra = env(&[("CODEX_CONFIG", "not-json")]);
+        let result = build_codex_config_env(&extra, None, Some(GENERATED));
         assert!(result.is_err(), "invalid persona JSON must return Err");
         let msg = format!("{}", result.unwrap_err());
         assert!(
@@ -5172,17 +5168,17 @@ mod tests {
 
     #[test]
     fn build_codex_config_env_errors_on_non_object_persona_json() {
-        // Non-object persona JSON + generated overlay, signal=true → parse error.
-        let extra = env(&[("CODEX_CONFIG", "[1,2,3]"), ("CODEX_CONFIG", GENERATED)]);
-        let result = build_codex_config_env(&extra, None, true);
+        // Non-object persona JSON + generated overlay: parse error.
+        let extra = env(&[("CODEX_CONFIG", "[1,2,3]")]);
+        let result = build_codex_config_env(&extra, None, Some(GENERATED));
         assert!(result.is_err(), "non-object persona JSON must return Err");
     }
 
     #[test]
     fn build_codex_config_env_errors_on_invalid_parent_json() {
         let persona = r#"{}"#;
-        let extra = env(&[("CODEX_CONFIG", persona), ("CODEX_CONFIG", GENERATED)]);
-        let result = build_codex_config_env(&extra, Some("bad-json"), true);
+        let extra = env(&[("CODEX_CONFIG", persona)]);
+        let result = build_codex_config_env(&extra, Some("bad-json"), Some(GENERATED));
         assert!(result.is_err(), "invalid parent env JSON must return Err");
     }
 
@@ -5192,10 +5188,10 @@ mod tests {
         // If the parent env sets it to a non-object scalar, deep_merge replaces
         // our object with the scalar, and the force step must fail clearly.
         let persona = r#"{}"#;
-        let extra = env(&[("CODEX_CONFIG", persona), ("CODEX_CONFIG", GENERATED)]);
+        let extra = env(&[("CODEX_CONFIG", persona)]);
         // Parent replaces the object with a scalar — deep_merge: scalar overlay wins.
         let parent = r#"{"sandbox_workspace_write": 42}"#;
-        let result = build_codex_config_env(&extra, Some(parent), true);
+        let result = build_codex_config_env(&extra, Some(parent), Some(GENERATED));
         assert!(
             result.is_err(),
             "non-object sandbox_workspace_write must return Err"
@@ -5209,9 +5205,9 @@ mod tests {
 
     #[test]
     fn build_codex_config_env_errors_on_non_array_writable_roots() {
-        let extra = env(&[("CODEX_CONFIG", GENERATED_WITH_SSH_GRANTS)]);
+        let extra = env(&[]);
         let parent = r#"{"sandbox_workspace_write":{"writable_roots":"bad"}}"#;
-        let result = build_codex_config_env(&extra, Some(parent), true);
+        let result = build_codex_config_env(&extra, Some(parent), Some(GENERATED));
 
         assert!(result.is_err(), "non-array writable_roots must fail");
         let msg = format!("{}", result.unwrap_err());
@@ -5223,15 +5219,47 @@ mod tests {
 
     #[test]
     fn build_codex_config_env_errors_on_non_array_unix_sockets() {
-        let extra = env(&[("CODEX_CONFIG", GENERATED_WITH_SSH_GRANTS)]);
+        let extra = env(&[]);
         let parent = r#"{"network":{"allow_unix_sockets":"bad"}}"#;
-        let result = build_codex_config_env(&extra, Some(parent), true);
+        let result = build_codex_config_env(&extra, Some(parent), Some(GENERATED));
 
         assert!(result.is_err(), "non-array allow_unix_sockets must fail");
         let msg = format!("{}", result.unwrap_err());
         assert!(
             msg.contains("allow_unix_sockets"),
             "error must mention allow_unix_sockets"
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_uses_explicit_generated_config_not_extra_env_position() {
+        let persona = r#"{"network":{"allow_unix_sockets":["/tmp/persona-one"]}}"#;
+        let persona_overlay = r#"{"network":{"allow_unix_sockets":["/tmp/persona-two"]}}"#;
+        let extra = env(&[("CODEX_CONFIG", persona), ("CODEX_CONFIG", persona_overlay)]);
+        let parent = r#"{"network":{"allow_unix_sockets":[]}}"#;
+        let merged = build_codex_config_env(&extra, Some(parent), Some(GENERATED_WITH_SSH_SOCKET))
+            .unwrap()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+
+        assert_eq!(
+            v["network"]["allow_unix_sockets"],
+            serde_json::json!(["/tmp/ssh-agent"])
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_deduplicates_normalized_path_entries() {
+        let extra = env(&[]);
+        let parent = r#"{"network":{"allow_unix_sockets":["/tmp/ssh-agent/"]}}"#;
+        let merged = build_codex_config_env(&extra, Some(parent), Some(GENERATED_WITH_SSH_SOCKET))
+            .unwrap()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+
+        assert_eq!(
+            v["network"]["allow_unix_sockets"],
+            serde_json::json!(["/tmp/ssh-agent"])
         );
     }
 }

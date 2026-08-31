@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use clap::ValueEnum;
@@ -15,6 +15,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::filter::SubscriptionRule;
+use crate::ssh_auth_sock::safe_ssh_auth_sock_parent;
 
 /// Default idle timeout (seconds) when neither `--idle-timeout` nor the
 /// deprecated `--turn-timeout` is set.
@@ -575,12 +576,12 @@ pub struct Config {
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
     /// Populated from persona pack resolution. Empty when no pack is configured.
     pub persona_env_vars: Vec<(String, String)>,
-    /// Whether `codex_network_env()` successfully injected a `CODEX_CONFIG` entry into
-    /// `persona_env_vars`.  When true, `AcpClient::spawn` merges all `CODEX_CONFIG` entries
-    /// and forces `sandbox_workspace_write.network_access = true` via `build_codex_config_env`.
-    /// When false (non-Codex agents or rejected relay URL), the helper returns None and
-    /// any persona-supplied `CODEX_CONFIG` is handled with ordinary operator-wins semantics.
-    pub has_generated_codex_config: bool,
+    /// Buzz-generated `CODEX_CONFIG` from `codex_network_env()`. `AcpClient::spawn`
+    /// merges this explicit generated value with persona and parent `CODEX_CONFIG`
+    /// values, then forces the generated sandbox requirements back into the result.
+    /// When `None` (non-Codex agents or rejected relay URL), any persona-supplied
+    /// `CODEX_CONFIG` is handled with ordinary operator-wins semantics.
+    pub generated_codex_config: Option<String>,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
     /// Seconds without dispatched events before an idle harness exits. 0 = disabled.
@@ -772,12 +773,11 @@ pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'sta
 /// session-level config override (via `CODEX_CONFIG` → `thread/start config`), which is
 /// equivalent to the TOML overrides:
 /// - `sandbox_workspace_write.network_access = true`
-/// - `sandbox_workspace_write.writable_roots += <SSH_AUTH_SOCK parent>`
 /// - `network.allow_unix_sockets += <SSH_AUTH_SOCK parent>`
 ///
 /// The first setting allows outbound TCP/TLS for the relay. The SSH socket
-/// settings let `git push` reach the user's existing SSH agent from within the
-/// Codex sandbox without granting broader home-directory access.
+/// setting lets `git push` reach the user's existing SSH agent from within the
+/// Codex sandbox without granting write access to the socket directory.
 ///
 /// URL validation is preserved as a guard: injection is skipped when the relay URL cannot
 /// be parsed, avoiding accidental sandbox widening for malformed configs.
@@ -850,247 +850,9 @@ fn codex_sandbox_config_json(ssh_socket_parent: Option<&str>) -> String {
         },
         "sandbox_workspace_write": {
             "network_access": true,
-            "writable_roots": [socket_parent],
         },
     })
     .to_string()
-}
-
-fn safe_ssh_auth_sock_parent(socket: &Path, home: Option<&Path>) -> Option<String> {
-    let parent = socket.parent()?;
-    if !parent.is_absolute() {
-        tracing::warn!(
-            path = %parent.display(),
-            "dropping SSH_AUTH_SOCK parent from Codex sandbox config: path is not absolute"
-        );
-        return None;
-    }
-    if is_forbidden_ssh_auth_sock_parent(parent, home) {
-        tracing::warn!(
-            path = %parent.display(),
-            "dropping SSH_AUTH_SOCK parent from Codex sandbox config: path is too broad"
-        );
-        return None;
-    }
-
-    let canonical_parent = match parent.canonicalize() {
-        Ok(path) if path.is_dir() => path,
-        _ => {
-            tracing::warn!(
-                path = %parent.display(),
-                "dropping SSH_AUTH_SOCK parent from Codex sandbox config: parent directory is missing"
-            );
-            return None;
-        }
-    };
-    if is_forbidden_ssh_auth_sock_parent(&canonical_parent, home) {
-        tracing::warn!(
-            path = %canonical_parent.display(),
-            "dropping SSH_AUTH_SOCK parent from Codex sandbox config: path is too broad"
-        );
-        return None;
-    }
-    if !is_known_ssh_auth_sock_parent_shape(parent, &canonical_parent) {
-        tracing::warn!(
-            path = %parent.display(),
-            canonical_path = %canonical_parent.display(),
-            "dropping SSH_AUTH_SOCK parent from Codex sandbox config: path shape is not recognized"
-        );
-        return None;
-    }
-    if !ssh_auth_sock_parent_contains_only_socket(&canonical_parent, socket) {
-        return None;
-    }
-
-    let normalized_parent = normalize_path_lexically(parent);
-    match normalized_parent.to_str() {
-        Some(path) => Some(path.to_string()),
-        None => {
-            tracing::warn!(
-                path = %normalized_parent.display(),
-                "dropping SSH_AUTH_SOCK parent from Codex sandbox config: path is not valid UTF-8"
-            );
-            None
-        }
-    }
-}
-
-fn is_forbidden_ssh_auth_sock_parent(path: &Path, home: Option<&Path>) -> bool {
-    is_filesystem_root_or_home_ancestor(path, home)
-        || home.is_some_and(|home| paths_equal_lexically(path, &home.join(".ssh")))
-}
-
-fn is_known_ssh_auth_sock_parent_shape(parent: &Path, canonical_parent: &Path) -> bool {
-    [parent, canonical_parent]
-        .into_iter()
-        .map(normalize_path_lexically)
-        .any(|path| is_tmp_ssh_auth_sock_parent(&path) || is_macos_ssh_auth_sock_parent(&path))
-}
-
-fn is_tmp_ssh_auth_sock_parent(path: &Path) -> bool {
-    path_has_file_name_prefix(path, "ssh-")
-        && path
-            .parent()
-            .is_some_and(|parent| is_known_temp_root(parent))
-}
-
-fn is_macos_ssh_auth_sock_parent(path: &Path) -> bool {
-    path_has_file_name_prefix(path, "com.apple.launchd.")
-        && path.parent().is_some_and(|parent| {
-            paths_equal_lexically(parent, Path::new("/var/run"))
-                || paths_equal_lexically(parent, Path::new("/private/var/run"))
-                || is_known_temp_root(parent)
-        })
-}
-
-fn path_has_file_name_prefix(path: &Path, prefix: &str) -> bool {
-    path.file_name()
-        .and_then(OsStr::to_str)
-        .is_some_and(|name| {
-            name.strip_prefix(prefix)
-                .is_some_and(|suffix| !suffix.is_empty())
-        })
-}
-
-fn is_known_temp_root(path: &Path) -> bool {
-    paths_equal_lexically(path, Path::new("/tmp"))
-        || paths_equal_lexically(path, Path::new("/private/tmp"))
-}
-
-fn ssh_auth_sock_parent_contains_only_socket(parent: &Path, socket: &Path) -> bool {
-    let Some(socket_file_name) = socket.file_name() else {
-        tracing::warn!(
-            path = %socket.display(),
-            "dropping SSH_AUTH_SOCK parent from Codex sandbox config: socket file name is missing"
-        );
-        return false;
-    };
-
-    let entries = match std::fs::read_dir(parent) {
-        Ok(entries) => entries,
-        Err(error) => {
-            tracing::warn!(
-                path = %parent.display(),
-                error = %error,
-                "dropping SSH_AUTH_SOCK parent from Codex sandbox config: parent directory is not readable"
-            );
-            return false;
-        }
-    };
-
-    let mut saw_socket = false;
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                tracing::warn!(
-                    path = %parent.display(),
-                    error = %error,
-                    "dropping SSH_AUTH_SOCK parent from Codex sandbox config: parent directory entry is not readable"
-                );
-                return false;
-            }
-        };
-
-        let entry_file_name = entry.file_name();
-        if entry_file_name.as_os_str() != socket_file_name {
-            tracing::warn!(
-                path = %parent.display(),
-                entry = %entry.path().display(),
-                "dropping SSH_AUTH_SOCK parent from Codex sandbox config: parent directory contains another entry"
-            );
-            return false;
-        }
-        if !ssh_auth_sock_entry_is_socket(&entry) {
-            return false;
-        }
-        saw_socket = true;
-    }
-
-    if !saw_socket {
-        tracing::warn!(
-            path = %socket.display(),
-            "dropping SSH_AUTH_SOCK parent from Codex sandbox config: socket path is missing"
-        );
-    }
-    saw_socket
-}
-
-#[cfg(unix)]
-fn ssh_auth_sock_entry_is_socket(entry: &std::fs::DirEntry) -> bool {
-    use std::os::unix::fs::FileTypeExt;
-
-    match entry.file_type() {
-        Ok(file_type) if file_type.is_socket() => true,
-        Ok(_) => {
-            tracing::warn!(
-                path = %entry.path().display(),
-                "dropping SSH_AUTH_SOCK parent from Codex sandbox config: socket path is not a Unix socket"
-            );
-            false
-        }
-        Err(error) => {
-            tracing::warn!(
-                path = %entry.path().display(),
-                error = %error,
-                "dropping SSH_AUTH_SOCK parent from Codex sandbox config: socket metadata is not readable"
-            );
-            false
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn ssh_auth_sock_entry_is_socket(entry: &std::fs::DirEntry) -> bool {
-    match entry.file_type() {
-        Ok(file_type) if file_type.is_file() => true,
-        Ok(_) => {
-            tracing::warn!(
-                path = %entry.path().display(),
-                "dropping SSH_AUTH_SOCK parent from Codex sandbox config: socket path is not a file"
-            );
-            false
-        }
-        Err(error) => {
-            tracing::warn!(
-                path = %entry.path().display(),
-                error = %error,
-                "dropping SSH_AUTH_SOCK parent from Codex sandbox config: socket metadata is not readable"
-            );
-            false
-        }
-    }
-}
-
-fn is_filesystem_root_or_home_ancestor(path: &Path, home: Option<&Path>) -> bool {
-    let normalized = normalize_path_lexically(path);
-    if normalized.has_root() && normalized.parent().is_none() {
-        return true;
-    }
-
-    let Some(home) = home else {
-        return false;
-    };
-    let normalized_home = normalize_path_lexically(home);
-    normalized.has_root() && normalized_home.starts_with(&normalized)
-}
-
-fn paths_equal_lexically(a: &Path, b: &Path) -> bool {
-    normalize_path_lexically(a) == normalize_path_lexically(b)
-}
-
-fn normalize_path_lexically(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized
 }
 
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
@@ -1359,19 +1121,14 @@ impl Config {
 
         // Spawned desktop agents now carry a complete instance snapshot. Team
         // instructions arrive independently so they can be layered at runtime.
-        let mut persona_env_vars = Vec::new();
+        let persona_env_vars = Vec::new();
         let model = args.model;
 
         // Inject CODEX_CONFIG so the @agentclientprotocol/codex-acp adapter (1.x)
         // opens the Seatbelt network sandbox for buzz-cli (an MCP subprocess). No-op
         // for non-Codex agents or unparseable relay URLs.
-        let has_generated_codex_config =
-            if let Some(network_env) = codex_network_env(&agent_command, &args.relay_url) {
-                persona_env_vars.push(network_env);
-                true
-            } else {
-                false
-            };
+        let generated_codex_config =
+            codex_network_env(&agent_command, &args.relay_url).map(|(_, value)| value);
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
@@ -1419,7 +1176,7 @@ impl Config {
             respond_to_allowlist,
             allowed_respond_to,
             persona_env_vars,
-            has_generated_codex_config,
+            generated_codex_config,
             relay_observer: args.relay_observer,
             exit_after_inactivity_secs: args.exit_after_inactivity,
             lazy_pool: args.lazy_pool,
@@ -1792,7 +1549,7 @@ mod tests {
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
             persona_env_vars: vec![],
-            has_generated_codex_config: false,
+            generated_codex_config: None,
             relay_observer: false,
             exit_after_inactivity_secs: 0,
             lazy_pool: false,
@@ -2136,17 +1893,89 @@ mod tests {
         .expect("valid Codex runtime should receive generated config");
         let json: serde_json::Value =
             serde_json::from_str(&value).expect("generated config must be valid JSON");
-        let socket_dir = socket_dir.display().to_string();
+        let socket_dir = socket_dir.canonicalize().unwrap().display().to_string();
 
         assert_eq!(json["sandbox_workspace_write"]["network_access"], true);
-        assert_eq!(
-            json["sandbox_workspace_write"]["writable_roots"],
-            serde_json::json!([socket_dir])
-        );
+        assert!(json["sandbox_workspace_write"]
+            .get("writable_roots")
+            .is_none());
         assert_eq!(
             json["network"]["allow_unix_sockets"],
             serde_json::json!([socket_dir])
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_network_env_uses_canonical_ssh_socket_parent() {
+        let home = codex_test_dir("canonical-home");
+        let real_socket_dir = codex_test_ssh_dir("canonical-real");
+        let link_socket_dir = codex_test_ssh_dir("canonical-link");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&real_socket_dir).unwrap();
+        std::os::unix::fs::symlink(&real_socket_dir, &link_socket_dir).unwrap();
+        let socket = link_socket_dir.join("agent.sock");
+        create_test_ssh_socket(&socket);
+
+        let (_, value) = codex_network_env_with_env(
+            "codex-acp",
+            "wss://relay.example.com",
+            Some(socket.as_os_str()),
+            Some(&home),
+        )
+        .expect("valid Codex runtime should receive generated config");
+        let json: serde_json::Value =
+            serde_json::from_str(&value).expect("generated config must be valid JSON");
+        let real_socket_dir = real_socket_dir
+            .canonicalize()
+            .unwrap()
+            .display()
+            .to_string();
+
+        assert!(json["sandbox_workspace_write"]
+            .get("writable_roots")
+            .is_none());
+        assert_eq!(
+            json["network"]["allow_unix_sockets"],
+            serde_json::json!([real_socket_dir])
+        );
+
+        std::fs::remove_file(&link_socket_dir).ok();
+        std::fs::remove_dir_all(&real_socket_dir).ok();
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codex_network_env_omits_ssh_socket_parent_with_unrecognized_canonical_shape() {
+        let home = codex_test_dir("canonical-shape-home");
+        let real_socket_dir = codex_test_unrecognized_socket_dir();
+        let link_socket_dir =
+            PathBuf::from("/tmp").join(format!("ssh-bacp-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&real_socket_dir).unwrap();
+        std::os::unix::fs::symlink(&real_socket_dir, &link_socket_dir).unwrap();
+        let socket = link_socket_dir.join("agent.sock");
+        create_test_ssh_socket(&socket);
+
+        let (_, value) = codex_network_env_with_env(
+            "codex-acp",
+            "wss://relay.example.com",
+            Some(socket.as_os_str()),
+            Some(&home),
+        )
+        .expect("valid Codex runtime should receive generated config");
+        let json: serde_json::Value =
+            serde_json::from_str(&value).expect("generated config must be valid JSON");
+
+        assert!(json["sandbox_workspace_write"]
+            .get("writable_roots")
+            .is_none());
+        assert!(json.get("network").is_none());
+
+        std::fs::remove_file(&link_socket_dir).ok();
+        std::fs::remove_dir_all(&real_socket_dir).ok();
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
