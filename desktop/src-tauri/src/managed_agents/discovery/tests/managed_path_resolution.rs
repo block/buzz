@@ -49,6 +49,24 @@ fn common_binary_paths_probes_legacy_goose_install_dir() {
     );
 }
 
+/// Kimi Code's official Unix installer places the binary in
+/// `~/.kimi-code/bin`. Its shell setup may only load in interactive shells, so
+/// the fixed probe list must include the installation directory for GUI launches.
+#[cfg(unix)]
+#[test]
+fn common_binary_paths_probes_kimi_code_install_dir() {
+    let home = dirs::home_dir().expect("home directory is available on Unix");
+    let kimi_code_bin = home.join(".kimi-code/bin");
+
+    let probed = super::super::common_binary_paths();
+
+    assert!(
+        probed.contains(&kimi_code_bin),
+        "Kimi Code install dir {} must be probed, got: {probed:?}",
+        kimi_code_bin.display()
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn resolve_command_prefers_buzz_managed_npm_shim_over_path() {
