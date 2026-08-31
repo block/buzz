@@ -152,6 +152,41 @@ pub enum ActionDef {
         /// Duration string (e.g. `"5m"`, `"1h"`).
         duration: String,
     },
+    /// Dispatch a task to exactly one agent identified by immutable pubkey.
+    ///
+    /// Unlike [`ActionDef::SendMessage`], which reverse-parses `@Name` from
+    /// prose against channel membership (ambiguous names silently wake no one;
+    /// renames silently rewrite the target), `assign_agent` binds dispatch to
+    /// the target's hex pubkey. The relay sink emits exactly **one** `p` tag on
+    /// the resulting message — `agent_pubkey`, the sole wake target. The
+    /// workflow owner is attributed via the `actor` tag instead: ACP wakes on
+    /// any `p` tag matching an agent's pubkey, so p-tagging the owner woke them
+    /// as a second agent whenever an agent owned the workflow. The message body
+    /// is never scanned for narrative names.
+    ///
+    /// `agent_pubkey` accepts either a static 64-char lowercase hex pubkey or a
+    /// single `{{...}}` template placeholder (e.g. `{{trigger.author}}`).
+    /// Mixed literal+template strings are rejected so a stray `@Name` cannot
+    /// smuggle an identity into the field. The resolved value must still be
+    /// 64-char lowercase hex at dispatch time and must belong to a current
+    /// member of the destination channel — a non-member fails the run.
+    AssignAgent {
+        /// Hex pubkey (64 lowercase hex chars) OR a single template
+        /// placeholder that resolves to one. See variant docs.
+        agent_pubkey: String,
+        /// Task text posted to the channel (supports template variables).
+        text: String,
+        /// Optional channel UUID override, or a single `{{...}}` template that
+        /// resolves to one. Must equal the workflow's channel when the workflow
+        /// is bound to one (matches `send_message`).
+        #[serde(default)]
+        channel: Option<String>,
+        /// Optional caller-supplied correlation id for downstream tracking.
+        /// A UUID, or a single `{{...}}` template that resolves to one — the
+        /// resolved value is re-checked before dispatch.
+        #[serde(default)]
+        task_id: Option<String>,
+    },
 }
 
 impl WorkflowDef {
@@ -211,6 +246,7 @@ impl WorkflowDef {
                     step.id
                 )));
             }
+            validate_action(&step.id, &step.action)?;
         }
 
         // `reply_in_thread` requires a triggering message to reply to. Schedule
@@ -276,6 +312,97 @@ impl WorkflowDef {
 
         Ok(())
     }
+}
+
+/// Per-action definition-time validation. Called by [`WorkflowDef::validate`]
+/// for every step. Rejects malformed inputs that would otherwise only surface
+/// as a runtime failure — for `assign_agent` this is the identity-safety line:
+/// a workflow that mistypes an agent pubkey should never save.
+pub(crate) fn validate_action(step_id: &str, action: &ActionDef) -> Result<(), WorkflowError> {
+    if let ActionDef::AssignAgent {
+        agent_pubkey,
+        text,
+        channel,
+        task_id,
+    } = action
+    {
+        if text.trim().is_empty() {
+            return Err(WorkflowError::InvalidDefinition(format!(
+                "assign_agent step '{step_id}': text must not be empty"
+            )));
+        }
+        if !is_agent_pubkey_shape(agent_pubkey) {
+            return Err(WorkflowError::InvalidDefinition(format!(
+                "assign_agent step '{step_id}': agent_pubkey must be a 64-char lowercase hex pubkey \
+                 or a single {{{{...}}}} template placeholder (got '{agent_pubkey}')"
+            )));
+        }
+        // `channel` and `task_id` are template-resolved at run time, exactly
+        // like `agent_pubkey`, so the definition-time check accepts either a
+        // literal UUID or a single `{{...}}` placeholder. Requiring a literal
+        // here made a workflow the executor was written to run unsaveable:
+        // `parse_yaml` always validates, so a templated routing field could
+        // never reach the executor that resolves it. The resolved values are
+        // re-checked before dispatch — `resolve_action_channel` re-parses the
+        // channel, and the executor re-parses `task_id`.
+        if let Some(ch) = channel {
+            let trimmed = ch.trim();
+            if !trimmed.is_empty()
+                && !is_single_template(trimmed)
+                && trimmed.parse::<uuid::Uuid>().is_err()
+            {
+                return Err(WorkflowError::InvalidDefinition(format!(
+                    "assign_agent step '{step_id}': channel override '{ch}' must be a valid UUID \
+                     or a single {{{{...}}}} template placeholder"
+                )));
+            }
+        }
+        if let Some(tid) = task_id {
+            let trimmed = tid.trim();
+            if trimmed.is_empty()
+                || (!is_single_template(trimmed) && trimmed.parse::<uuid::Uuid>().is_err())
+            {
+                return Err(WorkflowError::InvalidDefinition(format!(
+                    "assign_agent step '{step_id}': task_id '{tid}' must be a valid UUID or a \
+                     single {{{{...}}}} template placeholder when set"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// True when `s` is exactly 64 lowercase hex characters — the canonical
+/// on-the-wire pubkey shape. Membership lookups are performed against these
+/// bytes, so a mixed-case or short/long input can never match a real member
+/// and must not slip through.
+pub(crate) fn is_lowercase_hex_pubkey(s: &str) -> bool {
+    let trimmed = s.trim();
+    trimmed.len() == 64
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
+}
+
+/// True when `s` is a single, unbroken `{{...}}` template placeholder with
+/// non-empty inner content — e.g. `{{trigger.author}}`. Rejects mixed
+/// literal+template forms (`prefix-{{x}}`) so a caller cannot smuggle a
+/// name-like segment into an identity field.
+pub(crate) fn is_single_template(s: &str) -> bool {
+    let trimmed = s.trim();
+    trimmed.starts_with("{{")
+        && trimmed.ends_with("}}")
+        && trimmed.len() >= 4
+        && !trimmed[2..trimmed.len() - 2].contains("{{")
+        && !trimmed[2..trimmed.len() - 2].contains("}}")
+        && !trimmed[2..trimmed.len() - 2].trim().is_empty()
+}
+
+/// Definition-time shape check for `agent_pubkey`: accepts either a static
+/// pubkey or a single template placeholder. The resolved value is
+/// re-validated with [`is_lowercase_hex_pubkey`] at dispatch time.
+pub(crate) fn is_agent_pubkey_shape(s: &str) -> bool {
+    is_lowercase_hex_pubkey(s) || is_single_template(s)
 }
 
 /// Validate a cron expression using the `cron` crate.
@@ -396,9 +523,10 @@ mod tests {
             "  - id: hook\n    action: call_webhook\n    url: https://hooks.example.com/notify\n    method: POST\n",
             "  - id: approve\n    action: request_approval\n    from: '@manager'\n    message: Approve?\n    timeout: 4h\n",
             "  - id: wait\n    action: delay\n    duration: 5m\n",
+            "  - id: assign\n    action: assign_agent\n    agent_pubkey: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n    text: Please take this\n",
         );
         let (def, _) = parse_yaml(yaml).expect("parse failed");
-        assert_eq!(def.steps.len(), 7);
+        assert_eq!(def.steps.len(), 8);
 
         assert!(matches!(
             &def.steps[0].action,
@@ -422,6 +550,10 @@ mod tests {
             ActionDef::RequestApproval { .. }
         ));
         assert!(matches!(&def.steps[6].action, ActionDef::Delay { .. }));
+        assert!(matches!(
+            &def.steps[7].action,
+            ActionDef::AssignAgent { .. }
+        ));
     }
 
     #[test]
@@ -997,5 +1129,184 @@ mod tests {
             trigger,
             TriggerDef::DiffPosted { filter: Some(_) }
         ));
+    }
+
+    // --- assign_agent -------------------------------------------------------
+
+    /// 64-char lowercase hex fixture — a valid `agent_pubkey` shape.
+    const AGENT_HEX: &str = "dcd584bd8bbd49fd62caf3a8a0a43afd38b9a91dcbd3a1c9dba7d082ca024e66";
+
+    #[test]
+    fn assign_agent_parses_minimal_fields() {
+        let yaml = format!(
+            "name: Dispatch\ntrigger:\n  on: webhook\nsteps:\n  - id: assign\n    action: assign_agent\n    agent_pubkey: {AGENT_HEX}\n    text: 'Please pick up ticket 42'\n",
+        );
+        let (def, _) = parse_yaml(&yaml).expect("minimal assign_agent should parse");
+        match &def.steps[0].action {
+            ActionDef::AssignAgent {
+                agent_pubkey,
+                text,
+                channel,
+                task_id,
+            } => {
+                assert_eq!(agent_pubkey, AGENT_HEX);
+                assert_eq!(text, "Please pick up ticket 42");
+                assert!(channel.is_none());
+                assert!(task_id.is_none());
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assign_agent_round_trips_through_canonical_json() {
+        let channel_uuid = "4108b496-0efb-4fc6-85e3-6c88defb467c";
+        let task_uuid = "11111111-2222-3333-4444-555555555555";
+        let yaml = format!(
+            "name: Dispatch\ntrigger:\n  on: webhook\nsteps:\n  - id: assign\n    action: assign_agent\n    agent_pubkey: {AGENT_HEX}\n    text: 'Do the thing'\n    channel: {channel_uuid}\n    task_id: {task_uuid}\n",
+        );
+        let (def, json) = parse_yaml(&yaml).expect("assign_agent with all fields should parse");
+        let reparsed: WorkflowDef = serde_json::from_str(&json).expect("json round-trip");
+        match &reparsed.steps[0].action {
+            ActionDef::AssignAgent {
+                agent_pubkey,
+                text,
+                channel,
+                task_id,
+            } => {
+                assert_eq!(agent_pubkey, AGENT_HEX);
+                assert_eq!(text, "Do the thing");
+                assert_eq!(channel.as_deref(), Some(channel_uuid));
+                assert_eq!(task_id.as_deref(), Some(task_uuid));
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+        // Round-trip preserved the AssignAgent variant end-to-end.
+        assert_eq!(def.steps.len(), reparsed.steps.len());
+    }
+
+    #[test]
+    fn assign_agent_accepts_template_pubkey() {
+        // A single, unbroken template placeholder is allowed so a workflow can
+        // route back to the triggering author. The resolved value is
+        // re-validated at dispatch time.
+        let yaml = "name: Reply\ntrigger:\n  on: message_posted\nsteps:\n  - id: assign\n    action: assign_agent\n    agent_pubkey: '{{trigger.author}}'\n    text: 'Follow up please'\n";
+        let (def, _) = parse_yaml(yaml).expect("template agent_pubkey should parse");
+        match &def.steps[0].action {
+            ActionDef::AssignAgent { agent_pubkey, .. } => {
+                assert_eq!(agent_pubkey, "{{trigger.author}}");
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assign_agent_rejects_uppercase_hex_pubkey() {
+        // Case matters for identity: `dcd…` and `DCD…` render the same but
+        // channel-member pubkeys are stored/compared as lowercase hex. Reject
+        // the mixed-case shape at definition time so a workflow does not save
+        // in a state that would then miss the membership check.
+        let upper = AGENT_HEX.to_uppercase();
+        let yaml = format!(
+            "name: Bad\ntrigger:\n  on: webhook\nsteps:\n  - id: s\n    action: assign_agent\n    agent_pubkey: {upper}\n    text: hi\n",
+        );
+        let err = parse_yaml(&yaml).unwrap_err();
+        match &err {
+            WorkflowError::InvalidDefinition(msg) => {
+                assert!(
+                    msg.contains("agent_pubkey"),
+                    "error should mention agent_pubkey, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidDefinition, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn assign_agent_rejects_short_hex_pubkey() {
+        // 63 chars — one short of the pubkey length.
+        let short = &AGENT_HEX[..63];
+        let yaml = format!(
+            "name: Bad\ntrigger:\n  on: webhook\nsteps:\n  - id: s\n    action: assign_agent\n    agent_pubkey: {short}\n    text: hi\n",
+        );
+        let err = parse_yaml(&yaml).unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidDefinition(_)));
+    }
+
+    #[test]
+    fn assign_agent_rejects_non_hex_pubkey() {
+        // 64 chars but includes a non-hex letter.
+        let non_hex = format!("{}z", &AGENT_HEX[..63]);
+        let yaml = format!(
+            "name: Bad\ntrigger:\n  on: webhook\nsteps:\n  - id: s\n    action: assign_agent\n    agent_pubkey: {non_hex}\n    text: hi\n",
+        );
+        let err = parse_yaml(&yaml).unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidDefinition(_)));
+    }
+
+    #[test]
+    fn assign_agent_rejects_mixed_literal_and_template_pubkey() {
+        // Mixed strings are the identity-smuggle vector — literal characters
+        // mean the resolved value can never be exactly one pubkey. Reject.
+        let yaml = "name: Bad\ntrigger:\n  on: webhook\nsteps:\n  - id: s\n    action: assign_agent\n    agent_pubkey: 'prefix-{{trigger.author}}'\n    text: hi\n";
+        let err = parse_yaml(yaml).unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidDefinition(_)));
+    }
+
+    #[test]
+    fn assign_agent_rejects_empty_template_pubkey() {
+        // `{{ }}` alone is not a well-formed template — reject rather than
+        // let it slip through as "template-shaped".
+        let yaml = "name: Bad\ntrigger:\n  on: webhook\nsteps:\n  - id: s\n    action: assign_agent\n    agent_pubkey: '{{ }}'\n    text: hi\n";
+        let err = parse_yaml(yaml).unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidDefinition(_)));
+    }
+
+    #[test]
+    fn assign_agent_rejects_empty_text() {
+        let yaml = format!(
+            "name: Bad\ntrigger:\n  on: webhook\nsteps:\n  - id: s\n    action: assign_agent\n    agent_pubkey: {AGENT_HEX}\n    text: '   '\n",
+        );
+        let err = parse_yaml(&yaml).unwrap_err();
+        match &err {
+            WorkflowError::InvalidDefinition(msg) => {
+                assert!(msg.contains("text"), "error should mention text: {msg}");
+            }
+            other => panic!("expected InvalidDefinition, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn assign_agent_rejects_invalid_task_id() {
+        let yaml = format!(
+            "name: Bad\ntrigger:\n  on: webhook\nsteps:\n  - id: s\n    action: assign_agent\n    agent_pubkey: {AGENT_HEX}\n    text: hi\n    task_id: not-a-uuid\n",
+        );
+        let err = parse_yaml(&yaml).unwrap_err();
+        match &err {
+            WorkflowError::InvalidDefinition(msg) => {
+                assert!(
+                    msg.contains("task_id"),
+                    "error should mention task_id: {msg}"
+                );
+            }
+            other => panic!("expected InvalidDefinition, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn assign_agent_rejects_invalid_channel_uuid() {
+        let yaml = format!(
+            "name: Bad\ntrigger:\n  on: webhook\nsteps:\n  - id: s\n    action: assign_agent\n    agent_pubkey: {AGENT_HEX}\n    text: hi\n    channel: not-a-uuid\n",
+        );
+        let err = parse_yaml(&yaml).unwrap_err();
+        match &err {
+            WorkflowError::InvalidDefinition(msg) => {
+                assert!(
+                    msg.contains("channel"),
+                    "error should mention channel: {msg}"
+                );
+            }
+            other => panic!("expected InvalidDefinition, got: {other}"),
+        }
     }
 }
