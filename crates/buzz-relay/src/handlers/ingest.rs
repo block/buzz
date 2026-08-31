@@ -771,6 +771,20 @@ pub(crate) async fn check_channel_membership(
     }
 }
 
+fn requires_channel_write_membership(kind: u32) -> bool {
+    !matches!(
+        kind,
+        KIND_NIP29_JOIN_REQUEST
+            | KIND_NIP29_CREATE_GROUP
+            | KIND_STREAM_MESSAGE
+            | KIND_STREAM_MESSAGE_V2
+            | KIND_STREAM_MESSAGE_EDIT
+            | KIND_NIP29_EDIT_METADATA
+            | KIND_NIP29_DELETE_EVENT
+            | KIND_NIP29_DELETE_GROUP
+    )
+}
+
 fn check_token_channel_access(auth: &IngestAuth, channel_id: Uuid) -> Result<(), String> {
     if let Some(allowed) = auth.channel_ids() {
         if !allowed.contains(&channel_id) {
@@ -2483,7 +2497,22 @@ async fn ingest_event_inner(
     // it later in this request); each gate keeps its existing missing-row
     // behavior.
     let channel_row = match channel_id {
-        Some(ch_id) => state.db.get_channel(tenant.community(), ch_id).await.ok(),
+        Some(ch_id) => match state.db.get_channel(tenant.community(), ch_id).await {
+            Ok(channel) => Some(channel),
+            Err(buzz_db::DbError::ChannelNotFound(_))
+                if matches!(kind_u32, KIND_STREAM_MESSAGE | KIND_STREAM_MESSAGE_V2) =>
+            {
+                return Err(IngestError::Rejected(
+                    "restricted: not a channel member".into(),
+                ));
+            }
+            Err(error) if matches!(kind_u32, KIND_STREAM_MESSAGE | KIND_STREAM_MESSAGE_V2) => {
+                return Err(IngestError::Internal(format!(
+                    "error: database error resolving channel: {error}"
+                )));
+            }
+            Err(_) => None,
+        },
         None => None,
     };
     // E1 phase-2 (§4.8 phase-2 addendum): resolve the fan-out visibility once,
@@ -2507,20 +2536,15 @@ async fn ingest_event_inner(
         _ => None,
     };
     if let Some(ch_id) = channel_id {
-        // kind:9021 (join) doesn't require prior membership.
-        // kind:9007 (create) — channel doesn't exist yet; creator becomes owner in step 16.
+        // Signed stream messages keep their author provenance but do not require
+        // prior membership. kind:9021 (join) and kind:9007 (create) likewise do
+        // not require it; the creator becomes owner in step 16.
         // kind:40003/9002/9005/9008 — per-kind validators are the authority; they
         // individually enforce authorization and fail closed. Bypassing the generic
         // member/open gate here lets the owning human act on private agent channels
         // without being a member (OQ1 decision; see validate_edit_ownership /
         // validate_admin_event for per-kind enforcement).
-        let skip_membership = kind_u32 == KIND_NIP29_JOIN_REQUEST
-            || kind_u32 == KIND_NIP29_CREATE_GROUP
-            || kind_u32 == KIND_STREAM_MESSAGE_EDIT
-            || kind_u32 == KIND_NIP29_EDIT_METADATA
-            || kind_u32 == KIND_NIP29_DELETE_EVENT
-            || kind_u32 == KIND_NIP29_DELETE_GROUP;
-        if !skip_membership {
+        if requires_channel_write_membership(kind_u32) {
             // Spec AuthCheck (line 794): emit the verdict at the actual
             // call site. claimed_community comes from the event's h tag
             // (recorded separately to bite M2 / M8 — claim or A-host
@@ -3667,6 +3691,16 @@ mod tests {
             assert!(
                 requires_h_channel_scope(kind),
                 "kind {kind} should require h"
+            );
+        }
+    }
+
+    #[test]
+    fn channel_message_publication_does_not_require_membership() {
+        for kind in [KIND_STREAM_MESSAGE, buzz_core::kind::KIND_STREAM_MESSAGE_V2] {
+            assert!(
+                !requires_channel_write_membership(kind),
+                "signed channel message kind {kind} must not be refused for missing membership"
             );
         }
     }

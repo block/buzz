@@ -344,6 +344,10 @@ mod row_zero_host_binding {
 /// derives the community from the host — the channel lands in exactly that
 /// community and no other.
 async fn create_open_channel(base_url: &str, keys: &nostr::Keys) -> String {
+    create_channel(base_url, keys, "open").await
+}
+
+async fn create_channel(base_url: &str, keys: &nostr::Keys, visibility: &str) -> String {
     use nostr::{EventBuilder, Kind, Tag};
 
     let channel_uuid = uuid::Uuid::new_v4().to_string();
@@ -352,7 +356,7 @@ async fn create_open_channel(base_url: &str, keys: &nostr::Keys) -> String {
             Tag::parse(["h", &channel_uuid]).expect("h tag"),
             Tag::parse(["name", &format!("row-zero-{channel_uuid}")]).expect("name tag"),
             Tag::parse(["channel_type", "stream"]).expect("channel_type tag"),
-            Tag::parse(["visibility", "open"]).expect("visibility tag"),
+            Tag::parse(["visibility", visibility]).expect("visibility tag"),
         ])
         .sign_with_keys(keys)
         .expect("sign create-channel event");
@@ -386,9 +390,19 @@ async fn post_kind9(
     channel: &str,
     content: &str,
 ) -> (reqwest::StatusCode, String) {
+    post_stream_message(base_url, keys, channel, 9, content).await
+}
+
+async fn post_stream_message(
+    base_url: &str,
+    keys: &nostr::Keys,
+    channel: &str,
+    kind: u16,
+    content: &str,
+) -> (reqwest::StatusCode, String) {
     use nostr::{EventBuilder, Kind, Tag};
 
-    let event = EventBuilder::new(Kind::Custom(9), content)
+    let event = EventBuilder::new(Kind::Custom(kind), content)
         .tags(vec![Tag::parse(["h", channel]).expect("h tag")])
         .sign_with_keys(keys)
         .expect("sign kind:9 event");
@@ -405,6 +419,57 @@ async fn post_kind9(
     let status = resp.status();
     let body = resp.text().await.expect("read kind:9 body");
     (status, body)
+}
+
+#[tokio::test]
+#[ignore]
+async fn signed_nonmember_can_publish_to_an_existing_private_channel() {
+    use nostr::Keys;
+
+    let owner = Keys::generate();
+    let author = Keys::generate();
+    let channel = create_channel(&url_a(), &owner, "private").await;
+
+    for (kind, content) in [(9, "nonmember kind 9"), (40002, "nonmember kind 40002")] {
+        let (status, body) = post_stream_message(&url_a(), &author, &channel, kind, content).await;
+        assert!(
+            status.is_success() && accepted(&body),
+            "signed nonmember kind {kind} must publish to an existing private channel: \
+             status {status}, body {body}"
+        );
+    }
+
+    let filters = serde_json::json!([{
+        "kinds": [9, 40002],
+        "#h": [&channel],
+        "authors": [author.public_key().to_hex()],
+        "limit": 10,
+    }]);
+    let response = reqwest::Client::new()
+        .post(format!("{}/query", url_a()))
+        .header("X-Pubkey", owner.public_key().to_hex())
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&filters).expect("serialize query"))
+        .send()
+        .await
+        .expect("query accepted messages");
+    assert!(response.status().is_success(), "owner query must succeed");
+    let events: Vec<serde_json::Value> = response.json().await.expect("parse query response");
+    let mut contents = events
+        .iter()
+        .filter_map(|event| event["content"].as_str())
+        .collect::<Vec<_>>();
+    contents.sort_unstable();
+    assert_eq!(contents, ["nonmember kind 40002", "nonmember kind 9"]);
+
+    let missing_channel = uuid::Uuid::new_v4().to_string();
+    let (status, body) =
+        post_stream_message(&url_a(), &author, &missing_channel, 9, "orphan attempt").await;
+    assert!(
+        !status.is_success() || !accepted(&body),
+        "message to a nonexistent host-community channel must be rejected"
+    );
+    assert!(body.contains("restricted: not a channel member"));
 }
 
 /// Whether a `POST /events` JSON body reports the event as accepted.
