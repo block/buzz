@@ -11,6 +11,7 @@ import {
 
 import type { IdentityArchiveActions } from "@/features/identity-archive/hooks";
 import { ArchiveConfirmDialog } from "@/features/profile/ui/ArchiveConfirmDialog";
+import { useAgentMemoryQuery } from "@/features/agent-memory/hooks";
 import type { ManagedAgent } from "@/shared/api/types";
 import {
   AlertDialog,
@@ -31,6 +32,7 @@ export function UserProfileAgentManagementRows({
   canDeleteAgent,
   isDeletePending,
   managedAgent,
+  channelCount,
   onCreateCard,
   onDeleteAgent,
   onDuplicateAgent,
@@ -41,6 +43,7 @@ export function UserProfileAgentManagementRows({
   canDeleteAgent: boolean;
   isDeletePending: boolean;
   managedAgent?: ManagedAgent;
+  channelCount: number;
   /** Mint an agent trading card. Present only for owner-managed personas. */
   onCreateCard?: () => void;
   onDeleteAgent: () => void;
@@ -91,9 +94,11 @@ export function UserProfileAgentManagementRows({
       ) : null}
       {canDeleteAgent ? (
         <ProfileDeleteAgentRow
+          channelCount={channelCount}
           isPending={isDeletePending}
           managedAgent={managedAgent}
           onDelete={onDeleteAgent}
+          onExport={onExportAgent}
         />
       ) : null}
     </PanelSectionGroup>
@@ -194,15 +199,25 @@ function ProfileArchiveAgentRow({
 }
 
 function ProfileDeleteAgentRow({
+  channelCount,
   isPending,
   managedAgent,
   onDelete,
+  onExport,
 }: {
+  channelCount: number;
   isPending: boolean;
   managedAgent?: ManagedAgent;
   onDelete: () => void;
+  onExport?: () => void;
 }) {
   const [confirmOpen, setConfirmOpen] = React.useState(false);
+  const memoryQuery = useAgentMemoryQuery(managedAgent?.pubkey, {
+    enabled: confirmOpen && managedAgent !== undefined,
+  });
+  const memoryCount =
+    memoryQuery.data &&
+    (memoryQuery.data.core ? 1 : 0) + memoryQuery.data.memories.length;
 
   return (
     <>
@@ -223,11 +238,15 @@ function ProfileDeleteAgentRow({
       {managedAgent ? (
         <AgentDeleteConfirmDialog
           agent={managedAgent}
+          channelCount={channelCount}
           isPending={isPending}
+          memoryCount={memoryCount}
+          memoriesLoading={memoryQuery.isLoading}
           onConfirm={() => {
             setConfirmOpen(false);
             onDelete();
           }}
+          onExport={onExport}
           onOpenChange={setConfirmOpen}
           open={confirmOpen}
         />
@@ -238,44 +257,82 @@ function ProfileDeleteAgentRow({
 
 function AgentDeleteConfirmDialog({
   agent,
+  channelCount,
   isPending,
+  memoryCount,
+  memoriesLoading,
   onConfirm,
+  onExport,
   onOpenChange,
   open,
 }: {
   agent: ManagedAgent;
+  channelCount: number;
   isPending: boolean;
+  memoryCount?: number;
+  memoriesLoading: boolean;
   onConfirm: () => void;
+  onExport?: () => void;
   onOpenChange: (open: boolean) => void;
   open: boolean;
 }) {
   const isProviderAgent = agent.backend.type === "provider";
+  const showExportRecommendation =
+    onExport !== undefined && memoryCount !== undefined && memoryCount > 0;
 
   return (
     <AlertDialog onOpenChange={onOpenChange} open={open}>
       <AlertDialogContent data-testid="agent-delete-confirm-dialog">
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete this agent?</AlertDialogTitle>
+          <AlertDialogTitle>Delete {agent.name}?</AlertDialogTitle>
           <AlertDialogDescription>
-            Deleting this agent stops and removes the agent from this community.
+            This permanently removes the agent, its saved key, and its channel
+            access.
           </AlertDialogDescription>
         </AlertDialogHeader>
-        <ul className="list-disc space-y-1.5 pl-5 text-sm text-muted-foreground">
-          <li>Removes the local management record and saved agent key</li>
-          <li>Removes the agent from every channel it belongs to</li>
-          <li>
-            Archives the agent&apos;s identity on the relay so it no longer
-            appears in member lists or mention suggestions
-          </li>
-          <li>
-            {isProviderAgent
-              ? "Requests remote deletion; if it is online, Buzz first sends a shutdown command when possible. If the deployment cannot be reached through a channel, the remote process may keep running without local management."
-              : "Stops any local agent process before deleting the record"}
-          </li>
-        </ul>
-        <p className="text-sm text-muted-foreground">
-          Archive this agent if you want to hide it instead of removing it.
-        </p>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="rounded-lg border bg-muted/30 px-4 py-3">
+            <p className="text-xs text-muted-foreground">Memories</p>
+            <p
+              className="mt-1 text-2xl font-semibold tabular-nums"
+              data-testid="agent-delete-memory-count"
+            >
+              {memoriesLoading ? "…" : (memoryCount ?? "—")}
+            </p>
+          </div>
+          <div className="rounded-lg border bg-muted/30 px-4 py-3">
+            <p className="text-xs text-muted-foreground">Channels</p>
+            <p
+              className="mt-1 text-2xl font-semibold tabular-nums"
+              data-testid="agent-delete-channel-count"
+            >
+              {channelCount}
+            </p>
+          </div>
+        </div>
+        {showExportRecommendation ? (
+          <p className="text-sm text-muted-foreground">
+            Want a backup?{" "}
+            <Button
+              className="h-auto p-0 align-baseline font-medium underline underline-offset-2"
+              data-testid="agent-delete-export-action"
+              onClick={() => {
+                onOpenChange(false);
+                onExport();
+              }}
+              type="button"
+              variant="link"
+            >
+              Export this agent
+            </Button>
+            .
+          </p>
+        ) : null}
+        {isProviderAgent ? (
+          <p className="text-sm text-muted-foreground">
+            The remote process may keep running if Buzz can&apos;t reach it.
+          </p>
+        ) : null}
         <AlertDialogFooter>
           <AlertDialogCancel asChild>
             <Button type="button" variant="outline">

@@ -106,9 +106,9 @@ test.describe("agent lifecycle feedback screenshots", () => {
 
     await openAgentsView(page);
 
-    // The custom persona card appears in the library.
+    // The running instance is visible and owns the persona actions menu.
     await expect(
-      page.getByText("Cascade Test Agent", { exact: true }),
+      page.getByTestId(`managed-agent-${CASCADE_AGENT_B_PUBKEY}`),
     ).toBeVisible({ timeout: 10_000 });
 
     // Open the actions menu for the custom persona. The trigger button carries
@@ -240,7 +240,7 @@ test.describe("agent lifecycle feedback screenshots", () => {
     await openAgentsView(page);
 
     await expect(
-      page.getByText("Cascade Test Agent", { exact: true }),
+      page.getByTestId(`managed-agent-${CASCADE_AGENT_A_PUBKEY}`),
     ).toBeVisible({ timeout: 10_000 });
 
     await page

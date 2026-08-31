@@ -220,7 +220,9 @@ test("persona card main click records a persona target, never an explicit pubkey
   });
 
   fireEvent.click(
-    screen.getByRole("button", { name: "Fizz Prime agent profile" }),
+    screen.getAllByRole("button", {
+      name: "Fizz Prime agent profile",
+    })[0],
   );
 
   assert.ok(recordedPersona, "the click must record a persona target");

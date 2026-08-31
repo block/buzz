@@ -1,75 +1,132 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildUnifiedGroups } from "./unifiedAgentGroups.ts";
+import {
+  buildUnifiedGroups,
+  profileAgentsForGroup,
+} from "./unifiedAgentGroups.ts";
 
-const NONE_ARCHIVED = () => false;
-
-function agent(overrides = {}) {
+function agent(pubkey, overrides = {}) {
   return {
-    name: "Agent",
-    pubkey: "a".repeat(64),
-    personaId: null,
-    status: "stopped",
+    pubkey,
+    name: overrides.name ?? "Fizz",
+    personaId: overrides.personaId ?? "builtin:fizz",
+    status: overrides.status ?? "stopped",
     ...overrides,
   };
 }
 
-function persona(overrides = {}) {
-  return { id: "persona-1", displayName: "Persona", ...overrides };
-}
+const fizz = { id: "builtin:fizz", displayName: "Fizz" };
+const NONE_ARCHIVED = () => false;
+
+test("buildUnifiedGroups retains every managed instance for one persona", () => {
+  const first = agent("a".repeat(64));
+  const second = agent("b".repeat(64));
+
+  const { groups, ungrouped, unknown } = buildUnifiedGroups(
+    [fizz],
+    [first, second],
+    NONE_ARCHIVED,
+  );
+
+  assert.deepEqual(groups, [{ persona: fizz, agents: [first, second] }]);
+  assert.deepEqual(ungrouped, []);
+  assert.deepEqual(unknown, []);
+});
+
+test("profileAgentsForGroup returns every instance in stable order without mutating input", () => {
+  const stopped = agent("a".repeat(64), { name: "Zulu" });
+  const runningLater = agent("c".repeat(64), {
+    name: "Alpha",
+    status: "running",
+  });
+  const runningEarlier = agent("b".repeat(64), {
+    name: "Alpha",
+    status: "running",
+  });
+  const input = [stopped, runningLater, runningEarlier];
+
+  assert.deepEqual(profileAgentsForGroup(input, NONE_ARCHIVED), [
+    runningEarlier,
+    runningLater,
+    stopped,
+  ]);
+  assert.deepEqual(input, [stopped, runningLater, runningEarlier]);
+});
+
+test("a relay-restored persona instance follows the same visible group path", () => {
+  const relayRestored = agent("c".repeat(64), {
+    name: "Recovered Fizz",
+    status: "stopped",
+  });
+
+  const { groups } = buildUnifiedGroups([fizz], [relayRestored], NONE_ARCHIVED);
+
+  assert.deepEqual(profileAgentsForGroup(groups[0].agents, NONE_ARCHIVED), [
+    relayRestored,
+  ]);
+});
+
+test("a persona with no managed instance remains an empty group", () => {
+  const { groups } = buildUnifiedGroups([fizz], [], NONE_ARCHIVED);
+
+  assert.deepEqual(groups, [{ persona: fizz, agents: [] }]);
+  assert.deepEqual(profileAgentsForGroup(groups[0].agents, NONE_ARCHIVED), []);
+});
+
+test("profileAgentsForGroup omits archived instances while preserving visible peers", () => {
+  const archived = agent("a".repeat(64), { status: "running" });
+  const visible = agent("b".repeat(64), { status: "stopped" });
+
+  assert.deepEqual(
+    profileAgentsForGroup(
+      [archived, visible],
+      (pubkey) => pubkey === archived.pubkey,
+    ),
+    [visible],
+  );
+});
 
 test("archived standalone custom agents are omitted while live peers remain", () => {
-  const archived = agent({ pubkey: "a".repeat(64), personaId: null });
-  const live = agent({ pubkey: "b".repeat(64), personaId: null });
+  const archived = agent("a".repeat(64), { personaId: null });
+  const live = agent("b".repeat(64), { personaId: null });
   const isArchived = (pubkey) => pubkey === archived.pubkey;
 
   const { ungrouped } = buildUnifiedGroups([], [archived, live], isArchived);
 
   assert.deepEqual(
-    ungrouped.map((agent) => agent.pubkey),
+    ungrouped.map((candidate) => candidate.pubkey),
     [live.pubkey],
   );
 });
 
 test("archived unknown-persona agents are omitted while live peers remain", () => {
-  const archived = agent({ pubkey: "a".repeat(64), personaId: "orphan" });
-  const live = agent({ pubkey: "b".repeat(64), personaId: "orphan" });
+  const archived = agent("a".repeat(64), { personaId: "orphan" });
+  const live = agent("b".repeat(64), { personaId: "orphan" });
   const isArchived = (pubkey) => pubkey === archived.pubkey;
 
-  // No persona matches "orphan", so both land in the unknown bucket.
   const { unknown } = buildUnifiedGroups([], [archived, live], isArchived);
 
   assert.deepEqual(
-    unknown.map((agent) => agent.pubkey),
+    unknown.map((candidate) => candidate.pubkey),
     [live.pubkey],
   );
 });
 
-test("matched persona groups keep their full instance list including archived", () => {
-  const archived = agent({ pubkey: "a".repeat(64), personaId: "persona-1" });
-  const live = agent({ pubkey: "b".repeat(64), personaId: "persona-1" });
+test("matched persona groups retain archived instances for profile history", () => {
+  const archived = agent("a".repeat(64));
+  const live = agent("b".repeat(64));
   const isArchived = (pubkey) => pubkey === archived.pubkey;
 
-  // The card resolves its own target via pickProfileAgent; the group keeps the
-  // archived record so an all-archived persona still forms a card in
-  // persona-only mode rather than vanishing from the library.
-  const { groups } = buildUnifiedGroups(
-    [persona()],
-    [archived, live],
-    isArchived,
-  );
+  const { groups } = buildUnifiedGroups([fizz], [archived, live], isArchived);
 
-  assert.equal(groups.length, 1);
-  assert.deepEqual(
-    groups[0].agents.map((agent) => agent.pubkey).sort(),
-    [archived.pubkey, live.pubkey].sort(),
-  );
+  assert.deepEqual(groups, [{ persona: fizz, agents: [archived, live] }]);
+  assert.deepEqual(profileAgentsForGroup(groups[0].agents, isArchived), [live]);
 });
 
 test("a fail-open predicate keeps every standalone agent discoverable", () => {
-  const first = agent({ pubkey: "a".repeat(64), personaId: null });
-  const second = agent({ pubkey: "b".repeat(64), personaId: null });
+  const first = agent("a".repeat(64), { personaId: null });
+  const second = agent("b".repeat(64), { personaId: null });
 
   const { ungrouped } = buildUnifiedGroups([], [first, second], NONE_ARCHIVED);
 
