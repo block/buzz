@@ -24,6 +24,7 @@ use crate::audio;
 use crate::connection::handle_connection;
 use crate::metrics::track_metrics;
 use crate::nip11::{nip11_document, relay_info_handler};
+use crate::readiness::{self, ReadinessEvaluation, ReadinessReason};
 use crate::state::AppState;
 
 /// Build the axum [`Router`] with all relay routes, middleware, and CORS configuration.
@@ -406,11 +407,19 @@ async fn liveness_handler() -> impl IntoResponse {
     (StatusCode::OK, "ok")
 }
 
-/// Readiness probe — checks shutdown flag, Postgres, and Redis connectivity.
+/// Readiness probe — checks shutdown state and all serving dependencies.
 async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    use std::time::Duration;
+    let evaluation = if state.shutting_down.load(Ordering::Relaxed) {
+        ReadinessEvaluation::shutting_down()
+    } else {
+        readiness::evaluate(&state.db, &state.redis_pool).await
+    };
+    readiness::record_metrics(&evaluation);
+    readiness_response(evaluation)
+}
 
-    if state.shutting_down.load(Ordering::Relaxed) {
+fn readiness_response(evaluation: ReadinessEvaluation) -> axum::response::Response {
+    if evaluation.reason == ReadinessReason::ShuttingDown {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"status": "shutting_down"})),
@@ -418,27 +427,24 @@ async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
             .into_response();
     }
 
-    let check = async {
-        let (pg_ok, redis_ok, deletion_catalog_ok) = tokio::join!(
-            state.db.ping(),
-            async { state.redis_pool.get().await.is_ok() },
-            async { state.db.validate_deletion_serving_catalog().await.is_ok() },
-        );
-        (pg_ok, redis_ok, deletion_catalog_ok)
-    };
+    let pg_ok = evaluation
+        .postgres
+        .is_some_and(|result| result.outcome.is_success());
+    let redis_ok = evaluation
+        .redis
+        .is_some_and(|result| result.outcome.is_success());
+    let deletion_catalog_ok = evaluation
+        .deletion_catalog
+        .is_some_and(|result| result.outcome.is_success());
 
-    let (pg_ok, redis_ok, deletion_catalog_ok) =
-        tokio::time::timeout(Duration::from_secs(2), check)
-            .await
-            .unwrap_or((false, false, false));
-
-    if pg_ok && redis_ok && deletion_catalog_ok {
+    if evaluation.is_ready() {
         (StatusCode::OK, Json(json!({"status": "ready"}))).into_response()
     } else {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
                 "status": "not_ready",
+                "reason": evaluation.reason.label(),
                 "postgres": pg_ok,
                 "redis": redis_ok,
                 "deletion_catalog": deletion_catalog_ok

@@ -32,6 +32,11 @@ const LATENCY_BUCKETS_MS: [f64; 11] = [
 /// Seconds-scale buckets for internal processing histograms (event, search, audit).
 const DURATION_BUCKETS_S: [f64; 10] = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 5.0];
 
+/// Readiness buckets concentrate resolution near the two-second failure budget.
+const READINESS_DURATION_BUCKETS_S: [f64; 15] = [
+    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5,
+];
+
 /// Seconds-scale buckets for Git hydration and pack streams.
 const GIT_DURATION_BUCKETS_S: [f64; 13] = [
     0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
@@ -102,6 +107,11 @@ pub fn install(port: u16, gauge_idle_timeout_secs: u64) {
             &GIT_DURATION_BUCKETS_S,
         )
         .expect("valid git compaction duration bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full("buzz_readiness_check_duration_seconds".to_owned()),
+            &READINESS_DURATION_BUCKETS_S,
+        )
+        .expect("valid readiness duration bucket boundaries")
         .set_buckets_for_metric(
             Matcher::Full("buzz_git_hydrate_bytes".to_owned()),
             &GIT_BYTES_BUCKETS,

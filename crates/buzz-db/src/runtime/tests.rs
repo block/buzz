@@ -19,6 +19,33 @@ async fn setup_db() -> Db {
     Db::from_pool(pool)
 }
 
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn readiness_check_distinguishes_pool_exhaustion_from_success() {
+    let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect size-one readiness test pool");
+    let held = pool
+        .acquire()
+        .await
+        .expect("hold the only readiness test connection");
+    let db = Db::from_pool(pool);
+
+    let exhausted = db
+        .readiness_check(tokio::time::Instant::now() + std::time::Duration::from_millis(25))
+        .await;
+    assert_eq!(exhausted, DbReadinessOutcome::PoolTimeout);
+
+    drop(held);
+    let recovered = db
+        .readiness_check(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+        .await;
+    assert_eq!(recovered, DbReadinessOutcome::Success);
+}
+
 async fn make_community(pool: &PgPool) -> Uuid {
     let id = Uuid::new_v4();
     let host = format!("communities-of-channels-{}.example", id.simple());
