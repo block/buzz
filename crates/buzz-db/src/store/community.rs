@@ -1177,15 +1177,17 @@ mod postgres_tests {
         let community_id = created.id;
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
-        let fence = tokio::spawn(async move {
-            fenced_db
-                .with_inactive_community_fence(community_id, move |archived_at| {
+        let runtime = tokio::runtime::Handle::current();
+        let fence = tokio::task::spawn_blocking(move || {
+            runtime.block_on(fenced_db.with_inactive_community_fence(
+                community_id,
+                move |archived_at| {
                     assert_eq!(archived_at, Some(archived.archived_at));
                     entered_tx.send(()).expect("report entered fence");
                     release_rx.recv().expect("release fenced disconnect");
                     "disconnected"
-                })
-                .await
+                },
+            ))
         });
         entered_rx.await.expect("fence acquired row lock");
 
@@ -1214,8 +1216,9 @@ mod postgres_tests {
 
         release_tx.send(()).expect("release fence");
         assert_eq!(
-            fence
+            tokio::time::timeout(std::time::Duration::from_secs(5), fence)
                 .await
+                .expect("fence completes after release")
                 .expect("fence task")
                 .expect("inactive community fence"),
             Some("disconnected")
