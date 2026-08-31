@@ -66,6 +66,7 @@ async fn run(app: tauri::AppHandle, force: bool) -> Result<Vec<AcpRuntimeCatalog
         use tauri::Manager;
         if force {
             crate::managed_agents::clear_resolve_cache();
+            crate::managed_agents::wsl::clear_wsl_cache();
             crate::managed_agents::refresh_login_shell_path();
         }
         let custom_dir = app

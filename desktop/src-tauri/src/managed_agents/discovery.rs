@@ -12,6 +12,8 @@ mod auth_status_cache;
 mod bounded_command;
 mod login_shell;
 mod presets;
+#[cfg(windows)]
+pub(crate) use bounded_command::output_with_timeout;
 mod runtime_metadata;
 #[macro_use]
 mod windows_install;
@@ -1273,12 +1275,6 @@ pub fn discover_acp_runtimes_from(
     // then — on Windows hosts — the default WSL distribution, so harnesses
     // that only exist inside WSL (common for Hermes Agent) still surface as
     // Available. The WSL probe caches its resolution for the spawn path.
-    let resolve_with_wsl = |command: &str| {
-        find_command(command).or_else(|| {
-            crate::managed_agents::wsl::probe_wsl_command(command)
-                .map(|resolution| crate::managed_agents::wsl::wsl_display_path(&resolution))
-        })
-    };
 
     // Phase 2.5: insert static preset entries (PATH-probed, not editable/deletable).
     for def in PRESET_HARNESSES {
@@ -1288,7 +1284,7 @@ pub fn discover_acp_runtimes_from(
         }
         seen_ids.insert(def.id.to_string());
 
-        entries.push(preset_catalog_entry(def, &resolve_with_wsl));
+        entries.push(preset_catalog_entry(def, resolve_with_wsl));
     }
 
     // Phase 3: load and append custom harness definitions.

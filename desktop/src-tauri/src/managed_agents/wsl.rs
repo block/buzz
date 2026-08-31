@@ -24,6 +24,13 @@
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+/// Hard wall-clock deadline for one WSL probe, on par with the other bounded
+/// discovery spawns. WSL2 cold-boot (VM start + distro init) can exceed 10s,
+/// so this is scaled up from the 10s used for CLI auth probes; a genuinely
+/// wedged boot is still reaped rather than stalling discovery forever.
+#[cfg(windows)]
+const WSL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// A harness command located inside the default WSL distribution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct WslCommandResolution {
@@ -97,6 +104,16 @@ fn wsl_cache() -> &'static Mutex<std::collections::HashMap<String, Option<WslCom
     CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
+/// Clear the WSL resolution cache so a command installed inside the default
+/// distribution after the first miss is found on the next forced discovery.
+/// Mirrors `resolve_command`'s `clear_resolve_cache`; both run on the
+/// forced-discovery invalidation seam (see `commands/agent_discovery`).
+pub(crate) fn clear_wsl_cache() {
+    if let Ok(mut guard) = wsl_cache().lock() {
+        guard.clear()
+    }
+}
+
 /// Probe the default WSL distribution for `command`, caching the outcome
 /// (positive or negative) for the app lifetime — mirroring `resolve_command`'s
 /// cache contract so repeated discovery runs stay cheap.
@@ -127,7 +144,11 @@ fn probe_wsl_command_uncached(command: &str) -> Option<WslCommandResolution> {
     let mut cmd = std::process::Command::new(wsl);
     cmd.args(["-e", "sh", "-c", &wsl_probe_script(command)]);
     crate::util::configure_no_window(&mut cmd);
-    let output = cmd.output().ok()?;
+    // Bound the probe on the same wall-clock deadline as other discovery
+    // spawns: a hung distro boot (WSL2 cold start) or a wedged login shell must
+    // not stall discovery forever. `output_with_timeout` reaps the child tree
+    // on timeout and fails closed to `None`.
+    let output = super::discovery::output_with_timeout(cmd, WSL_PROBE_TIMEOUT)?;
     if !output.status.success() {
         return None;
     }
