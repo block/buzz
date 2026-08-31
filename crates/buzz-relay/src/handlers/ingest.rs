@@ -10,6 +10,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use buzz_auth::Scope;
+use buzz_core::git_perms::REPO_EXPECTED_REVISION_TAG;
 use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
     is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
@@ -288,6 +289,25 @@ fn emit_product_feedback_success(
     );
 }
 
+fn emit_repository_duplicate_success(
+    tracer: &Arc<dyn buzz_conformance::Tracer>,
+    tenant: &TenantContext,
+    event: &Event,
+    auth: &IngestAuth,
+) {
+    // Repository announcements are relay-global. The conformance model folds
+    // a global exact replay into the same observation shape as a global
+    // insert, while the durable and domain side effects remain suppressed.
+    emit(
+        tracer,
+        TraceAction::WriteInsertGlobal {
+            msg_id: msg_id_label(event.id.as_bytes()),
+            claimed_community: claimed_community_from_event(event),
+        },
+        state_for_request(tenant, auth.pubkey()),
+    );
+}
+
 /// Increment the rejection counter with a bounded reason and transport label.
 ///
 /// Shared by the WS `EVENT` handler and the HTTP `POST /events` handler so
@@ -389,6 +409,38 @@ pub enum IngestError {
     AuthFailed(String),
     /// Server error — WS: OK false, HTTP: 500.
     Internal(String),
+}
+
+fn parse_repo_expected_revision(event: &Event) -> Result<Option<Vec<u8>>, IngestError> {
+    let mut revision = None;
+    for tag in event.tags.iter().filter(|tag| {
+        tag.as_slice().first().map(String::as_str) == Some(REPO_EXPECTED_REVISION_TAG)
+    }) {
+        if revision.is_some() {
+            return Err(IngestError::Rejected(
+                "invalid: duplicate repository expected revision".into(),
+            ));
+        }
+        let values = tag.as_slice();
+        let Some(value) = values.get(1).filter(|_| values.len() == 2) else {
+            return Err(IngestError::Rejected(
+                "invalid: bad repository expected revision".into(),
+            ));
+        };
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(IngestError::Rejected(
+                "invalid: bad repository expected revision".into(),
+            ));
+        }
+        revision = Some(hex::decode(value).map_err(|_| {
+            IngestError::Rejected("invalid: bad repository expected revision".into())
+        })?);
+    }
+    Ok(revision)
 }
 
 /// Map the durable community write-fence lookup onto the ingest error taxonomy.
@@ -3148,11 +3200,84 @@ async fn ingest_event_inner(
                 buzz_db::event::D_TAG_MAX_LEN,
             )));
         }
-        state
-            .db
-            .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
-            .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+        if kind_u32 == KIND_GIT_REPO_ANNOUNCEMENT {
+            use buzz_db::replaceable::{
+                ParameterizedReplacePrecondition, ParameterizedReplaceStatus,
+            };
+
+            let (expected_revision, revision_error) = match parse_repo_expected_revision(&event) {
+                Ok(revision) => (revision, None),
+                Err(error) => (None, Some(error)),
+            };
+            let precondition = if revision_error.is_some() {
+                ParameterizedReplacePrecondition::ExactReplayOnly
+            } else if let Some(expected) = expected_revision.as_deref() {
+                ParameterizedReplacePrecondition::ExpectedRevision(expected)
+            } else {
+                ParameterizedReplacePrecondition::Unconditional
+            };
+
+            if precondition == ParameterizedReplacePrecondition::Unconditional {
+                state
+                    .db
+                    .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
+                    .await
+                    .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            } else {
+                let result = state
+                    .db
+                    .replace_parameterized_event_with_precondition(
+                        tenant.community(),
+                        &event,
+                        &d_tag,
+                        channel_id,
+                        precondition,
+                    )
+                    .await
+                    .map_err(|e| IngestError::Internal(format!("error: {e}")))?;
+                match result.status {
+                    ParameterizedReplaceStatus::Inserted => (result.event, true),
+                    ParameterizedReplaceStatus::Duplicate => {
+                        emit_repository_duplicate_success(tracer, tenant, &event, &auth);
+                        return Ok(IngestResult {
+                            event_id: event_id_hex,
+                            accepted: true,
+                            message: String::new(),
+                        });
+                    }
+                    ParameterizedReplaceStatus::RevisionMissing => {
+                        return Err(IngestError::Rejected(
+                            "conflict: repository revision does not exist".into(),
+                        ));
+                    }
+                    ParameterizedReplaceStatus::RevisionMismatch => {
+                        return Err(IngestError::Rejected(
+                            "conflict: repository changed since it was loaded".into(),
+                        ));
+                    }
+                    ParameterizedReplaceStatus::Superseded => {
+                        return Err(IngestError::Rejected(
+                            "conflict: repository update was superseded; refresh and try again"
+                                .into(),
+                        ));
+                    }
+                    ParameterizedReplaceStatus::ReplayOnlyMiss => {
+                        return Err(revision_error.unwrap_or_else(|| {
+                            IngestError::Internal(
+                                "error: replay-only repository update lacked a revision error"
+                                    .into(),
+                            )
+                        }));
+                    }
+                }
+            }
+        } else {
+            state
+                .db
+                .replace_parameterized_event(tenant.community(), &event, &d_tag, channel_id)
+                .await
+                .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+        }
     } else {
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
         match state
@@ -3286,6 +3411,66 @@ mod tests {
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
+
+    fn repo_announcement_with_revision_tags(revisions: &[Vec<String>]) -> Event {
+        let mut tags = vec![nostr::Tag::parse(["d", "demo"]).expect("d tag")];
+        for revision in revisions {
+            tags.push(nostr::Tag::parse(revision.clone()).expect("revision tag"));
+        }
+        EventBuilder::new(Kind::Custom(KIND_GIT_REPO_ANNOUNCEMENT as u16), "")
+            .tags(tags)
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign repository announcement")
+    }
+
+    #[test]
+    fn repository_expected_revision_is_optional_and_canonical() {
+        let vanilla = repo_announcement_with_revision_tags(&[]);
+        assert!(parse_repo_expected_revision(&vanilla)
+            .expect("vanilla announcement")
+            .is_none());
+
+        let revision = "ab".repeat(32);
+        let conditional = repo_announcement_with_revision_tags(&[vec![
+            REPO_EXPECTED_REVISION_TAG.to_string(),
+            revision.clone(),
+        ]]);
+        assert_eq!(
+            parse_repo_expected_revision(&conditional).expect("conditional announcement"),
+            Some(hex::decode(revision).expect("revision hex"))
+        );
+    }
+
+    #[test]
+    fn repository_expected_revision_rejects_malformed_or_duplicate_tags() {
+        let cases = vec![
+            vec![vec![REPO_EXPECTED_REVISION_TAG.to_string()]],
+            vec![vec![
+                REPO_EXPECTED_REVISION_TAG.to_string(),
+                "abc".to_string(),
+            ]],
+            vec![vec![
+                REPO_EXPECTED_REVISION_TAG.to_string(),
+                "AB".repeat(32),
+            ]],
+            vec![vec![
+                REPO_EXPECTED_REVISION_TAG.to_string(),
+                "ab".repeat(32),
+                "extra".to_string(),
+            ]],
+            vec![
+                vec![REPO_EXPECTED_REVISION_TAG.to_string(), "ab".repeat(32)],
+                vec![REPO_EXPECTED_REVISION_TAG.to_string(), "cd".repeat(32)],
+            ],
+        ];
+        for tags in cases {
+            let event = repo_announcement_with_revision_tags(&tags);
+            assert!(matches!(
+                parse_repo_expected_revision(&event),
+                Err(IngestError::Rejected(_))
+            ));
+        }
+    }
 
     #[test]
     fn missing_huddle_backing_channel_is_a_client_rejection() {
@@ -3630,6 +3815,44 @@ mod tests {
                 "ingest_event_exited_without_trace",
             );
             emit_product_feedback_success(&counting, &tenant, &event, &auth);
+            drop(guard);
+        }
+
+        let steps = tracer.steps.lock().expect("trace lock");
+        assert_eq!(steps.len(), 1);
+        assert!(matches!(
+            steps[0].action,
+            TraceAction::WriteInsertGlobal { .. }
+        ));
+    }
+
+    #[test]
+    fn repository_duplicate_action_satisfies_ingest_emit_guard() {
+        let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let tenant = TenantContext::resolved(community, "repository.test");
+        let keys = nostr::Keys::generate();
+        let event = EventBuilder::new(
+            Kind::Custom(KIND_GIT_REPO_ANNOUNCEMENT as u16),
+            "repository announcement",
+        )
+        .tags([nostr::Tag::parse(["d", "demo"]).expect("d tag")])
+        .sign_with_keys(&keys)
+        .expect("sign repository announcement");
+        let auth = IngestAuth::Http {
+            pubkey: keys.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        let tracer = Arc::new(VecTracer::default());
+        let abstract_state = state_for_request(&tenant, auth.pubkey());
+
+        {
+            let (guard, counting) = EmitGuard::arm(
+                tracer.clone(),
+                abstract_state,
+                "ingest_event_exited_without_trace",
+            );
+            emit_repository_duplicate_success(&counting, &tenant, &event, &auth);
             drop(guard);
         }
 
