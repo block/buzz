@@ -66,6 +66,10 @@ type UseDraftPersistLifecycleParams = {
 };
 
 type UseDraftPersistLifecycleResult = {
+  /** Monotonic editor revision, including same-text edit/clear cycles. */
+  getComposerRevision: () => number;
+  /** Optimistic send/recovery is not an authored edit or authoritative deletion. */
+  runComposerUpdate: (update: () => void) => void;
   /**
    * Record the latest authored editor content. Empty content is persisted
    * immediately and remains authoritative across composer remounts until a
@@ -135,9 +139,23 @@ export function useDraftPersistLifecycle({
     [getImplicitAgentMentionPrefix],
   );
 
+  const composerRevision = React.useRef(0);
+  const getComposerRevision = React.useCallback(
+    () => composerRevision.current,
+    [],
+  );
   const pendingImetaForPersistRef = React.useRef<ImetaMedia[]>([]);
   const emptyContentIsAuthoritativeRef = React.useRef(false);
   const isRestoringContentRef = React.useRef(false);
+  const runComposerUpdate = React.useCallback((update: () => void) => {
+    const wasRestoring = isRestoringContentRef.current;
+    isRestoringContentRef.current = true;
+    try {
+      update();
+    } finally {
+      isRestoringContentRef.current = wasRestoring;
+    }
+  }, []);
   const restoredQueuedAttachmentsRef = React.useRef<QueuedMediaAttachment[]>(
     [],
   );
@@ -221,7 +239,9 @@ export function useDraftPersistLifecycle({
 
   const trackAuthoredContent = React.useCallback(
     (content: string) => {
-      if (!effectiveDraftKey || isRestoringContentRef.current) return;
+      if (isRestoringContentRef.current) return;
+      composerRevision.current += 1;
+      if (!effectiveDraftKey) return;
       const authoritativeDraftKey = scopedDraftKey(effectiveDraftKey);
       if (content.length > 0) {
         authoritativelyClearedDraftKeys.delete(authoritativeDraftKey);
@@ -242,5 +262,5 @@ export function useDraftPersistLifecycle({
     [channelId, effectiveDraftKey, persistDraft, spoileredAttachmentUrlsRef],
   );
 
-  return { trackAuthoredContent };
+  return { trackAuthoredContent, getComposerRevision, runComposerUpdate };
 }

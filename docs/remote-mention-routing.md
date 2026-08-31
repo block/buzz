@@ -47,3 +47,27 @@ exact mention refs without overwriting newer edits.
 `useMentionSendFlow.cancellation.test.mjs` drives the actual hooks with React
 StrictMode and deferred dependencies; `remote-owned-mentions.spec.ts` covers
 visible pending, Escape/retry and route navigation at deferred IPC boundaries.
+
+### Source draft ownership
+
+Invitation intent belongs to one visit of the effective persistence key and
+channel, not just the mounted composer or destination channel. Same-channel
+thread changes and A → B → A invalidate the original visit. The same owner gates
+optimistic clear, recovery and pending state. Invalidation makes recovery durable
+synchronously, before a later visit can load or edit the source draft; late async
+completion cannot revive that recovery or release a newer attempt's latch.
+
+The editor's authored revision distinguishes an intentional edit → clear from an
+optimistic empty composer. Programmatic send clear/recovery runs inside the draft
+lifecycle's restoration boundary, so it does not mark the source as authoritatively
+deleted. Exact selected mention refs are captured before asynchronous preparation.
+Persona preparation similarly consumes captured selections and returns resolved
+refs, writing them into the editor only while the original visit/revision remains
+current. Normal persona creation/reuse and ordinary destination-bound background
+sends retain their existing behavior; accepted membership is never rolled back.
+
+Recovery still compares stored content/media/refs rather than implementing a
+versioned draft database. Final membership/policy reads are not atomic with send,
+and cancellation cannot retract an already dispatched publication. Standalone
+forum transport-failure binding recovery and native compatibility remain separate
+review/follow-up boundaries.

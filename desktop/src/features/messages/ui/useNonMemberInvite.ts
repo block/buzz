@@ -8,11 +8,12 @@ import {
   mentionRevalidationOptions,
   uniqueNormalizedPubkeys,
   type PendingNonMemberMentionSend,
+  type ComposerDraftOwner,
 } from "./useMentionSendFlow.helpers";
 
 /** Own the whole Invite attempt, not just the membership mutation's pending state. */
 export function useNonMemberInvite({
-  channelId,
+  sourceOwner,
   draft,
   canInvite,
   revalidate,
@@ -22,7 +23,7 @@ export function useNonMemberInvite({
   completeSend,
   setError,
 }: {
-  channelId: string | null;
+  sourceOwner: ComposerDraftOwner;
   draft: PendingNonMemberMentionSend | null;
   canInvite: boolean;
   revalidate: (
@@ -48,8 +49,8 @@ export function useNonMemberInvite({
     controller: AbortController;
     draft: PendingNonMemberMentionSend;
   } | null>(null);
-  const currentChannel = React.useRef(channelId);
-  currentChannel.current = channelId;
+  const currentOwner = React.useRef(sourceOwner);
+  currentOwner.current = sourceOwner;
   const [isPending, setIsPending] = React.useState(false);
   const cancel = React.useCallback(() => {
     active.current?.controller.abort();
@@ -62,11 +63,11 @@ export function useNonMemberInvite({
     // A different non-null prompt or destination supersedes the old intent.
     if (
       attempt &&
-      (attempt.draft.capturedChannelId !== channelId ||
+      (attempt.draft.sourceOwner !== sourceOwner ||
         (draft !== null && draft !== attempt.draft))
     )
       cancel();
-  }, [channelId, draft, cancel]);
+  }, [sourceOwner, draft, cancel]);
   React.useLayoutEffect(
     () => () => {
       active.current?.controller.abort();
@@ -76,7 +77,8 @@ export function useNonMemberInvite({
   );
 
   const invite = React.useCallback(() => {
-    if (!draft || active.current) return;
+    if (!draft || draft.sourceOwner !== currentOwner.current || active.current)
+      return;
     if (!canInvite) {
       setError(PRIVATE_CHANNEL_ADD_DENIED_MESSAGE);
       return;
@@ -88,7 +90,7 @@ export function useNonMemberInvite({
     const isCurrent = () =>
       active.current?.controller === attempt &&
       !attempt.signal.aborted &&
-      currentChannel.current === draft.capturedChannelId;
+      currentOwner.current === draft.sourceOwner;
     void (async () => {
       const mentionPubkeys = uniqueNormalizedPubkeys(
         await revalidate(

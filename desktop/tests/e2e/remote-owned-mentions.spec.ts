@@ -154,7 +154,7 @@ for (const error of [
     await expect(page.getByText(error, { exact: true })).toBeVisible();
     await waitForAnimations(page);
     await page.screenshot({
-      path: `test-results/remote-error-${error.split(" ")[0]}.png`,
+      path: `test-results/remote-error-${error.split(" ")[0].replace(/[^a-zA-Z0-9_-]/g, "-")}.png`,
     });
     await expect(page.getByTestId("message-input")).toHaveText(
       "@RemoteScout hello",
@@ -262,21 +262,25 @@ type InviteGateWindow = Window & {
   inviteGateEntered?: boolean;
   releaseInviteGate?: () => void;
 };
-async function holdInviteCommand(page: Page, command: string) {
-  await page.evaluate((heldCommand) => {
-    const state = window as unknown as InviteGateWindow;
-    const invoke = state.__TAURI_INTERNALS__.invoke;
-    const gate = new Promise<void>((resolve) => {
-      state.releaseInviteGate = resolve;
-    });
-    state.__TAURI_INTERNALS__.invoke = async (command, payload) => {
-      if (command !== heldCommand) return invoke(command, payload);
-      state.__TAURI_INTERNALS__.invoke = invoke;
-      state.inviteGateEntered = true;
-      await gate;
-      return invoke(command, payload);
-    };
-  }, command);
+async function holdInviteCommand(page: Page, command: string, skip = 0) {
+  await page.evaluate(
+    ({ heldCommand, skip }) => {
+      const state = window as unknown as InviteGateWindow;
+      const invoke = state.__TAURI_INTERNALS__.invoke;
+      const gate = new Promise<void>((resolve) => {
+        state.releaseInviteGate = resolve;
+      });
+      state.__TAURI_INTERNALS__.invoke = async (command, payload) => {
+        if (command !== heldCommand || skip-- > 0)
+          return invoke(command, payload);
+        state.__TAURI_INTERNALS__.invoke = invoke;
+        state.inviteGateEntered = true;
+        await gate;
+        return invoke(command, payload);
+      };
+    },
+    { heldCommand: command, skip },
+  );
 }
 async function releaseInviteCommand(page: Page) {
   await page.evaluate(() => {
@@ -365,3 +369,92 @@ test("B1 navigation during delayed add cannot publish its captured draft", async
     "@RemoteScout hello",
   );
 });
+
+for (const stage of ["add", "publish"] as const) {
+  for (const incoming of ["unrelated thread B draft", "@RemoteScout hello"]) {
+    test(`B1 same-channel thread navigation during ${stage} preserves ${incoming}`, async ({
+      page,
+    }) => {
+      await install(page);
+      await expect
+        .poll(() =>
+          page.evaluate(
+            () =>
+              window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+                channelName: "general",
+              }) ?? false,
+          ),
+        )
+        .toBe(true);
+      const roots = await page.evaluate(() =>
+        ["Lifecycle thread A", "Lifecycle thread B"].map(
+          (content) =>
+            window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+              channelName: "general",
+              content,
+            })?.id,
+        ),
+      );
+      expect(roots.every(Boolean)).toBe(true);
+      const navigate = async (id: string | undefined) => {
+        // Drive the real reply route handler, including while the modal has
+        // focus (the equivalent external history/navigation intent).
+        await page
+          .getByTestId(`reply-message-${id}`)
+          .first()
+          .evaluate((button) => (button as HTMLButtonElement).click());
+        await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+        await expect(page.getByTestId("message-thread-head")).toContainText(
+          id === roots[0] ? "Lifecycle thread A" : "Lifecycle thread B",
+        );
+      };
+      const input = page
+        .getByTestId("message-thread-panel")
+        .getByTestId("message-input");
+      // Visit both first: the transition under test must reuse the available
+      // panel/composer, not get a fortuitous unmount via a loading skeleton.
+      await navigate(roots[1]);
+      await input.fill(incoming);
+      await navigate(roots[0]);
+      await expect(input).toHaveText("");
+      await input.fill("@Remote");
+      await page
+        .getByTestId(`mention-suggestion-${REMOTE}`)
+        .locator("button")
+        .first()
+        .click();
+      await page.keyboard.type("hello");
+      await page
+        .getByTestId("message-thread-panel")
+        .getByTestId("send-message")
+        .click();
+      await holdInviteCommand(
+        page,
+        stage === "add" ? "add_channel_members" : "revalidate_relay_agents",
+        stage === "publish" ? 2 : 0,
+      );
+      await page.getByRole("button", { name: "Invite", exact: true }).click();
+      await waitForInviteGate(page);
+      // Expando proves the actual editor DOM host survived A -> B.
+      await input.evaluate((el) =>
+        el.setAttribute("data-lifecycle-host", "retained"),
+      );
+      await navigate(roots[1]);
+      await expect(input).toHaveAttribute("data-lifecycle-host", "retained");
+      await expect(input).toHaveText(incoming);
+      await expect(page.getByRole("alertdialog")).toHaveCount(0);
+      // Return before resolution: optimistic recovery must already be durable.
+      await navigate(roots[0]);
+      await expect(input).toHaveText("@RemoteScout hello");
+      await input.fill("new A draft after return");
+      await navigate(roots[1]);
+      await releaseInviteCommand(page);
+      await page.waitForTimeout(300);
+      expect(await sent(page)).toEqual([]);
+      await expect(input).toHaveText(incoming);
+      await navigate(roots[0]);
+      await expect(input).toHaveText("new A draft after return");
+      await assertNoLocalLifecycle(page);
+    });
+  }
+}

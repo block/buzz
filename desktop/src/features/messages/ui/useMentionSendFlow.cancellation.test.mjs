@@ -62,7 +62,7 @@ function load(name, stubs) {
   );
   return exports;
 }
-async function setup() {
+async function setup({ lifecycle = false } = {}) {
   const { act, renderHook } = await import("@testing-library/react");
   const calls = [];
   const control = { prepare: null, add: null, publish: null, inventory: null };
@@ -88,8 +88,21 @@ async function setup() {
     "@/features/agents/hooks": new Proxy(
       {},
       {
-        get: (_, key) =>
-          key.includes("Mutation") ? () => mutation : () => query,
+        get: (_, key) => {
+          if (
+            key === "useCreateChannelManagedAgentMutation" ||
+            key === "useProvisionChannelManagedAgentMutation"
+          )
+            return () => ({
+              isPending: false,
+              mutateAsync: async (input) => {
+                calls.push(["persona", input]);
+                if (control.persona) await control.persona.promise;
+                return { agent: { pubkey: KEY, name: "Fizz" } };
+              },
+            });
+          return key.includes("Mutation") ? () => mutation : () => query;
+        },
       },
     ),
     "@/features/agents/channelAgents": {
@@ -99,7 +112,9 @@ async function setup() {
         return agent;
       },
     },
-    "@/features/agents/lib/resolvePersonaRuntime": {},
+    "@/features/agents/lib/resolvePersonaRuntime": {
+      resolvePersonaRuntime: () => ({ runtime: "test-runtime" }),
+    },
     "@/features/channels/hooks": {
       useAddChannelMembersMutation: () => mutation,
     },
@@ -111,7 +126,15 @@ async function setup() {
       dmThreadAgentMentionError: () => null,
     },
     "@/features/messages/lib/backgroundMediaUploadStore": {
-      saveQueuedAttachmentsForDraft: noop,
+      saveQueuedAttachmentsForDraft: (...args) =>
+        calls.push(["save-queue", ...args]),
+      prepareBackgroundMediaUpload: () => ({
+        start(callbacks) {
+          control.uploadCallbacks = callbacks;
+          return true;
+        },
+        cancel: noop,
+      }),
     },
     "@/features/messages/lib/imetaMediaMarkdown": {
       buildOutgoingMessage: (text) => ({ content: text, mediaTags: [] }),
@@ -136,8 +159,48 @@ async function setup() {
     stubs,
   );
   const { useMentionSendFlow } = load("useMentionSendFlow", stubs);
+  const store = new Map();
+  const persistDraft = (
+    key,
+    content,
+    channelId,
+    pendingImeta,
+    spoileredAttachmentUrls,
+    mentionRefs,
+  ) => {
+    calls.push([
+      "persist",
+      key,
+      content,
+      channelId,
+      pendingImeta,
+      spoileredAttachmentUrls,
+      mentionRefs,
+    ]);
+    if (content || pendingImeta.length)
+      store.set(key, {
+        content,
+        channelId,
+        pendingImeta,
+        spoileredAttachmentUrls,
+        mentionRefs,
+      });
+    else store.delete(key);
+  };
+  const initialKey = lifecycle ? "thread:a" : "general";
+  if (lifecycle)
+    store.set(initialKey, {
+      content: TEXT,
+      channelId: "general",
+      pendingImeta: [],
+      spoileredAttachmentUrls: [],
+      mentionRefs: refs,
+    });
   const options = {
     channelId: "general",
+    effectiveDraftKey: initialKey,
+    getComposerRevision: () => 0,
+    runComposerUpdate: (update) => update(),
     channelType: "stream",
     customEmoji: [],
     mentions: {
@@ -147,10 +210,20 @@ async function setup() {
       extractMentionPubkeys: () => [KEY],
       isAgentPubkey: (key) => key === KEY,
       isManagedAgentPubkey: () => false,
-      getDraftMentionRefs: () => refs,
+      getDraftMentionRefs: () => control.currentRefs ?? refs,
+      registerMentionPubkey: (displayName, pubkey, options) => {
+        const ref = { displayName, pubkey, isAgent: options.isAgent };
+        control.currentRefs = [...(control.currentRefs ?? []), ref];
+        calls.push(["register-ref", ref]);
+      },
       getMentionDisplayName: () => "RemoteScout",
-      clearMentions: noop,
-      restoreDraftMentionRefs: (value) => calls.push(["restore-refs", value]),
+      clearMentions: () => {
+        if (lifecycle) control.currentRefs = [];
+      },
+      restoreDraftMentionRefs: (value) => {
+        if (lifecycle) control.currentRefs = value;
+        calls.push(["restore-refs", value]);
+      },
       revalidateMentionPubkeys: async (keys, channel, opts) => {
         calls.push([opts.phase, channel]);
         if (control[opts.phase]) await control[opts.phase].promise;
@@ -160,10 +233,17 @@ async function setup() {
     contentRef: { current: TEXT },
     channelLinks: { clearChannels: noop },
     emojiAutocomplete: { clearEmojis: noop },
-    richText: { clearContent: noop, setContent: noop },
+    richText: {
+      clearContent: () => {
+        if (lifecycle) lifecycleApi.trackAuthoredContent("");
+      },
+      setContent: (text) => {
+        if (lifecycle) lifecycleApi.trackAuthoredContent(text);
+      },
+    },
     drafts: {
-      loadDraft: () => null,
-      persistDraft: (...args) => calls.push(["persist", ...args]),
+      loadDraft: (key) => (lifecycle ? store.get(key) : null),
+      persistDraft,
       markDraftSent: noop,
     },
     setContent: noop,
@@ -174,10 +254,47 @@ async function setup() {
     hasUnsavedMedia: () => false,
     onSendRef: { current: async (...args) => calls.push(["SEND", ...args]) },
   };
-  const hook = renderHook(() => useMentionSendFlow(options), {
-    wrapper: ({ children }) =>
-      React.createElement(React.StrictMode, null, children),
-  });
+  stubs["@/features/messages/lib/stripImplicitAgentMentions"] = {
+    stripImplicitAgentMentionPrefix: (text) => text,
+  };
+  stubs["@/features/messages/lib/useDrafts"] = {
+    getDraftStoreScope: () => "test",
+  };
+  const { useDraftPersistLifecycle } = load("useDraftPersistSnapshot", stubs);
+  let lifecycleApi;
+  const hook = renderHook(
+    () => {
+      if (lifecycle) {
+        // biome-ignore lint/correctness/useHookAtTopLevel: lifecycle is immutable for this harness mount
+        lifecycleApi = useDraftPersistLifecycle({
+          effectiveDraftKey: options.effectiveDraftKey,
+          channelId: options.channelId,
+          loadDraft: options.drafts.loadDraft,
+          persistDraft,
+          getMentionRefs: options.mentions.getDraftMentionRefs,
+          restoreMentionRefs: options.mentions.restoreDraftMentionRefs,
+          livePendingImeta: [],
+          setPendingImeta: noop,
+          setContent: (text) => {
+            options.contentRef.current = text;
+          },
+          clearContent: () => {
+            options.contentRef.current = "";
+          },
+          setSpoileredAttachmentUrls: noop,
+          spoileredAttachmentUrlsRef: { current: new Set() },
+          syncComposerContentFromEditor: () => options.contentRef.current,
+        });
+        options.getComposerRevision = lifecycleApi.getComposerRevision;
+        options.runComposerUpdate = lifecycleApi.runComposerUpdate;
+      }
+      return useMentionSendFlow(options);
+    },
+    {
+      wrapper: ({ children }) =>
+        React.createElement(React.StrictMode, null, children),
+    },
+  );
   const flush = async () =>
     act(async () => {
       await new Promise((resolve) => setImmediate(resolve));
@@ -189,7 +306,14 @@ async function setup() {
         capturedChannelId: options.channelId,
         pendingImeta: [],
         trimmed: text,
-        recoveryDraftKey: "general",
+        recoveryDraftKey: options.effectiveDraftKey,
+        capturedThreadContext: lifecycle
+          ? {
+              parentEventId: options.effectiveDraftKey,
+              threadHeadId: options.effectiveDraftKey,
+            }
+          : null,
+        queuedAttachments: control.attachments ?? [],
       });
     });
   await prompt();
@@ -216,6 +340,17 @@ async function setup() {
     finish,
     flush,
     events,
+    store,
+    edit: (text, mentionRefs = refs) =>
+      act(() => {
+        options.contentRef.current = text;
+        control.currentRefs = mentionRefs;
+        lifecycleApi.trackAuthoredContent(text);
+      }),
+    navigate: (key) => {
+      options.effectiveDraftKey = key;
+      hook.rerender();
+    },
   };
 }
 
@@ -349,3 +484,152 @@ test("cancelled invitation cannot attach a local recipient after delayed policy 
   assert.equal(s.events("SEND").length, 0);
   assert.equal(s.options.contentRef.current, TEXT);
 });
+
+// Real draft lifecycle + real send/Invite hooks share one reused StrictMode host.
+// The editor and storage adapter are mocked; draft leave/restore ordering is not.
+for (const stage of ["add", "publish"]) {
+  for (const incoming of [TEXT, "unrelated thread B draft"]) {
+    test(`same-channel ${stage}: incoming ${incoming === TEXT ? "same-text" : "different-text"} draft and exact refs survive`, async () => {
+      const s = await setup({ lifecycle: true });
+      const otherRefs = [
+        { displayName: "RemoteScout", pubkey: "c".repeat(64), isAgent: true },
+      ];
+      s.store.set("thread:b", {
+        content: incoming,
+        channelId: "general",
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        mentionRefs: otherRefs,
+      });
+      const gate = deferred();
+      s.control[stage] = gate;
+      await s.invite();
+      s.navigate("thread:b");
+      assert.equal(s.result.current.nonMemberPromptProps.open, false);
+      assert.equal(s.result.current.isPreparingMentionSend, false);
+      assert.equal(s.options.contentRef.current, incoming);
+      assert.deepEqual(s.control.currentRefs, otherRefs);
+      // Recovery must be available on return BEFORE the network responds.
+      s.navigate("thread:a");
+      assert.equal(s.options.contentRef.current, TEXT);
+      assert.deepEqual(s.control.currentRefs, s.refs);
+      s.edit(TEXT, otherRefs); // identical visible text is a new exact selection
+      s.navigate("thread:b");
+      await s.finish(gate);
+      assert.equal(s.events("SEND").length, 0);
+      assert.equal(s.options.contentRef.current, incoming);
+      assert.deepEqual(s.control.currentRefs, otherRefs);
+      assert.deepEqual(s.store.get("thread:a").mentionRefs, otherRefs);
+      assert.deepEqual(s.store.get("thread:b").mentionRefs, otherRefs);
+    });
+  }
+}
+test("late validation completion cannot restore over an authored empty draft or reset a newer send", async () => {
+  const s = await setup({ lifecycle: true });
+  const old = deferred();
+  s.control.publish = old;
+  await s.invite();
+  s.edit("new text");
+  s.edit("");
+  s.dismiss();
+  assert.equal(s.options.contentRef.current, "");
+  const current = deferred();
+  s.control.publish = current;
+  await s.prompt();
+  await s.invite();
+  await s.finish(old);
+  assert.equal(s.result.current.isPreparingMentionSend, true);
+  assert.equal(s.events("SEND").length, 0);
+  await s.finish(current);
+  assert.equal(s.events("SEND").length, 1);
+});
+test("cancelled media continuation preserves refs and cannot overwrite an unrelated stored draft", async () => {
+  const s = await setup({ lifecycle: true });
+  s.dismiss();
+  s.control.attachments = [{ id: "file", file: {}, spoilered: false }];
+  await s.prompt();
+  await s.invite();
+  assert.ok(s.control.uploadCallbacks);
+  const other = {
+    content: "new saved draft",
+    channelId: "general",
+    pendingImeta: [],
+    spoileredAttachmentUrls: [],
+    mentionRefs: [],
+  };
+  s.store.set("thread:a", other);
+  s.dismiss();
+  assert.equal(s.options.contentRef.current, TEXT);
+  assert.deepEqual(s.control.currentRefs, s.refs);
+  assert.equal(s.store.get("thread:a"), other);
+  await s.act(async () =>
+    s.control.uploadCallbacks.onComplete([], new AbortController().signal),
+  );
+  assert.equal(s.events("SEND").length, 0);
+  assert.equal(s.store.get("thread:a"), other);
+});
+
+for (const action of ["unchanged", "navigate", "edit"]) {
+  test(`delayed persona reuse binds the captured draft, not a later selection: ${action}`, async () => {
+    const s = await setup({ lifecycle: true });
+    s.dismiss();
+    const text = "@Fizz hello";
+    const personaRefs = [{ displayName: "Fizz", pubkey: KEY, isAgent: true }];
+    const otherRefs = [{ ...personaRefs[0], pubkey: "c".repeat(64) }];
+    s.edit(text, []);
+    s.store.delete("thread:a"); // new, not-yet-persisted persona draft
+    s.options.mentions.extractMentionPubkeys = () => [];
+    s.options.mentions.extractMentionPersonas = () => [
+      {
+        displayName: "Fizz",
+        persona: { id: "builtin:fizz", displayName: "Fizz" },
+      },
+    ];
+    const gate = deferred();
+    s.control.persona = gate;
+    s.rerender();
+    let send;
+    await s.act(async () => {
+      send = s.result.current.sendMessageWithMentionFlow({
+        capturedChannelId: "general",
+        pendingImeta: [],
+        trimmed: text,
+        recoveryDraftKey: "thread:a",
+      });
+    });
+    assert.equal(s.events("persona").length, 1);
+    if (action === "navigate") {
+      s.store.set("thread:b", {
+        content: text,
+        channelId: "general",
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        mentionRefs: otherRefs,
+      });
+      s.navigate("thread:b");
+    } else if (action === "edit") s.edit(text, otherRefs);
+    // Transport failure owes exact resolved persona refs to the source snapshot,
+    // without replacing a new editor's identical-label selection.
+    s.options.onSendRef.current = async () => {
+      throw new Error("transport");
+    };
+    await s.finish(gate);
+    await send;
+    if (action === "unchanged") {
+      assert.equal(s.events("register-ref").length, 1);
+      assert.equal(s.options.contentRef.current, text);
+      assert.deepEqual(
+        JSON.parse(JSON.stringify(s.control.currentRefs)),
+        personaRefs,
+      );
+      assert.deepEqual(
+        JSON.parse(JSON.stringify(s.store.get("thread:a").mentionRefs)),
+        personaRefs,
+      );
+    } else {
+      assert.equal(s.events("register-ref").length, 0);
+      assert.equal(s.options.contentRef.current, text);
+      assert.deepEqual(s.control.currentRefs, otherRefs);
+    }
+  });
+}
