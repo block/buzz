@@ -10,7 +10,7 @@ import type { UseRichTextEditorResult } from "@/features/messages/lib/useRichTex
 import type { UseDraftsResult } from "@/features/messages/lib/useDrafts";
 
 export type UseMentionSendFlowOptions = {
-  /** Lifecycle accessor bound to this visit, still readable after it exits. */
+  /** Visit-bound accessor reading shared source-key intent, even after exit. */
   getComposerRevision: () => number;
   runComposerUpdate: (update: () => void) => void;
   channelId: string | null;

@@ -5,7 +5,8 @@ import { stripImplicitAgentMentionPrefix } from "@/features/messages/lib/stripIm
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import type { QueuedMediaAttachment } from "@/features/messages/lib/backgroundMediaUploadStore";
 import {
-  getDraftStoreScope,
+  getDraftAuthority,
+  recordDraftAuthoredContent,
   type DraftMentionRef,
   type DraftState,
 } from "@/features/messages/lib/useDrafts";
@@ -66,7 +67,7 @@ type UseDraftPersistLifecycleParams = {
 };
 
 type UseDraftPersistLifecycleResult = {
-  /** Captured visit revision; remains readable after exit, excluding later visits. */
+  /** Shared key intent; later visits can revoke a captured continuation. */
   getComposerRevision: () => number;
   /** Optimistic send/recovery is not an authored edit or authoritative deletion. */
   runComposerUpdate: (update: () => void) => void;
@@ -77,12 +78,6 @@ type UseDraftPersistLifecycleResult = {
    */
   trackAuthoredContent: (content: string) => void;
 };
-
-const authoritativelyClearedDraftKeys = new Set<string>();
-
-function scopedDraftKey(draftKey: string): string {
-  return `${getDraftStoreScope()}:${draftKey}`;
-}
 
 /**
  * Owns the draft-persist lifecycle for `MessageComposer`.
@@ -139,13 +134,24 @@ export function useDraftPersistLifecycle({
     [getImplicitAgentMentionPrefix],
   );
 
-  // Pending sends retain this visit's record after navigation/unmount. A live
-  // editor ref would lose A's deletion authority as soon as B became visible.
-  const visit = React.useMemo(
-    () => ({ channelId, draftKey: effectiveDraftKey, revision: 0 }),
-    [channelId, effectiveDraftKey],
+  // Each visit keeps its own accessor identity (visible ownership), but reads
+  // the store's shared key authority, including later visits and absent values.
+  const authority = React.useMemo(
+    () =>
+      effectiveDraftKey
+        ? getDraftAuthority(effectiveDraftKey)
+        : {
+            revision: 0,
+            authoredRevision: 0,
+            emptyContentIsAuthoritative: false,
+          },
+    [effectiveDraftKey],
   );
-  const getComposerRevision = React.useCallback(() => visit.revision, [visit]);
+  const getComposerRevision = React.useCallback(
+    () => authority.revision,
+    [authority],
+  );
+  const lastAuthoredRevisionRef = React.useRef(authority.authoredRevision);
   const pendingImetaForPersistRef = React.useRef<ImetaMedia[]>([]);
   const emptyContentIsAuthoritativeRef = React.useRef(false);
   const isRestoringContentRef = React.useRef(false);
@@ -186,12 +192,8 @@ export function useDraftPersistLifecycle({
         : [];
     }
     restoreQueuedAttachments?.(restoredQueuedAttachmentsRef.current);
-    const authoritativeDraftKey = effectiveDraftKey
-      ? scopedDraftKey(effectiveDraftKey)
-      : null;
-    const wasAuthoritativelyCleared = authoritativeDraftKey
-      ? authoritativelyClearedDraftKeys.has(authoritativeDraftKey)
-      : false;
+    lastAuthoredRevisionRef.current = authority.authoredRevision;
+    const wasAuthoritativelyCleared = authority.emptyContentIsAuthoritative;
     const saved = effectiveDraftKey ? loadDraft(effectiveDraftKey) : undefined;
     emptyContentIsAuthoritativeRef.current = wasAuthoritativelyCleared;
     isRestoringContentRef.current = true;
@@ -219,7 +221,13 @@ export function useDraftPersistLifecycle({
     isRestoringContentRef.current = false;
 
     return () => {
-      if (effectiveDraftKey) {
+      // Another composer or explicit inbox deletion may supersede this visit
+      // without changing its editor. A send claim alone does not block saving
+      // the outgoing editor: optimistic clear must still persist normally.
+      if (
+        effectiveDraftKey &&
+        lastAuthoredRevisionRef.current === authority.authoredRevision
+      ) {
         const queuedAttachments = getQueuedAttachments?.() ?? [];
         if (queuedAttachments.length > 0) {
           saveQueuedAttachmentsForDraft?.(effectiveDraftKey, queuedAttachments);
@@ -242,15 +250,13 @@ export function useDraftPersistLifecycle({
   const trackAuthoredContent = React.useCallback(
     (content: string) => {
       if (isRestoringContentRef.current) return;
-      visit.revision += 1;
       if (!effectiveDraftKey) return;
-      const authoritativeDraftKey = scopedDraftKey(effectiveDraftKey);
+      recordDraftAuthoredContent(effectiveDraftKey, content);
+      lastAuthoredRevisionRef.current = authority.authoredRevision;
       if (content.length > 0) {
-        authoritativelyClearedDraftKeys.delete(authoritativeDraftKey);
         emptyContentIsAuthoritativeRef.current = false;
         return;
       }
-      authoritativelyClearedDraftKeys.add(authoritativeDraftKey);
       emptyContentIsAuthoritativeRef.current = true;
       persistDraft(
         effectiveDraftKey,
@@ -262,11 +268,11 @@ export function useDraftPersistLifecycle({
       );
     },
     [
+      authority,
       channelId,
       effectiveDraftKey,
       persistDraft,
       spoileredAttachmentUrlsRef,
-      visit,
     ],
   );
 

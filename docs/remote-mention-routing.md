@@ -54,11 +54,12 @@ Invitation intent belongs to one visit of the effective persistence key and
 channel, not just the mounted composer or destination channel. Same-channel
 thread changes and A → B → A invalidate the original visit. The visible owner gates
 optimistic clear, editor recovery and pending state. Storage recovery instead
-consults the captured source visit's authored revision even after that visit
-exits; losing visible ownership never revokes an authored deletion. The lifecycle
-retains a per-visit revision record through its captured accessor, so B's edits
-cannot authorize or suppress A's recovery. Preflight recovery and sent-draft
-cleanup use that same source authority. Invalidation makes recovery durable
+consults shared authored intent for the source draft key, even after exit,
+re-entry or unmount. The draft store retains a revision and authoritative-empty
+marker independently of the stored value. Later same-key authored text/deletion
+or a new send revokes older recovery and sent-draft cleanup; editing B does not
+change A's authority. A visit-specific accessor reads that shared authority while
+preserving the separate visible-owner identity. Invalidation makes recovery durable
 synchronously, before a later visit can load or edit the source draft; late async
 completion cannot revive that recovery or release a newer attempt's latch.
 
@@ -71,8 +72,12 @@ refs, writing them into the editor only while the original visit/revision remain
 current. Normal persona creation/reuse and ordinary destination-bound background
 sends retain their existing behavior; accepted membership is never rolled back.
 
-Recovery still compares stored content/media/refs rather than implementing a
-versioned draft database. Final membership/policy reads are not atomic with send,
+Recovery additionally compares stored content/media/exact refs before replacing
+an existing record. Programmatic persistence does not itself change semantic
+intent. Explicit inbox deletion and replacement do; scope reset invalidates old
+handles. This is same-window authority for live continuations, not cross-window
+synchronization or a versioned storage protocol. Reload destroys continuations;
+authored deletion has already removed the durable value. Final membership/policy reads are not atomic with send,
 and cancellation cannot retract an already dispatched publication. Standalone
 forum transport-failure binding recovery and native compatibility remain separate
 review/follow-up boundaries.

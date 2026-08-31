@@ -559,3 +559,134 @@ for (const incoming of ["unrelated thread B draft", "@RemoteScout hello"]) {
     await assertNoLocalLifecycle(page);
   });
 }
+
+for (const incoming of ["B preserved"]) {
+  test(`ordinary failure after returning to A and deleting does not resurrect storage`, async ({
+    page,
+  }) => {
+    await install(page);
+    await page.evaluate(
+      async ({ pubkey, channelId }) => {
+        await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("add_channel_members", {
+          channelId,
+          pubkeys: [pubkey],
+          role: "bot",
+        });
+        await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+          queryKey: ["channels"],
+        });
+        await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+          queryKey: ["relay-agents"],
+        });
+      },
+      { pubkey: REMOTE, channelId: GENERAL },
+    );
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+              channelName: "general",
+            }) ?? false,
+        ),
+      )
+      .toBe(true);
+    const roots = await page.evaluate(() =>
+      ["Lifecycle thread A", "Lifecycle thread B"].map(
+        (content) =>
+          window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+            channelName: "general",
+            content,
+          })?.id,
+      ),
+    );
+    expect(roots.every(Boolean)).toBe(true);
+    const navigate = async (id: string | undefined) => {
+      // Drive the real reply route handler, including while the modal has
+      // focus (the equivalent external history/navigation intent).
+      await page
+        .getByTestId(`reply-message-${id}`)
+        .first()
+        .evaluate((button) => (button as HTMLButtonElement).click());
+      await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+      await expect(page.getByTestId("message-thread-head")).toContainText(
+        id === roots[0] ? "Lifecycle thread A" : "Lifecycle thread B",
+      );
+    };
+    const input = page
+      .getByTestId("message-thread-panel")
+      .getByTestId("message-input");
+    // Visit both first: the transition under test must reuse the available
+    // panel/composer, not get a fortuitous unmount via a loading skeleton.
+    await navigate(roots[1]);
+    await input.fill(incoming);
+    await navigate(roots[0]);
+    await expect(input).toHaveText("");
+    await input.fill("@Remote");
+    await page
+      .getByTestId(`mention-suggestion-${REMOTE}`)
+      .locator("button")
+      .first()
+      .click();
+    await page.keyboard.type("hello");
+    await holdInviteCommand(page, "revalidate_relay_agents", 1);
+    await page
+      .getByTestId("message-thread-panel")
+      .getByTestId("send-message")
+      .click();
+    await waitForInviteGate(page);
+    await expect(input).toHaveText("");
+    await input.evaluate((el) =>
+      el.setAttribute("data-lifecycle-host", "retained"),
+    );
+    await navigate(roots[1]);
+    await expect(input).toHaveAttribute("data-lifecycle-host", "retained");
+    await expect(input).toHaveText(incoming);
+    await navigate(roots[0]);
+    await expect(input).toHaveAttribute("data-lifecycle-host", "retained");
+    await input.fill("new authored text");
+    await input.fill("");
+    const sourceRecord = () =>
+      page.evaluate(([root, otherRoot]) => {
+        const key = Object.keys(localStorage).find((key) =>
+          key.startsWith("buzz-drafts.v2"),
+        );
+        if (!key) throw new Error("draft storage scope missing");
+        const drafts = JSON.parse(localStorage.getItem(key) ?? "{}");
+        if (!drafts[`thread:${otherRoot}`])
+          throw new Error("control B draft missing");
+        return drafts[`thread:${root}`] ?? null;
+      }, roots);
+    expect(await sourceRecord()).toBeNull();
+    // Expando proves the actual editor DOM host survived A -> B.
+    await input.evaluate((el) =>
+      el.setAttribute("data-lifecycle-host", "retained"),
+    );
+    await navigate(roots[1]);
+    await expect(input).toHaveAttribute("data-lifecycle-host", "retained");
+    await expect(input).toHaveText(incoming);
+    await expect(page.getByRole("alertdialog")).toHaveCount(0);
+    // Read actual persistence, not the editor (whose tombstone could mask a
+    // resurrected record until reload). Neither text nor exact refs may return.
+    expect(await sourceRecord()).toBeNull();
+    await navigate(roots[0]);
+    await expect(input).toHaveText("");
+
+    await navigate(roots[1]);
+    await page.evaluate((pubkey) => {
+      window.__BUZZ_E2E__.mock ??= {};
+      window.__BUZZ_E2E__.mock.relayAgentRevalidationRevokedPubkeys = [pubkey];
+    }, REMOTE);
+    await releaseInviteCommand(page);
+    await expect(
+      page.getByText(/Could not authorize a mentioned agent/),
+    ).toBeVisible();
+    await page.waitForTimeout(300);
+    expect(await sent(page)).toEqual([]);
+    await expect(input).toHaveText(incoming);
+    await navigate(roots[0]);
+    await expect(input).toHaveText("");
+    expect(await sourceRecord()).toBeNull();
+    await assertNoLocalLifecycle(page);
+  });
+}
