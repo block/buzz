@@ -25,34 +25,13 @@ export function hasHighPriorityOverflow(
   );
 }
 
-export function getOffscreenMentionCount(
-  offscreenChannelIds: readonly string[],
-  dmChannelIds: ReadonlySet<string>,
-  highPriorityUnreadChannelIds: ReadonlySet<string>,
-  unreadChannelCounts: ReadonlyMap<string, number>,
-) {
-  return offscreenChannelIds.reduce(
-    (count, channelId) =>
-      count +
-      (!dmChannelIds.has(channelId) &&
-      highPriorityUnreadChannelIds.has(channelId)
-        ? (unreadChannelCounts.get(channelId) ?? 0)
-        : 0),
-    0,
-  );
-}
-
 export function useSidebarActivityOverflow({
-  dmChannelIds,
   highPriorityUnreadChannelIds,
   scrollRef,
-  unreadChannelCounts,
   ...activityOptions
 }: ActivityOptions & {
-  dmChannelIds: ReadonlySet<string>;
   highPriorityUnreadChannelIds: ReadonlySet<string>;
   scrollRef: ScrollRef;
-  unreadChannelCounts: ReadonlyMap<string, number>;
 }) {
   const { channelIds, messageChannelIds } =
     useOffscreenActivityChannelIds(activityOptions);
@@ -76,18 +55,6 @@ export function useSidebarActivityOverflow({
     hasHighPriorityBelow: hasHighPriorityOverflow(
       messageOverflow.unreadBelowChannelIds,
       highPriorityUnreadChannelIds,
-    ),
-    mentionAboveCount: getOffscreenMentionCount(
-      messageOverflow.unreadAboveChannelIds,
-      dmChannelIds,
-      highPriorityUnreadChannelIds,
-      unreadChannelCounts,
-    ),
-    mentionBelowCount: getOffscreenMentionCount(
-      messageOverflow.unreadBelowChannelIds,
-      dmChannelIds,
-      highPriorityUnreadChannelIds,
-      unreadChannelCounts,
     ),
     unreadAboveLabel: getSidebarActivityOverflowLabel({
       activityCount: activityOverflow.unreadAboveCount,

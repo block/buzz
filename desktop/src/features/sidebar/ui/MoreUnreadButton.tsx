@@ -1,12 +1,6 @@
 import { topChromeInset } from "@/shared/layout/chromeLayout";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { UnreadPill, unreadCountLabel } from "@/shared/ui/UnreadPill";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/shared/ui/tooltip";
 
 export type UnreadDmPreview = {
   accessibleLabel: string;
@@ -60,24 +54,12 @@ export function preferredUnreadTarget(
   );
 }
 
-export function sidebarOverflowTooltipLabel(
-  unreadCount: number,
-  mentionCount: number,
-) {
-  return `${unreadCount} unread${unreadCount === 1 ? "" : "s"}${
-    mentionCount > 0
-      ? ` (${mentionCount} mention${mentionCount === 1 ? "" : "s"})`
-      : ""
-  }`;
-}
-
 export function MoreUnreadButton({
   bottomClassName = "bottom-0",
   count,
   dmPreviews = [],
   emphasis,
   label,
-  mentionCount = 0,
   onClick,
   position,
   targetChannelId,
@@ -88,7 +70,6 @@ export function MoreUnreadButton({
   dmPreviews?: UnreadDmPreview[];
   emphasis: "default" | "primary";
   label?: string;
-  mentionCount?: number;
   onClick: () => void;
   position: "top" | "bottom";
   targetChannelId?: string;
@@ -98,7 +79,6 @@ export function MoreUnreadButton({
     position === "top" ? topChromeInset.top : bottomClassName;
   const visibleDmPreviews = visibleUnreadDmPreviews(dmPreviews);
   const resolvedLabel = label ?? unreadCountLabel(count);
-  const tooltipLabel = sidebarOverflowTooltipLabel(count, mentionCount);
   const accessibleLabel = unreadDmAccessibleLabel({
     count,
     dmPreviews,
@@ -111,51 +91,44 @@ export function MoreUnreadButton({
     <div
       className={`pointer-events-none absolute inset-x-0 z-10 flex justify-center px-2 py-1 ${positionClassName}`}
     >
-      <TooltipProvider>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <UnreadPill
-              accessibleLabel={accessibleLabel}
-              className="max-w-full"
-              direction={position === "top" ? "up" : "down"}
-              emphasis={emphasis}
-              label={resolvedLabel}
-              leading={
-                visibleDmPreviews.length > 0 ? (
+      <UnreadPill
+        accessibleLabel={accessibleLabel}
+        className="max-w-full"
+        direction={position === "top" ? "up" : "down"}
+        emphasis={emphasis}
+        label={resolvedLabel}
+        leading={
+          visibleDmPreviews.length > 0 ? (
+            <span
+              aria-hidden="true"
+              className="flex shrink-0 items-center gap-1.5"
+            >
+              <span className="flex -space-x-1.5">
+                {visibleDmPreviews.map((preview, index) => (
                   <span
-                    aria-hidden="true"
-                    className="flex shrink-0 items-center gap-1.5"
+                    className="relative"
+                    key={preview.channelId}
+                    style={{ zIndex: visibleDmPreviews.length - index }}
                   >
-                    <span className="flex -space-x-1.5">
-                      {visibleDmPreviews.map((preview, index) => (
-                        <span
-                          className="relative"
-                          key={preview.channelId}
-                          style={{ zIndex: visibleDmPreviews.length - index }}
-                        >
-                          <UserAvatar
-                            avatarUrl={preview.avatarUrl}
-                            className="ring-2 ring-primary"
-                            displayName={preview.label}
-                            shape={preview.isAgent ? "squircle" : "circle"}
-                            fallbackDelayMs={0}
-                            size="xs"
-                            testId={`sidebar-unread-dm-avatar-${preview.channelId}`}
-                          />
-                        </span>
-                      ))}
-                    </span>
-                    <span>·</span>
+                    <UserAvatar
+                      avatarUrl={preview.avatarUrl}
+                      className="ring-2 ring-primary"
+                      displayName={preview.label}
+                      shape={preview.isAgent ? "squircle" : "circle"}
+                      fallbackDelayMs={0}
+                      size="xs"
+                      testId={`sidebar-unread-dm-avatar-${preview.channelId}`}
+                    />
                   </span>
-                ) : undefined
-              }
-              onClick={onClick}
-              testId={testId}
-            />
-          </TooltipTrigger>
-          <TooltipContent>{tooltipLabel}</TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
+                ))}
+              </span>
+              <span>·</span>
+            </span>
+          ) : undefined
+        }
+        onClick={onClick}
+        testId={testId}
+      />
     </div>
   );
 }

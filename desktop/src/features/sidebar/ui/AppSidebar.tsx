@@ -154,17 +154,8 @@ export function AppSidebar({
   const [dmActionsMenuOpen, setDmActionsMenuOpen] = React.useState(false);
   const scrollRef = React.useRef<HTMLDivElement>(null);
   useSidebarScrollLock(scrollRef);
-  const dmChannelIds = React.useMemo(
-    () =>
-      new Set(
-        channels
-          .filter((channel) => channel.channelType === "dm")
-          .map((channel) => channel.id),
-      ),
-    [channels],
-  );
   // biome-ignore format: keep compact to stay within file size limit
-  const { hasHighPriorityAbove, hasHighPriorityBelow, mentionAboveCount, mentionBelowCount, scrollToChannel, scrollToNextAbove, scrollToNextBelow, unreadAboveCount, unreadBelowCount, unreadMessageBelowChannelIds, unreadAboveLabel, unreadBelowLabel } = useSidebarActivityOverflow({ activeWorkingByChannelId, dmChannelIds, highPriorityUnreadChannelIds, previewActivityChannelIds, scrollRef, unreadChannelCounts, unreadChannelIds });
+  const { hasHighPriorityAbove, hasHighPriorityBelow, scrollToChannel, scrollToNextAbove, scrollToNextBelow, unreadAboveCount, unreadBelowCount, unreadMessageBelowChannelIds, unreadAboveLabel, unreadBelowLabel } = useSidebarActivityOverflow({ activeWorkingByChannelId, highPriorityUnreadChannelIds, previewActivityChannelIds, scrollRef, unreadChannelIds });
 
   React.useEffect(() => {
     const scrollElement = scrollRef.current;
@@ -552,7 +543,6 @@ export function AppSidebar({
               count={unreadAboveCount}
               emphasis={hasHighPriorityAbove ? "primary" : "default"}
               label={unreadAboveLabel ?? unreadCountLabel(unreadAboveCount)}
-              mentionCount={mentionAboveCount}
               onClick={scrollToNextAbove}
               position="top"
               testId="sidebar-more-unread-above"
@@ -828,7 +818,6 @@ export function AppSidebar({
               dmPreviews={unreadDmPreviewsBelow}
               emphasis={hasHighPriorityBelow ? "primary" : "default"}
               label={unreadBelowLabel ?? unreadCountLabel(unreadBelowCount)}
-              mentionCount={mentionBelowCount}
               onClick={() =>
                 nextUnreadDmBelowId
                   ? scrollToChannel(nextUnreadDmBelowId)

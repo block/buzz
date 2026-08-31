@@ -3,7 +3,6 @@ import test from "node:test";
 
 import { getOffscreenActivityChannelIds } from "./useOffscreenActivityChannelIds.ts";
 import {
-  getOffscreenMentionCount,
   getSidebarActivityOverflowLabel,
   hasHighPriorityOverflow,
 } from "./useSidebarActivityOverflow.ts";
@@ -52,26 +51,6 @@ test("uses an activity-neutral overflow label when work contributes", () => {
   assert.equal(
     getSidebarActivityOverflowLabel({ activityCount: 1, messageCount: 1 }),
     undefined,
-  );
-});
-
-test("counts offscreen mentions without treating unread DMs as mentions", () => {
-  const highPriority = new Set(["dm", "mention", "mention-without-count"]);
-  const dmChannels = new Set(["dm"]);
-  const counts = new Map([
-    ["dm", 3],
-    ["mention", 2],
-    ["channel", 8],
-  ]);
-
-  assert.equal(
-    getOffscreenMentionCount(
-      ["dm", "mention", "mention-without-count", "channel"],
-      dmChannels,
-      highPriority,
-      counts,
-    ),
-    2,
   );
 });
 
