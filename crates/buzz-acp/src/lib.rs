@@ -1650,6 +1650,15 @@ fn inactivity_expired(
     !bound.is_zero() && !turn_in_flight && now.duration_since(last_activity) >= bound
 }
 
+/// Re-anchor point for the idle-reaper clock when a pool turn settles.
+///
+/// Called unconditionally by the `PoolEvent::Result` and `PoolEvent::Panic`
+/// arms before their trailing `dispatch_pending`, so the clock reflects the
+/// most recent turn completion — not only the last dispatch.
+fn note_turn_settled(last_activity: &mut tokio::time::Instant) {
+    *last_activity = tokio::time::Instant::now();
+}
+
 /// Whether a woken lazy pool may be torn back down to the empty-slot state.
 ///
 /// True only when the pool is ready, the idle bound has elapsed with no
@@ -1738,6 +1747,41 @@ mod idle_pool_sleep_tests {
 
     #[test]
     fn sleeps_when_ready_idle_and_quiet() {
+        let (last, now, bound) = ready_after_bound();
+        assert!(idle_pool_sleep_due(
+            true, last, now, bound, false, false, false, false
+        ));
+    }
+
+    // Decision-level pin for block/buzz#6378: a turn that ran from T to
+    // T + 2B and has just settled (empty queue, nothing in flight) must
+    // re-anchor the clock at completion, so the pool is not sleep-due at
+    // T + 2B even though the dispatch-time anchor is long stale.
+    #[tokio::test(start_paused = true)]
+    async fn completed_long_turn_reanchors_clock_not_sleep_due() {
+        let bound = Duration::from_secs(30);
+        let turn_start = tokio::time::Instant::now();
+        tokio::time::advance(2 * bound).await;
+
+        let mut last_activity = turn_start;
+        note_turn_settled(&mut last_activity);
+
+        assert!(!idle_pool_sleep_due(
+            true,
+            last_activity,
+            tokio::time::Instant::now(),
+            bound,
+            false,
+            false,
+            false,
+            false
+        ));
+    }
+
+    // The bump must not defeat teardown: with no completed turn since the
+    // anchor T, an idle pool is still sleep-due once the bound elapses.
+    #[test]
+    fn idle_pool_without_completion_still_sleep_due_after_bound() {
         let (last, now, bound) = ready_after_bound();
         assert!(idle_pool_sleep_due(
             true, last, now, bound, false, false, false, false
@@ -3146,6 +3190,7 @@ async fn tokio_main() -> Result<()> {
 
         match pool_event {
             Some(PoolEvent::Result(result)) => {
+                note_turn_settled(&mut last_activity);
                 // Stop typing indicator for the completed channel.
                 if let PromptSource::Channel(ch) = &result.source {
                     typing_channels.remove(ch);
@@ -3188,6 +3233,7 @@ async fn tokio_main() -> Result<()> {
                 }
             }
             Some(PoolEvent::Panic(join_error)) => {
+                note_turn_settled(&mut last_activity);
                 tracing::error!("agent task panicked: {join_error}");
                 recover_panicked_agent(
                     &mut pool,
