@@ -811,3 +811,35 @@ for (const authored of [false, true]) {
     assert.equal(s.control.currentRefs.length, 0);
   });
 }
+
+test("ordinary send may clean its untouched source even if navigation preceded optimistic clear", async () => {
+  const s = await setup({ lifecycle: true });
+  s.dismiss();
+  s.options.mentions.memberPubkeys = new Set([KEY]);
+  s.options.drafts.markDraftSent = (...args) =>
+    s.calls.push(["mark-sent", ...args]);
+  const gate = deferred();
+  s.control.publish = gate;
+  s.rerender();
+  let send;
+  s.act(() => {
+    send = s.result.current.sendMessageWithMentionFlow({
+      capturedChannelId: "general",
+      pendingImeta: [],
+      trimmed: TEXT,
+      recoveryDraftKey: "thread:a",
+      sentDraftKey: "thread:a",
+    });
+    // Preparation yields before completeSend can clear the composer.
+    s.navigate("thread:b");
+  });
+  await s.flush();
+  assert.equal(s.events("publish").length, 1);
+  assert.equal(s.store.get("thread:a").content, TEXT);
+  s.edit("B edit", []);
+  await s.finish(gate);
+  await send;
+  assert.equal(s.events("SEND").length, 1);
+  assert.equal(s.events("mark-sent").length, 1);
+  assert.equal(s.options.contentRef.current, "B edit");
+});
