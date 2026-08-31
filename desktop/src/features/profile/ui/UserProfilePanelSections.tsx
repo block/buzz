@@ -5,6 +5,7 @@ import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import {
   getManagedAgentPrimaryActionLabel,
   isManagedAgentActive,
+  isManagedAgentLive,
 } from "@/features/agents/lib/managedAgentControlActions";
 import { RestartDiffBadge } from "@/features/agents/ui/RestartDiffBadge";
 import { AgentConfigPanel } from "@/features/agents/ui/AgentConfigPanel";
@@ -191,7 +192,7 @@ export function ProfileSummaryView({
   const activeTurns = useAgentWorking(isBot ? pubkey : null).channels;
   const avatarStatus = isBot
     ? managedAgent
-      ? isManagedAgentActive(managedAgent)
+      ? isManagedAgentLive(managedAgent, presenceStatus)
         ? "online"
         : "offline"
       : (presenceStatus ?? "offline")
@@ -429,12 +430,13 @@ export function ProfileSummaryView({
           agentActionDisabled={isAgentActionPending}
           agentActionLabel={
             isOwner === true && managedAgent
-              ? getManagedAgentPrimaryActionLabel(managedAgent)
+              ? getManagedAgentPrimaryActionLabel(managedAgent, presenceStatus)
               : undefined
           }
           agentActionLive={
-            managedAgent?.status === "running" ||
-            managedAgent?.status === "deployed"
+            managedAgent
+              ? isManagedAgentLive(managedAgent, presenceStatus)
+              : false
           }
           onAgentPrimaryAction={
             isOwner === true && managedAgent
