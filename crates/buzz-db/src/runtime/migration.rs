@@ -702,7 +702,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 44);
+        assert_eq!(migrations.len(), 45);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -2448,6 +2448,75 @@ mod postgres_tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn function_search_path_migration_repairs_restore_context() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        run_migrations_through(&pool, 44)
+            .await
+            .expect("apply migrations through 44");
+
+        let community = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community)
+            .bind(format!("restore-proof-{}.example", community.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert restore proof community");
+
+        let mut before = pool.acquire().await.expect("pre-migration connection");
+        sqlx::query("BEGIN")
+            .execute(&mut *before)
+            .await
+            .expect("begin pre-migration transaction");
+        sqlx::query("SET LOCAL search_path TO ''")
+            .execute(&mut *before)
+            .await
+            .expect("clear pre-migration search path");
+        let before_error = sqlx::query("SELECT public.assert_community_write_allowed($1)")
+            .bind(community)
+            .execute(&mut *before)
+            .await
+            .expect_err("migration 44 must reproduce restore name-resolution failure");
+        assert_eq!(
+            before_error
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::code)
+                .as_deref(),
+            Some("42883")
+        );
+        sqlx::query("ROLLBACK")
+            .execute(&mut *before)
+            .await
+            .expect("rollback pre-migration transaction");
+        drop(before);
+
+        run_migrations(&pool)
+            .await
+            .expect("apply function search-path migration");
+
+        let mut after = pool.acquire().await.expect("post-migration connection");
+        sqlx::query("BEGIN")
+            .execute(&mut *after)
+            .await
+            .expect("begin restore-like transaction");
+        sqlx::query("SET LOCAL search_path TO ''")
+            .execute(&mut *after)
+            .await
+            .expect("clear restore-like search path");
+        sqlx::query("INSERT INTO public.users (community_id, pubkey) VALUES ($1, $2)")
+            .bind(community)
+            .bind(vec![0x41_u8; 32])
+            .execute(&mut *after)
+            .await
+            .expect("restore-like insert must traverse the repaired write fence");
+        sqlx::query("ROLLBACK")
+            .execute(&mut *after)
+            .await
+            .expect("finish restore-like transaction");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn run_migrations_applies_consolidated_initial_schema_on_fresh_database() {
         let pool = connect_test_pool().await;
         reset_public_schema(&pool).await;
@@ -2521,6 +2590,57 @@ mod postgres_tests {
                 .await
                 .expect("insert late-table test community");
         }
+
+        let unpinned_application_functions: i64 = sqlx::query_scalar(
+            "SELECT count(*)::BIGINT \
+               FROM pg_proc AS procedure \
+               JOIN pg_namespace AS namespace \
+                 ON namespace.oid = procedure.pronamespace \
+              WHERE namespace.nspname = 'public' \
+                AND procedure.prokind = 'f' \
+                AND procedure.proowner = (SELECT oid FROM pg_roles WHERE rolname = current_user) \
+                AND NOT EXISTS (\
+                    SELECT 1 FROM pg_depend AS dependency \
+                     WHERE dependency.classid = 'pg_proc'::REGCLASS \
+                       AND dependency.objid = procedure.oid \
+                       AND dependency.deptype = 'e'\
+                ) \
+                AND NOT coalesce(procedure.proconfig, ARRAY[]::TEXT[]) \
+                    @> ARRAY['search_path=public, pg_catalog']",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect application function search paths");
+        assert_eq!(
+            unpinned_application_functions, 0,
+            "every application-owned function must resolve independently of the restore session"
+        );
+
+        let mut restore_connection = pool.acquire().await.expect("restore-like connection");
+        sqlx::query("BEGIN")
+            .execute(&mut *restore_connection)
+            .await
+            .expect("begin restore-like transaction");
+        sqlx::query("SET LOCAL search_path TO ''")
+            .execute(&mut *restore_connection)
+            .await
+            .expect("clear restore-like search path");
+        sqlx::query("SELECT public.assert_community_write_allowed($1)")
+            .bind(active_a)
+            .execute(&mut *restore_connection)
+            .await
+            .expect("write fence must resolve with an empty invoker search path");
+        sqlx::query("INSERT INTO public.users (community_id, pubkey) VALUES ($1, $2)")
+            .bind(active_a)
+            .bind(vec![0x41_u8; 32])
+            .execute(&mut *restore_connection)
+            .await
+            .expect("restore-like insert must traverse the write-fence trigger");
+        sqlx::query("ROLLBACK")
+            .execute(&mut *restore_connection)
+            .await
+            .expect("finish restore-like transaction");
+
         sqlx::query(
             "CREATE TABLE late_created_scoped (\
                  community_id UUID NOT NULL, id BIGINT PRIMARY KEY, value TEXT NOT NULL\
