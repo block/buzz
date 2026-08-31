@@ -30,14 +30,15 @@ chmod +x "$test_root/bin/swift"
 
 result=$(
   PATH="$test_root/bin:$PATH"
-  BUZZ_DEV_LABEL="voice route fix"
+  BUZZ_DEV_LABEL='voice "route" \ fix'
   BUZZ_SHARE_IDENTITY=0
   source "$repo_root/scripts/instance-env.sh"
   printf '%s\n%s\n%s\n' \
     "$BUZZ_WORKTREE_LABEL" "$BUZZ_INSTANCE_SLUG" "$BUZZ_TAURI_CONFIG"
 )
 
-[[ "$result" == *$'voice route fix\nvoice-route-fix\n'* ]]
-[[ "$result" == *'Buzz Dev (voice route fix)'* ]]
+[[ "$result" == *$'voice "route" \ fix\nvoice-route-fix\n'* ]]
+config=$(printf '%s\n' "$result" | tail -1)
+[[ "$(node -e 'const c=JSON.parse(process.argv[1]); process.stdout.write(c.productName)' "$config")" == 'Buzz Dev (voice "route" \ fix)' ]]
 
 echo "instance-env tests passed"

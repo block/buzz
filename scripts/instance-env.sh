@@ -46,6 +46,7 @@ if git rev-parse --is-inside-work-tree &>/dev/null; then
             echo "BUZZ_DEV_LABEL must contain at least one letter or number" >&2
             return 1 2>/dev/null || exit 1
         fi
+        WORKTREE_PRODUCT_NAME=$(python3 -c 'import json,sys; print(json.dumps(f"Buzz Dev ({sys.argv[1]})"))' "$BUZZ_WORKTREE_LABEL")
 
         # BUZZ_SHARE_IDENTITY=1: reuse the main dev checkout's Nostr key so
         # worktrees skip onboarding and share the same identity. The per-worktree
@@ -94,7 +95,7 @@ if git rev-parse --is-inside-work-tree &>/dev/null; then
         if swift "$GENERATE_DEV_ICON" "$BASE_ICON" "$DEV_ICON" "$BUZZ_WORKTREE_LABEL"; then
             echo "🌳 Worktree: ${BUZZ_WORKTREE_LABEL}"
             export VITE_DEV_BRANCH="$BUZZ_WORKTREE_LABEL"
-            BUZZ_TAURI_CONFIG="{\"build\":{\"devUrl\":\"${DEV_URL}\",\"beforeDevCommand\":\"exec ./node_modules/.bin/vite --port ${BUZZ_VITE_PORT} --strictPort\"},\"identifier\":\"xyz.block.buzz.app.dev.${BUZZ_INSTANCE_SLUG}\",\"productName\":\"Buzz Dev (${BUZZ_WORKTREE_LABEL})\",\"bundle\":{\"icon\":[\"$DEV_ICON\"]}}"
+            BUZZ_TAURI_CONFIG="{\"build\":{\"devUrl\":\"${DEV_URL}\",\"beforeDevCommand\":\"exec ./node_modules/.bin/vite --port ${BUZZ_VITE_PORT} --strictPort\"},\"identifier\":\"xyz.block.buzz.app.dev.${BUZZ_INSTANCE_SLUG}\",\"productName\":${WORKTREE_PRODUCT_NAME},\"bundle\":{\"icon\":[\"$DEV_ICON\"]}}"
         fi
     fi
 fi
