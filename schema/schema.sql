@@ -3733,9 +3733,12 @@ BEGIN
 
     -- Only applied (outcome_code = 1) and no-op (outcome_code = 3) lifecycle
     -- receipts require exactly one paired success-transition event. A denied
-    -- lifecycle receipt (outcome_code = 2) requires zero events of the mapped
-    -- transition kind: a success-transition event would falsely record that the
-    -- denied transition occurred, creating contradictory durable ledger facts.
+    -- lifecycle receipt (outcome_code = 2) requires zero events from the
+    -- complete core lifecycle success-transition class (kinds 1, 2, 3, 6:
+    -- enrolled, revoked, rotated, retired). Forbidding only the mapped kind
+    -- would allow a wrong-kind transition event to attach to the denied receipt,
+    -- which is equally a contradictory durable fact. Legitimate audit/denial
+    -- events of other kinds (e.g., authenticated kind 9) remain allowed.
     -- Other outcome codes (4, 5) are not core lifecycle outcomes; skip.
     IF receipt.outcome_code IN (1, 3) THEN
         SELECT
@@ -3755,7 +3758,7 @@ BEGIN
                       CONSTRAINT = 'authorization_operation_receipt_event_cardinality';
         END IF;
     ELSIF receipt.outcome_code = 2 THEN
-        SELECT count(*) FILTER (WHERE event_kind = expected_event_kind)
+        SELECT count(*) FILTER (WHERE event_kind IN (1, 2, 3, 6))
         INTO expected_event_count
         FROM authorization_events
         WHERE community_id = receipt.community_id
@@ -3764,9 +3767,9 @@ BEGIN
 
         IF expected_event_count <> 0 THEN
             RAISE EXCEPTION
-                'denied lifecycle receipt must not have a mapped success-transition event '
-                '(kind %); found % — contradictory durable facts are not permitted',
-                expected_event_kind, expected_event_count
+                'denied lifecycle receipt must not have any core success-transition event '
+                '(kinds 1/2/3/6); found % — contradictory durable facts are not permitted',
+                expected_event_count
                 USING ERRCODE = 'check_violation',
                       CONSTRAINT = 'authorization_denied_lifecycle_receipt_no_success_event';
         END IF;

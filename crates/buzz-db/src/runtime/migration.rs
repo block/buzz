@@ -4429,6 +4429,13 @@ mod tests {
     /// (outcome_code = 2) must commit without a paired audit event. Requiring
     /// one would falsely record that the lifecycle transition occurred.
     ///
+    /// The denied branch forbids any event from the complete core
+    /// success-transition class (kinds 1, 2, 3, 6). This test uses the mapped
+    /// kind (kind 1 for enroll). Cross-kind rejection — a wrong success-transition
+    /// kind on a denied receipt — is exercised by
+    /// `denied_lifecycle_receipt_wrong_kind_receipt_side` (receipt-side trigger)
+    /// and `denied_lifecycle_receipt_wrong_kind_event_side` (event-side trigger).
+    ///
     /// Mutation sensitivity:
     /// - Removing the `outcome_code IN (1, 3)` branch entirely (or replacing it with a
     ///   blanket early-return) makes the positive case red — the denied enroll receipt
@@ -4604,7 +4611,9 @@ mod tests {
     /// In `denied_lifecycle_receipt_commits_without_audit_event`'s receipt-then-event
     /// negative, the receipt-side trigger (`authorization_operation_receipt_event_cardinality`)
     /// also fires. Here the committed receipt produces no deferred trigger, so rejection
-    /// can only come from the event-side trigger.
+    /// can only come from the event-side trigger. Uses the mapped kind (kind 1 for
+    /// enroll). Wrong-kind event-side isolation is in
+    /// `denied_lifecycle_receipt_wrong_kind_event_side`.
     ///
     /// Mutation sensitivity: disabling the
     /// `authorization_event_receipt_cardinality` trigger (DROP or ALTER TABLE
@@ -4994,6 +5003,232 @@ mod tests {
             Some("authorization_operation_receipt_event_cardinality"),
             "expected authorization_operation_receipt_event_cardinality rejection \
              for applied receipt without event, got: {absent_event_err}"
+        );
+    }
+
+    /// NIP-FI cross-kind denied lifecycle: a wrong success-transition kind paired
+    /// with a denied lifecycle receipt must be rejected through the receipt-side
+    /// deferred trigger. Uses a denied enroll receipt (operation_kind = 1, mapped
+    /// kind = 1) with a kind-6 (retired) event — a different success-transition
+    /// kind that is equally forbidden by the class-based guard (kinds 1, 2, 3, 6).
+    ///
+    /// Both the receipt and the wrong-kind event are inserted in the same
+    /// transaction, so the receipt-side deferred trigger
+    /// (`authorization_operation_receipt_event_cardinality`) fires at COMMIT.
+    ///
+    /// Mutation sensitivity: narrowing the denied filter back to
+    /// `event_kind = expected_event_kind` (the mapped kind, 1) removes kind 6
+    /// from the forbidden set, causing this negative to turn green — COMMIT
+    /// succeeds when it must not, failing `expect_err`.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn denied_lifecycle_receipt_wrong_kind_receipt_side() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(42, &pool)
+            .await
+            .expect("apply migrations 1-42");
+
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("wrong-kind-rcpt-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+
+        sqlx::query(
+            "INSERT INTO authorization_event_capacity \
+             (community_id, max_events_per_domain, max_bytes_per_domain, max_envelope_bytes) \
+             VALUES ($1, 1000, 16777216, 16384)",
+        )
+        .bind(community_id)
+        .execute(&pool)
+        .await
+        .expect("insert event capacity");
+
+        let op_id = uuid::Uuid::new_v4();
+        let fp = vec![0xA0_u8; 32];
+        let event_id = uuid::Uuid::new_v4();
+        let corr_id = uuid::Uuid::new_v4();
+        let attempt_id = uuid::Uuid::new_v4();
+
+        let mut conn = pool
+            .acquire()
+            .await
+            .expect("acquire connection for wrong-kind receipt-side test");
+        sqlx::query("BEGIN")
+            .execute(&mut *conn)
+            .await
+            .expect("begin");
+
+        // Denied enroll receipt (operation_kind = 1, outcome_code = 2).
+        // No history row needed: outcome_code = 2 expects zero history rows.
+        sqlx::query(
+            "INSERT INTO authorization_operation_receipts \
+             (community_id, operation_id, request_fingerprint, operation_kind, \
+              actor_fingerprint, outcome_code, result_digest) \
+             VALUES ($1, $2, $3, 1, $4, 2, $5)",
+        )
+        .bind(community_id)
+        .bind(op_id)
+        .bind(&fp)
+        .bind(vec![0xA1_u8; 32])
+        .bind(vec![0xA2_u8; 32])
+        .execute(&mut *conn)
+        .await
+        .expect("insert denied enroll receipt — deferred guard");
+
+        // Wrong success-transition kind: event_kind = 6 (retired), not the mapped
+        // kind 1 (enrolled). Both are in the forbidden class (1, 2, 3, 6).
+        sqlx::query(
+            "INSERT INTO authorization_events \
+             (community_id, event_id, event_kind, outcome_code, reason_code, \
+              actor_kind, actor_fingerprint, operation_id, request_fingerprint, \
+              correlation_id, attempt_id, semantic_fingerprint, \
+              occurred_at, canonical_envelope, envelope_digest) \
+             VALUES ($1, $2, 6, 1, 4, 1, $3, $4, $5, $6, $7, NULL, \
+                     '2026-01-01T00:00:00Z', $8, $9)",
+            // event_kind 6 (retired) — wrong kind for a denied enroll receipt
+        )
+        .bind(community_id)
+        .bind(event_id)
+        .bind(vec![0xA3_u8; 32]) // actor_fingerprint
+        .bind(op_id)
+        .bind(&fp)
+        .bind(corr_id)
+        .bind(attempt_id)
+        .bind(vec![0xA4_u8; 64]) // canonical_envelope
+        .bind(vec![0xA5_u8; 32]) // envelope_digest
+        .execute(&mut *conn)
+        .await
+        .expect("event INSERT must pass — deferred guard fires at COMMIT");
+
+        let wrong_kind_err = sqlx::query("COMMIT").execute(&mut *conn).await.expect_err(
+            "denied receipt + wrong success-transition kind (6) must be rejected at COMMIT \
+                 — class-based guard forbids all of kinds 1, 2, 3, 6",
+        );
+        assert_eq!(
+            wrong_kind_err
+                .as_database_error()
+                .and_then(|e| e.constraint()),
+            Some("authorization_denied_lifecycle_receipt_no_success_event"),
+            "expected authorization_denied_lifecycle_receipt_no_success_event for \
+             denied receipt + wrong kind (6), got: {wrong_kind_err}"
+        );
+    }
+
+    /// NIP-FI cross-kind denied lifecycle event-side: after a denied enroll
+    /// receipt is committed alone (auto-commit), a new transaction that inserts
+    /// only a wrong success-transition kind (kind 6, retired) must be rejected at
+    /// COMMIT by `authorization_event_receipt_cardinality` (event-side trigger).
+    ///
+    /// This isolates the event-side trigger path for the cross-kind case.
+    /// The committed receipt produces no active deferred trigger, so rejection
+    /// can only come from the event-side trigger.
+    ///
+    /// Mutation sensitivity: narrowing the denied filter to
+    /// `event_kind = expected_event_kind` (kind 1) removes kind 6 from the
+    /// forbidden set, making this negative green — COMMIT succeeds when it must
+    /// not, failing `expect_err`.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn denied_lifecycle_receipt_wrong_kind_event_side() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(42, &pool)
+            .await
+            .expect("apply migrations 1-42");
+
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!("wrong-kind-evt-{}.example", community_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+
+        sqlx::query(
+            "INSERT INTO authorization_event_capacity \
+             (community_id, max_events_per_domain, max_bytes_per_domain, max_envelope_bytes) \
+             VALUES ($1, 1000, 16777216, 16384)",
+        )
+        .bind(community_id)
+        .execute(&pool)
+        .await
+        .expect("insert event capacity");
+
+        // Commit a denied enroll receipt in auto-commit mode. No deferred trigger
+        // is active after this commit; the receipt-side trigger fires only within
+        // the transaction that inserts the receipt.
+        let op_id = uuid::Uuid::new_v4();
+        let fp = vec![0xB0_u8; 32];
+        sqlx::query(
+            "INSERT INTO authorization_operation_receipts \
+             (community_id, operation_id, request_fingerprint, operation_kind, \
+              actor_fingerprint, outcome_code, result_digest) \
+             VALUES ($1, $2, $3, 1, $4, 2, $5)",
+        )
+        .bind(community_id)
+        .bind(op_id)
+        .bind(&fp)
+        .bind(vec![0xB1_u8; 32])
+        .bind(vec![0xB2_u8; 32])
+        .execute(&pool)
+        .await
+        .expect("denied receipt must commit alone in auto-commit mode");
+
+        // New transaction: insert only a kind-6 (retired) event for the same
+        // operation. The event-side trigger is the only active deferred trigger.
+        let event_id = uuid::Uuid::new_v4();
+        let corr_id = uuid::Uuid::new_v4();
+        let attempt_id = uuid::Uuid::new_v4();
+
+        let mut conn = pool
+            .acquire()
+            .await
+            .expect("acquire connection for wrong-kind event-side test");
+        sqlx::query("BEGIN")
+            .execute(&mut *conn)
+            .await
+            .expect("begin event-side wrong-kind transaction");
+
+        sqlx::query(
+            "INSERT INTO authorization_events \
+             (community_id, event_id, event_kind, outcome_code, reason_code, \
+              actor_kind, actor_fingerprint, operation_id, request_fingerprint, \
+              correlation_id, attempt_id, semantic_fingerprint, \
+              occurred_at, canonical_envelope, envelope_digest) \
+             VALUES ($1, $2, 6, 1, 4, 1, $3, $4, $5, $6, $7, NULL, \
+                     '2026-01-01T00:00:00Z', $8, $9)",
+            // event_kind 6 (retired) — wrong kind for the denied enroll receipt
+        )
+        .bind(community_id)
+        .bind(event_id)
+        .bind(vec![0xB3_u8; 32]) // actor_fingerprint
+        .bind(op_id)
+        .bind(&fp)
+        .bind(corr_id)
+        .bind(attempt_id)
+        .bind(vec![0xB4_u8; 64]) // canonical_envelope
+        .bind(vec![0xB5_u8; 32]) // envelope_digest
+        .execute(&mut *conn)
+        .await
+        .expect("event INSERT must pass — event-side deferred guard fires at COMMIT");
+
+        let wrong_kind_evt_err = sqlx::query("COMMIT").execute(&mut *conn).await.expect_err(
+            "kind-6 event paired with a committed denied enroll receipt must be \
+                 rejected at COMMIT by the event-side trigger",
+        );
+        assert_eq!(
+            wrong_kind_evt_err
+                .as_database_error()
+                .and_then(|e| e.constraint()),
+            Some("authorization_denied_lifecycle_receipt_no_success_event"),
+            "event-side trigger must reject with authorization_denied_lifecycle_receipt_no_success_event \
+             for wrong kind (6) against denied receipt, got: {wrong_kind_evt_err}"
         );
     }
 }
