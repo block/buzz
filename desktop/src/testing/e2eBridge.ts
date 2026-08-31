@@ -7642,6 +7642,14 @@ async function handleAddChannelMembers(
         joined_at: new Date().toISOString(),
         display_name: mockDisplayNames.get(pubkey) ?? null,
       });
+
+      const relayAgent = mockRelayAgents.find(
+        (agent) => normalizePubkey(agent.pubkey) === normalizePubkey(pubkey),
+      );
+      if (relayAgent && !relayAgent.channel_ids.includes(targetChannel.id)) {
+        relayAgent.channel_ids.push(targetChannel.id);
+        relayAgent.channels.push(targetChannel.name);
+      }
     }
 
     syncMockChannel(targetChannel);

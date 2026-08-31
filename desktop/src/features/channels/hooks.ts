@@ -855,11 +855,20 @@ export function useAddChannelMembersMutation(channelId: string | null) {
         });
       }
     },
-    onSettled: async (_data, _err, variables) => {
+    onSettled: async (data, _err, variables) => {
       // Invalidate the effective channel (the one actually mutated) not the
       // live hook-closure channel, which may have changed mid-send.
       const effectiveChannelId = variables?.channelId ?? channelId;
-      await invalidateChannelState(queryClient, effectiveChannelId);
+      await Promise.all([
+        invalidateChannelState(queryClient, effectiveChannelId),
+        ...(variables?.role === "bot" && data?.added.length
+          ? [
+              queryClient.invalidateQueries({
+                queryKey: ["relay-agents"],
+              }),
+            ]
+          : []),
+      ]);
     },
   });
 }
