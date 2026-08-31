@@ -10,16 +10,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use buzz_core::tenant::{CommunityId, TenantContext};
-use buzz_object_store::{ObjectStore, ObjectStoreError, S3ObjectStore, S3StoreConfig};
+use buzz_object_store::{ObjectStore, ObjectStoreError};
 
-use crate::config::MediaConfig;
 use crate::error::MediaError;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 pub use buzz_object_store::{
-    BulkDeleteOutcome, ObjectVersionEntry, ObjectVersionKind, ObjectVersionRef,
-    ObjectVersionsPage,
+    BulkDeleteOutcome, ObjectVersionEntry, ObjectVersionKind, ObjectVersionRef, ObjectVersionsPage,
 };
 
 /// A stream of byte chunks from object storage, usable with
@@ -32,19 +30,6 @@ pub struct MediaStorage {
 }
 
 impl MediaStorage {
-    /// Create a storage client from media config, over the S3 provider.
-    pub fn new(config: &MediaConfig) -> Result<Self, MediaError> {
-        let store = S3ObjectStore::new(&S3StoreConfig {
-            endpoint: config.s3_endpoint.clone(),
-            access_key: config.s3_access_key.clone(),
-            secret_key: config.s3_secret_key.clone(),
-            bucket: config.s3_bucket.clone(),
-            region: config.s3_region.clone(),
-            addressing_style: config.s3_addressing_style,
-        })?;
-        Ok(Self::with_store(Arc::new(store)))
-    }
-
     /// Wrap an already-constructed object store.
     ///
     /// The relay builds one provider per process and shares it between media
@@ -317,46 +302,6 @@ mod tests {
             CommunityId::from_uuid(uuid::Uuid::from_u128(n)),
             "media.example",
         )
-    }
-
-    fn storage_config(access: &str, secret: &str) -> crate::config::MediaConfig {
-        crate::config::MediaConfig {
-            s3_endpoint: "http://localhost:9000".to_string(),
-            s3_access_key: access.to_string(),
-            s3_secret_key: secret.to_string(),
-            s3_bucket: "buzz-media".to_string(),
-            s3_region: "us-west-2".to_string(),
-            s3_addressing_style: crate::config::S3AddressingStyle::Path,
-            max_image_bytes: 50 * 1024 * 1024,
-            max_gif_bytes: 10 * 1024 * 1024,
-            max_video_bytes: 524_288_000,
-            max_file_bytes: 104_857_600,
-            public_base_url: "http://localhost:3000/media".to_string(),
-            upload_records_enabled: false,
-            upload_ip_header: None,
-            upload_port_header: None,
-        }
-    }
-
-    #[test]
-    fn partial_static_keys_are_rejected() {
-        let err = match MediaStorage::new(&storage_config("buzz_dev", "")) {
-            Ok(_) => panic!("partial static creds must not silently use credential chain"),
-            Err(err) => err,
-        };
-        assert!(
-            err.to_string().contains("must be configured together"),
-            "unexpected error: {err}"
-        );
-
-        let err = match MediaStorage::new(&storage_config("", "buzz_dev_secret")) {
-            Ok(_) => panic!("partial static creds must not silently use credential chain"),
-            Err(err) => err,
-        };
-        assert!(
-            err.to_string().contains("must be configured together"),
-            "unexpected error: {err}"
-        );
     }
 
     #[test]

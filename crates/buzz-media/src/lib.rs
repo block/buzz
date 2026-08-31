@@ -18,7 +18,7 @@ pub use bucket_index::{
     BucketAggregate, BucketSnapshot, CommunityStorage, KeyClass, Page, SweepError,
     TaxonomySweepOutcome,
 };
-pub use config::{MediaConfig, S3AddressingStyle};
+pub use config::MediaConfig;
 pub use error::MediaError;
 pub use storage::{
     BlobHeadMeta, BlobMeta, BulkDeleteOutcome, ByteStream, MediaStorage, ObjectVersionEntry,

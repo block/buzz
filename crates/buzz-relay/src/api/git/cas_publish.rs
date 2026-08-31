@@ -1598,13 +1598,13 @@ mod tests {
     }
 
     fn live_store() -> GitStore {
-        GitStore::from_s3_config(
+        crate::test_git_store(
             "http://localhost:9000",
             "buzz_dev",
             "buzz_dev_secret",
             "buzz-media",
             "us-east-1",
-            buzz_media::config::S3AddressingStyle::Path,
+            "path",
         )
         .expect("connect local MinIO")
     }

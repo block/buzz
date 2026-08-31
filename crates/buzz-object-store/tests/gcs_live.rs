@@ -36,7 +36,7 @@ use futures_util::FutureExt;
 
 use buzz_object_store::{
     ConditionalWrite, GcsObjectStore, GcsStoreConfig, ImmutableWrite, ObjectStore,
-    ObjectStoreError, ProviderKind, Revision, WriteCondition,
+    ObjectStoreError, ObjectVersionKind, ObjectVersionRef, ProviderKind, Revision, WriteCondition,
 };
 
 const CONTENT_TYPE: &str = "application/octet-stream";
@@ -159,6 +159,43 @@ async fn admits_a_bucket_that_can_prove_deletion() {
             "the test bucket must have object versioning and soft delete disabled"
         );
         store.ping().await.expect("bucket is reachable");
+    })
+    .await;
+}
+
+/// The provider-neutral exact-version contract maps GCS generations without
+/// leaking generation vocabulary into media or deletion code.
+#[tokio::test]
+#[ignore = "requires a live GCS bucket (BUZZ_GCS_LIVE=1)"]
+async fn lists_and_deletes_an_exact_generation() {
+    with_prefix("exact-version", async |store, prefix| {
+        let key = format!("{prefix}/_meta/a.json");
+        store
+            .put(&key, b"version body", CONTENT_TYPE)
+            .await
+            .expect("write object");
+
+        let page = store
+            .list_versions_page(prefix, None, None, 100)
+            .await
+            .expect("list exact versions");
+        let entry = page
+            .entries
+            .into_iter()
+            .find(|entry| entry.key == key)
+            .expect("written generation is listed");
+        assert_eq!(entry.kind, ObjectVersionKind::Object);
+
+        let outcome = store
+            .delete_versions(&[ObjectVersionRef {
+                key: entry.key,
+                version_id: entry.version_id,
+            }])
+            .await
+            .expect("delete exact generation");
+        assert_eq!(outcome.deleted, 1);
+        assert!(outcome.failed.is_empty());
+        assert!(store.head(&key).await.expect("head after delete").is_none());
     })
     .await;
 }

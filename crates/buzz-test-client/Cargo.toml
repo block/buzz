@@ -37,6 +37,7 @@ sqlx = { workspace = true }
 chrono = { workspace = true }
 s3 = { version = "0.37", package = "rust-s3", default-features = false, features = ["tokio-rustls-tls", "fail-on-err", "tags"] }
 buzz-media = { workspace = true }
+buzz-object-store = { workspace = true }
 buzz-sdk = { workspace = true }
 
 [[bin]]

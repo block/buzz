@@ -35,7 +35,7 @@ use std::time::{Duration, Instant};
 
 use buzz_object_store::{
     ConditionalWrite, ImmutableWrite, ObjectStore, ObjectStoreError, ProviderKind, Revision,
-    S3AddressingStyle, S3ObjectStore, S3StoreConfig, WriteCondition,
+    WriteCondition,
 };
 use bytes::Bytes;
 use sha2::{Digest, Sha256};
@@ -380,34 +380,6 @@ impl GitStore {
     /// same client to media storage and to this facade.
     pub fn new(store: Arc<dyn ObjectStore>) -> Self {
         Self { store }
-    }
-
-    /// Build a git store over a freshly constructed S3 provider.
-    ///
-    /// Convenience for tests and the backend conformance probe, which connect
-    /// to a bare S3-compatible endpoint without the rest of the relay.
-    /// Production shares one client via [`GitStore::new`].
-    pub fn from_s3_config(
-        endpoint: &str,
-        access_key: &str,
-        secret_key: &str,
-        bucket_name: &str,
-        region: &str,
-        addressing_style: S3AddressingStyle,
-    ) -> Result<Self, StoreError> {
-        let store = S3ObjectStore::new(&S3StoreConfig {
-            endpoint: endpoint.to_string(),
-            access_key: access_key.to_string(),
-            secret_key: secret_key.to_string(),
-            bucket: bucket_name.to_string(),
-            region: region.to_string(),
-            addressing_style,
-        })
-        .map_err(|e| match e {
-            ObjectStoreError::Config(message) => StoreError::Config(message),
-            other => StoreError::Backend(other),
-        })?;
-        Ok(Self::new(Arc::new(store)))
     }
 
     /// Compute the hex SHA-256 of `bytes`. The content-addressed key.
@@ -1542,29 +1514,6 @@ mod tests {
             other => panic!("expected Backend, got {other:?}"),
         }
     }
-
-    #[test]
-    fn partial_static_keys_are_rejected() {
-        for (access, secret) in [("buzz_dev", ""), ("", "buzz_dev_secret")] {
-            let err = match GitStore::from_s3_config(
-                "http://localhost:9000",
-                access,
-                secret,
-                "buzz-git",
-                "us-east-1",
-                S3AddressingStyle::Path,
-            ) {
-                Ok(_) => {
-                    panic!("partial static creds must not silently use the credential chain")
-                }
-                Err(err) => err,
-            };
-            assert!(
-                matches!(err, StoreError::Config(_)),
-                "expected Config error, got {err:?}"
-            );
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1582,7 +1531,9 @@ mod profiles {
     use std::sync::Mutex;
 
     use async_trait::async_trait;
-    use buzz_object_store::{BulkDeleteOutcome, ByteStream, ListPage, ObjectMeta};
+    use buzz_object_store::{
+        BulkDeleteOutcome, ByteStream, ListPage, ObjectMeta, ObjectVersionRef, ObjectVersionsPage,
+    };
 
     use super::*;
 
@@ -1868,6 +1819,27 @@ mod profiles {
                 outcome.deleted += 1;
             }
             Ok(outcome)
+        }
+
+        async fn list_versions_page(
+            &self,
+            _prefix: &str,
+            _key_marker: Option<String>,
+            _version_id_marker: Option<String>,
+            _max_keys: usize,
+        ) -> Result<ObjectVersionsPage, ObjectStoreError> {
+            Ok(ObjectVersionsPage::default())
+        }
+
+        async fn delete_versions(
+            &self,
+            versions: &[ObjectVersionRef],
+        ) -> Result<BulkDeleteOutcome, ObjectStoreError> {
+            let keys = versions
+                .iter()
+                .map(|version| version.key.clone())
+                .collect::<Vec<_>>();
+            self.delete_objects(&keys).await
         }
 
         async fn ping(&self) -> Result<(), ObjectStoreError> {
@@ -2232,17 +2204,15 @@ mod probe {
             std::env::var("BUZZ_S3_SECRET_KEY").unwrap_or_else(|_| "buzz_dev_secret".into());
         let bucket = std::env::var("BUZZ_S3_BUCKET").unwrap_or_else(|_| "buzz-git".into());
         let region = std::env::var("BUZZ_S3_REGION").unwrap_or_else(|_| "us-east-1".into());
-        let addressing_style = std::env::var("BUZZ_S3_ADDRESSING_STYLE")
-            .unwrap_or_else(|_| "path".into())
-            .parse()
-            .expect("BUZZ_S3_ADDRESSING_STYLE must be path or virtual");
-        GitStore::from_s3_config(
+        let addressing_style =
+            std::env::var("BUZZ_S3_ADDRESSING_STYLE").unwrap_or_else(|_| "path".into());
+        crate::test_git_store(
             &endpoint,
             &access_key,
             &secret_key,
             &bucket,
             &region,
-            addressing_style,
+            &addressing_style,
         )
         .expect("connect S3-compatible storage")
     }

@@ -832,28 +832,7 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(9102);
 
-        let s3_addressing_style = match std::env::var("BUZZ_S3_ADDRESSING_STYLE") {
-            Ok(value) => value.parse().map_err(ConfigError::InvalidValue)?,
-            Err(std::env::VarError::NotPresent) => buzz_media::config::S3AddressingStyle::default(),
-            Err(std::env::VarError::NotUnicode(_)) => {
-                return Err(ConfigError::InvalidValue(
-                    "BUZZ_S3_ADDRESSING_STYLE must be valid Unicode and one of 'path' or 'virtual'"
-                        .to_string(),
-                ));
-            }
-        };
         let media = buzz_media::MediaConfig {
-            s3_endpoint: std::env::var("BUZZ_S3_ENDPOINT")
-                .unwrap_or_else(|_| "http://localhost:9000".to_string()),
-            s3_access_key: std::env::var("BUZZ_S3_ACCESS_KEY")
-                .unwrap_or_else(|_| "buzz_dev".to_string()),
-            s3_secret_key: std::env::var("BUZZ_S3_SECRET_KEY")
-                .unwrap_or_else(|_| "buzz_dev_secret".to_string()),
-            s3_bucket: std::env::var("BUZZ_S3_BUCKET").unwrap_or_else(|_| "buzz-media".to_string()),
-            s3_region: std::env::var("BUZZ_S3_REGION")
-                .or_else(|_| std::env::var("AWS_REGION"))
-                .unwrap_or_else(|_| "us-east-1".to_string()),
-            s3_addressing_style,
             max_image_bytes: std::env::var("BUZZ_MAX_IMAGE_BYTES")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -887,20 +866,38 @@ impl Config {
                 .map(|s| s.trim().to_lowercase())
                 .filter(|s| !s.is_empty()),
         };
-        // The provider is chosen once here; a Cloud Storage deployment carries
-        // no `BUZZ_S3_*` values at all, so its bucket comes from
-        // `BUZZ_OBJECT_STORE_BUCKET` rather than from the media settings.
+        // Choose the provider before reading provider-native settings. A GCS
+        // deployment is unaffected by stale or malformed `BUZZ_S3_*` values,
+        // and vice versa.
         let object_store = match buzz_object_store::ProviderSelection::from_env()
             .map_err(ConfigError::InvalidValue)?
         {
             buzz_object_store::ProviderSelection::S3 => {
+                let addressing_style = match std::env::var("BUZZ_S3_ADDRESSING_STYLE") {
+                    Ok(value) => value.parse().map_err(ConfigError::InvalidValue)?,
+                    Err(std::env::VarError::NotPresent) => {
+                        buzz_object_store::S3AddressingStyle::default()
+                    }
+                    Err(std::env::VarError::NotUnicode(_)) => {
+                        return Err(ConfigError::InvalidValue(
+                            "BUZZ_S3_ADDRESSING_STYLE must be valid Unicode and one of 'path' or 'virtual'"
+                                .to_string(),
+                        ));
+                    }
+                };
                 buzz_object_store::ObjectStoreConfig::S3(buzz_object_store::S3StoreConfig {
-                    endpoint: media.s3_endpoint.clone(),
-                    access_key: media.s3_access_key.clone(),
-                    secret_key: media.s3_secret_key.clone(),
-                    bucket: media.s3_bucket.clone(),
-                    region: media.s3_region.clone(),
-                    addressing_style: media.s3_addressing_style,
+                    endpoint: std::env::var("BUZZ_S3_ENDPOINT")
+                        .unwrap_or_else(|_| "http://localhost:9000".to_string()),
+                    access_key: std::env::var("BUZZ_S3_ACCESS_KEY")
+                        .unwrap_or_else(|_| "buzz_dev".to_string()),
+                    secret_key: std::env::var("BUZZ_S3_SECRET_KEY")
+                        .unwrap_or_else(|_| "buzz_dev_secret".to_string()),
+                    bucket: std::env::var("BUZZ_S3_BUCKET")
+                        .unwrap_or_else(|_| "buzz-media".to_string()),
+                    region: std::env::var("BUZZ_S3_REGION")
+                        .or_else(|_| std::env::var("AWS_REGION"))
+                        .unwrap_or_else(|_| "us-east-1".to_string()),
+                    addressing_style,
                 })
             }
             buzz_object_store::ProviderSelection::Gcs { bucket } => {
@@ -1402,9 +1399,14 @@ mod tests {
             !config.serve_git_web_gui,
             "serve_git_web_gui should default to false"
         );
-        assert_eq!(
-            config.media.s3_addressing_style,
-            buzz_media::config::S3AddressingStyle::Path,
+        assert!(
+            matches!(
+                config.object_store,
+                buzz_object_store::ObjectStoreConfig::S3(buzz_object_store::S3StoreConfig {
+                    addressing_style: buzz_object_store::S3AddressingStyle::Path,
+                    ..
+                })
+            ),
             "S3 addressing must default to path style for bundled MinIO compatibility"
         );
         assert!(
@@ -1783,8 +1785,7 @@ mod tests {
         std::env::set_var("BUZZ_S3_ADDRESSING_STYLE", "virtual");
         let configured = Config::from_env()
             .expect("virtual style config")
-            .media
-            .s3_addressing_style;
+            .object_store;
 
         std::env::set_var("BUZZ_S3_ADDRESSING_STYLE", "auto");
         let invalid = Config::from_env();
@@ -1795,7 +1796,13 @@ mod tests {
             std::env::remove_var("BUZZ_S3_ADDRESSING_STYLE");
         }
 
-        assert_eq!(configured, buzz_media::config::S3AddressingStyle::Virtual);
+        assert!(matches!(
+            configured,
+            buzz_object_store::ObjectStoreConfig::S3(buzz_object_store::S3StoreConfig {
+                addressing_style: buzz_object_store::S3AddressingStyle::Virtual,
+                ..
+            })
+        ));
         assert!(matches!(
             invalid,
             Err(ConfigError::InvalidValue(ref message))
@@ -1826,10 +1833,13 @@ mod tests {
 
         match config.object_store {
             buzz_object_store::ObjectStoreConfig::S3(s3) => {
-                assert_eq!(s3.endpoint, config.media.s3_endpoint);
-                assert_eq!(s3.bucket, config.media.s3_bucket);
-                assert_eq!(s3.region, config.media.s3_region);
-                assert_eq!(s3.addressing_style, config.media.s3_addressing_style);
+                assert_eq!(s3.endpoint, "http://localhost:9000");
+                assert_eq!(s3.bucket, "buzz-media");
+                assert_eq!(s3.region, "us-east-1");
+                assert_eq!(
+                    s3.addressing_style,
+                    buzz_object_store::S3AddressingStyle::Path
+                );
             }
             other => panic!("expected the S3 provider by default, got {other:?}"),
         }
@@ -1844,8 +1854,11 @@ mod tests {
         let _guard = ENV_MUTEX.lock().unwrap();
         let previous_provider = std::env::var_os("BUZZ_OBJECT_STORE_PROVIDER");
         let previous_bucket = std::env::var_os("BUZZ_OBJECT_STORE_BUCKET");
+        let previous_s3_style = std::env::var_os("BUZZ_S3_ADDRESSING_STYLE");
 
         std::env::set_var("BUZZ_OBJECT_STORE_PROVIDER", "gcs");
+        // Provider-native settings from an inactive provider are not parsed.
+        std::env::set_var("BUZZ_S3_ADDRESSING_STYLE", "not-an-s3-style");
         std::env::remove_var("BUZZ_OBJECT_STORE_BUCKET");
         let without_bucket = Config::from_env();
 
@@ -1857,6 +1870,7 @@ mod tests {
 
         restore_env("BUZZ_OBJECT_STORE_PROVIDER", previous_provider);
         restore_env("BUZZ_OBJECT_STORE_BUCKET", previous_bucket);
+        restore_env("BUZZ_S3_ADDRESSING_STYLE", previous_s3_style);
 
         assert!(matches!(
             without_bucket,

@@ -317,9 +317,9 @@ fn parse_list_version_entry(
                 _ => {}
             },
             Event::End(end) if end.name().as_ref() == start.to_end().name().as_ref() => {
-                let key = fields.key.ok_or_else(|| {
-                    version_xml_error("ListObjectVersions entry missing Key")
-                })?;
+                let key = fields
+                    .key
+                    .ok_or_else(|| version_xml_error("ListObjectVersions entry missing Key"))?;
                 let version_id = fields.version_id.ok_or_else(|| {
                     version_xml_error("ListObjectVersions entry missing VersionId")
                 })?;
@@ -909,6 +909,71 @@ mod tests {
                 "AccessDenied".to_string(),
                 "nope".to_string()
             )]
+        );
+    }
+
+    #[test]
+    fn explicit_version_delete_counts_version_artifacts_as_deleted() {
+        use s3::serde_types::{DeleteError, DeleteObjectsResult, DeletedObject};
+        let result = DeleteObjectsResult {
+            deleted: vec![DeletedObject {
+                key: "versioned".to_string(),
+                version_id: Some("v1".to_string()),
+                delete_marker: Some(true),
+                delete_marker_version_id: Some("v1".to_string()),
+            }],
+            errors: vec![DeleteError {
+                key: "already-gone".to_string(),
+                code: "NoSuchVersion".to_string(),
+                message: "absent".to_string(),
+                version_id: Some("v0".to_string()),
+            }],
+        };
+
+        let outcome = fold_version_delete_result(result);
+        assert_eq!(outcome.deleted, 1);
+        assert_eq!(outcome.already_missing, 1);
+        assert!(outcome.versioned_keys.is_empty());
+        assert!(outcome.failed.is_empty());
+    }
+
+    #[test]
+    fn version_listing_preserves_objects_markers_and_dual_cursor() {
+        let page = parse_object_versions_page(
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<ListVersionsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <IsTruncated>true</IsTruncated>
+  <NextKeyMarker>_meta/tenant/a.json</NextKeyMarker>
+  <NextVersionIdMarker>v-new</NextVersionIdMarker>
+  <DeleteMarker>
+    <Key>_meta/tenant/a.json</Key><VersionId>v-delete</VersionId>
+  </DeleteMarker>
+  <Version>
+    <Key>_meta/tenant/a.json</Key><VersionId>v-new</VersionId><Size>42</Size>
+  </Version>
+</ListVersionsResult>"#,
+        )
+        .expect("parse S3 version page");
+
+        assert!(page.is_truncated);
+        assert_eq!(page.next_key_marker.as_deref(), Some("_meta/tenant/a.json"));
+        assert_eq!(page.next_version_id_marker.as_deref(), Some("v-new"));
+        assert_eq!(
+            page.entries,
+            vec![
+                ObjectVersionEntry {
+                    key: "_meta/tenant/a.json".to_string(),
+                    version_id: "v-delete".to_string(),
+                    kind: ObjectVersionKind::DeleteMarker,
+                    size: 0,
+                },
+                ObjectVersionEntry {
+                    key: "_meta/tenant/a.json".to_string(),
+                    version_id: "v-new".to_string(),
+                    kind: ObjectVersionKind::Object,
+                    size: 42,
+                },
+            ]
         );
     }
 }

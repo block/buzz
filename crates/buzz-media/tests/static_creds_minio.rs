@@ -18,39 +18,31 @@
 //! `BUZZ_S3_SECRET_KEY` / `BUZZ_S3_BUCKET` / `BUZZ_S3_REGION` /
 //! `BUZZ_S3_ADDRESSING_STYLE`. The default remains `path` for MinIO.
 
-use buzz_media::config::MediaConfig;
 use buzz_media::storage::MediaStorage;
+use buzz_object_store::{S3ObjectStore, S3StoreConfig};
 
-fn minio_config() -> MediaConfig {
-    MediaConfig {
-        s3_endpoint: std::env::var("BUZZ_S3_ENDPOINT")
+fn minio_config() -> S3StoreConfig {
+    S3StoreConfig {
+        endpoint: std::env::var("BUZZ_S3_ENDPOINT")
             .unwrap_or_else(|_| "http://localhost:9000".to_string()),
-        s3_access_key: std::env::var("BUZZ_S3_ACCESS_KEY")
-            .unwrap_or_else(|_| "buzz_dev".to_string()),
-        s3_secret_key: std::env::var("BUZZ_S3_SECRET_KEY")
+        access_key: std::env::var("BUZZ_S3_ACCESS_KEY").unwrap_or_else(|_| "buzz_dev".to_string()),
+        secret_key: std::env::var("BUZZ_S3_SECRET_KEY")
             .unwrap_or_else(|_| "buzz_dev_secret".to_string()),
-        s3_bucket: std::env::var("BUZZ_S3_BUCKET").unwrap_or_else(|_| "buzz-media".to_string()),
-        s3_region: std::env::var("BUZZ_S3_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
-        s3_addressing_style: std::env::var("BUZZ_S3_ADDRESSING_STYLE")
+        bucket: std::env::var("BUZZ_S3_BUCKET").unwrap_or_else(|_| "buzz-media".to_string()),
+        region: std::env::var("BUZZ_S3_REGION").unwrap_or_else(|_| "us-east-1".to_string()),
+        addressing_style: std::env::var("BUZZ_S3_ADDRESSING_STYLE")
             .unwrap_or_else(|_| "path".to_string())
             .parse()
             .expect("BUZZ_S3_ADDRESSING_STYLE must be path or virtual"),
-        max_image_bytes: 50 * 1024 * 1024,
-        max_gif_bytes: 10 * 1024 * 1024,
-        max_video_bytes: 524_288_000,
-        max_file_bytes: 104_857_600,
-        public_base_url: "http://localhost:3000/media".to_string(),
-        upload_records_enabled: false,
-        upload_ip_header: None,
-        upload_port_header: None,
     }
 }
 
 #[tokio::test]
 #[ignore = "requires a live MinIO (docker compose up -d minio minio-init)"]
 async fn static_creds_round_trip_against_minio() {
-    let storage =
-        MediaStorage::new(&minio_config()).expect("static creds should build a storage client");
+    let store = S3ObjectStore::new(&minio_config())
+        .expect("static creds should build an object-store client");
+    let storage = MediaStorage::with_store(std::sync::Arc::new(store));
 
     let key = format!("_test/static-creds-{}.bin", std::process::id());
     let body = b"hardcoded-creds-still-work";

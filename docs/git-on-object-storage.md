@@ -5,7 +5,7 @@
 ## Abstract
 
 This document specifies a protocol for hosting git repositories on an object
-store (S3 and S3-compatible backends such as MinIO) with **no persistent
+store (currently Google Cloud Storage, with an AWS S3 adapter) with **no persistent
 filesystem**, and gives a formal proof of its safety properties. Repository
 content is stored as create-only, content-addressed pack objects (immutable by
 protocol discipline — see A1, not by assuming an immutable store); the current
@@ -64,6 +64,39 @@ per-pod ephemeral volume, so accounting and single-flight coordination stay
 local. Cache misses, restarts, and evictions only affect performance; object
 storage remains the source of truth, and per-request refs/HEAD are still
 materialized from the current manifest.
+
+### Provider portability and cutover
+
+Object storage is a deployment choice, not a media or Git domain choice.
+`crates/buzz-object-store::ObjectStore` is the only interface those domains
+consume. The relay constructs one provider at composition time and shares it
+between `MediaStorage` and `GitStore`; `BUZZ_OBJECT_STORE_PROVIDER` selects
+`gcs` or `s3`. Provider-native vocabulary is confined to its adapter:
+
+- GCS generations implement revisions, conditional writes, version listing,
+  and exact-version deletion; Application Default Credentials provide identity.
+- S3 ETags/version IDs implement the same contract; the AWS credential chain
+  provides identity when static interoperability credentials are absent.
+
+The current Mozart deployment selects GCS. Moving Buzz to AWS does not require
+changes in media, Git, deletion, or key layout. It is an explicit data cutover:
+
+1. provision the target bucket with the deletion contract satisfied (no object
+   versioning or recoverable soft-delete retention), and grant only the Buzz
+   runtime identity;
+2. run the target adapter's conformance profile before serving traffic;
+3. drain writers, copy every key and byte exactly, and prove source/target key
+   stream digests and byte totals agree for both tenant and Git prefixes;
+4. switch `BUZZ_OBJECT_STORE_PROVIDER` and its provider configuration in the
+   deployment layer, then prove media reads, Git hydrate/clone, CAS publication,
+   version enumeration, and exact deletion on the target;
+5. retain the source read-only for the rollback window. A rollback after target
+   writes requires a reverse delta copy before switching; never point two live
+   writers at different buckets.
+
+The bucket name is configuration, never embedded in object keys or domain
+records. This keeps a future GCS-to-S3 move a copy-and-composition change rather
+than a schema or application rewrite.
 
 The accepted v1 tradeoff: under concurrent same-repo pushes, every contender
 hydrates and runs receive-pack, and the CAS losers' subprocess work is

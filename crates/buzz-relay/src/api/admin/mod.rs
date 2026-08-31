@@ -1315,7 +1315,7 @@ mod postgres_tests {
             db.clone(),
             buzz_workflow::WorkflowConfig::default(),
         ));
-        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let media_storage = crate::test_media_storage(&config).expect("media storage");
         let (state, _audit_shutdown) = crate::state::AppState::new(
             config,
             db,
@@ -1820,7 +1820,7 @@ mod postgres_tests {
             db.clone(),
             buzz_workflow::WorkflowConfig::default(),
         ));
-        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let media_storage = crate::test_media_storage(&config).expect("media storage");
         let (mut state, _audit_shutdown) = crate::state::AppState::new(
             config,
             db,
@@ -2314,7 +2314,7 @@ mod postgres_tests {
             db.clone(),
             buzz_workflow::WorkflowConfig::default(),
         ));
-        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let media_storage = crate::test_media_storage(&config).expect("media storage");
         let (mut state, _) = crate::state::AppState::new(
             config,
             db,
@@ -2392,7 +2392,7 @@ mod postgres_tests {
             db.clone(),
             buzz_workflow::WorkflowConfig::default(),
         ));
-        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let media_storage = crate::test_media_storage(&config).expect("media storage");
         let (mut state, _audit_shutdown) = crate::state::AppState::new(
             config,
             db,
@@ -2519,7 +2519,7 @@ mod postgres_tests {
             db.clone(),
             buzz_workflow::WorkflowConfig::default(),
         ));
-        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let media_storage = crate::test_media_storage(&config).expect("media storage");
         let (mut state, _) = crate::state::AppState::new(
             config,
             db,
@@ -2888,7 +2888,7 @@ mod postgres_tests {
             db.clone(),
             buzz_workflow::WorkflowConfig::default(),
         ));
-        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let media_storage = crate::test_media_storage(&config).expect("media storage");
         let (mut state, _) = crate::state::AppState::new(
             config,
             db,
@@ -2961,7 +2961,7 @@ mod postgres_tests {
             db.clone(),
             buzz_workflow::WorkflowConfig::default(),
         ));
-        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let media_storage = crate::test_media_storage(&config).expect("media storage");
         let (mut state, _) = crate::state::AppState::new(
             config,
             db,
@@ -3031,7 +3031,7 @@ mod postgres_tests {
             db.clone(),
             buzz_workflow::WorkflowConfig::default(),
         ));
-        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let media_storage = crate::test_media_storage(&config).expect("media storage");
         let (mut state, _) = crate::state::AppState::new(
             config,
             db,
@@ -4736,7 +4736,7 @@ mod postgres_tests {
             db.clone(),
             buzz_workflow::WorkflowConfig::default(),
         ));
-        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let media_storage = crate::test_media_storage(&config).expect("media storage");
         let (state, _audit_shutdown) = crate::state::AppState::new(
             config,
             db,

@@ -561,27 +561,8 @@ async fn connect_services() -> Result<Services> {
 }
 
 async fn connect_services_with_store(store: DeletionStore) -> Result<Services> {
-    let (s3_access_key, s3_secret_key) = s3_key_pair_from_env();
-    let media_config = buzz_media::MediaConfig {
-        s3_endpoint: required_env("BUZZ_S3_ENDPOINT")?,
-        s3_access_key,
-        s3_secret_key,
-        s3_bucket: required_env("BUZZ_S3_BUCKET")?,
-        s3_region: s3_region_from_env(),
-        s3_addressing_style: std::env::var("BUZZ_S3_ADDRESSING_STYLE")
-            .unwrap_or_else(|_| "path".to_string())
-            .parse()
-            .map_err(anyhow::Error::msg)?,
-        max_image_bytes: 1,
-        max_gif_bytes: 1,
-        max_video_bytes: 1,
-        max_file_bytes: 1,
-        public_base_url: "http://localhost/media".to_string(),
-        upload_records_enabled: false,
-        upload_ip_header: None,
-        upload_port_header: None,
-    };
-    let media = Arc::new(MediaStorage::new(&media_config)?);
+    let object_store = buzz_object_store::connect(&deletion_object_store_config()?).await?;
+    let media = Arc::new(MediaStorage::with_store(object_store));
     let redis_url = required_env("REDIS_URL")?;
     let mut redis_config = deadpool_redis::Config::from_url(&redis_url);
     redis_config.pool = Some(deadpool_redis::PoolConfig::new(env_parse(
@@ -596,6 +577,37 @@ async fn connect_services_with_store(store: DeletionStore) -> Result<Services> {
         media,
         redis,
     })
+}
+
+/// Resolve the same deployment-level provider used by the relay.
+///
+/// The deletion executable is a separate composition root, so it must select
+/// the provider independently while preserving exactly the relay's environment
+/// contract. Domain deletion code continues to consume `MediaStorage` only.
+fn deletion_object_store_config() -> Result<buzz_object_store::ObjectStoreConfig> {
+    match buzz_object_store::ProviderSelection::from_env().map_err(anyhow::Error::msg)? {
+        buzz_object_store::ProviderSelection::Gcs { bucket } => {
+            Ok(buzz_object_store::ObjectStoreConfig::Gcs(
+                buzz_object_store::GcsStoreConfig::new(bucket),
+            ))
+        }
+        buzz_object_store::ProviderSelection::S3 => {
+            let (access_key, secret_key) = s3_key_pair_from_env();
+            Ok(buzz_object_store::ObjectStoreConfig::S3(
+                buzz_object_store::S3StoreConfig {
+                    endpoint: required_env("BUZZ_S3_ENDPOINT")?,
+                    access_key,
+                    secret_key,
+                    bucket: required_env("BUZZ_S3_BUCKET")?,
+                    region: s3_region_from_env(),
+                    addressing_style: std::env::var("BUZZ_S3_ADDRESSING_STYLE")
+                        .unwrap_or_else(|_| "path".to_string())
+                        .parse()
+                        .map_err(anyhow::Error::msg)?,
+                },
+            ))
+        }
+    }
 }
 
 fn s3_region_from_env() -> String {
@@ -1605,6 +1617,12 @@ fn print_json(value: &impl Serialize) -> Result<()> {
 mod postgres_tests {
     use super::*;
 
+    fn s3_media_storage(config: buzz_object_store::S3StoreConfig) -> Arc<MediaStorage> {
+        let store =
+            buzz_object_store::S3ObjectStore::new(&config).expect("construct S3 test object store");
+        Arc::new(MediaStorage::with_store(Arc::new(store)))
+    }
+
     #[test]
     fn submit_host_prefers_explicit_host() {
         assert_eq!(
@@ -1695,25 +1713,14 @@ mod postgres_tests {
             .expect("runnable deletion request");
         let services = Services {
             store,
-            media: Arc::new(
-                MediaStorage::new(&buzz_media::MediaConfig {
-                    s3_endpoint: "http://127.0.0.1:1".to_string(),
-                    s3_access_key: "unused".to_string(),
-                    s3_secret_key: "unused".to_string(),
-                    s3_bucket: "unused".to_string(),
-                    s3_region: "us-east-1".to_string(),
-                    s3_addressing_style: buzz_media::S3AddressingStyle::Path,
-                    max_image_bytes: 1,
-                    max_gif_bytes: 1,
-                    max_video_bytes: 1,
-                    max_file_bytes: 1,
-                    public_base_url: "http://localhost/media".to_string(),
-                    upload_records_enabled: false,
-                    upload_ip_header: None,
-                    upload_port_header: None,
-                })
-                .expect("construct unused media service"),
-            ),
+            media: s3_media_storage(buzz_object_store::S3StoreConfig {
+                endpoint: "http://127.0.0.1:1".to_string(),
+                access_key: "unused".to_string(),
+                secret_key: "unused".to_string(),
+                bucket: "unused".to_string(),
+                region: "us-east-1".to_string(),
+                addressing_style: buzz_object_store::S3AddressingStyle::Path,
+            }),
             redis: deadpool_redis::Config::from_url("redis://127.0.0.1:1")
                 .create_pool(Some(deadpool_redis::Runtime::Tokio1))
                 .expect("construct unused Redis pool"),
@@ -1796,27 +1803,16 @@ mod postgres_tests {
         let bucket = std::env::var("BUZZ_TEST_S3_BUCKET")
             .or_else(|_| std::env::var("BUZZ_S3_BUCKET"))
             .expect("BUZZ_TEST_S3_BUCKET or BUZZ_S3_BUCKET is required");
-        Arc::new(
-            MediaStorage::new(&buzz_media::MediaConfig {
-                s3_endpoint: endpoint,
-                s3_access_key: access_key,
-                s3_secret_key: secret_key,
-                s3_bucket: bucket,
-                s3_region: std::env::var("BUZZ_TEST_S3_REGION")
-                    .or_else(|_| std::env::var("BUZZ_S3_REGION"))
-                    .unwrap_or_else(|_| "us-east-1".to_string()),
-                s3_addressing_style: buzz_media::S3AddressingStyle::Path,
-                max_image_bytes: 1,
-                max_gif_bytes: 1,
-                max_video_bytes: 1,
-                max_file_bytes: 1,
-                public_base_url: "http://localhost/media".to_string(),
-                upload_records_enabled: false,
-                upload_ip_header: None,
-                upload_port_header: None,
-            })
-            .expect("construct deletion test media service"),
-        )
+        s3_media_storage(buzz_object_store::S3StoreConfig {
+            endpoint,
+            access_key,
+            secret_key,
+            bucket,
+            region: std::env::var("BUZZ_TEST_S3_REGION")
+                .or_else(|_| std::env::var("BUZZ_S3_REGION"))
+                .unwrap_or_else(|_| "us-east-1".to_string()),
+            addressing_style: buzz_object_store::S3AddressingStyle::Path,
+        })
     }
 
     async fn approved_stage_allows_post_inventory_row_churn_before_fencing() {

@@ -461,6 +461,36 @@ fn bucket_resource(bucket: &str) -> String {
     format!("projects/_/buckets/{bucket}")
 }
 
+/// Translate one Cloud Storage object descriptor into the provider-neutral
+/// version vocabulary used by deletion.
+fn version_entry_of(object: google_cloud_storage::model::Object) -> ObjectVersionEntry {
+    ObjectVersionEntry {
+        key: object.name,
+        version_id: object.generation.to_string(),
+        kind: ObjectVersionKind::Object,
+        size: u64::try_from(object.size).unwrap_or(0),
+    }
+}
+
+/// Parse an opaque seam token back into a generation without ever accepting a
+/// token from a different provider or a sentinel generation.
+fn generation_of(version: &ObjectVersionRef) -> Result<i64, ObjectStoreError> {
+    let generation = version
+        .version_id
+        .parse::<i64>()
+        .map_err(|_| ObjectStoreError::Provider {
+            operation: "delete_versions",
+            message: format!("invalid GCS generation for object {:?}", version.key),
+        })?;
+    if generation <= 0 {
+        return Err(ObjectStoreError::Provider {
+            operation: "delete_versions",
+            message: format!("non-positive GCS generation for object {:?}", version.key),
+        });
+    }
+    Ok(generation)
+}
+
 /// The `ifGenerationMatch` value implementing a [`WriteCondition`].
 ///
 /// `0` is Cloud Storage's create-only precondition: no live generation can be
@@ -974,16 +1004,7 @@ impl ObjectStore for GcsObjectStore {
                 .map_err(|e| classify("list_versions_page", prefix, e))?;
             let next = Some(response.next_page_token).filter(|token| !token.is_empty());
             Ok(ObjectVersionsPage {
-                entries: response
-                    .objects
-                    .into_iter()
-                    .map(|object| ObjectVersionEntry {
-                        key: object.name,
-                        version_id: object.generation.to_string(),
-                        kind: ObjectVersionKind::Object,
-                        size: u64::try_from(object.size).unwrap_or(0),
-                    })
-                    .collect(),
+                entries: response.objects.into_iter().map(version_entry_of).collect(),
                 is_truncated: next.is_some(),
                 next_key_marker: next,
                 next_version_id_marker: None,
@@ -1002,25 +1023,7 @@ impl ObjectStore for GcsObjectStore {
 
         let mut parsed = Vec::with_capacity(versions.len());
         for version in versions {
-            let generation = version.version_id.parse::<i64>().map_err(|_| {
-                ObjectStoreError::Provider {
-                    operation: "delete_versions",
-                    message: format!(
-                        "invalid GCS generation for object {:?}",
-                        version.key
-                    ),
-                }
-            })?;
-            if generation <= 0 {
-                return Err(ObjectStoreError::Provider {
-                    operation: "delete_versions",
-                    message: format!(
-                        "non-positive GCS generation for object {:?}",
-                        version.key
-                    ),
-                });
-            }
-            parsed.push((version.key.clone(), generation));
+            parsed.push((version.key.clone(), generation_of(version)?));
         }
 
         let outcomes = futures_util::stream::iter(parsed)
@@ -1048,11 +1051,11 @@ impl ObjectStore for GcsObjectStore {
             match result {
                 Ok(()) => outcome.deleted += 1,
                 Err(ObjectStoreError::NotFound { .. }) => outcome.already_missing += 1,
-                Err(error) => outcome.failed.push((
-                    key,
-                    error_code(&error).to_string(),
-                    error.to_string(),
-                )),
+                Err(error) => {
+                    outcome
+                        .failed
+                        .push((key, error_code(&error).to_string(), error.to_string()))
+                }
             }
         }
         Ok(outcome)
@@ -1099,7 +1102,7 @@ mod tests {
     use super::*;
     use google_cloud_storage::http::HeaderMap;
     use google_cloud_storage::model::bucket::{SoftDeletePolicy, Versioning};
-    use google_cloud_storage::model::Bucket;
+    use google_cloud_storage::model::{Bucket, Object};
 
     fn http_error(status: u16) -> GcsError {
         GcsError::http(status, HeaderMap::new(), bytes::Bytes::new())
@@ -1117,6 +1120,38 @@ mod tests {
             bucket_resource("buzz-objects"),
             "projects/_/buckets/buzz-objects"
         );
+    }
+
+    #[test]
+    fn object_generations_map_to_provider_neutral_versions() {
+        let entry = version_entry_of(
+            Object::new()
+                .set_name("_meta/tenant/a.json")
+                .set_generation(1_700_000_000_000_042_i64)
+                .set_size(42_i64),
+        );
+        assert_eq!(entry.key, "_meta/tenant/a.json");
+        assert_eq!(entry.version_id, "1700000000000042");
+        assert_eq!(entry.kind, ObjectVersionKind::Object);
+        assert_eq!(entry.size, 42);
+    }
+
+    #[test]
+    fn exact_delete_rejects_foreign_or_sentinel_generation_tokens() {
+        for version_id in ["v-s3-token", "0", "-1"] {
+            let error = generation_of(&ObjectVersionRef {
+                key: "object".to_string(),
+                version_id: version_id.to_string(),
+            })
+            .expect_err("invalid generation must fail closed");
+            assert!(matches!(
+                error,
+                ObjectStoreError::Provider {
+                    operation: "delete_versions",
+                    ..
+                }
+            ));
+        }
     }
 
     /// Create-only is `ifGenerationMatch=0`; a compare-and-swap carries the

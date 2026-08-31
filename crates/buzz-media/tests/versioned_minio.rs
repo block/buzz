@@ -18,32 +18,29 @@
 
 use std::process::Command;
 
-use buzz_media::config::MediaConfig;
 use buzz_media::storage::{MediaStorage, ObjectVersionKind, ObjectVersionRef};
+use buzz_object_store::{S3ObjectStore, S3StoreConfig};
 
 fn env_or(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
 }
 
-fn minio_config(bucket: String) -> MediaConfig {
-    MediaConfig {
-        s3_endpoint: env_or("BUZZ_S3_ENDPOINT", "http://localhost:9000"),
-        s3_access_key: env_or("BUZZ_S3_ACCESS_KEY", "buzz_dev"),
-        s3_secret_key: env_or("BUZZ_S3_SECRET_KEY", "buzz_dev_secret"),
-        s3_bucket: bucket,
-        s3_region: env_or("BUZZ_S3_REGION", "us-east-1"),
-        s3_addressing_style: env_or("BUZZ_S3_ADDRESSING_STYLE", "path")
+fn minio_config(bucket: String) -> S3StoreConfig {
+    S3StoreConfig {
+        endpoint: env_or("BUZZ_S3_ENDPOINT", "http://localhost:9000"),
+        access_key: env_or("BUZZ_S3_ACCESS_KEY", "buzz_dev"),
+        secret_key: env_or("BUZZ_S3_SECRET_KEY", "buzz_dev_secret"),
+        bucket,
+        region: env_or("BUZZ_S3_REGION", "us-east-1"),
+        addressing_style: env_or("BUZZ_S3_ADDRESSING_STYLE", "path")
             .parse()
             .expect("BUZZ_S3_ADDRESSING_STYLE must be path or virtual"),
-        max_image_bytes: 50 * 1024 * 1024,
-        max_gif_bytes: 10 * 1024 * 1024,
-        max_video_bytes: 524_288_000,
-        max_file_bytes: 104_857_600,
-        public_base_url: "http://localhost:3000/media".to_string(),
-        upload_records_enabled: false,
-        upload_ip_header: None,
-        upload_port_header: None,
     }
+}
+
+fn media_storage(config: &S3StoreConfig) -> MediaStorage {
+    let store = S3ObjectStore::new(config).expect("static MinIO object-store client");
+    MediaStorage::with_store(std::sync::Arc::new(store))
 }
 
 fn run_mc(args: &[String]) -> Result<(), String> {
@@ -133,7 +130,7 @@ async fn never_versioned_bucket_lists_null_versions_and_exact_delete_empties_lis
     let bucket = format!("buzz-media-never-versioned-{}", std::process::id());
     let bucket_path = format!("local/{bucket}");
     let config = minio_config(bucket.clone());
-    mc_alias(&config.s3_access_key, &config.s3_secret_key).expect("configure mc alias");
+    mc_alias(&config.access_key, &config.secret_key).expect("configure mc alias");
     run_mc(&[
         "mb".to_string(),
         "--ignore-existing".to_string(),
@@ -141,7 +138,7 @@ async fn never_versioned_bucket_lists_null_versions_and_exact_delete_empties_lis
     ])
     .expect("create isolated never-versioned test bucket");
 
-    let storage = MediaStorage::new(&config).expect("static MinIO storage client");
+    let storage = media_storage(&config);
     let prefix = format!("_test/never-versioned-{}/", uuid::Uuid::new_v4());
     let key = format!("{prefix}plain.bin");
     storage
@@ -187,7 +184,7 @@ async fn versioned_bucket_exact_version_delete_reaches_final_list_versions_empti
     let bucket = format!("buzz-media-versioned-{}", std::process::id());
     let bucket_path = format!("local/{bucket}");
     let config = minio_config(bucket.clone());
-    mc_alias(&config.s3_access_key, &config.s3_secret_key).expect("configure mc alias");
+    mc_alias(&config.access_key, &config.secret_key).expect("configure mc alias");
     run_mc(&[
         "mb".to_string(),
         "--ignore-existing".to_string(),
@@ -201,7 +198,7 @@ async fn versioned_bucket_exact_version_delete_reaches_final_list_versions_empti
     ])
     .expect("enable bucket versioning");
 
-    let storage = MediaStorage::new(&config).expect("static MinIO storage client");
+    let storage = media_storage(&config);
     let prefix = format!("_test/versioned-{}/", uuid::Uuid::new_v4());
     let historical_key = format!("{prefix}historical.bin");
     let marker_only_key = format!("{prefix}marker-only.bin");

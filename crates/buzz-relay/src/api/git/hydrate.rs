@@ -545,15 +545,9 @@ mod tests {
     #[tokio::test]
     async fn materialized_repo_is_created_under_configured_scratch_dir() {
         let scratch = TempDir::new().unwrap();
-        let store = GitStore::from_s3_config(
-            "http://localhost:9000",
-            "x",
-            "x",
-            "x",
-            "us-east-1",
-            buzz_media::config::S3AddressingStyle::Path,
-        )
-        .expect("construct store");
+        let store =
+            crate::test_git_store("http://localhost:9000", "x", "x", "x", "us-east-1", "path")
+                .expect("construct store");
         let manifest = Manifest {
             version: 1,
             head: "refs/heads/main".into(),
@@ -590,13 +584,13 @@ mod tests {
     }
 
     fn store() -> GitStore {
-        GitStore::from_s3_config(
+        crate::test_git_store(
             "http://localhost:9000",
             "buzz_dev",
             "buzz_dev_secret",
             "buzz-git",
             "us-east-1",
-            buzz_media::config::S3AddressingStyle::Path,
+            "path",
         )
         .expect("connect local MinIO")
     }

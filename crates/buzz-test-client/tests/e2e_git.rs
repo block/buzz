@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use buzz_media::S3AddressingStyle;
+use buzz_object_store::S3AddressingStyle;
 use nostr::{EventBuilder, Keys, Kind, Tag};
 use s3::creds::Credentials;
 use s3::{Bucket, Region};

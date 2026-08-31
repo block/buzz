@@ -2314,7 +2314,7 @@ mod track_c_tests {
             db.clone(),
             buzz_workflow::WorkflowConfig::default(),
         ));
-        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let media_storage = crate::test_media_storage(&config).expect("media storage");
         let (state, _audit_shutdown) = AppState::new(
             config,
             db,
