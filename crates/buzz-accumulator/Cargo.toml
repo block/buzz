@@ -7,6 +7,28 @@ license.workspace = true
 repository.workspace = true
 description = "Fold engine: incrementally maintained, provenance-carrying artifacts over the event stream"
 
+[features]
+# The `daemon` feature adds the standalone headless app (relay sync → local
+# SQLite mirror → HTTP status/machinery API). It is on by default so
+# `cargo run -p buzz-accumulator` just works; engine consumers (buzz-cli)
+# depend with `default-features = false` and stay pure.
+default = ["daemon"]
+daemon = [
+    "dep:anyhow",
+    "dep:axum",
+    "dep:buzz-core",
+    "dep:buzz-sdk",
+    "dep:buzz-ws-client",
+    "dep:clap",
+    "dep:futures-util",
+    "dep:nostr",
+    "dep:rustls",
+    "dep:sqlx",
+    "dep:tokio",
+    "dep:tracing",
+    "dep:tracing-subscriber",
+]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -14,5 +36,31 @@ thiserror = { workspace = true }
 sha2 = { workspace = true }
 chrono = { workspace = true }
 
+# --- daemon-only (all optional; see [features]) ---
+anyhow = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+buzz-core = { workspace = true, optional = true }
+buzz-sdk = { workspace = true, optional = true }
+buzz-ws-client = { workspace = true, optional = true }
+clap = { version = "4", features = ["derive", "env"], optional = true }
+futures-util = { workspace = true, optional = true }
+nostr = { workspace = true, optional = true }
+# Explicit rustls with the ring provider: without it a multi-package release
+# build unifies ring + aws-lc-rs features and provider auto-selection panics.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
+sqlx = { workspace = true, features = ["sqlite"], optional = true }
+tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true }
+tower = { workspace = true }
+
+[[bin]]
+name = "buzz-accumulator"
+path = "src/main.rs"
+required-features = ["daemon"]

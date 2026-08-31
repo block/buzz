@@ -14,13 +14,19 @@
 //!   signals it came from; published back to the relay as an immutable event.
 //! - (a **lens** renders artifacts into UI; rendering is out of scope here.)
 //!
-//! This crate is deliberately **pure**: it plans runs, prices them, renders
-//! transcripts, validates model output, and splices history — but it performs
-//! no relay I/O and holds no storage. Callers (the `buzz` CLI, the desktop
-//! app) fetch signals and prior artifacts from the relay, hand them to
-//! [`run::plan_run`], invoke a [`runner::FoldRunner`] if the plan is ready,
-//! and finish with [`run::complete_run`]. All state lives in signed relay
-//! events, so the artifact store is append-only by construction.
+//! The engine modules are deliberately **pure**: they plan runs, price them,
+//! render transcripts, validate model output, and splice history — but perform
+//! no relay I/O and hold no storage. Callers (the `buzz` CLI, the [`daemon`])
+//! fetch signals and prior artifacts, hand them to [`run::plan_run`], invoke a
+//! [`runner::FoldRunner`] if the plan is ready, and finish with
+//! [`run::complete_run`].
+//!
+//! The optional `daemon` feature (default; engine consumers opt out with
+//! `default-features = false`) adds the standalone headless app: it borrows a
+//! person's key, mirrors everything that key can see from the relay into local
+//! SQLite, holds the live subscription, and exposes connection/backfill status
+//! plus the fold machinery (selections, folds, runs, artifacts) over a
+//! localhost HTTP API for an external UI. `cargo run -p buzz-accumulator`.
 //!
 //! Honesty invariants the engine enforces (ported from the X-Ray POC and
 //! covered by unit tests in each module):
@@ -36,6 +42,8 @@
 //!   history cannot be rewritten regardless of model output ([`validate::splice_append_sections`]).
 
 pub mod artifact;
+#[cfg(feature = "daemon")]
+pub mod daemon;
 pub mod error;
 pub mod estimate;
 pub mod run;
