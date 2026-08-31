@@ -1526,6 +1526,97 @@ void main() {
       reason: 'only `rate-limited:` rejections signal back-pressure',
     );
   });
+
+  test('equal session states compare equal', () {
+    // Built through a non-const path on purpose: identical const instances are
+    // canonicalized to one object, so a const pair would pass on identity even
+    // with no operator== at all.
+    SessionState reconnecting(int attempt) => SessionState(
+      status: SessionStatus.reconnecting,
+      reconnectAttempt: 0 + attempt,
+    );
+
+    final a = reconnecting(0);
+    final b = reconnecting(0);
+
+    expect(identical(a, b), isFalse);
+    expect(a, b);
+    expect(a.hashCode, b.hashCode);
+    expect(a, isNot(reconnecting(1)));
+    expect(
+      a,
+      isNot(SessionState(status: SessionStatus.connected, reconnectAttempt: 0)),
+    );
+  });
+
+  test('a reconnect attempt that changes nothing does not notify', () async {
+    final sockets = <_ControlledRelaySocket>[];
+    final keychain = nostr.Keys.generate();
+    final session = RelaySessionNotifier(
+      socketFactory:
+          ({
+            required wsUrl,
+            required nsec,
+            required onMessage,
+            required onConnected,
+            required onDisconnected,
+          }) {
+            final socket = _ControlledRelaySocket(
+              wsUrl: wsUrl,
+              nsec: nsec,
+              onMessage: onMessage,
+              onConnected: onConnected,
+              onDisconnected: onDisconnected,
+            );
+            sockets.add(socket);
+            return socket;
+          },
+    );
+    final container = ProviderContainer(
+      overrides: [
+        relaySessionProvider.overrideWith(() => session),
+        relayConfigProvider.overrideWith(
+          () => _FakeRelayConfigNotifier(
+            baseUrl: 'https://relay.example',
+            nsec: keychain.nsec,
+          ),
+        ),
+        authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
+      ],
+    );
+    addTearDown(container.dispose);
+    await container.read(authProvider.future);
+
+    final observed = <SessionState>[];
+    final subscription = container.listen(
+      relaySessionProvider,
+      (_, next) => observed.add(next),
+    );
+    addTearDown(subscription.close);
+    await Future<void>.delayed(Duration.zero);
+
+    sockets.last.connectSuccessfully();
+    sockets.last.disconnectWith(Exception('connection lost'));
+    expect(session.state.status, SessionStatus.reconnecting);
+    expect(session.state.reconnectAttempt, 1);
+    final settled = observed.length;
+    final socketsBefore = sockets.length;
+
+    // The backoff timer fires _connect, which re-emits reconnecting at the same
+    // attempt: a distinct object carrying identical values. Watchers must not
+    // see it, or every reconnect rebuilds all 25 subtrees that watch this.
+    await Future<void>.delayed(const Duration(milliseconds: 1200));
+
+    expect(sockets, hasLength(socketsBefore + 1));
+    expect(session.state.status, SessionStatus.reconnecting);
+    expect(session.state.reconnectAttempt, 1);
+    expect(observed, hasLength(settled));
+
+    // A real reconnect still increments, and still notifies.
+    sockets.last.disconnectWith(Exception('connection lost'));
+    expect(session.state.reconnectAttempt, 2);
+    expect(observed, hasLength(settled + 1));
+  });
 }
 
 class _ControlledHttpClient extends http.BaseClient {
