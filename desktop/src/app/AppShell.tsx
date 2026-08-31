@@ -50,6 +50,7 @@ import { useManagedAgentRuntimeReconciliation } from "@/features/agents/useManag
 import { useAutoRestartPolicy } from "@/features/agents/lib/useAutoRestartPolicy";
 import { usePersonaSync } from "@/features/agents/lib/usePersonaSync";
 import { useAgentObserverIngestion } from "@/features/agents/useAgentObserverIngestion";
+import { useActivityLedgerTodaySnapshot } from "@/features/agents/useActivityLedgerTodaySnapshot";
 import { AgentManagementDialogs } from "@/features/agents/ui/AgentManagementDialogs";
 import { RequestedAgentCreateDialogs } from "@/features/agents/ui/RequestedAgentCreateDialogs";
 import {
@@ -215,6 +216,7 @@ export function AppShell() {
   // The archive batch now persists in Rust, so the agent-metrics invalidation
   // signal arrives as a Tauri event rather than an in-process call.
   useArchiveAgentMetricsBridge();
+  useActivityLedgerTodaySnapshot();
   // Kind 44200 is relay-persisted (durable) and stays deferred: missed
   // startup frames can be replayed, so there's no ordering constraint.
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;

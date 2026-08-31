@@ -1,4 +1,4 @@
-import type { ObserverEvent } from "./agentSessionTypes";
+import { observerEventIdentity, type ObserverEvent } from "./agentSessionTypes";
 
 /**
  * Filter transcript items or raw observer events down to a single channel.
@@ -21,7 +21,8 @@ export function scopeByChannel<T extends { channelId?: string | null }>(
  * paged history loaded from SQLite — it extends the visible range beyond the cap.
  *
  * Deduplication: events present in both (e.g. a frame that arrived live and was
- * also loaded from the archive) are collapsed to one entry by `(seq, timestamp)`.
+ * also loaded from the archive) are collapsed by signed outer id plus inner
+ * `(timestamp, seq)`. One signed frame may carry several batch siblings.
  * The live copy is preferred when a duplicate exists, since the live path may
  * have applied incremental transcript mutations via `processTranscriptEvent`.
  *
@@ -36,9 +37,10 @@ export function mergeObserverEventWindows(
   if (liveEvents.length === 0) return archivedEvents as ObserverEvent[];
 
   // Dedup key: same as appendAgentEvent / appendArchivedChannelEvent.
-  const liveKeySet = new Set(liveEvents.map((e) => `${e.seq}:${e.timestamp}`));
+  const eventKey = observerEventIdentity;
+  const liveKeySet = new Set(liveEvents.map(eventKey));
   const uniqueArchived = archivedEvents.filter(
-    (e) => !liveKeySet.has(`${e.seq}:${e.timestamp}`),
+    (event) => !liveKeySet.has(eventKey(event)),
   );
   if (uniqueArchived.length === 0) return liveEvents as ObserverEvent[];
 
@@ -68,7 +70,9 @@ export function mergeObserverEventWindows(
  * agentSessionTranscript.ts) — unique within one channel's combined window.
  */
 export function observerEventScrollId(event: ObserverEvent): string {
-  return `${event.seq}:${event.timestamp}`;
+  return event.sourceEventId
+    ? observerEventIdentity(event)
+    : `${event.seq}:${event.timestamp}`;
 }
 
 /**

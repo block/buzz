@@ -1,19 +1,42 @@
 import * as React from "react";
 import {
+  CheckCircle2,
   CircleAlert,
   CircleDot,
   Clock3,
+  Pencil,
   TerminalSquare,
   XCircle,
 } from "lucide-react";
 
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { useCommunities } from "@/features/communities/useCommunities";
+import {
+  buildMissionJournal,
+  normalizeActivityEvents,
+  type MissionJournal,
+} from "@/features/agents/activityLedger";
+import {
+  applyValidatedJournalAuthority,
+  journalAuthorityCorrelationId,
+  journalVerificationSources,
+} from "@/features/agents/activityLedgerAuthority";
+import {
+  getJournalAuthorityArtifacts,
+  upsertJournalVerification,
+  upsertOwnerJournalOverride,
+  type JournalAuthorityArtifact,
+} from "@/shared/api/tauriArchive";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { useNow } from "@/shared/lib/useNow";
 import { Badge } from "@/shared/ui/badge";
+import { Button } from "@/shared/ui/button";
+import { Input } from "@/shared/ui/input";
 import { Skeleton } from "@/shared/ui/skeleton";
 import { Spinner } from "@/shared/ui/spinner";
+import { Textarea } from "@/shared/ui/textarea";
 import {
   AgentSessionTranscriptList,
   type AgentSessionTranscriptEmptyState,
@@ -76,6 +99,7 @@ export function ManagedAgentSessionPanel({
   rawEventsOverride,
   transcriptOverride,
 }: ManagedAgentSessionPanelProps) {
+  const relayUrl = useCommunities().activeCommunity?.relayUrl ?? null;
   const hasObserver = isManagedAgentActive(agent);
   // Always read from the store — archived frames are ingested regardless of
   // live status and must be renderable for idle agents with channel history.
@@ -127,6 +151,14 @@ export function ManagedAgentSessionPanel({
     () => deriveLatestSessionId(displayEvents),
     [displayEvents],
   );
+  const journalAsOf = useNow(60_000);
+  const latestJournal = React.useMemo(
+    () =>
+      buildMissionJournal(normalizeActivityEvents(combinedEvents), {
+        asOf: new Date(journalAsOf),
+      }),
+    [combinedEvents, journalAsOf],
+  );
 
   return (
     <section
@@ -143,6 +175,14 @@ export function ManagedAgentSessionPanel({
           eventCount={displayEvents.length}
           hasObserver={hasObserver}
           latestSessionId={latestSessionId}
+        />
+      ) : null}
+
+      {latestJournal.eventCount > 0 && relayUrl ? (
+        <MissionJournalSummary
+          journal={latestJournal}
+          relayUrl={relayUrl}
+          agentPubkey={agent.pubkey}
         />
       ) : null}
 
@@ -167,6 +207,273 @@ export function ManagedAgentSessionPanel({
         transcriptVariant={transcriptVariant}
       />
     </section>
+  );
+}
+
+function journalStatusLabel(status: MissionJournal["status"]): string {
+  switch (status) {
+    case "in_progress":
+      return "In progress";
+    case "ended_unverified":
+      return "Ended, proof needed";
+    case "incomplete":
+      return "Incomplete";
+    case "completed":
+      return "Execution ended";
+    case "failed":
+      return "Failed";
+    case "observed":
+      return "Observed";
+  }
+}
+
+function MissionJournalSummary({
+  journal,
+  relayUrl,
+  agentPubkey,
+}: {
+  journal: MissionJournal;
+  relayUrl: string;
+  agentPubkey: string;
+}) {
+  const [artifacts, setArtifacts] = React.useState<JournalAuthorityArtifact[]>(
+    [],
+  );
+  const [mode, setMode] = React.useState<"summary" | "verify" | null>(null);
+  const [summary, setSummary] = React.useState(journal.summary);
+  const [receiptRef, setReceiptRef] = React.useState("");
+  const [saving, setSaving] = React.useState(false);
+  const [authorityLoading, setAuthorityLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const reloadAuthority = React.useCallback(async () => {
+    const current = await getJournalAuthorityArtifacts(
+      relayUrl,
+      agentPubkey,
+      journal.id,
+    );
+    setArtifacts(current);
+  }, [agentPubkey, journal.id, relayUrl]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    setArtifacts([]);
+    setMode(null);
+    setSummary(journal.summary);
+    setReceiptRef("");
+    setAuthorityLoading(true);
+    setError(null);
+    getJournalAuthorityArtifacts(relayUrl, agentPubkey, journal.id)
+      .then((current) => {
+        if (!cancelled) setArtifacts(current);
+      })
+      .catch((loadError) => {
+        if (!cancelled) {
+          setError(
+            loadError instanceof Error
+              ? loadError.message
+              : "Owner journal proof could not be loaded.",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAuthorityLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agentPubkey, journal.id, journal.summary, relayUrl]);
+
+  const authorizedJournal = React.useMemo(
+    () =>
+      applyValidatedJournalAuthority(journal, artifacts, relayUrl, agentPubkey),
+    [agentPubkey, artifacts, journal, relayUrl],
+  );
+  React.useEffect(() => {
+    if (mode !== "summary") setSummary(authorizedJournal.summary);
+  }, [authorizedJournal.summary, mode]);
+  const verificationSources = React.useMemo(
+    () => journalVerificationSources(journal),
+    [journal],
+  );
+  const saveSummary = async () => {
+    if (!summary.trim() || saving) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await upsertOwnerJournalOverride(relayUrl, {
+        agentPubkey,
+        journalId: journal.id,
+        correlationId: journal.correlationId,
+        summary: summary.trim(),
+      });
+      await reloadAuthority();
+      setMode(null);
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : "The owner summary was not saved.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveVerification = async () => {
+    if (
+      !receiptRef.trim() ||
+      !verificationSources.hasReceiptedEvidence ||
+      !verificationSources.hasCorrelationEvidence ||
+      !verificationSources.hasSupportedSourceSet ||
+      saving
+    ) {
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await upsertJournalVerification(relayUrl, {
+        agentPubkey,
+        journalId: journal.id,
+        correlationId: journalAuthorityCorrelationId(journal),
+        receiptRef: receiptRef.trim(),
+        sourceEventIds: verificationSources.sourceEventIds,
+      });
+      await reloadAuthority();
+      setMode(null);
+      setReceiptRef("");
+    } catch (saveError) {
+      setError(
+        saveError instanceof Error
+          ? saveError.message
+          : "The verification was not saved.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 rounded-md border border-border/60 bg-muted/30 px-3 py-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Mission journal
+        </span>
+        <Badge variant="secondary">
+          {journalStatusLabel(authorizedJournal.status)}
+        </Badge>
+        <Badge variant="outline">{authorizedJournal.proofState}</Badge>
+        {authorizedJournal.claimedCompletionWithoutEvidence ? (
+          <Badge variant="destructive">Evidence gap</Badge>
+        ) : null}
+      </div>
+      <p className="mt-2 text-sm text-foreground">
+        {authorizedJournal.summary}
+      </p>
+      {authorizedJournal.summarySource === "owner" ? (
+        <p className="mt-1 text-xs text-muted-foreground">Owner edited</p>
+      ) : null}
+
+      {mode === "summary" ? (
+        <div className="mt-3 space-y-2">
+          <Textarea
+            aria-label="Owner journal summary"
+            value={summary}
+            onChange={(event) => setSummary(event.target.value)}
+          />
+          <div className="flex gap-2">
+            <Button
+              size="xs"
+              disabled={saving || !summary.trim()}
+              onClick={saveSummary}
+            >
+              Save owner summary
+            </Button>
+            <Button size="xs" variant="ghost" onClick={() => setMode(null)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {mode === "verify" ? (
+        <div className="mt-3 space-y-2">
+          <Input
+            aria-label="Verification receipt reference"
+            placeholder="Receipt or independent check reference"
+            value={receiptRef}
+            onChange={(event) => setReceiptRef(event.target.value)}
+          />
+          {!verificationSources.hasReceiptedEvidence ? (
+            <p className="text-xs text-destructive">
+              This journal has no receipted tool evidence to verify.
+            </p>
+          ) : null}
+          {verificationSources.hasReceiptedEvidence &&
+          !verificationSources.hasCorrelationEvidence ? (
+            <p className="text-xs text-destructive">
+              The journal correlation source is unavailable. Refresh archived
+              activity before verifying.
+            </p>
+          ) : null}
+          {!verificationSources.hasSupportedSourceSet ? (
+            <p className="text-xs text-destructive">
+              This journal has {verificationSources.overflowCount} more signed
+              evidence frame
+              {verificationSources.overflowCount === 1 ? "" : "s"} than the
+              verification limit. Split the work into a new mission before
+              recording owner verification.
+            </p>
+          ) : null}
+          <div className="flex gap-2">
+            <Button
+              size="xs"
+              disabled={
+                saving ||
+                !receiptRef.trim() ||
+                !verificationSources.hasReceiptedEvidence ||
+                !verificationSources.hasCorrelationEvidence ||
+                !verificationSources.hasSupportedSourceSet
+              }
+              onClick={saveVerification}
+            >
+              Record owner verification
+            </Button>
+            <Button size="xs" variant="ghost" onClick={() => setMode(null)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
+      {mode == null ? (
+        <div className="mt-2 flex flex-wrap gap-1">
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={authorityLoading}
+            onClick={() => {
+              setSummary(authorizedJournal.summary);
+              setMode("summary");
+            }}
+          >
+            <Pencil /> Edit summary
+          </Button>
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={
+              authorityLoading || authorizedJournal.proofState === "VERIFIED"
+            }
+            onClick={() => setMode("verify")}
+          >
+            <CheckCircle2 /> Verify receipt
+          </Button>
+        </div>
+      ) : null}
+      {error ? <p className="mt-2 text-xs text-destructive">{error}</p> : null}
+    </div>
   );
 }
 

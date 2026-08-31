@@ -154,6 +154,25 @@ impl ArchiveDb {
         .await
         .map_err(|e| format!("archive db task failed: {e}"))?
     }
+
+    /// Run one task while excluding every ordinary in-process archive
+    /// connection. The closure must still take the appropriate SQLite lock
+    /// when its invariant must also hold against a second OS process.
+    pub async fn with_exclusive_conn<T, F>(&self, task: F) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Connection) -> Result<T, String> + Send + 'static,
+    {
+        self.ensure_initialized().await?;
+        let path = self.db_path()?;
+        let _guard = self.maintenance.write().await;
+        tokio::task::spawn_blocking(move || {
+            let conn = store::open_archive_db(&path)?;
+            task(&conn)
+        })
+        .await
+        .map_err(|e| format!("exclusive archive db task failed: {e}"))?
+    }
 }
 
 #[cfg(test)]

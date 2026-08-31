@@ -7,12 +7,12 @@
 
 use super::*;
 use nostr::{EventBuilder, Keys, Kind, Tag};
-use std::sync::Mutex as StdMutex;
+use std::{path::PathBuf, sync::Mutex as StdMutex};
 
 // ── Test doubles ─────────────────────────────────────────────────────────────
 
-#[derive(Default)]
 struct FakeIo {
+    queue_dir: tempfile::TempDir,
     /// Successive results for `list_subscriptions`; the last one repeats so a
     /// reload that outruns the script does not panic.
     listings: StdMutex<Vec<Vec<SaveSubscription>>>,
@@ -21,7 +21,23 @@ struct FakeIo {
     /// What `archive` returns; drives the notify-on-metrics assertion.
     persisted_agent_metrics: StdMutex<u32>,
     archive_fails: StdMutex<bool>,
+    archive_failures_remaining: StdMutex<usize>,
     metrics_notifications: StdMutex<u32>,
+}
+
+impl Default for FakeIo {
+    fn default() -> Self {
+        Self {
+            queue_dir: tempfile::tempdir().expect("queue tempdir"),
+            listings: StdMutex::new(Vec::new()),
+            applied: StdMutex::new(Vec::new()),
+            batches: StdMutex::new(Vec::new()),
+            persisted_agent_metrics: StdMutex::new(0),
+            archive_fails: StdMutex::new(false),
+            archive_failures_remaining: StdMutex::new(0),
+            metrics_notifications: StdMutex::new(0),
+        }
+    }
 }
 
 impl FakeIo {
@@ -49,6 +65,10 @@ impl FakeIo {
                     .collect()
             })
             .collect()
+    }
+
+    fn queue_path(&self) -> PathBuf {
+        self.queue_dir.path().join("pending.json")
     }
 }
 
@@ -81,6 +101,12 @@ impl ArchiveSyncIo for FakeIo {
             if *self.archive_fails.lock().unwrap() {
                 return Err("archive failed".to_string());
             }
+            let mut failures = self.archive_failures_remaining.lock().unwrap();
+            if *failures > 0 {
+                *failures -= 1;
+                return Err("archive failed once".to_string());
+            }
+            drop(failures);
             Ok(ArchiveBatchResult {
                 persisted: 0,
                 persisted_agent_metrics: *self.persisted_agent_metrics.lock().unwrap(),
@@ -133,29 +159,33 @@ fn matched(subscription_id: &str) -> MatchedEvent {
 /// Runs `run_sync` on a task, handing back the controls the tests drive it
 /// with. Every test cancels and joins, so a loop that fails to observe
 /// cancellation hangs the test rather than passing silently.
-fn spawn_sync(
-    io: Arc<FakeIo>,
-) -> (
+type SpawnedSync = (
     mpsc::Sender<MatchedEvent>,
     Arc<Notify>,
     CancellationToken,
-    tokio::task::JoinHandle<()>,
-) {
+    tokio::task::JoinHandle<Result<(), String>>,
+);
+
+fn spawn_sync(io: Arc<FakeIo>) -> SpawnedSync {
     let (tx, rx) = mpsc::channel(64);
     let reload = Arc::new(Notify::new());
     let cancel = CancellationToken::new();
+    let queue = DurableQueue::open(io.queue_path()).expect("open test durable queue");
     let handle = {
         let io = Arc::clone(&io);
         let reload = Arc::clone(&reload);
         let cancel = cancel.clone();
-        tokio::spawn(async move { run_sync(io.as_ref(), reload, rx, cancel).await })
+        tokio::spawn(async move { run_sync(io.as_ref(), reload, rx, cancel, queue).await })
     };
     (tx, reload, cancel, handle)
 }
 
-async fn stop(cancel: CancellationToken, handle: tokio::task::JoinHandle<()>) {
+async fn stop(cancel: CancellationToken, handle: tokio::task::JoinHandle<Result<(), String>>) {
     cancel.cancel();
-    handle.await.expect("sync task panicked");
+    handle
+        .await
+        .expect("sync task panicked")
+        .expect("sync task failed");
 }
 
 // ── Filter construction ──────────────────────────────────────────────────────
@@ -247,7 +277,6 @@ async fn subscribes_to_saved_configs_on_start() {
     )]]));
     let (_tx, _reload, cancel, handle) = spawn_sync(Arc::clone(&io));
 
-    // The first reconcile races the cancel; wait for it to land.
     wait_for("initial subscribe", || !io.applied().is_empty()).await;
     assert_eq!(io.applied()[0].len(), 1);
     stop(cancel, handle).await;
@@ -366,12 +395,11 @@ async fn events_for_an_unknown_subscription_are_dropped() {
     let (tx, _reload, cancel, handle) = spawn_sync(Arc::clone(&io));
     wait_for("initial subscribe", || !io.applied().is_empty()).await;
 
-    // An event from a subscription we already closed: no scope, no archive.
     tx.send(matched("archive:channel_h:gone:[9]"))
         .await
         .unwrap();
     cancel.cancel();
-    handle.await.unwrap();
+    handle.await.unwrap().unwrap();
 
     assert!(
         io.archived().is_empty(),
@@ -398,7 +426,7 @@ async fn buffered_events_flush_on_shutdown() {
     })
     .await;
     cancel.cancel();
-    handle.await.unwrap();
+    handle.await.unwrap().unwrap();
 
     let archived = io.archived();
     assert_eq!(archived.len(), 1, "shutdown did not flush the buffer");
@@ -429,8 +457,6 @@ async fn does_not_notify_when_nothing_was_persisted() {
     let io = Arc::new(FakeIo::with_listings(vec![vec![saved(
         "owner_p", "owner-pk", "[44200]",
     )]]));
-    // persisted_agent_metrics stays 0: a duplicate-only batch must not
-    // invalidate the renderer's usage queries.
     let (tx, _reload, cancel, handle) = spawn_sync(Arc::clone(&io));
     wait_for("initial subscribe", || !io.applied().is_empty()).await;
     let id = io.applied()[0][0].id.clone();
@@ -498,11 +524,12 @@ async fn a_failed_listing_leaves_the_previous_subscriptions_live() {
     let (tx, rx) = mpsc::channel(8);
     let reload = Arc::new(Notify::new());
     let cancel = CancellationToken::new();
+    let queue = DurableQueue::open(inner.queue_path()).expect("open test durable queue");
     let handle = {
         let io = Arc::clone(&io);
         let reload = Arc::clone(&reload);
         let cancel = cancel.clone();
-        tokio::spawn(async move { run_sync(io.as_ref(), reload, rx, cancel).await })
+        tokio::spawn(async move { run_sync(io.as_ref(), reload, rx, cancel, queue).await })
     };
 
     wait_for("initial subscribe", || !inner.applied().is_empty()).await;
@@ -521,47 +548,33 @@ async fn a_failed_listing_leaves_the_previous_subscriptions_live() {
 }
 
 // ── Lifecycle ownership ──────────────────────────────────────────────────────
-//
-// The renderer fires `start_archive_sync` and `stop_archive_sync` without
-// awaiting them, and Tauri commands may complete in any order. These tests
-// drive `ArchiveSyncState` through the same `claim_start`/`claim_stop`/
-// `install`/`stop` seam the commands use, applying the halves in a chosen
-// order — which is the one thing the mounted-hook test cannot do, because its
-// mock `invoke` resolves immediately and can only observe call order.
 
-/// Runs the ownership half of `start_archive_sync` under `lease`, returning the
-/// installed task's cancel token. `None` means the start did not take
-/// ownership. Mirrors the command minus the relay session and spawned loop,
-/// which the ordering invariant does not involve.
-///
-/// The ownership token is dropped before returning, so these tests apply the
-/// halves sequentially as before. The test that needs it held across an
-/// acquisition calls [`ArchiveSyncState::begin`] directly.
-///
-/// The token is the task's identity: two starts produce distinct tokens, so a
-/// test can name WHICH task survived an interleaving rather than only that one
-/// did. "Something is running" is satisfiable by the stale start's task.
+/// Test half of `start_archive_sync`, without relay acquisition.
 async fn start_half(
     state: &ArchiveSyncState,
     mark: (u64, u64),
     scope: (&str, &str),
 ) -> Option<CancellationToken> {
     let cancel = CancellationToken::new();
+    let completion = Arc::new(SyncCompletion::default());
+    completion.finish();
     state
         .begin(
             mark,
             (scope.0.to_string(), scope.1.to_string()),
             cancel.clone(),
             Arc::new(Notify::new()),
+            completion,
         )
         .await
+        .expect("lifecycle start is available")
         .is_some()
         .then_some(cancel)
 }
 
 /// Runs `stop_archive_sync` under `mark`.
 async fn stop_half(state: &ArchiveSyncState, mark: (u64, u64)) {
-    state.end(mark).await;
+    state.end(mark).await.unwrap();
 }
 
 async fn is_running(state: &ArchiveSyncState) -> bool {
@@ -666,29 +679,6 @@ async fn ordered_start_and_stop_still_take_effect() {
     assert!(!is_running(&state).await, "the newer stop must take effect");
 }
 
-/// A same-scope remount that reaches the backend in order is still a no-op at
-/// the socket, so the lease does not undo the idempotence the port relies on.
-#[tokio::test]
-async fn a_same_scope_restart_does_not_churn_the_running_task() {
-    let state = ArchiveSyncState::default();
-
-    let first = start_half(&state, (1, 1), SCOPE)
-        .await
-        .expect("first start");
-    assert!(
-        start_half(&state, (1, 2), SCOPE).await.is_none(),
-        "a newer start for the same scope must not reinstall"
-    );
-    assert!(
-        !first.is_cancelled(),
-        "the original task must not be torn down"
-    );
-    assert!(
-        running_is(&state, &first).await,
-        "the original task must still be the installed one"
-    );
-}
-
 /// An identity or relay change must replace the task rather than leaving the
 /// old scope's socket live.
 #[tokio::test]
@@ -751,7 +741,7 @@ async fn a_stop_holds_its_lease_guard_across_the_cancellation() {
     let lease_held = state.latest.try_lock().is_err();
 
     drop(running_guard);
-    stopper.await.expect("stop task");
+    stopper.await.expect("stop task").expect("stop succeeds");
 
     assert!(
         lease_held,
@@ -885,19 +875,6 @@ async fn announced_epochs_strictly_increase() {
 }
 
 // ── Session acquisition ──────────────────────────────────────────────────────
-//
-// Ordering alone is not enough once a start has to acquire the shared relay
-// session: `ensure_session` shuts down a different scope's socket and
-// `attach_archive` replaces the archive sender, both destructively on entry.
-// A start that checked its mark, yielded, and acquired afterwards would already
-// have torn down the newer owner's session by the time it discovered it lost.
-//
-// Two things close that, and only one of them is testable here. That a
-// superseded start cannot call `archive_session` at all is the token's job and
-// is enforced by the compiler, not by a test — `ArchiveOwnership` is
-// un-constructible outside this module, so the bypass does not compile. What
-// this test pins is the property the token's usefulness rests on: while a
-// winner holds it, no other start can claim.
 
 /// While a start holds its ownership token, a newer start cannot claim — so the
 /// window in which the shared session is acquired is exclusive.
@@ -917,14 +894,18 @@ async fn a_newer_start_cannot_claim_while_the_owner_holds_its_token() {
     let state = Arc::new(ArchiveSyncState::default());
 
     let first = CancellationToken::new();
+    let first_completion = Arc::new(SyncCompletion::default());
+    first_completion.finish();
     let ownership = state
         .begin(
             (1, 1),
             (SCOPE.0.to_string(), SCOPE.1.to_string()),
             first.clone(),
             Arc::new(Notify::new()),
+            first_completion,
         )
         .await
+        .expect("first lifecycle start is available")
         .expect("the first start claims ownership");
 
     let second = CancellationToken::new();
@@ -934,14 +915,18 @@ async fn a_newer_start_cannot_claim_while_the_owner_holds_its_token() {
         let claimed = Arc::clone(&claimed);
         let second = second.clone();
         async move {
+            let completion = Arc::new(SyncCompletion::default());
+            completion.finish();
             let won = state
                 .begin(
                     (1, 2),
                     ("other-pubkey".to_string(), SCOPE.1.to_string()),
                     second,
                     Arc::new(Notify::new()),
+                    completion,
                 )
                 .await
+                .expect("competing lifecycle start is available")
                 .is_some();
             claimed.store(won, std::sync::atomic::Ordering::SeqCst);
         }

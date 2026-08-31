@@ -19,15 +19,19 @@
 
 mod agent_usage;
 mod archive_db;
+mod journal_authority;
+pub mod journal_authority_commands;
 mod metric_store;
+mod observer_revision;
+mod observer_time;
 mod pipeline;
 pub mod retention;
 pub mod store;
 mod store_migrations;
 pub mod sync;
+pub(crate) mod today_snapshot;
 
 pub use archive_db::ArchiveDb;
-
 use pipeline::{commit_archive, plan_archive, query_buckets};
 
 use nostr::Event;
@@ -591,6 +595,132 @@ pub async fn read_archived_observer_events_for_channel(
                 before_id.as_deref(),
                 limit.unwrap_or(DEFAULT_READ_LIMIT),
             )
+        })
+        .await
+}
+
+/// Read observer frames by inner time with stable signed-envelope pagination.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedObserverRangeInput {
+    start_created_at: i64,
+    end_created_at: i64,
+    agent_pubkey: Option<String>,
+    channel_id: Option<String>,
+    before_created_at: Option<i64>,
+    before_id: Option<String>,
+    archive_revision: Option<i64>,
+    limit: Option<i64>,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedObserverRangeOutput {
+    events: Vec<String>,
+    backfill_complete: bool,
+    unindexed_observer_frames: i64,
+    archive_revision: i64,
+    restart_required: bool,
+    total_observer_frames: i64,
+    has_more: bool,
+    next_before_created_at: Option<i64>,
+    next_before_id: Option<String>,
+}
+#[tauri::command]
+pub async fn read_archived_observer_events_for_range(
+    state: State<'_, AppState>,
+    input: ArchivedObserverRangeInput,
+) -> Result<ArchivedObserverRangeOutput, String> {
+    let ArchivedObserverRangeInput {
+        start_created_at,
+        end_created_at,
+        agent_pubkey,
+        channel_id,
+        before_created_at,
+        before_id,
+        archive_revision,
+        limit,
+    } = input;
+    if start_created_at >= end_created_at {
+        return Err("archive range must have start_created_at < end_created_at".into());
+    }
+    if before_created_at.is_some() != before_id.is_some() {
+        return Err("archive range cursor requires both before_created_at and before_id".into());
+    }
+    if archive_revision.is_some_and(|revision| revision < 0) {
+        return Err("archive revision must be non-negative".into());
+    }
+    let limit = limit.unwrap_or(DEFAULT_READ_LIMIT);
+    if !(1..=500).contains(&limit) {
+        return Err("archive range limit must be between 1 and 500".into());
+    }
+    let identity_pk = identity_pubkey(&state)?;
+    let relay_url = relay_ws_url_with_override(&state);
+    let owner_keys = state
+        .keys
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone();
+    state
+        .archive_db
+        .with_conn(move |conn| {
+            let backfill_complete =
+                observer_time::backfill_missing(conn, &identity_pk, &relay_url, &owner_keys)?;
+            if !backfill_complete {
+                let current_revision = observer_revision::current(conn, &identity_pk, &relay_url)?;
+                return Ok(ArchivedObserverRangeOutput {
+                    events: Vec::new(),
+                    backfill_complete: false,
+                    unindexed_observer_frames: 0,
+                    archive_revision: current_revision,
+                    restart_required: false,
+                    total_observer_frames: 0,
+                    has_more: false,
+                    next_before_created_at: None,
+                    next_before_id: None,
+                });
+            }
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|error| format!("begin observer range snapshot: {error}"))?;
+            let current_revision = observer_revision::current(&tx, &identity_pk, &relay_url)?;
+            let restart_required =
+                archive_revision.is_some_and(|expected| expected != current_revision);
+            let (page_before_created_at, page_before_id) = if restart_required {
+                (None, None)
+            } else {
+                (before_created_at, before_id.as_deref())
+            };
+            let unindexed_observer_frames =
+                store::count_unindexed_observer_frames(&tx, &identity_pk, &relay_url)?;
+            let page = observer_time::read_archived_observer_event_page_for_range(
+                &tx,
+                &identity_pk,
+                &relay_url,
+                start_created_at,
+                end_created_at,
+                agent_pubkey.as_deref(),
+                channel_id.as_deref(),
+                page_before_created_at,
+                page_before_id,
+                limit,
+            )?;
+            let has_more = page.total_count > page.rows.len() as i64;
+            let next_before_created_at = page.rows.last().map(|row| row.created_at);
+            let next_before_id = page.rows.last().map(|row| row.id.clone());
+            let events = page.rows.into_iter().map(|row| row.raw_json).collect();
+            tx.commit()
+                .map_err(|error| format!("finish observer range snapshot: {error}"))?;
+            Ok(ArchivedObserverRangeOutput {
+                events,
+                backfill_complete: true,
+                unindexed_observer_frames,
+                archive_revision: current_revision,
+                restart_required,
+                total_observer_frames: page.total_count,
+                has_more,
+                next_before_created_at,
+                next_before_id,
+            })
         })
         .await
 }

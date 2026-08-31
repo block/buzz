@@ -11,6 +11,10 @@ use crate::mcp::truncate_at_boundary;
 use crate::types::{ToolDef, ToolResult, ToolResultContent};
 
 pub const LOAD_SKILL_TOOL: &str = "load_skill";
+pub use crate::activity_ledger_today::{
+    activity_ledger_today_def, activity_ledger_today_enabled, call_activity_ledger_today,
+    ACTIVITY_LEDGER_TODAY_TOOL,
+};
 
 /// Return the `ToolDef` for `load_skill` to include in the LLM tool list.
 pub fn load_skill_def() -> ToolDef {
@@ -111,7 +115,6 @@ pub async fn call_load_skill(arguments: &Value, skills: &[SkillEntry]) -> ToolRe
         is_error: false,
     }
 }
-
 /// Load a supporting file identified by `skill_name/rel_path`.
 /// Matches against the pre-enumerated `supporting_files` list and applies a
 /// canonicalize-based traversal guard before reading.
@@ -272,7 +275,6 @@ mod tests {
             supporting_files,
         }
     }
-
     #[tokio::test]
     async fn call_load_skill_missing_name_arg() {
         let result = call_load_skill(&serde_json::json!({}), &[]).await;
