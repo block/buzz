@@ -29,3 +29,21 @@ NIP-OA establishes ownership, not physical hosting, availability, or lifecycle
 control. Final native queries do not provide an atomic relay transaction with
 message publication. Independent review of both native and publication boundaries
 is required before landing.
+
+## Invitation intent and cancellation
+
+Each chat Invite owns one synchronous pending latch and abort signal, covering
+preparation, inventory, adds and the eventual publication continuation. Escape,
+navigation/unmount, reference-only selection or a replacement prompt invalidates
+that attempt. Clearing the prompt when promoting it to send is not cancellation;
+the signal remains live through final validation and queued media completion.
+Check cancellation after asynchronous preparation and before subsequent mutations
+(including nested local readiness), and again before publication. A completed add
+cannot be undone, but its late response cannot revive cancelled message intent.
+The pending state includes preparation, disabling both Invite and reference-only
+buttons. Cancellation after optimistic clearing restores the captured draft and
+exact mention refs without overwriting newer edits.
+
+`useMentionSendFlow.cancellation.test.mjs` drives the actual hooks with React
+StrictMode and deferred dependencies; `remote-owned-mentions.spec.ts` covers
+visible pending, Escape/retry and route navigation at deferred IPC boundaries.

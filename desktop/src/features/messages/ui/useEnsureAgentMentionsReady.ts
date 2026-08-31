@@ -37,6 +37,7 @@ export type EnsureAgentMentionsReady = (
   capturedChannelId: string,
   preparedParticipantPubkeys?: string[],
   preparedManagedAgents?: ManagedAgent[],
+  isCancelled?: () => boolean,
 ) => Promise<EnsureAgentMentionsReadyResult>;
 
 type AttachAgentToChannel = (input: {
@@ -75,6 +76,7 @@ export function useEnsureAgentMentionsReady({
       capturedChannelId: string,
       preparedParticipantPubkeys: string[] = [],
       preparedManagedAgents: ManagedAgent[] = [],
+      isCancelled: () => boolean = () => false,
     ) => {
       if (!capturedChannelId || mentionPubkeys.length === 0) {
         return {
@@ -101,6 +103,7 @@ export function useEnsureAgentMentionsReady({
       let wroteRelayState = false;
       const agentsToWake: QueuedAgentWake[] = [];
       for (const pubkey of uniqueNormalizedPubkeys(mentionPubkeys)) {
+        if (isCancelled()) break;
         const agent = managedAgentsByPubkey.get(pubkey);
         if (!agent) continue;
         try {
@@ -116,6 +119,7 @@ export function useEnsureAgentMentionsReady({
             // policy reports `wrote: false`.
             wroteRelayState = true;
           }
+          if (isCancelled()) break;
           if (participants.has(pubkey)) {
             if (
               (isProviderBackedAgent(readyAgent) &&

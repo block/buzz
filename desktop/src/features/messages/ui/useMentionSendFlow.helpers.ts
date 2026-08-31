@@ -58,6 +58,7 @@ export function dedupeQueuedAgentWakes(
 }
 
 export type PendingNonMemberMentionSend = {
+  invitationSignal?: AbortSignal;
   addressedAgentPubkeys: string[];
   inlineAgentMentionPubkeys: string[];
   capturedChannelId: string | null;

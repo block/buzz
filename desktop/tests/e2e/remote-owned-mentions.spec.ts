@@ -252,3 +252,116 @@ test("membership revoked at final publish keeps draft and emits no message", asy
   );
   expect(await sent(page)).toEqual([]);
 });
+
+// Deferred IPC seam: hold the exact next preparation/add response, not a timer.
+// This lets the browser exercise Escape/navigation before the continuation runs.
+type InviteGateWindow = Window & {
+  __TAURI_INTERNALS__: {
+    invoke: (command: string, payload?: unknown) => Promise<unknown>;
+  };
+  inviteGateEntered?: boolean;
+  releaseInviteGate?: () => void;
+};
+async function holdInviteCommand(page: Page, command: string) {
+  await page.evaluate((heldCommand) => {
+    const state = window as unknown as InviteGateWindow;
+    const invoke = state.__TAURI_INTERNALS__.invoke;
+    const gate = new Promise<void>((resolve) => {
+      state.releaseInviteGate = resolve;
+    });
+    state.__TAURI_INTERNALS__.invoke = async (command, payload) => {
+      if (command !== heldCommand) return invoke(command, payload);
+      state.__TAURI_INTERNALS__.invoke = invoke;
+      state.inviteGateEntered = true;
+      await gate;
+      return invoke(command, payload);
+    };
+  }, command);
+}
+async function releaseInviteCommand(page: Page) {
+  await page.evaluate(() => {
+    (window as unknown as InviteGateWindow).releaseInviteGate?.();
+  });
+}
+async function waitForInviteGate(page: Page) {
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => (window as unknown as InviteGateWindow).inviteGateEntered,
+      ),
+    )
+    .toBe(true);
+}
+async function remoteAdds(page: Page) {
+  return page.evaluate(() =>
+    (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+      (call) => call.command === "add_channel_members",
+    ),
+  );
+}
+test("B1 delayed preparation shows pending; Escape retains draft and cancels add/send", async ({
+  page,
+}) => {
+  await install(page);
+  await select(page);
+  await page.getByTestId("send-message").click();
+  await holdInviteCommand(page, "revalidate_relay_agents");
+  await page.getByRole("button", { name: "Invite", exact: true }).click();
+  await waitForInviteGate(page);
+  await expect(
+    page.getByRole("button", { name: "Inviting...", exact: true }),
+  ).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Do nothing", exact: true }),
+  ).toBeDisabled();
+  await waitForAnimations(page);
+  await page
+    .getByRole("alertdialog")
+    .screenshot({ path: "test-results/b1-invite-pending.png" });
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  await releaseInviteCommand(page);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window.__BUZZ_E2E_COMMANDS__ ?? []).filter(
+            (command) => command === "revalidate_relay_agents",
+          ).length,
+      ),
+    )
+    .toBeGreaterThan(0);
+  await page.waitForTimeout(300);
+  expect(await remoteAdds(page)).toEqual([]);
+  expect(await sent(page)).toEqual([]);
+  await expect(page.getByTestId("message-input")).toHaveText(
+    "@RemoteScout hello",
+  );
+  // A retry is a new intent and still succeeds exactly once.
+  await page.getByTestId("send-message").click();
+  await page.getByRole("button", { name: "Invite", exact: true }).click();
+  await expect.poll(() => sent(page)).toEqual([[REMOTE]]);
+});
+test("B1 navigation during delayed add cannot publish its captured draft", async ({
+  page,
+}) => {
+  await install(page);
+  await select(page);
+  await page.getByTestId("send-message").click();
+  await holdInviteCommand(page, "add_channel_members");
+  await page.getByRole("button", { name: "Invite", exact: true }).click();
+  await waitForInviteGate(page);
+  // Hash routing unmounts the composer without reloading the IPC context.
+  await page.evaluate(() => {
+    window.location.hash = "/channels/9dae0116-799b-5071-a0a8-fdd30a91a35d";
+  });
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await releaseInviteCommand(page);
+  await expect.poll(async () => (await remoteAdds(page)).length).toBe(1);
+  await page.waitForTimeout(300);
+  expect(await sent(page)).toEqual([]);
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("message-input")).toHaveText(
+    "@RemoteScout hello",
+  );
+});
