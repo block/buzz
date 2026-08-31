@@ -606,6 +606,51 @@ pub struct SendMessageParams {
     pub broadcast: bool,
     pub files: Vec<String>,
     pub mentions: Vec<String>,
+    pub link_preview_json: Option<String>,
+    pub no_link_preview: bool,
+}
+
+const MAX_LINK_PREVIEW_JSON_BYTES: u64 = 64 * 1024;
+
+fn read_link_preview_json(path: &str) -> Result<Vec<Vec<String>>, CliError> {
+    if path == "-" {
+        return Err(CliError::Usage(
+            "--link-preview-json does not accept stdin; provide a file path".into(),
+        ));
+    }
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        CliError::Usage(format!(
+            "failed to inspect --link-preview-json {path}: {error}"
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(CliError::Usage(format!(
+            "--link-preview-json must name a regular file: {path}"
+        )));
+    }
+    if metadata.len() > MAX_LINK_PREVIEW_JSON_BYTES {
+        return Err(CliError::Usage(format!(
+            "--link-preview-json exceeds {MAX_LINK_PREVIEW_JSON_BYTES} bytes"
+        )));
+    }
+    let bytes = std::fs::read(path).map_err(|error| {
+        CliError::Usage(format!(
+            "failed to read --link-preview-json {path}: {error}"
+        ))
+    })?;
+    if bytes.len() as u64 > MAX_LINK_PREVIEW_JSON_BYTES {
+        return Err(CliError::Usage(format!(
+            "--link-preview-json exceeds {MAX_LINK_PREVIEW_JSON_BYTES} bytes"
+        )));
+    }
+    let tags: Vec<Vec<String>> = serde_json::from_slice(&bytes)
+        .map_err(|error| CliError::Usage(format!("invalid --link-preview-json: {error}")))?;
+    if tags.is_empty() {
+        return Err(CliError::Usage(
+            "--link-preview-json must contain at least one snapshot".into(),
+        ));
+    }
+    Ok(tags)
 }
 
 pub async fn cmd_send_message(
@@ -618,6 +663,14 @@ pub async fn cmd_send_message(
     // bugs for agent and human users alike.
     p.content = read_or_stdin(&p.content)?;
     validate_content_size(&p.content)?;
+    // Decode the bounded local file before any network call or media upload.
+    let raw_link_preview_tags = if let Some(path) = p.link_preview_json.as_deref() {
+        read_link_preview_json(path)?
+    } else if p.no_link_preview {
+        vec![vec!["link-preview".into(), "none".into()]]
+    } else {
+        Vec::new()
+    };
     if let Some(ref r) = p.reply_to {
         validate_hex64(r)?;
     }
@@ -669,6 +722,12 @@ pub async fn cmd_send_message(
     } else {
         format!("{}{media_content}", p.content)
     };
+    let link_preview_tags = buzz_sdk::link_preview::parse_link_preview_tags(
+        &raw_link_preview_tags,
+        &final_content,
+        client.relay_url(),
+    )
+    .map_err(|error| CliError::Usage(format!("invalid link preview: {error}")))?;
 
     // Build thread ref if replying. `--reply-to` is the immediate parent; the
     // thread root is derived from the parent's NIP-10 tags via the relay.
@@ -713,6 +772,8 @@ pub async fn cmd_send_message(
             )))
         }
     };
+    // EventBuilder::tags extends the builders' h/e/p/imeta tags.
+    let builder = builder.tags(link_preview_tags);
 
     let event = client.sign_event(builder)?;
     let emitted_mentions = event_mention_pubkeys(&event);
@@ -917,6 +978,8 @@ pub async fn dispatch(
             broadcast,
             files,
             mentions,
+            link_preview_json,
+            no_link_preview,
         } => {
             cmd_send_message(
                 client,
@@ -928,6 +991,8 @@ pub async fn dispatch(
                     broadcast,
                     files,
                     mentions,
+                    link_preview_json,
+                    no_link_preview,
                 },
             )
             .await

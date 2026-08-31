@@ -14,6 +14,7 @@
 
 pub mod broker;
 pub mod builders;
+pub mod link_preview;
 pub mod mentions;
 pub mod nip_oa;
 

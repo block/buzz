@@ -398,6 +398,12 @@ pub enum MessagesCmd {
         /// Pubkey to mention (hex or npub; repeatable). Supplying any explicit identity permits unresolved or ambiguous @Name text as presentation-only; uniquely resolved member names still notify.
         #[arg(long = "mention")]
         mentions: Vec<String>,
+        /// Read exact link-preview snapshot tag arrays from a JSON file
+        #[arg(long, value_name = "PATH", conflicts_with = "no_link_preview")]
+        link_preview_json: Option<String>,
+        /// Suppress automatic link previews for this message
+        #[arg(long, conflicts_with = "link_preview_json")]
+        no_link_preview: bool,
     },
     /// Send a code diff / patch to a channel
     SendDiff {
@@ -2800,5 +2806,41 @@ mod tests {
             .is_err(),
             "--visibility chartreuse on update must be rejected at parse time"
         );
+    }
+
+    #[test]
+    fn messages_send_accepts_typed_link_preview_options() {
+        let base = [
+            "buzz",
+            "messages",
+            "send",
+            "--channel",
+            "11111111-1111-4111-8111-111111111111",
+            "--content",
+            "https://example.com",
+        ];
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--no-link-preview"])).is_ok());
+        assert!(Cli::try_parse_from(
+            base.into_iter()
+                .chain(["--link-preview-json", "snapshots.json"])
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn messages_send_rejects_conflicting_link_preview_options() {
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "messages",
+            "send",
+            "--channel",
+            "11111111-1111-4111-8111-111111111111",
+            "--content",
+            "https://example.com",
+            "--no-link-preview",
+            "--link-preview-json",
+            "snapshots.json",
+        ])
+        .is_err());
     }
 }

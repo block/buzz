@@ -307,7 +307,7 @@ pub fn build_message_with_client_tags(
     imeta_tags(media_tags, &mut tags)?;
     emoji_tags(custom_emoji_tags, &mut tags)?;
     mention_reference_tags(mention_ref_tags, &mut tags)?;
-    crate::link_preview_tags::append(link_preview_tags, relay_base, &mut tags)?;
+    crate::link_preview_tags::append(link_preview_tags, content, relay_base, &mut tags)?;
     append_sent_from_thread_tag(sent_from_thread_tag, &mut tags)?;
     append_client_tags(client_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(9), content).tags(tags))
