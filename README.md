@@ -134,9 +134,11 @@ By default the app connects to `ws://localhost:3000`. To point it at a relay you
 
 ### I want my own hosted relay
 
-To run a relay for your team without managing servers, you can deploy one to Railway in a click:
+To run a relay for your team without managing servers, you can deploy one to Railway or RepoCloud in a click:
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/buzz-relay-block)
+
+[![Deploy on RepoCloud](https://d16t0pc4846x52.cloudfront.net/deploylobe.svg)](https://repocloud.io/details/Buzz/)
 
 See [here](https://engineering.block.xyz/blog/run-your-own-buzz-relay) for details.
 
