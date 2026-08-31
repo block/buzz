@@ -96,6 +96,8 @@ test("canonicalRelayUrl mirrors the backend pair-key normalization", () => {
   assert.equal(canonicalRelayUrl("ws://[::1]:3000"), "ws://127.0.0.1:3000");
   assert.equal(canonicalRelayUrl("https://relay.example"), null);
   assert.equal(canonicalRelayUrl("not a url"), null);
+  assert.equal(canonicalRelayUrl("wss://user@relay.example"), null);
+  assert.equal(canonicalRelayUrl("wss://relay.example/#fragment"), null);
 });
 
 test("matches a stored community URL against canonical backend rows", () => {

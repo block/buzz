@@ -1,7 +1,8 @@
 use super::{
-    built_in_persona_records, ensure_persona_ids_are_active, ensure_persona_is_active,
-    merge_personas, migrate_retired_personas, validate_persona_activation_change,
-    validate_persona_deletion, BUILT_IN_PERSONAS, RETIRED_PERSONAS,
+    bestie_build_enabled, built_in_persona_records, built_in_persona_records_for_build,
+    definitions_for_save, ensure_persona_ids_are_active, ensure_persona_is_active, merge_personas,
+    merge_personas_for_build, migrate_retired_personas, validate_persona_activation_change,
+    validate_persona_deletion, visible_personas_for_build, BUILT_IN_PERSONAS, RETIRED_PERSONAS,
 };
 use crate::managed_agents::discovery::{default_agent_command, effective_agent_command};
 use crate::managed_agents::AgentDefinition;
@@ -34,10 +35,10 @@ fn custom_persona(id: &str, display_name: &str) -> AgentDefinition {
 
 #[test]
 fn merge_personas_adds_missing_built_ins() {
-    let (records, changed) = merge_personas(Vec::new(), "2026-03-19T00:00:00Z");
+    let (records, changed) = merge_personas_for_build(Vec::new(), "2026-03-19T00:00:00Z", false);
 
     assert!(changed);
-    assert_eq!(records.len(), BUILT_IN_PERSONAS.len());
+    assert_eq!(records.len(), BUILT_IN_PERSONAS.len() - 1);
     assert!(records.iter().all(|record| record.is_builtin));
     assert!(records
         .iter()
@@ -56,6 +57,147 @@ fn merge_personas_adds_missing_built_ins() {
         active_ids,
         vec!["builtin:fizz", "builtin:honey", "builtin:bumble"]
     );
+}
+
+#[test]
+fn bestie_persona_requires_the_internal_build_capability() {
+    let without_bestie = built_in_persona_records_for_build("2026-03-19T00:00:00Z", false);
+    let with_bestie = built_in_persona_records_for_build("2026-03-19T00:00:00Z", true);
+
+    assert!(!without_bestie
+        .iter()
+        .any(|record| record.id == "builtin:bestie"));
+    let bestie = with_bestie
+        .iter()
+        .find(|record| record.id == "builtin:bestie")
+        .expect("eligible builds should include Bestie");
+    assert_eq!(bestie.display_name, "Bestie");
+    assert!(bestie.is_builtin);
+    assert!(bestie.is_active);
+}
+
+#[test]
+#[ignore = "run explicitly in both compiled feature states"]
+fn compiled_bestie_flag_matches_expected() {
+    let expected = std::env::var("BUZZ_TEST_EXPECTED_BESTIE")
+        .expect("BUZZ_TEST_EXPECTED_BESTIE must be set")
+        .parse::<bool>()
+        .expect("BUZZ_TEST_EXPECTED_BESTIE must be true or false");
+    assert_eq!(bestie_build_enabled(), expected);
+}
+
+#[test]
+fn ineligible_build_hides_bestie_without_demoting_it() {
+    let now = "2026-03-19T00:00:00Z";
+    let (eligible, _) = merge_personas_for_build(Vec::new(), now, true);
+    let original = eligible
+        .iter()
+        .find(|record| record.id == "builtin:bestie")
+        .expect("eligible build should seed Bestie")
+        .clone();
+
+    let (ineligible, changed) = merge_personas_for_build(eligible, now, false);
+    let persisted = ineligible
+        .iter()
+        .find(|record| record.id == "builtin:bestie")
+        .expect("ineligible builds must preserve the durable Bestie definition");
+
+    assert!(
+        !changed,
+        "changing build eligibility must not rewrite the store"
+    );
+    assert!(persisted.is_builtin);
+    assert_eq!(
+        serde_json::to_value(persisted).unwrap(),
+        serde_json::to_value(original).unwrap()
+    );
+    assert!(!visible_personas_for_build(ineligible, false)
+        .iter()
+        .any(|record| record.id == "builtin:bestie"));
+}
+
+#[test]
+fn unified_store_preserves_bestie_and_instance_across_build_transitions() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("managed-agents.json");
+    let now = "2026-03-19T00:00:00Z";
+    let (eligible, _) = merge_personas_for_build(Vec::new(), now, true);
+    let original_bestie = eligible
+        .iter()
+        .find(|record| record.id == "builtin:bestie")
+        .expect("eligible build should seed Bestie")
+        .clone();
+    let mut instance = original_bestie.clone().into_agent_record();
+    instance.pubkey = "a".repeat(64);
+    instance.name = "My Bestie".to_string();
+    instance.persona_id = Some("builtin:bestie".to_string());
+    instance.slug = None;
+    instance.display_name = None;
+    instance.relay_url = "wss://buzz.example".to_string();
+
+    crate::managed_agents::storage::write_agent_store_to_path(
+        &path,
+        eligible
+            .iter()
+            .cloned()
+            .map(AgentDefinition::into_agent_record)
+            .collect(),
+        vec![instance.clone()],
+    )
+    .expect("write eligible unified store");
+
+    let raw = crate::managed_agents::storage::load_agent_store_from_path(&path)
+        .expect("load ineligible unified store");
+    let existing: Vec<_> = raw
+        .iter()
+        .filter(|record| record.pubkey.is_empty())
+        .filter_map(|record| record.to_definition_view())
+        .collect();
+    let (all_ineligible, changed) = merge_personas_for_build(existing.clone(), now, false);
+    assert!(
+        !changed,
+        "ineligible load must not mutate durable ownership"
+    );
+    let visible = visible_personas_for_build(all_ineligible, false);
+    assert!(!visible.iter().any(|record| record.id == "builtin:bestie"));
+
+    let definitions = definitions_for_save(&visible, &existing, false)
+        .into_iter()
+        .map(AgentDefinition::into_agent_record)
+        .collect::<Vec<_>>();
+    crate::managed_agents::storage::save_agent_definitions_to_path(&path, &definitions)
+        .expect("save from ineligible build");
+
+    let after_save = crate::managed_agents::storage::load_agent_store_from_path(&path)
+        .expect("reload unified store");
+    let saved_bestie = after_save
+        .iter()
+        .find(|record| record.slug.as_deref() == Some("builtin:bestie"))
+        .and_then(|record| record.to_definition_view())
+        .expect("hidden Bestie definition should survive the save");
+    assert!(saved_bestie.is_builtin);
+    assert_eq!(
+        serde_json::to_value(saved_bestie).unwrap(),
+        serde_json::to_value(original_bestie).unwrap()
+    );
+    assert_eq!(
+        after_save
+            .iter()
+            .find(|record| record.pubkey == instance.pubkey)
+            .and_then(|record| record.persona_id.as_deref()),
+        Some("builtin:bestie"),
+        "definition saves must preserve keyed instance references"
+    );
+
+    let reloaded_definitions = after_save
+        .iter()
+        .filter(|record| record.pubkey.is_empty())
+        .filter_map(|record| record.to_definition_view())
+        .collect();
+    let (eligible_again, _) = merge_personas_for_build(reloaded_definitions, now, true);
+    assert!(visible_personas_for_build(eligible_again, true)
+        .iter()
+        .any(|record| record.id == "builtin:bestie" && record.is_builtin));
 }
 
 #[test]

@@ -12,7 +12,8 @@ use std::path::Path;
 use tempfile::NamedTempFile;
 
 use super::{
-    agent_keyring_name, hydrate_keys_with, migrate_inline_key, persist_agent_keys_with,
+    agent_keyring_name, filter_agent_definitions_for_build, filter_managed_agents_for_build,
+    hydrate_keys_with, instances_for_save, migrate_inline_key, persist_agent_keys_with,
     KeyMigration, KeyStore, KeyringProbe, ManagedAgentRecord,
 };
 
@@ -141,6 +142,59 @@ fn record_with_pubkey_and_key(pubkey: &str, nsec: &str) -> ManagedAgentRecord {
         }}"#
     ))
     .expect("sample record")
+}
+
+fn linked_record(pubkey: &str, persona_id: &str) -> ManagedAgentRecord {
+    let mut record = record_with_pubkey_and_key(pubkey, "");
+    record.persona_id = Some(persona_id.to_string());
+    record
+}
+
+fn definition_record(slug: &str) -> ManagedAgentRecord {
+    let mut record = record_with_pubkey_and_key("", "");
+    record.slug = Some(slug.to_string());
+    record
+}
+
+#[test]
+fn capability_off_filters_bestie_instances_and_definitions() {
+    let bestie = linked_record("bestie-pubkey", "builtin:bestie");
+    let fizz = linked_record("fizz-pubkey", "builtin:fizz");
+    let custom = linked_record("custom-pubkey", "custom:helper");
+    let mut instances = vec![bestie.clone(), fizz.clone(), custom.clone()];
+
+    filter_managed_agents_for_build(&mut instances, false);
+
+    assert_eq!(instances, vec![fizz, custom]);
+
+    let bestie_definition = definition_record("builtin:bestie");
+    let fizz_definition = definition_record("builtin:fizz");
+    let mut definitions = vec![bestie_definition, fizz_definition.clone()];
+    filter_agent_definitions_for_build(&mut definitions, false);
+    assert_eq!(definitions, vec![fizz_definition]);
+
+    let mut eligible_instances = vec![bestie];
+    filter_managed_agents_for_build(&mut eligible_instances, true);
+    assert_eq!(eligible_instances.len(), 1);
+}
+
+#[test]
+fn capability_off_save_preserves_hidden_bestie_instance_unchanged() {
+    let original_bestie = linked_record("bestie-pubkey", "builtin:bestie");
+    let fizz = linked_record("fizz-pubkey", "builtin:fizz");
+    let mut forged_bestie = original_bestie.clone();
+    forged_bestie.name = "forged edit".to_string();
+
+    let saved = instances_for_save(
+        &[fizz.clone(), forged_bestie],
+        &[fizz.clone(), original_bestie.clone()],
+        false,
+    );
+
+    assert_eq!(saved.len(), 2);
+    assert!(saved.contains(&fizz));
+    assert!(saved.contains(&original_bestie));
+    assert!(!saved.iter().any(|record| record.name == "forged edit"));
 }
 
 #[test]

@@ -420,7 +420,7 @@ pub(crate) fn valid_agent_runtime_receipt_with(
         && has_marker(receipt.pid, &receipt.desktop_instance_id)
 }
 
-pub(super) fn terminate_runtime_receipt_with(
+pub(crate) fn terminate_runtime_receipt_with(
     path: &std::path::Path,
     receipt: &super::super::ManagedAgentRuntimeReceipt,
     terminate: impl FnOnce(u32) -> Result<(), String>,

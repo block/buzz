@@ -78,6 +78,10 @@ export function canonicalRelayUrl(raw: string): string | null {
     return null;
   }
   if (url.protocol !== "ws:" && url.protocol !== "wss:") return null;
+  if (url.username !== "" || url.password !== "" || url.hash !== "") {
+    return null;
+  }
+  if (url.hostname === "") return null;
   let host = url.hostname.toLowerCase();
   if (host === "localhost" || host === "[::1]" || host.startsWith("127.")) {
     host = "127.0.0.1";

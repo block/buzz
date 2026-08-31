@@ -9,6 +9,7 @@ use crate::managed_agents::{
         AgentSnapshot, AgentSnapshotDefinition, AgentSnapshotMemory, AgentSnapshotMemoryEntry,
         AgentSnapshotProfile, FORMAT_DISCRIMINATOR, FORMAT_VERSION,
     },
+    storage::{filter_agent_definitions_for_build, filter_managed_agents_for_build},
     BackendKind, ManagedAgentRecord, RespondTo,
 };
 use std::collections::BTreeMap;
@@ -178,6 +179,25 @@ fn resolve_unknown_id_returns_error() {
     let result = resolve_from_lists("ghost", &[], &[]);
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("ghost"));
+}
+
+#[test]
+fn capability_off_shared_snapshot_and_card_lookup_rejects_known_bestie_ids() {
+    let mut instances = vec![
+        make_instance("bestie-pubkey", "builtin:bestie"),
+        make_instance("fizz-pubkey", "builtin:fizz"),
+    ];
+    let mut definitions = vec![
+        make_definition("builtin:bestie"),
+        make_definition("builtin:fizz"),
+    ];
+    filter_managed_agents_for_build(&mut instances, false);
+    filter_agent_definitions_for_build(&mut definitions, false);
+
+    assert!(resolve_from_lists("bestie-pubkey", &instances, &definitions).is_err());
+    assert!(resolve_from_lists("builtin:bestie", &instances, &definitions).is_err());
+    assert!(resolve_from_lists("fizz-pubkey", &instances, &definitions).is_ok());
+    assert!(resolve_from_lists("builtin:fizz", &instances, &definitions).is_ok());
 }
 
 // ── Validator fail-closed cases ───────────────────────────────────────────

@@ -13,6 +13,18 @@ use crate::managed_agents::{
 };
 use crate::secret_store::{KeyringProbe, SecretStore};
 
+mod build_filter;
+
+use build_filter::instances_for_save;
+pub use build_filter::load_managed_agents;
+#[cfg(test)]
+pub(crate) use build_filter::{
+    filter_agent_definitions_for_build, filter_managed_agents_for_build,
+};
+pub(crate) use build_filter::{
+    load_agent_definitions, load_agent_definitions_unfiltered, load_agent_store_from_path,
+};
+
 /// Keyring key name for an agent's nsec, namespaced from the human identity
 /// key (`"identity"`) which shares the service.
 fn agent_keyring_name(pubkey: &str) -> String {
@@ -242,45 +254,7 @@ fn load_agent_store<R: tauri::Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Vec<ManagedAgentRecord>, String> {
     let path = managed_agents_store_path(app)?;
-    if !path.exists() {
-        return Ok(Vec::new());
-    }
-
-    let content = fs::read_to_string(&path)
-        .map_err(|error| format!("failed to read agent store: {error}"))?;
-    serde_json::from_str(&content).map_err(|error| {
-        // Fail loudly and preserve the evidence: a later in-app save rewrites
-        // this file wholesale, which would silently destroy a malformed hand
-        // edit. Best-effort file-authoring contract (see managed_agents::
-        // reconcile): the broken content survives as `.invalid` for the user
-        // to recover, and the parse error propagates instead of being
-        // swallowed into an empty store.
-        backup_invalid_store(&path);
-        format!("failed to parse agent store (preserved as .invalid): {error}")
-    })
-}
-
-/// Load the keyed agent *instances*. Key-less definitions (former personas,
-/// folded into the same store) are filtered out so every pre-fold call site
-/// keeps seeing exactly the records it always did.
-pub fn load_managed_agents<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-) -> Result<Vec<ManagedAgentRecord>, String> {
-    let mut records = load_agent_store(app)?;
-    records.retain(|record| !record.pubkey.is_empty());
-    hydrate_keys(&mut records);
-    Ok(records)
-}
-
-/// Load the key-less agent *definitions* (former personas) from the unified
-/// store. The persona compatibility shim (`load_personas`) presents these in
-/// the legacy shape via `to_definition_view`.
-pub(crate) fn load_agent_definitions<R: tauri::Runtime>(
-    app: &AppHandle<R>,
-) -> Result<Vec<ManagedAgentRecord>, String> {
-    let mut records = load_agent_store(app)?;
-    records.retain(|record| record.pubkey.is_empty());
-    Ok(records)
+    load_agent_store_from_path(&path)
 }
 
 /// Preserve a malformed store file as `<name>.invalid` before the error path
@@ -372,8 +346,14 @@ pub fn save_managed_agents<R: tauri::Runtime>(
     app: &AppHandle<R>,
     records: &[ManagedAgentRecord],
 ) -> Result<(), String> {
-    let definitions = load_agent_definitions(app).unwrap_or_default();
-    let mut sorted = records.to_vec();
+    let existing = load_agent_store(app).unwrap_or_default();
+    let definitions = existing
+        .iter()
+        .filter(|record| record.pubkey.is_empty())
+        .cloned()
+        .collect();
+    let include_bestie = crate::managed_agents::personas::bestie_build_enabled();
+    let mut sorted = instances_for_save(records, &existing, include_bestie);
     // A caller-supplied key-less record would collide with the definition
     // half re-read below; instances always carry a pubkey.
     sorted.retain(|record| !record.pubkey.is_empty());
@@ -398,11 +378,19 @@ pub(crate) fn save_agent_definitions<R: tauri::Runtime>(
     app: &AppHandle<R>,
     definitions: &[ManagedAgentRecord],
 ) -> Result<(), String> {
-    let mut instances = load_agent_store(app)?;
+    let path = managed_agents_store_path(app)?;
+    save_agent_definitions_to_path(&path, definitions)
+}
+
+pub(crate) fn save_agent_definitions_to_path(
+    path: &Path,
+    definitions: &[ManagedAgentRecord],
+) -> Result<(), String> {
+    let mut instances = load_agent_store_from_path(path)?;
     instances.retain(|record| !record.pubkey.is_empty());
     let mut definitions = definitions.to_vec();
     definitions.retain(|record| record.pubkey.is_empty());
-    write_agent_store(app, definitions, instances)
+    write_agent_store_to_path(path, definitions, instances)
 }
 
 /// Serialize definitions + instances into the single unified store file.
@@ -410,6 +398,15 @@ pub(crate) fn save_agent_definitions<R: tauri::Runtime>(
 /// name/pubkey order their save path established.
 fn write_agent_store<R: tauri::Runtime>(
     app: &AppHandle<R>,
+    definitions: Vec<ManagedAgentRecord>,
+    instances: Vec<ManagedAgentRecord>,
+) -> Result<(), String> {
+    let path = managed_agents_store_path(app)?;
+    write_agent_store_to_path(&path, definitions, instances)
+}
+
+pub(crate) fn write_agent_store_to_path(
+    path: &Path,
     mut definitions: Vec<ManagedAgentRecord>,
     instances: Vec<ManagedAgentRecord>,
 ) -> Result<(), String> {
@@ -417,7 +414,6 @@ fn write_agent_store<R: tauri::Runtime>(
     let mut all = definitions;
     all.extend(instances);
 
-    let path = managed_agents_store_path(app)?;
     let payload = serde_json::to_vec_pretty(&all)
         .map_err(|error| format!("failed to serialize agent store: {error}"))?;
 
@@ -425,7 +421,7 @@ fn write_agent_store<R: tauri::Runtime>(
     // fallback. Write it owner-only (`0o600`) unconditionally — harmless for the
     // keyring-backed case (it is the user's own agent store) and closes the
     // umask window a post-write `chmod` would leave open.
-    atomic_write_json_restricted(&path, &payload)
+    atomic_write_json_restricted(path, &payload)
 }
 
 /// Write each record's in-memory key to the keyring and blank the inline copy

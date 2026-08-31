@@ -5,6 +5,7 @@ use super::{
 };
 use crate::app_state::AppState;
 use crate::util;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
 
@@ -25,6 +26,39 @@ enum SpawnOutcome {
     Failed(String),
 }
 type AgentSpawnResult = (String, SpawnOutcome);
+
+type RuntimeReceiptEntry = (PathBuf, super::ManagedAgentRuntimeReceipt);
+
+/// Keep only valid receipts for capability-visible agent records. A receipt
+/// belonging to a hidden built-in must be terminated before orphan sweeps build
+/// their skip set; otherwise an OSS launch can leave a protected Bestie process
+/// alive even though every record-facing API correctly hides it.
+fn visible_runtime_receipt_pids_with(
+    records: &[super::ManagedAgentRecord],
+    receipts: Vec<RuntimeReceiptEntry>,
+    instance_id: &str,
+    valid: impl Fn(&Path, &super::ManagedAgentRuntimeReceipt, &str) -> bool,
+    mut terminate_hidden: impl FnMut(&Path, &super::ManagedAgentRuntimeReceipt) -> Result<(), String>,
+) -> Result<Vec<u32>, String> {
+    let visible_pubkeys: std::collections::HashSet<&str> = records
+        .iter()
+        .map(|record| record.pubkey.as_str())
+        .collect();
+    let mut tracked_pids = Vec::new();
+
+    for (path, receipt) in receipts {
+        if !valid(&path, &receipt, instance_id) {
+            continue;
+        }
+        if visible_pubkeys.contains(receipt.key.pubkey.as_str()) {
+            tracked_pids.push(receipt.pid);
+        } else {
+            terminate_hidden(&path, &receipt)?;
+        }
+    }
+
+    Ok(tracked_pids)
+}
 
 /// Backfill the pinned persona snapshot for pre-existing agents created before
 /// the record became the spawn source of truth. Runs once at launch, before
@@ -126,22 +160,26 @@ pub async fn restore_managed_agents_on_launch(
         changed |=
             kill_stale_tracked_processes(&mut records, &runtimes, &super::current_instance_id(app));
 
-        let tracked_pids: Vec<u32> = runtimes
+        let mut tracked_pids: Vec<u32> = runtimes
             .values()
             .map(|runtime| runtime.child.id())
-            .chain(
-                super::read_all_agent_runtime_receipts(app)
-                    .into_iter()
-                    .filter_map(|(path, receipt)| {
-                        super::valid_agent_runtime_receipt(
-                            &path,
-                            &receipt,
-                            &super::current_instance_id(app),
-                        )
-                        .then_some(receipt.pid)
-                    }),
-            )
             .collect();
+        let receipt_pids = visible_runtime_receipt_pids_with(
+            &records,
+            super::read_all_agent_runtime_receipts(app),
+            &super::current_instance_id(app),
+            super::valid_agent_runtime_receipt,
+            |path, receipt| {
+                super::terminate_runtime_receipt_with(
+                    path,
+                    receipt,
+                    super::terminate_process,
+                    super::process_is_running,
+                    super::remove_agent_runtime_receipt_path,
+                )
+            },
+        )?;
+        tracked_pids.extend(receipt_pids);
         super::sweep_orphaned_agent_processes(app, &tracked_pids);
 
         // System-wide sweep: enumerate all user processes and kill any known
@@ -547,6 +585,122 @@ mod profile_reconcile_tests {
         assert!(!profile_reconcile_completed(
             ProfileReconcileOutcome::SkippedDisabled
         ));
+    }
+}
+
+#[cfg(test)]
+mod runtime_receipt_visibility_tests {
+    use super::visible_runtime_receipt_pids_with;
+    use crate::managed_agents::{
+        filter_managed_agents_for_build, terminate_runtime_receipt_with, ManagedAgentRecord,
+        ManagedAgentRuntimeKey, ManagedAgentRuntimeReceipt,
+    };
+    use std::cell::Cell;
+    use std::path::PathBuf;
+
+    fn record(pubkey: &str, persona_id: &str) -> ManagedAgentRecord {
+        let mut record: ManagedAgentRecord = serde_json::from_str(&format!(
+            r#"{{
+                "pubkey": "{pubkey}",
+                "name": "test-agent",
+                "private_key_nsec": "preserved-key",
+                "relay_url": "wss://relay.example",
+                "acp_command": "buzz-acp",
+                "agent_command": "goose",
+                "agent_args": [],
+                "mcp_command": "",
+                "turn_timeout_seconds": 320,
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z"
+            }}"#
+        ))
+        .expect("managed-agent fixture");
+        record.persona_id = Some(persona_id.to_string());
+        record
+    }
+
+    fn receipt(pubkey: &str, pid: u32) -> (PathBuf, ManagedAgentRuntimeReceipt) {
+        let key = ManagedAgentRuntimeKey::new(pubkey, "wss://relay.example")
+            .expect("canonical runtime key");
+        (
+            PathBuf::from(format!("{}.json", key.runtime_id())),
+            ManagedAgentRuntimeReceipt {
+                key,
+                pid,
+                desktop_instance_id: "instance".into(),
+                started_at: "now".into(),
+            },
+        )
+    }
+
+    #[test]
+    fn capability_visible_receipt_is_admitted_without_termination() {
+        let pubkey = "aa".repeat(32);
+        let records = vec![record(&pubkey, "builtin:bestie")];
+        let terminated = Cell::new(false);
+
+        let tracked = visible_runtime_receipt_pids_with(
+            &records,
+            vec![receipt(&pubkey, 41)],
+            "instance",
+            |_, _, _| true,
+            |_, _| {
+                terminated.set(true);
+                Ok(())
+            },
+        )
+        .expect("visible receipt classification");
+
+        assert_eq!(tracked, vec![41]);
+        assert!(!terminated.get());
+    }
+
+    #[test]
+    fn capability_hidden_receipt_is_terminated_removed_and_never_tracked() {
+        let pubkey = "bb".repeat(32);
+        // This is the exact capability-off shape: load_managed_agents filtered
+        // Bestie out, while the durable unified-store record remains untouched.
+        let durable_record = record(&pubkey, "builtin:bestie");
+        let original = serde_json::to_value(&durable_record).expect("serialize durable record");
+        let mut visible_records = vec![durable_record.clone()];
+        filter_managed_agents_for_build(&mut visible_records, false);
+        assert!(visible_records.is_empty(), "capability-off hides Bestie");
+        let terminated = Cell::new(false);
+        let removed = Cell::new(false);
+
+        let tracked = visible_runtime_receipt_pids_with(
+            &visible_records,
+            vec![receipt(&pubkey, 42)],
+            "instance",
+            |_, _, _| true,
+            |path, receipt| {
+                terminate_runtime_receipt_with(
+                    path,
+                    receipt,
+                    |_| {
+                        terminated.set(true);
+                        Ok(())
+                    },
+                    |_| false,
+                    |_| removed.set(true),
+                )
+            },
+        )
+        .expect("hidden receipt cleanup");
+
+        assert!(
+            tracked.is_empty(),
+            "hidden PID must not enter any sweep skip set"
+        );
+        assert!(terminated.get(), "hidden process group must be terminated");
+        assert!(removed.get(), "hidden runtime receipt must be removed");
+        assert_eq!(
+            serde_json::to_value(&durable_record).expect("serialize preserved record"),
+            original,
+            "cleanup must preserve the definition link, instance identity, and key for a later eligible build"
+        );
+        assert_eq!(durable_record.persona_id.as_deref(), Some("builtin:bestie"));
+        assert_eq!(durable_record.private_key_nsec, "preserved-key");
     }
 }
 
