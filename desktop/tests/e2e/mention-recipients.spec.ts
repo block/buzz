@@ -274,3 +274,59 @@ test("selected duplicate labels survive send, reopen, replacement and second reo
     .poll(() => editPayload(secondReplacement))
     .toEqual({ references: [SECOND], notifying: [] });
 });
+
+test("editing to a longer typed member drops the original shorter reference", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    searchProfiles: [
+      { pubkey: FIRST, displayName: "Scout" },
+      { pubkey: SECOND, displayName: "Scout Jones" },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  const input = page.getByTestId("message-input");
+  await input.fill("@Scout");
+  await page.getByTestId(`mention-suggestion-${FIRST}`).click();
+  await page.keyboard.type("hello");
+  await page.getByTestId("send-message").click();
+  await expect.poll(() => recipients(page, "@Scout hello")).toEqual([[FIRST]]);
+  const row = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .last();
+  await expect(row).toContainText("Scout hello");
+  await waitForAnimations(page);
+  await row.hover();
+  await row.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Edit message" }).click();
+  await expect(input).toHaveText("@Scout hello");
+  await input.fill("@Scout Jones hello");
+  await page.getByTestId("send-message").click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const call = window.__BUZZ_E2E_COMMAND_LOG__
+          ?.filter((call) => call.command === "edit_message")
+          .at(-1);
+        const input = (
+          call?.payload as {
+            input?: {
+              content: string;
+              mentionTags?: string[][];
+              mentionPubkeys: string[];
+            };
+          }
+        )?.input;
+        return input?.content === "@Scout Jones hello"
+          ? {
+              references: input.mentionTags ?? [],
+              notifying: input.mentionPubkeys,
+            }
+          : null;
+      }),
+    )
+    .toEqual({ references: [], notifying: [SECOND] });
+  await expect(row).toContainText("Scout Jones hello");
+});

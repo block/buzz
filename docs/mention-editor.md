@@ -79,3 +79,14 @@ profile renames or missing profiles. Historical arbitrary labels are not stored:
 missing or genuinely ambiguous unqualified aliases remain unresolved,
 non-notifying references rather than guessed recipients. Edit regression coverage
 checks reference preservation, not a claim of new notifying edit `p` tags.
+
+Occurrence recognition must retain every competing literal label before binding
+eligibility is applied. The historical resolver's `mentionNames` includes
+ambiguous aliases as blockers; its explicit `mentionPubkeysByName` map binds only
+resolved aliases. Renderers leave unbound occurrences as literal text. Body-based
+ordering and legacy send-to-channel fallback use both outputs, not the map alone.
+Edit-open fallback refs enter the same candidate composition as current selected
+refs, typed members and personas before presence selection; they are never matched
+in a separate, narrower pass. Current selections (including unbound personas)
+take precedence over same-label fallback refs. Historical unresolved identities
+still preserve non-notifying metadata, without claiming a literal binding.

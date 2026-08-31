@@ -53,6 +53,7 @@ export function collectProfileAliases(
 }
 
 export type ResolvedMentionProps = {
+  /** All literal competitors, including ambiguous aliases without a binding. */
   mentionNames: string[] | undefined;
   mentionPubkeysByName: Record<string, string> | undefined;
 };
@@ -65,8 +66,9 @@ export type ResolvedMentionProps = {
  * `p` tags drive notification/search semantics. `mention` tags only preserve
  * render metadata for reference-only mentions.
  *
- * Both outputs come from the same alias set, so any `@name` chip the markdown
- * renderer matches is guaranteed to resolve to a pubkey.
+ * Recognition is separate from identity resolution: ambiguous aliases still
+ * own their literal ranges but have no map entry. An explicit (possibly empty)
+ * map tells renderers to leave those unbound occurrences as plain text.
  */
 export function resolveMentionProps(
   tags: string[][] | undefined,
@@ -116,6 +118,18 @@ export function resolveMentionProps(
     add(displayName, pubkey);
   }
 
+  // Qualification can narrow an ambiguous base only when that literal is itself
+  // an unambiguous winning occurrence, not a prefix of another tagged alias.
+  const ownedAliases = new Set(
+    mentionOccurrences(content, [...aliases.values()]).flatMap((match) =>
+      match.candidates
+        .filter((entry) => entry.keys.size === 1)
+        .map((entry) => entry.displayName.toLowerCase()),
+    ),
+  );
+  const ownedQualified = qualified.filter((item) =>
+    ownedAliases.has(item.displayName.toLowerCase()),
+  );
   const names = new Set<string>();
   const pubkeysByName: Record<string, string> = {};
   for (const [label, entry] of aliases) {
@@ -125,18 +139,18 @@ export function resolveMentionProps(
       // Scout can own the unqualified label; tag iteration order is irrelevant.
       keys = keys.filter(
         (key) =>
-          !qualified.some((item) => item.base === label && item.pubkey === key),
+          !ownedQualified.some(
+            (item) => item.base === label && item.pubkey === key,
+          ),
       );
     }
-    if (keys.length !== 1) continue;
     names.add(entry.displayName);
-    pubkeysByName[label] = keys[0];
+    if (keys.length === 1) pubkeysByName[label] = keys[0];
   }
 
   return {
     mentionNames: names.size > 0 ? [...names] : undefined,
-    mentionPubkeysByName:
-      Object.keys(pubkeysByName).length > 0 ? pubkeysByName : undefined,
+    mentionPubkeysByName: names.size > 0 ? pubkeysByName : undefined,
   };
 }
 

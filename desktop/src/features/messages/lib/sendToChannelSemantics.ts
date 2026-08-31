@@ -32,6 +32,11 @@ export function getSendToChannelSemantics(
   );
   const seenMentions = new Set<string>();
   const mentionPubkeys: string[] = [];
+  const mentionProps = resolveMentionProps(
+    message.tags,
+    profiles,
+    message.body,
+  );
   const effectiveMentionPubkeys = message.edited
     ? new Set(
         (message.tags ?? []).some((tag) => tag[0] === "buzz:mention-snapshot")
@@ -41,9 +46,9 @@ export function getSendToChannelSemantics(
               .filter((pubkey) => PUBKEY_PATTERN.test(pubkey))
           : orderMentionPubkeysByText(
               message.body,
-              resolveMentionProps(message.tags, profiles, message.body)
-                .mentionPubkeysByName,
+              mentionProps.mentionPubkeysByName,
               () => true,
+              mentionProps.mentionNames,
             ),
       )
     : null;

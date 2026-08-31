@@ -1474,3 +1474,53 @@ test("renderEntityLinkAnchor keeps chip styling when interaction is disabled", (
   assert.match(html, /class="mention-chip\s/);
   assert.doesNotMatch(html, /<button/);
 });
+
+test("ambiguous longer aliases stay literal rather than rendering a shorter tagged chip", async () => {
+  const { resolveMentionProps } = await import("../lib/resolveMentionNames.ts");
+  const a = "a".repeat(64),
+    b = "b".repeat(64),
+    c = "c".repeat(64);
+  for (const includeShorter of [false, true]) {
+    const content = `@Scout Jones hello${includeShorter ? " @Scout!" : ""}`;
+    const props = resolveMentionProps(
+      [
+        ["p", a],
+        ["p", b],
+        ["p", c],
+      ],
+      {
+        [a]: { displayName: "Scout" },
+        [b]: { displayName: "Scout Jones" },
+        [c]: { displayName: "Scout Jones" },
+      },
+      content,
+    );
+    const markdown = renderCachedMarkdown({
+      components: createMarkdownComponents(false, false),
+      content,
+      mentionNames: props.mentionNames,
+      variant: "ambiguous-prefix-test",
+    });
+    const html = renderToStaticMarkup(
+      React.createElement(
+        MarkdownRuntimeContext.Provider,
+        {
+          value: {
+            channels: [],
+            mentionPubkeysByName: props.mentionPubkeysByName,
+            onOpenChannel() {},
+            onOpenEntityLink() {},
+            onOpenMessageLink() {},
+            relayOrigin: null,
+          },
+        },
+        markdown,
+      ),
+    );
+    assert.match(html, /@Scout Jones hello/);
+    assert.equal(
+      (html.match(/data-mention=""/g) ?? []).length,
+      includeShorter ? 1 : 0,
+    );
+  }
+});

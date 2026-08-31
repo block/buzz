@@ -18,17 +18,21 @@ export function useDraftMentionRouting(params: {
   setSelectedNames: (names: string[]) => void;
   setSelectedAgentNames: (names: string[]) => void;
 }): {
-  getDraftMentionRefs: (content: string) => DraftMentionRef[];
+  getDraftMentionRefs: (
+    content: string,
+    fallbackRefs?: readonly DraftMentionRef[],
+  ) => DraftMentionRef[];
   restoreDraftMentionRefs: (refs: readonly DraftMentionRef[]) => void;
 } {
   const getDraftMentionRefs = React.useCallback(
-    (content: string) =>
+    (content: string, fallbackRefs: readonly DraftMentionRef[] = []) =>
       snapshotDraftMentionRefs(
         content,
         params.mentionMapRef.current,
         params.selectedAgentNamesRef.current,
         params.memberCandidates,
         params.personaMentionMapRef.current.keys(),
+        fallbackRefs,
       ),
     [
       params.mentionMapRef,

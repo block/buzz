@@ -121,23 +121,42 @@ export function snapshotDraftMentionRefs(
   selectedAgentNames: readonly string[],
   memberCandidates: readonly MentionPubkeyCandidate[] = [],
   selectedDisplayNames: Iterable<string> = [],
+  fallbackRefs: readonly DraftMentionRef[] = [],
 ): DraftMentionRef[] {
+  // Edit-open refs are fallback bindings, not a second occurrence pass. Compose
+  // them before matching against current selections, typed members and personas.
+  const personaLabels = [...selectedDisplayNames];
+  const currentNames = new Set(
+    [...mentions.keys(), ...personaLabels].map((name) =>
+      name.trim().toLowerCase(),
+    ),
+  );
+  const fallback = fallbackRefs.filter(
+    (ref) => !currentNames.has(ref.displayName.trim().toLowerCase()),
+  );
+  const bindings = new Map([
+    ...fallback.map((ref) => [ref.displayName, ref.pubkey] as const),
+    ...mentions,
+  ]);
   const agentNames = new Set(
-    selectedAgentNames.map((name) => name.trim().toLowerCase()),
+    [
+      ...selectedAgentNames,
+      ...fallback.filter((ref) => ref.isAgent).map((ref) => ref.displayName),
+    ].map((name) => name.trim().toLowerCase()),
   );
   const presentNames = new Set(
     mentionOccurrences(
       content,
       mentionMatchCandidates({
-        selectedMentions: mentions,
+        selectedMentions: bindings,
         memberCandidates,
-        selectedDisplayNames,
+        selectedDisplayNames: personaLabels,
       }),
     ).flatMap((match) =>
       match.candidates.map((candidate) => candidate.displayName),
     ),
   );
-  return [...mentions.entries()]
+  return [...bindings.entries()]
     .filter(([displayName]) => presentNames.has(displayName))
     .map(([displayName, pubkey]) => ({
       displayName,

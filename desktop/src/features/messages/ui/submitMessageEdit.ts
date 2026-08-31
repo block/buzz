@@ -1,6 +1,5 @@
 import type { QueuedMediaAttachment } from "@/features/messages/lib/backgroundMediaUploadStore";
 import { enqueueBackgroundMediaUpload } from "@/features/messages/lib/backgroundMediaUploadStore";
-import { mentionOccurrences } from "@/shared/lib/mentionOccurrences";
 import type { DraftMentionRef } from "@/features/messages/lib/useDrafts";
 import type { MessageComposerEditTarget } from "@/features/messages/ui/MessageComposer.types";
 import {
@@ -29,7 +28,10 @@ type SubmitMessageEditOptions = Omit<
   clearComposer: () => void;
   customEmoji: ReadonlyArray<CustomEmoji>;
   extractMentionPubkeys: (content: string) => string[];
-  getMentionRefs: (content: string) => DraftMentionRef[];
+  getMentionRefs: (
+    content: string,
+    fallbackRefs: readonly DraftMentionRef[],
+  ) => DraftMentionRef[];
   editTargetId: string;
   enqueueUpload?: typeof enqueueBackgroundMediaUpload;
   editTarget: Pick<
@@ -74,25 +76,9 @@ export async function submitMessageEdit({
   setUploadError,
   spoileredAttachmentUrls,
 }: SubmitMessageEditOptions): Promise<void> {
-  const selectedRefs = getMentionRefs(content);
-  const selectedNames = new Set(
-    selectedRefs.map((ref) => ref.displayName.toLowerCase()),
-  );
-  const currentMentionRefs = [
-    ...selectedRefs,
-    ...(editTarget.mentionRefs ?? []).filter(
-      (ref) => !selectedNames.has(ref.displayName.toLowerCase()),
-    ),
-  ];
   const draft: EditDraft = {
     content,
-    mentionRefs: [
-      ...new Set(
-        mentionOccurrences(content, currentMentionRefs).flatMap(
-          (match) => match.candidates,
-        ),
-      ),
-    ],
+    mentionRefs: getMentionRefs(content, editTarget.mentionRefs ?? []),
     pendingImeta: [...pendingImeta],
     queuedAttachments: [...queuedAttachments],
     spoileredAttachmentUrls: new Set(spoileredAttachmentUrls),
