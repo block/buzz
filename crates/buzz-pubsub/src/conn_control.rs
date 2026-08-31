@@ -359,6 +359,28 @@ mod tests {
     }
 
     #[test]
+    fn legacy_consumer_accepts_archived_community_disconnect_payload() {
+        #[derive(Debug, Deserialize, PartialEq, Eq)]
+        #[serde(tag = "op")]
+        enum LegacyConnControl {
+            DisconnectCommunity,
+        }
+
+        let archived_at = chrono::DateTime::parse_from_rfc3339("2026-08-31T12:34:56.123456Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let json = serde_json::to_string(&ConnControl::DisconnectCommunity {
+            archived_at: Some(archived_at),
+        })
+        .unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<LegacyConnControl>(&json).unwrap(),
+            LegacyConnControl::DisconnectCommunity
+        );
+    }
+
+    #[test]
     fn unknown_command_is_rejected_without_affecting_later_messages() {
         assert!(serde_json::from_str::<ConnControl>(r#"{"op":"FutureCommand"}"#).is_err());
         let known =

@@ -1339,7 +1339,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                                         || {
                                             state_for_conn_ctrl
                                                 .community_connections
-                                                .disconnect_community(scoped.community_id)
+                                                .disconnect_archived_community(scoped.community_id)
                                         },
                                     )
                                     .await
@@ -1360,7 +1360,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
                             } else {
                                 state_for_conn_ctrl
                                     .community_connections
-                                    .disconnect_community(scoped.community_id);
+                                    .disconnect_deleted_community(scoped.community_id);
                             }
                         }
                         buzz_pubsub::conn_control::ConnControl::DisconnectPubkey {

@@ -223,7 +223,8 @@ impl Db {
     }
 
     /// Runs `apply` while holding the community row lock only when the
-    /// community is not active.
+    /// community is not active. The callback receives the current archive
+    /// transition, or `None` when the row is deleted, deleting, or missing.
     ///
     /// The row lock serializes the synchronous action with unarchive so a
     /// periodic lifecycle revalidation cannot disconnect a community after it
@@ -232,13 +233,12 @@ impl Db {
     pub async fn with_inactive_community_fence<T>(
         &self,
         community_id: CommunityId,
-        apply: impl FnOnce() -> T,
+        apply: impl FnOnce(Option<DateTime<Utc>>) -> T,
     ) -> Result<Option<T>> {
         let mut tx = self.pool.begin().await?;
-        let active = sqlx::query_scalar::<_, bool>(
-            r#"SELECT archived_at IS NULL
-                      AND deleted_at IS NULL
-                      AND deletion_state = 'active'
+        let lifecycle = sqlx::query_as::<_, (Option<DateTime<Utc>>, bool)>(
+            r#"SELECT archived_at,
+                      deleted_at IS NOT NULL OR deletion_state <> 'active'
                FROM communities
                WHERE id = $1
                FOR UPDATE"#,
@@ -247,12 +247,16 @@ impl Db {
         .fetch_optional(&mut *tx)
         .await?;
 
-        if active == Some(true) {
-            tx.rollback().await?;
-            return Ok(None);
-        }
+        let archived_at = match lifecycle {
+            Some((None, false)) => {
+                tx.rollback().await?;
+                return Ok(None);
+            }
+            Some((archived_at, false)) => archived_at,
+            Some((_, true)) | None => None,
+        };
 
-        let result = apply();
+        let result = apply(archived_at);
         tx.commit().await?;
         Ok(Some(result))
     }
@@ -1163,7 +1167,8 @@ mod postgres_tests {
         let CreateCommunityWithOwnerResult::Created(created) = created else {
             panic!("expected new community");
         };
-        db.archive_community_owned_by(&host, &owner, "protected.example")
+        let archived = db
+            .archive_community_owned_by(&host, &owner, "protected.example")
             .await
             .expect("archive community")
             .expect("owned community");
@@ -1174,7 +1179,8 @@ mod postgres_tests {
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
         let fence = tokio::spawn(async move {
             fenced_db
-                .with_inactive_community_fence(community_id, move || {
+                .with_inactive_community_fence(community_id, move |archived_at| {
+                    assert_eq!(archived_at, Some(archived.archived_at));
                     entered_tx.send(()).expect("report entered fence");
                     release_rx.recv().expect("release fenced disconnect");
                     "disconnected"
