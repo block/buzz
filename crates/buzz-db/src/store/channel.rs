@@ -42,6 +42,8 @@ pub struct ChannelRecord {
     pub visibility: String,
     /// Optional channel description.
     pub description: Option<String>,
+    /// Public HTTPS URL for the channel picture, if configured.
+    pub picture_url: Option<String>,
     /// Optional canvas (rich document) content.
     pub canvas: Option<String>,
     /// Compressed public key bytes of the channel creator.
@@ -144,7 +146,7 @@ pub async fn create_channel(
     let row = sqlx::query(
         r#"
         SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
-               description, canvas,
+               description, picture_url, canvas,
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
@@ -244,7 +246,7 @@ pub async fn create_channel_with_id(
     let row = sqlx::query(
         r#"
         SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
-               description, canvas,
+               description, picture_url, canvas,
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
@@ -272,7 +274,7 @@ pub async fn get_channel(
     let row = sqlx::query(
         r#"
         SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
-               description, canvas,
+               description, picture_url, canvas,
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
@@ -338,7 +340,7 @@ pub async fn list_channels(
         sqlx::query(
             r#"
             SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
-                   description, canvas,
+                   description, picture_url, canvas,
                    created_by, created_at, updated_at, archived_at, deleted_at,
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
@@ -358,7 +360,7 @@ pub async fn list_channels(
         sqlx::query(
             r#"
             SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
-                   description, canvas,
+                   description, picture_url, canvas,
                    created_by, created_at, updated_at, archived_at, deleted_at,
                    nip29_group_id, topic_required, max_members,
                    topic, topic_set_by, topic_set_at,
@@ -401,6 +403,7 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
     let purpose: Option<String> = row.try_get("purpose").unwrap_or(None);
     let purpose_set_by: Option<Vec<u8>> = row.try_get("purpose_set_by").unwrap_or(None);
     let purpose_set_at: Option<DateTime<Utc>> = row.try_get("purpose_set_at").unwrap_or(None);
+    let picture_url: Option<String> = row.try_get("picture_url").unwrap_or(None);
     let ttl_seconds: Option<i32> = row.try_get("ttl_seconds").unwrap_or(None);
     let ttl_deadline: Option<DateTime<Utc>> = row.try_get("ttl_deadline").unwrap_or(None);
 
@@ -410,6 +413,7 @@ pub(crate) fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<Channe
         channel_type: row.try_get("channel_type")?,
         visibility: row.try_get("visibility")?,
         description: row.try_get("description")?,
+        picture_url,
         canvas: row.try_get("canvas")?,
         created_by: row.try_get("created_by")?,
         created_at: row.try_get("created_at")?,
@@ -440,6 +444,9 @@ pub struct ChannelUpdate {
     pub description: Option<String>,
     /// New visibility (`"open"`/`"private"`), or `None` to leave unchanged.
     pub visibility: Option<String>,
+    /// Picture change: outer `None` leaves it unchanged, `Some(None)` clears
+    /// it, and `Some(Some(url))` sets a validated public HTTPS URL.
+    pub picture_url: Option<Option<String>>,
     /// TTL change: outer `None` leaves it unchanged, `Some(None)` clears the
     /// ephemeral TTL (channel becomes permanent), `Some(Some(secs))` sets it.
     /// On any change the `ttl_deadline` is reset to `NOW() + ttl_seconds`.
@@ -459,6 +466,7 @@ pub async fn update_channel(
     if updates.name.is_none()
         && updates.description.is_none()
         && updates.visibility.is_none()
+        && updates.picture_url.is_none()
         && updates.ttl_seconds.is_none()
     {
         return Err(DbError::InvalidData(
@@ -470,6 +478,13 @@ pub async fn update_channel(
         *name = buzz_core::channel::canonical_channel_name(name).to_owned();
         if name.is_empty() {
             return Err(DbError::InvalidData("channel name is required".into()));
+        }
+    }
+    if let Some(Some(picture_url)) = updates.picture_url.as_ref() {
+        if !buzz_core::channel::is_safe_channel_picture_url(picture_url) {
+            return Err(DbError::InvalidData(
+                "channel picture must be a public HTTPS URL without embedded secrets".into(),
+            ));
         }
     }
 
@@ -487,6 +502,10 @@ pub async fn update_channel(
     }
     if updates.visibility.is_some() {
         set_parts.push(format!("visibility = ${param_idx}::channel_visibility"));
+        param_idx += 1;
+    }
+    if updates.picture_url.is_some() {
+        set_parts.push(format!("picture_url = ${param_idx}"));
         param_idx += 1;
     }
     if let Some(ref ttl) = updates.ttl_seconds {
@@ -516,6 +535,9 @@ pub async fn update_channel(
     }
     if let Some(ref vis) = updates.visibility {
         q = q.bind(vis);
+    }
+    if let Some(ref picture_url) = updates.picture_url {
+        q = q.bind(picture_url.as_deref());
     }
     if let Some(ref ttl) = updates.ttl_seconds {
         q = q.bind(*ttl);

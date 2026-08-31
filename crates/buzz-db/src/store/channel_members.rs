@@ -886,7 +886,7 @@ async fn get_channel_tx(
     let row = sqlx::query(
         r#"
         SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
-               description, canvas,
+               description, picture_url, canvas,
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
@@ -977,7 +977,7 @@ pub async fn get_accessible_channels(
     let base = format!(
         r#"
         SELECT c.id, c.name, c.channel_type::text AS channel_type,
-               c.visibility::text AS visibility, c.description, c.canvas,
+               c.visibility::text AS visibility, c.description, c.picture_url, c.canvas,
                c.created_by, c.created_at, c.updated_at, c.archived_at, c.deleted_at,
                c.nip29_group_id, c.topic_required, c.max_members,
                c.topic, c.topic_set_by, c.topic_set_at,

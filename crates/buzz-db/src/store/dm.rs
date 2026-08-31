@@ -72,7 +72,7 @@ pub async fn find_dm_by_participants(
     let row = sqlx::query(
         r#"
         SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
-               description, canvas,
+               description, picture_url, canvas,
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
@@ -133,7 +133,7 @@ pub async fn create_dm(
     let existing = sqlx::query(
         r#"
         SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
-               description, canvas,
+               description, picture_url, canvas,
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
@@ -203,7 +203,7 @@ pub async fn create_dm(
     let row = sqlx::query(
         r#"
         SELECT id, name, channel_type::text AS channel_type, visibility::text AS visibility,
-               description, canvas,
+               description, picture_url, canvas,
                created_by, created_at, updated_at, archived_at, deleted_at,
                nip29_group_id, topic_required, max_members,
                topic, topic_set_by, topic_set_at,
@@ -496,6 +496,7 @@ fn row_to_channel_record(row: sqlx::postgres::PgRow) -> Result<ChannelRecord> {
         channel_type: row.try_get("channel_type")?,
         visibility: row.try_get("visibility")?,
         description: row.try_get("description")?,
+        picture_url: row.try_get("picture_url").unwrap_or(None),
         canvas: row.try_get("canvas")?,
         created_by: row.try_get("created_by")?,
         created_at: row.try_get("created_at")?,

@@ -22,6 +22,50 @@ use crate::state::AppState;
 use buzz_core::tenant::TenantContext;
 use buzz_pubsub::EventTopic;
 
+const CHANNEL_METADATA_TAGS: &[&str] = &[
+    "name",
+    "about",
+    "archived",
+    "topic",
+    "purpose",
+    "visibility",
+    "ttl",
+    "picture",
+];
+
+const CHANNEL_PRIVILEGED_METADATA_TAGS: &[&str] =
+    &["name", "about", "archived", "visibility", "ttl", "picture"];
+
+fn validate_channel_picture_tags(event: &Event) -> anyhow::Result<()> {
+    let pictures: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.kind().to_string() == "picture")
+        .collect();
+    if pictures.len() > 1 {
+        return Err(anyhow::anyhow!(
+            "kind:9002 must include at most one picture tag"
+        ));
+    }
+    if let Some(tag) = pictures.first() {
+        match tag.content() {
+            Some("") => {}
+            Some(value) if buzz_core::channel::is_safe_channel_picture_url(value) => {}
+            Some(_) => {
+                return Err(anyhow::anyhow!(
+                    "picture must be a public HTTPS URL without credentials, query, or fragment"
+                ));
+            }
+            None => {
+                return Err(anyhow::anyhow!(
+                    "picture tag must have a value (URL, or empty string to clear)"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Check if a kind is an admin kind (9000-9022) that needs pre-storage validation.
 pub fn is_admin_kind(kind: u32) -> bool {
     matches!(kind, 9000..=9022)
@@ -495,24 +539,17 @@ pub async fn validate_admin_event(
         }
         9002 => {
             // EDIT_METADATA: require at least one recognized metadata tag.
-            const RECOGNIZED_TAGS: &[&str] = &[
-                "name",
-                "about",
-                "archived",
-                "topic",
-                "purpose",
-                "visibility",
-                "ttl",
-            ];
             let has_recognized = event
                 .tags
                 .iter()
-                .any(|t| RECOGNIZED_TAGS.contains(&t.kind().to_string().as_str()));
+                .any(|t| CHANNEL_METADATA_TAGS.contains(&t.kind().to_string().as_str()));
             if !has_recognized {
                 return Err(anyhow::anyhow!(
-                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl)"
+                    "kind:9002 must include at least one metadata tag (name, about, archived, topic, purpose, visibility, ttl, picture)"
                 ));
             }
+
+            validate_channel_picture_tags(event)?;
 
             // Validate archived values before storage.
             for t in event.tags.iter() {
@@ -589,11 +626,11 @@ pub async fn validate_admin_event(
                 }
             }
 
-            // name/about/archived/visibility/ttl require owner/admin;
+            // name/about/archived/visibility/ttl/picture require owner/admin;
             // topic/purpose allow any member.
             let has_privileged_tag = event.tags.iter().any(|t| {
                 let k = t.kind().to_string();
-                k == "name" || k == "about" || k == "archived" || k == "visibility" || k == "ttl"
+                CHANNEL_PRIVILEGED_METADATA_TAGS.contains(&k.as_str())
             });
             if has_privileged_tag {
                 let members = state.db.get_members(tenant.community(), channel_id).await?;
@@ -615,7 +652,7 @@ pub async fn validate_admin_event(
                             return Ok(());
                         }
                         Err(anyhow::anyhow!(
-                            "actor not authorized for name/about/archived/visibility/ttl changes"
+                            "actor not authorized for name/about/archived/visibility/ttl/picture changes"
                         ))
                     }
                 }
@@ -1143,6 +1180,9 @@ pub async fn emit_group_discovery_events(
                 tags.push(Tag::parse(["about", desc])?);
             }
         }
+        if let Some(ref picture_url) = channel.picture_url {
+            tags.push(Tag::parse(["picture", picture_url])?);
+        }
         if channel.visibility == "private" {
             tags.push(Tag::parse(["private"])?);
         } else {
@@ -1617,6 +1657,20 @@ async fn handle_edit_metadata(
                         chrono::Utc::now(),
                     )
                     .await?;
+                }
+                "picture" => {
+                    let picture_url = (!val.is_empty()).then(|| val.to_string());
+                    state
+                        .db
+                        .update_channel(
+                            tenant.community(),
+                            channel_id,
+                            buzz_db::channel::ChannelUpdate {
+                                picture_url: Some(picture_url),
+                                ..Default::default()
+                            },
+                        )
+                        .await?;
                 }
                 "ttl" => {
                     // Empty string clears the TTL (permanent); otherwise it is a
@@ -3683,6 +3737,38 @@ pub async fn publish_nipia_unarchived(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_picture_is_recognized_and_validated_for_metadata_updates() {
+        assert!(CHANNEL_METADATA_TAGS.contains(&"picture"));
+        assert!(CHANNEL_PRIVILEGED_METADATA_TAGS.contains(&"picture"));
+        let keys = nostr::Keys::generate();
+        let channel = Uuid::new_v4().to_string();
+
+        for value in ["https://media.example.test/groups/photo.jpg", ""] {
+            let event = EventBuilder::new(Kind::Custom(9002), "")
+                .tags([
+                    Tag::parse(["h", &channel]).unwrap(),
+                    Tag::parse(["picture", value]).unwrap(),
+                ])
+                .sign_with_keys(&keys)
+                .expect("sign picture update");
+            assert!(validate_channel_picture_tags(&event).is_ok());
+        }
+
+        let unsafe_event = EventBuilder::new(Kind::Custom(9002), "")
+            .tags([
+                Tag::parse(["h", &channel]).unwrap(),
+                Tag::parse([
+                    "picture",
+                    "https://media.example.test/photo.jpg?token=secret",
+                ])
+                .unwrap(),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign unsafe picture update");
+        assert!(validate_channel_picture_tags(&unsafe_event).is_err());
+    }
 
     #[test]
     fn group_members_snapshot_keeps_members_past_one_thousand() {
