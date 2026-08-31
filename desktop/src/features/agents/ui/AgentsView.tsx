@@ -223,6 +223,7 @@ export function AgentsView() {
               actionErrorMessage={agents.actionErrorMessage}
               actionNoticeMessage={agents.actionNoticeMessage}
               agents={agents.managedAgents}
+              remoteAgents={agents.relayAgentsQuery.data ?? []}
               agentsError={
                 agents.managedAgentsQuery.error instanceof Error
                   ? agents.managedAgentsQuery.error
@@ -232,6 +233,7 @@ export function AgentsView() {
               isAgentsLoading={agents.managedAgentsQuery.isLoading}
               startingAgentPubkey={agents.startingAgentPubkey}
               restartingAgentPubkey={agents.restartingAgentPubkey}
+              stoppingAgentPubkey={agents.stoppingAgentPubkey}
               startingPersonaIds={agents.startingPersonaIds}
               onOpenAgentProfile={(pubkey, options) => {
                 openProfilePanel?.(pubkey, options);
@@ -244,6 +246,9 @@ export function AgentsView() {
               }}
               onRestartAgent={(pubkey) => {
                 void agents.handleRestart(pubkey);
+              }}
+              onStopAgent={(pubkey) => {
+                void agents.handleStop(pubkey);
               }}
               onStartPersona={(persona) => {
                 void agents.handleStartPersona(persona);

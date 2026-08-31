@@ -423,6 +423,10 @@ export function useManagedAgentActions() {
     startMutation.isPending && typeof startMutation.variables === "string"
       ? startMutation.variables
       : null;
+  const stoppingAgentPubkey =
+    stopMutation.isPending && typeof stopMutation.variables === "string"
+      ? stopMutation.variables
+      : null;
 
   return {
     relayAgentsQuery,
@@ -446,6 +450,7 @@ export function useManagedAgentActions() {
     setActionErrorMessage,
     startingAgentPubkey,
     restartingAgentPubkey,
+    stoppingAgentPubkey,
     startingPersonaIds,
     handleStart,
     handleRestart,

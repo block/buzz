@@ -1,0 +1,19 @@
+{
+  "$schema": "https://open-plugin-spec.org/schema/v1/plugin.json",
+  "id": "com.tangoren.musing-lyrics-cleanup",
+  "name": "muSing Lyrics Cleanup",
+  "version": "0.1.0",
+  "description": "Cleans song lyrics for distribution-platform submission while preserving wording and reporting flags.",
+  "keywords": ["lyrics", "songwriting", "distrokid", "musixmatch", "musing"],
+  "personas": ["agents/lyrics-cleanup.persona.md"],
+  "defaults": {
+    "temperature": 0.1,
+    "triggers": {
+      "mentions": true,
+      "keywords": ["clean lyrics", "sanitize lyrics", "lyric cleanup", "lyrics"],
+      "all_messages": false
+    },
+    "thread_replies": true,
+    "broadcast_replies": false
+  }
+}
