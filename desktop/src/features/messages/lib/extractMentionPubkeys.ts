@@ -1,4 +1,4 @@
-import { getMentionOffsets } from "./hasMention";
+import { mentionOccurrences } from "@/shared/lib/mentionOccurrences";
 
 export type MentionPubkeyCandidate = {
   displayName: string | null;
@@ -61,43 +61,36 @@ export function selectedMentionLabels<
 }
 
 /**
- * Returns explicit selected mention pubkeys and manually typed channel-member
- * mentions. At each `@` offset, only the longest valid display name wins so a
- * member whose name prefixes another member is not spuriously tagged.
+ * Build shared candidates for selected bindings, personas and typed members.
+ * Selected labels suppress same-name member fallback; unbound selected labels
+ * still compete with shorter keyed labels for exact occurrence ownership.
  */
-export function extractMentionPubkeys({
-  text,
+export function mentionMatchCandidates({
   selectedMentions,
   selectedDisplayNames,
   memberCandidates,
 }: {
-  text: string;
   selectedMentions: ReadonlyMap<string, string>;
   selectedDisplayNames?: Iterable<string>;
   memberCandidates: readonly MentionPubkeyCandidate[];
-}): string[] {
+}): MentionMatch[] {
+  const selectedLabels = [...(selectedDisplayNames ?? [])];
   const selectedNames = new Set(
-    [...selectedMentions.keys(), ...(selectedDisplayNames ?? [])].map(
-      normalizeDisplayName,
-    ),
+    [...selectedMentions.keys(), ...selectedLabels].map(normalizeDisplayName),
   );
-  const matchesByOffset = new Map<number, MentionMatch[]>();
+  const candidates: MentionMatch[] = [];
 
   const addMatches = (displayName: string, pubkey?: string) => {
     const trimmedName = displayName.trim();
     if (!trimmedName) return;
 
-    for (const offset of getMentionOffsets(text, trimmedName)) {
-      const matches = matchesByOffset.get(offset) ?? [];
-      matches.push({ displayName: trimmedName, pubkey });
-      matchesByOffset.set(offset, matches);
-    }
+    candidates.push({ displayName: trimmedName, pubkey });
   };
 
   for (const [displayName, pubkey] of selectedMentions) {
     addMatches(displayName, pubkey);
   }
-  for (const displayName of selectedDisplayNames ?? []) {
+  for (const displayName of selectedLabels) {
     addMatches(displayName);
   }
   for (const candidate of memberCandidates) {
@@ -111,14 +104,20 @@ export function extractMentionPubkeys({
     }
   }
 
+  return candidates;
+}
+
+/** Extract recipients from the same exact occurrences used by draft routing. */
+export function extractMentionPubkeys(options: {
+  text: string;
+  selectedMentions: ReadonlyMap<string, string>;
+  selectedDisplayNames?: Iterable<string>;
+  memberCandidates: readonly MentionPubkeyCandidate[];
+}): string[] {
+  const { text, selectedMentions, memberCandidates } = options;
+  const candidates = mentionMatchCandidates(options);
   const winningPubkeys = new Set<string>();
-  for (const matches of matchesByOffset.values()) {
-    const longestNameLength = Math.max(
-      ...matches.map((match) => match.displayName.length),
-    );
-    const winners = matches.filter(
-      (match) => match.displayName.length === longestNameLength,
-    );
+  for (const { candidates: winners } of mentionOccurrences(text, candidates)) {
     const identities = new Set(
       winners.flatMap((match) =>
         match.pubkey ? [match.pubkey.toLowerCase()] : [],

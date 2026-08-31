@@ -194,3 +194,71 @@ for (const replacement of ["hello", "hello @Alice"]) {
     ]);
   });
 }
+
+test("send/reopen/edit preserves distinct same-name refs independently of tag order", async () => {
+  const {
+    buildEditMentionState,
+    replaceWithDraftMentionRefs,
+    snapshotDraftMentionRefs,
+  } = await import("../lib/draftMentionRefs.ts");
+  const { extractMentionPubkeys, selectedMentionLabel } = await import(
+    "../lib/extractMentionPubkeys.ts"
+  );
+  const a = "a".repeat(64),
+    b = "b".repeat(64);
+  const bindings = new Map([["Scout", a]]);
+  const label = selectedMentionLabel("Scout", b, bindings);
+  bindings.set(label, b);
+  const originalContent = `@Scout @${label} hello`;
+  const sent = extractMentionPubkeys({
+    text: originalContent,
+    selectedMentions: bindings,
+    memberCandidates: [],
+  });
+  assert.deepEqual(sent, [a, b]);
+  for (const keys of [sent, [...sent].reverse()]) {
+    const editTarget = buildEditMentionState(
+      originalContent,
+      keys.map((key) => ["p", key]),
+      { [a]: { displayName: "Scout" }, [b]: { displayName: "Scout" } },
+      () => false,
+    );
+    assert.deepEqual(
+      new Map(
+        editTarget.mentionRefs.map((ref) => [ref.displayName, ref.pubkey]),
+      ),
+      bindings,
+    );
+    assert.deepEqual(editTarget.unresolvedMentionPubkeys, []);
+    const restored = new Map();
+    replaceWithDraftMentionRefs(editTarget.mentionRefs, restored, new Map());
+    let saved;
+    await submitMessageEdit({
+      ...baseOptions(async (content, tags, mentionPubkeys) => {
+        saved = { content, tags, mentionPubkeys };
+      }),
+      content: `${originalContent} edited`,
+      originalContent,
+      editTarget,
+      extractMentionPubkeys: (text) =>
+        extractMentionPubkeys({
+          text,
+          selectedMentions: restored,
+          memberCandidates: [],
+        }),
+      getMentionRefs: (text) => snapshotDraftMentionRefs(text, restored, []),
+    });
+    assert.deepEqual(saved.tags.map((tag) => tag[1]).sort(), [a, b]);
+    assert.deepEqual(saved.mentionPubkeys, []); // references, not fresh notifying p-tags
+    const reopened = buildEditMentionState(
+      saved.content,
+      saved.tags,
+      { [a]: { displayName: "Scout" }, [b]: { displayName: "Renamed Scout" } },
+      () => false,
+    );
+    assert.deepEqual(
+      new Map(reopened.mentionRefs.map((ref) => [ref.displayName, ref.pubkey])),
+      bindings,
+    );
+  }
+});

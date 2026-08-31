@@ -46,6 +46,7 @@ import {
 import { useVerifyMentionIdentities } from "./useVerifyMentionIdentities";
 import {
   extractMentionPubkeys,
+  mentionMatchCandidates,
   selectedMentionLabel,
   selectedMentionLabels,
 } from "./extractMentionPubkeys";
@@ -782,8 +783,13 @@ export function useMentions(
         text,
         personaMentionMapRef.current,
         activePersonaById,
+        mentionMatchCandidates({
+          selectedMentions: mentionMapRef.current,
+          selectedDisplayNames: personaMentionMapRef.current.keys(),
+          memberCandidates: mentionCandidates,
+        }).map((candidate) => candidate.displayName),
       ),
-    [activePersonaById],
+    [activePersonaById, mentionCandidates],
   );
   const cancelMentionAutocomplete = React.useCallback(() => {
     autocompleteGenerationRef.current += 1;
@@ -811,6 +817,7 @@ export function useMentions(
   }, [cancelMentionAutocomplete, pasteBinding.clearMentionIntents]);
   const { getDraftMentionRefs, restoreDraftMentionRefs } =
     useDraftMentionRouting({
+      memberCandidates: mentionCandidates,
       mentionMapRef,
       personaMentionMapRef,
       selectedAgentNamesRef: selectedAgentMentionNamesRef,

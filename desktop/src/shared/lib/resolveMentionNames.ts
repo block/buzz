@@ -1,3 +1,4 @@
+import { mentionOccurrences } from "./mentionOccurrences";
 import type { UserProfileSummary } from "@/shared/api/types";
 
 export const MENTION_REFERENCE_TAG = "mention";
@@ -70,24 +71,66 @@ export type ResolvedMentionProps = {
 export function resolveMentionProps(
   tags: string[][] | undefined,
   profiles: Record<string, UserProfileSummary> | undefined,
+  content = "",
 ): ResolvedMentionProps {
-  if (!profiles || !tags) {
-    return { mentionNames: undefined, mentionPubkeysByName: undefined };
+  const taggedKeys = new Set(
+    (tags ?? [])
+      .map(getMentionTagPubkey)
+      .filter((key): key is string => Boolean(key)),
+  );
+  const aliases = new Map<string, { displayName: string; keys: Set<string> }>();
+  const add = (label: string, key: string) => {
+    const normalized = label.toLowerCase();
+    const entry = aliases.get(normalized) ?? {
+      displayName: label,
+      keys: new Set<string>(),
+    };
+    entry.keys.add(key);
+    aliases.set(normalized, entry);
+  };
+  for (const key of taggedKeys) {
+    for (const alias of collectProfileAliases(profiles?.[key])) add(alias, key);
+  }
+
+  // Only event-tagged identities can supply qualified bindings. The body is not
+  // an authority to add recipients. Keep the historical literal label even if
+  // its profile has since been renamed or is not loaded.
+  const qualified: Array<{
+    displayName: string;
+    pubkey: string;
+    base: string;
+  }> = [];
+  for (const match of content.matchAll(
+    /@([^@\r\n]+) \(([0-9a-f]{64})\)(?: ((?:[1-9][0-9]+|[2-9])))?/gi,
+  )) {
+    const pubkey = match[2].toLowerCase();
+    if (!taggedKeys.has(pubkey)) continue;
+    const displayName = match[0].slice(1);
+    if (
+      !mentionOccurrences(content, [{ displayName }]).some(
+        (item) => item.start === match.index,
+      )
+    )
+      continue;
+    qualified.push({ displayName, pubkey, base: match[1].toLowerCase() });
+    add(displayName, pubkey);
   }
 
   const names = new Set<string>();
   const pubkeysByName: Record<string, string> = {};
-
-  for (const tag of tags) {
-    const pubkey = getMentionTagPubkey(tag);
-    if (!pubkey) {
-      continue;
+  for (const [label, entry] of aliases) {
+    let keys = [...entry.keys];
+    if (keys.length > 1) {
+      // A selected second Scout is explicitly qualified. Only a unique remaining
+      // Scout can own the unqualified label; tag iteration order is irrelevant.
+      keys = keys.filter(
+        (key) =>
+          !qualified.some((item) => item.base === label && item.pubkey === key),
+      );
     }
-
-    for (const alias of collectProfileAliases(profiles[pubkey])) {
-      names.add(alias);
-      pubkeysByName[alias.toLowerCase()] = pubkey;
-    }
+    if (keys.length !== 1) continue;
+    names.add(entry.displayName);
+    pubkeysByName[label] = keys[0];
   }
 
   return {

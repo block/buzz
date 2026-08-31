@@ -83,7 +83,7 @@ function ReplyRow({
   const {
     mentionNames: replyMentionNames,
     mentionPubkeysByName: replyMentionPubkeysByName,
-  } = resolveMentionProps(reply.tags, profiles);
+  } = resolveMentionProps(reply.tags, profiles, reply.content);
 
   return (
     <div
@@ -210,7 +210,7 @@ export function ForumThreadPanel({
   const {
     mentionNames: postMentionNames,
     mentionPubkeysByName: postMentionPubkeysByName,
-  } = resolveMentionProps(post.tags, profiles);
+  } = resolveMentionProps(post.tags, profiles, post.content);
   const postAuthorLabel = resolveUserLabel({
     pubkey: post.pubkey,
     currentPubkey,

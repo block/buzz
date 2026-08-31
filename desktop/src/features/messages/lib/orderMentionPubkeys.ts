@@ -1,4 +1,4 @@
-import { getMentionOffset } from "@/features/messages/lib/hasMention";
+import { mentionOccurrences } from "@/shared/lib/mentionOccurrences";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 export function orderMentionPubkeysByText(
@@ -9,15 +9,18 @@ export function orderMentionPubkeysByText(
   if (!mentionPubkeysByName) return [];
 
   const earliestOffsetByPubkey = new Map<string, number>();
-  for (const [name, pubkey] of Object.entries(mentionPubkeysByName)) {
-    const normalized = normalizePubkey(pubkey);
-    const offset = getMentionOffset(text, name);
-    if (offset === null || !isEligible(normalized)) continue;
-
-    const previousOffset = earliestOffsetByPubkey.get(normalized);
-    if (previousOffset === undefined || offset < previousOffset) {
-      earliestOffsetByPubkey.set(normalized, offset);
-    }
+  const candidates = Object.entries(mentionPubkeysByName).map(
+    ([displayName, pubkey]) => ({ displayName, pubkey }),
+  );
+  for (const { start, candidates: winners } of mentionOccurrences(
+    text,
+    candidates,
+  )) {
+    if (new Set(winners.map((item) => normalizePubkey(item.pubkey))).size !== 1)
+      continue;
+    const normalized = normalizePubkey(winners[0].pubkey);
+    if (isEligible(normalized) && !earliestOffsetByPubkey.has(normalized))
+      earliestOffsetByPubkey.set(normalized, start);
   }
 
   return [...earliestOffsetByPubkey.entries()]

@@ -41,7 +41,8 @@ export function getSendToChannelSemantics(
               .filter((pubkey) => PUBKEY_PATTERN.test(pubkey))
           : orderMentionPubkeysByText(
               message.body,
-              resolveMentionProps(message.tags, profiles).mentionPubkeysByName,
+              resolveMentionProps(message.tags, profiles, message.body)
+                .mentionPubkeysByName,
               () => true,
             ),
       )

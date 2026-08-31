@@ -1,3 +1,4 @@
+import type { MentionPubkeyCandidate } from "./extractMentionPubkeys";
 import * as React from "react";
 
 import type { DraftMentionRef } from "./useDrafts";
@@ -9,6 +10,7 @@ import {
 } from "./draftMentionRefs";
 
 export function useDraftMentionRouting(params: {
+  memberCandidates?: readonly MentionPubkeyCandidate[];
   mentionMapRef: React.MutableRefObject<Map<string, string>>;
   personaMentionMapRef: React.MutableRefObject<Map<string, string>>;
   selectedAgentNamesRef: React.MutableRefObject<string[]>;
@@ -25,8 +27,15 @@ export function useDraftMentionRouting(params: {
         content,
         params.mentionMapRef.current,
         params.selectedAgentNamesRef.current,
+        params.memberCandidates,
+        params.personaMentionMapRef.current.keys(),
       ),
-    [params.mentionMapRef, params.selectedAgentNamesRef],
+    [
+      params.mentionMapRef,
+      params.selectedAgentNamesRef,
+      params.memberCandidates,
+      params.personaMentionMapRef,
+    ],
   );
   const restoreDraftMentionRefs = React.useCallback(
     (refs: readonly DraftMentionRef[]) => {

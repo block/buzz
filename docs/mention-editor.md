@@ -62,3 +62,20 @@ same-name agent case in `mentions.spec.ts`. The integration-project
 `onboarding.spec.ts` checks that an ambiguous Fizz mention cannot complete the
 welcome flow, then selects the exact newly started starter and asserts its sole
 recipient tag before checking the original completion and layout behavior.
+
+## Exact occurrences and edit history
+
+Draft presence, extraction, audience removal/restoration and persona preparation
+share longest literal occurrence ownership, including typed-member and persona
+competitors. A shorter alias cannot claim another label's qualified key or
+collision suffix. Removing one recipient must preserve a different recipient's
+full label and exclude only the removed identity from the composed send audience.
+
+Rendering and edit hydration reconstruct qualified labels only for identities
+already present in event `p` or `mention` tags. Body text alone does not authorize
+a key. Tag order cannot resolve ambiguous aliases; an unqualified label is
+restored only when one candidate remains. Qualified tagged labels can survive
+profile renames or missing profiles. Historical arbitrary labels are not stored:
+missing or genuinely ambiguous unqualified aliases remain unresolved,
+non-notifying references rather than guessed recipients. Edit regression coverage
+checks reference preservation, not a claim of new notifying edit `p` tags.

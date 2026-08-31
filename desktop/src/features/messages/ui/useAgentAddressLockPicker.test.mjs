@@ -38,13 +38,7 @@ test("always addressing an agent keeps autocomplete open, inserts the chip, adds
     cancelMentionAutocomplete: () => {
       cancelCount += 1;
     },
-    getDraftMentionRefs: () => [
-      {
-        displayName: "Agent Ada",
-        pubkey: "agent-pubkey",
-        isAgent: true,
-      },
-    ],
+    getDraftMentionRefs: () => [],
     getMentionDisplayName: () => "Agent Ada",
     isInlineMentionSelection: () => false,
     isMentionOpen: true,
@@ -489,7 +483,16 @@ test("restoring an existing automatic mention re-registers its agent chip", asyn
       },
       audienceScope: "thread-scope",
       mentions: {
-        getDraftMentionRefs: () => [],
+        getDraftMentionRefs: () =>
+          registeredMentions.length
+            ? [
+                {
+                  displayName: "claude code",
+                  pubkey: "agent-pubkey",
+                  isAgent: true,
+                },
+              ]
+            : [],
         getMentionDisplayName: () => "claude code",
         registerMentionPubkey: (...args) => {
           registeredMentions.push(args);
@@ -963,4 +966,131 @@ test("automatic mention insertion and restoration use the registered collision-s
     }),
     [remote],
   );
+});
+
+test("inverse deletion and toggle preserve B and exclude A from the composed send recipients", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  const { selectedMentionLabel, extractMentionPubkeys } = await import(
+    "../lib/extractMentionPubkeys.ts"
+  );
+  const { snapshotDraftMentionRefs } = await import(
+    "../lib/draftMentionRefs.ts"
+  );
+  const { mergeMentionRecipients } = await import(
+    "./useMentionSendFlow.helpers.ts"
+  );
+  const A = "a".repeat(64),
+    B = "b".repeat(64);
+  const bindings = new Map([["Scout", A]]);
+  const qualified = selectedMentionLabel("Scout", B, bindings);
+  bindings.set(qualified, B);
+  let text = `@Scout @${qualified} hello`;
+  const excluded = [],
+    edits = [];
+  const mentions = {
+    getDraftMentionRefs: (value) =>
+      snapshotDraftMentionRefs(value, bindings, [...bindings.keys()]),
+    getMentionDisplayName: (key) =>
+      [...bindings].find(([, k]) => k === key)?.[0],
+    registerMentionPubkey: (name, key) => {
+      const label = selectedMentionLabel(name, key, bindings);
+      bindings.set(label, key);
+      return label;
+    },
+    isMentionOpen: false,
+  };
+  const { result } = renderHook(() =>
+    useAgentAddressLockPicker({
+      audience: { pubkeys: [A, B], excludePubkey: (key) => excluded.push(key) },
+      audienceScope: "channel",
+      mentions,
+      onPulseAddressLock: () => {},
+      applyAutocompleteEdit: (edit) => {
+        edits.push(edit);
+        text =
+          text.slice(0, edit.replaceFromOffset) +
+          edit.insertText +
+          text.slice(edit.replaceToOffset);
+      },
+      richText: {
+        getPlainTextAndCursor: () => ({ text, cursor: text.length }),
+      },
+    }),
+  );
+  act(() => {
+    result.current.trackMentionAddressedAgent(A);
+    result.current.trackMentionAddressedAgent(B);
+  });
+  // The user deletes only the first (unqualified A) mention.
+  text = `@${qualified} hello`;
+  act(() => result.current.syncAddressedAgentsFromText(text));
+  const explicit = extractMentionPubkeys({
+    text,
+    selectedMentions: bindings,
+    memberCandidates: [],
+  });
+  const merged = mergeMentionRecipients(
+    explicit,
+    [A, B].filter((k) => !excluded.includes(k)),
+  );
+  assert.deepEqual(explicit, [B]);
+  assert.deepEqual(excluded, [A]);
+  assert.deepEqual(merged, [B]);
+
+  // Toggling off A should not touch B's qualified mention.
+  text = `@Scout @${qualified} hello`;
+  act(() =>
+    result.current.toggleAlwaysAddressAgent({
+      displayName: "Scout",
+      pubkey: A,
+      isAgent: true,
+    }),
+  );
+  assert.equal(text, `@${qualified} hello`);
+
+  const afterToggle = mergeMentionRecipients(
+    extractMentionPubkeys({
+      text,
+      selectedMentions: bindings,
+      memberCandidates: [],
+    }),
+    [A, B].filter((k) => !excluded.includes(k)),
+  );
+  assert.deepEqual(afterToggle, [B]);
+});
+
+test("implicit prefix removal uses the present exact label rather than a stale alias", async () => {
+  const { act, renderHook } = await import("@testing-library/react");
+  const { useAgentAddressLockPicker } = await import(
+    "./useAgentAddressLockPicker.ts"
+  );
+  const key = "a".repeat(64);
+  let text = "@Historical Scout hello";
+  const { result } = renderHook(() =>
+    useAgentAddressLockPicker({
+      audience: { pubkeys: [key], excludePubkey: () => {} },
+      audienceScope: "channel",
+      mentions: {
+        getDraftMentionRefs: () => [
+          { displayName: "Historical Scout", pubkey: key, isAgent: true },
+        ],
+        getMentionDisplayName: () => "Scout",
+      },
+      onPulseAddressLock: () => {},
+      applyAutocompleteEdit: (edit) => {
+        text =
+          text.slice(0, edit.replaceFromOffset) +
+          edit.insertText +
+          text.slice(edit.replaceToOffset);
+      },
+      richText: {
+        getPlainTextAndCursor: () => ({ text, cursor: text.length }),
+      },
+    }),
+  );
+  act(() => result.current.removeAddressedAgent(key));
+  assert.equal(text, "hello");
 });

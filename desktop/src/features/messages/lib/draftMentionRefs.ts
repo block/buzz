@@ -1,4 +1,8 @@
-import { hasMention } from "@/features/messages/lib/hasMention";
+import {
+  mentionMatchCandidates,
+  type MentionPubkeyCandidate,
+} from "./extractMentionPubkeys";
+import { mentionOccurrences } from "@/shared/lib/mentionOccurrences";
 import { imetaMediaFromTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { isThreadReply } from "@/features/messages/lib/threading";
 import type { DraftMentionRef } from "@/features/messages/lib/useDrafts";
@@ -20,9 +24,18 @@ export function resolveEditMentionRefs(
   const { mentionNames, mentionPubkeysByName } = resolveMentionProps(
     tags,
     profiles,
+    content,
+  );
+  const presentNames = new Set(
+    mentionOccurrences(
+      content,
+      (mentionNames ?? []).map((displayName) => ({ displayName })),
+    ).flatMap((match) =>
+      match.candidates.map((candidate) => candidate.displayName),
+    ),
   );
   const refs = (mentionNames ?? [])
-    .filter((displayName) => hasMention(content, displayName))
+    .filter((displayName) => presentNames.has(displayName))
     .flatMap((displayName) => {
       const pubkey = mentionPubkeysByName?.[displayName.toLowerCase()];
       return pubkey
@@ -106,12 +119,26 @@ export function snapshotDraftMentionRefs(
   content: string,
   mentions: ReadonlyMap<string, string>,
   selectedAgentNames: readonly string[],
+  memberCandidates: readonly MentionPubkeyCandidate[] = [],
+  selectedDisplayNames: Iterable<string> = [],
 ): DraftMentionRef[] {
   const agentNames = new Set(
     selectedAgentNames.map((name) => name.trim().toLowerCase()),
   );
+  const presentNames = new Set(
+    mentionOccurrences(
+      content,
+      mentionMatchCandidates({
+        selectedMentions: mentions,
+        memberCandidates,
+        selectedDisplayNames,
+      }),
+    ).flatMap((match) =>
+      match.candidates.map((candidate) => candidate.displayName),
+    ),
+  );
   return [...mentions.entries()]
-    .filter(([displayName]) => hasMention(content, displayName))
+    .filter(([displayName]) => presentNames.has(displayName))
     .map(([displayName, pubkey]) => ({
       displayName,
       pubkey: normalizePubkey(pubkey),

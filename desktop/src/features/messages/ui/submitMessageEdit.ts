@@ -1,6 +1,6 @@
 import type { QueuedMediaAttachment } from "@/features/messages/lib/backgroundMediaUploadStore";
 import { enqueueBackgroundMediaUpload } from "@/features/messages/lib/backgroundMediaUploadStore";
-import { hasMention } from "@/features/messages/lib/hasMention";
+import { mentionOccurrences } from "@/shared/lib/mentionOccurrences";
 import type { DraftMentionRef } from "@/features/messages/lib/useDrafts";
 import type { MessageComposerEditTarget } from "@/features/messages/ui/MessageComposer.types";
 import {
@@ -74,13 +74,23 @@ export async function submitMessageEdit({
   setUploadError,
   spoileredAttachmentUrls,
 }: SubmitMessageEditOptions): Promise<void> {
-  const currentMentionRefs = editTarget.mentionRefs ?? [];
+  const selectedRefs = getMentionRefs(content);
+  const selectedNames = new Set(
+    selectedRefs.map((ref) => ref.displayName.toLowerCase()),
+  );
+  const currentMentionRefs = [
+    ...selectedRefs,
+    ...(editTarget.mentionRefs ?? []).filter(
+      (ref) => !selectedNames.has(ref.displayName.toLowerCase()),
+    ),
+  ];
   const draft: EditDraft = {
     content,
     mentionRefs: [
-      ...getMentionRefs(content),
-      ...currentMentionRefs.filter((ref) =>
-        hasMention(content, ref.displayName),
+      ...new Set(
+        mentionOccurrences(content, currentMentionRefs).flatMap(
+          (match) => match.candidates,
+        ),
       ),
     ],
     pendingImeta: [...pendingImeta],
