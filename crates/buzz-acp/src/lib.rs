@@ -5,6 +5,7 @@ mod config;
 mod engram_fetch;
 mod filter;
 mod observer;
+mod pending_store;
 mod pool;
 mod pool_lifecycle;
 mod prompt_framing;
@@ -2166,8 +2167,18 @@ async fn tokio_main() -> Result<()> {
 
     let runtime_start_nonce = std::env::var("BUZZ_MANAGED_AGENT_START_NONCE").unwrap_or_default();
     let dedup_mode = config.dedup_mode;
-    let mut queue =
-        EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
+    let pending_store = pending_store::PendingStore::open(&pubkey_hex)
+        .map_err(|error| anyhow::anyhow!("open durable pending-work journal: {error}"))?;
+    let mut queue = EventQueue::new(dedup_mode)
+        .with_in_flight_deadline(config.max_turn_duration_secs)
+        .with_pending_store(pending_store);
+    let restored_event_ids = queue.pending_event_ids();
+    if !restored_event_ids.is_empty() {
+        let rest = relay.rest_client();
+        for event_id in &restored_event_ids {
+            pool::reaction_add(&rest, event_id, "👀").await;
+        }
+    }
 
     // Online means the harness can receive work, not merely that its socket is
     // connected. Publishing after channel subscriptions gives desktop callers
@@ -2778,6 +2789,55 @@ async fn tokio_main() -> Result<()> {
                                 // contain "!shutdown" from a non-owner.
                             }
 
+                            // Owner-only, mode-independent status lane. Exact
+                            // commands are answered by the harness so checking
+                            // progress never cancels, steers, or queues behind
+                            // the active model turn.
+                            let is_status = ["!status", "status", "status?"]
+                                .iter()
+                                .any(|command| {
+                                    is_owner_control_phrase(
+                                        &buzz_event.event,
+                                        kind_u32,
+                                        command,
+                                        &pubkey_hex,
+                                    )
+                                });
+                            if is_status {
+                                if let Some(owner) = owner_cache.get() {
+                                    if buzz_event.event.pubkey.to_hex() == *owner {
+                                        let active = queue
+                                            .is_channel_in_flight(buzz_event.channel_id);
+                                        let queued =
+                                            queue.queued_event_count(&buzz_event.channel_id);
+                                        let content = if active {
+                                            format!(
+                                                "Status: the current task is still running; {queued} follow-up request(s) are durably queued. Send !stop to stop the active task."
+                                            )
+                                        } else {
+                                            format!(
+                                                "Status: no task is currently running; {queued} request(s) are durably queued."
+                                            )
+                                        };
+                                        let thread_tags =
+                                            queue::parse_thread_tags(&buzz_event.event);
+                                        let rest = ctx.rest_client.clone();
+                                        let channel_id = buzz_event.channel_id;
+                                        tokio::spawn(async move {
+                                            pool::post_failure_notice(
+                                                &rest,
+                                                channel_id,
+                                                &thread_tags,
+                                                &content,
+                                            )
+                                            .await;
+                                        });
+                                        continue;
+                                    }
+                                }
+                                // Not from owner — fall through to normal prompt handling.
+                            }
+
                             // Mirrors !shutdown: kind:9, content "!cancel", from
                             // owner, mentions THIS agent. Must be BEFORE
                             // queue.push() — the event content is moved by push.
@@ -2785,12 +2845,16 @@ async fn tokio_main() -> Result<()> {
                             // Mode-independent: !cancel fires regardless of
                             // --multiple-event-handling. It is explicit user
                             // intent, not an automatic policy decision.
-                            let is_cancel = is_owner_control_command(
-                                &buzz_event.event,
-                                kind_u32,
-                                "!cancel",
-                                &pubkey_hex,
-                            );
+                            let is_cancel = ["!cancel", "!stop", "stop"]
+                                .iter()
+                                .any(|command| {
+                                    is_owner_control_phrase(
+                                        &buzz_event.event,
+                                        kind_u32,
+                                        command,
+                                        &pubkey_hex,
+                                    )
+                                });
                             if is_cancel {
                                 if let Some(owner) = owner_cache.get() {
                                     if buzz_event.event.pubkey.to_hex() == *owner {
@@ -2802,7 +2866,7 @@ async fn tokio_main() -> Result<()> {
                                         if !fired {
                                             tracing::warn!(
                                                 channel_id = %buzz_event.channel_id,
-                                                "!cancel received but no in-flight task — no-op"
+                                                "stop command received but no in-flight task — no-op"
                                             );
                                         }
                                         continue; // consume event — do NOT push to queue
@@ -3445,6 +3509,15 @@ async fn tokio_main() -> Result<()> {
     // explicitly shut them down here to reap child processes. If the grace
     // period expires, remaining tasks are aborted and fall back to
     // AcpClient::Drop (start_kill + try_wait — best-effort, not guaranteed).
+    let shutdown_batches: HashMap<usize, FlushBatch> = pool
+        .task_map()
+        .values()
+        .filter_map(|meta| {
+            meta.recoverable_batch
+                .clone()
+                .map(|batch| (meta.agent_index, batch))
+        })
+        .collect();
     let (rx_ref, js_ref) = pool.rx_and_join_set();
     let shutdown_result = tokio::time::timeout(grace, async {
         loop {
@@ -3459,6 +3532,11 @@ async fn tokio_main() -> Result<()> {
                 maybe_result = rx_ref.recv() => {
                     if let Some(mut pr) = maybe_result {
                         let idx = pr.agent.index;
+                        if matches!(pr.outcome, PromptOutcome::Ok(_)) {
+                            if let Some(batch) = shutdown_batches.get(&idx) {
+                                queue.finish_batch(batch);
+                            }
+                        }
                         pr.agent.acp.shutdown().await;
                         tracing::debug!(agent = idx, "reaped checked-out agent on shutdown");
                     }
@@ -3476,6 +3554,11 @@ async fn tokio_main() -> Result<()> {
     // before tasks were aborted.
     while let Ok(mut pr) = pool.result_rx_try_recv() {
         let idx = pr.agent.index;
+        if matches!(pr.outcome, PromptOutcome::Ok(_)) {
+            if let Some(batch) = shutdown_batches.get(&idx) {
+                queue.finish_batch(batch);
+            }
+        }
         pr.agent.acp.shutdown().await;
         tracing::debug!(agent = idx, "reaped late-arriving agent on shutdown");
     }
@@ -3558,6 +3641,27 @@ fn is_owner_control_command(
     kind_u32 == KIND_STREAM_MESSAGE
         && event.content.trim() == command
         && event_mentions_agent(event, agent_pubkey_hex)
+}
+
+fn is_owner_control_phrase(
+    event: &nostr::Event,
+    kind_u32: u32,
+    command: &str,
+    agent_pubkey_hex: &str,
+) -> bool {
+    if kind_u32 != KIND_STREAM_MESSAGE || !event_mentions_agent(event, agent_pubkey_hex) {
+        return false;
+    }
+    let content = event.content.trim();
+    if content.eq_ignore_ascii_case(command) {
+        return true;
+    }
+    let mut words = content.split_whitespace();
+    matches!(
+        (words.next(), words.next(), words.next()),
+        (Some(mention), Some(candidate), None)
+            if mention.starts_with('@') && candidate.eq_ignore_ascii_case(command)
+    )
 }
 
 // ── signal_in_flight_task ─────────────────────────────────────────────────────
@@ -3757,10 +3861,11 @@ fn dispatch_pending(
         };
         tracing::debug!(agent = agent.index, channel = %channel_id, affinity_hit, "agent_claimed");
 
-        let recoverable_batch = match ctx.dedup_mode {
-            DedupMode::Queue => Some(batch.clone()),
-            DedupMode::Drop => None,
-        };
+        // Retain a disposition copy in both dedup modes. PromptResult::batch
+        // remains responsible for retry policy (None in Drop mode), while this
+        // copy ensures every accepted event can be removed or dead-lettered in
+        // the durable journal after success, terminal failure, or panic.
+        let recoverable_batch = Some(batch.clone());
 
         let result_tx = pool.result_tx();
         let ctx_clone = Arc::clone(ctx);
@@ -3887,6 +3992,12 @@ fn handle_prompt_result(
     observer: Option<observer::ObserverHandle>,
     rest_client: Option<&relay::RestClient>,
 ) -> LoopAction {
+    let had_retry_batch = result.batch.is_some();
+    let recoverable_batch = pool
+        .task_map()
+        .values()
+        .find(|meta| meta.agent_index == result.agent.index)
+        .and_then(|meta| meta.recoverable_batch.clone());
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
     let successful_steer_deliveries = pool
@@ -3961,7 +4072,7 @@ fn handle_prompt_result(
                 tracing::error!(
                     channel_id = %batch.channel_id,
                     events = batch.events.len(),
-                    "dead-lettering batch after hard-cap timeout (no recent activity) — discarding {} events",
+                    "dead-lettering batch after hard-cap timeout (no recent activity) — retaining {} events in durable dead-letter storage",
                     batch.events.len(),
                 );
                 let content = format!(
@@ -3969,6 +4080,7 @@ fn handle_prompt_result(
                     config.max_turn_duration_secs
                 );
                 spawn_failure_notice(rest_client, &batch, content);
+                queue.dead_letter_batch(&batch, "hard-cap timeout without recent activity");
                 hard_timeout_fate_suffix = Some(" — dead-lettered (no recent activity)");
             } else if matches!(
                 result.outcome,
@@ -3987,6 +4099,7 @@ fn handle_prompt_result(
                         config.max_turn_duration_secs
                     );
                     spawn_failure_notice(rest_client, &dead, content);
+                    queue.dead_letter_batch(&dead, "retry budget exhausted after hard-cap timeout");
                     hard_timeout_fate_suffix = Some(" — dead-lettered (retry budget exhausted)");
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
@@ -4006,6 +4119,7 @@ fn handle_prompt_result(
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);
+                queue.dead_letter_batch(&batch, "non-retryable authentication error");
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -4021,6 +4135,7 @@ fn handle_prompt_result(
                     "⚠️ I couldn't process the last request after multiple retries ({reason}). Please re-send if it's still needed."
                 );
                 spawn_failure_notice(rest_client, &dead, content);
+                queue.dead_letter_batch(&dead, "retry budget exhausted");
             }
         } else {
             tracing::debug!(
@@ -4029,6 +4144,36 @@ fn handle_prompt_result(
                 "dropping failed batch for removed channel"
             );
             hard_timeout_fate_suffix = Some(" — batch dropped (channel removed)");
+            queue.finish_batch(&batch);
+        }
+    }
+
+    // Drop mode deliberately returns no PromptResult::batch, so it never
+    // retries. The TaskMeta disposition copy must still reach a terminal
+    // durable state or the accepted event would replay after every restart.
+    if matches!(config.dedup_mode, DedupMode::Drop)
+        && !matches!(
+            result.outcome,
+            PromptOutcome::Ok(_) | PromptOutcome::Cancelled | PromptOutcome::CancelDrainTimeout(_)
+        )
+    {
+        if let Some(batch) = recoverable_batch.as_ref() {
+            if removed_channels.contains(&batch.channel_id) {
+                queue.finish_batch(batch);
+            } else {
+                queue.dead_letter_batch(batch, "terminal prompt failure in drop mode");
+            }
+        }
+    }
+
+    if matches!(result.outcome, PromptOutcome::Ok(_))
+        || (matches!(
+            result.outcome,
+            PromptOutcome::Cancelled | PromptOutcome::CancelDrainTimeout(_)
+        ) && !had_retry_batch)
+    {
+        if let Some(batch) = recoverable_batch.as_ref() {
+            queue.finish_batch(batch);
         }
     }
 
@@ -4299,15 +4444,37 @@ fn recover_panicked_agent(
     if let Some(batch) = meta.recoverable_batch {
         if let Some(ch) = meta.channel_id {
             if !removed_channels.contains(&ch) {
-                // Dead-letter on exhaustion is logged inside requeue(); a
-                // panic path has no outcome to report, so no notice here.
-                let _ = queue.requeue(batch);
-                tracing::warn!("requeued batch for panicked agent {i}");
+                match config.dedup_mode {
+                    DedupMode::Queue => {
+                        if let Some(dead) = queue.requeue(batch) {
+                            queue.dead_letter_batch(
+                                &dead,
+                                "retry budget exhausted after agent panic",
+                            );
+                            tracing::error!(
+                                agent = i,
+                                channel_id = %ch,
+                                "dead-lettered panicked batch after retry budget exhaustion"
+                            );
+                        } else {
+                            tracing::warn!("requeued batch for panicked agent {i}");
+                        }
+                    }
+                    DedupMode::Drop => {
+                        queue.dead_letter_batch(&batch, "agent panic in drop mode");
+                        tracing::error!(
+                            agent = i,
+                            channel_id = %ch,
+                            "dead-lettered panicked batch in drop mode"
+                        );
+                    }
+                }
             } else {
                 tracing::debug!(
                     channel_id = %ch,
-                    "dropping panicked batch for removed channel"
+                    "finalizing panicked batch for removed channel"
                 );
+                queue.finish_batch(&batch);
             }
         }
     }
@@ -5340,6 +5507,26 @@ mod owner_control_command_tests {
             &keys,
         );
         assert!(unaddressed.is_err());
+    }
+
+    #[test]
+    fn owner_control_phrase_accepts_a_single_display_mention_prefix() {
+        let agent = "ab".repeat(32);
+        let prefixed = make_event(KIND_STREAM_MESSAGE, "@Jarvis status?", Some(&agent));
+        assert!(is_owner_control_phrase(
+            &prefixed,
+            KIND_STREAM_MESSAGE,
+            "status?",
+            &agent
+        ));
+
+        let conversational = make_event(KIND_STREAM_MESSAGE, "@Jarvis please stop", Some(&agent));
+        assert!(!is_owner_control_phrase(
+            &conversational,
+            KIND_STREAM_MESSAGE,
+            "stop",
+            &agent
+        ));
     }
 }
 
@@ -7500,6 +7687,239 @@ mod error_outcome_emission_tests {
             Some(channel_id.to_string().as_str())
         );
         assert_eq!(panic.turn_id.as_deref(), Some("panic-turn-id"));
+    }
+
+    async fn recover_test_batch_after_panic(
+        queue: &mut EventQueue,
+        batch: FlushBatch,
+        config: &Config,
+        removed_channels: &HashSet<Uuid>,
+    ) {
+        let channel_id = batch.channel_id;
+        let mut pool = AgentPool::from_slots(vec![]);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let abort_handle = pool.join_set.spawn(async move {
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let task_id = abort_handle.id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "panic-durable-turn".to_string(),
+                recoverable_batch: Some(batch),
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        started_rx.await.expect("task started");
+        abort_handle.abort();
+        let join_error = pool.join_set.join_next().await.unwrap().unwrap_err();
+
+        let mut heartbeat_in_flight = false;
+        let mut typing_channels = HashMap::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+
+        recover_panicked_agent(
+            &mut pool,
+            queue,
+            config,
+            join_error,
+            &mut heartbeat_in_flight,
+            removed_channels,
+            &mut typing_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+        );
+    }
+
+    #[tokio::test]
+    async fn panic_retry_exhaustion_retains_accepted_work_as_dead_letter() {
+        let dir = std::env::temp_dir().join(format!("buzz-acp-panic-dead-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create tempdir");
+        let journal_path = dir.join("pending.json");
+        let store = crate::pending_store::PendingStore::open_path(journal_path.clone())
+            .expect("open pending store");
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::Custom(9), "survive panic exhaustion")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign event");
+        let event_id = event.id.to_hex();
+        let mut queue = EventQueue::new(config::DedupMode::Queue).with_pending_store(store);
+        assert!(queue.push(crate::queue::QueuedEvent {
+            channel_id,
+            event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "test".into(),
+        }));
+        let batch = queue.flush_next().expect("flush accepted event");
+        queue.set_retry_count_for_test(channel_id, crate::queue::MAX_RETRIES);
+
+        let config = test_config();
+        let removed_channels = HashSet::new();
+        recover_test_batch_after_panic(&mut queue, batch, &config, &removed_channels).await;
+
+        let journal: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&journal_path).expect("read pending journal"))
+                .expect("parse pending journal");
+        assert!(journal["pending"].as_object().unwrap().is_empty());
+        assert!(journal["dead_letters"].get(&event_id).is_some());
+
+        std::fs::remove_dir_all(dir).expect("remove tempdir");
+    }
+
+    #[tokio::test]
+    async fn panic_in_drop_mode_dead_letters_without_retrying() {
+        let dir = std::env::temp_dir().join(format!("buzz-acp-panic-drop-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create tempdir");
+        let journal_path = dir.join("pending.json");
+        let store = crate::pending_store::PendingStore::open_path(journal_path.clone())
+            .expect("open pending store");
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::Custom(9), "drop panic")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign event");
+        let event_id = event.id.to_hex();
+        let mut queue = EventQueue::new(config::DedupMode::Drop).with_pending_store(store);
+        assert!(queue.push(crate::queue::QueuedEvent {
+            channel_id,
+            event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "test".into(),
+        }));
+        let batch = queue.flush_next().expect("flush accepted event");
+        let mut config = test_config();
+        config.dedup_mode = config::DedupMode::Drop;
+        recover_test_batch_after_panic(&mut queue, batch, &config, &HashSet::new()).await;
+
+        let journal: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&journal_path).expect("read pending journal"))
+                .expect("parse pending journal");
+        assert!(journal["pending"].as_object().unwrap().is_empty());
+        assert!(journal["dead_letters"].get(&event_id).is_some());
+        assert_eq!(queue.queued_event_count(&channel_id), 0);
+        std::fs::remove_dir_all(dir).expect("remove tempdir");
+    }
+
+    #[tokio::test]
+    async fn panic_for_removed_channel_finalizes_durable_work() {
+        let dir = std::env::temp_dir().join(format!("buzz-acp-panic-removed-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create tempdir");
+        let journal_path = dir.join("pending.json");
+        let store = crate::pending_store::PendingStore::open_path(journal_path.clone())
+            .expect("open pending store");
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::Custom(9), "removed channel panic")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign event");
+        let mut queue = EventQueue::new(config::DedupMode::Queue).with_pending_store(store);
+        assert!(queue.push(crate::queue::QueuedEvent {
+            channel_id,
+            event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "test".into(),
+        }));
+        let batch = queue.flush_next().expect("flush accepted event");
+        recover_test_batch_after_panic(
+            &mut queue,
+            batch,
+            &test_config(),
+            &HashSet::from([channel_id]),
+        )
+        .await;
+
+        let journal: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&journal_path).expect("read pending journal"))
+                .expect("parse pending journal");
+        assert!(journal["pending"].as_object().unwrap().is_empty());
+        assert!(journal["dead_letters"].as_object().unwrap().is_empty());
+        std::fs::remove_dir_all(dir).expect("remove tempdir");
+    }
+
+    #[tokio::test]
+    async fn drop_mode_success_finalizes_durable_work_without_retry_batch() {
+        let dir = std::env::temp_dir().join(format!("buzz-acp-drop-success-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create tempdir");
+        let journal_path = dir.join("pending.json");
+        let store = crate::pending_store::PendingStore::open_path(journal_path.clone())
+            .expect("open pending store");
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::Custom(9), "drop success")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign event");
+        let mut queue = EventQueue::new(config::DedupMode::Drop).with_pending_store(store);
+        assert!(queue.push(crate::queue::QueuedEvent {
+            channel_id,
+            event,
+            received_at: std::time::Instant::now(),
+            prompt_tag: "test".into(),
+        }));
+        let disposition_batch = queue.flush_next().expect("flush accepted event");
+
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "drop-success-turn".to_string(),
+                recoverable_batch: Some(disposition_batch),
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut config = test_config();
+        config.dedup_mode = config::DedupMode::Drop;
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "drop-success-turn".to_string(),
+            outcome: PromptOutcome::Ok(crate::acp::StopReason::EndTurn),
+            batch: None,
+        };
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            None,
+            None,
+        );
+
+        let journal: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&journal_path).expect("read pending journal"))
+                .expect("parse pending journal");
+        assert!(journal["pending"].as_object().unwrap().is_empty());
+        assert!(journal["dead_letters"].as_object().unwrap().is_empty());
+        std::fs::remove_dir_all(dir).expect("remove tempdir");
     }
 
     #[tokio::test]
