@@ -24,6 +24,12 @@ use std::time::Duration;
 use buzz_test_client::{BuzzTestClient, RelayMessage, TestClientError};
 use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag};
 
+type MembershipRemovalState = (
+    Option<chrono::DateTime<chrono::Utc>>,
+    Option<Vec<u8>>,
+    Option<chrono::DateTime<chrono::Utc>>,
+);
+
 fn relay_url() -> String {
     std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string())
 }
@@ -34,6 +40,16 @@ fn relay_http_url() -> String {
         .replace("ws://", "http://")
         .trim_end_matches('/')
         .to_string()
+}
+
+async fn e2e_db_pool() -> sqlx::Pool<sqlx::Postgres> {
+    let database_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await
+        .expect("connect to e2e Postgres")
 }
 
 fn sub_id(name: &str) -> String {
@@ -103,6 +119,26 @@ async fn send_rest_message(keys: &Keys, channel_id: &str, content: &str) -> Stri
     );
     let body: serde_json::Value = resp.json().await.expect("parse event response");
     body["event_id"].as_str().expect("event_id").to_string()
+}
+
+async fn post_rest_message(keys: &Keys, channel_id: &str, content: &str) -> serde_json::Value {
+    let client = reqwest::Client::new();
+    let pubkey_hex = keys.public_key().to_hex();
+    let event = EventBuilder::new(Kind::Custom(9), content)
+        .tags(vec![Tag::parse(["h", channel_id]).unwrap()])
+        .sign_with_keys(keys)
+        .unwrap();
+    client
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", &pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&event).unwrap())
+        .send()
+        .await
+        .expect("submit message event")
+        .json()
+        .await
+        .expect("parse message response")
 }
 
 /// Create a DM via a signed kind:41010 (DM open) command event and return the
@@ -1471,6 +1507,128 @@ async fn test_nipdv_two_viewers_independent_snapshots() {
         !b_hidden.contains(&dm_a),
         "B's snapshot leaked A's hidden DM; B sees: {b_hidden:?}"
     );
+    client_b.disconnect().await.expect("disconnect B");
+}
+
+/// Reopening an existing immutable DM must repair an inactive peer, evict a
+/// cached negative membership decision, and notify the peer so a live agent can
+/// subscribe to the restored channel without restarting.
+#[tokio::test]
+#[ignore]
+async fn test_dm_reopen_restores_removed_peer_and_emits_notification() {
+    let url = relay_url();
+    let keys_a = Keys::generate();
+    let keys_b = Keys::generate();
+    let b_pubkey = keys_b.public_key().to_bytes();
+    let b_pubkey_hex = keys_b.public_key().to_hex();
+    let channel_id = create_dm(&keys_a, &b_pubkey_hex).await;
+    let channel_uuid = uuid::Uuid::parse_str(&channel_id).expect("DM channel UUID");
+
+    let mut client_b = BuzzTestClient::connect(&url, &keys_b)
+        .await
+        .expect("client B connect");
+    let sid_membership = sub_id("dm-recovery-44100");
+    let membership_filter = Filter::new().kind(Kind::Custom(44100)).custom_tag(
+        SingleLetterTag::lowercase(Alphabet::P),
+        b_pubkey_hex.as_str(),
+    );
+    client_b
+        .subscribe(&sid_membership, vec![membership_filter])
+        .await
+        .expect("subscribe membership recovery");
+    client_b
+        .collect_until_eose(&sid_membership, Duration::from_secs(10))
+        .await
+        .expect("drain initial membership history");
+
+    let pool = e2e_db_pool().await;
+    let community_id: uuid::Uuid =
+        sqlx::query_scalar("SELECT community_id FROM channels WHERE id = $1")
+            .bind(channel_uuid)
+            .fetch_one(&pool)
+            .await
+            .expect("read DM community");
+    let removed = sqlx::query(
+        r#"
+        UPDATE channel_members
+        SET removed_at = NOW(), removed_by = $4, hidden_at = NOW()
+        WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3 AND removed_at IS NULL
+        "#,
+    )
+    .bind(community_id)
+    .bind(channel_uuid)
+    .bind(b_pubkey.as_slice())
+    .bind(keys_a.public_key().to_bytes().as_slice())
+    .execute(&pool)
+    .await
+    .expect("soft-remove B fixture");
+    assert_eq!(removed.rows_affected(), 1, "fixture must remove B once");
+
+    // This rejection seeds the relay's negative membership cache for B.
+    let blocked = post_rest_message(&keys_b, &channel_id, "blocked-before-dm-recovery").await;
+    assert!(
+        !blocked["accepted"].as_bool().unwrap_or(false),
+        "removed B must be rejected before recovery: {blocked}"
+    );
+
+    post_signed_event(
+        &keys_a,
+        41010,
+        vec![Tag::parse(["p", &b_pubkey_hex]).unwrap()],
+    )
+    .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or(Duration::ZERO);
+        assert!(
+            !remaining.is_zero(),
+            "B did not receive a live kind:44100 recovery notification"
+        );
+        match client_b
+            .recv_event(remaining)
+            .await
+            .expect("receive membership recovery notification")
+        {
+            RelayMessage::Event {
+                subscription_id,
+                event,
+            } if subscription_id == sid_membership
+                && event.kind == Kind::Custom(44100)
+                && event.tags.iter().any(|tag| {
+                    let values = tag.as_slice();
+                    values.len() >= 2 && values[0] == "h" && values[1] == channel_id
+                }) =>
+            {
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let membership: MembershipRemovalState = sqlx::query_as(
+        r#"
+            SELECT removed_at, removed_by, hidden_at
+            FROM channel_members
+            WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3
+            "#,
+    )
+    .bind(community_id)
+    .bind(channel_uuid)
+    .bind(b_pubkey.as_slice())
+    .fetch_one(&pool)
+    .await
+    .expect("read recovered membership");
+    assert_eq!(membership, (None, None, None));
+
+    let accepted = post_rest_message(&keys_b, &channel_id, "accepted-after-dm-recovery").await;
+    assert!(
+        accepted["accepted"].as_bool().unwrap_or(false),
+        "recovery must evict B's cached rejection: {accepted}"
+    );
+
     client_b.disconnect().await.expect("disconnect B");
 }
 

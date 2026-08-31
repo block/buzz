@@ -29,8 +29,8 @@ use crate::webhook_secret;
 
 use super::ingest::{extract_channel_id, IngestAuth, IngestError, IngestResult};
 use super::side_effects::{
-    emit_group_discovery_events, emit_membership_notification, emit_system_message,
-    publish_dm_visibility_snapshot,
+    emit_dm_membership_recovery_side_effects, emit_group_discovery_events,
+    emit_membership_notification, emit_system_message, publish_dm_visibility_snapshot,
 };
 
 /// Route a command-kind event to the appropriate handler.
@@ -346,11 +346,14 @@ async fn handle_dm_open(
 
     // 4. Execute: open_dm
     let all_refs: Vec<&[u8]> = all_bytes.iter().map(|b| b.as_slice()).collect();
-    let (channel, was_created) = state
+    let opened = state
         .db
         .open_dm(tenant.community(), &all_refs, &self_bytes)
         .await
         .map_err(|e| IngestError::Internal(format!("error: db open_dm: {e}")))?;
+    let channel = opened.channel;
+    let was_created = opened.was_created;
+    let restored_participants = opened.restored_participants;
 
     // Finalize the idempotency record after the separate mutation succeeds.
     tx.commit()
@@ -406,6 +409,15 @@ async fn handle_dm_open(
             }
         }
     } else {
+        emit_dm_membership_recovery_side_effects(
+            tenant,
+            state,
+            channel.id,
+            &restored_participants,
+            &self_bytes,
+        )
+        .await;
+
         // Re-open of an existing DM cleared the caller's hidden_at; refresh
         // their NIP-DV snapshot so the DM reappears in the sidebar.
         if let Err(e) = publish_dm_visibility_snapshot(tenant, state, &self_bytes).await {
@@ -507,11 +519,14 @@ async fn handle_dm_add_member(
 
     // 6. Execute: open_dm with expanded set (creates NEW DM — DM sets are immutable)
     let all_refs: Vec<&[u8]> = all_bytes.iter().map(|b| b.as_slice()).collect();
-    let (new_channel, was_created) = state
+    let opened = state
         .db
         .open_dm(tenant.community(), &all_refs, &self_bytes)
         .await
         .map_err(|e| IngestError::Internal(format!("error: db open_dm: {e}")))?;
+    let new_channel = opened.channel;
+    let was_created = opened.was_created;
+    let restored_participants = opened.restored_participants;
 
     // Finalize the idempotency record after the separate mutation succeeds.
     tx.commit()
@@ -549,6 +564,15 @@ async fn handle_dm_add_member(
                 warn!("DM add_member: membership notification failed: {e}");
             }
         }
+    } else {
+        emit_dm_membership_recovery_side_effects(
+            tenant,
+            state,
+            new_channel.id,
+            &restored_participants,
+            &self_bytes,
+        )
+        .await;
     }
 
     // 8. Return response

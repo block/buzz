@@ -2341,7 +2341,7 @@ impl Db {
         community_id: CommunityId,
         pubkeys: &[&[u8]],
         created_by: &[u8],
-    ) -> Result<(channel::ChannelRecord, bool)> {
+    ) -> Result<dm::OpenDmResult> {
         dm::open_dm(&self.pool, community_id, pubkeys, created_by).await
     }
 

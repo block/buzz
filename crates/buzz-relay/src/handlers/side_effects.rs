@@ -934,8 +934,33 @@ pub async fn emit_membership_notification(
     })
     .to_string();
 
+    // A member can be removed and restored in the same second as the original
+    // add. Because these relay-signed notifications otherwise have identical
+    // kind, content, tags, and timestamp, Nostr gives them the same event id and
+    // `insert_event` suppresses the recovery fan-out as a duplicate. Advance
+    // past the latest notification for this target/channel pair so every real
+    // membership transition remains observable by live clients.
+    let now = nostr::Timestamp::now().as_secs();
+    let previous = state
+        .db
+        .query_events(&buzz_db::event::EventQuery {
+            kinds: Some(vec![notification_kind as i32]),
+            pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+            p_tag_hex: Some(target_hex.clone()),
+            custom_tag: Some(("h".to_owned(), channel_id_str.clone())),
+            limit: Some(1),
+            global_only: true,
+            ..buzz_db::event::EventQuery::for_community(tenant.community())
+        })
+        .await?;
+    let created_at = previous
+        .first()
+        .map(|event| (event.event.created_at.as_secs() + 1).max(now))
+        .unwrap_or(now);
+
     let event = EventBuilder::new(Kind::Custom(notification_kind as u16), content)
         .tags([p_tag, h_tag])
+        .custom_created_at(nostr::Timestamp::from(created_at))
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign membership notification: {e}"))?;
 
@@ -1669,12 +1694,6 @@ async fn handle_edit_metadata(
                             // remove/re-add uses to recover. Humans self-heal via the re-emitted
                             // kind:39000 discovery, so this is intentionally agent-scoped.
                             //
-                            // Known limitation: emit_membership_notification builds a created_at=now
-                            // event with no nonce, and insert_event skips fan-out on a duplicate id.
-                            // Four sub-second toggles (archive->unarchive->archive->unarchive) on the
-                            // same channel by the same actor could collide ids and skip a fan-out.
-                            // Not reachable in practice — unarchive has a single human-driven caller;
-                            // the reaper only auto-archives — so we don't engineer around it.
                             for member in
                                 state.db.get_members(tenant.community(), channel_id).await?
                             {
@@ -3442,6 +3461,61 @@ pub async fn publish_nipia_archival_list(
     anyhow::bail!(
         "failed to publish kind:{KIND_IA_ARCHIVED_LIST} after {MAX_REPLACEMENT_ATTEMPTS} concurrent replacements"
     )
+}
+
+/// Refresh relay and client state after an existing DM repairs inactive
+/// participant memberships.
+pub async fn emit_dm_membership_recovery_side_effects(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    restored_participants: &[Vec<u8>],
+    actor: &[u8],
+) {
+    if restored_participants.is_empty() {
+        return;
+    }
+
+    for participant in restored_participants {
+        state.invalidate_membership(tenant, channel_id, participant);
+    }
+
+    if let Err(error) = emit_group_discovery_events(tenant, state, channel_id).await {
+        warn!(
+            channel = %channel_id,
+            error = %error,
+            "DM membership recovery discovery emission failed"
+        );
+    }
+
+    for participant in restored_participants {
+        if let Err(error) = emit_membership_notification(
+            tenant,
+            state,
+            channel_id,
+            participant,
+            actor,
+            KIND_MEMBER_ADDED_NOTIFICATION,
+        )
+        .await
+        {
+            warn!(
+                channel = %channel_id,
+                participant = %hex::encode(participant),
+                error = %error,
+                "DM membership recovery notification failed"
+            );
+        }
+
+        if let Err(error) = publish_dm_visibility_snapshot(tenant, state, participant).await {
+            warn!(
+                channel = %channel_id,
+                participant = %hex::encode(participant),
+                error = %error,
+                "DM membership recovery visibility snapshot failed"
+            );
+        }
+    }
 }
 
 /// NIP-DV: publish the relay-signed, per-viewer DM visibility snapshot for
