@@ -1,5 +1,5 @@
 import * as React from "react";
-import { EllipsisVertical, OctagonX, Settings2 } from "lucide-react";
+import { Bot, EllipsisVertical, OctagonX, Settings2 } from "lucide-react";
 import {
   consumePendingSnapshotImport,
   subscribeSnapshotImport,
@@ -8,6 +8,7 @@ import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { AgentDialog } from "./AgentDialog";
+import { ConnectHermesProfilesDialog } from "./ConnectHermesProfilesDialog";
 import { PersonaCatalogDialog } from "./PersonaCatalogDialog";
 import { PersonaDeleteDialog } from "./PersonaDeleteDialog";
 import { PersonaShareDialog } from "./PersonaShareDialog";
@@ -49,6 +50,11 @@ export function AgentsView() {
   const fullAiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const compactActionsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [isAiDefaultsOpen, setIsAiDefaultsOpen] = React.useState(false);
+  const [isHermesConnectOpen, setIsHermesConnectOpen] = React.useState(false);
+  const hermesAvailable = (personas.acpRuntimesQuery.data ?? []).some(
+    (runtime) =>
+      runtime.id === "hermes" && runtime.availability === "available",
+  );
 
   function openUnifiedCatalog() {
     personas.prepareCreate();
@@ -137,6 +143,17 @@ export function AgentsView() {
             action={
               <>
                 <div className="flex flex-wrap justify-end gap-2 [@container(max-width:40rem)]:hidden">
+                  {hermesAvailable ? (
+                    <Button
+                      data-testid="connect-hermes-profiles-button"
+                      onClick={() => setIsHermesConnectOpen(true)}
+                      size="sm"
+                      variant="outline"
+                    >
+                      <Bot />
+                      Connect Hermes profiles
+                    </Button>
+                  ) : null}
                   <Button
                     data-testid="agent-defaults-button"
                     ref={fullAiDefaultsTriggerRef}
@@ -179,6 +196,14 @@ export function AgentsView() {
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
+                    {hermesAvailable ? (
+                      <DropdownMenuItem
+                        onSelect={() => setIsHermesConnectOpen(true)}
+                      >
+                        <Bot />
+                        Connect Hermes profiles
+                      </DropdownMenuItem>
+                    ) : null}
                     <DropdownMenuItem
                       onSelect={() => {
                         openAiDefaults(compactActionsTriggerRef.current);
@@ -299,6 +324,10 @@ export function AgentsView() {
         onOpenChange={setAiDefaultsDialogOpen}
         open={isAiDefaultsOpen}
         returnFocusRef={aiDefaultsTriggerRef}
+      />
+      <ConnectHermesProfilesDialog
+        onOpenChange={setIsHermesConnectOpen}
+        open={isHermesConnectOpen}
       />
 
       {agents.agentToAddToChannel ? (
