@@ -3,6 +3,7 @@ import type { LeaveCommunityResult } from "@/features/communities/leaveCommunity
 import type { Community } from "@/features/communities/types";
 import type { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
+import type { OpenDmInput } from "@/shared/api/tauriChannels";
 import type {
   Channel,
   ChannelVisibility,
@@ -75,7 +76,7 @@ export type AppSidebarProps = {
   ) => void;
   onMarkAllChannelsRead: () => void;
   onBrowseChannels?: (onCreated?: (channelId: string) => void) => void;
-  onOpenDm: (input: { pubkeys: string[] }) => Promise<void>;
+  onOpenDm: (input: OpenDmInput) => Promise<void>;
   onUpdateCommunity: (
     id: string,
     updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,

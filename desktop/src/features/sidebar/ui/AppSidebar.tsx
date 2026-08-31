@@ -552,7 +552,10 @@ export function AppSidebar({
               data-testid="sidebar-scroll-content"
             >
               <AppSidebarPrimaryMenu
+                bestieRelayUrl={activeCommunity?.relayUrl}
+                currentPubkey={currentPubkey}
                 homeBadgeCount={homeBadgeCount}
+                onOpenDm={onOpenDm}
                 onSelectAgents={onSelectAgents}
                 onSelectHome={onSelectHome}
                 onSelectProjects={onSelectProjects}
