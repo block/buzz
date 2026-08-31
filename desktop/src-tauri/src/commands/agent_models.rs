@@ -8,21 +8,21 @@ use super::agent_model_process::run_agent_models_command;
 use super::managed_agent_definition::apply_model_provider_prompt_update;
 // The map-only lookup is reached solely from the base-URL helpers that exist for
 // their unit tests; discovery itself always goes through the process-env variant.
-#[cfg(test)]
-use super::agent_models_env::env_value;
 use super::agent_models_env::{
     effective_discovery_provider, env_or_process_value, redaction_env_with_value, DiscoveryProvider,
 };
+#[cfg(test)]
+use super::agent_models_env::{env_value, env_value_or_process_if_absent};
 use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRollback};
 
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, current_instance_id, discovery_env_with_baked_floor,
-        find_managed_agent_mut, known_acp_runtime, load_global_agent_config, load_managed_agents,
-        load_personas, managed_agent_avatar_url, missing_command_message, normalize_agent_args,
-        resolve_command, save_managed_agents, sync_managed_agent_processes, try_regenerate_nest,
-        AgentModelInfo, AgentModelsResponse, ManagedAgentRecord, UpdateManagedAgentRequest,
+        current_instance_id, discovery_env_with_baked_floor, find_managed_agent_mut,
+        known_acp_runtime, load_global_agent_config, load_managed_agents, load_personas,
+        managed_agent_avatar_url, missing_command_message, normalize_agent_args, resolve_command,
+        save_managed_agents, sync_managed_agent_processes, try_regenerate_nest, AgentModelInfo,
+        AgentModelsResponse, ManagedAgentRecord, UpdateManagedAgentRequest,
         UpdateManagedAgentResponse, DEFAULT_ACP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
@@ -692,8 +692,8 @@ async fn discover_anthropic_models(
 mod databricks;
 #[cfg(test)]
 use databricks::{
-    databricks_sign_in_required_error, databricks_static_token_error, is_databricks_provider,
-    should_start_interactive_auth,
+    databricks_models_response, databricks_sign_in_required_error, databricks_static_token_error,
+    is_databricks_provider, should_start_interactive_auth,
 };
 use databricks::{discover_databricks_models, DatabricksAuthIntent};
 

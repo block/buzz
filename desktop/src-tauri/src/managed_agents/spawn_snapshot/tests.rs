@@ -34,6 +34,12 @@ fn snapshot(
     snapshot_with_policy(record, personas, teams, workspace_relay, global, false)
 }
 
+/// `snapshot` with the fixed no-persona/no-team/default-global shape the effort
+/// tests share, so their call sites read as `snap(&record)` instead of wrapping.
+fn snap(record: &ManagedAgentRecord) -> serde_json::Value {
+    snapshot(record, &[], &[], "wss://ws.example", &Default::default())
+}
+
 fn record() -> ManagedAgentRecord {
     ManagedAgentRecord {
         pubkey: "p".repeat(64),
@@ -86,10 +92,12 @@ fn record() -> ManagedAgentRecord {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,
         relay_mesh: None,
+        effort_level: None,
     }
 }
 
@@ -109,6 +117,7 @@ fn persona(id: &str, runtime: Option<&str>, prompt: &str) -> AgentDefinition {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
@@ -925,3 +934,7 @@ fn openclaw_cap_crossing_parallelism_snapshots_differ() {
         "parallelism 8 (clamps to 5) and 3 (runs as 3) must produce different snapshots"
     );
 }
+
+#[cfg(test)]
+#[path = "tests_ext.rs"]
+mod ext;

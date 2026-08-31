@@ -5,7 +5,8 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::commands::agent_models_env::{
-    env_or_process_value, redaction_env_with_value, DiscoveryProvider,
+    env_or_process_value, env_value_or_process_if_absent, redaction_env_with_value,
+    DiscoveryProvider,
 };
 use crate::managed_agents::AgentModelInfo;
 use crate::managed_agents::AgentModelsResponse;
@@ -167,10 +168,14 @@ pub(super) async fn discover_databricks_models(
         None => return Ok(None),
     };
     let api_key = env_or_process_value(env, "DATABRICKS_TOKEN").unwrap_or_default();
+    let filter = env_value_or_process_if_absent(env, "DATABRICKS_MODEL_FILTER");
+    let parsed_filter = buzz_agent_pkg::config::DatabricksModelFilter::parse(filter.as_deref())
+        .map_err(|error| format!("invalid DATABRICKS_MODEL_FILTER: {error}"))?;
     let config = buzz_agent_pkg::config::Config::for_discovery(
         databricks_agent_provider(provider_name),
         api_key.clone(),
         host.clone(),
+        parsed_filter.clone(),
     );
     let redaction_env = redaction_env_with_value(env, "DATABRICKS_TOKEN", &api_key);
 
@@ -230,11 +235,30 @@ pub(super) async fn discover_databricks_models(
         }
     };
 
-    if entries.is_empty() {
+    databricks_models_response(
+        provider_name,
+        entries,
+        selected_model,
+        parsed_filter.as_ref(),
+    )
+    .map(Some)
+}
+
+/// When a catalog query fails, Desktop reports the catalog error to the UI and
+/// does not fall through to subprocess discovery, so the filter cannot be
+/// bypassed by a second model source.
+pub(super) fn databricks_models_response(
+    provider_name: &str,
+    entries: Vec<buzz_agent_pkg::ModelEntry>,
+    selected_model: Option<String>,
+    filter: Option<&buzz_agent_pkg::config::DatabricksModelFilter>,
+) -> Result<AgentModelsResponse, String> {
+    let entries_are_empty = entries.is_empty();
+    if entries_are_empty && filter.is_none() {
         return Err("Databricks model discovery returned no models".to_string());
     }
 
-    Ok(Some(AgentModelsResponse {
+    Ok(AgentModelsResponse {
         agent_name: provider_name.trim().to_string(),
         agent_version: "models-api".to_string(),
         models: entries
@@ -247,8 +271,8 @@ pub(super) async fn discover_databricks_models(
             .collect(),
         agent_default_model: None,
         selected_model,
-        supports_switching: true,
-    }))
+        supports_switching: !entries_are_empty,
+    })
 }
 
 fn format_redacted_error(

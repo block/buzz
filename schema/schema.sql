@@ -219,9 +219,9 @@ CREATE TABLE events (
     -- Privacy: encrypted/private routing wrappers and p-gated membership notices
     -- must never be discoverable through NIP-50 full-text search. NULL tsvector
     -- never matches `@@`.
-    -- Keep in sync with migrations (final state: 0001 + 0005 + 0009).
+    -- Keep in sync with migrations (final state: 0001 + 0005 + 0014 + 0033).
     search_tsv  TSVECTOR GENERATED ALWAYS AS (
-        CASE WHEN kind IN (1059, 30300, 30350, 30622, 44100, 44101, 44200) THEN NULL::tsvector
+        CASE WHEN kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200) THEN NULL::tsvector
              ELSE to_tsvector('simple', content)
         END
     ) STORED,
@@ -680,7 +680,9 @@ CREATE TABLE moderation_reports (
     -- Reporter's optional free-text context (mod-queue-only; never public).
     note                TEXT,
     status              TEXT NOT NULL DEFAULT 'open'
-                        CHECK (status IN ('open', 'resolved', 'dismissed', 'escalated')),
+                        CHECK (status IN ('open', 'processing', 'resolved', 'dismissed', 'escalated')),
+    -- Non-null when status='processing': the relay_admin_actions row that claimed this report.
+    active_action_id    UUID,
     resolved_by         BYTEA,
     resolved_at         TIMESTAMPTZ,
     -- moderation_actions row that resolved this report, if any.
@@ -762,6 +764,9 @@ CREATE TABLE moderation_actions (
     -- NIP-OA: which principal matched a ban ('self' | 'owner'); audit-only,
     -- the client never learns which.
     matched_principal TEXT CHECK (matched_principal IS NULL OR matched_principal IN ('self', 'owner')),
+    -- Deployment authority type for HTTP-initiated actions.
+    actor_authority   TEXT NOT NULL DEFAULT 'community'
+                      CHECK (actor_authority IN ('community', 'relay_operator', 'relay_moderator')),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (community_id, id),
     FOREIGN KEY (community_id, channel_id) REFERENCES channels (community_id, id)
@@ -829,6 +834,8 @@ CREATE TABLE product_feedback (
     tags JSONB NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(tags) = 'array'),
     event_created_at TIMESTAMPTZ NOT NULL,
     received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Operator-managed lifecycle status.
+    status TEXT NOT NULL DEFAULT 'new' CHECK (status IN ('new', 'reviewed', 'archived')),
     UNIQUE (event_id)
 );
 CREATE INDEX idx_product_feedback_received
@@ -920,7 +927,7 @@ BEGIN
     -- Keep this allowlist identical to the relay's validated NIP-PL descriptor.
     -- Centralizing it on the events table covers every durable producer,
     -- including internal paths that bypass live dispatch.
-    IF NEW.kind IN (7, 9, 1059, 40007, 46010) THEN
+    IF NEW.kind IN (9, 40002, 45001, 45003) THEN
         PERFORM pg_advisory_xact_lock_shared(
             hashtextextended('buzz_push_gate:' || NEW.community_id::text, 0));
         IF EXISTS (
@@ -989,6 +996,85 @@ CREATE CONSTRAINT TRIGGER events_refresh_channel_ttl
 AFTER INSERT ON events
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW EXECUTE FUNCTION refresh_channel_ttl_after_event_insert();
+
+-- Channel roster snapshot fence (keep in sync with migrations/0032).
+-- Prevent mixed-version relay pods from publishing a stale NIP-29 member
+-- snapshot after a newer canonical roster has been committed.
+--
+-- Old binaries already serialize kind 39002 replacement on the replacement
+-- advisory key. This trigger adds the channel-membership key at INSERT time,
+-- after that canonical key, and validates every p tag against the current
+-- active membership set and roles. New binaries take both keys in the same
+-- order before capture and replacement. Thus old and new writers remain
+-- compatible during a rolling deploy.
+CREATE OR REPLACE FUNCTION guard_channel_roster_snapshot()
+RETURNS TRIGGER AS $$
+DECLARE
+    canonical_members TEXT[];
+    snapshot_members TEXT[];
+BEGIN
+    IF NEW.kind <> 39002 OR NEW.channel_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'buzz_channel_membership:' || NEW.community_id::text || ':' || NEW.channel_id::text,
+        0
+    ));
+
+    SELECT COALESCE(
+               array_agg(encode(cm.pubkey, 'hex') || ':' || cm.role::text ORDER BY cm.pubkey),
+               ARRAY[]::TEXT[]
+           )
+      INTO canonical_members
+      FROM channel_members cm
+     WHERE cm.community_id = NEW.community_id
+       AND cm.channel_id = NEW.channel_id
+       AND cm.removed_at IS NULL;
+
+    -- A roster is canonical only when every p tag uses the emitted four-field
+    -- shape, contains a 32-byte hex pubkey and valid authoritative role, has no
+    -- duplicate members, and exactly matches the active membership rows.
+    IF EXISTS (
+        SELECT 1
+          FROM jsonb_array_elements(NEW.tags) AS roster_tag(tag_json)
+         WHERE roster_tag.tag_json->>0 = 'p'
+           AND (
+               jsonb_array_length(roster_tag.tag_json) <> 4
+               OR COALESCE(roster_tag.tag_json->>1, '') !~ '^[0-9a-fA-F]{64}$'
+               OR roster_tag.tag_json->>2 <> ''
+               OR COALESCE(roster_tag.tag_json->>3, '') NOT IN ('owner', 'admin', 'bot', 'member', 'guest')
+           )
+    ) THEN
+        RAISE EXCEPTION 'kind 39002 roster contains an invalid p tag'
+            USING ERRCODE = '23514';
+    END IF;
+
+    SELECT COALESCE(
+               array_agg(
+                   lower((roster_tag.tag_json->>1)) || ':' || (roster_tag.tag_json->>3)
+                   ORDER BY decode((roster_tag.tag_json->>1), 'hex')
+               ),
+               ARRAY[]::TEXT[]
+           )
+      INTO snapshot_members
+      FROM jsonb_array_elements(NEW.tags) AS roster_tag(tag_json)
+     WHERE roster_tag.tag_json->>0 = 'p';
+
+    IF snapshot_members IS DISTINCT FROM canonical_members THEN
+        RAISE EXCEPTION 'kind 39002 roster does not match canonical channel membership'
+            USING ERRCODE = '23514';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events;
+CREATE TRIGGER trg_events_guard_channel_roster_snapshot
+    BEFORE INSERT ON events
+    FOR EACH ROW EXECUTE FUNCTION guard_channel_roster_snapshot();
+
 
 -- Replica-fence floor guard (keep in sync with migrations/0021). A deferred
 -- constraint trigger re-checks, inside COMMIT processing, that channel-bearing
@@ -1120,6 +1206,8 @@ CREATE TABLE replica_heartbeat (
     id    smallint PRIMARY KEY CHECK (id = 1),
     epoch uuid     NOT NULL DEFAULT gen_random_uuid(),
     token bigint   NOT NULL DEFAULT 0
+) WITH (
+    vacuum_truncate = false
 );
 
 INSERT INTO replica_heartbeat (id) VALUES (1);
@@ -1668,3 +1756,142 @@ SELECT attach_community_write_fence('users');
 SELECT attach_community_write_fence('workflow_approvals');
 SELECT attach_community_write_fence('workflow_runs');
 SELECT attach_community_write_fence('workflows');
+
+-- ── Relay operator/moderator roster ──────────────────────────────────────────
+-- Deployment-level principals staffed via the admin API. Config-backed operators
+-- (RELAY_OPERATOR_PUBKEYS, RELAY_OWNER_PUBKEY owner-fallback) are NOT seeded here;
+-- they are authoritative in config and outrank any DB row.
+
+CREATE TABLE relay_operators (
+    pubkey      BYTEA NOT NULL PRIMARY KEY CHECK (length(pubkey) = 32),
+    role        TEXT NOT NULL CHECK (role IN ('operator', 'moderator')),
+    added_by    BYTEA NOT NULL CHECK (length(added_by) = 32),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+INSERT INTO _operator_global_tables (table_name, reason) VALUES
+    ('relay_operators', 'deployment-global operator/moderator roster; no community_id intentionally');
+
+-- ── Relay admin actions (HTTP enforcement state machine) ──────────────────────
+-- One row per HTTP report-resolution enforcement action. Tracks the durable
+-- state machine from claim → enforcing → succeeded|failed|cancelled.
+
+CREATE TABLE relay_admin_actions (
+    id              UUID NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
+    report_id       UUID NOT NULL,
+    report_community_id UUID NOT NULL,
+    -- Client-generated idempotency key (signed in NIP-98 request body).
+    request_id      UUID NOT NULL,
+    -- Principal who claimed the report.
+    actor_pubkey    BYTEA NOT NULL CHECK (length(actor_pubkey) = 32),
+    actor_role      TEXT NOT NULL CHECK (actor_role IN ('operator', 'moderator')),
+    -- The enforcement action requested.
+    action          TEXT NOT NULL,
+    reason          TEXT,
+    -- Timeout expiration for timeout actions; NULL otherwise.
+    timeout_until   TIMESTAMPTZ,
+    -- Durable state machine: pending → enforcing → succeeded|failed|cancelled.
+    state           TEXT NOT NULL DEFAULT 'pending'
+                    CHECK (state IN ('pending', 'enforcing', 'succeeded', 'failed', 'cancelled')),
+    -- Step marker: the last durably committed mutation step (NULL = none yet).
+    -- Values: 'mutation_committed' (core DB mutation done), 'artifacts_done' (tombstone/notice done).
+    step_marker     TEXT CHECK (step_marker IN ('mutation_committed', 'artifacts_done')),
+    -- Principal who cancelled a pre-mutation failed action; NULL until cancelled.
+    -- Attributes the cancel transition on the action row itself, mirroring
+    -- moderation_reports.resolved_by for report resolution.
+    cancelled_by    BYTEA CHECK (cancelled_by IS NULL OR length(cancelled_by) = 32),
+    -- Error from the last failure, if any.
+    error_message   TEXT,
+    -- Per-action exclusive lease (migration 0037): fences concurrent same-request
+    -- retries and lets the recovery worker claim/re-drive stranded actions.
+    action_lease_token      UUID,
+    action_lease_expires_at TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Report-scoped idempotency: one action per (report, request_id).
+    UNIQUE (report_community_id, report_id, request_id),
+    FOREIGN KEY (report_community_id, report_id)
+        REFERENCES moderation_reports (community_id, id)
+);
+
+CREATE INDEX idx_relay_admin_actions_report
+    ON relay_admin_actions (report_community_id, report_id);
+CREATE INDEX idx_relay_admin_actions_state
+    ON relay_admin_actions (state)
+    WHERE state IN ('pending', 'enforcing');
+-- Recovery worker (migration 0037): find stranded actions by lease expiry.
+CREATE INDEX idx_relay_admin_actions_lease
+    ON relay_admin_actions (action_lease_expires_at)
+    WHERE state IN ('pending', 'enforcing');
+
+INSERT INTO _operator_global_tables (table_name, reason) VALUES
+    ('relay_admin_actions', 'deployment-global enforcement state machine; community_id is embedded in report FK');
+
+-- ── Relay admin outbox (durable enforcement delivery) ────────────────────────
+-- Transactional outbox for durable artifact/notice delivery.
+
+CREATE TABLE relay_admin_outbox (
+    id          UUID NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
+    action_id   UUID NOT NULL REFERENCES relay_admin_actions(id),
+    -- Delivery task type: 'tombstone' | 'system_message' | 'reporter_notice'.
+    task_type   TEXT NOT NULL,
+    -- Task payload (JSON).
+    payload     JSONB NOT NULL DEFAULT '{}'::jsonb,
+    -- Lease-based delivery: held_by identifies the worker pod.
+    held_by     TEXT,
+    lease_expires_at TIMESTAMPTZ,
+    -- Delivery state: pending → delivered | failed.
+    state       TEXT NOT NULL DEFAULT 'pending'
+                CHECK (state IN ('pending', 'delivered', 'failed')),
+    -- Deduplication key: prevents re-creating an artifact after delivery.
+    dedup_key   TEXT UNIQUE,
+    error_message TEXT,
+    -- Retryable delivery with backoff (migration 0037): failures reschedule via
+    -- retry_after rather than terminating immediately.
+    attempt_count INT NOT NULL DEFAULT 0,
+    retry_after   TIMESTAMPTZ,
+    -- Per-claim ownership fence (migration 0038): completion/failure updates
+    -- require the token written at claim time, so a stale worker cannot overwrite
+    -- a newer worker's terminal update.
+    outbox_claim_token UUID,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_relay_admin_outbox_action
+    ON relay_admin_outbox (action_id);
+CREATE INDEX idx_relay_admin_outbox_pending
+    ON relay_admin_outbox (retry_after, created_at)
+    WHERE state = 'pending';
+
+INSERT INTO _operator_global_tables (table_name, reason) VALUES
+    ('relay_admin_outbox', 'deployment-global enforcement artifact delivery queue');
+
+-- ── Relay operator audit (append-only roster mutation trail) ─────────────────
+-- One row per PUT/DELETE /operators/{pubkey} mutation. The roster is the
+-- deployment-wide root of trust and its mutations overwrite/remove in place;
+-- this append-only trail records who granted, elevated, or revoked whom, and
+-- when, so privilege changes are as auditable as the enforcement actions those
+-- principals perform. Written only inside the upsert/delete transactions; no
+-- UPDATE/DELETE path.
+
+CREATE TABLE relay_operator_audit (
+    id            UUID NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
+    actor_pubkey  BYTEA NOT NULL CHECK (length(actor_pubkey) = 32),
+    target_pubkey BYTEA NOT NULL CHECK (length(target_pubkey) = 32),
+    op            TEXT NOT NULL CHECK (op IN ('grant', 'revoke')),
+    prev_role     TEXT CHECK (prev_role IN ('operator', 'moderator')),
+    new_role      TEXT CHECK (new_role IN ('operator', 'moderator')),
+    -- created_at is wall-clock occurrence time (clock_timestamp()), informational
+    -- only — not monotonic, so it never establishes order. `seq` is the sole
+    -- chronology key: mutations write their audit row under the serializing lock,
+    -- so identity order equals the true privilege chain. Reads use ORDER BY seq.
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    seq           BIGINT GENERATED ALWAYS AS IDENTITY
+);
+
+CREATE INDEX idx_relay_operator_audit_target
+    ON relay_operator_audit (target_pubkey, seq);
+
+INSERT INTO _operator_global_tables (table_name, reason) VALUES
+    ('relay_operator_audit', 'deployment-global append-only roster mutation audit trail; no community_id intentionally');

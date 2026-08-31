@@ -6,6 +6,7 @@ import { buildOutgoingMessage } from "@/features/messages/lib/imetaMediaMarkdown
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
+import { isMentionCodeContext } from "@/features/messages/lib/mentionCodeContext";
 import { useMentions } from "@/features/messages/lib/useMentions";
 import {
   hasMentionClipboardHtml,
@@ -323,7 +324,9 @@ export function ForumComposer({
         return;
       }
 
-      const { handled, suggestion } = mentions.handleMentionKeyDown(event);
+      const { handled, suggestion } = mentions.handleMentionKeyDown(event, {
+        isCodeContext: () => isMentionCodeContext(richText.editor),
+      });
       if (handled) {
         if (suggestion) {
           applyMentionInsert(suggestion);
@@ -343,6 +346,7 @@ export function ForumComposer({
       channelLinks.handleChannelKeyDown,
       applyChannelInsert,
       mentions.handleMentionKeyDown,
+      richText.editor,
       applyMentionInsert,
       linkEditor.isCardOpen,
       linkEditor.focusCardFirstControl,
@@ -527,6 +531,7 @@ export function ForumComposer({
                 mentions.isMentionOpen ? mentions.suggestions : []
               }
               onChannelSelect={applyChannelInsert}
+              onMentionDismiss={mentions.cancelMentionAutocomplete}
               onMentionFetchMore={mentions.fetchMoreSuggestions}
               onMentionSelect={applyMentionInsert}
               position={autocompletePosition}
@@ -609,6 +614,7 @@ export function ForumComposer({
                 ) : undefined
               }
               formattingDisabled={Boolean(disabled || isSubmissionPending)}
+              gifMediaController={media}
               isEmojiPickerOpen={isEmojiPickerOpen}
               isFormattingOpen={isFormattingOpen}
               isSending={Boolean(isSending || isSubmissionPending)}

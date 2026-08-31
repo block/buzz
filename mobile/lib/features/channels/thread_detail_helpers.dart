@@ -1,5 +1,67 @@
 part of 'thread_detail_page.dart';
 
+const _threadTailScrollTolerance = 0.5;
+
+// Keep the direct-position correction finite in case the viewport cannot
+// expose its tail (for example, continuously changing media dimensions).
+const _latestTailCorrectionLimit = 8;
+
+Widget _trackActiveThreadScrollPosition(
+  Widget child,
+  ObjectRef<ScrollPosition?> activePosition,
+) => Builder(
+  builder: (context) {
+    activePosition.value = Scrollable.of(context).position;
+    return child;
+  },
+);
+
+bool _jumpActiveThreadScrollToTail(
+  ObjectRef<ScrollPosition?> activePosition,
+  bool Function()? testOverride,
+) {
+  if (testOverride != null) return testOverride();
+  final position = activePosition.value;
+  if (position == null || !position.hasContentDimensions) return false;
+  // Moving the one active viewport avoids a second list and its visible bounce.
+  position.jumpTo(position.maxScrollExtent);
+  return true;
+}
+
+Future<bool> _animateActiveThreadScrollToTail(
+  BuildContext context,
+  ObjectRef<ScrollPosition?> activePosition,
+) async {
+  final position = activePosition.value;
+  if (position == null || !position.hasContentDimensions) return false;
+  if (MediaQuery.disableAnimationsOf(context)) {
+    position.jumpTo(position.maxScrollExtent);
+    return true;
+  }
+  await position.animateTo(
+    position.maxScrollExtent,
+    duration: jumpToLatestScrollDuration,
+    curve: jumpToLatestScrollCurve,
+  );
+  return true;
+}
+
+/// Returns whether the thread is at its effective scroll end.
+///
+/// Item positions can lag or briefly oscillate during lazy layout, so an exact
+/// end-of-scroll measurement remains authoritative even while the tail item
+/// reports outside the visible boundary.
+@visibleForTesting
+bool threadTailIsAtEffectiveEnd({
+  required bool tailIsLaidOut,
+  required bool tailIsVisible,
+  required double? extentAfter,
+}) =>
+    tailIsVisible ||
+    (tailIsLaidOut &&
+        extentAfter != null &&
+        extentAfter <= _threadTailScrollTolerance);
+
 int _threadTailIndex(int replyCount) => replyCount;
 
 void _resumeThreadTailFollow({

@@ -7,6 +7,8 @@ mod filter;
 mod observer;
 mod pool;
 mod pool_lifecycle;
+mod prompt_framing;
+mod prompt_project;
 mod queue;
 mod relay;
 mod setup_mode;
@@ -19,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use acp::{AcpClient, EnvVar, McpServer};
-use anyhow::Result;
+use anyhow::{ensure, Context, Result};
 use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
     KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
@@ -65,6 +67,22 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Timeout for `buzz-acp authenticate`. Browser-based vendor auth can require
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+/// Resolve the process working directory for ACP session metadata and prompts.
+///
+/// `std::env::current_dir()` returns an absolute path on every supported
+/// platform. Keep the explicit invariant check so a future source cannot
+/// silently introduce a relative path, and surface resolution failures instead
+/// of substituting a misleading Unix-specific fallback.
+fn current_working_directory() -> Result<String> {
+    let cwd = std::env::current_dir().context("failed to resolve current working directory")?;
+    ensure!(
+        cwd.is_absolute(),
+        "current working directory is not absolute: {}",
+        cwd.display()
+    );
+    Ok(cwd.to_string_lossy().into_owned())
+}
 
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
@@ -274,7 +292,7 @@ pub(crate) async fn is_dm_channel(
     channel_id: Uuid,
     channel_info: &pool::ChannelInfoResolver,
 ) -> bool {
-    match channel_info.resolve(channel_id).await {
+    match channel_info.resolve_channel_metadata(channel_id).await {
         Some(info) => info.channel_type == "dm",
         None => {
             tracing::warn!(
@@ -1336,6 +1354,13 @@ fn handle_switch_model_control(
         tracing::warn!("observer switch_model control frame missing modelId");
         return;
     };
+    // Opaque per-pick correlator, echoed on every result frame so the Desktop
+    // can ignore a replayed result for an earlier pick. Optional: absent on
+    // older Desktop clients, in which case the frames simply carry no id.
+    let request_id = payload
+        .get("requestId")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
 
     // A turn is in flight for this channel iff a task_map entry exists. The
     // agent is moved out of the pool during a turn, so the control oneshot is
@@ -1352,7 +1377,10 @@ fn handle_switch_model_control(
         if signal_in_flight_task(
             pool,
             channel_id,
-            ControlSignal::SwitchModel(model_id.to_string()),
+            ControlSignal::SwitchModel {
+                model_id: model_id.to_string(),
+                request_id: request_id.clone(),
+            },
         ) {
             "sent"
         } else {
@@ -1360,7 +1388,7 @@ fn handle_switch_model_control(
         }
     } else {
         // Idle path: validate against the cached catalog before invalidating.
-        match pool.switch_idle_agent_model(channel_id, model_id) {
+        match pool.switch_idle_agent_model(channel_id, model_id, request_id.clone()) {
             IdleSwitchResult::Switched => "switched",
             IdleSwitchResult::UnsupportedModel => "unsupported_model",
             IdleSwitchResult::NoIdleAgent => "no_active_turn",
@@ -1381,6 +1409,9 @@ fn handle_switch_model_control(
                 "type": "switch_model",
                 "status": status,
                 "modelId": model_id,
+                // Echo the correlator on the immediate ack so a `sent` /
+                // `turn_ending` / idle-path terminal frame matches the pick.
+                "requestId": request_id,
             }),
         );
     }
@@ -2025,19 +2056,6 @@ async fn tokio_main() -> Result<()> {
     }
     let owner_cache = OwnerCache::new(startup_owner.clone());
 
-    // Relay `self` pubkey (NIP-11), used to recognize relay-signed workflow
-    // messages in the inbound author gate. Best-effort: `None` simply means
-    // workflow messages get no attributed-author exemption (pre-fix behavior),
-    // so a fetch failure degrades gracefully instead of blocking startup.
-    let relay_self: Option<String> = relay.rest_client().fetch_relay_self().await;
-    match &relay_self {
-        Some(pk) => tracing::info!("relay self pubkey: {pk}"),
-        None => tracing::warn!(
-            "relay self pubkey unavailable (NIP-11 fetch failed or no stable relay key) — \
-             relay-signed workflow messages will be dropped by the author gate"
-        ),
-    }
-
     let mut relay_observer_control_rx = None;
     let mut relay_observer_publisher_task = None;
     let mut relay_observer_publisher = None;
@@ -2173,6 +2191,7 @@ async fn tokio_main() -> Result<()> {
     }
 
     let base_prompt_content = config.base_prompt_content.take();
+    let cwd = current_working_directory()?;
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
         initial_message: config.initial_message.clone(),
@@ -2191,10 +2210,7 @@ async fn tokio_main() -> Result<()> {
             Some(include_str!("base_prompt.md"))
         },
         heartbeat_prompt: config.heartbeat_prompt.clone(),
-        cwd: std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-            .to_string_lossy()
-            .to_string(),
+        cwd,
         rest_client: relay.rest_client(),
         channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,
@@ -2479,6 +2495,9 @@ async fn tokio_main() -> Result<()> {
                         model_capabilities: None,
                         desired_model: config.model.clone(),
                         model_overridden: false,
+                        desired_model_request_id: None,
+                        desired_model_pending_ack: false,
+                        startup_effort: config.effort_level.clone(),
                         agent_name,
                         goose_system_prompt_supported: None,
                         protocol_version,
@@ -2850,31 +2869,7 @@ async fn tokio_main() -> Result<()> {
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
                             {
-                                // Relay-signed workflow messages (workflow
-                                // `send_message` actions) are authored by the
-                                // relay keypair, not the workflow owner — the
-                                // plain author gate would drop them and the
-                                // scheduled @mention would silently never wake
-                                // the agent. Gate them on their *attributed*
-                                // author (the `buzz:workflow-owner` tag — the
-                                // pubkey that created the workflow) instead.
-                                // See `workflow_attributed_author`
-                                // for the recognition + trust argument.
-                                let author = match workflow_attributed_author(
-                                    &buzz_event.event,
-                                    relay_self.as_deref(),
-                                ) {
-                                    Some(attributed) => {
-                                        tracing::debug!(
-                                            channel_id = %buzz_event.channel_id,
-                                            relay_author = %buzz_event.event.pubkey.to_hex(),
-                                            attributed_author = %attributed,
-                                            "relay-signed workflow message — gating on attributed author"
-                                        );
-                                        attributed
-                                    }
-                                    None => buzz_event.event.pubkey.to_hex(),
-                                };
+                                let author = buzz_event.event.pubkey.to_hex();
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
                                 // exercised by non-owner authors inside DMs.
@@ -3555,90 +3550,6 @@ fn event_mentions_agent(event: &nostr::Event, agent_pubkey_hex: &str) -> bool {
     })
 }
 
-/// If `event` is a relay-signed workflow message, return its *attributed*
-/// author for inbound author gating; otherwise `None`.
-///
-/// Workflow `send_message` actions are signed by the **relay keypair**
-/// (`event.pubkey` = the relay's NIP-11 `self` key), not by the human who owns
-/// the workflow — so the plain author gate would drop them even though they
-/// carry `p` tags meant to wake mentioned agents. The relay attributes the
-/// message to the **workflow owner** (the pubkey that created the workflow,
-/// `workflow.owner_pubkey` relay-side) via the explicit `buzz:workflow-owner`
-/// tag emitted by `workflow_sink.rs`, and it has already verified that owner's
-/// access to the destination channel before emitting the event.
-///
-/// Recognition requires ALL of the following, failing closed otherwise:
-/// 1. kind `9` (stream message) — the only kind the workflow sink emits;
-/// 2. a known, syntactically valid relay `self` pubkey (fetched from NIP-11
-///    at startup) — no `relay_self`, no exemption;
-/// 3. `event.pubkey` == relay `self`, with a **valid event signature**
-///    verified here. The relay verifies signatures on submission, but this
-///    gate re-checks locally so the exemption never rests on an upstream
-///    guarantee it can't see;
-/// 4. **exactly one** tag exactly equal to `["buzz:workflow", "true"]` — no
-///    duplicates, no extra fields, no other value;
-/// 5. **exactly one** tag exactly equal to `["buzz:workflow-owner", <pubkey>]`
-///    where the owner parses as a full pubkey — no duplicates, no extra
-///    fields. Mention `p` tags are never used for attribution, so who is
-///    @mentioned in the message text has no bearing on whose authority the
-///    gate evaluates.
-///
-/// The returned pubkey is gated exactly like a direct author: owner/sibling
-/// under `owner-only`, plus the explicit list under `allowlist`. A workflow
-/// owned by a random channel member therefore still cannot wake an
-/// owner-only agent.
-fn workflow_attributed_author(event: &nostr::Event, relay_self: Option<&str>) -> Option<String> {
-    // 1. Kind gate first — cheapest check, and everything below only makes
-    //    sense for the kind:9 messages the workflow sink emits.
-    if event.kind.as_u16() as u32 != KIND_STREAM_MESSAGE {
-        return None;
-    }
-
-    // 2. Relay identity must be known AND syntactically valid.
-    let relay_self = nostr::PublicKey::from_hex(relay_self?).ok()?;
-    if event.pubkey != relay_self {
-        return None;
-    }
-
-    // 4. Exactly one marker tag, exactly ["buzz:workflow", "true"]. Collect
-    //    every tag with the marker key so duplicates or shape/value mismatches
-    //    (extra fields, wrong value) disqualify instead of being skipped over.
-    let markers: Vec<&[String]> = event
-        .tags
-        .iter()
-        .map(|t| t.as_slice())
-        .filter(|s| s.first().map(|k| k.as_str()) == Some("buzz:workflow"))
-        .collect();
-    if markers.len() != 1 || markers[0] != ["buzz:workflow", "true"] {
-        return None;
-    }
-
-    // 5. Exactly one owner tag, exactly ["buzz:workflow-owner", <pubkey>].
-    //    The owner must parse as a full pubkey — not merely look hex-ish —
-    //    before it is fed into the owner/sibling/allowlist comparison.
-    let owners: Vec<&[String]> = event
-        .tags
-        .iter()
-        .map(|t| t.as_slice())
-        .filter(|s| s.first().map(|k| k.as_str()) == Some("buzz:workflow-owner"))
-        .collect();
-    let [owner_tag] = owners.as_slice() else {
-        return None;
-    };
-    let [_, owner_value] = owner_tag else {
-        return None;
-    };
-    let owner = nostr::PublicKey::from_hex(owner_value).ok()?;
-
-    // 3. Signature check last — it is the most expensive step, so only pay
-    //    for it once every structural requirement has already passed.
-    if event.verify().is_err() {
-        return None;
-    }
-
-    Some(owner.to_hex())
-}
-
 fn is_owner_control_command(
     event: &nostr::Event,
     kind_u32: u32,
@@ -3745,7 +3656,7 @@ fn try_native_steer(
     // channel context and the actor's profile in the original prompt,
     // duplicating it here would defeat the point of non-cancelling
     // steering (which is to inject only what's new).
-    let (header, closing) = queue::native_steer_framing();
+    let (tag, closing) = queue::native_steer_framing();
     let event_id_hex = event.id.to_hex();
     let be = queue::BatchEvent {
         event,
@@ -3753,7 +3664,13 @@ fn try_native_steer(
         received_at: std::time::Instant::now(),
     };
     let event_block = queue::format_event_block(channel_id, None, &be, None);
-    let body = format!("{header}\n\n[Buzz event: {prompt_tag}]\n{event_block}\n\n{closing}");
+    let new_message = prompt_framing::semantic_section(tag, "");
+    let event_section = prompt_framing::semantic_section_with_attributes(
+        "buzz-event",
+        &[("type", prompt_tag.as_str())],
+        &event_block,
+    );
+    let body = format!("{new_message}\n\n{event_section}\n\n{closing}");
 
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
     let request = pool::SteerRequest {
@@ -4098,6 +4015,7 @@ fn handle_prompt_result(
                     }
                     PromptOutcome::AgentExited => "the agent process exited".to_string(),
                     PromptOutcome::Error(e) => format!("{e}"),
+                    PromptOutcome::ProjectContextIndeterminate(reason) => reason.clone(),
                     _ => "repeated failures".to_string(),
                 };
                 let content = format!(
@@ -4130,6 +4048,7 @@ fn handle_prompt_result(
     let outcome_label = match &result.outcome {
         PromptOutcome::Ok(_) => "ok",
         PromptOutcome::Error(_) => "error",
+        PromptOutcome::ProjectContextIndeterminate(_) => "project_context_indeterminate",
         PromptOutcome::Timeout(TimeoutKind::Idle) => "idle_timeout",
         PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => "hard_timeout",
         PromptOutcome::AgentExited => "exited",
@@ -4289,6 +4208,16 @@ fn handle_prompt_result(
                 pid = harness_pid,
                 "agent_returned (cancelled)"
             );
+            pool.return_agent(result.agent);
+        }
+        PromptOutcome::ProjectContextIndeterminate(reason) => {
+            tracing::warn!(
+                agent = agent_index,
+                outcome = outcome_label,
+                reason,
+                "agent_returned (local project context indeterminate — pipe intact)"
+            );
+            emit_turn_error(&reason, None);
             pool.return_agent(result.agent);
         }
         PromptOutcome::Error(ref e) => {
@@ -4547,6 +4476,14 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_names_current_context_framing() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("UUID from `<context>`"));
+        assert!(prompt.contains("reply destination supplied in the `<context>` block"));
+        assert!(!prompt.contains("`[Context]`"));
+    }
+
+    #[test]
     fn shared_base_prompt_teaches_real_newlines_for_multiline_messages() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("pass real newline bytes through stdin"));
@@ -4565,6 +4502,14 @@ mod agent_draft_prompt_tests {
         assert!(prompt.contains("CI and live workflow evidence answer different questions"));
         assert!(prompt.contains("record the invariant in the same session"));
         assert!(prompt.contains("update the team's shared guidance"));
+    }
+
+    #[test]
+    fn shared_base_prompt_teaches_not_to_duplicate_projects() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("do **not** run `buzz projects create`"));
+        assert!(prompt.contains("buzz issues create --channel"));
+        assert!(prompt.contains("is not a Buzz repository"));
     }
 
     #[test]
@@ -4702,6 +4647,7 @@ struct PoolStartup {
     extra_env: Vec<(String, String)>,
     has_generated_codex_config: bool,
     model: Option<String>,
+    effort_level: Option<String>,
     observer: Option<observer::ObserverHandle>,
 }
 
@@ -4714,6 +4660,7 @@ impl PoolStartup {
             extra_env: config.persona_env_vars.clone(),
             has_generated_codex_config: config.has_generated_codex_config,
             model: config.model.clone(),
+            effort_level: config.effort_level.clone(),
             observer,
         }
     }
@@ -4781,6 +4728,9 @@ async fn initialize_agent_pool(
                             model_capabilities: None,
                             desired_model: startup.model.clone(),
                             model_overridden: false,
+                            desired_model_request_id: None,
+                            desired_model_pending_ack: false,
+                            startup_effort: startup.effort_level.clone(),
                             agent_name,
                             goose_system_prompt_supported: None,
                             protocol_version,
@@ -4988,10 +4938,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     use acp::{extract_model_config_options, extract_model_state};
 
     let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
-    let cwd = std::env::current_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-        .to_string_lossy()
-        .to_string();
+    let cwd = current_working_directory()?;
 
     // Spawn outside the timeout so we always own the child for cleanup.
     // `models` subcommand doesn't use persona packs — no extra env, no codex config.
@@ -5182,8 +5129,8 @@ mod heartbeat_base_prompt_tests {
     use super::*;
 
     // Pins the heartbeat dispatch path (dispatch_heartbeat, ~line 2359): a
-    // legacy agent WITH a base_prompt must get [Base] prepended to the
-    // heartbeat user message, composed as `[Base]\n{bp}\n\n{prompt}`. This is
+    // legacy agent WITH a base_prompt must get <base> prepended to the
+    // heartbeat user message. This is
     // the second half of the round-2 regression (the first being initial_message).
 
     fn heartbeat_standing() -> queue::StandingContext<'static> {
@@ -5196,12 +5143,12 @@ mod heartbeat_base_prompt_tests {
     #[test]
     fn test_heartbeat_legacy_agent_gets_base_prepended() {
         // protocol_version 1 + Some(base_prompt): heartbeat prompt is prefixed
-        // with the [Base] section exactly as the legacy session/new path would.
+        // with the <base> section exactly as the legacy session/new path would.
         let prompt = "[System: Heartbeat]\nrun feed get";
         let composed = pool::prepend_standing_for_legacy(1, &heartbeat_standing(), prompt);
         assert_eq!(
             composed,
-            "[Base]\nyou are a helpful agent\n\n[System: Heartbeat]\nrun feed get"
+            "<base>\nyou are a helpful agent\n</base>\n\n[System: Heartbeat]\nrun feed get"
         );
     }
 
@@ -5757,7 +5704,7 @@ mod author_gate_tests {
         assert_eq!(
             requests.load(Ordering::SeqCst),
             1,
-            "second resolution uses cache"
+            "author-gate DM classification resolves and caches channel metadata only"
         );
         server.abort();
     }
@@ -5792,273 +5739,6 @@ mod author_gate_tests {
             is_dm_channel(Uuid::new_v4(), &resolver(HashMap::new())).await,
             "an unresolvable channel type must be treated as a DM"
         );
-    }
-}
-
-#[cfg(test)]
-mod workflow_attributed_author_tests {
-    use super::*;
-    use nostr::{EventBuilder, Keys, Kind, Tag};
-
-    /// Build a kind:9 event signed by `signer` with the given extra tags.
-    fn make_event(signer: &Keys, tags: Vec<Tag>) -> nostr::Event {
-        EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), "wake up")
-            .tags(tags)
-            .sign_with_keys(signer)
-            .expect("sign test event")
-    }
-
-    fn workflow_tags(owner_hex: &str, mention_hex: &str) -> Vec<Tag> {
-        vec![
-            Tag::parse(["p", owner_hex]).unwrap(),
-            Tag::parse(["h", "3204e3f9-fd09-4e95-b749-76966794c287"]).unwrap(),
-            Tag::parse(["buzz:workflow", "true"]).unwrap(),
-            Tag::parse(["buzz:workflow-owner", owner_hex]).unwrap(),
-            Tag::parse(["p", mention_hex]).unwrap(),
-        ]
-    }
-
-    #[test]
-    fn relay_signed_workflow_message_attributes_to_workflow_owner_tag() {
-        let relay = Keys::generate();
-        let owner = Keys::generate().public_key().to_hex();
-        let agent = Keys::generate().public_key().to_hex();
-        let event = make_event(&relay, workflow_tags(&owner, &agent));
-        assert_eq!(
-            workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
-            Some(owner),
-            "a relay-signed buzz:workflow event must attribute to the \
-             buzz:workflow-owner tag, not any mentioned agent"
-        );
-    }
-
-    #[test]
-    fn attribution_ignores_p_tags_entirely() {
-        // Only the explicit buzz:workflow-owner tag attributes; p tags
-        // (owner attribution + mentions) must have no effect on the gate.
-        let relay = Keys::generate();
-        let someone = Keys::generate().public_key().to_hex();
-        let event = make_event(
-            &relay,
-            vec![
-                Tag::parse(["p", &someone]).unwrap(),
-                Tag::parse(["buzz:workflow", "true"]).unwrap(),
-            ],
-        );
-        assert_eq!(
-            workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
-            None,
-            "without a buzz:workflow-owner tag there is no attributed author, \
-             even when p tags are present"
-        );
-    }
-
-    #[test]
-    fn malformed_owner_tag_value_attributes_to_no_one() {
-        let relay = Keys::generate();
-        let event = make_event(
-            &relay,
-            vec![
-                Tag::parse(["buzz:workflow", "true"]).unwrap(),
-                Tag::parse(["buzz:workflow-owner", "not-a-pubkey"]).unwrap(),
-            ],
-        );
-        assert_eq!(
-            workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
-            None,
-            "a buzz:workflow-owner value that is not 64-hex must be rejected"
-        );
-    }
-
-    #[test]
-    fn no_relay_self_means_no_exemption() {
-        let relay = Keys::generate();
-        let owner = Keys::generate().public_key().to_hex();
-        let agent = Keys::generate().public_key().to_hex();
-        let event = make_event(&relay, workflow_tags(&owner, &agent));
-        assert_eq!(
-            workflow_attributed_author(&event, None),
-            None,
-            "without a known relay self pubkey the exemption must not apply (fail closed)"
-        );
-    }
-
-    #[test]
-    fn non_relay_author_gets_no_exemption_even_with_workflow_tag() {
-        // A member forging the buzz:workflow tag on their own event must not
-        // be able to attribute it to someone else via a p tag.
-        let forger = Keys::generate();
-        let relay = Keys::generate();
-        let owner = Keys::generate().public_key().to_hex();
-        let agent = Keys::generate().public_key().to_hex();
-        let event = make_event(&forger, workflow_tags(&owner, &agent));
-        assert_eq!(
-            workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
-            None,
-            "a buzz:workflow tag on a non-relay-signed event must be ignored"
-        );
-    }
-
-    #[test]
-    fn relay_signed_message_without_workflow_tag_gets_no_exemption() {
-        let relay = Keys::generate();
-        let owner = Keys::generate().public_key().to_hex();
-        let event = make_event(&relay, vec![Tag::parse(["p", &owner]).unwrap()]);
-        assert_eq!(
-            workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
-            None,
-            "relay-signed events without the buzz:workflow tag keep the plain author gate"
-        );
-    }
-
-    #[test]
-    fn workflow_message_without_owner_tag_attributes_to_no_one() {
-        let relay = Keys::generate();
-        let event = make_event(&relay, vec![Tag::parse(["buzz:workflow", "true"]).unwrap()]);
-        assert_eq!(
-            workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
-            None,
-            "a workflow message with no buzz:workflow-owner tag has no attributed \
-             author and must fall through to the plain (relay-pubkey) author gate"
-        );
-    }
-
-    #[test]
-    fn duplicate_marker_tags_disqualify() {
-        let relay = Keys::generate();
-        let owner = Keys::generate().public_key().to_hex();
-        let event = make_event(
-            &relay,
-            vec![
-                Tag::parse(["buzz:workflow", "true"]).unwrap(),
-                Tag::parse(["buzz:workflow", "true"]).unwrap(),
-                Tag::parse(["buzz:workflow-owner", &owner]).unwrap(),
-            ],
-        );
-        assert_eq!(
-            workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
-            None,
-            "more than one buzz:workflow marker tag must fail closed"
-        );
-    }
-
-    #[test]
-    fn marker_value_mismatch_disqualifies() {
-        let relay = Keys::generate();
-        let owner = Keys::generate().public_key().to_hex();
-        for bad_marker in [
-            Tag::parse(["buzz:workflow", "false"]).unwrap(),
-            Tag::parse(["buzz:workflow"]).unwrap(),
-            Tag::parse(["buzz:workflow", "true", "extra"]).unwrap(),
-        ] {
-            let event = make_event(
-                &relay,
-                vec![
-                    bad_marker.clone(),
-                    Tag::parse(["buzz:workflow-owner", &owner]).unwrap(),
-                ],
-            );
-            assert_eq!(
-                workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
-                None,
-                "marker tag {:?} is not exactly [\"buzz:workflow\", \"true\"] and must fail closed",
-                bad_marker.as_slice()
-            );
-        }
-    }
-
-    #[test]
-    fn duplicate_owner_tags_disqualify() {
-        // Two owner tags — even with identical values — are ambiguous
-        // provenance and must not attribute to anyone.
-        let relay = Keys::generate();
-        let owner = Keys::generate().public_key().to_hex();
-        let other = Keys::generate().public_key().to_hex();
-        for second_owner in [&owner, &other] {
-            let event = make_event(
-                &relay,
-                vec![
-                    Tag::parse(["buzz:workflow", "true"]).unwrap(),
-                    Tag::parse(["buzz:workflow-owner", &owner]).unwrap(),
-                    Tag::parse(["buzz:workflow-owner", second_owner]).unwrap(),
-                ],
-            );
-            assert_eq!(
-                workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
-                None,
-                "duplicate buzz:workflow-owner tags must fail closed"
-            );
-        }
-    }
-
-    #[test]
-    fn owner_tag_with_extra_fields_disqualifies() {
-        let relay = Keys::generate();
-        let owner = Keys::generate().public_key().to_hex();
-        let event = make_event(
-            &relay,
-            vec![
-                Tag::parse(["buzz:workflow", "true"]).unwrap(),
-                Tag::parse(["buzz:workflow-owner", &owner, "extra"]).unwrap(),
-            ],
-        );
-        assert_eq!(
-            workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
-            None,
-            "an owner tag with extra fields is not the exact shape the relay \
-             emits and must fail closed"
-        );
-    }
-
-    #[test]
-    fn wrong_kind_disqualifies() {
-        let relay = Keys::generate();
-        let owner = Keys::generate().public_key().to_hex();
-        let agent = Keys::generate().public_key().to_hex();
-        let event = EventBuilder::new(Kind::from(1u16), "wake up")
-            .tags(workflow_tags(&owner, &agent))
-            .sign_with_keys(&relay)
-            .expect("sign test event");
-        assert_eq!(
-            workflow_attributed_author(&event, Some(&relay.public_key().to_hex())),
-            None,
-            "only kind:9 stream messages may use the workflow exemption"
-        );
-    }
-
-    #[test]
-    fn tampered_event_fails_signature_check() {
-        // Alter the content after signing: pubkey still matches relay_self
-        // and the tags are pristine, but the signature no longer covers the
-        // event — the local verify must reject it.
-        let relay = Keys::generate();
-        let owner = Keys::generate().public_key().to_hex();
-        let agent = Keys::generate().public_key().to_hex();
-        let event = make_event(&relay, workflow_tags(&owner, &agent));
-        let mut json = serde_json::to_value(&event).expect("event to JSON");
-        json["content"] = serde_json::Value::String("tampered".into());
-        let tampered: nostr::Event = serde_json::from_value(json).expect("tampered event parses");
-        assert_eq!(
-            workflow_attributed_author(&tampered, Some(&relay.public_key().to_hex())),
-            None,
-            "a tampered event must fail the local signature check"
-        );
-    }
-
-    #[test]
-    fn syntactically_invalid_relay_self_means_no_exemption() {
-        let relay = Keys::generate();
-        let owner = Keys::generate().public_key().to_hex();
-        let agent = Keys::generate().public_key().to_hex();
-        let event = make_event(&relay, workflow_tags(&owner, &agent));
-        let long_not_hex = "zz".repeat(32);
-        for bad_self in ["", "not-hex", long_not_hex.as_str()] {
-            assert_eq!(
-                workflow_attributed_author(&event, Some(bad_self)),
-                None,
-                "an invalid NIP-11 self value {bad_self:?} must disable the exemption"
-            );
-        }
     }
 }
 
@@ -7140,6 +6820,7 @@ mod build_mcp_servers_tests {
             typing_enabled: true,
             memory_enabled: false,
             model: None,
+            effort_level: None,
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
@@ -7364,6 +7045,7 @@ mod error_outcome_emission_tests {
             typing_enabled: true,
             memory_enabled: false,
             model: None,
+            effort_level: None,
             session_title: None,
             permission_mode: config::PermissionMode::BypassPermissions,
             respond_to: config::RespondTo::Anyone,
@@ -7411,6 +7093,9 @@ mod error_outcome_emission_tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            desired_model_request_id: None,
+            desired_model_pending_ack: false,
+            startup_effort: None,
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             // Error branches under test never read this; 1 is the legacy
@@ -8588,6 +8273,94 @@ mod error_outcome_emission_tests {
         assert_eq!(turn_errors_emitted_for(PromptOutcome::Error(app)).await, 1);
     }
 
+    #[tokio::test]
+    async fn indeterminate_project_context_requeues_without_poisoning_agent_or_circuit() {
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(Kind::Custom(9), "project work")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+
+        let mut agent = dummy_agent(0).await;
+        agent
+            .state
+            .sessions
+            .insert(channel_id, "healthy-session".into());
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "indeterminate-project".into(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+                successful_steer_deliveries: HashSet::new(),
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "indeterminate-project".into(),
+            outcome: PromptOutcome::ProjectContextIndeterminate(
+                "project context is indeterminate".into(),
+            ),
+            batch: Some(batch),
+        };
+
+        assert!(matches!(
+            handle_prompt_result(
+                &mut pool,
+                &mut queue,
+                &config,
+                result,
+                &mut heartbeat_in_flight,
+                &removed_channels,
+                &mut crash_history,
+                &respawn_tx,
+                &mut respawn_tasks,
+                None,
+                None,
+            ),
+            LoopAction::Continue
+        ));
+
+        let returned = pool.agents_mut()[0]
+            .as_ref()
+            .expect("healthy agent returns to its slot");
+        assert_eq!(
+            returned.state.sessions.get(&channel_id).map(String::as_str),
+            Some("healthy-session")
+        );
+        assert_eq!(queue.queued_event_count(&channel_id), 1);
+        assert!(crash_history[0].crash_times.is_empty());
+        assert!(crash_history[0].open_until.is_none());
+        assert!(!crash_history[0].respawn_in_flight);
+        assert!(respawn_tasks.is_empty());
+    }
+
     // ── is_auth_error classification ───────────────────────────────────────
 
     #[test]
@@ -8900,7 +8673,7 @@ mod observer_payload_trim_tests {
         // to 1).
         let sections = [
             "[Base]\nyou are a helpful agent".to_string(),
-            "[System]\npersona text".to_string(),
+            "[Agent Instructions]\npersona text".to_string(),
             "[Agent Memory — core]\nremember this".to_string(),
             "[Context]\nScope: thread".to_string(),
             // The triggering event body, oversized on its own.
@@ -8937,7 +8710,7 @@ mod observer_payload_trim_tests {
         let texts: Vec<&str> = blocks.iter().map(|b| b["text"].as_str().unwrap()).collect();
         for header in [
             "[Base]",
-            "[System]",
+            "[Agent Instructions]",
             "[Agent Memory — core]",
             "[Context]",
             "[Buzz event: @mention]",

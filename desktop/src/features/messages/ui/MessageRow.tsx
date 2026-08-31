@@ -1,6 +1,5 @@
 import * as React from "react";
 import { AlertTriangle } from "lucide-react";
-
 import {
   depthGuideActionsEqual,
   numberArrayEqual,
@@ -58,6 +57,9 @@ import { MessageTimestamp } from "./MessageTimestamp";
 import { SentFromThreadLine } from "./SentFromThreadLine";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { getAgentAddressMentionPubkeys } from "@/features/messages/lib/agentAddressMention.mjs";
+import { getVisibleAgentAddressPubkeys } from "@/features/messages/lib/getVisibleAgentAddressPubkeys";
+import { MessageAgentAddressPrefix } from "./MessageAgentAddressPrefix";
 
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
@@ -277,6 +279,20 @@ export const MessageRow = React.memo(
 
       return Object.keys(values).length > 0 ? values : undefined;
     }, [isKnownAgentPubkey, mentionPubkeysByName]);
+    const addressedAgentPubkeys = React.useMemo(() => {
+      return getVisibleAgentAddressPubkeys(
+        message.body,
+        getAgentAddressMentionPubkeys(message.tags).filter(isKnownAgentPubkey),
+        mentionPubkeysByName,
+      );
+    }, [isKnownAgentPubkey, mentionPubkeysByName, message.body, message.tags]);
+    const agentAddressPrefix =
+      addressedAgentPubkeys.length > 0 ? (
+        <MessageAgentAddressPrefix
+          profiles={profiles}
+          pubkeys={addressedAgentPubkeys}
+        />
+      ) : undefined;
 
     const imetaByUrl = React.useMemo(
       () => (message.tags ? parseImetaTags(message.tags) : undefined),
@@ -295,7 +311,7 @@ export const MessageRow = React.memo(
       message.body,
       message.tags,
     );
-    const bodyOffsetClass = emojiOnly ? "mt-1" : "-mt-0.5";
+    const bodyOffsetClass = emojiOnly ? "mt-1" : "mt-conversation-body";
 
     const { nonDmChannelNames: channelNames } = useChannelNavigation();
 
@@ -382,6 +398,7 @@ export const MessageRow = React.memo(
                   setExpandedDiffId(message.id);
                 }}
                 repoUrl={getTag("repo")}
+                searchQuery={searchQuery}
                 truncated={getTag("truncated") === "true"}
               />
             </React.Suspense>
@@ -403,6 +420,7 @@ export const MessageRow = React.memo(
                 fallbackText={waveMessage.fallbackText}
                 huddleMemberPubkeys={huddleMemberPubkeys}
                 huddleMemberPubkeysPending={huddleMemberPubkeysPending}
+                searchQuery={searchQuery}
               />
             );
           }
@@ -411,7 +429,7 @@ export const MessageRow = React.memo(
             <VideoReviewCommentMarkdown
               channelNames={channelNames}
               className={cn(
-                "max-w-full text-sm",
+                "max-w-full text-message",
                 emojiOnly &&
                   "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
               )}
@@ -427,6 +445,7 @@ export const MessageRow = React.memo(
               messageId={message.id}
               linkPreviewsSuppressed={linkPreviewsSuppressed}
               linkPreviewTags={message.tags}
+              leadingInlineContent={agentAddressPrefix}
               onRemoveLinkPreviewsForEveryone={removeLinkPreviewsForEveryone}
               customEmoji={customEmoji}
               imetaByUrl={imetaByUrl}
@@ -635,7 +654,7 @@ export const MessageRow = React.memo(
             botIdenticonValue={message.author}
           >
             <button
-              className="truncate rounded leading-4 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+              className="truncate rounded leading-message-author focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
               type="button"
             >
               {authorNode}
@@ -868,7 +887,7 @@ export const MessageRow = React.memo(
           className={cn(
             "group/message relative z-10 rounded-2xl transition-colors",
             playEntrance && "motion-enter-conversation",
-            "py-1",
+            "py-conversation-row",
             hoverBackground
               ? "mx-1 px-2 hover:bg-muted/50 focus-within:bg-muted/50"
               : isThreadReplyLayout
@@ -888,17 +907,21 @@ export const MessageRow = React.memo(
           {isThreadReplyLayout ? (
             <>
               {avatarGutterNode}
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <div className="flex min-w-0 flex-1 flex-col">
                 {headerNode}
-                <div className={bodyContainerClass}>{messageBodyNode}</div>
+                <div className={bodyContainerClass} data-testid="message-body">
+                  {messageBodyNode}
+                </div>
               </div>
             </>
           ) : (
             <>
               {avatarGutterNode}
-              <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+              <div className="flex min-w-0 flex-1 flex-col">
                 {headerNode}
-                <div className={bodyContainerClass}>{messageBodyNode}</div>
+                <div className={bodyContainerClass} data-testid="message-body">
+                  {messageBodyNode}
+                </div>
               </div>
             </>
           )}

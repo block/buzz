@@ -7,7 +7,7 @@ members = ["crates/buzz-terminal"]
 
 [package]
 name = "buzz-desktop"
-version = "0.5.16"
+version = "0.5.20"
 description = "Buzz desktop app"
 authors = ["you"]
 edition = "2021"
@@ -63,7 +63,7 @@ user-idle = { version = "0.6", default-features = false }
 plist = "1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_Foundation"] }
+windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_System_Threading", "Win32_Foundation"] }
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native", "vendored"], optional = true }
 user-idle = { version = "0.6", default-features = false }
 
@@ -108,6 +108,7 @@ buzz_sdk_pkg = { package = "buzz-sdk", path = "../../crates/buzz-sdk" }
 buzz_agent_pkg = { package = "buzz-agent", path = "../../crates/buzz-agent" }
 buzz_voice_pkg = { package = "buzz-voice", path = "../../crates/buzz-voice" }
 buzz_terminal = { package = "buzz-terminal", path = "crates/buzz-terminal" }
+buzz_ws_client_pkg = { package = "buzz-ws-client", path = "../../crates/buzz-ws-client" }
 portable-pty = "0.9"
 iroh = { version = "1.0.2", optional = true }
 mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.75.1", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"], optional = true }
@@ -148,6 +149,7 @@ strip-ansi-escapes = "0.2"
 tracing = "0.1"
 
 [dev-dependencies]
+tauri = { version = "2", features = ["test"] }
 tauri-utils = "2"
 # `test-util` enables tokio's paused-clock (`start_paused`) so the relay
 # admission gate tests can assert exact wait durations without real sleeps.

@@ -1,15 +1,17 @@
 import { LayoutGrid, List } from "lucide-react";
+import { motion } from "motion/react";
 import * as React from "react";
 
 import type {
   ProjectsFilter,
   ProjectsViewMode,
 } from "@/features/projects/lib/projectsViewHelpers";
+import {
+  PROJECT_TAB_SELECTED_CLASS,
+  PROJECT_TAB_TRIGGER_CLASS,
+} from "@/features/projects/ui/ProjectWorkspaceTabList";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
-
-const SELECTED_MENU_ITEM_CLASSES =
-  "font-semibold text-foreground after:opacity-100 hover:text-foreground";
 
 // Fade the clipped edge(s) of the scrollable tab row so a cut-off label
 // reads as "scroll for more" instead of a rendering bug. Masking the row
@@ -25,6 +27,7 @@ const MASK_RIGHT =
 type ProjectsToolbarProps = {
   filter: ProjectsFilter;
   onFilterChange: (filter: ProjectsFilter) => void;
+  reduceMotion?: boolean;
 };
 
 export function ProjectsViewModeToggle({
@@ -103,6 +106,7 @@ function useHorizontalOverflow(ref: React.RefObject<HTMLElement | null>) {
 export function ProjectsToolbar({
   filter,
   onFilterChange,
+  reduceMotion = false,
 }: ProjectsToolbarProps) {
   const scrollRef = React.useRef<HTMLFieldSetElement>(null);
   const overflow = useHorizontalOverflow(scrollRef);
@@ -122,19 +126,20 @@ export function ProjectsToolbar({
     { label: "Activity", value: "all" },
     { label: "Projects", value: "projects" },
     { label: "Repositories", value: "repositories" },
-    { label: "Pull Requests", value: "prs" },
-    { label: "Issues", value: "issues" },
+    { label: "Tasks", value: "issues" },
+    { label: "Reviews", value: "prs" },
+    { label: "Channels", value: "channels" },
   ];
 
   return (
     <div
-      className="pointer-events-auto flex h-full min-w-0 items-center"
+      className="pointer-events-auto flex min-w-0 items-center"
       data-tauri-drag-region
     >
-      <div className="flex h-full min-w-0 flex-1 items-center gap-0.5 overflow-hidden">
+      <div className="flex min-w-0 flex-1 items-center overflow-hidden">
         <fieldset
           className={cn(
-            "flex h-full min-w-0 flex-1 flex-nowrap items-stretch gap-1 overflow-x-auto scrollbar-none [&::-webkit-scrollbar]:hidden",
+            "flex min-w-0 flex-1 flex-nowrap items-center gap-1.5 overflow-x-auto scrollbar-none [&::-webkit-scrollbar]:hidden",
             overflow.left && overflow.right
               ? MASK_BOTH
               : overflow.left
@@ -147,30 +152,45 @@ export function ProjectsToolbar({
         >
           <legend className="sr-only">Project owner filter</legend>
           {filterOptions.map((option) => (
-            <Button
-              aria-label={option.label}
-              aria-pressed={filter === option.value}
-              className={cn(
-                "relative h-full shrink-0 gap-1.5 rounded-none px-2.5 text-base leading-5 tracking-tight text-muted-foreground after:absolute after:inset-x-2.5 after:bottom-0 after:h-0.5 after:bg-current after:opacity-0 after:transition-opacity after:content-[''] hover:bg-transparent hover:text-foreground hover:after:opacity-100",
-                option.value === "all" && "pl-0 after:left-0",
-                filter === option.value && SELECTED_MENU_ITEM_CLASSES,
-              )}
-              data-testid={`projects-section-${option.value}`}
+            <motion.span
+              className="shrink-0"
               key={option.value}
-              onClick={() => onFilterChange(option.value)}
-              type="button"
-              variant="ghost"
+              variants={{
+                hidden: {
+                  opacity: 0,
+                  transition: { duration: reduceMotion ? 0 : 0.025 },
+                },
+                visible: {
+                  opacity: 1,
+                  transition: { duration: reduceMotion ? 0 : 0.025 },
+                },
+              }}
             >
-              <span className="grid">
-                <span
-                  aria-hidden="true"
-                  className="invisible col-start-1 row-start-1 font-semibold"
-                >
-                  {option.label}
+              <Button
+                aria-label={option.label}
+                aria-pressed={filter === option.value}
+                className={cn(
+                  PROJECT_TAB_TRIGGER_CLASS,
+                  filter === option.value && PROJECT_TAB_SELECTED_CLASS,
+                )}
+                data-testid={`projects-section-${option.value}`}
+                onClick={() => onFilterChange(option.value)}
+                type="button"
+                variant="ghost"
+              >
+                <span className="grid">
+                  <span
+                    aria-hidden="true"
+                    className="invisible col-start-1 row-start-1 font-semibold"
+                  >
+                    {option.label}
+                  </span>
+                  <span className="col-start-1 row-start-1">
+                    {option.label}
+                  </span>
                 </span>
-                <span className="col-start-1 row-start-1">{option.label}</span>
-              </span>
-            </Button>
+              </Button>
+            </motion.span>
           ))}
         </fieldset>
       </div>

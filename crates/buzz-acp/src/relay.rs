@@ -410,37 +410,6 @@ impl RestClient {
         .await
     }
 
-    /// Fetch the relay's own signing pubkey from the public NIP-11 `/info`
-    /// document (the `self` field, hex, normalized to lowercase).
-    ///
-    /// Used by the inbound author gate to recognize relay-signed workflow
-    /// messages (`buzz:workflow`-tagged kind:9 events authored by the relay
-    /// keypair) and gate them on their *attributed* author instead.
-    ///
-    /// Returns `None` when the document is unreachable, unparseable, or has
-    /// no valid `self` field (e.g. the relay runs with an ephemeral key).
-    /// Callers must treat `None` as "no relay-signed exemption" — fail closed
-    /// to the plain author gate, never guess a pubkey.
-    pub async fn fetch_relay_self(&self) -> Option<String> {
-        let url = format!("{}/info", self.base_url);
-        let resp = self
-            .http
-            .get(&url)
-            .header("Accept", "application/nostr+json")
-            .send()
-            .await
-            .ok()?;
-        if !resp.status().is_success() {
-            return None;
-        }
-        let doc: Value = resp.json().await.ok()?;
-        let self_hex = doc.get("self")?.as_str()?;
-        if self_hex.len() != 64 || !self_hex.chars().all(|c| c.is_ascii_hexdigit()) {
-            return None;
-        }
-        Some(self_hex.to_ascii_lowercase())
-    }
-
     /// Query events via the HTTP bridge: `POST /query` with NIP-98 auth.
     ///
     /// Accepts a slice of `nostr::Filter` (serialized as JSON array).
@@ -452,6 +421,64 @@ impl RestClient {
         resp.json()
             .await
             .map_err(|e| RelayError::Http(e.to_string()))
+    }
+
+    /// Query events via `POST /query` with a raw NIP-01 filter document.
+    ///
+    /// `nostr::Filter` only encodes single-letter generic tags. Project home
+    /// lookup needs `#buzz-channel`, which this path serializes verbatim.
+    pub async fn query_raw(&self, filters: &[Value]) -> Result<Value, RelayError> {
+        let body_bytes = serde_json::to_vec(filters)
+            .map_err(|e| RelayError::Http(format!("filter serialize error: {e}")))?;
+        let resp = self.bridge_post("/query", &body_bytes).await?;
+        resp.json()
+            .await
+            .map_err(|e| RelayError::Http(e.to_string()))
+    }
+
+    /// Query every historical event matching one raw filter across bounded pages.
+    ///
+    /// Uses the bridge's composite `(until, before_id)` cursor so a full page
+    /// never becomes evidence that older project metadata is absent.
+    pub async fn query_raw_all(&self, mut filter: Value) -> Result<Vec<Value>, RelayError> {
+        const PAGE_SIZE: usize = 500;
+        const EVENT_BOUND: usize = 10_000;
+        let mut events = Vec::new();
+        loop {
+            let remaining_probe = EVENT_BOUND + 1 - events.len();
+            let page_limit = PAGE_SIZE.min(remaining_probe);
+            filter["limit"] = serde_json::json!(page_limit);
+            let page = self.query_raw(std::slice::from_ref(&filter)).await?;
+            let page = page
+                .as_array()
+                .ok_or_else(|| RelayError::Http("query response is not an array".into()))?;
+            let done = page.len() < page_limit;
+            if events.len() + page.len() > EVENT_BOUND {
+                return Err(RelayError::Http(format!(
+                    "query exceeded the exhaustive {EVENT_BOUND}-event bound"
+                )));
+            }
+            if !done {
+                let last = page
+                    .last()
+                    .ok_or_else(|| RelayError::Http("full query page is empty".into()))?;
+                let created_at = last
+                    .get("created_at")
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| RelayError::Http("query page event lacks created_at".into()))?;
+                let id = last
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .filter(|id| id.len() == 64 && id.chars().all(|ch| ch.is_ascii_hexdigit()))
+                    .ok_or_else(|| RelayError::Http("query page event has invalid id".into()))?;
+                filter["until"] = serde_json::json!(created_at);
+                filter["before_id"] = serde_json::json!(id);
+            }
+            events.extend(page.iter().cloned());
+            if done {
+                return Ok(events);
+            }
+        }
     }
 
     /// Count events via the HTTP bridge: `POST /count` with NIP-98 auth.

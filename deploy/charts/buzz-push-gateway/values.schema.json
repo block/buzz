@@ -19,10 +19,19 @@
       "minimum": 1,
       "maximum": 31536000
     },
-    "appAttestAppId": {
-      "type": "string",
-      "minLength": 1
+    "profiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dogfood"
+      ],
+      "properties": {
+        "dogfood": {
+          "$ref": "#/$defs/enabledProfile"
+        }
+      }
     },
+    "apnsKey": false,
     "httpRoute": {
       "type": "object",
       "required": [
@@ -232,12 +241,72 @@
       }
     }
   },
+  "$defs": {
+    "profileBase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "appAttestAppId",
+        "apnsTopic",
+        "apnsEnvironment"
+      ],
+      "properties": {
+        "appAttestAppId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "apnsTopic": {
+          "type": "string",
+          "minLength": 1
+        },
+        "apnsEnvironment": {
+          "enum": [
+            "production",
+            "sandbox"
+          ]
+        },
+        "apnsCert": {
+          "$ref": "#/$defs/apnsCert"
+        }
+      }
+    },
+    "enabledProfile": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/profileBase"
+        },
+        {
+          "required": [
+            "apnsCert"
+          ]
+        }
+      ]
+    },
+    "apnsCert": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "secretName",
+        "secretKey"
+      ],
+      "properties": {
+        "secretName": {
+          "type": "string",
+          "minLength": 1
+        },
+        "secretKey": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  },
   "required": [
     "replicaCount",
     "existingSecret",
     "publicDeliveryUrl",
     "maxGrantLifetimeSeconds",
-    "appAttestAppId",
+    "profiles",
     "httpRoute",
     "image",
     "migration"

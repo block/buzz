@@ -3,6 +3,104 @@ import type {
   ProjectRepoCommit,
   ProjectRepoContributor,
 } from "@/shared/api/types";
+import { parsePubkeyInput } from "@/shared/lib/nostrUtils";
+
+type SignedProjectContributorSources = {
+  owner: string;
+  contributors: readonly string[];
+  pullRequests: readonly {
+    author: string;
+    initialCommit?: string | null;
+    commit?: string | null;
+    comments: readonly { author: string }[];
+    approvals: readonly { author: string }[];
+    updates: readonly { author: string; commit: string | null }[];
+  }[];
+  issues: readonly {
+    author: string;
+    comments: readonly { author: string }[];
+  }[];
+};
+
+export type ProjectContributorActivityCounts = {
+  commits: number;
+  reviews: number;
+  tasks: number;
+};
+
+/**
+ * Collects identities tied to a repository by its announcement or by signed
+ * project activity. Assignments and recipients are intentionally excluded:
+ * being asked to review or own a task is not itself a contribution.
+ */
+export function signedProjectContributorPubkeys({
+  owner,
+  contributors,
+  pullRequests,
+  issues,
+}: SignedProjectContributorSources): string[] {
+  return [
+    ...new Set(
+      [
+        owner,
+        ...contributors,
+        ...pullRequests.flatMap((pullRequest) => [
+          pullRequest.author,
+          ...pullRequest.comments.map((comment) => comment.author),
+          ...pullRequest.approvals.map((approval) => approval.author),
+          ...pullRequest.updates.map((update) => update.author),
+        ]),
+        ...issues.flatMap((issue) => [
+          issue.author,
+          ...issue.comments.map((comment) => comment.author),
+        ]),
+      ]
+        .filter(Boolean)
+        .map((pubkey) => pubkey.trim().toLowerCase()),
+    ),
+  ];
+}
+
+/** Counts signed repository activity by actor for contributor list columns. */
+export function projectContributorActivityCounts({
+  owner,
+  contributors,
+  pullRequests,
+  issues,
+}: SignedProjectContributorSources): Record<
+  string,
+  ProjectContributorActivityCounts
+> {
+  const counts = Object.fromEntries(
+    signedProjectContributorPubkeys({
+      owner,
+      contributors,
+      pullRequests,
+      issues,
+    }).map((pubkey) => [pubkey, { commits: 0, reviews: 0, tasks: 0 }]),
+  );
+  const ensureCounts = (rawPubkey: string) => {
+    const pubkey = rawPubkey.trim().toLowerCase();
+    const existing = counts[pubkey];
+    if (existing) return existing;
+    const created = { commits: 0, reviews: 0, tasks: 0 };
+    counts[pubkey] = created;
+    return created;
+  };
+
+  for (const pubkey of commitAuthorPubkeysFromPullRequests(
+    pullRequests,
+  ).values()) {
+    ensureCounts(pubkey).commits += 1;
+  }
+  for (const pullRequest of pullRequests) {
+    ensureCounts(pullRequest.author).reviews += 1;
+  }
+  for (const issue of issues) {
+    ensureCounts(issue.author).tasks += 1;
+  }
+  return counts;
+}
 
 export function contributorKey(contributor: ProjectRepoContributor) {
   return (contributor.email || contributor.name).trim().toLowerCase();
@@ -55,6 +153,16 @@ export function profileForCommitAuthor(
   profiles: UserProfileLookup | undefined,
 ) {
   if (!profiles) return null;
+  // A Git author may use their Nostr key as the name/email. This is still an
+  // unauthenticated display hint—the signed PR mapping remains authoritative.
+  const claimedPubkey =
+    parsePubkeyInput(commit.authorName) ?? parsePubkeyInput(commit.authorEmail);
+  if (claimedPubkey) {
+    const profile = profiles[claimedPubkey];
+    if (profile) {
+      return { pubkey: claimedPubkey, profile };
+    }
+  }
   const contributor = {
     name: commit.authorName,
     email: commit.authorEmail,
@@ -101,6 +209,39 @@ export function commitAuthorPubkeysFromPullRequests(
 }
 
 /**
+ * Links aggregate Git author rows to Buzz identities through commit hashes
+ * published in signed review events. Ambiguous author strings fail closed.
+ */
+export function gitContributorPubkeysFromCommits(
+  commits: readonly ProjectRepoCommit[],
+  pullRequests: Parameters<typeof commitAuthorPubkeysFromPullRequests>[0],
+): Map<string, string> {
+  const pubkeysByHash = commitAuthorPubkeysFromPullRequests(pullRequests);
+  const candidatesByContributor = new Map<string, Set<string>>();
+  for (const commit of commits) {
+    const pubkey =
+      pubkeysByHash.get(commit.hash.toLowerCase()) ??
+      pubkeysByHash.get(commit.shortHash.toLowerCase());
+    if (!pubkey) continue;
+    const key = contributorKey({
+      commitCount: 0,
+      email: commit.authorEmail,
+      lastCommitAt: commit.timestamp,
+      name: commit.authorName,
+    });
+    const candidates = candidatesByContributor.get(key) ?? new Set<string>();
+    candidates.add(pubkey.toLowerCase());
+    candidatesByContributor.set(key, candidates);
+  }
+
+  return new Map(
+    [...candidatesByContributor.entries()]
+      .filter(([, pubkeys]) => pubkeys.size === 1)
+      .map(([key, pubkeys]) => [key, [...pubkeys][0]]),
+  );
+}
+
+/**
  * The viewer's own git identity (`git config user.name/user.email`) paired
  * with their Nostr pubkey. Only used to attribute the viewer's own commits —
  * their git author string is known locally, so this match doesn't rely on
@@ -116,14 +257,13 @@ function commitMatchesViewerGitIdentity(
   commit: ProjectRepoCommit,
   viewer: ViewerGitIdentity,
 ) {
-  const name = commit.authorName.trim().toLowerCase();
+  // Email-only equality. A display name is not an identity: two contributors
+  // can share "Alex Chen", and a name-based match would borrow the viewer's
+  // avatar for a stranger's commit. The git email is what the viewer's own
+  // commits actually carry, so requiring it loses nothing legitimate.
   const email = commit.authorEmail.trim().toLowerCase();
-  const viewerName = viewer.name?.trim().toLowerCase() ?? "";
   const viewerEmail = viewer.email?.trim().toLowerCase() ?? "";
-  return (
-    (email.length > 0 && email === viewerEmail) ||
-    (name.length > 0 && name === viewerName)
-  );
+  return email.length > 0 && email === viewerEmail;
 }
 
 /**

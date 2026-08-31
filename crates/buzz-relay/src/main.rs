@@ -35,6 +35,16 @@ fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
     })
 }
 
+fn relay_keypair_from_config(relay_private_key: Option<&str>) -> anyhow::Result<nostr::Keys> {
+    let hex = relay_private_key.ok_or_else(|| {
+        anyhow::anyhow!(
+            "BUZZ_RELAY_PRIVATE_KEY must be set. Run `just bootstrap` for local \
+             development or configure a stable 32-byte hex private key."
+        )
+    })?;
+    nostr::Keys::parse(hex).map_err(|e| anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY: {e}"))
+}
+
 /// Controls how many per-community gauge series the usage poller emits.
 ///
 /// Datadog cost is proportional to the number of unique time-series.  With ~25
@@ -143,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
         error!("Invalid configuration: {e}");
         anyhow::anyhow!("Configuration error: {e}")
     })?;
+    let relay_keypair = relay_keypair_from_config(config.relay_private_key.as_deref())?;
     info!(
         bind_addr = %config.bind_addr,
         relay_url = %config.relay_url,
@@ -150,6 +161,7 @@ async fn main() -> anyhow::Result<()> {
         metrics_port = config.metrics_port,
         max_frame_bytes = config.max_frame_bytes,
         audit_enabled = config.audit_enabled,
+        push_enabled = config.push_enabled,
         "Config loaded"
     );
 
@@ -157,6 +169,7 @@ async fn main() -> anyhow::Result<()> {
     let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(usage_interval_secs);
     relay_metrics::install(config.metrics_port, usage_idle_timeout_secs);
     metrics::gauge!("buzz_audit_enabled").set(if config.audit_enabled { 1.0 } else { 0.0 });
+    metrics::gauge!("buzz_push_enabled").set(if config.push_enabled { 1.0 } else { 0.0 });
     info!(
         port = config.metrics_port,
         idle_timeout_secs = usage_idle_timeout_secs,
@@ -422,29 +435,6 @@ async fn main() -> anyhow::Result<()> {
     let workflow_config = buzz_workflow::WorkflowConfig::default();
     let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), workflow_config));
 
-    let relay_keypair = if let Some(hex) = &config.relay_private_key {
-        nostr::Keys::parse(hex)
-            .map_err(|e| anyhow::anyhow!("invalid BUZZ_RELAY_PRIVATE_KEY: {e}"))?
-    } else if !config.require_auth_token {
-        // Dev mode: use a deterministic keypair so addressable events (kind:39000/39001/39002)
-        // replace correctly across restarts. Without this, each restart generates a new pubkey
-        // and replace_addressable_event inserts duplicates instead of replacing.
-        const DEV_RELAY_PRIVKEY: &str =
-            "0000000000000000000000000000000000000000000000000000000000000001";
-        let keys = nostr::Keys::parse(DEV_RELAY_PRIVKEY).expect("hardcoded dev key is valid");
-        tracing::warn!(
-            pubkey = %keys.public_key().to_hex(),
-            "Using hardcoded dev relay keypair (BUZZ_REQUIRE_AUTH_TOKEN=false). \
-             Set BUZZ_RELAY_PRIVATE_KEY for production."
-        );
-        keys
-    } else {
-        panic!(
-            "BUZZ_RELAY_PRIVATE_KEY must be set when BUZZ_REQUIRE_AUTH_TOKEN=true. \
-             A stable relay identity is required for production."
-        );
-    };
-
     config
         .media
         .validate()
@@ -532,6 +522,31 @@ async fn main() -> anyhow::Result<()> {
             transport_drops = report.transport_drops,
             "git object-store backend admitted: A3 conformance probe passed"
         );
+    }
+
+    match state.db.verify_channel_roster_fence().await {
+        Ok(()) => {
+            info!("Channel roster fence verified");
+        }
+        Err(error) => {
+            error!(%error, "Channel roster fence validation failed");
+            return Err(anyhow::anyhow!(
+                "Channel roster fence is unsafe; apply or repair migration 0032 before starting this relay: {error}"
+            ));
+        }
+    }
+
+    // Repair legacy NIP-29 channel rosters that were persisted while the
+    // canonical member query still truncated at 1,000 rows. Validation above
+    // makes migration 0032 a code/schema compatibility gate before the new
+    // replacement protocol or listener can serve traffic.
+    match buzz_relay::handlers::side_effects::reconcile_large_channel_member_snapshots(&state).await
+    {
+        Ok(count) if count > 0 => info!(count, "large channel member snapshots repaired"),
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(%error, "large channel member snapshot startup reconciliation failed")
+        }
     }
 
     // NIP-43: reconcile the event-backed roster for every provisioned
@@ -682,6 +697,7 @@ async fn main() -> anyhow::Result<()> {
                         &reaper_state,
                         channel_id,
                         serde_json::json!({ "type": "channel_auto_archived" }),
+                        chrono::Utc::now(),
                     )
                     .await
                     {
@@ -714,15 +730,40 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // NIP-PL matcher and worker are enabled as one unit. Lease acceptance is
-    // already disabled without the exact gateway URL, so discovery and runtime
-    // cannot advertise or accumulate work for an undeliverable configuration.
-    if state.config.push_gateway_delivery_url.is_some() {
+    // NIP-PL matcher and worker are enabled as one unit behind the explicit
+    // deployment opt-in. The gateway URL alone never enables push.
+    if state.config.push_enabled {
         tokio::spawn(buzz_relay::push_runtime::run_matcher(Arc::clone(&state)));
         tokio::spawn(buzz_relay::push_runtime::run_delivery_worker(Arc::clone(
             &state,
         )));
         info!("NIP-PL push matcher and delivery worker started");
+    } else {
+        info!("NIP-PL push disabled by BUZZ_PUSH_ENABLED");
+    }
+
+    // Admin outbox delivery worker — drives `relay_admin_outbox` rows.
+    // Uses DB-level leases (held_by / lease_expires_at) so multiple pods can
+    // run the worker concurrently without double-delivery.
+    {
+        let outbox_state = Arc::clone(&state);
+        tokio::spawn(
+            async move { buzz_relay::handlers::admin_outbox_worker::run(outbox_state).await },
+        );
+        info!("Admin outbox delivery worker started");
+    }
+
+    // Action recovery worker: re-drives stranded relay_admin_actions rows whose
+    // action lease expired before the enforcement state machine completed.
+    // Crash safety: a process that died between claim and finalization leaves
+    // an action in pending/enforcing; this worker resumes from the persisted
+    // step_marker state without re-running the mutation.
+    {
+        let action_state = Arc::clone(&state);
+        tokio::spawn(
+            async move { buzz_relay::handlers::admin_action_worker::run(action_state).await },
+        );
+        info!("Admin action recovery worker started");
     }
 
     // NIP-ER reminder scheduler — polls for due reminders and publishes them
@@ -2012,8 +2053,8 @@ mod tests {
 
     use super::{
         buzz_auto_migrate_enabled, dropped_in_memory_keys, idle_timeout_secs,
-        refresh_legacy_active_gauge_recency, run_periodic_until_cancelled, EmissionScope,
-        InMemoryMetricKey,
+        refresh_legacy_active_gauge_recency, relay_keypair_from_config,
+        run_periodic_until_cancelled, EmissionScope, InMemoryMetricKey,
     };
     use metrics::GaugeFn;
     use metrics_util::{
@@ -2059,6 +2100,23 @@ mod tests {
         assert!(buzz_auto_migrate_enabled(Some(" 1 ")));
         assert!(buzz_auto_migrate_enabled(Some("yes")));
         assert!(buzz_auto_migrate_enabled(Some("on")));
+    }
+
+    #[test]
+    fn configured_relay_identity_is_preserved() {
+        let configured = nostr::Keys::generate();
+        let secret = configured.secret_key().to_secret_hex();
+
+        let selected = relay_keypair_from_config(Some(&secret)).expect("configured key");
+
+        assert_eq!(selected.public_key(), configured.public_key());
+    }
+
+    #[test]
+    fn missing_relay_identity_is_rejected() {
+        let result = relay_keypair_from_config(None);
+
+        assert!(result.is_err());
     }
 
     #[test]

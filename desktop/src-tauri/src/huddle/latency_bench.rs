@@ -141,6 +141,7 @@ fn baseline_stt_fake_llm_tts_first_audio() {
         tts_dir,
         Arc::clone(&tts_active),
         Arc::clone(&tts_cancel),
+        super::human_floor::HumanFloor::new(),
         "eve",
         None, // default output device
         None, // no Tauri app handle
@@ -152,7 +153,14 @@ fn baseline_stt_fake_llm_tts_first_audio() {
     );
 
     let t = Instant::now();
-    let (stt, mut text_rx) = SttPipeline::new(stt_dir, None, None).expect("stt pipeline");
+    let (stt, mut text_rx) = SttPipeline::new(
+        stt_dir,
+        None,
+        None,
+        super::human_floor::HumanFloor::new(),
+        None,
+    )
+    .expect("stt pipeline");
     // Recognizer loads inside the worker thread; give it time, then verify
     // liveness via a first throwaway feed below.
     std::thread::sleep(Duration::from_secs(2));

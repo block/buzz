@@ -6,7 +6,7 @@ use std::sync::Arc;
 use axum::{
     body::Body,
     extract::{ConnectInfo, FromRequest, State, WebSocketUpgrade},
-    http::{HeaderMap, Request, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     middleware,
     response::{IntoResponse, Json},
     routing::{get, post, put},
@@ -72,6 +72,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/events", post(api::bridge::submit_event))
         .route("/query", post(api::bridge::query_events))
         .route("/count", post(api::bridge::count_events))
+        // Relay-owned third-party GIF metadata proxy (NIP-98 auth).
+        .route(api::gifs::SEARCH_PATH, post(api::gifs::search))
+        .route(api::gifs::SHARE_PATH, post(api::gifs::share))
         .route(
             "/workflows/{workflow_id}/runs",
             get(api::workflows::workflow_runs),
@@ -170,14 +173,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
                 let admin_host = api::admin::is_admin_host(&state, req.headers());
                 if admin_host {
                     if let (Some(index), Some(files)) = (admin_index, admin_files) {
-                        if path.starts_with("/assets/") {
-                            return files.oneshot(req).await.map(IntoResponse::into_response);
+                        if is_admin_static_path(path) {
+                            return files
+                                .oneshot(req)
+                                .await
+                                .map(|response| with_admin_csp(response.into_response()));
                         }
                         if is_admin_spa_path(path) {
-                            return Ok(read_spa_index(&index).await);
+                            return Ok(with_admin_csp(read_spa_index(&index).await));
                         }
                     }
-                    return Ok(StatusCode::NOT_FOUND.into_response());
+                    return Ok(with_admin_csp(StatusCode::NOT_FOUND.into_response()));
                 }
 
                 if let (Some(index), Some(files)) = (web_index, web_files) {
@@ -221,6 +227,14 @@ fn is_admin_spa_path(path: &str) -> bool {
         || path.starts_with("/feedback/")
 }
 
+/// Files served from the admin bundle directory verbatim. `/assets/*` is the
+/// hashed Vite output; `/favicon.svg` is the one root-level file the bundle
+/// emits and the document links. Everything else on the admin host is a 404 —
+/// the directory is not browsable.
+fn is_admin_static_path(path: &str) -> bool {
+    path.starts_with("/assets/") || path == "/favicon.svg"
+}
+
 fn is_invite_landing_path(path: &str) -> bool {
     path.strip_prefix("/invite/")
         .is_some_and(|code| !code.is_empty() && !code.contains('/'))
@@ -238,6 +252,39 @@ async fn read_spa_index(index: &std::path::Path) -> axum::response::Response {
     match tokio::fs::read(index).await {
         Ok(body) => axum::response::Html(body).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// The admin dashboard holds the operator token in `sessionStorage`, so its
+/// documents and assets are locked to same-origin code with no framing. `blob:`
+/// images are required: attachments are fetched with the token and rendered
+/// from object URLs. Applied only to the admin host — the public bundle keeps
+/// its own headers.
+#[rustfmt::skip]
+const ADMIN_CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+
+fn with_admin_csp(mut response: axum::response::Response) -> axum::response::Response {
+    response.headers_mut().insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(ADMIN_CSP),
+    );
+    response
+}
+
+/// Serve the admin bundle's `index.html` for a browser request to `/`. Any
+/// non-HTML request to the admin authority is a 404: the relay protocol is not
+/// exposed there.
+async fn admin_spa_document(state: &AppState, accept: &str) -> axum::response::Response {
+    let index = state
+        .config
+        .admin
+        .as_ref()
+        .and_then(|config| config.web_dir.as_ref())
+        .filter(|_| accept.contains("text/html"))
+        .map(|dir| dir.join("index.html"));
+    match index {
+        Some(index) => read_spa_index(&index).await,
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -279,19 +326,7 @@ async fn nip11_or_ws_handler(
     // Short-circuit the exact admin authority here and never let it serve the
     // public web bundle, NIP-11 document, or WebSocket endpoint.
     if api::admin::is_admin_host(&state, &headers) {
-        if !accept.contains("text/html") {
-            return StatusCode::NOT_FOUND.into_response();
-        }
-        let Some(index) = state
-            .config
-            .admin
-            .as_ref()
-            .and_then(|config| config.web_dir.as_ref())
-            .map(|dir| dir.join("index.html"))
-        else {
-            return StatusCode::NOT_FOUND.into_response();
-        };
-        return read_spa_index(&index).await;
+        return with_admin_csp(admin_spa_document(&state, accept).await);
     }
 
     if accept.contains("application/nostr+json") {
@@ -413,14 +448,22 @@ async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoRespo
     }
 }
 
-/// Status endpoint — service name, version, uptime.
-async fn status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let uptime_secs = state.started_at.elapsed().as_secs();
-    Json(json!({
+fn status_payload(uptime_secs: u64) -> serde_json::Value {
+    json!({
         "service": "buzz-relay",
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_seconds": uptime_secs,
-    }))
+        "build": {
+            "source_sha": crate::build_info::source_sha(),
+            "id": crate::build_info::build_id(),
+            "url": crate::build_info::build_url(),
+        },
+    })
+}
+
+/// Status endpoint — service name, version, uptime, and intrinsic build identity.
+async fn status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(status_payload(state.started_at.elapsed().as_secs()))
 }
 
 /// `/_mesh` — live mesh status: peer table, connection/phi state, per-peer
@@ -504,6 +547,169 @@ mod tests {
         assert!(should_serve_spa("/", true));
         assert!(should_serve_spa("/repos/example", true));
         assert!(!should_serve_spa("/arbitrary", true));
+    }
+
+    /// Relay state serving both bundles: the admin SPA on `admin.example` and
+    /// the public SPA on any other host.
+    async fn spa_state(admin_dir: &std::path::Path, web_dir: &std::path::Path) -> Arc<AppState> {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        config.web_dir = Some(web_dir.to_path_buf());
+        config.admin = Some(crate::config::AdminConfig {
+            host: "admin.example".to_string(),
+            auth: crate::config::AdminAuth::Disabled,
+            web_dir: Some(admin_dir.to_path_buf()),
+        });
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        Arc::new(state)
+    }
+
+    /// A minimal built SPA: an index document, one hashed asset, and the
+    /// root-level favicon Vite copies out of `public/`.
+    fn write_bundle(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir.join("assets")).expect("assets dir");
+        std::fs::write(dir.join("index.html"), "<!doctype html>").expect("index.html");
+        std::fs::write(dir.join("assets/app.js"), "export {};").expect("bundle asset");
+        std::fs::write(dir.join("favicon.svg"), "<svg/>").expect("favicon");
+    }
+
+    async fn spa_response(
+        state: Arc<AppState>,
+        host: &str,
+        path: &str,
+    ) -> axum::response::Response {
+        build_router(state)
+            .oneshot(
+                Request::get(path)
+                    .header(axum::http::header::HOST, host)
+                    .header(axum::http::header::ACCEPT, "text/html")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response")
+    }
+
+    #[tokio::test]
+    async fn admin_spa_documents_and_assets_carry_the_admin_csp() {
+        let admin_dir = tempfile::tempdir().expect("admin bundle dir");
+        let web_dir = tempfile::tempdir().expect("public bundle dir");
+        write_bundle(admin_dir.path());
+        write_bundle(web_dir.path());
+        let state = spa_state(admin_dir.path(), web_dir.path()).await;
+
+        for path in [
+            "/",
+            "/reports",
+            "/feedback/abc",
+            "/assets/app.js",
+            "/favicon.svg",
+        ] {
+            let response = spa_response(state.clone(), "admin.example", path).await;
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CONTENT_SECURITY_POLICY)
+                    .and_then(|value| value.to_str().ok()),
+                Some(ADMIN_CSP),
+                "{path} must carry the admin CSP"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_admin_host_serves_the_favicon_the_document_links() {
+        let admin_dir = tempfile::tempdir().expect("admin bundle dir");
+        let web_dir = tempfile::tempdir().expect("public bundle dir");
+        write_bundle(admin_dir.path());
+        write_bundle(web_dir.path());
+        let state = spa_state(admin_dir.path(), web_dir.path()).await;
+
+        let response = spa_response(state.clone(), "admin.example", "/favicon.svg").await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // The bundle directory is not browsable: only the assets Vite emits at
+        // the root are reachable, never arbitrary files beside them.
+        for path in ["/index.html", "/nope.svg"] {
+            let response = spa_response(state.clone(), "admin.example", path).await;
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+
+    #[test]
+    fn the_admin_csp_never_allows_inline_or_eval() {
+        assert!(
+            !ADMIN_CSP.contains("unsafe-inline") && !ADMIN_CSP.contains("unsafe-eval"),
+            "the dashboard performs signed admin requests — inline script or style must stay blocked"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_public_spa_is_untouched_by_the_admin_csp() {
+        let admin_dir = tempfile::tempdir().expect("admin bundle dir");
+        let web_dir = tempfile::tempdir().expect("public bundle dir");
+        write_bundle(admin_dir.path());
+        write_bundle(web_dir.path());
+        let state = spa_state(admin_dir.path(), web_dir.path()).await;
+
+        for path in ["/invite/payload.mac", "/assets/app.js"] {
+            let response = spa_response(state.clone(), "public.example", path).await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            assert!(
+                response
+                    .headers()
+                    .get(header::CONTENT_SECURITY_POLICY)
+                    .is_none(),
+                "{path} on the public host must keep its own headers"
+            );
+        }
+    }
+
+    #[test]
+    fn status_payload_exposes_source_and_build_identity() {
+        let payload = status_payload(42);
+
+        assert_eq!(payload["service"], "buzz-relay");
+        assert_eq!(payload["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(payload["uptime_seconds"], 42);
+        for field in ["source_sha", "id", "url"] {
+            assert!(
+                payload["build"][field]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty()),
+                "build.{field} must be a non-empty string"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -20,16 +20,18 @@ migration:
     limits: {cpu: 250m, memory: 128Mi}
 publicDeliveryUrl: https://push.buzz.xyz/v1/deliveries/apns
 maxGrantLifetimeSeconds: 2592000
-enabledProfiles: buzz-ios-production
-# Example App Attest identifier. Production MUST override this with the exact
-# Apple TEAMID.bundle-id value (see values-production.yaml).
-appAttestAppId: TEAMID.xyz.buzz
+profiles:
+  dogfood:
+    # Production MUST override this with the exact Apple TEAMID.bundle-id.
+    appAttestAppId: TEAMID.xyz.block.buzz.dogfood.mobile
+    apnsTopic: xyz.block.buzz.dogfood.mobile
+    apnsEnvironment: production
+    apnsCert:
+      secretName: buzz-push-gateway
+      secretKey: dogfood-apns-identity.pem
 appAttestRoot:
   secretName: buzz-push-gateway
   secretKey: app-attest-root.pem
-apnsKey:
-  secretName: buzz-push-gateway
-  secretKey: apns-provider.p8
 service:
   port: 8080
 httpRoute:

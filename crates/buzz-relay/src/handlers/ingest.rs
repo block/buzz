@@ -50,6 +50,98 @@ use crate::conformance::{
     state_for_request, EmitGuard, TraceAction, Verdict,
 };
 
+fn huddle_backing_channel_id(event: &Event) -> Result<Uuid, IngestError> {
+    let content: serde_json::Value = serde_json::from_str(&event.content).map_err(|_| {
+        IngestError::Rejected("invalid: Huddle event content must be a JSON object".into())
+    })?;
+    let channel_id = content
+        .get("ephemeral_channel_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            IngestError::Rejected("invalid: Huddle event must name an ephemeral_channel_id".into())
+        })?;
+    channel_id.parse::<Uuid>().map_err(|_| {
+        IngestError::Rejected("invalid: Huddle ephemeral_channel_id must be a UUID".into())
+    })
+}
+
+fn map_huddle_backing_channel_error(error: buzz_db::DbError) -> IngestError {
+    match error {
+        buzz_db::DbError::ChannelNotFound(_) => {
+            IngestError::Rejected("invalid: Huddle backing channel not found".into())
+        }
+        error => IngestError::Internal(format!("error: loading Huddle backing channel: {error}")),
+    }
+}
+
+fn expected_huddle_backing_ttl(ephemeral_ttl_override: Option<i32>) -> i32 {
+    ephemeral_ttl_override.unwrap_or(3600)
+}
+
+async fn validate_huddle_lifecycle_event(
+    tenant: &TenantContext,
+    state: &AppState,
+    event: &Event,
+    kind: u32,
+) -> Result<(), IngestError> {
+    if kind != KIND_HUDDLE_STARTED && kind != KIND_HUDDLE_ENDED {
+        return Ok(());
+    }
+
+    let backing_channel_id = huddle_backing_channel_id(event)?;
+    let backing = state
+        .db
+        .get_channel(tenant.community(), backing_channel_id)
+        .await
+        .map_err(map_huddle_backing_channel_error)?;
+    let signer = event.pubkey.to_bytes();
+    let relay = state.relay_keypair.public_key().to_bytes();
+    let signer_created_backing = backing.created_by.as_slice() == signer.as_slice();
+
+    if kind == KIND_HUDDLE_STARTED {
+        let expected_ttl = expected_huddle_backing_ttl(state.config.ephemeral_ttl_override);
+        if !signer_created_backing
+            || backing.channel_type != "stream"
+            || backing.visibility != "private"
+            || backing.ttl_seconds != Some(expected_ttl)
+            || backing.archived_at.is_some()
+        {
+            return Err(IngestError::Rejected(
+                "invalid: Huddle start must reference the signer's active private ephemeral stream"
+                    .into(),
+            ));
+        }
+    } else {
+        if !signer_created_backing && signer.as_slice() != relay.as_slice() {
+            return Err(IngestError::Rejected(
+                "invalid: only the Huddle creator or relay may end it".into(),
+            ));
+        }
+        let parent_channel_id = extract_channel_id(event).ok_or_else(|| {
+            IngestError::Rejected("invalid: Huddle end must name its parent channel".into())
+        })?;
+        let linked = state
+            .db
+            .huddle_started_link_exists(
+                tenant.community(),
+                parent_channel_id,
+                backing_channel_id,
+                &backing.created_by,
+            )
+            .await
+            .map_err(|error| {
+                IngestError::Internal(format!("error: checking Huddle start linkage: {error}"))
+            })?;
+        if !linked {
+            return Err(IngestError::Rejected(
+                "invalid: Huddle end does not match a creator-signed start in this channel".into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn validate_custom_emoji_tags(event: &Event) -> Result<(), IngestError> {
     for tag in event.tags.iter() {
         let parts = tag.as_slice();
@@ -724,32 +816,11 @@ pub(crate) async fn resolve_nip10_thread_meta(
     channel_id: Uuid,
     state: &AppState,
 ) -> Result<Option<ThreadMetadataOwned>, String> {
-    let mut root_hex: Option<String> = None;
-    let mut reply_hex: Option<String> = None;
+    let markers = buzz_core::nip10::parse_thread_markers(&event.tags);
 
-    for tag in event.tags.iter() {
-        let parts = tag.as_slice();
-        if parts.len() >= 4 && parts[0] == "e" {
-            let hex_val = &parts[1];
-            let marker = &parts[3];
-            if hex_val.len() == 64 && hex_val.chars().all(|c| c.is_ascii_hexdigit()) {
-                match marker.as_str() {
-                    "root" => root_hex = Some(hex_val.to_string()),
-                    "reply" => reply_hex = Some(hex_val.to_string()),
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    if root_hex.is_none() && reply_hex.is_none() {
-        return Ok(None);
-    }
-
-    let (root_hex, parent_hex) = match (root_hex, reply_hex) {
-        (Some(r), Some(p)) => (r, p),
-        (None, Some(p)) => (p.clone(), p),
-        (Some(_), None) | (None, None) => return Ok(None),
+    let (root_hex, parent_hex) = match markers.resolve() {
+        Some(pair) => pair,
+        None => return Ok(None),
     };
 
     let parent_bytes =
@@ -807,46 +878,18 @@ pub(crate) async fn resolve_nip10_thread_meta(
             (effective_root, root_ts, depth)
         }
         None => {
-            let parent_root = parent_event
-                .event
-                .tags
-                .iter()
-                .find_map(|t| {
-                    let parts = t.as_slice();
-                    if parts.len() >= 4 && parts[0] == "e" && parts[3] == "root" {
-                        hex::decode(&parts[1]).ok().filter(|b| b.len() == 32)
-                    } else {
-                        None
-                    }
-                })
-                .or_else(|| {
-                    parent_event.event.tags.iter().find_map(|t| {
-                        let parts = t.as_slice();
-                        if parts.len() >= 4 && parts[0] == "e" && parts[3] == "reply" {
-                            hex::decode(&parts[1]).ok().filter(|b| b.len() == 32)
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .unwrap_or_else(|| parent_bytes.clone());
+            let (parent_root, root_created, depth) = derive_ancestry_from_parent_tags(
+                community_id,
+                &parent_event.event,
+                &parent_bytes,
+                parent_created,
+                state,
+            )
+            .await;
 
             if client_root_bytes != parent_root {
                 return Err("root tag does not match thread ancestry".to_string());
             }
-            let depth = if parent_root == parent_bytes { 1 } else { 2 };
-            let root_created = if parent_root != parent_bytes {
-                if let Ok(Some(root_ev)) =
-                    state.db.get_event_by_id(community_id, &parent_root).await
-                {
-                    chrono::DateTime::from_timestamp(root_ev.event.created_at.as_secs() as i64, 0)
-                        .unwrap_or(parent_created)
-                } else {
-                    parent_created
-                }
-            } else {
-                parent_created
-            };
             (parent_root, root_created, depth)
         }
     };
@@ -870,6 +913,182 @@ pub(crate) async fn resolve_nip10_thread_meta(
         depth,
         broadcast,
     }))
+}
+
+/// Recover a reply's thread ancestry from its *parent's* NIP-10 tags when the
+/// parent has **no** `thread_metadata` row (legacy or not-yet-indexed events).
+///
+/// The parent's markers are first collapsed through `ThreadMarkers::resolve()`:
+/// a `root`+`reply` parent carries its marked root, a `reply`-only parent carries
+/// its reply target as root, and a root-only/malformed/unmarked parent is itself
+/// top-level and its own root. Depth is 1 when the parent is the root and 2
+/// otherwise — a reply to a nested-but-unindexed parent must not be mistaken for
+/// a top-level reply.
+///
+/// Shared by [`resolve_nip10_thread_meta`] (client path) and
+/// [`resolve_relay_reply_thread_meta`] (workflow path) so the two cannot
+/// diverge. Returns `(root_event_id, root_event_created_at, depth)`.
+async fn derive_ancestry_from_parent_tags(
+    community_id: CommunityId,
+    parent_event: &Event,
+    parent_bytes: &[u8],
+    parent_created: chrono::DateTime<Utc>,
+    state: &AppState,
+) -> (Vec<u8>, chrono::DateTime<Utc>, i32) {
+    let marked_ancestor = |id_hex: &str| hex::decode(id_hex).ok().filter(|b| b.len() == 32);
+    let markers = buzz_core::nip10::parse_thread_markers(&parent_event.tags);
+    let parent_root = markers
+        .resolve()
+        .map(|(root, _)| root)
+        .as_deref()
+        .and_then(marked_ancestor)
+        .unwrap_or_else(|| parent_bytes.to_vec());
+
+    if parent_root.as_slice() == parent_bytes {
+        (parent_root, parent_created, 1)
+    } else {
+        let root_created =
+            if let Ok(Some(root_ev)) = state.db.get_event_by_id(community_id, &parent_root).await {
+                chrono::DateTime::from_timestamp(root_ev.event.created_at.as_secs() as i64, 0)
+                    .unwrap_or(parent_created)
+            } else {
+                parent_created
+            };
+        (parent_root, root_created, 2)
+    }
+}
+
+/// Resolved thread ancestry for a relay-built reply (workflow path).
+///
+/// Carries the parent and root identifiers plus the reply's depth, so the
+/// caller can both emit matching NIP-10 `root`/`reply` tags and persist thread
+/// metadata for the signed reply event.
+pub(crate) struct ReplyAncestry {
+    pub parent_event_id: Vec<u8>,
+    pub parent_event_created_at: chrono::DateTime<Utc>,
+    pub root_event_id: Vec<u8>,
+    pub root_event_created_at: chrono::DateTime<Utc>,
+    pub depth: i32,
+}
+
+impl ReplyAncestry {
+    /// Root event ID as lowercase hex, for the NIP-10 `root` tag.
+    pub fn root_hex(&self) -> String {
+        hex::encode(&self.root_event_id)
+    }
+
+    /// Parent event ID as lowercase hex, for the NIP-10 `reply` tag.
+    pub fn parent_hex(&self) -> String {
+        hex::encode(&self.parent_event_id)
+    }
+
+    /// Build the DB thread-metadata params for the signed reply event.
+    pub fn into_thread_meta(
+        self,
+        reply_event_id: Vec<u8>,
+        reply_created_at: chrono::DateTime<Utc>,
+        channel_id: Uuid,
+    ) -> ThreadMetadataOwned {
+        ThreadMetadataOwned {
+            event_id: reply_event_id,
+            event_created_at: reply_created_at,
+            channel_id,
+            parent_event_id: self.parent_event_id,
+            parent_event_created_at: self.parent_event_created_at,
+            root_event_id: self.root_event_id,
+            root_event_created_at: self.root_event_created_at,
+            depth: self.depth,
+            broadcast: false,
+        }
+    }
+}
+
+/// Resolve thread ancestry for a reply built by the relay (workflow path).
+///
+/// Unlike [`resolve_nip10_thread_meta`], which validates client-supplied NIP-10
+/// `e` tags, this derives ancestry from a known `parent_hex` (the triggering
+/// event) and *computes* the correct root and depth. Enforces the same-channel
+/// invariant and the depth limit that the ingest path applies.
+pub(crate) async fn resolve_relay_reply_thread_meta(
+    community_id: CommunityId,
+    parent_hex: &str,
+    channel_id: Uuid,
+    state: &AppState,
+) -> Result<ReplyAncestry, String> {
+    let parent_bytes =
+        hex::decode(parent_hex).map_err(|_| "invalid parent event ID hex".to_string())?;
+
+    let (parent_event_result, parent_meta_result) = tokio::join!(
+        state.db.get_event_by_id(community_id, &parent_bytes),
+        state
+            .db
+            .get_thread_metadata_by_event(community_id, &parent_bytes),
+    );
+
+    let parent_event = parent_event_result
+        .map_err(|e| format!("db error looking up parent: {e}"))?
+        .ok_or_else(|| "reply parent not found".to_string())?;
+
+    match parent_event.channel_id {
+        Some(parent_ch) if parent_ch != channel_id => {
+            return Err("parent event belongs to a different channel".to_string());
+        }
+        None => return Err("parent event has no channel association".to_string()),
+        _ => {}
+    }
+
+    let parent_created =
+        chrono::DateTime::from_timestamp(parent_event.event.created_at.as_secs() as i64, 0)
+            .unwrap_or_else(Utc::now);
+
+    let parent_meta =
+        parent_meta_result.map_err(|e| format!("db error looking up thread metadata: {e}"))?;
+
+    // Root = parent's root if the parent is itself a reply, else the parent.
+    // Depth = parent depth + 1 (a direct reply to a top-level message is depth 1).
+    let (root_bytes, root_created, depth) = match parent_meta {
+        Some(meta) => {
+            let effective_root = meta.root_event_id.unwrap_or_else(|| parent_bytes.clone());
+            let root_ts = if effective_root == parent_bytes {
+                parent_created
+            } else if let Ok(Some(root_ev)) = state
+                .db
+                .get_event_by_id(community_id, &effective_root)
+                .await
+            {
+                chrono::DateTime::from_timestamp(root_ev.event.created_at.as_secs() as i64, 0)
+                    .unwrap_or(parent_created)
+            } else {
+                parent_created
+            };
+            (effective_root, root_ts, meta.depth + 1)
+        }
+        // No metadata row ⇒ recover the parent's ancestry from its own NIP-10
+        // tags. A marked (but not-yet-indexed) nested parent yields depth 2, not
+        // a false top-level depth 1.
+        None => {
+            derive_ancestry_from_parent_tags(
+                community_id,
+                &parent_event.event,
+                &parent_bytes,
+                parent_created,
+                state,
+            )
+            .await
+        }
+    };
+
+    if depth > 100 {
+        return Err("thread depth limit exceeded".to_string());
+    }
+
+    Ok(ReplyAncestry {
+        parent_event_id: parent_bytes,
+        parent_event_created_at: parent_created,
+        root_event_id: root_bytes,
+        root_event_created_at: root_created,
+        depth,
+    })
 }
 
 /// Count all `e` tags regardless of content validity.
@@ -2433,6 +2652,8 @@ async fn ingest_event_inner(
         });
     }
 
+    validate_huddle_lifecycle_event(tenant, state, &event, kind_u32).await?;
+
     if crate::handlers::side_effects::is_admin_kind(kind_u32) {
         crate::handlers::side_effects::validate_admin_event(tenant, kind_u32, &event, state)
             .await
@@ -3065,6 +3286,61 @@ mod tests {
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
     use nostr::{EventBuilder, Kind};
+
+    #[test]
+    fn missing_huddle_backing_channel_is_a_client_rejection() {
+        let channel_id = Uuid::new_v4();
+        assert!(matches!(
+            map_huddle_backing_channel_error(buzz_db::DbError::ChannelNotFound(channel_id)),
+            IngestError::Rejected(message) if message.contains("backing channel not found")
+        ));
+    }
+
+    #[test]
+    fn huddle_backing_channel_lookup_outage_is_internal() {
+        let error = sqlx::Error::Io(std::io::Error::other("database unavailable"));
+        assert!(matches!(
+            map_huddle_backing_channel_error(buzz_db::DbError::Sqlx(error)),
+            IngestError::Internal(message) if message.contains("loading Huddle backing channel")
+        ));
+    }
+
+    #[test]
+    fn huddle_backing_ttl_honors_the_ephemeral_override() {
+        assert_eq!(expected_huddle_backing_ttl(None), 3600);
+        assert_eq!(expected_huddle_backing_ttl(Some(60)), 60);
+    }
+
+    #[test]
+    fn huddle_lifecycle_requires_a_uuid_backing_channel() {
+        let event = EventBuilder::new(
+            Kind::Custom(KIND_HUDDLE_STARTED as u16),
+            r#"{"ephemeral_channel_id":"not-a-uuid"}"#,
+        )
+        .sign_with_keys(&nostr::Keys::generate())
+        .expect("sign Huddle event");
+
+        assert!(matches!(
+            huddle_backing_channel_id(&event),
+            Err(IngestError::Rejected(message)) if message.contains("must be a UUID")
+        ));
+    }
+
+    #[test]
+    fn huddle_lifecycle_extracts_the_backing_channel() {
+        let channel_id = Uuid::new_v4();
+        let event = EventBuilder::new(
+            Kind::Custom(KIND_HUDDLE_ENDED as u16),
+            serde_json::json!({"ephemeral_channel_id": channel_id}).to_string(),
+        )
+        .sign_with_keys(&nostr::Keys::generate())
+        .expect("sign Huddle event");
+
+        assert_eq!(
+            huddle_backing_channel_id(&event).expect("channel id"),
+            channel_id
+        );
+    }
 
     #[test]
     fn reaction_validation_accepts_wrapped_max_shortcode() {

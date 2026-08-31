@@ -135,6 +135,7 @@ fn built_in_persona_records(now: &str) -> Vec<AgentDefinition> {
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
+            team_catalog_source: None,
             env_vars: std::collections::BTreeMap::new(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
@@ -335,7 +336,9 @@ pub fn validate_persona_activation_change(
     Ok(())
 }
 
-pub fn load_personas(app: &AppHandle) -> Result<Vec<AgentDefinition>, String> {
+pub fn load_personas<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+) -> Result<Vec<AgentDefinition>, String> {
     let now = now_iso();
 
     // Post-fold: definitions live in the unified agent store, presented in
@@ -373,7 +376,10 @@ pub(crate) fn load_personas_from_path(
         .map_err(|error| format!("failed to parse persona store: {error}"))
 }
 
-pub fn save_personas(app: &AppHandle, records: &[AgentDefinition]) -> Result<(), String> {
+pub fn save_personas<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    records: &[AgentDefinition],
+) -> Result<(), String> {
     let mut sorted = records.to_vec();
     sort_personas(&mut sorted);
 
