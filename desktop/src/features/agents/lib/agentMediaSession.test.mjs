@@ -6,6 +6,7 @@ import {
   isSessionExpired,
   parseAgentMediaSession,
   parseAgentMediaSessionEnd,
+  trackBelongsToSessionAgent,
 } from "./agentMediaSession.ts";
 
 const AGENT = "a".repeat(64);
@@ -272,4 +273,110 @@ test("endRetiresSession refuses an end naming a different start", () => {
   });
   assert.ok(end);
   assert.equal(endRetiresSession(end, session), false);
+});
+
+// -- trackBelongsToSessionAgent -------------------------------------------
+//
+// The panel plays only the announcing agent's tracks. Audio reached these
+// tests the hard way: the room hook dropped every non-video track, so the
+// avatar rendered silently and the surface's own comment ("hearing it is the
+// point") described behaviour the code did not have.
+
+const OTHER = "b".repeat(64);
+
+/** A session whose announcement declares `participants`. */
+function sessionWith(participants) {
+  const session = parseAgentMediaSession(
+    announcement({
+      content: JSON.stringify({
+        v: 1,
+        provider: "livekit",
+        connect: { url: "wss://example.livekit.cloud", room: "room-1" },
+        participants,
+        expires_at: EXPIRES_AT,
+      }),
+    }),
+  );
+  assert.ok(session);
+  return session;
+}
+
+const SOLE_AVATAR = [{ pubkey: AGENT, tracks: ["avatar_video", "audio"] }];
+
+test("trackBelongsToSessionAgent accepts a track whose identity names the agent", () => {
+  const session = sessionWith(SOLE_AVATAR);
+  for (const kind of ["video", "audio"]) {
+    assert.equal(
+      trackBelongsToSessionAgent(session, `anam-avatar-${AGENT}`, kind),
+      true,
+    );
+  }
+});
+
+test("trackBelongsToSessionAgent matches an identity regardless of case", () => {
+  const session = sessionWith(SOLE_AVATAR);
+  assert.equal(
+    trackBelongsToSessionAgent(session, AGENT.toUpperCase(), "audio"),
+    true,
+  );
+});
+
+test("trackBelongsToSessionAgent accepts a foreign identity when the announcement declares one publisher of that kind", () => {
+  // The gateway is not obliged to put the pubkey in its provider identity, and
+  // LiveKit's avatar worker joins as `anam-avatar-agent`. One declared
+  // publisher makes a single track of that kind unambiguous anyway.
+  const session = sessionWith(SOLE_AVATAR);
+  for (const kind of ["video", "audio"]) {
+    assert.equal(
+      trackBelongsToSessionAgent(session, "anam-avatar-agent", kind),
+      true,
+    );
+  }
+});
+
+test("trackBelongsToSessionAgent refuses a foreign identity once two publishers declare that kind", () => {
+  const session = sessionWith([
+    { pubkey: AGENT, tracks: ["avatar_video", "audio"] },
+    { pubkey: OTHER, tracks: ["audio"] },
+  ]);
+  // Two declared audio publishers: this voice could be either, so it must not
+  // play under the agent's face.
+  assert.equal(
+    trackBelongsToSessionAgent(session, "some-other-participant", "audio"),
+    false,
+  );
+  // The video declaration is untouched by the second audio publisher — the
+  // kinds are counted separately, so a multi-voice room still shows the face.
+  assert.equal(
+    trackBelongsToSessionAgent(session, "some-other-participant", "video"),
+    true,
+  );
+});
+
+test("trackBelongsToSessionAgent refuses a foreign identity when the announcement declares nothing", () => {
+  const session = sessionWith([]);
+  for (const kind of ["video", "audio"]) {
+    assert.equal(
+      trackBelongsToSessionAgent(session, "anam-avatar-agent", kind),
+      false,
+    );
+  }
+});
+
+test("trackBelongsToSessionAgent counts each kind against its own declaration", () => {
+  // An announcement may grant audio to a participant that publishes no face.
+  const session = sessionWith([
+    { pubkey: AGENT, tracks: ["avatar_video"] },
+    { pubkey: OTHER, tracks: ["audio"] },
+  ]);
+  assert.equal(
+    trackBelongsToSessionAgent(session, "unnamed", "video"),
+    true,
+    "one declared avatar publisher",
+  );
+  assert.equal(
+    trackBelongsToSessionAgent(session, "unnamed", "audio"),
+    true,
+    "one declared audio publisher, even though it is not the agent's own entry",
+  );
 });

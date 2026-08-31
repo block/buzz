@@ -239,3 +239,40 @@ export function isSessionExpired(
 ): boolean {
   return session.expiresAt <= nowSeconds;
 }
+
+/**
+ * Whether a track published by `participantIdentity` is this session's agent's.
+ *
+ * Called for every subscribed track, because only the announcing agent's face
+ * and voice belong in its panel. A room may carry other publishers once
+ * sessions go multi-party, and rendering the wrong face — or playing the wrong
+ * voice under the right one — is worse than rendering nothing.
+ *
+ * Two ways to qualify, in order:
+ *
+ * 1. The provider identity contains the agent's hex pubkey. This is what a
+ *    gateway is expected to do, and it is unambiguous.
+ * 2. Failing that, the announcement declares exactly one publisher of this
+ *    track kind. Then a single track of that kind cannot be anyone else's, and
+ *    refusing it would strand v1 on an identity convention the wire format
+ *    never actually promised.
+ *
+ * Audio is checked the same way as video and against its own declaration: an
+ * announcement may name one avatar publisher and several audio ones, and the
+ * agent's face arriving unambiguously says nothing about whose voice this is.
+ */
+export function trackBelongsToSessionAgent(
+  session: AgentMediaSession,
+  participantIdentity: string,
+  kind: "audio" | "video",
+): boolean {
+  // `session.agentPubkey` is normalized at parse time; the identity is not.
+  if (participantIdentity.toLowerCase().includes(session.agentPubkey)) {
+    return true;
+  }
+  const declared: MediaTrackKind = kind === "video" ? "avatar_video" : "audio";
+  return (
+    session.participants.filter((entry) => entry.tracks.includes(declared))
+      .length === 1
+  );
+}

@@ -10,7 +10,10 @@ import {
 } from "livekit-client";
 
 import { nip98PostHeader } from "@/shared/api/nip98";
-import type { AgentMediaSession } from "./agentMediaSession";
+import {
+  type AgentMediaSession,
+  trackBelongsToSessionAgent,
+} from "./agentMediaSession";
 
 /** Bound the token request so an unreachable gateway surfaces in seconds. */
 const TOKEN_REQUEST_TIMEOUT_MS = 15_000;
@@ -34,6 +37,25 @@ export type AgentMediaRoomState = {
    * stale attachment keeps a decoded video surface alive after the panel closes.
    */
   attachVideo: ((element: HTMLVideoElement) => () => void) | null;
+  /**
+   * Attach the agent's audio to an element. Returns a detach function.
+   *
+   * Separate from `attachVideo` because a media element plays only the tracks
+   * in the stream it was given: attaching the video track alone renders a
+   * silent face, which is what shipped before this existed.
+   */
+  attachAudio: ((element: HTMLMediaElement) => () => void) | null;
+  /**
+   * True when the browser is refusing to start audio without a gesture.
+   *
+   * Autoplay policy is per-document and sticky, so opening the panel by
+   * clicking usually satisfies it — but the token fetch and the room connect
+   * happen after that click, and a viewer who arrived some other way has no
+   * gesture at all. When this is set, call `enableAudio` from a real click.
+   */
+  audioBlocked: boolean;
+  /** Start audio playback after a user gesture. Safe to call at any time. */
+  enableAudio: () => void;
   /** Whether the local microphone is publishing. */
   micEnabled: boolean;
   setMicEnabled: (enabled: boolean) => void;
@@ -93,6 +115,8 @@ export function useAgentMediaRoom(
   const [status, setStatus] = React.useState<AgentMediaRoomStatus>("idle");
   const [error, setError] = React.useState<string | null>(null);
   const [videoTrack, setVideoTrack] = React.useState<RemoteTrack | null>(null);
+  const [audioTrack, setAudioTrack] = React.useState<RemoteTrack | null>(null);
+  const [audioBlocked, setAudioBlocked] = React.useState(false);
   const [micEnabled, setMicEnabledState] = React.useState(false);
   const roomRef = React.useRef<Room | null>(null);
 
@@ -103,6 +127,8 @@ export function useAgentMediaRoom(
       setStatus("idle");
       setError(null);
       setVideoTrack(null);
+      setAudioTrack(null);
+      setAudioBlocked(false);
       return;
     }
 
@@ -116,29 +142,35 @@ export function useAgentMediaRoom(
       _publication: RemoteTrackPublication,
       participant: RemoteParticipant,
     ) => {
-      if (disposed || track.kind !== Track.Kind.Video) return;
-      // Only the announcing agent's video belongs in this panel — a room may
-      // carry other publishers once sessions go multi-party, and rendering the
-      // wrong face is worse than rendering none.
-      //
-      // The gateway is expected to put the agent's hex pubkey in its LiveKit
-      // identity. When it does, match on that. When it does not, fall back to
-      // the announcement: if it declares exactly one avatar publisher then a
-      // single video track is unambiguous, and refusing it would strand v1 on
-      // an identity convention the wire format never actually promised.
-      const identity = participant.identity.toLowerCase();
-      const identifiesAgent = identity.includes(session.agentPubkey);
-      const soleAvatarPublisher =
-        session.participants.filter((entry) =>
-          entry.tracks.includes("avatar_video"),
-        ).length === 1;
-      if (!identifiesAgent && !soleAvatarPublisher) return;
-      setVideoTrack(track);
+      if (disposed) return;
+      const isVideo = track.kind === Track.Kind.Video;
+      const isAudio = track.kind === Track.Kind.Audio;
+      if (!isVideo && !isAudio) return;
+
+      // Only the announcing agent's tracks belong in this panel; the rule
+      // itself lives with the other announcement logic so it can be tested
+      // without a room.
+      if (
+        !trackBelongsToSessionAgent(
+          session,
+          participant.identity,
+          isVideo ? "video" : "audio",
+        )
+      ) {
+        return;
+      }
+
+      if (isVideo) {
+        setVideoTrack(track);
+        return;
+      }
+      setAudioTrack(track);
     };
 
     const onUnsubscribed = (track: RemoteTrack) => {
       if (disposed) return;
       setVideoTrack((current) => (current === track ? null : current));
+      setAudioTrack((current) => (current === track ? null : current));
     };
 
     const onStateChanged = (state: ConnectionState) => {
@@ -150,13 +182,23 @@ export function useAgentMediaRoom(
     const onDisconnected = () => {
       if (disposed) return;
       setVideoTrack(null);
+      setAudioTrack(null);
       setStatus("idle");
+    };
+
+    // The browser, not LiveKit, decides whether audio may start. Track its
+    // answer rather than assuming success, so a blocked room can offer a
+    // gesture instead of playing silently and looking broken.
+    const onAudioPlaybackChanged = () => {
+      if (disposed) return;
+      setAudioBlocked(!room.canPlaybackAudio);
     };
 
     room
       .on(RoomEvent.TrackSubscribed, onSubscribed)
       .on(RoomEvent.TrackUnsubscribed, onUnsubscribed)
       .on(RoomEvent.ConnectionStateChanged, onStateChanged)
+      .on(RoomEvent.AudioPlaybackStatusChanged, onAudioPlaybackChanged)
       .on(RoomEvent.Disconnected, onDisconnected);
 
     setStatus("authorizing");
@@ -186,10 +228,13 @@ export function useAgentMediaRoom(
         .off(RoomEvent.TrackSubscribed, onSubscribed)
         .off(RoomEvent.TrackUnsubscribed, onUnsubscribed)
         .off(RoomEvent.ConnectionStateChanged, onStateChanged)
+        .off(RoomEvent.AudioPlaybackStatusChanged, onAudioPlaybackChanged)
         .off(RoomEvent.Disconnected, onDisconnected);
       void room.disconnect();
       if (roomRef.current === room) roomRef.current = null;
       setVideoTrack(null);
+      setAudioTrack(null);
+      setAudioBlocked(false);
     };
   }, [session]);
 
@@ -202,6 +247,24 @@ export function useAgentMediaRoom(
       };
     };
   }, [videoTrack]);
+
+  const attachAudio = React.useMemo(() => {
+    if (!audioTrack) return null;
+    return (element: HTMLMediaElement) => {
+      audioTrack.attach(element);
+      return () => {
+        audioTrack.detach(element);
+      };
+    };
+  }, [audioTrack]);
+
+  const enableAudio = React.useCallback(() => {
+    const room = roomRef.current;
+    if (!room) return;
+    // Success fires AudioPlaybackStatusChanged, which clears the flag; a
+    // rejection leaves it set so the affordance stays available.
+    void room.startAudio().catch(() => {});
+  }, []);
 
   const setMicEnabled = React.useCallback((enabled: boolean) => {
     const room = roomRef.current;
@@ -216,6 +279,9 @@ export function useAgentMediaRoom(
     status,
     error,
     attachVideo,
+    attachAudio,
+    audioBlocked,
+    enableAudio,
     micEnabled,
     setMicEnabled,
     canPublishAudio,

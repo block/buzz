@@ -12,6 +12,7 @@ import {
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
 import { mergeChannelKnownAgentPubkeys } from "@/features/agents/knownAgentPubkeys";
+import { AgentMediaIndicator } from "@/features/agents/ui/AgentMediaIndicator";
 import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
 import { useChannelMembersQuery } from "@/features/channels/hooks";
 import {
@@ -189,6 +190,13 @@ export function ChannelMembersBar({
     />
   );
 
+  const agentMediaIndicator = (
+    <AgentMediaIndicator
+      channelId={channel.id}
+      renderMode={variant === "compact" ? "menu-item" : "button"}
+    />
+  );
+
   const controls =
     variant === "compact" ? (
       <div className="flex items-center gap-[6px]">
@@ -215,6 +223,7 @@ export function ChannelMembersBar({
                 {memberCount}
               </span>
             </DropdownMenuItem>
+            {agentMediaIndicator}
             {huddleIndicator}
             <DropdownMenuItem
               data-testid="channel-management-trigger"
@@ -247,6 +256,8 @@ export function ChannelMembersBar({
           </TooltipTrigger>
           <TooltipContent>Channel members</TooltipContent>
         </Tooltip>
+
+        {agentMediaIndicator}
 
         {huddleIndicator}
 
