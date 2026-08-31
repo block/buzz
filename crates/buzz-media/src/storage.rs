@@ -962,6 +962,7 @@ mod tests {
             max_image_bytes: 50 * 1024 * 1024,
             max_gif_bytes: 10 * 1024 * 1024,
             max_video_bytes: 524_288_000,
+            max_video_duration_secs: 900,
             max_file_bytes: 104_857_600,
             public_base_url: "http://localhost:3000/media".to_string(),
             upload_records_enabled: false,

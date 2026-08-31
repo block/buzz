@@ -293,7 +293,7 @@ pub fn validate_content(bytes: &[u8], config: &MediaConfig) -> Result<String, Me
 /// - Container is MP4 (ftyp brand is not QuickTime `qt  `)
 /// - Exactly one video track using `avc1` (H.264 only — rejects HEVC, VP9, AV1)
 /// - At most one audio track, using `mp4a` (AAC)
-/// - Duration ≤ 600 seconds (from mvhd timescale, not edit lists)
+/// - Duration ≤ `config.max_video_duration_secs` (from mvhd timescale, not edit lists)
 /// - Resolution: short edge ≤ 2160 and long edge ≤ 3840 (portrait or landscape)
 /// - moov atom precedes mdat (fast-start / web-optimised)
 ///
@@ -354,8 +354,9 @@ pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMet
                 }
 
                 // Duration from mvhd timescale (track duration / timescale).
-                // Reject zero/negative (malformed) and >600s (too long).
-                // Must match imeta validation which requires duration > 0.0.
+                // Reject zero/negative (malformed) and above the configured
+                // cap (too long). Must match imeta validation which requires
+                // duration > 0.0.
                 // Guard: timescale=0 causes division-by-zero in the mp4 crate's
                 // duration() method. Fail fast before it panics.
                 if track.timescale() == 0 {
@@ -366,8 +367,10 @@ pub fn validate_video_file(path: &Path, config: &MediaConfig) -> Result<VideoMet
                 if duration_secs <= 0.0 {
                     return Err(MediaError::InvalidVideo);
                 }
-                if duration_secs > 600.0 {
-                    return Err(MediaError::DurationTooLong);
+                if duration_secs > config.max_video_duration_secs as f64 {
+                    return Err(MediaError::DurationTooLong {
+                        max_secs: config.max_video_duration_secs,
+                    });
                 }
 
                 // Resolution check. Apply the 2160×3840 envelope independent
@@ -969,6 +972,7 @@ mod tests {
             max_image_bytes: 50 * 1024 * 1024,
             max_gif_bytes: 10 * 1024 * 1024,
             max_video_bytes: 524_288_000,
+            max_video_duration_secs: 900,
             max_file_bytes: 104_857_600,
             public_base_url: String::new(),
             upload_records_enabled: false,
@@ -1679,7 +1683,7 @@ mod tests {
         build_mp4_bytes(true, b"hev1", 1_000, 320, 240, false)
     }
 
-    /// Build an MP4 with duration > 600s.
+    /// Build an MP4 with duration > 600s (used against a 600s cap).
     fn build_mp4_too_long() -> Vec<u8> {
         build_mp4_bytes(true, b"avc1", 601_000, 320, 240, false)
     }
@@ -2318,7 +2322,10 @@ mod tests {
                 assert_eq!(meta.width, 320);
                 assert_eq!(meta.height, 240);
                 assert!(!meta.has_audio);
-                assert!(meta.duration_secs > 0.0 && meta.duration_secs <= 600.0);
+                assert!(
+                    meta.duration_secs > 0.0
+                        && meta.duration_secs <= config.max_video_duration_secs as f64
+                );
             }
             Err(e) => panic!("expected Ok, got {e:?}"),
         }
@@ -2526,14 +2533,41 @@ mod tests {
 
     #[test]
     fn test_validate_video_too_long_rejected() {
-        let config = test_config();
+        let mut config = test_config();
+        config.max_video_duration_secs = 600;
         let mp4_bytes = build_mp4_too_long();
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), &mp4_bytes).unwrap();
         let result = validate_video_file(tmp.path(), &config);
         assert!(
-            matches!(result, Err(MediaError::DurationTooLong)),
+            matches!(result, Err(MediaError::DurationTooLong { max_secs: 600 })),
             "expected DurationTooLong, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_video_601s_accepted_at_default_15min_cap() {
+        let config = test_config();
+        assert_eq!(config.max_video_duration_secs, 900);
+        let mp4_bytes = build_mp4_too_long(); // 601s
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &mp4_bytes).unwrap();
+        assert!(
+            validate_video_file(tmp.path(), &config).is_ok(),
+            "601s must pass the default 900s cap (sales-demo length)"
+        );
+    }
+
+    #[test]
+    fn test_validate_video_rejects_over_configured_15min_cap() {
+        let config = test_config();
+        let mp4_bytes = build_mp4_bytes(true, b"avc1", 901_000, 320, 240, false);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &mp4_bytes).unwrap();
+        let result = validate_video_file(tmp.path(), &config);
+        assert!(
+            matches!(result, Err(MediaError::DurationTooLong { max_secs: 900 })),
+            "expected DurationTooLong at 900s, got {result:?}"
         );
     }
 

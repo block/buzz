@@ -69,9 +69,9 @@ pub enum MediaError {
     /// A video/audio track does not use the canonical H.264/AAC codecs.
     #[error("unsupported media codec: only H.264 video and AAC audio are accepted")]
     WrongCodec,
-    /// Video duration exceeds the 600-second limit.
-    #[error("video too long: duration exceeds 600 seconds")]
-    DurationTooLong,
+    /// Video duration exceeds the configured limit.
+    #[error("video too long: duration exceeds {max_secs} seconds")]
+    DurationTooLong { max_secs: u64 },
     /// Video resolution exceeds the 2160 short-edge / 3840 long-edge envelope.
     #[error(
         "video resolution too high: maximum is 2160 on the short edge and 3840 on the long edge"
@@ -154,7 +154,7 @@ impl IntoResponse for MediaError {
             Self::UnknownContentType | Self::UnsupportedContainer | Self::WrongCodec => {
                 (StatusCode::UNSUPPORTED_MEDIA_TYPE, self.to_string())
             }
-            Self::DurationTooLong
+            Self::DurationTooLong { .. }
             | Self::ResolutionTooHigh
             | Self::MoovNotAtFront
             | Self::InvalidVideo
@@ -210,7 +210,7 @@ mod tests {
             MediaError::InvalidVideo,
             MediaError::MetadataForbidden,
             MediaError::MoovNotAtFront,
-            MediaError::DurationTooLong,
+            MediaError::DurationTooLong { max_secs: 900 },
             MediaError::ResolutionTooHigh,
         ] {
             assert_eq!(
