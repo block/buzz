@@ -563,9 +563,15 @@ fn name_matches_known_binary_rejects_node() {
 }
 
 #[test]
-fn name_matches_interpreter_accepts_node() {
-    // `node` IS a known script interpreter and must be recognized.
-    assert!(super::name_matches_interpreter("node"));
+fn name_matches_interpreter_accepts_node_and_python_hermes_hosts() {
+    // Script interpreters are only ownership candidates; callers still require
+    // the exact BUZZ_MANAGED_AGENT marker before touching the process.
+    for name in ["node", "python", "python3", "Python", "python.exe"] {
+        assert!(
+            super::name_matches_interpreter(name),
+            "expected {name} to be a known marker-gated interpreter"
+        );
+    }
 }
 
 #[test]
