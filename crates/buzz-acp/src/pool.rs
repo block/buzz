@@ -4917,6 +4917,23 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
 
+    #[cfg(unix)]
+    struct TempCaptureFile(std::path::PathBuf);
+
+    #[cfg(unix)]
+    impl TempCaptureFile {
+        fn new(path: &std::path::Path) -> Self {
+            Self(path.to_owned())
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for TempCaptureFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
     fn test_mcp_server() -> McpServer {
         McpServer {
             name: "dev".into(),
@@ -9233,6 +9250,184 @@ done"#
             "one fetch_channel_info sequence (initial attempt + single retry)"
         );
         server.abort();
+    }
+
+    // ── Permission-mode bounds (#4280 / #3729 regression pins) ──────────────
+    //
+    // These pin the two halves of the permission-mode fix class:
+    //  1. `agent_supports_mode` — the advertisement gate behind the #3729
+    //     (OpenCode hang) fix: never send a mode the agent did not list.
+    //  2. `apply_permission_mode` — the 5s PERMISSION_MODE_TIMEOUT bound: a
+    //     silent agent yields a fast fatal Timeout rather than an unbounded wait.
+
+    /// A Hermes-shaped agent that answers `session/new` advertising the mode and
+    /// then goes silent on `session/set_config_option` must fail fast: the outer
+    /// PERMISSION_MODE_TIMEOUT (5s) fires and maps to a fatal AcpError::Timeout.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_apply_permission_mode_silent_agent_fails_fast_with_timeout() {
+        // Reads stdin forever, never writes a response. The test watchdog keeps
+        // a broken timeout implementation from hanging the suite indefinitely.
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &["-c".to_string(), "cat > /dev/null".to_string()],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn silent test agent");
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(15),
+            apply_permission_mode(&mut acp, "ses_silent", &PermissionMode::AcceptEdits),
+        )
+        .await;
+        // Do this before assertions so normal assertion failures do not leave a
+        // live subprocess behind; AcpClient::Drop remains only the panic-path
+        // fallback.
+        acp.shutdown().await;
+
+        let result = result.expect("permission-mode test exceeded its 15s watchdog");
+        let err = result.expect_err("a silent agent must fail the permission-mode set");
+        assert!(
+            matches!(err, AcpError::Timeout(d) if d == PERMISSION_MODE_TIMEOUT),
+            "expected AcpError::Timeout(PERMISSION_MODE_TIMEOUT), got {err:?}"
+        );
+    }
+
+    /// Positive end-to-end pin: an advertised non-default mode must emit the
+    /// expected `session/set_config_option` frame, not merely pass the helper
+    /// advertisement unit test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_advertised_permission_mode_emits_set_config_option() {
+        let capture = std::env::temp_dir().join(format!(
+            "buzz-acp-positive-capture-{}.jsonl",
+            Uuid::new_v4()
+        ));
+        let _capture_guard = TempCaptureFile::new(&capture);
+        let extra_env = vec![(
+            "CAPTURE_FILE".to_string(),
+            capture.to_string_lossy().into_owned(),
+        )];
+
+        // Record each inbound frame and answer the two requests used by this
+        // test. The path comes through the environment so arbitrary temp paths
+        // cannot change the Bash program's syntax.
+        let script = r#"while IFS= read -r -t 10 line; do
+  printf '%s\n' "$line" >> "$CAPTURE_FILE"
+  case "$line" in
+    *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"sessionId":"ses_advertised","modes":{"availableModes":[{"id":"acceptEdits","name":"Accept edits"}]}}}' ;;
+    *session/set_config_option*) printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{}}' ;;
+  esac
+done"#;
+
+        let acp = AcpClient::spawn(
+            "bash",
+            &["-c".to_string(), script.to_string()],
+            &extra_env,
+            false,
+        )
+        .await
+        .expect("failed to spawn advertised-mode test agent");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.permission_mode = PermissionMode::AcceptEdits;
+
+        let session_result =
+            create_session_and_apply_model(&mut agent, &ctx, None, None, None, None, None).await;
+        agent.acp.shutdown().await;
+        let session_id = session_result.expect("advertised mode session setup must succeed");
+        let sent = std::fs::read_to_string(&capture).expect("capture file must exist");
+
+        assert_eq!(session_id, "ses_advertised");
+        assert!(
+            sent.contains("session/set_config_option"),
+            "advertised mode must emit session/set_config_option: {sent}"
+        );
+        assert!(
+            sent.contains("\"configId\":\"mode\""),
+            "permission mode must use configId=mode: {sent}"
+        );
+        assert!(
+            sent.contains("\"value\":\"acceptEdits\""),
+            "permission mode must emit the requested wire value: {sent}"
+        );
+    }
+
+    /// Gate (#3729): when `session/new` advertises no modes, a non-default
+    /// permission mode must NOT emit `session/set_config_option`, while session
+    /// setup still succeeds. These Bash/`read -t` subprocess tests are Unix-only
+    /// because they intentionally exercise the repository's POSIX agent-spawn path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_unadvertised_permission_mode_sends_no_set_config_option() {
+        let capture =
+            std::env::temp_dir().join(format!("buzz-acp-gate-capture-{}.jsonl", Uuid::new_v4()));
+        let _capture_guard = TempCaptureFile::new(&capture);
+        let extra_env = vec![(
+            "CAPTURE_FILE".to_string(),
+            capture.to_string_lossy().into_owned(),
+        )];
+
+        // Respond to session/new with a Hermes-shaped result (no `modes`
+        // member), recording every inbound frame first. Stay silent on anything
+        // else, so an (unwanted) set_config_option would be captured.
+        let script = r#"while IFS= read -r -t 10 line; do
+  printf '%s\n' "$line" >> "$CAPTURE_FILE"
+  case "$line" in
+    *session/new*) printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"sessionId":"ses_gate"}}' ;;
+  esac
+done"#;
+
+        let acp = AcpClient::spawn(
+            "bash",
+            &["-c".to_string(), script.to_string()],
+            &extra_env,
+            false,
+        )
+        .await
+        .expect("failed to spawn gate test agent");
+        let mut agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.permission_mode = PermissionMode::AcceptEdits;
+
+        let session_result =
+            create_session_and_apply_model(&mut agent, &ctx, None, None, None, None, None).await;
+        agent.acp.shutdown().await;
+        let session_id =
+            session_result.expect("session setup must succeed when the mode is gated out");
+        let sent = std::fs::read_to_string(&capture).expect("capture file must exist");
+
+        assert_eq!(session_id, "ses_gate");
+        assert!(
+            sent.contains("session/new"),
+            "sanity: the capture must contain the session/new frame: {sent}"
+        );
+        assert!(
+            !sent.contains("session/set_config_option"),
+            "no set_config_option frame may be sent for an unadvertised mode: {sent}"
+        );
     }
 }
 
