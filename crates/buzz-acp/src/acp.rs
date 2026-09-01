@@ -9,8 +9,8 @@
 //! 5. [`AcpClient::session_cancel`] / [`AcpClient::cancel_with_cleanup`] — cancel in-flight turn
 
 use futures_util::StreamExt;
-use tokio::io::AsyncWriteExt;
-use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::process::{Child, ChildStdout};
 use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 
 use crate::observer::{ObserverContext, ObserverHandle};
@@ -134,6 +134,122 @@ fn build_initialize_params() -> serde_json::Value {
     })
 }
 
+/// Default timeout for a single stdin frame write. Preserved from the previous
+/// inline `write_ndjson` implementation: if the agent stops reading stdin, a
+/// write would otherwise block forever.
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Bound on the number of frames that can sit queued for the writer task.
+/// Backpressure (a full queue makes `write_line`'s send pend) is still fully
+/// cancel-safe: a dropped `send` future leaves the frame either wholly enqueued
+/// or not at all — never half-written to stdin.
+const WRITER_QUEUE_DEPTH: usize = 256;
+
+/// One complete NDJSON frame handed to the writer task, plus a one-shot channel
+/// to return the write `Result` to the submitting caller.
+struct WriteRequest {
+    /// The full line to write, including its trailing `'\n'`.
+    frame: Vec<u8>,
+    /// Returns the io result of writing+flushing `frame`. May be dropped by the
+    /// caller if its future was cancelled — the actor writes the frame anyway,
+    /// which is exactly the point (a whole frame reaches stdin, never a part).
+    resp: tokio::sync::oneshot::Sender<Result<(), std::io::Error>>,
+}
+
+/// Single owner of the agent's stdin (the "actor" pattern).
+///
+/// # Why this exists
+///
+/// The prompt turn in `pool.rs` runs inside a `tokio::select!` so the main loop
+/// can cancel/rotate it. When that `select!` dropped a `session/prompt` write
+/// mid-flight, partial bytes were left in the stdin pipe; the cleanup path then
+/// wrote `session/cancel` right after, fusing two NDJSON frames into one
+/// invalid line. The ACP agent then failed to parse the fused frame and exited.
+/// See <https://github.com/block/buzz/issues/6671>.
+///
+/// A single writer task is the ONLY thing that touches `ChildStdin`. Callers
+/// never write to stdin directly: they submit a COMPLETE frame over an `mpsc`
+/// and await the result over a `oneshot`. Because the actual `write_all`+`flush`
+/// runs inside the actor — never inside any caller's cancellable `select!` — a
+/// write is never interrupted mid-frame. Submitting to the channel is itself
+/// cancel-safe, so a cancelled caller can never truncate a frame.
+struct StdinWriter {
+    /// Submit side of the frame queue. Cloneable in principle; a single handle
+    /// is kept by the owning `AcpClient`. Dropping the last sender ends the task.
+    tx: tokio::sync::mpsc::Sender<WriteRequest>,
+}
+
+impl StdinWriter {
+    /// Spawn the writer task, transferring exclusive ownership of `stdin` to it.
+    ///
+    /// Generic over the writer so tests can drive it with `tokio::io::duplex`
+    /// as a stand-in for `ChildStdin`.
+    fn spawn<W>(mut stdin: W) -> Self
+    where
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<WriteRequest>(WRITER_QUEUE_DEPTH);
+        tokio::spawn(async move {
+            // Each iteration writes ONE complete frame atomically w.r.t. cancels:
+            // no caller can interrupt the write, because it lives here, not in a
+            // caller's future.
+            while let Some(req) = rx.recv().await {
+                let result = async {
+                    stdin.write_all(&req.frame).await?;
+                    stdin.flush().await?;
+                    Ok::<(), std::io::Error>(())
+                }
+                .await;
+                // Ignore send errors: the caller may have been cancelled and
+                // dropped its receiver. The frame still went out whole.
+                let _ = req.resp.send(result);
+            }
+            // All senders dropped: connection closing. Best-effort flush, then
+            // let `stdin` drop so the agent sees EOF on its stdin.
+            let _ = stdin.flush().await;
+        });
+        Self { tx }
+    }
+
+    /// Serialize path: submit one COMPLETE NDJSON line (`line` + `'\n'`) to the
+    /// writer task and await its write result.
+    ///
+    /// Preserves the previous `write_ndjson` semantics: a 30s
+    /// [`WRITE_TIMEOUT`] bounds the whole submit+write, mapping to
+    /// [`AcpError::WriteTimeout`]; io failures map to [`AcpError::Io`]. If the
+    /// writer task is gone (connection torn down), the write is reported as a
+    /// broken pipe [`AcpError::Io`].
+    async fn write_line(&self, line: String) -> Result<(), AcpError> {
+        let mut frame = line.into_bytes();
+        frame.push(b'\n');
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let req = WriteRequest {
+            frame,
+            resp: resp_tx,
+        };
+
+        let io_result = tokio::time::timeout(WRITE_TIMEOUT, async {
+            self.tx.send(req).await.map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "acp stdin writer task is gone",
+                )
+            })?;
+            resp_rx.await.map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "acp stdin writer task dropped before ack",
+                )
+            })?
+        })
+        .await
+        .map_err(|_| AcpError::WriteTimeout(WRITE_TIMEOUT))?;
+
+        io_result.map_err(AcpError::Io)?;
+        Ok(())
+    }
+}
+
 /// ACP client that owns an agent subprocess and communicates over its stdio.
 ///
 /// One `AcpClient` per agent process. Multiple sessions can be created on the
@@ -141,8 +257,10 @@ fn build_initialize_params() -> serde_json::Value {
 pub struct AcpClient {
     /// The agent child process (kept alive to prevent zombie).
     child: Child,
-    /// Write end of the agent's stdin pipe.
-    stdin: ChildStdin,
+    /// Single-writer handle owning the agent's stdin pipe. All writes go
+    /// through the actor task so a cancelled turn can never truncate a frame
+    /// (issue #6671). See [`StdinWriter`].
+    writer: StdinWriter,
     /// Framed reader over the agent's stdout pipe (line-oriented, bounded).
     /// Uses `LinesCodec::new_with_max_length` to enforce MAX_LINE_SIZE at the
     /// read level — prevents OOM from rogue agents writing infinite non-newline bytes.
@@ -547,7 +665,7 @@ impl AcpClient {
 
         Ok(Self {
             child,
-            stdin,
+            writer: StdinWriter::spawn(stdin),
             reader: FramedRead::new(stdout, LinesCodec::new_with_max_length(MAX_LINE_SIZE)),
             next_id: 0,
             pending_permission_id: None,
@@ -1066,17 +1184,12 @@ impl AcpClient {
     /// Bounded by a 30-second write timeout. If the agent stops reading stdin
     /// (e.g., it's stuck or dead), the write would otherwise block forever.
     async fn write_ndjson(&mut self, value: &serde_json::Value) -> Result<(), AcpError> {
-        const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
         let line = serde_json::to_string(value)?;
-        tokio::time::timeout(WRITE_TIMEOUT, async {
-            self.stdin.write_all(line.as_bytes()).await?;
-            self.stdin.write_all(b"\n").await?;
-            self.stdin.flush().await?;
-            Ok::<(), std::io::Error>(())
-        })
-        .await
-        .map_err(|_| AcpError::WriteTimeout(WRITE_TIMEOUT))?
-        .map_err(AcpError::Io)?;
+        // Submit the whole frame to the single writer task. The actual
+        // write_all+flush happens there, never inside a caller's cancellable
+        // `select!`, so a cancelled turn can never leave a partial frame in the
+        // stdin pipe that fuses with the following one (issue #6671).
+        self.writer.write_line(line).await?;
         self.observe("acp_write", value.clone());
         Ok(())
     }
@@ -2351,6 +2464,91 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Cancel-safe stdin writer regression (issue #6671) ─────────────────
+    //
+    // Invariant under test: when a `session/prompt` write is cancelled
+    // mid-flight (pool.rs wraps it in a `select!` so the main loop can
+    // rotate/cancel a turn) and the cleanup path then writes a `session/cancel`
+    // frame, the reader must still see TWO well-formed NDJSON frames — never a
+    // fused line. A 65,773-byte fused production frame and its parse error are
+    // documented in https://github.com/block/buzz/issues/6671.
+    //
+    // The test drives the real production writer (`StdinWriter`, the single
+    // owner of stdin) over a `tokio::io::duplex` stand-in for `ChildStdin`, and
+    // reads it back through the same `FramedRead<_, LinesCodec>` the code uses.
+    #[tokio::test]
+    async fn interleave_cancelled_prompt_then_cancel_yields_two_valid_frames() {
+        // A prompt frame far larger than the duplex buffer: its write cannot
+        // finish in a single poll, so a cancel can land mid-frame.
+        let big = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "session/prompt",
+            "params": { "text": "x".repeat(256 * 1024) },
+        });
+        let big_line = serde_json::to_string(&big).unwrap();
+        let cancel = serde_json::json!({
+            "jsonrpc": "2.0", "method": "session/cancel",
+            "params": { "sessionId": "s1" },
+        });
+        let cancel_line = serde_json::to_string(&cancel).unwrap();
+
+        // 64 KiB duplex: a 256 KiB frame fills it and then pends.
+        let (wr, rd) = tokio::io::duplex(64 * 1024);
+
+        // The writer actor owns the write end (as it owns ChildStdin in prod).
+        let writer = StdinWriter::spawn(wr);
+
+        // Drain the reader concurrently so the actor's large write can drain and
+        // complete — the reader collects whole lines split by LinesCodec.
+        let reader = tokio::spawn(async move {
+            let mut framed = FramedRead::new(rd, LinesCodec::new_with_max_length(MAX_LINE_SIZE));
+            let mut lines = Vec::new();
+            while let Some(item) = framed.next().await {
+                match item {
+                    Ok(l) => lines.push(l),
+                    Err(_) => break,
+                }
+            }
+            lines
+        });
+
+        // Phase 1 — start writing the prompt frame, then cancel the caller's
+        // future immediately (biased select! with a ready cancel arm). This is
+        // the pool.rs prompt-vs-control race. Submitting to the actor's channel
+        // is cancel-safe: the frame is either fully enqueued or not at all, so
+        // the actor writes it whole regardless of the caller being cancelled.
+        tokio::select! {
+            biased;
+            _ = writer.write_line(big_line.clone()) => {}
+            _ = async {} => {}
+        }
+
+        // Phase 2 — cleanup path writes session/cancel.
+        writer.write_line(cancel_line.clone()).await.unwrap();
+
+        // Close the writer so the actor finishes and the pipe reaches EOF.
+        drop(writer);
+
+        let lines = reader.await.unwrap();
+
+        assert_eq!(
+            lines.len(),
+            2,
+            "expected two separate NDJSON frames, got {}. first frame prefix = {:?}",
+            lines.len(),
+            lines
+                .first()
+                .map(|l| l.chars().take(140).collect::<String>()),
+        );
+        for (i, l) in lines.iter().enumerate() {
+            serde_json::from_str::<serde_json::Value>(l).unwrap_or_else(|e| {
+                panic!(
+                    "frame {i} is not valid JSON: {e}; prefix = {:?}",
+                    l.chars().take(140).collect::<String>()
+                )
+            });
+        }
+    }
 
     #[test]
     fn stop_reason_parses_all_known_values() {
