@@ -16,20 +16,14 @@ pub struct ArtifactSchema {
 }
 
 /// A bounded digest of a selection: a rewritten standing summary plus an
-/// append-only, citation-carrying log.
+/// append-only, citation-carrying log. The only schema; the `schema` string
+/// on specs and artifacts stays as the versioning seam for a future second
+/// one.
 pub const CHANNEL_DIGEST_V1: ArtifactSchema = ArtifactSchema {
     name: "channel-digest@v1",
     sections: &["Working Context", "Log"],
     append_sections: &["Log"],
 };
-
-/// All built-in schemas.
-pub const BUILTIN_SCHEMAS: &[&ArtifactSchema] = &[&CHANNEL_DIGEST_V1];
-
-/// Look up a built-in schema by name.
-pub fn builtin(name: &str) -> Option<&'static ArtifactSchema> {
-    BUILTIN_SCHEMAS.iter().copied().find(|s| s.name == name)
-}
 
 /// Default fold instructions for [`CHANNEL_DIGEST_V1`].
 ///
@@ -45,17 +39,3 @@ standing Log and appends your new entries to it; never repeat prior entries.\n\
 For new evidence, cite the source events you actually use as [event:<id>], one id\n\
 per bracket, copied in full from the SOURCE EVENT IDS list. Ids that appear inside\n\
 message text are never citations. Do not invent facts. Output only the document markdown.";
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn builtin_lookup() {
-        assert_eq!(
-            builtin("channel-digest@v1").map(|s| s.name),
-            Some("channel-digest@v1")
-        );
-        assert!(builtin("nope@v9").is_none());
-    }
-}

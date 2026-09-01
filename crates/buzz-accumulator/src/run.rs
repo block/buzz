@@ -27,14 +27,14 @@ use crate::validate::{splice_append_sections, validate_output};
 pub const MAX_CONTEXT_CHARS: usize = 120_000;
 
 /// Most signals one run may show (and therefore seal). Bounds `shown_ids` so
-/// an artifact payload cannot outgrow its encrypted relay event; the rest of
-/// an oversized backlog stays pending for the next run.
+/// one version's coverage list stays small; the rest of an oversized backlog
+/// stays pending for the next run.
 pub const MAX_SHOWN_PER_RUN: usize = 250;
 
-/// Largest prior artifact document a run will build on. The artifact JSON
-/// must fit one NIP-44-encrypted relay event (65,535-byte plaintext cap);
-/// stalling here keeps that failure priced-before-spend instead of a model
-/// call whose output can never be published.
+/// Largest prior artifact document a run will build on: a model-input budget.
+/// The prior digest is re-fed to the model every run, so an unbounded one
+/// erodes the transcript budget until runs fold nothing; stalling here keeps
+/// that failure priced-before-spend instead of a wasted model call.
 pub const MAX_PRIOR_OUTPUT_BYTES: usize = 40_000;
 
 /// The outcome of planning a run.
@@ -60,7 +60,7 @@ pub struct RunPlan {
     /// True when pending signals were dropped/trimmed to fit the budget; the
     /// remainder stays pending for the next run.
     pub truncated: bool,
-    /// Zero-spend price of `model_input` for the spec's model.
+    /// Zero-spend input-size estimate of `model_input` for the spec's model.
     pub estimate: Estimate,
     /// Total uncovered signals this plan drew from (`shown.len() <=` this).
     pub pending: usize,
@@ -79,12 +79,6 @@ pub fn plan_run(
     fetched: Vec<Signal>,
     names: &BTreeMap<String, String>,
 ) -> Result<Plan, Error> {
-    if schema::builtin(&spec.schema).is_none() {
-        return Err(Error::InvalidSpec(format!(
-            "unknown schema {:?}",
-            spec.schema
-        )));
-    }
     let signals = materialize(fetched);
     let new: Vec<Signal> = signals
         .into_iter()
@@ -108,7 +102,7 @@ pub fn plan_run(
     if prior.is_some_and(|p| p.output.len() > MAX_PRIOR_OUTPUT_BYTES) {
         return Ok(Plan::Stalled {
             reason: format!(
-                "standing artifact is over the {MAX_PRIOR_OUTPUT_BYTES}-byte publish ceiling; \
+                "standing artifact is over the {MAX_PRIOR_OUTPUT_BYTES}-byte prior-digest budget; \
                  compact it (tighter instructions, or start a fresh fold) before retrying"
             ),
             pending: new.len(),
@@ -121,8 +115,8 @@ pub fn plan_run(
         ),
         None => String::new(),
     };
-    // A prior under the publish ceiling always leaves ample transcript budget
-    // (40k bytes of parent against a 120k-char context).
+    // A prior under the prior-digest budget always leaves ample transcript
+    // budget (40k bytes of parent against a 120k-char context).
     let raw_budget = MAX_CONTEXT_CHARS.saturating_sub(parent.chars().count() + 2);
     let render = render_transcript(&new, names, raw_budget, MAX_SHOWN_PER_RUN);
     if !new.is_empty() && render.shown.is_empty() {
@@ -169,8 +163,7 @@ pub fn complete_run(
     output: &str,
     created_at: i64,
 ) -> Result<ArtifactPayload, Error> {
-    let sch = schema::builtin(&spec.schema)
-        .ok_or_else(|| Error::InvalidSpec(format!("unknown schema {:?}", spec.schema)))?;
+    let sch = &schema::CHANNEL_DIGEST_V1;
     let shown_ids: Vec<String> = plan.shown.iter().map(|s| s.id.clone()).collect();
     validate_output(sch, output, prior.map(|p| p.output.as_str()), &shown_ids)?;
     let spliced = splice_append_sections(sch, prior.map(|p| p.output.as_str()), output);
@@ -306,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn stalled_when_standing_artifact_exceeds_publish_ceiling() {
+    fn stalled_when_standing_artifact_exceeds_prior_digest_budget() {
         let spec = spec();
         let mut prior = artifact_v1(&spec, &[]);
         prior.output = "x".repeat(MAX_PRIOR_OUTPUT_BYTES + 1);
@@ -321,7 +314,7 @@ mod tests {
         let Plan::Stalled { reason, pending } = plan else {
             panic!("expected Stalled, got Ready/Cached");
         };
-        assert!(reason.contains("publish ceiling"));
+        assert!(reason.contains("prior-digest budget"));
         assert_eq!(pending, 1);
     }
 

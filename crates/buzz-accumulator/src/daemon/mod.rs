@@ -7,6 +7,10 @@
 //! - [`http`] — loopback HTTP API exposing status and the fold machinery to
 //!   an external client (the future standalone UI).
 //!
+//! The HTTP API is **loopback-only by design** and completely unauthenticated:
+//! `POST /folds/{name}/run` spends real money, so any future non-loopback
+//! bind must add authentication first.
+//!
 //! Run it with `cargo run -p buzz-accumulator`.
 
 pub mod folds;
@@ -63,7 +67,9 @@ pub struct Config {
     #[arg(long, env = "BUZZ_ACCUMULATOR_DB")]
     pub db: Option<String>,
 
-    /// Loopback address for the HTTP status/machinery API.
+    /// Loopback address for the HTTP status/machinery API. The API is
+    /// unauthenticated and `/run` spends money — do not bind non-loopback
+    /// without adding auth first.
     #[arg(
         long,
         env = "BUZZ_ACCUMULATOR_HTTP_ADDR",

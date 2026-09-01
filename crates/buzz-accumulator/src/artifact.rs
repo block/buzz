@@ -4,15 +4,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::selection::Selection;
 
-/// One artifact version — the JSON a caller NIP-44-encrypts into the content
-/// of an immutable relay event.
+/// One artifact version — the JSON the caller persists immutably (the daemon
+/// stores it in SQLite under a `(fold, version)` primary key).
 ///
 /// Versions form a chain per fold (v1, v2, …), each produced by
 /// [`crate::run::complete_run`]. The chain is the coverage ledger: the set of
 /// signals a fold has ever folded is exactly the union of `shown_ids` over
 /// its versions — computed from what the model was actually shown, so unread
-/// signals are never sealed as covered. Append-only is physics here: relay
-/// events cannot be rewritten.
+/// signals are never sealed as covered. Versions are never updated or
+/// deleted, only appended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactPayload {
     /// Fold name this version belongs to.

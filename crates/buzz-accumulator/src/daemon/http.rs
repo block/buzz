@@ -185,7 +185,7 @@ struct PutFoldBody {
     model: String,
     /// Defaults to the built-in channel digest prompt.
     instructions: Option<String>,
-    /// Defaults to `channel-digest@v1` (the only built-in schema).
+    /// Defaults to `channel-digest@v1` (the only schema).
     schema: Option<String>,
 }
 

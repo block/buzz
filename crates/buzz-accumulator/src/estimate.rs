@@ -1,16 +1,15 @@
-//! Zero-spend price estimates and context-window fit.
+//! Zero-spend input-size estimates and context-window fit.
 //!
 //! Estimates never call a model — by construction, not by discipline: this
-//! module has no runner access. Prices and context windows are curated rather
-//! than discovered; an unknown model's cost deliberately remains `None`
-//! instead of becoming false precision.
+//! module has no runner access. Windows are curated rather than discovered;
+//! an unknown model's fit deliberately remains `None` instead of becoming
+//! false precision. Deliberately no dollar figures: a curated USD table that
+//! ignores output tokens goes silently stale — a UI can price tokens × rate
+//! client-side if it wants money on screen.
 
 use serde::Serialize;
 
-/// USD per million *input* tokens (curated; update deliberately with a source).
-const PRICING: &[(&str, f64)] = &[("haiku", 0.80), ("sonnet", 3.00), ("opus", 15.00)];
-
-/// Documented context window for the Claude aliases above.
+/// Documented context window for the Claude aliases below.
 const CLAUDE_WINDOW: u64 = 200_000;
 
 /// Curated input-context capacities by model alias.
@@ -42,8 +41,6 @@ pub struct WindowFit {
 pub struct Estimate {
     /// chars/4 heuristic, clearly labeled as such.
     pub est_input_tokens: u64,
-    /// `None` for a model with no curated rate — an honest unknown.
-    pub est_cost_usd: Option<f64>,
     /// Window fit for the model.
     pub window_fit: WindowFit,
 }
@@ -74,18 +71,12 @@ pub fn window_fit(model: &str, est_input_tokens: u64) -> WindowFit {
     }
 }
 
-/// Estimate one run's input cost; never fabricates a dollar cost for an
-/// unknown model.
+/// Estimate one run's input size and window fit.
 pub fn estimate(model: &str, chars: usize) -> Estimate {
     let tokens = estimate_tokens(chars);
     let fit = window_fit(model, tokens);
-    let cost = PRICING
-        .iter()
-        .find(|(m, _)| *m == model)
-        .map(|(_, rate)| (tokens as f64 * rate / 1_000_000.0 * 1e8).round() / 1e8);
     Estimate {
         est_input_tokens: tokens,
-        est_cost_usd: cost,
         window_fit: fit,
     }
 }
@@ -103,10 +94,9 @@ mod tests {
     }
 
     #[test]
-    fn known_model_prices_exactly() {
+    fn known_model_reports_overflow() {
         let e = estimate("haiku", 4_000_000);
         assert_eq!(e.est_input_tokens, 1_000_000);
-        assert_eq!(e.est_cost_usd, Some(0.80));
         assert_eq!(e.window_fit.fits, Some(false));
         assert_eq!(e.window_fit.headroom_tokens, Some(200_000 - 1_000_000));
     }
@@ -115,7 +105,6 @@ mod tests {
     fn unknown_model_is_honest_none() {
         let e = estimate("mystery-model", 400);
         assert_eq!(e.est_input_tokens, 100);
-        assert_eq!(e.est_cost_usd, None);
         assert_eq!(e.window_fit.fits, None);
         assert_eq!(e.window_fit.model_window, None);
     }

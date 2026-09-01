@@ -1,10 +1,9 @@
 //! Fold specs: the saved definition of one accumulator.
 //!
-//! A spec is the JSON content of an addressable relay event (`d` tag = fold
-//! name, last-write-wins), NIP-44-encrypted to its author. There is
-//! deliberately no cadence field: *when* to run belongs to the caller — a
-//! human pressing Run today, a `buzz-workflow` schedule trigger later. The
-//! spec only says what to read and how to fold it.
+//! A spec is a named, saveable JSON definition; the daemon persists it in
+//! local SQLite, keyed by name. There is deliberately no cadence field:
+//! *when* to run belongs to the caller — a human pressing Run today, a
+//! scheduler later. The spec only says what to read and how to fold it.
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -23,7 +22,7 @@ pub struct FoldSpec {
     pub name: String,
     /// What to read.
     pub selection: Selection,
-    /// Built-in schema name (see [`crate::schema::BUILTIN_SCHEMAS`]).
+    /// Schema name; the only one is [`crate::schema::CHANNEL_DIGEST_V1`].
     pub schema: String,
     /// Model alias passed to the runner and priced by [`crate::estimate`].
     pub model: String,
@@ -48,11 +47,11 @@ impl FoldSpec {
                 self.name
             )));
         }
-        if schema::builtin(&self.schema).is_none() {
-            let known: Vec<&str> = schema::BUILTIN_SCHEMAS.iter().map(|s| s.name).collect();
+        if self.schema != schema::CHANNEL_DIGEST_V1.name {
             return Err(Error::InvalidSpec(format!(
-                "unknown schema {:?}; built-ins: {known:?}",
-                self.schema
+                "unknown schema {:?}; the only schema is {:?}",
+                self.schema,
+                schema::CHANNEL_DIGEST_V1.name
             )));
         }
         if self.model.trim().is_empty() {

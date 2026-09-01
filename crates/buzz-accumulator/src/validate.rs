@@ -78,15 +78,13 @@ pub fn headings(output: &str) -> Vec<String> {
         .collect()
 }
 
-/// Extract cited event ids from `[event:…]` brackets, splitting brackets that
-/// jam several full ids together.
+/// Extract cited ids from `[event:…]` brackets under a strict grammar: one
+/// bracket, one id.
 ///
-/// `[event:<64 hex>]` yields that id; `[event:<id>, event:<id>]` yields both.
-/// A hex run splits into ids only when its length is an exact multiple of 64 —
-/// a 64-hex prefix with hex garbage appended must not pass as a valid id, so
-/// any other run of ≥ 64 is kept whole. A bracket without a full 64-hex id
-/// inside (shortened id, prose) is kept verbatim. Either way the impostor
-/// cannot match a real shown id, so it still fails validation loudly.
+/// The bracket's trimmed content is kept verbatim, and only content that is
+/// exactly 64 lowercase hex characters can ever match a real shown id —
+/// anything else (shortened id, several ids jammed together, prose) fails
+/// validation loudly as a citation of nothing.
 pub fn cited_event_ids(citation_text: &str) -> BTreeSet<String> {
     let mut cited = BTreeSet::new();
     let mut rest = citation_text;
@@ -95,33 +93,10 @@ pub fn cited_event_ids(citation_text: &str) -> BTreeSet<String> {
         let Some(close_rel) = rest[inner_start..].find(']') else {
             break;
         };
-        let chunk = &rest[inner_start..inner_start + close_rel];
+        let chunk = rest[inner_start..inner_start + close_rel].trim();
         rest = &rest[inner_start + close_rel + 1..];
-        if chunk.is_empty() {
-            continue;
-        }
-        let before = cited.len();
-        // Non-overlapping 64-char windows over each maximal hex run whose
-        // length is an exact multiple of 64.
-        let mut run_start: Option<usize> = None;
-        for (i, c) in chunk.char_indices().chain([(chunk.len(), ' ')]) {
-            if matches!(c, '0'..='9' | 'a'..='f') {
-                run_start.get_or_insert(i);
-            } else if let Some(s) = run_start.take() {
-                let len = i - s;
-                if len >= 64 && len % 64 == 0 {
-                    let mut at = s;
-                    while at < i {
-                        cited.insert(chunk[at..at + 64].to_string());
-                        at += 64;
-                    }
-                } else if len > 64 {
-                    cited.insert(chunk[s..i].to_string());
-                }
-            }
-        }
-        if cited.len() == before {
-            cited.insert(chunk.trim().to_string());
+        if !chunk.is_empty() {
+            cited.insert(chunk.to_string());
         }
     }
     cited
@@ -301,11 +276,14 @@ mod tests {
     }
 
     #[test]
-    fn multi_id_bracket_splits_and_short_id_fails_loudly() {
-        let jam = format!("[event:{}, event:{}]", id('a'), id('b'));
-        let cited = cited_event_ids(&jam);
-        assert_eq!(cited.len(), 2);
-        assert!(cited.contains(&id('a')) && cited.contains(&id('b')));
+    fn jammed_or_short_brackets_are_refused_not_split() {
+        // Several ids jammed into one bracket: the whole chunk is one
+        // (unmatchable) citation, so the output is refused even though both
+        // ids were legitimately shown.
+        let jam = format!("- both [event:{}, event:{}]", id('a'), id('b'));
+        let err = validate_output(&CHANNEL_DIGEST_V1, &digest(&jam), None, &[id('a'), id('b')]);
+        assert!(matches!(err, Err(Error::Nonconforming(_))));
+        // A shortened id is kept verbatim and can never match a shown id.
         let short = cited_event_ids("[event:abc123]");
         assert_eq!(short.into_iter().collect::<Vec<_>>(), vec!["abc123"]);
     }
@@ -313,7 +291,7 @@ mod tests {
     #[test]
     fn hex_run_with_trailing_garbage_is_not_a_valid_prefix_id() {
         // 64 valid hex chars + 6 more hex chars: must NOT yield the 64-char
-        // prefix (which could match a real shown id); the run is kept whole.
+        // prefix (which could match a real shown id); the chunk is verbatim.
         let run = format!("{}abcdef", id('a'));
         let cited = cited_event_ids(&format!("[event:{run}]"));
         assert!(!cited.contains(&id('a')));

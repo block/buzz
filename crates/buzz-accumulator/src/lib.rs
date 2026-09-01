@@ -11,7 +11,8 @@
 //! - **selection** — a saveable query over signals (channels, authors, kinds).
 //! - **fold** — `artifact' = fold(artifact, new_signals, spec)`.
 //! - **artifact** — compact sectioned output where every claim cites the exact
-//!   signals it came from; published back to the relay as an immutable event.
+//!   signals it came from; persisted locally as an immutable, append-only
+//!   version chain.
 //! - (a **lens** renders artifacts into UI; rendering is out of scope here.)
 //!
 //! The engine modules are deliberately **pure**: they plan runs, price them,
@@ -31,7 +32,7 @@
 //! Honesty invariants the engine enforces (ported from the X-Ray POC and
 //! covered by unit tests in each module):
 //! - Estimates are computed without any model call, and an unknown model's
-//!   cost is an honest `None`, never a guess ([`estimate`]).
+//!   window fit is an honest `None`, never a guess ([`estimate`]).
 //! - Coverage records exactly the signals the model was shown — an oversized
 //!   window stalls or truncates honestly; unread signals are never sealed
 //!   ([`run`]).

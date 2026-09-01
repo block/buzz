@@ -79,7 +79,7 @@ pub enum PreflightOutcome {
         pending: usize,
         /// Whether the window would be chunked.
         truncated: bool,
-        /// Zero-spend estimate (tokens; cost only for curated models).
+        /// Zero-spend input-size estimate (tokens + window fit).
         estimate: crate::estimate::Estimate,
         /// Window actually queried, `[since, until_exclusive)`.
         window: (i64, i64),
