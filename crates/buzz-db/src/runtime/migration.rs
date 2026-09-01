@@ -193,8 +193,8 @@ mod tests {
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
-    /// Connection parameters parsed out of a `postgres://user:pass@host:port/db`
-    /// URL so the parity test can pass them to the `bin/pgschema` binary, which
+    /// Connection parameters parsed out of a PostgreSQL URL so the parity test
+    /// can pass them to the `bin/pgschema` binary, which
     /// takes discrete `--host/--port/--user/--password/--db` flags rather than a
     /// URL. Only the shapes this test emits (`BUZZ_TEST_DATABASE_URL` /
     /// `DATABASE_URL` / `TEST_DB_URL`) are supported.
@@ -699,7 +699,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 42);
+        assert_eq!(migrations.len(), 43);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1280,6 +1280,18 @@ mod tests {
             extract_excluded_table_array(desired_schema),
             "schema.sql exclusion list drifted from migration 0042"
         );
+
+        // Brownfield relay databases created through SQLx still carry the
+        // production/sandbox constraint from 0015. Converge them to the same
+        // dogfood-only authority declared by the desired-state schema.
+        assert_eq!(migrations[42].version, 43);
+        let dogfood_profile = migrations[42].sql.as_str();
+        assert!(dogfood_profile.contains("DELETE FROM push_gateway_delegations"));
+        assert!(dogfood_profile.contains("DELETE FROM push_gateway_installations"));
+        assert!(dogfood_profile
+            .contains("DROP CONSTRAINT push_gateway_installations_app_profile_check"));
+        assert!(dogfood_profile.contains("CHECK (app_profile = 'buzz-ios-dogfood')"));
+        assert!(desired_schema.contains("CHECK (app_profile = 'buzz-ios-dogfood')"));
     }
 
     #[test]

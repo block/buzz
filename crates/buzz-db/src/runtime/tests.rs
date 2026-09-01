@@ -4,7 +4,7 @@ use buzz_core::CommunityId;
 use sqlx::{Connection, PgPool};
 use uuid::Uuid;
 
-const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials
 
 async fn setup_db() -> Db {
     let database_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
@@ -392,6 +392,98 @@ async fn drop_scratch_db(admin: &PgPool, pool: PgPool, name: &str) {
     )))
     .execute(admin)
     .await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn push_gateway_profile_migration_converges_brownfield_authority() {
+    let admin = PgPool::connect(&admin_url().await)
+        .await
+        .expect("connect admin database");
+    let (pool, name) = create_scratch_db_through(&admin, "push_profile", Some(42)).await;
+    let installation_id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+
+    sqlx::query(
+        "INSERT INTO push_gateway_installations(\
+         id, app_attest_key_id, app_attest_public_key, assertion_counter, app_profile, \
+         token_ciphertext, token_fingerprint, endpoint_epoch, expires_at) \
+         VALUES($1, $2, $3, 0, 'buzz-ios-production', $4, $5, 1, $6)",
+    )
+    .bind(installation_id)
+    .bind(vec![1_u8])
+    .bind(vec![2_u8; 33])
+    .bind(vec![3_u8])
+    .bind(vec![4_u8; 32])
+    .bind(now + chrono::Duration::days(1))
+    .execute(&pool)
+    .await
+    .expect("insert legacy production installation");
+    sqlx::query(
+        "INSERT INTO push_gateway_delegations(\
+         id, installation_id, relay_pubkey, endpoint_epoch, generation, not_before, expires_at) \
+         VALUES($1, $2, $3, 1, 1, $4, $5)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(installation_id)
+    .bind(vec![5_u8; 32])
+    .bind(now)
+    .bind(now + chrono::Duration::hours(1))
+    .execute(&pool)
+    .await
+    .expect("insert delegation for legacy installation");
+
+    migration::run_migrations(&pool)
+        .await
+        .expect("apply dogfood-only migration");
+
+    let legacy_installations: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM push_gateway_installations")
+            .fetch_one(&pool)
+            .await
+            .expect("count legacy installations");
+    let legacy_delegations: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM push_gateway_delegations")
+            .fetch_one(&pool)
+            .await
+            .expect("count legacy delegations");
+    assert_eq!(legacy_installations, 0);
+    assert_eq!(legacy_delegations, 0);
+
+    sqlx::query(
+        "INSERT INTO push_gateway_installations(\
+         id, app_attest_key_id, app_attest_public_key, assertion_counter, app_profile, \
+         token_ciphertext, token_fingerprint, endpoint_epoch, expires_at) \
+         VALUES($1, $2, $3, 0, 'buzz-ios-dogfood', $4, $5, 1, $6)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(vec![6_u8])
+    .bind(vec![7_u8; 33])
+    .bind(vec![8_u8])
+    .bind(vec![9_u8; 32])
+    .bind(now + chrono::Duration::days(1))
+    .execute(&pool)
+    .await
+    .expect("dogfood installation is accepted after migration");
+
+    let sandbox = sqlx::query(
+        "INSERT INTO push_gateway_installations(\
+         id, app_attest_key_id, app_attest_public_key, assertion_counter, app_profile, \
+         token_ciphertext, token_fingerprint, endpoint_epoch, expires_at) \
+         VALUES($1, $2, $3, 0, 'buzz-ios-sandbox', $4, $5, 1, $6)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(vec![10_u8])
+    .bind(vec![11_u8; 33])
+    .bind(vec![12_u8])
+    .bind(vec![13_u8; 32])
+    .bind(now + chrono::Duration::days(1))
+    .execute(&pool)
+    .await;
+    assert!(sandbox.is_err(), "legacy sandbox profile must be rejected");
+
+    drop_scratch_db(&admin, pool, &name).await;
+    admin.close().await;
 }
 
 /// Insert identical community + channel rows into a database so the same
