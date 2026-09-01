@@ -29,7 +29,6 @@ import {
   type RegisteredRoom,
   type RelayMeetingsCapability,
   type RelayMeetingsInfo,
-  type RoomInfo,
   type SubscribeIntent,
   type SubscriptionStatus,
   normalizePlans,
@@ -291,17 +290,6 @@ export async function getPlans(
   return normalizePlans(body);
 }
 
-export function getRoomInfo(
-  relayWsUrl: string,
-  roomName: string,
-  signal?: AbortSignal,
-): Promise<RoomInfo> {
-  return meetingsRequest(relayWsUrl, "GET", "/room-info", {
-    query: `room_name=${encodeURIComponent(roomName)}`,
-    signal,
-  });
-}
-
 export async function listRooms(
   relayWsUrl: string,
   signal?: AbortSignal,
@@ -397,30 +385,6 @@ export function registerRoom(
     method: "POST",
     localPath: "/register-room",
     upstreamPath: "/api/register-room",
-    body,
-    signal,
-  });
-}
-
-export function editRoom(
-  relayWsUrl: string,
-  cap: Pick<RelayMeetingsCapability, "apiBase">,
-  args: { roomName: string; newName: string; roomId?: string },
-  signal?: AbortSignal,
-): Promise<RegisteredRoom> {
-  // `/api/room/edit` takes snake_case and requires `new_name`; the room is
-  // keyed by `room_id` when given, else by its current `room_name`. There is
-  // no privacy field here — that comes from the kind-30312 `status`.
-  const body = JSON.stringify({
-    new_name: args.newName,
-    room_name: args.roomName,
-    ...(args.roomId === undefined ? {} : { room_id: args.roomId }),
-  });
-  return challengeFlow(relayWsUrl, cap, {
-    action: "edit-room",
-    method: "POST",
-    localPath: "/room/edit",
-    upstreamPath: "/api/room/edit",
     body,
     signal,
   });

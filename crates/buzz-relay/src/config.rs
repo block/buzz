@@ -1130,17 +1130,40 @@ mod tests {
 
     #[test]
     fn hivetalk_config_is_none_by_default_and_strips_trailing_slash() {
-        assert!(HivetalkConfig {
-            api_root: "https://premrelay.exe.xyz".to_string()
-        }
-        .api_root
-        .ends_with("xyz"));
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_HIVETALK_API_ROOT");
 
-        let trimmed = "https://premrelay.exe.xyz/"
-            .trim()
-            .trim_end_matches('/')
-            .to_string();
-        assert_eq!(trimmed, "https://premrelay.exe.xyz");
+        std::env::remove_var("BUZZ_HIVETALK_API_ROOT");
+        let unset = Config::from_env()
+            .expect("config with meetings unset")
+            .hivetalk;
+
+        std::env::set_var("BUZZ_HIVETALK_API_ROOT", "  https://premrelay.exe.xyz/  ");
+        let configured = Config::from_env()
+            .expect("config with meetings set")
+            .hivetalk;
+
+        std::env::set_var("BUZZ_HIVETALK_API_ROOT", "   ");
+        let blank = Config::from_env()
+            .expect("config with blank meetings root")
+            .hivetalk;
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_HIVETALK_API_ROOT", value);
+        } else {
+            std::env::remove_var("BUZZ_HIVETALK_API_ROOT");
+        }
+
+        // Unset means Meetings is off — `nip11.rs` gates the whole descriptor on
+        // this being `None`, so a default here would advertise a provider the
+        // operator never configured.
+        assert!(unset.is_none());
+        // A trailing slash would produce `.../api//plans` upstream.
+        assert_eq!(
+            configured.expect("hivetalk configured").api_root,
+            "https://premrelay.exe.xyz"
+        );
+        assert!(blank.is_none());
     }
 
     // Mutex to serialize tests that mutate environment variables.

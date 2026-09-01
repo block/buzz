@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { MeetingError } from "@/features/meetings/api";
+import { MeetingError, notConfiguredError } from "@/features/meetings/api";
 import type { ModerationAction } from "@/features/meetings/relay";
 import {
   getMeetingToken,
@@ -22,7 +22,7 @@ import { useFocusedRefetchInterval } from "@/shared/lib/useDocumentVisible";
 /** Active-room list poll cadence while the Meetings screen is focused. */
 export const MEETING_ROOMS_REFETCH_INTERVAL_MS = 15_000;
 /** Stale gate — the list has no relay push, so a focus return refreshes it. */
-export const MEETING_ROOMS_STALE_TIME_MS = 10_000;
+const MEETING_ROOMS_STALE_TIME_MS = 10_000;
 
 /** Query keys for the Meetings feature; a shared prefix so a mutation can
  * invalidate every room list for the active relay in one call. */
@@ -49,13 +49,13 @@ export const PAYMENT_STATUS_POLL_INTERVAL_MS = 3_000;
  * endpoint. */
 export const PAYMENT_STATUS_MAX_POLL_FAILURES = 5;
 /** Fallback backoff for a `payment/status` 429 with no parseable `retry in Ns`. */
-export const PAYMENT_STATUS_RATE_LIMIT_BACKOFF_MS = 10_000;
+const PAYMENT_STATUS_RATE_LIMIT_BACKOFF_MS = 10_000;
 /** Plans rarely change within a session. */
-export const MEETING_PLANS_STALE_TIME_MS = 5 * 60 * 1_000;
+const MEETING_PLANS_STALE_TIME_MS = 5 * 60 * 1_000;
 
 /** LiveKit access tokens are time-limited; refetch a still-mounted call view's
  * token no more than once a minute. */
-export const MEETING_TOKEN_STALE_TIME_MS = 60_000;
+const MEETING_TOKEN_STALE_TIME_MS = 60_000;
 
 function useActiveRelayUrl(): string {
   const { activeCommunity } = useCommunities();
@@ -107,11 +107,7 @@ export function useRegisterRoomMutation() {
   return useMutation({
     mutationFn: (roomName: string) => {
       if (!capability) {
-        throw new MeetingError(
-          "not_configured",
-          0,
-          "Meetings isn't enabled on this relay.",
-        );
+        throw notConfiguredError();
       }
       return registerRoom(relayUrl, capability, roomName);
     },
@@ -144,11 +140,7 @@ export function useMeetingTokenQuery(room: string) {
       room.length > 0,
     queryFn: ({ signal }) => {
       if (!capability) {
-        throw new MeetingError(
-          "not_configured",
-          0,
-          "Meetings isn't enabled on this relay.",
-        );
+        throw notConfiguredError();
       }
       return getMeetingToken(
         relayUrl,
@@ -191,11 +183,7 @@ export function useSubscriptionQuery() {
     enabled: relayUrl.length > 0 && capability !== null && pubkey.length > 0,
     queryFn: ({ signal }) => {
       if (!capability) {
-        throw new MeetingError(
-          "not_configured",
-          0,
-          "Meetings isn't enabled on this relay.",
-        );
+        throw notConfiguredError();
       }
       return getSubscription(relayUrl, capability, signal);
     },
@@ -217,11 +205,7 @@ export function useSubscribeMutation() {
   return useMutation({
     mutationFn: (plan: string) => {
       if (!capability) {
-        throw new MeetingError(
-          "not_configured",
-          0,
-          "Meetings isn't enabled on this relay.",
-        );
+        throw notConfiguredError();
       }
       return subscribe(relayUrl, capability, plan);
     },
@@ -247,11 +231,7 @@ export function usePaymentStatusQuery(
       (intentId?.length ?? 0) > 0,
     queryFn: ({ signal }) => {
       if (!capability || !intentId) {
-        throw new MeetingError(
-          "not_configured",
-          0,
-          "Meetings isn't enabled on this relay.",
-        );
+        throw notConfiguredError();
       }
       return getPaymentStatus(relayUrl, capability, intentId, signal);
     },

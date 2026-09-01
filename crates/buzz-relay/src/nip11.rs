@@ -216,16 +216,20 @@ impl RelayInfo {
             }
         });
 
-        let meetings = meetings_provider.map(|provider| {
-            supported_extensions.push("buzz-meetings".to_string());
-            MeetingsDescriptor {
-                provider: provider.to_string(),
-                proxy: crate::api::meetings::MEETINGS_PREFIX.to_string(),
-                api_base: meetings_api_base
-                    .unwrap_or(crate::api::meetings::DEFAULT_HIVETALK_API_ROOT)
-                    .to_string(),
-            }
-        });
+        // `zip`, not `map`: both halves come from the same `config.hivetalk`, so
+        // a provider without an api_base is not a state the caller can reach —
+        // and a descriptor advertising a guessed api_base would be worse than
+        // not advertising Meetings at all.
+        let meetings = meetings_provider
+            .zip(meetings_api_base)
+            .map(|(provider, api_base)| {
+                supported_extensions.push("buzz-meetings".to_string());
+                MeetingsDescriptor {
+                    provider: provider.to_string(),
+                    proxy: crate::api::meetings::MEETINGS_PREFIX.to_string(),
+                    api_base: api_base.to_string(),
+                }
+            });
 
         Self {
             name: "Buzz Relay".to_string(),

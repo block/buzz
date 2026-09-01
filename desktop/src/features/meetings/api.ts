@@ -92,7 +92,7 @@ export type MeetingPlan = {
  * its fields `id` / `price_sats`, not `plan` / `amount_sats`; `normalizePlans`
  * is the single place that reconciles the two.
  */
-export type PlansResponse = {
+type PlansResponse = {
   free_quota?: number;
   plans?: unknown;
 };
@@ -186,13 +186,6 @@ export type RegisteredRoom = {
   broadcast_pending?: boolean;
   status?: string;
   updated_at?: string;
-};
-
-export type RoomInfo = {
-  room_name: string;
-  room_id?: string;
-  is_private?: boolean;
-  room_kind?: string;
 };
 
 export type ActiveRoom = {
@@ -301,6 +294,15 @@ function retryAfterFromMessage(
 ): number | undefined {
   const match = message?.match(/retry in (\d+)s/i);
   return match ? Number(match[1]) : undefined;
+}
+
+/**
+ * The rejection every Meetings query/mutation raises when the relay never
+ * advertised `buzz-meetings`. Here rather than in `hooks.ts` so the wording
+ * lives with the rest of the friendly copy.
+ */
+export function notConfiguredError(): MeetingError {
+  return new MeetingError("not_configured", 0, FRIENDLY.not_configured);
 }
 
 /** Map an HTTP status + relay/HiveTalk error body onto a typed `MeetingError`. */

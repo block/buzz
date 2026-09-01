@@ -7,16 +7,16 @@
  * can be unit-tested without a router (Phase 3 test policy: pure helpers only).
  */
 
+import type { MeetingsDeepLinkSearch } from "@/features/meetings/ui/meetingsDeepLink";
 import {
   MEETING_ROOM_NAME_MAX,
   MEETING_ROOM_NAME_MIN,
   normalizeMeetingRoomName,
 } from "@/features/meetings/ui/meetingRoomName";
 
-export type MeetingsRouteSearch = {
-  room?: string;
-  action?: "join" | "start";
-};
+/** The route's search params are the deep-link shape; one definition, so the
+ * channel button and the route can't drift apart. */
+export type MeetingsRouteSearch = MeetingsDeepLinkSearch;
 
 /**
  * Sanitize a room name that is about to be **registered**: the same

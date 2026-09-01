@@ -52,10 +52,6 @@ const MAX_UPSTREAM_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_ARRAY_ELEMENTS: usize = 500;
 const MAX_QUERY_BYTES: usize = 512;
 
-/// Default HiveTalk control-plane API root when the operator does not override
-/// it. Exposed so `config.rs` can document the default in one place.
-pub const DEFAULT_HIVETALK_API_ROOT: &str = "https://premrelay.exe.xyz";
-
 /// How the caller's HiveTalk auth reaches the upstream request.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum HivetalkAuth {
@@ -102,20 +98,11 @@ struct Proxied {
 
 /// Fields common to moderation responses (most send no body).
 const MOD_FIELDS: &[&str] = &["ok", "status", "room_name", "mute_on_join", "message"];
-/// BOLT11 invoice fields HiveTalk returns on a `409 pending_invoice` — the
-/// client resumes an in-flight subscription from these. `register-room` and
-/// `get-token` can both 409, so their allowlists must carry them through
-/// (`/subscribe` already lists them as its success shape).
-const INVOICE_FIELDS: &[&str] = &[
-    "amount_sats",
-    "bolt11",
-    "expires_at",
-    "intent_id",
-    "payment_hash",
-    "plan",
-];
-/// register-room / room-edit share this response shape (plus [`INVOICE_FIELDS`]
-/// on a 409).
+/// register-room / room-edit share this response shape. The first six entries
+/// are the BOLT11 invoice fields HiveTalk returns on a `409 pending_invoice`
+/// (the client resumes an in-flight subscription from them); every allowlist on
+/// an endpoint that can 409 must carry them, which
+/// `invoice_fields_reach_every_allowlist_that_can_409` enforces.
 const ROOM_FIELDS: &[&str] = &[
     "amount_sats",
     "bolt11",
@@ -137,7 +124,7 @@ const ROOM_FIELDS: &[&str] = &[
     "status",
     "updated_at",
 ];
-/// `get-token` success shape (`token`/`url`) plus [`INVOICE_FIELDS`] for a 409.
+/// `get-token` success shape (`token`/`url`) plus the invoice fields for a 409.
 const GET_TOKEN_FIELDS: &[&str] = &[
     "amount_sats",
     "bolt11",
@@ -768,6 +755,38 @@ async fn limited_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BOLT11 invoice fields HiveTalk returns on a `409 pending_invoice`. Not a
+    /// production const: three allowlists spell these out inline, and this is
+    /// the check that keeps those copies from drifting apart.
+    const INVOICE_FIELDS: &[&str] = &[
+        "amount_sats",
+        "bolt11",
+        "expires_at",
+        "intent_id",
+        "payment_hash",
+        "plan",
+    ];
+
+    /// A dropped invoice field would silently break resume-an-invoice: the
+    /// client 409s, the filter strips the `bolt11`, and the user sees a pending
+    /// subscription with no QR to pay.
+    #[test]
+    fn invoice_fields_reach_every_allowlist_that_can_409() {
+        let subscribe_fields = match ROUTE_SUBSCRIBE.filter {
+            Filter::Object(fields) => fields,
+            Filter::Public => panic!("/subscribe must filter its response object"),
+        };
+        for allowlist in [ROOM_FIELDS, GET_TOKEN_FIELDS, subscribe_fields] {
+            for field in INVOICE_FIELDS {
+                assert!(
+                    allowlist.contains(field),
+                    "allowlist {allowlist:?} is missing invoice field {field}"
+                );
+            }
+        }
+    }
+
     use axum::{
         body::Body,
         http::{Request, StatusCode},

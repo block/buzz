@@ -6,11 +6,10 @@
 
 import { MeetingError, type MeetingErrorKind } from "@/features/meetings/api";
 import type { SubscribeIntent } from "@/features/meetings/api";
+import type { MeetingsDeepLinkSearch } from "@/features/meetings/ui/meetingsDeepLink";
 
-export type MeetingsDeepLink = {
-  room?: string;
-  action?: "join" | "start";
-};
+/** Same shape the route hands us; see `meetingsDeepLink.ts`. */
+export type MeetingsDeepLink = MeetingsDeepLinkSearch;
 
 export type MeetingsView =
   | { kind: "loading" }
