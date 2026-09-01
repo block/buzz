@@ -11,6 +11,19 @@ use crate::{AgentsCmd, RespondToArg};
 
 pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), CliError> {
     match command {
+        AgentsCmd::AuthTag {
+            agent_pubkey,
+            conditions,
+        } => {
+            let agent_pubkey = PublicKey::parse(&agent_pubkey)
+                .map_err(|e| CliError::Usage(format!("invalid agent pubkey: {e}")))?;
+            let auth_tag =
+                buzz_sdk::nip_oa::compute_auth_tag(client.keys(), &agent_pubkey, &conditions)
+                    .map_err(|e| CliError::Usage(format!("cannot mint owner attestation: {e}")))?;
+            println!("{auth_tag}");
+            Ok(())
+        }
+
         AgentsCmd::DraftCreate {
             channel,
             display_name,
@@ -1075,6 +1088,35 @@ mod tests {
         match cli.command {
             crate::Cmd::Agents(crate::AgentsCmd::Unarchive { admin, .. }) => {
                 assert!(admin, "--admin must be true when flag is present");
+            }
+            _ => panic!("unexpected command variant"),
+        }
+    }
+
+    #[test]
+    fn auth_tag_command_parses_agent_pubkey_and_conditions() {
+        use crate::Cli;
+        use clap::Parser;
+
+        let agent_pubkey = Keys::generate().public_key().to_hex();
+        let cli = Cli::try_parse_from([
+            "buzz",
+            "agents",
+            "auth-tag",
+            "--agent-pubkey",
+            &agent_pubkey,
+            "--conditions",
+            "kind=1",
+        ])
+        .expect("agents auth-tag must parse");
+
+        match cli.command {
+            crate::Cmd::Agents(crate::AgentsCmd::AuthTag {
+                agent_pubkey: parsed,
+                conditions,
+            }) => {
+                assert_eq!(parsed, agent_pubkey);
+                assert_eq!(conditions, "kind=1");
             }
             _ => panic!("unexpected command variant"),
         }

@@ -262,6 +262,15 @@ impl RespondToArg {
 
 #[derive(Subcommand)]
 pub enum AgentsCmd {
+    /// Mint a NIP-OA owner attestation for an agent identity (local only)
+    AuthTag {
+        /// Managed agent public key (64-character lowercase hex or npub)
+        #[arg(long)]
+        agent_pubkey: String,
+        /// Optional NIP-OA conditions (for example: kind=1&created_at<1713957000)
+        #[arg(long, default_value = "")]
+        conditions: String,
+    },
     /// Open a prefilled create-agent form in the owner's Buzz Desktop
     DraftCreate {
         /// Current channel UUID; the new agent is added here after save
@@ -2291,6 +2300,7 @@ mod tests {
             vec![
                 "archive",
                 "archived",
+                "auth-tag",
                 "draft-create",
                 "draft-update",
                 "unarchive"
@@ -2432,7 +2442,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 5),
+            ("agents", 6),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),
