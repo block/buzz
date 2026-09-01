@@ -382,10 +382,20 @@ fn managed_node_install_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn node_runtime_supported(
+    managed_artifact_available: bool,
+    override_is_set: bool,
+    managed_bin_dir_available: bool,
+) -> bool {
+    override_is_set || (managed_artifact_available && managed_bin_dir_available)
+}
+
 pub(super) fn managed_node_runtime_supported() -> bool {
-    MANAGED_NODE_ARTIFACT.is_some()
-        && (crate::managed_agents::buzz_node_bin_dir_override_is_set()
-            || crate::managed_agents::buzz_managed_node_bin_dir().is_some())
+    node_runtime_supported(
+        MANAGED_NODE_ARTIFACT.is_some(),
+        crate::managed_agents::buzz_node_bin_dir_override_is_set(),
+        crate::managed_agents::buzz_managed_node_bin_dir().is_some(),
+    )
 }
 
 pub(super) fn ensure_managed_node_runtime_blocking() -> Result<(), Box<InstallStepResult>> {

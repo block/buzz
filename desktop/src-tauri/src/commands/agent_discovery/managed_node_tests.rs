@@ -126,6 +126,13 @@ fn test_node_version_policies_keep_download_exact_and_allow_node_24_override() {
     }
 }
 
+#[test]
+fn test_packager_override_does_not_require_managed_artifact() {
+    assert!(node_runtime_supported(false, true, false));
+    assert!(node_runtime_supported(true, false, true));
+    assert!(!node_runtime_supported(false, false, false));
+}
+
 // ── zip validation tests ──────────────────────────────────────────────────────
 
 /// Build an in-memory zip archive with the supplied entry names and return

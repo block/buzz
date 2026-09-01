@@ -1143,9 +1143,8 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime, force: bool) -
         | AcpAvailabilityStatus::NotInstalled => runtime.cli_install_instructions_url,
     };
 
-    // node_required means Buzz cannot provide npm for this platform. A
-    // configured override is handled by the install flow so invalid values can
-    // surface their specific error instead of an unrelated nodejs.org link.
+    // A configured override stays in the install flow so invalid values surface
+    // their specific error instead of an unrelated nodejs.org link.
     let node_required = matches!(
         availability,
         AcpAvailabilityStatus::AdapterMissing | AcpAvailabilityStatus::NotInstalled
