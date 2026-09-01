@@ -2,6 +2,7 @@ import * as React from "react";
 import { toast } from "sonner";
 import { useStartManagedAgentMutation } from "@/features/agents/hooks";
 import { useCommunities } from "@/features/communities/useCommunities";
+import { matchesDetachedToastScope } from "@/features/messages/lib/detachedToastScope";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -160,6 +161,23 @@ export function useDetachedAgentStart(): (
         replayFloorUnix: replayFloorUnix ?? Math.floor(Date.now() / 1000),
       })
         .catch((error: unknown) => {
+          // This settles arbitrarily long after the send, and `<Toaster />`
+          // mounts outside the community remount boundary — so an unfenced
+          // warning would render this community's agent name and error detail
+          // over whichever community is on screen by then. Deliver only while
+          // the scope captured above is the one being looked at; on an A→B→A
+          // round-trip the mirror matches again and the warning lands exactly
+          // where re-mentioning the agent is possible. Suppression is logged,
+          // not reworded: any wording still names another community's agent.
+          if (
+            !matchesDetachedToastScope(expectedRelayUrl, expectedSignerPubkey)
+          ) {
+            console.warn(
+              `[useDetachedAgentStart] suppressed a start-failure warning for ${agent.name}: the community it was fired in is no longer on screen`,
+              error,
+            );
+            return;
+          }
           warnAgentMayNotRespond(agent.name, detachedStartFailureDetail(error));
         })
         .finally(() => {

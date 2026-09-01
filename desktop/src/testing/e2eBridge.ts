@@ -13741,10 +13741,18 @@ export function maybeInstallE2eTauriMocks() {
           activeConfig,
         );
       case "start_managed_agent":
+        // The settled marker (distinct from the invocation entry, so exact-
+        // match commandCount("start_managed_agent") is unaffected) lets a
+        // spec wait deterministically for a delayed start to resolve or
+        // reject — required to assert the *absence* of the failure toast,
+        // which is only falsifiable once the rejection is known to have
+        // landed.
         return handleStartManagedAgent(
           payload as Parameters<typeof handleStartManagedAgent>[0],
           activeConfig,
-        );
+        ).finally(() => {
+          window.__BUZZ_E2E_COMMANDS__?.push("start_managed_agent:settled");
+        });
       case "stop_managed_agent":
         return handleStopManagedAgent(
           payload as Parameters<typeof handleStopManagedAgent>[0],

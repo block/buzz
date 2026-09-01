@@ -17,8 +17,16 @@
  * 3. A scope that is not yet known is not a scope: the backend reads a missing
  *    relay or signer as "no assertion", so the wake is refused rather than
  *    fired unscoped.
+ * 4. The failure warning is fenced to the scope it was fired under: the
+ *    `<Toaster />` outlives the community remount boundary, so an unfenced
+ *    toast from a start that settled after a switch would name community A's
+ *    agent over community B's UI. Delivery compares the captured scope against
+ *    the on-screen mirror (`detachedToastScope`) at toast time — not a reset
+ *    generation, so an A→B→A round-trip warns again once A is back on screen.
  *
- * These tests drive the real hook against the real CommunitiesProvider.
+ * These tests drive the real hook against the real CommunitiesProvider; the
+ * scope mirror is driven directly through its module seam, standing in for
+ * `useCommunityInit` (its only production writer), which is not mounted here.
  */
 
 import assert from "node:assert/strict";
@@ -121,6 +129,14 @@ beforeEach(async () => {
     "./useDetachedAgentStart.ts"
   );
   resetDetachedAgentStarts();
+  // The toast-scope mirror is a module singleton too. Point it at community A
+  // — what `useCommunityInit` does when A's apply completes — so failure
+  // warnings deliver by default, as in the running app.
+  const { resetDetachedToastScope, setDetachedToastScope } = await import(
+    "@/features/messages/lib/detachedToastScope.ts"
+  );
+  resetDetachedToastScope();
+  setDetachedToastScope({ relayUrl: RELAY_A, signerPubkey: SELF });
   window.localStorage.clear();
   window.localStorage.setItem(
     "buzz-communities",
@@ -464,6 +480,140 @@ test("a blank relay URL is refused rather than sent as no assertion", async () =
   });
 
   assert.equal(startCalls.length, 0);
+  rendered.unmount();
+});
+
+/** The scope-mirror module, driven directly in place of `useCommunityInit`. */
+async function toastScopeModule() {
+  return import("@/features/messages/lib/detachedToastScope.ts");
+}
+
+test("a start failure warns while the community it was fired in is on screen", async () => {
+  // The positive control for the fence: with the mirror still pointing at the
+  // scope the wake captured (beforeEach models A's completed apply), the
+  // failure toast must deliver — a fence that suppresses everything would
+  // silently drop the only signal that the agent never woke.
+  holdStarts = true;
+  const { act, rendered } = await renderDetachedStart();
+
+  await act(async () => {
+    rendered.result.current.startDetached(AGENT_RECORD);
+    await settle();
+  });
+  await act(async () => {
+    heldStarts[0].reject();
+    await settle();
+  });
+
+  assert.match(
+    (await toastTitles()).join("\n"),
+    MAY_NOT_RESPOND,
+    "an on-scope failure must keep warning the user",
+  );
+  rendered.unmount();
+});
+
+test("a start failure fired in one community stays silent while another is on screen", async (t) => {
+  holdStarts = true;
+  const { act, rendered } = await renderDetachedStart();
+
+  await act(async () => {
+    rendered.result.current.startDetached(AGENT_RECORD);
+    await settle();
+  });
+
+  // What a real switch does to the mirror: `resetCommunityState` clears it,
+  // B's completed apply repoints it. The rejection then lands with B's UI on
+  // screen — where a toast naming A's agent would read as a bug in B.
+  const { resetDetachedToastScope, setDetachedToastScope } =
+    await toastScopeModule();
+  resetDetachedToastScope();
+  setDetachedToastScope({ relayUrl: RELAY_B, signerPubkey: SELF });
+
+  const warn = t.mock.method(console, "warn", () => {});
+  await act(async () => {
+    heldStarts[0].reject();
+    await settle();
+  });
+
+  assert.doesNotMatch(
+    (await toastTitles()).join("\n"),
+    MAY_NOT_RESPOND,
+    "community A's failure must not toast over community B",
+  );
+  assert.ok(
+    warn.mock.calls.some((call) =>
+      String(call.arguments[0]).includes(
+        "suppressed a start-failure warning for fizz",
+      ),
+    ),
+    "suppression must stay diagnosable in the console",
+  );
+  rendered.unmount();
+});
+
+test("a start failure that settles mid-switch stays silent", async (t) => {
+  // The window between `resetCommunityState` and the next apply: no scope is
+  // on screen at all, so delivery fails closed exactly like a mismatch.
+  holdStarts = true;
+  const { act, rendered } = await renderDetachedStart();
+
+  await act(async () => {
+    rendered.result.current.startDetached(AGENT_RECORD);
+    await settle();
+  });
+
+  const { resetDetachedToastScope } = await toastScopeModule();
+  resetDetachedToastScope();
+
+  const warn = t.mock.method(console, "warn", () => {});
+  await act(async () => {
+    heldStarts[0].reject();
+    await settle();
+  });
+
+  assert.doesNotMatch((await toastTitles()).join("\n"), MAY_NOT_RESPOND);
+  assert.ok(
+    warn.mock.calls.some((call) =>
+      String(call.arguments[0]).includes(
+        "suppressed a start-failure warning for fizz",
+      ),
+    ),
+  );
+  rendered.unmount();
+});
+
+test("an A→B→A round-trip keeps the warning deliverable back in A", async () => {
+  // The fence compares scopes at toast time — deliberately not "has a reset
+  // happened since capture". A generation check would get this wrong: the
+  // user is back in A when the slow start settles, the warning concerns the
+  // community on screen, and re-mentioning the agent is actionable right
+  // there.
+  holdStarts = true;
+  const { act, rendered } = await renderDetachedStart();
+
+  await act(async () => {
+    rendered.result.current.startDetached(AGENT_RECORD);
+    await settle();
+  });
+
+  const { resetDetachedToastScope, setDetachedToastScope } =
+    await toastScopeModule();
+  resetDetachedToastScope();
+  setDetachedToastScope({ relayUrl: RELAY_B, signerPubkey: SELF });
+  resetDetachedToastScope();
+  setDetachedToastScope({ relayUrl: RELAY_A, signerPubkey: SELF });
+
+  await act(async () => {
+    heldStarts[0].reject();
+    await settle();
+  });
+
+  assert.match(
+    (await toastTitles()).join("\n"),
+    MAY_NOT_RESPOND,
+    "back in A, the warning is on-scope again and must show",
+  );
   rendered.unmount();
 });
 
