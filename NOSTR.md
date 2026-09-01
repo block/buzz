@@ -42,6 +42,84 @@ PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
 # 4. Connect any NIP-29 + NIP-42 client to ws://localhost:3000
 ```
 
+### Connection order: authenticate before your first REQ
+
+The relay issues its NIP-42 `AUTH` challenge **proactively, immediately after the
+WebSocket opens**. Complete the handshake before sending anything else.
+
+A client that opens the socket and sends a `REQ` straight away races that
+challenge. The relay answers the premature subscription with
+`["CLOSED", "<sub-id>", "auth-required: ..."]` while the client is still
+building its `kind:22242` response, so a client whose auth routine reads from
+the same socket will consume that `CLOSED` and discard it as "not the `OK` I am
+waiting for". Auth then succeeds, but the original subscription is gone and no
+`EOSE` is ever coming. The symptom is a client that hangs on its first query
+rather than one that reports an auth error, which sends you looking in the wrong
+place.
+
+The order that works:
+
+```
+1. open socket
+2. read  ["AUTH", "<challenge>"]
+3. send  ["AUTH", <signed kind:22242 event>]
+4. read  ["OK", "<event-id>", true, ""]
+5. now send REQ / EVENT
+```
+
+This is a client-side ordering requirement, not a relay bug — the relay is
+behaving per NIP-42. It is written down here because the failure mode does not
+look like an auth problem.
+
+### Behind a tunnel or reverse proxy: preserve the Host header
+
+The relay resolves which community a connection belongs to from the **`Host`
+header** (see [Community scope](#community-scope)). Anything that rewrites
+`Host` — an SSH tunnel, a port-forward, a reverse proxy with the wrong
+configuration — will point at a host that has no community, and the WebSocket
+upgrade is rejected:
+
+```console
+$ curl -sS -o /dev/null -w '%{http_code}\n' \
+    -H 'Host: relay.example.com' \
+    -H 'Upgrade: websocket' -H 'Connection: Upgrade' \
+    -H 'Sec-WebSocket-Key: <base64>' -H 'Sec-WebSocket-Version: 13' \
+    http://relay.example.com:3000/
+101
+
+$ curl -sS \
+    -H 'Host: 127.0.0.1:13000' \
+    -H 'Upgrade: websocket' -H 'Connection: Upgrade' \
+    -H 'Sec-WebSocket-Key: <base64>' -H 'Sec-WebSocket-Version: 13' \
+    http://relay.example.com:3000/
+relay: no community is configured for this host        # HTTP 404
+```
+
+The relay's error text is explicit, but most WebSocket client libraries discard
+the response body on a failed upgrade and surface only `404`.
+
+**The health endpoints do not catch this.** `GET /_liveness` and the NIP-11
+document both return `200` for a host with no community:
+
+```console
+$ curl -sS -H 'Host: 127.0.0.1:13000' http://relay.example.com:3000/_liveness
+ok
+```
+
+So a monitoring check can report the relay healthy while every WebSocket
+connection through the same path is being refused. If clients cannot connect but
+`/_liveness` is green, compare the `Host` your client sends against the
+`Deployment community ensured` line in the relay log, which records the host
+each community was registered under:
+
+```
+INFO Deployment community ensured  host="relay.example.com:3000"  community=<uuid>
+```
+
+Set your proxy to preserve the original `Host` (`proxy_set_header Host $host` in
+nginx, `ProxyPreserveHost On` in Apache), or have the client send the relay's
+real host explicitly.
+
 ### What Works
 
 | Feature | Status | Notes |
