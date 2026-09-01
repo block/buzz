@@ -22,5 +22,5 @@ test("global tasks route exposes a channel scope control", async () => {
 
   assert.match(source, /data-testid="channel-task-scope"/);
   assert.match(source, /All channels/);
-  assert.match(source, /channelId=\{selectedChannelId\}/);
+  assert.match(source, /useChannelTasks\(selectedChannelId\)/);
 });

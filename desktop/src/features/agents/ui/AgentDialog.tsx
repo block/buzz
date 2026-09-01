@@ -11,7 +11,10 @@ import {
   runLocationForRunOn,
 } from "../lib/agentAccessWarning";
 import { AgentRunLocationProvider } from "./AgentRunLocationContext";
-import type { BackendIntent } from "../lib/instanceInputForDefinition";
+import type {
+  BackendIntent,
+  RuntimeBindingIntent,
+} from "../lib/instanceInputForDefinition";
 import type { AgentCreateIntent } from "./agentCreateIntent";
 import type { EditAgentFocusTarget } from "@/features/agents/openEditAgentEvent";
 import { AgentInstanceEditDialog } from "./AgentInstanceEditDialog";
@@ -42,6 +45,7 @@ type AgentDialogCreateProps = {
     input: CreatePersonaInput | UpdatePersonaInput,
     intent: AgentCreateIntent,
     backendIntent: BackendIntent | null,
+    runtimeBindingIntent?: RuntimeBindingIntent,
   ) => Promise<boolean>;
 };
 
@@ -157,6 +161,7 @@ function AgentCreateDialogRouter({
             }}
           />
         }
+        createRunOnLocal={runDraft.runOn === "local"}
         createSubmitBlocked={!canSubmitWhereToRun(runDraft)}
         description={copy.description}
         embedded={embedded}
@@ -165,11 +170,18 @@ function AgentCreateDialogRouter({
         isPending={isDefinitionPending}
         onDirtyChange={onDirtyChange}
         onOpenChange={onOpenChange}
-        onSubmit={async (input) => {
+        onSubmit={async (input, options) => {
+          const runtimeBindingIntent = options.hermesProfile
+            ? ({
+                type: "hermes_profile",
+                profileName: options.hermesProfile,
+              } satisfies RuntimeBindingIntent)
+            : undefined;
           const submitted = await onSubmitDefinition(
             input,
             "definition_start",
             resolveBackendIntent(runDraft),
+            runtimeBindingIntent,
           );
           if (submitted) {
             onDirtyChange?.(false);

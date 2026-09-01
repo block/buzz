@@ -4,9 +4,18 @@ import * as React from "react";
 import {
   useAvailableAcpRuntimes,
   useCreateChannelManagedAgentsMutation,
+  useManagedAgentsQuery,
+  useStartManagedAgentMutation,
+  useStopManagedAgentMutation,
+  useUpdateManagedAgentMutation,
 } from "@/features/agents/hooks";
+import { hermesTeamAgentForPersona } from "@/features/agents/lib/hermesTeamBinding";
+import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
-import type { CreateChannelManagedAgentsResult } from "@/features/agents/channelAgents";
+import type {
+  CreateChannelManagedAgentInput,
+  CreateChannelManagedAgentsResult,
+} from "@/features/agents/channelAgents";
 import {
   emptyResolvedTeamPersonas,
   resolveTeamPersonas,
@@ -56,6 +65,13 @@ export function AddTeamToChannelDialog({
   const providersQuery = useAvailableAcpRuntimes();
   const [channelId, setChannelId] = React.useState("");
   const [role, setRole] = React.useState<Exclude<ChannelRole, "owner">>("bot");
+  const [preparationError, setPreparationError] = React.useState<string | null>(
+    null,
+  );
+  const managedAgentsQuery = useManagedAgentsQuery({ enabled: open });
+  const stopAgentMutation = useStopManagedAgentMutation();
+  const startAgentMutation = useStartManagedAgentMutation();
+  const updateAgentMutation = useUpdateManagedAgentMutation();
   const deployMutation = useCreateChannelManagedAgentsMutation(
     channelId || null,
   );
@@ -95,6 +111,7 @@ export function AddTeamToChannelDialog({
   function reset() {
     setChannelId("");
     setRole("bot");
+    setPreparationError(null);
     deployMutation.reset();
   }
 
@@ -122,19 +139,61 @@ export function AddTeamToChannelDialog({
       return;
     }
 
+    type Adoption = { pubkey: string; personaId: string; wasActive: boolean };
+    const adopted: Adoption[] = [];
+    async function rollback(items: Adoption[]) {
+      const errors: string[] = [];
+      for (const item of [...items].reverse()) {
+        try {
+          await updateAgentMutation.mutateAsync({
+            pubkey: item.pubkey,
+            teamId: null,
+          });
+          if (item.wasActive) {
+            await startAgentMutation.mutateAsync(item.pubkey);
+          }
+        } catch (cause) {
+          errors.push(
+            cause instanceof Error ? cause.message : "rollback failed",
+          );
+        }
+      }
+      return errors;
+    }
+
     try {
-      // Resolve each persona's preferred runtime. This dialog has no
-      // runtime selector, so the fallback is `defaultProvider` (first
-      // available runtime). Warnings are computed separately via the
-      // `runtimeWarnings` memo and rendered as inline alerts above.
-      const inputs = resolved.map((persona) => {
+      setPreparationError(null);
+      const inputs: CreateChannelManagedAgentInput[] = [];
+      for (const persona of resolved) {
         const { runtime: personaRuntime } = resolvePersonaRuntime(
           persona.runtime,
           runtimes,
           defaultProvider,
         );
         const runtimeToUse = personaRuntime ?? defaultProvider;
-        return {
+        const existingHermesAgent = hermesTeamAgentForPersona({
+          runtimeId: runtimeToUse.id,
+          personaId: persona.id,
+          personaName: persona.displayName,
+          teamId: team.id,
+          agents: managedAgentsQuery.data ?? [],
+        });
+        if (existingHermesAgent && !existingHermesAgent.teamId) {
+          const wasActive = isManagedAgentActive(existingHermesAgent);
+          adopted.push({
+            pubkey: existingHermesAgent.pubkey,
+            personaId: persona.id,
+            wasActive,
+          });
+          if (wasActive) {
+            await stopAgentMutation.mutateAsync(existingHermesAgent.pubkey);
+          }
+          await updateAgentMutation.mutateAsync({
+            pubkey: existingHermesAgent.pubkey,
+            teamId: team.id,
+          });
+        }
+        inputs.push({
           runtime: {
             id: runtimeToUse.id,
             label: runtimeToUse.label,
@@ -148,17 +207,41 @@ export function AddTeamToChannelDialog({
           model: persona.model ?? undefined,
           personaId: persona.id,
           teamId: team.id,
-          // One persona can be deployed under multiple teams with different instructions.
-          forceNewInstance: true,
+          forceNewInstance: !existingHermesAgent,
+          existingAgentPubkey: existingHermesAgent?.pubkey,
           role,
-        };
-      });
+        });
+      }
 
       const result = await deployMutation.mutateAsync(inputs);
+      const failedPersonaIds = new Set(
+        result.failures
+          .map((failure) => failure.personaId)
+          .filter((id): id is string => id !== null),
+      );
+      const failedAdoptions = adopted.filter((item) =>
+        failedPersonaIds.has(item.personaId),
+      );
+      const rollbackErrors = await rollback(failedAdoptions);
+      if (rollbackErrors.length > 0) {
+        setPreparationError(
+          `Team deployment failed and ${rollbackErrors.length} profile binding rollback${rollbackErrors.length === 1 ? "" : "s"} also failed.`,
+        );
+        return;
+      }
       onDeployed(selectedChannel, result);
       handleOpenChange(false);
-    } catch {
-      // React Query stores the error; keep the dialog open.
+    } catch (cause) {
+      const rollbackErrors = await rollback(adopted);
+      const message =
+        cause instanceof Error
+          ? cause.message
+          : "Could not prepare Team agents.";
+      setPreparationError(
+        rollbackErrors.length > 0
+          ? `${message} ${rollbackErrors.length} rollback${rollbackErrors.length === 1 ? "" : "s"} also failed.`
+          : message,
+      );
     }
   }
 
@@ -285,6 +368,11 @@ export function AddTeamToChannelDialog({
                 {deployMutation.error.message}
               </p>
             ) : null}
+            {preparationError ? (
+              <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+                {preparationError}
+              </p>
+            ) : null}
           </div>
 
           <div className="flex shrink-0 justify-end gap-2 border-t border-border/60 px-6 py-4">
@@ -305,6 +393,10 @@ export function AddTeamToChannelDialog({
                 missingPersonaCount > 0 ||
                 channelsQuery.isLoading ||
                 providersQuery.isLoading ||
+                managedAgentsQuery.isLoading ||
+                stopAgentMutation.isPending ||
+                updateAgentMutation.isPending ||
+                startAgentMutation.isPending ||
                 deployMutation.isPending
               }
               onClick={() => void handleDeploy()}

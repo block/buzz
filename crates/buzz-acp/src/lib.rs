@@ -4883,6 +4883,47 @@ fn normalized_agent_name(init_result: &serde_json::Value) -> String {
         .to_ascii_lowercase()
 }
 
+fn expected_hermes_profile<'a>(command: &str, args: &'a [String]) -> Option<&'a str> {
+    let executable = std::path::Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(command)
+        .to_ascii_lowercase();
+    let executable = executable
+        .strip_suffix(".exe")
+        .or_else(|| executable.strip_suffix(".cmd"))
+        .or_else(|| executable.strip_suffix(".bat"))
+        .unwrap_or(&executable);
+    if !matches!(executable, "hermes" | "hermes-agent" | "hermes-acp") {
+        return None;
+    }
+    args.windows(2)
+        .find(|pair| pair[0] == "--profile" || pair[0] == "-p")
+        .map(|pair| pair[1].as_str())
+}
+
+fn validate_hermes_profile_handshake(
+    init_result: &serde_json::Value,
+    expected_profile: Option<&str>,
+) -> Result<(), String> {
+    let Some(expected) = expected_profile else {
+        return Ok(());
+    };
+    let actual = init_result
+        .pointer("/agentInfo/_meta/hermes/profile")
+        .or_else(|| init_result.pointer("/serverInfo/_meta/hermes/profile"))
+        .and_then(|value| value.as_str());
+    match actual {
+        Some(actual) if actual == expected => Ok(()),
+        Some(actual) => Err(format!(
+            "Hermes profile handshake mismatch: requested {expected:?}, adapter reported {actual:?}"
+        )),
+        None => Err(format!(
+            "Hermes profile handshake missing: requested {expected:?}, adapter did not attest a profile"
+        )),
+    }
+}
+
 async fn shutdown_agent_slots(slots: &mut [Option<OwnedAgent>]) {
     for slot in slots {
         if let Some(mut agent) = slot.take() {
@@ -4962,6 +5003,15 @@ async fn initialize_agent_pool(
                 };
                 match initialize_result {
                     Ok(Ok(init_result)) => {
+                        if let Err(reason) = validate_hermes_profile_handshake(
+                            &init_result,
+                            expected_hermes_profile(&startup.command, &startup.args),
+                        ) {
+                            tracing::error!(agent = i, %reason, "agent profile handshake failed");
+                            acp.shutdown().await;
+                            agent_slots.push(None);
+                            continue;
+                        }
                         tracing::info!(agent = i, "agent initialized: {init_result}");
                         let protocol_version =
                             init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
@@ -7341,6 +7391,59 @@ mod error_outcome_emission_tests {
             })),
             "buzz-agent"
         );
+    }
+
+    #[test]
+    fn validates_hermes_profile_attestation_from_exact_launcher_args() {
+        let args = vec!["--profile".to_string(), "jake".to_string()];
+        assert_eq!(
+            expected_hermes_profile("/opt/bin/hermes-acp", &args),
+            Some("jake")
+        );
+        let init = serde_json::json!({
+            "agentInfo": {
+                "name": "hermes-agent",
+                "_meta": { "hermes": { "profile": "jake" } }
+            }
+        });
+        assert!(validate_hermes_profile_handshake(&init, Some("jake")).is_ok());
+        assert!(validate_hermes_profile_handshake(&init, Some("archie"))
+            .unwrap_err()
+            .contains("mismatch"));
+    }
+
+    #[test]
+    fn rejects_missing_hermes_attestation_but_ignores_other_harnesses() {
+        let init = serde_json::json!({ "agentInfo": { "name": "hermes-agent" } });
+        assert!(validate_hermes_profile_handshake(&init, Some("jake"))
+            .unwrap_err()
+            .contains("missing"));
+        assert!(validate_hermes_profile_handshake(&init, None).is_ok());
+        assert_eq!(
+            expected_hermes_profile("codex-acp", &["--profile".into(), "jake".into()]),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn real_hermes_profile_initialize_attests_requested_profile_when_configured() {
+        let Ok(command) = std::env::var("BUZZ_TEST_HERMES_ACP") else {
+            return;
+        };
+        let profile =
+            std::env::var("BUZZ_TEST_HERMES_PROFILE").unwrap_or_else(|_| "jake".to_string());
+        let args = vec!["--profile".to_string(), profile.clone()];
+        let mut client = AcpClient::spawn(&command, &args, &[], false)
+            .await
+            .expect("real Hermes ACP process should spawn");
+        let init = tokio::time::timeout(Duration::from_secs(60), client.initialize())
+            .await
+            .expect("real Hermes ACP initialize should stay bounded")
+            .expect("real Hermes ACP initialize should succeed");
+        assert_eq!(normalized_agent_name(&init), "hermes-agent");
+        validate_hermes_profile_handshake(&init, Some(&profile))
+            .expect("real Hermes adapter must attest the requested profile");
+        client.shutdown().await;
     }
 
     /// Spawn a real but inert agent subprocess (`cat`) so the error paths have

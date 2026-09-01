@@ -88,6 +88,11 @@ export type BackendIntent = {
   config: Record<string, unknown>;
 };
 
+export type RuntimeBindingIntent = {
+  type: "hermes_profile";
+  profileName: string;
+};
+
 /**
  * The single definition→instance mapping (Phase 1B.3.5 rows 2–4). Every
  * surface that creates a running instance from a definition builds its
@@ -112,6 +117,7 @@ export async function buildInstanceInputForDefinition(
   runtime: AcpRuntime,
   upload?: UploadMediaBytes,
   backendIntent?: BackendIntent,
+  runtimeBindingIntent?: RuntimeBindingIntent,
 ): Promise<CreateManagedAgentInput> {
   const avatarUrl = await resolveManagedAgentAvatarUrl(
     persona.avatarUrl,
@@ -139,17 +145,29 @@ export async function buildInstanceInputForDefinition(
     };
   }
 
+  let agentArgs: string[] = [];
+  if (runtimeBindingIntent?.type === "hermes_profile") {
+    if (runtime.id !== "hermes") {
+      throw new Error(
+        "A Hermes profile can only be bound to the Hermes Agent harness.",
+      );
+    }
+    const profileName = runtimeBindingIntent.profileName.trim();
+    if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(profileName)) {
+      throw new Error("Choose a valid Hermes profile.");
+    }
+    agentArgs = ["--profile", profileName];
+  }
+
   return {
     ...base,
     acpCommand: "buzz-acp",
     agentCommand: runtime.command,
-    // Do NOT seed agentArgs from runtime.defaultArgs: record.agent_args must
-    // remain empty so spawn resolves args live from the definition on every
-    // start.  Seeding here would freeze the args at create-time, silently
-    // ignoring any later definition-arg edits (Thufir F5 / phase B-5).
-    // envVars are intentionally never seeded for the same reason (see comment
-    // at top of this function).
-    agentArgs: [],
+    // Do NOT seed generic agentArgs from runtime.defaultArgs: record.agent_args
+    // remains empty so spawn resolves definition defaults live. The one typed
+    // exception is a local Hermes profile binding above — profile selection is
+    // instance-local state and cannot live on the portable definition.
+    agentArgs,
     mcpCommand: runtime.mcpCommand ?? "",
     harnessOverride: !persona.runtime || persona.runtime === runtime.id,
     model: persona.model ?? undefined,
