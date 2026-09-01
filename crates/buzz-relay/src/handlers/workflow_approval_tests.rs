@@ -10,7 +10,7 @@ struct RecordingActionSink {
 impl buzz_workflow::ActionSink for RecordingActionSink {
     fn send_message(
         &self,
-        _community_id: CommunityId,
+        _context: buzz_workflow::action_sink::WorkflowMessageContext,
         _channel_id: &str,
         text: &str,
         _authored_text: &str,

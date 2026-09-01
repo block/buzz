@@ -480,41 +480,6 @@ impl RestClient {
         .await
     }
 
-    /// Fetch the relay's advertised signing identity from NIP-11 `/info`.
-    pub async fn relay_signing_pubkey(&self) -> Result<nostr::PublicKey, RelayError> {
-        let url = format!("{}/info", self.base_url.trim_end_matches('/'));
-        let value: Value = self
-            .http
-            .get(&url)
-            .header("Accept", "application/nostr+json")
-            .send()
-            .await
-            .map_err(|error| RelayError::Http(error.to_string()))?
-            .json()
-            .await
-            .map_err(|error| RelayError::Http(error.to_string()))?;
-        let relay_self = value
-            .get("self")
-            .and_then(Value::as_str)
-            .ok_or_else(|| RelayError::Http("relay did not advertise a signing identity".into()))?;
-        nostr::PublicKey::from_hex(relay_self)
-            .map_err(|error| RelayError::Http(format!("invalid relay signing identity: {error}")))
-    }
-
-    async fn bridge_get(&self, path: &str) -> Result<reqwest::Response, RelayError> {
-        let url = format!("{}{}", self.base_url, path);
-        let auth_tag_header = self.auth_tag_json.clone();
-        self.request_with_retry("GET", path, || {
-            let auth = self.nip98_header("GET", &url, None).unwrap_or_default();
-            let mut request = self.http.get(&url).header("Authorization", auth);
-            if let Some(ref tag) = auth_tag_header {
-                request = request.header("x-auth-tag", tag);
-            }
-            request.send()
-        })
-        .await
-    }
-
     /// Fetch one exact workflow-wake authority bundle.
     pub async fn workflow_wake_authority(
         &self,

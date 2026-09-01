@@ -143,7 +143,7 @@ impl WorkflowEngine {
         let workflow = self.db.get_workflow(community_id, run.workflow_id).await?;
         let stored = self
             .db
-            .get_event_by_id_including_deleted(community_id, revision)
+            .get_workflow_revision(community_id, revision)
             .await?
             .ok_or_else(|| {
                 WorkflowError::InvalidDefinition(
