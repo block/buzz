@@ -35,6 +35,28 @@ export function isManagedAgentActive(agent: Pick<ManagedAgent, "status">) {
   return agent.status === "running" || agent.status === "deployed";
 }
 
+/**
+ * Decide whether a just-saved edit should offer an immediate restart because
+ * it changed the inbound author gate ("Who can talk to this agent").
+ *
+ * `respond_to`/`respond_to_allowlist` control who may address the agent, but
+ * a running process keeps its OLD gate until restarted — `update_managed_agent`
+ * never auto-restarts, and the passive "Restart required" badge is easy to
+ * miss for a setting whose whole point is to take effect promptly (buzz#2501,
+ * buzz#2950: agents set to `anyone`/`allowlist` stayed unreachable to
+ * non-owners because the running harness never picked up the change). Only
+ * fires when the save actually touched the gate AND the backend confirms the
+ * running instance's config now differs from what it's live with.
+ */
+export function shouldOfferImmediateRespondToRestart(
+  input: { respondTo?: unknown; respondToAllowlist?: unknown },
+  needsRestart: boolean,
+) {
+  const respondToChanged =
+    input.respondTo !== undefined || input.respondToAllowlist !== undefined;
+  return respondToChanged && needsRestart;
+}
+
 export function getManagedAgentPrimaryActionLabel(agent: ManagedAgent) {
   if (agent.backend.type === "provider") {
     return isManagedAgentActive(agent) ? "Shutdown" : "Deploy";
