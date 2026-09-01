@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -11,6 +12,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/clipboard_utils.dart';
 import '../../shared/community/community_membership_provider.dart';
+import '../../shared/push/push_bridge.dart';
 import '../../shared/relay/relay.dart';
 import '../pairing/pairing_provider.dart';
 import '../../shared/theme/theme.dart';
@@ -28,6 +30,7 @@ import 'theme_picker_page.dart';
 part 'settings_page/appearance_section.dart';
 part 'settings_page/community_section.dart';
 part 'settings_page/connection_section.dart';
+part 'settings_page/notifications_section.dart';
 
 Widget _emptyProfileEditPage(BuildContext context) => const SizedBox.shrink();
 
@@ -215,6 +218,7 @@ class SettingsPage extends HookConsumerWidget {
                 profileHeader,
                 _CommunitySection(invitePageBuilder: invitePageBuilder),
                 const _AppearanceSection(),
+                const _NotificationsSection(),
                 _ConnectionSection(
                   identityRecoveryPageBuilder: identityRecoveryPageBuilder,
                 ),

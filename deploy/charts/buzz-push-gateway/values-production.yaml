@@ -3,7 +3,9 @@
 image:
   tag: ""
   digest: ""
-appAttestAppId: ""
+profiles:
+  dogfood:
+    appAttestAppId: ""
 httpRoute:
   enabled: true
   parentRefs: []

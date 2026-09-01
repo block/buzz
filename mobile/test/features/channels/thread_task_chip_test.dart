@@ -15,14 +15,19 @@ Task _task({
   title: title,
   status: status,
   priority: 0,
-  createdAt: DateTime.fromMillisecondsSinceEpoch(1786000000 * 1000, isUtc: true),
+  createdAt: DateTime.fromMillisecondsSinceEpoch(
+    1786000000 * 1000,
+    isUtc: true,
+  ),
   updatedAt: DateTime.fromMillisecondsSinceEpoch(updatedAt * 1000, isUtc: true),
   channelId: 'channel-1',
   sourceRef: 'event-1',
 );
 
-Widget _app(Widget child) =>
-    MaterialApp(theme: AppTheme.light(), home: Scaffold(body: child));
+Widget _app(Widget child) => MaterialApp(
+  theme: AppTheme.light(),
+  home: Scaffold(body: child),
+);
 
 final _chipTitle = find.byKey(const ValueKey('thread-task-chip-title'));
 final _chipStatus = find.byKey(const ValueKey('thread-task-chip-status'));

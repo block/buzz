@@ -1,0 +1,34 @@
+schema_version: "1"
+condition: M1-hello-world-local-qwen36
+roster:
+  - id: orch
+    kind: orchestrator
+    role: lead
+    count: 1
+    endpoint: hf.co/HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive:Q4_K_M
+    model_revision: Q4_K_M GGUF (local ollama)
+    prompt:
+      path: personas/orchestrator-m1.md
+      sha256: af64b515de914c99fbdfc5a50830909ac10ab3a4f37e8352a354019a6be74151
+    generation:
+      max_output_tokens: 4096
+      context_window_tokens: 128000
+  - id: worker
+    kind: worker
+    role: implementer
+    count: 1
+    endpoint: hf.co/HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive:Q4_K_M
+    model_revision: Q4_K_M GGUF (local ollama)
+    prompt:
+      path: personas/worker-m1.md
+      sha256: f3fef3d2c42105c256ff019d71ef99506b31a23e8cb252cac727c8bc470eb304
+    generation:
+      max_output_tokens: 4096
+      context_window_tokens: 128000
+prices:
+  hf.co/HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive:Q4_K_M:
+    input_per_million_usd: 0
+    cached_input_per_million_usd: 0
+    output_per_million_usd: 0
+trial_budget:
+  timeout_seconds: 1800

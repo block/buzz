@@ -297,10 +297,14 @@ pub struct Config {
     /// Used to authenticate internal policy endpoint requests.
     pub git_hook_hmac_secret: String,
 
+    /// Whether NIP-PL push discovery, lease acceptance, matching, and delivery
+    /// are enabled for this deployment. Defaults to false.
+    pub push_enabled: bool,
     /// Descriptor key identifier accepted in kind:30350 `exec` tags.
     pub push_executor_key_id: String,
     /// Exact HTTPS gateway endpoint used to submit client-authorized APNs delivery capabilities.
-    /// Push lease support is disabled when unset.
+    /// An absent setting selects the canonical Buzz gateway. An explicitly
+    /// empty setting is allowed only while push is disabled.
     pub push_gateway_delivery_url: Option<url::Url>,
     /// Hard timeout for one gateway delivery request.
     pub push_gateway_timeout: Duration,
@@ -897,6 +901,7 @@ impl Config {
                 let secret: [u8; 32] = rand::random();
                 hex::encode(secret)
             });
+        let push_enabled = parse_bool("BUZZ_PUSH_ENABLED", false)?;
         let push_executor_key_id =
             std::env::var("BUZZ_PUSH_EXECUTOR_KEY_ID").unwrap_or_else(|_| "relay-v1".to_string());
         if push_executor_key_id.is_empty() || push_executor_key_id.len() > 64 {
@@ -905,6 +910,12 @@ impl Config {
             ));
         }
         let push_gateway_delivery_url = match std::env::var("BUZZ_PUSH_GATEWAY_DELIVERY_URL") {
+            Ok(raw) if raw.trim().is_empty() && push_enabled => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_PUSH_GATEWAY_DELIVERY_URL must not be empty when BUZZ_PUSH_ENABLED=true"
+                        .to_string(),
+                ));
+            }
             Ok(raw) if raw.trim().is_empty() => None,
             Ok(raw) => Some(parse_push_gateway_delivery_url(&raw)?),
             Err(_) => Some(parse_push_gateway_delivery_url(
@@ -1073,6 +1084,7 @@ impl Config {
             git_max_repos_per_pubkey,
             git_max_concurrent_ops,
             git_hook_hmac_secret,
+            push_enabled,
             push_executor_key_id,
             push_gateway_delivery_url,
             push_gateway_timeout,
@@ -1630,11 +1642,25 @@ mod tests {
     }
 
     #[test]
-    fn push_gateway_defaults_to_buzz_and_can_be_disabled() {
+    fn push_is_opt_in_and_gateway_defaults_to_buzz() {
         let _guard = ENV_MUTEX.lock().unwrap();
+        let previous_enabled = std::env::var_os("BUZZ_PUSH_ENABLED");
         let previous = std::env::var_os("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
+        std::env::remove_var("BUZZ_PUSH_ENABLED");
         std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
         let config = Config::from_env().expect("default config");
+        assert!(!config.push_enabled);
+        assert_eq!(
+            config
+                .push_gateway_delivery_url
+                .as_ref()
+                .map(url::Url::as_str),
+            Some(DEFAULT_PUSH_GATEWAY_DELIVERY_URL)
+        );
+
+        std::env::set_var("BUZZ_PUSH_ENABLED", "true");
+        let config = Config::from_env().expect("enabled push config");
+        assert!(config.push_enabled);
         assert_eq!(
             config
                 .push_gateway_delivery_url
@@ -1644,14 +1670,45 @@ mod tests {
         );
 
         std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", "");
+        let result = Config::from_env();
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("must not be empty")
+        ));
+
+        std::env::set_var("BUZZ_PUSH_ENABLED", "false");
         let config = Config::from_env().expect("disabled push config");
         assert!(config.push_gateway_delivery_url.is_none());
 
+        if let Some(value) = previous_enabled {
+            std::env::set_var("BUZZ_PUSH_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_PUSH_ENABLED");
+        }
         if let Some(value) = previous {
             std::env::set_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL", value);
         } else {
             std::env::remove_var("BUZZ_PUSH_GATEWAY_DELIVERY_URL");
         }
+    }
+
+    #[test]
+    fn invalid_push_enabled_value_is_rejected() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_PUSH_ENABLED");
+        std::env::set_var("BUZZ_PUSH_ENABLED", "sometimes");
+        let result = Config::from_env();
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_PUSH_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_PUSH_ENABLED");
+        }
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_PUSH_ENABLED")
+        ));
     }
 
     #[test]

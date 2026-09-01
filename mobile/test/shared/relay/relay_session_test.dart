@@ -1377,40 +1377,42 @@ void main() {
     expect(filter['since'], 115);
   });
 
-  test('BUZZ_SYNC_REQUIRED refetches the missed event into channel state',
-      () async {
-    final socket = _RecordingRelaySocket();
-    final session = RelaySessionNotifier();
-    session.debugAttachSocketForTest(socket);
+  test(
+    'BUZZ_SYNC_REQUIRED refetches the missed event into channel state',
+    () async {
+      final socket = _RecordingRelaySocket();
+      final session = RelaySessionNotifier();
+      session.debugAttachSocketForTest(socket);
 
-    final events = <NostrEvent>[];
-    final subscribe = session.subscribe(_channelFilter, events.add);
-    session.debugHandleMessage(['EOSE', 'l-1']);
-    await subscribe;
-    session.debugHandleMessage([
-      'EVENT',
-      'l-1',
-      _event(createdAt: 30).toJson(),
-    ]);
-    session.debugFlushEventBuffer();
-    expect(events, hasLength(1));
-    socket.messages.clear();
+      final events = <NostrEvent>[];
+      final subscribe = session.subscribe(_channelFilter, events.add);
+      session.debugHandleMessage(['EOSE', 'l-1']);
+      await subscribe;
+      session.debugHandleMessage([
+        'EVENT',
+        'l-1',
+        _event(createdAt: 30).toJson(),
+      ]);
+      session.debugFlushEventBuffer();
+      expect(events, hasLength(1));
+      socket.messages.clear();
 
-    // The relay dropped the event at createdAt 40 and told us.
-    session.debugHandleMessage(['BUZZ_SYNC_REQUIRED', 'backpressure']);
-    await Future<void>.delayed(Duration.zero);
+      // The relay dropped the event at createdAt 40 and told us.
+      session.debugHandleMessage(['BUZZ_SYNC_REQUIRED', 'backpressure']);
+      await Future<void>.delayed(Duration.zero);
 
-    // The relay answers the replay REQ with the missed event (distinct id:
-    // the recent-delivery dedup correctly drops literal re-deliveries).
-    session.debugHandleMessage([
-      'EVENT',
-      'l-1',
-      _event(createdAt: 40, id: 'event-2').toJson(),
-    ]);
-    session.debugFlushEventBuffer();
+      // The relay answers the replay REQ with the missed event (distinct id:
+      // the recent-delivery dedup correctly drops literal re-deliveries).
+      session.debugHandleMessage([
+        'EVENT',
+        'l-1',
+        _event(createdAt: 40, id: 'event-2').toJson(),
+      ]);
+      session.debugFlushEventBuffer();
 
-    expect(events.map((event) => event.createdAt), [30, 40]);
-  });
+      expect(events.map((event) => event.createdAt), [30, 40]);
+    },
+  );
 
   test('gap frame while disconnected does not replay', () async {
     final socket = _RecordingRelaySocket();

@@ -22,6 +22,7 @@ import { ChannelIntroBlock, type ChannelIntro } from "./ChannelIntroBlock";
 import { TimelineSkeleton, useTimelineSkeletonRows } from "./TimelineSkeleton";
 import { TimelineMessageList } from "./TimelineMessageList";
 import type { TimelineVirtualizerApi } from "./TimelineMessageList";
+import { TimelineAnnouncementRegion } from "./TimelineAnnouncementRegion";
 import { useAnchoredScroll } from "./useAnchoredScroll";
 import { useLoadOlderOnScroll } from "./useLoadOlderOnScroll";
 import { useBufferedTimelineMessages } from "./useBufferedTimelineMessages";
@@ -694,6 +695,11 @@ const MessageTimelineBase = React.forwardRef<
   return (
     <TooltipProvider>
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <TimelineAnnouncementRegion
+          channelId={channelId ?? ""}
+          isHydrated={!isLoading}
+          messages={messages}
+        />
         {showUnreadPill ? (
           <div
             className={cn(

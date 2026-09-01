@@ -2761,18 +2761,23 @@ test("renamed instances of one persona each get their own gallery card", async (
     fizzCard.getByRole("button", { name: "Open actions for Fizz" }),
   ).toBeVisible();
 
-  // The renamed card opens its own instance, not the persona's active winner:
-  // the stopped "Fizz" offers Start, where running "Claude" would offer Stop.
+  // Post-#5706 contract: the card's main click opens the PERSONA target, so
+  // the archive-aware selector resolves this split persona to its running
+  // "Claude" instance. Both cards therefore land on the same persona panel;
+  // the exact-instance pick belongs to the panel's Instances list.
   await fizzCard.click();
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
-  ).toHaveAttribute("aria-label", "Start agent");
+  ).toHaveAttribute("aria-label", "Stop");
 
-  // ...and the "Claude" card opens the running instance.
-  await page.getByTestId("auxiliary-panel-close").click();
-  await claudeCard.click();
+  // The renamed "Fizz" instance is still deliberately reachable: open the
+  // persona panel's Runtime tab, expand Instances, and pick the stopped
+  // "Fizz" instance — which offers Start, where running "Claude" offers Stop.
+  await page.getByRole("tab", { name: "Runtime" }).click();
+  await page.getByTestId("user-profile-instances").click();
+  await page.getByTestId(`user-profile-instance-${fizzPubkey}`).click();
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
-  ).toHaveAttribute("aria-label", "Stop");
+  ).toHaveAttribute("aria-label", "Start agent");
 });

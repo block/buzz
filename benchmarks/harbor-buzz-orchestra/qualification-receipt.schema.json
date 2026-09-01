@@ -1,0 +1,393 @@
+{
+  "$defs": {
+    "HostProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "architecture": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Architecture",
+          "type": "string"
+        },
+        "chip_model": {
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Chip Model",
+          "type": "string"
+        },
+        "os": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Os",
+          "type": "string"
+        },
+        "os_version": {
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Os Version",
+          "type": "string"
+        },
+        "ram_bytes": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ram Bytes"
+        }
+      },
+      "required": [
+        "os",
+        "os_version",
+        "architecture",
+        "chip_model"
+      ],
+      "title": "HostProvenance",
+      "type": "object"
+    },
+    "LaunchProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "argv_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Argv Sha256",
+          "type": "string"
+        },
+        "base_origin": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Base Origin",
+          "type": "string"
+        },
+        "flags": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              }
+            ]
+          },
+          "title": "Flags",
+          "type": "object"
+        },
+        "provider": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Provider",
+          "type": "string"
+        }
+      },
+      "required": [
+        "base_origin",
+        "provider",
+        "argv_sha256"
+      ],
+      "title": "LaunchProvenance",
+      "type": "object"
+    },
+    "ProbeResult": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_ms": {
+          "minimum": 0,
+          "title": "Duration Ms",
+          "type": "integer"
+        },
+        "evidence": {
+          "default": "",
+          "maxLength": 512,
+          "title": "Evidence",
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_-]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "metrics": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              }
+            ]
+          },
+          "title": "Metrics",
+          "type": "object"
+        },
+        "reason_code": {
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9_-]*$",
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "started_at_utc": {
+          "format": "date-time",
+          "title": "Started At Utc",
+          "type": "string"
+        },
+        "tier": {
+          "enum": [
+            1,
+            2
+          ],
+          "title": "Tier",
+          "type": "integer"
+        },
+        "verdict": {
+          "$ref": "#/$defs/Verdict"
+        }
+      },
+      "required": [
+        "id",
+        "tier",
+        "started_at_utc",
+        "duration_ms",
+        "verdict",
+        "reason_code"
+      ],
+      "title": "ProbeResult",
+      "type": "object"
+    },
+    "ReceiptSummary": {
+      "additionalProperties": false,
+      "properties": {
+        "error_count": {
+          "minimum": 0,
+          "title": "Error Count",
+          "type": "integer"
+        },
+        "pass_count": {
+          "minimum": 0,
+          "title": "Pass Count",
+          "type": "integer"
+        },
+        "qualifies": {
+          "title": "Qualifies",
+          "type": "boolean"
+        },
+        "regressed_count": {
+          "minimum": 0,
+          "title": "Regressed Count",
+          "type": "integer"
+        },
+        "tier2_joined": {
+          "title": "Tier2 Joined",
+          "type": "boolean"
+        },
+        "unsupported_count": {
+          "minimum": 0,
+          "title": "Unsupported Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "pass_count",
+        "unsupported_count",
+        "regressed_count",
+        "error_count",
+        "tier2_joined",
+        "qualifies"
+      ],
+      "title": "ReceiptSummary",
+      "type": "object"
+    },
+    "SourceProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "buzz_commit_sha": {
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+          "title": "Buzz Commit Sha",
+          "type": "string"
+        },
+        "dirty_tree": {
+          "title": "Dirty Tree",
+          "type": "boolean"
+        },
+        "harbor_version": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Harbor Version",
+          "type": "string"
+        },
+        "lockfile_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lockfile Sha256",
+          "type": "string"
+        },
+        "model_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Model Id",
+          "type": "string"
+        },
+        "model_revision": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Model Revision",
+          "type": "string"
+        },
+        "python_version": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Python Version",
+          "type": "string"
+        },
+        "qualifier_commit_sha": {
+          "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$",
+          "title": "Qualifier Commit Sha",
+          "type": "string"
+        },
+        "server_implementation": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Server Implementation",
+          "type": "string"
+        },
+        "server_source_revision": {
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Server Source Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "buzz_commit_sha",
+        "qualifier_commit_sha",
+        "dirty_tree",
+        "python_version",
+        "harbor_version",
+        "lockfile_sha256",
+        "server_implementation",
+        "server_source_revision",
+        "model_id",
+        "model_revision"
+      ],
+      "title": "SourceProvenance",
+      "type": "object"
+    },
+    "Verdict": {
+      "enum": [
+        "PASS",
+        "UNSUPPORTED",
+        "REGRESSED",
+        "ERROR"
+      ],
+      "title": "Verdict",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "baseline_receipt_id": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Baseline Receipt Id"
+    },
+    "created_at_utc": {
+      "format": "date-time",
+      "title": "Created At Utc",
+      "type": "string"
+    },
+    "endpoint_config_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Endpoint Config Sha256",
+      "type": "string"
+    },
+    "endpoint_name": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Endpoint Name",
+      "type": "string"
+    },
+    "host": {
+      "$ref": "#/$defs/HostProvenance"
+    },
+    "launch": {
+      "$ref": "#/$defs/LaunchProvenance"
+    },
+    "manifest_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Manifest Sha256",
+      "type": "string"
+    },
+    "probes": {
+      "items": {
+        "$ref": "#/$defs/ProbeResult"
+      },
+      "minItems": 1,
+      "title": "Probes",
+      "type": "array"
+    },
+    "receipt_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Receipt Id",
+      "type": "string"
+    },
+    "run_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "1",
+      "default": "1",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/$defs/SourceProvenance"
+    },
+    "summary": {
+      "$ref": "#/$defs/ReceiptSummary"
+    }
+  },
+  "required": [
+    "receipt_id",
+    "created_at_utc",
+    "run_id",
+    "manifest_sha256",
+    "endpoint_name",
+    "endpoint_config_sha256",
+    "source",
+    "host",
+    "launch",
+    "probes",
+    "summary"
+  ],
+  "title": "QualificationReceipt",
+  "type": "object"
+}

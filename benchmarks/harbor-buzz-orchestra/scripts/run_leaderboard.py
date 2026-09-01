@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -223,6 +224,16 @@ def build_command(
     if args.relay_gateway:
         kwargs["relay_gateway"] = args.relay_gateway
         kwargs["forwarder_binary"] = agent_binaries[FORWARDER_BINARY]
+    # Terminal-bench task images can ship without any CA certificates, which
+    # breaks reqwest client construction inside the agents. Upload a bundle.
+    ca_bundle = Path(
+        os.environ.get(
+            "BUZZ_BENCHMARK_CA_BUNDLE",
+            PACKAGE_ROOT / ".benchmark" / "ca-bundle.crt",
+        )
+    )
+    if ca_bundle.is_file():
+        kwargs["ca_bundle"] = str(ca_bundle)
     for key, value in kwargs.items():
         command += ["--agent-kwarg", f"{key}={value}"]
     return command

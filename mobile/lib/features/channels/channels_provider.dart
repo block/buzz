@@ -5,6 +5,8 @@ import 'dart:math';
 import 'package:flutter/widgets.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
+import '../../shared/community/community_provider.dart';
+import '../../shared/push/push_presentation_cache.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme_provider.dart';
 import '../../shared/utils/string_utils.dart';
@@ -21,6 +23,7 @@ import 'unread_badge/observed_unread_event.dart';
 import 'unread_badge/should_notify_for_event.dart';
 
 part 'channel_directory.dart';
+part 'channel_member_snapshots.dart';
 part 'channels_provider_lifecycle.dart';
 
 const _channelTypeOrder = {'stream': 0, 'forum': 1, 'dm': 2};
@@ -161,6 +164,7 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
   }) async {
     final myPk = ref.read(myPubkeyProvider);
     if (myPk == null) throw StateError('No signing identity available');
+    final communityID = ref.read(activeCommunityProvider).value?.id;
     _loadThreadInterestStores(myPk);
 
     final session = ref.read(relaySessionProvider.notifier);
@@ -211,11 +215,14 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
       final id = event.getTagValue('d');
       if (id == null) continue;
       final existing = latestMetaPerId[id];
-      if (existing == null || event.createdAt > existing.createdAt) {
+      if (existing == null ||
+          event.createdAt > existing.createdAt ||
+          (event.createdAt == existing.createdAt &&
+              event.id.compareTo(existing.id) < 0)) {
         latestMetaPerId[id] = event;
       }
     }
-    final dedupedMetas = latestMetaPerId.values;
+    final dedupedMetas = latestMetaPerId.values.toList();
 
     // Resolve DM participant display names. Extracted into the part file so
     // `channels_provider.dart` stays under the 1000-line ceiling enforced by
@@ -284,6 +291,12 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // Use the membership snapshots already fetched above for both Huddle
     // linkage validation and member-count hydration.
     if (memberEvents.isNotEmpty) _cacheMemberSnapshots(memberEvents);
+    unawaited(
+      cacheBuzzPushChannelEvents(communityID, dedupedMetas, [
+        ...memberships,
+        ...memberEvents,
+      ]),
+    );
     final memberCounts = _memberCountsByChannelId(memberEvents);
     for (var i = 0; i < channels.length; i++) {
       final count = memberCounts[channels[i].id];
@@ -389,40 +402,6 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     // caller assigns whatever this returns, so the last check belongs here.
     fence.ensureCurrent();
     return channels;
-  }
-
-  void _cacheMemberSnapshots(
-    Iterable<NostrEvent> events, {
-    bool replaceAll = false,
-  }) {
-    final latestByChannelId = <String, NostrEvent>{};
-    for (final event in events) {
-      final channelId = event.getTagValue('d');
-      if (channelId == null) continue;
-      final current = latestByChannelId[channelId];
-      if (current == null || event.createdAt > current.createdAt) {
-        latestByChannelId[channelId] = event;
-      }
-    }
-
-    final snapshots = replaceAll
-        ? <String, List<ChannelMember>>{}
-        : Map<String, List<ChannelMember>>.of(_memberSnapshotsByChannelId);
-    snapshots.addAll({
-      for (final entry in latestByChannelId.entries)
-        entry.key: List.unmodifiable([
-          for (final member in membersFromEvent(entry.value))
-            ChannelMember(
-              pubkey: member.pubkey,
-              role: member.role,
-              joinedAt: DateTime.fromMillisecondsSinceEpoch(
-                entry.value.createdAt * 1000,
-                isUtc: true,
-              ),
-            ),
-        ]),
-    });
-    _memberSnapshotsByChannelId = Map.unmodifiable(snapshots);
   }
 
   /// Fetches each channel's independent latest-message window in one HTTP

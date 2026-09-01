@@ -161,6 +161,7 @@ async fn main() -> anyhow::Result<()> {
         metrics_port = config.metrics_port,
         max_frame_bytes = config.max_frame_bytes,
         audit_enabled = config.audit_enabled,
+        push_enabled = config.push_enabled,
         "Config loaded"
     );
 
@@ -168,6 +169,7 @@ async fn main() -> anyhow::Result<()> {
     let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(usage_interval_secs);
     relay_metrics::install(config.metrics_port, usage_idle_timeout_secs);
     metrics::gauge!("buzz_audit_enabled").set(if config.audit_enabled { 1.0 } else { 0.0 });
+    metrics::gauge!("buzz_push_enabled").set(if config.push_enabled { 1.0 } else { 0.0 });
     info!(
         port = config.metrics_port,
         idle_timeout_secs = usage_idle_timeout_secs,
@@ -727,15 +729,16 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // NIP-PL matcher and worker are enabled as one unit. Lease acceptance is
-    // already disabled without the exact gateway URL, so discovery and runtime
-    // cannot advertise or accumulate work for an undeliverable configuration.
-    if state.config.push_gateway_delivery_url.is_some() {
+    // NIP-PL matcher and worker are enabled as one unit behind the explicit
+    // deployment opt-in. The gateway URL alone never enables push.
+    if state.config.push_enabled {
         tokio::spawn(buzz_relay::push_runtime::run_matcher(Arc::clone(&state)));
         tokio::spawn(buzz_relay::push_runtime::run_delivery_worker(Arc::clone(
             &state,
         )));
         info!("NIP-PL push matcher and delivery worker started");
+    } else {
+        info!("NIP-PL push disabled by BUZZ_PUSH_ENABLED");
     }
 
     // NIP-ER reminder scheduler — polls for due reminders and publishes them

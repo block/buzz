@@ -88,11 +88,8 @@ class _TaskDetailSheetOpener extends HookConsumerWidget {
       body: Center(
         child: TextButton(
           key: const ValueKey('open-task-detail'),
-          onPressed: () => showTaskDetailSheet(
-            context: context,
-            ref: ref,
-            taskId: 'task-1',
-          ),
+          onPressed: () =>
+              showTaskDetailSheet(context: context, ref: ref, taskId: 'task-1'),
           child: const Text('Open task detail'),
         ),
       ),
@@ -405,9 +402,7 @@ void main() {
         nsec: nsec,
         handler: (request) async => _detailResponse(
           title: 'x' * 10000,
-          events: [
-            _eventJson(id: 1, action: 'commented', body: 'y' * 10000),
-          ],
+          events: [_eventJson(id: 1, action: 'commented', body: 'y' * 10000)],
         ),
       );
       await _openSheet(tester);
@@ -558,10 +553,7 @@ void main() {
           methods.add(request.method);
           if (request.method == 'PATCH') {
             patchBodies.add(request.body);
-            return http.Response(
-              jsonEncode(_taskJson(status: 'done')),
-              200,
-            );
+            return http.Response(jsonEncode(_taskJson(status: 'done')), 200);
           }
           getCount++;
           // The relay appends the status_changed row itself; the second GET
@@ -592,9 +584,7 @@ void main() {
 
       await tester.tap(_statusFinder);
       await tester.pumpAndSettle();
-      await tester.tap(
-        find.byKey(const ValueKey('task-status-option-done')),
-      );
+      await tester.tap(find.byKey(const ValueKey('task-status-option-done')));
       await tester.pumpAndSettle();
 
       // EXACTLY ONE PATCH.
@@ -693,9 +683,7 @@ void main() {
 
       await tester.tap(_statusFinder);
       await tester.pumpAndSettle();
-      await tester.tap(
-        find.byKey(const ValueKey('task-status-option-done')),
-      );
+      await tester.tap(find.byKey(const ValueKey('task-status-option-done')));
       await tester.pumpAndSettle();
 
       // The error is surfaced...
@@ -746,10 +734,7 @@ void main() {
         nsec: nsec,
         handler: (request) async {
           if (request.method == 'PATCH') {
-            return http.Response(
-              jsonEncode({'error': 'z' * 10000}),
-              400,
-            );
+            return http.Response(jsonEncode({'error': 'z' * 10000}), 400);
           }
           return _detailResponse();
         },
@@ -759,9 +744,7 @@ void main() {
 
       await tester.tap(_statusFinder);
       await tester.pumpAndSettle();
-      await tester.tap(
-        find.byKey(const ValueKey('task-status-option-done')),
-      );
+      await tester.tap(find.byKey(const ValueKey('task-status-option-done')));
       await tester.pumpAndSettle();
 
       final message = tester.widget<Text>(_statusErrorFinder).data!;
@@ -791,9 +774,7 @@ void main() {
 
       await tester.tap(_statusFinder);
       await tester.pumpAndSettle();
-      await tester.tap(
-        find.byKey(const ValueKey('task-status-option-done')),
-      );
+      await tester.tap(find.byKey(const ValueKey('task-status-option-done')));
       await tester.pump();
 
       // In flight: the control shows pending and refuses a second tap.

@@ -41,6 +41,12 @@ REMOTE_ROOT = "/opt/buzz"
 REMOTE_BIN = f"{REMOTE_ROOT}/bin"
 REMOTE_PROMPTS = f"{REMOTE_ROOT}/prompts"
 REMOTE_LOGS = f"{REMOTE_ROOT}/logs"
+# Some task images ship without any CA certificates (e.g. slim Ubuntu
+# terminal-bench images), which makes reqwest's rustls backend fail at
+# Client::builder().build() ("No CA certificates were loaded from the
+# system"). We upload a known-good bundle and point SSL_CERT_FILE at it
+# so agent startup never depends on the task image's TLS store.
+REMOTE_CA_BUNDLE = f"{REMOTE_ROOT}/ca-bundle.crt"
 REMOTE_EVIDENCE = "/logs/artifacts/buzz-evidence.json"
 # The relay is host-header tenant-bound (its community row is the authority
 # of its own RELAY_URL), so agents must present that exact Host. When the
@@ -99,6 +105,7 @@ class BuzzContainerRuntime:
         buzz_cli_binary: str = "buzz",
         relay_gateway: str = "",
         forwarder_binary: str = "relay-forwarder",
+        ca_bundle_path: str = "",
         max_agent_rounds: int = DEFAULT_MAX_AGENT_ROUNDS,
         readiness_timeout_seconds: float = 60.0,
         poll_seconds: float = 1.0,
@@ -122,6 +129,9 @@ class BuzzContainerRuntime:
         # the relay's community row is bound to — to this gateway.
         self.relay_gateway = relay_gateway
         self.forwarder_binary = forwarder_binary
+        # Optional CA bundle uploaded into the task container (see
+        # REMOTE_CA_BUNDLE) for images that ship without TLS roots.
+        self.ca_bundle_path = ca_bundle_path
         self.max_agent_rounds = max_agent_rounds
         self.readiness_timeout_seconds = readiness_timeout_seconds
         self.poll_seconds = poll_seconds
@@ -287,6 +297,9 @@ class BuzzContainerRuntime:
             )
         for target, source in uploads.items():
             await environment.upload_file(source, target)
+        ca_bundle = Path(self.ca_bundle_path)
+        if ca_bundle.is_file():
+            await environment.upload_file(str(ca_bundle), REMOTE_CA_BUNDLE)
         await environment.exec(f"chmod 0755 {REMOTE_BIN}/*")
 
     async def _start_forwarder(
@@ -427,6 +440,11 @@ class BuzzContainerRuntime:
         """The desktop-launch environment: real acp/agent/dev-mcp wiring."""
         return {
             **endpoint.env,
+            # Slim task images ship without CA certificates; reqwest's rustls
+            # then fails to build its HTTP client at startup. Pointing
+            # SSL_CERT_FILE at the uploaded bundle makes agent startup
+            # independent of the task image's TLS store.
+            "SSL_CERT_FILE": REMOTE_CA_BUNDLE,
             "RUST_LOG": self._rust_log(endpoint.env.get("RUST_LOG")),
             "BUZZ_RELAY_URL": trial.relay_ws_url,
             "BUZZ_PRIVATE_KEY": credential.nostr_secret_key,

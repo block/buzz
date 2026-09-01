@@ -43,12 +43,11 @@ Future<void> showThreadSummarySheet({
       maxWidth: 640,
       maxHeight: MediaQuery.sizeOf(context).height * 0.9,
     ),
-    builder: (_) =>
-        _ThreadSummarySheet(
-          channelId: channelId,
-          messages: messages,
-          sourceRef: sourceRef,
-        ),
+    builder: (_) => _ThreadSummarySheet(
+      channelId: channelId,
+      messages: messages,
+      sourceRef: sourceRef,
+    ),
   );
 }
 
@@ -88,7 +87,10 @@ class _ThreadSummarySheet extends HookConsumerWidget {
       SummaryTaskTarget? target;
       if (sourceRef case final key?) {
         try {
-          final linked = await api.listTasks(channelId: channelId, sourceRef: key);
+          final linked = await api.listTasks(
+            channelId: channelId,
+            sourceRef: key,
+          );
           if (linked.length == 1) target = SummaryTaskTarget(linked.single);
         } on Exception {
           // A failed reverse lookup is not a failed save: fall through to the

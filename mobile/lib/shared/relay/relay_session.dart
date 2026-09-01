@@ -609,16 +609,16 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   /// Replay-in-flight dedup state for `BUZZ_SYNC_REQUIRED` handling.
   static const _syncRequiredKnownReasons = {'backpressure'};
 
-  /// Handle a `BUZZ_SYNC_REQUIRED` control frame: the relay dropped a fan-out
-  /// EVENT on this connection's data channel (e.g. under backpressure) and is
-  /// signalling a gap in the live event stream. Recovery re-uses the existing
-  /// reconnect replay path — REQs with `since: lastSeenCreatedAt - 5s` per
-  /// live subscription — so the dropped range is re-fetched through the
-  /// identical validation pipeline. No UI surface; recovery is silent.
+  /// Handle `BUZZ_SYNC_REQUIRED`: the relay dropped a fan-out EVENT on this
+  /// connection under backpressure. Recovery re-uses the reconnect replay
+  /// path (`since: lastSeenCreatedAt - 5s`), so the dropped range is
+  /// re-fetched through the identical validation pipeline. Silent recovery.
   void _handleSyncRequired(List<dynamic> data) {
-    if (!_socketConnected) return; // Gap frames during a reconnect are
-    // consumed by the in-flight generation's own replay.
-    final reason = data.length > 1 && data[1] is String ? data[1] as String : null;
+    // Gap frames during a reconnect are consumed by the in-flight replay.
+    if (!_socketConnected) return;
+    final reason = data.length > 1 && data[1] is String
+        ? data[1] as String
+        : null;
     // The reason is attacker-controllable text: never render it and only log
     // values from a fixed allowlist.
     if (reason != null && _syncRequiredKnownReasons.contains(reason)) {
