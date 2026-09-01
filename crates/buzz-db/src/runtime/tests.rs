@@ -11,6 +11,11 @@ async fn setup_db() -> Db {
     let pool = PgPool::connect(&database_url)
         .await
         .expect("connect to test DB");
+    if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() == Ok("migration") {
+        crate::migration::run_migrations(&pool)
+            .await
+            .expect("apply migration schema");
+    }
     Db::from_pool(pool)
 }
 
@@ -28,7 +33,7 @@ async fn make_community(pool: &PgPool) -> Uuid {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
-async fn database_guard_covers_legacy_writer_and_nip09_deletion() {
+async fn migration_schema_database_guard_covers_legacy_writer_and_nip09_deletion() {
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     let db = setup_db().await;

@@ -27,6 +27,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 
+use super::jwks::JwksSourceContract;
+
 /// Maximum accepted length of an `iss` or `aud` string.
 const MAX_URI_LEN: usize = 2_048;
 /// Maximum accepted length of a claim name.
@@ -349,6 +351,11 @@ pub struct IssuerPolicy {
     skew_seconds: u64,
     maximum_assertion_age_seconds: u64,
     maximum_status_age_seconds: Option<u64>,
+    /// The authenticated key-source contract: validated JWKS URI, refresh
+    /// interval, and hard deadline. Included in `derive_assertion_policy_id`
+    /// so that a change to the endpoint, refresh schedule, or hard-deadline
+    /// rule changes the policy ID and invalidates all prepared evidence.
+    jwks_source_contract: JwksSourceContract,
     id: AssertionPolicyId,
 }
 
@@ -382,6 +389,10 @@ pub enum IssuerPolicyError {
     /// so subject classification could not be total and mutually exclusive.
     #[error("subject class contract is not exclusive")]
     NonExclusiveSubjectClass,
+    /// The [`JwksSourceContract`] was not valid — invalid URI, zero or
+    /// out-of-range timing, or `refresh_interval >= hard_deadline`.
+    #[error("invalid JWKS source contract")]
+    InvalidJwksSourceContract,
 }
 
 impl IssuerPolicy {
@@ -397,6 +408,7 @@ impl IssuerPolicy {
         skew_seconds: u64,
         maximum_assertion_age_seconds: u64,
         maximum_status_age_seconds: Option<u64>,
+        jwks_source_contract: JwksSourceContract,
     ) -> Result<Self, IssuerPolicyError> {
         // Identity-bearing strings are validated for bounds but never mutated:
         // exact `iss`/`aud`/`sub` bytes select policies and form the identity
@@ -459,6 +471,7 @@ impl IssuerPolicy {
             skew_seconds,
             maximum_assertion_age_seconds,
             maximum_status_age_seconds,
+            &jwks_source_contract,
         );
 
         Ok(Self {
@@ -471,6 +484,7 @@ impl IssuerPolicy {
             skew_seconds,
             maximum_assertion_age_seconds,
             maximum_status_age_seconds,
+            jwks_source_contract,
             id,
         })
     }
@@ -524,6 +538,11 @@ impl IssuerPolicy {
     pub const fn id(&self) -> AssertionPolicyId {
         self.id
     }
+
+    /// The authenticated key-source contract for this policy's JWKS endpoint.
+    pub fn jwks_source_contract(&self) -> &JwksSourceContract {
+        &self.jwks_source_contract
+    }
 }
 
 /// A closed set of issuer policies keyed by exact `iss`. Selection preserves
@@ -559,6 +578,12 @@ impl IssuerRegistry {
     /// Whether the registry is empty.
     pub fn is_empty(&self) -> bool {
         self.policies.is_empty()
+    }
+
+    /// Iteration order is deliberately unspecified; callers must not depend on
+    /// registration order.
+    pub fn all_policies(&self) -> impl Iterator<Item = &IssuerPolicy> {
+        self.policies.values()
     }
 }
 
@@ -625,6 +650,7 @@ fn derive_assertion_policy_id(
     skew_seconds: u64,
     maximum_assertion_age_seconds: u64,
     maximum_status_age_seconds: Option<u64>,
+    jwks_source_contract: &JwksSourceContract,
 ) -> AssertionPolicyId {
     let mut hasher = Sha256::new();
     hasher.update(b"buzz:nip-fi:assertion-policy:v1\0");
@@ -680,6 +706,23 @@ fn derive_assertion_policy_id(
     hasher.update(skew_seconds.to_be_bytes());
     hasher.update(maximum_assertion_age_seconds.to_be_bytes());
     hasher.update(maximum_status_age_seconds.unwrap_or(0).to_be_bytes());
+    // Authenticated key-source contract (NIP-FI.md, "Policy identity and
+    // snapshots"): URI selects the authenticated source; interval defines
+    // bounded refresh; hard deadline defines the accepted time rule. These are
+    // contract, not mutable state — key rotation (JWKS content change) leaves
+    // all three unchanged and must not move the ID.
+    hasher.update(b"jwks-source-contract\0");
+    hash_field(&mut hasher, jwks_source_contract.jwks_uri().as_bytes());
+    hasher.update(
+        jwks_source_contract
+            .refresh_interval_seconds()
+            .to_be_bytes(),
+    );
+    hasher.update(
+        jwks_source_contract
+            .key_snapshot_hard_deadline_seconds()
+            .to_be_bytes(),
+    );
     AssertionPolicyId(hasher.finalize().into())
 }
 

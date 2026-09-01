@@ -814,7 +814,7 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use chrono::Duration;
     use uuid::Uuid;

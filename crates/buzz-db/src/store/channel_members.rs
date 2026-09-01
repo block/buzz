@@ -1379,7 +1379,7 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use crate::channel::{ChannelType, ChannelVisibility};
     use crate::migration;
@@ -1387,10 +1387,8 @@ mod tests {
     use nostr::Keys;
     use sqlx::postgres::PgPoolOptions;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1 -- local test-only credentials
-
     async fn setup_pool() -> PgPool {
-        PgPool::connect(TEST_DB_URL)
+        PgPool::connect(&crate::test_support::database_url())
             .await
             .expect("connect to test DB")
     }
@@ -1573,8 +1571,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn accessible_channel_ids_are_not_truncated_at_one_thousand() {
-        let database_url =
-            std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
+        let database_url = crate::test_support::database_url();
         let pool = PgPool::connect(&database_url)
             .await
             .expect("connect to test DB");
@@ -1612,8 +1609,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn get_members_returns_full_roster_beyond_1000() {
-        let database_url =
-            std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
+        let database_url = crate::test_support::database_url();
         let pool = PgPool::connect(&database_url)
             .await
             .expect("connect to test DB");
@@ -1720,11 +1716,15 @@ mod tests {
         .await
         .expect("insert large roster");
 
+        // Migration 0032's roster guard requires canonical four-field p tags
+        // whose roles exactly match channel_members, including the creator's
+        // owner row created by create_test_channel.
+        let creator_hex = hex::encode(&creator);
         let stale_tags: Vec<serde_json::Value> =
             std::iter::once(serde_json::json!(["d", channel.id.to_string()]))
                 .chain(std::iter::once(serde_json::json!([
                     "p",
-                    hex::encode(&creator),
+                    creator_hex,
                     "",
                     "owner"
                 ])))
@@ -1736,7 +1736,7 @@ mod tests {
             std::iter::once(serde_json::json!(["d", channel.id.to_string()]))
                 .chain(std::iter::once(serde_json::json!([
                     "p",
-                    hex::encode(&creator),
+                    creator_hex,
                     "",
                     "owner"
                 ])))
@@ -1747,8 +1747,14 @@ mod tests {
                 .collect();
         let other_complete_tags: Vec<serde_json::Value> =
             std::iter::once(serde_json::json!(["d", channel.id.to_string()]))
+                .chain(std::iter::once(serde_json::json!([
+                    "p",
+                    hex::encode(&creator),
+                    "",
+                    "owner"
+                ])))
                 .chain(
-                    (0..=1_500)
+                    (1..=extra_members)
                         .map(|n| serde_json::json!(["p", format!("{n:064x}"), "", "member"])),
                 )
                 .collect();
@@ -1793,6 +1799,10 @@ mod tests {
         // The same channel UUID in another tenant is deliberately valid. A
         // complete snapshot there must not mask this tenant's stale head.
         let other_community_id = make_test_community(&pool).await;
+        // Insert directly because create_test_channel generates a fresh UUID,
+        // while this test needs the same channel ID in both tenants. Direct
+        // insertion skips the helper's creator membership, so add the owner
+        // row explicitly below.
         sqlx::query(
             r#"
             INSERT INTO channels
@@ -1809,13 +1819,26 @@ mod tests {
         sqlx::query(
             r#"
             INSERT INTO channel_members (community_id, channel_id, pubkey, role, joined_at)
-            SELECT $1, $2, decode(lpad(to_hex(n), 64, '0'), 'hex'), 'member',
-                   NOW() + (n || ' seconds')::interval
-            FROM generate_series(0, 1500) n
+            VALUES ($1, $2, $3, 'owner', NOW())
             "#,
         )
         .bind(other_community_id)
         .bind(channel.id)
+        .bind(&creator)
+        .execute(&pool)
+        .await
+        .expect("insert other-tenant owner");
+        sqlx::query(
+            r#"
+            INSERT INTO channel_members (community_id, channel_id, pubkey, role, joined_at)
+            SELECT $1, $2, decode(lpad(to_hex(n), 64, '0'), 'hex'), 'member',
+                   NOW() + (n || ' seconds')::interval
+            FROM generate_series(1, $3) n
+            "#,
+        )
+        .bind(other_community_id)
+        .bind(channel.id)
+        .bind(extra_members)
         .execute(&pool)
         .await
         .expect("insert complete other-tenant roster");
@@ -2398,7 +2421,7 @@ mod tests {
         let snapshot_pool = PgPoolOptions::new()
             .max_connections(1)
             .acquire_timeout(std::time::Duration::from_secs(1))
-            .connect(TEST_DB_URL)
+            .connect(&crate::test_support::database_url())
             .await
             .expect("connect one-connection pool");
         let relay_keys = Keys::generate();
@@ -2470,7 +2493,7 @@ mod tests {
     /// until it is released. Verified by mutation — dropping the lock from either
     /// function makes that call return immediately and fails this test.
     #[tokio::test]
-    #[ignore]
+    #[ignore = "requires PostgreSQL"]
     async fn membership_writes_serialize_on_the_shared_channel_lock() {
         let pool = setup_pool().await;
         let (community, channel_id, owner_a, owner_b) =
@@ -2541,7 +2564,7 @@ mod tests {
     /// holder then demotes the remover and commits. Once the key is released the
     /// remover must re-read its (now unprivileged) role and be rejected.
     #[tokio::test]
-    #[ignore]
+    #[ignore = "requires PostgreSQL"]
     async fn remove_member_rejects_an_actor_demoted_while_it_waited() {
         let pool = setup_pool().await;
         let (community, channel_id, owner_a, owner_b) =
@@ -2627,7 +2650,7 @@ mod tests {
     /// Two owners on purpose, so the last-owner guard can never be what
     /// decides the outcome — only role resolution can.
     #[tokio::test]
-    #[ignore]
+    #[ignore = "requires PostgreSQL"]
     async fn kicked_owner_rejoins_as_member_not_owner() {
         let pool = setup_pool().await;
         let (community, channel_id, owner_a, owner_b) =
@@ -2679,7 +2702,7 @@ mod tests {
     /// The other side of the same boundary: reactivation may reach an elevated
     /// role, but only because a *currently* elevated granter asked for it.
     #[tokio::test]
-    #[ignore]
+    #[ignore = "requires PostgreSQL"]
     async fn removed_owner_is_restored_only_by_a_current_owner() {
         let pool = setup_pool().await;
         let (community, channel_id, owner_a, owner_b) =
@@ -2736,7 +2759,7 @@ mod tests {
     }
 
     async fn admin_url() -> String {
-        std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into())
+        crate::test_support::database_url()
     }
 
     /// Create a fresh scratch database on the same server and optionally run migrations.

@@ -968,7 +968,7 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     #[test]
     fn owner_limit_defaults_when_unset_or_invalid() {
         assert_eq!(
@@ -1359,8 +1359,8 @@ mod tests {
         let owner = test_pubkey();
         let transferee = test_pubkey();
 
-        // Give the transferee 3 communities (the max).
-        for _ in 0..3 {
+        // Fill the configured default ownership limit.
+        for _ in 0..MAX_COMMUNITIES_PER_OWNER {
             let c = make_test_community(&pool).await;
             bootstrap_owner(&pool, c, &transferee)
                 .await

@@ -1032,7 +1032,14 @@ test("drops an expanded DM after the first message fails", async ({ page }) => {
   await page.keyboard.type(" for a hand");
   await page.getByTestId("send-message").click();
 
-  await expect(page.getByText(sendError)).toBeVisible();
+  await expect(
+    page.getByTestId("new-message-page").getByText(sendError, { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page
+      .locator("[data-sonner-toast]")
+      .filter({ hasText: `Message failed to send: ${sendError}` }),
+  ).toBeVisible();
   await expect(input).toContainText("Fizz");
 
   const commandsAfterFailure = await readCommandPayloadLog(page);

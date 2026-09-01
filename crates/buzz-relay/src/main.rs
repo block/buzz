@@ -2098,8 +2098,6 @@ mod tests {
         assert!(tick_count.load(std::sync::atomic::Ordering::Relaxed) <= 1);
     }
 
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
     async fn audit_writer_pool_installs_timeouts_and_bounds_advisory_lock_waits() {
         let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
         let pool = connect_audit_pool(&DbConfig {
@@ -2157,6 +2155,14 @@ mod tests {
             .execute(&mut *holder)
             .await
             .expect("release audit advisory lock");
+    }
+
+    mod postgres_tests {
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn audit_writer_pool_installs_timeouts_and_bounds_advisory_lock_waits() {
+            super::audit_writer_pool_installs_timeouts_and_bounds_advisory_lock_waits().await;
+        }
     }
 
     #[test]

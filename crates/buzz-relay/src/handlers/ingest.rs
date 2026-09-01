@@ -3275,7 +3275,7 @@ async fn ingest_event_inner(
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use std::sync::Mutex;
 
     use super::*;
@@ -3528,7 +3528,9 @@ mod tests {
             .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
         let pool = sqlx::PgPool::connect(&url).await.expect("connect test DB");
         let db = buzz_db::Db::from_pool(pool);
-        db.migrate().await.expect("migrate test DB");
+        if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+            db.migrate().await.expect("migrate test DB");
+        }
         let store = buzz_deletion::store(&db);
 
         let host = format!("lane3-fence-{}.example", Uuid::new_v4().simple());

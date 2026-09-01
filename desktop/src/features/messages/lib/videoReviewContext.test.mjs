@@ -119,6 +119,23 @@ test("hasVideoAttachment uses the Markdown renderer's video classification", () 
   );
 });
 
+test("packaged MP4 voice notes are not video-review roots", () => {
+  const voiceNote = message({
+    body: "[voice-note-123.mp4](https://relay/media/voice.mp4)",
+    tags: [
+      [
+        "imeta",
+        "url https://relay/media/voice.mp4",
+        "m video/mp4",
+        "filename voice-note-123.mp4",
+      ],
+    ],
+  });
+
+  assert.equal(hasVideoAttachment(voiceNote), false);
+  assert.equal(hasRenderedVideoAttachment(voiceNote), false);
+});
+
 test("buildVideoReviewCommentsByRootId includes nested descendants", () => {
   const video = message({
     id: "video",

@@ -772,7 +772,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod integration_tests {
+mod postgres_tests {
     //! Regression test for `e3661764` / `7899c1a8`: a workflow `send_message`
     //! that mentions a channel member by name (`@Name`) in its author-written
     //! step template must emit both the legacy `p` tag and authenticated

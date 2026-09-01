@@ -2530,7 +2530,7 @@ fn ban_json(b: &buzz_db::moderation::BanRecord) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use nostr::{Alphabet, EventBuilder, Keys, Kind, SingleLetterTag, Tag};
     use std::sync::Mutex;
@@ -2765,8 +2765,6 @@ mod tests {
     /// replay of the same event id in the same community is rejected. The same
     /// id in a different community still succeeds, proving the key is scoped by
     /// server-resolved tenant rather than global process memory.
-    #[tokio::test]
-    #[ignore = "requires Redis"]
     async fn nip98_replay_guard_rejects_cross_pod_replay_on_bridge_path() {
         let pool = redis_pool();
         let pod_a = buzz_pubsub::RedisNip98ReplayGuard::new(pool.clone());
@@ -2794,8 +2792,6 @@ mod tests {
     /// rejection. A single guard instance, called twice with the same
     /// `TenantContext` and the same event id, MUST reject the second call.
     /// Bites if `try_mark`'s admit/reject mapping is reversed or no-op'd.
-    #[tokio::test]
-    #[ignore = "requires Redis"]
     async fn nip98_replay_guard_rejects_same_pod_same_community_replay() {
         let pool = redis_pool();
         let pod = buzz_pubsub::RedisNip98ReplayGuard::new(pool);
@@ -2810,6 +2806,20 @@ mod tests {
             .await
             .expect_err("same-pod replay of the same id+community must reject");
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    mod external_infra_redis_tests {
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn nip98_replay_guard_rejects_cross_pod_replay_on_bridge_path() {
+            super::nip98_replay_guard_rejects_cross_pod_replay_on_bridge_path().await;
+        }
+
+        #[tokio::test]
+        #[ignore = "requires Redis"]
+        async fn nip98_replay_guard_rejects_same_pod_same_community_replay() {
+            super::nip98_replay_guard_rejects_same_pod_same_community_replay().await;
+        }
     }
 
     /// Attack 3 fail-closed guard: a stateless worker that loses Redis MUST
@@ -3819,8 +3829,6 @@ mod tests {
         }
     }
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
-
     /// Build an AppState suitable for handler-level bridge tests.
     ///
     /// - `require_auth_token = false` → X-Pubkey dev-mode fallback active.
@@ -3833,7 +3841,7 @@ mod tests {
     /// Returns `None` when local Postgres is not reachable.
     async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
         let mut config = crate::config::Config::from_env().ok()?;
-        config.database_url = TEST_DB_URL.to_string();
+        config.database_url = crate::test_support::database_url();
         // Use the real local Redis so enforce_http_admission can pass.
         config.redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
@@ -3841,7 +3849,9 @@ mod tests {
         config.require_auth_token = false;
         config.require_relay_membership = false;
 
-        let pool = sqlx::PgPool::connect(TEST_DB_URL).await.ok()?;
+        let pool = sqlx::PgPool::connect(&crate::test_support::database_url())
+            .await
+            .ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
         let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))

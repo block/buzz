@@ -37,6 +37,15 @@ export type MentionSuggestion = {
 type MentionAutocompleteProps = {
   suggestions: MentionSuggestion[];
   selectedIndex: number;
+  /**
+   * Whether the owning composer owns document focus — its editor or this
+   * overlay's own controls (see useComposerFocusOwnership). The focus gate
+   * lives here rather than in each composer so a background composer
+   * replaying a stale update (e.g. a shared mid-send disabled toggle) can't
+   * resurrect its suggestion overlay, while keyboard focus moving into the
+   * Options controls keeps the overlay mounted.
+   */
+  composerOwnsFocus: boolean;
   onFetchMore?: () => void;
   onSelect: (suggestion: MentionSuggestion) => void;
   lockedAgentPubkeys?: ReadonlySet<string>;
@@ -56,9 +65,27 @@ export function showMentionAgentProvenanceMarker(
   return hasNameCollision && suggestion.agentProvenance === "managed-elsewhere";
 }
 
+/**
+ * Move keyboard focus to the mention overlay's Options trigger inside
+ * `container` (the composer form). Returns false when the trigger isn't
+ * rendered — overlay closed, or a composer without audience controls — so
+ * the caller can leave the key event to its default behavior.
+ */
+export function focusMentionOptionsTrigger(
+  container: HTMLElement | null,
+): boolean {
+  const trigger = container?.querySelector<HTMLElement>(
+    "[data-mention-options-trigger]",
+  );
+  if (!trigger) return false;
+  trigger.focus();
+  return true;
+}
+
 export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   suggestions,
   selectedIndex,
+  composerOwnsFocus,
   onFetchMore,
   onSelect,
   lockedAgentPubkeys,
@@ -145,7 +172,27 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
     }
   }, [onFetchMore]);
 
-  if (suggestions.length === 0) {
+  // Escape from inside the overlay is the keyboard counterpart of pressing
+  // outside it: hand focus back to the editor the overlay belongs to, then
+  // dismiss. Focusing first keeps the composer's focus ownership unbroken, so
+  // the overlay never unmounts with focus stranded on the document. Escape in
+  // the editor itself never reaches here — that path is the composer's own
+  // key handler.
+  const handleOverlayKeyDown = React.useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      rootRef.current
+        ?.closest("form")
+        ?.querySelector<HTMLElement>('[data-testid="message-input"]')
+        ?.focus();
+      onDismiss?.();
+    },
+    [onDismiss],
+  );
+
+  if (!composerOwnsFocus || suggestions.length === 0) {
     return null;
   }
 
@@ -159,23 +206,27 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
   }
 
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: the overlay's own controls are the interactive elements; this listener only gives them the standard Escape-to-dismiss exit.
     <div
       className={cn(
         "absolute left-0 right-0 z-50 px-3 sm:px-4",
         position === "below" ? "top-full mt-1" : "bottom-full mb-1",
       )}
       data-testid="mention-autocomplete-layer"
+      onKeyDown={handleOverlayKeyDown}
       ref={rootRef}
     >
       <div className="w-full max-w-2xl">
         {onKeepMentionedAgentsPinnedChange ? (
           <div className="mb-2 flex justify-end">
+            {/* biome-ignore lint/a11y/noStaticElementInteractions: pointer-only guard, no behavior of its own — an unprevented mousedown on this surface (its padding, the switch's label) blurs the editor, and the focus gate above would unmount the overlay before the click lands. */}
             <div
               className={cn(
                 "max-w-full overflow-hidden rounded-xl text-popover-foreground ring-1 ring-border/50 transition-[width] duration-200 ease-out",
                 POPOVER_SURFACE_CLASS,
                 optionsOpen ? "w-72" : "w-24",
               )}
+              onMouseDown={(event) => event.preventDefault()}
               ref={optionsSurfaceRef}
               style={POPOVER_SHADOW_STYLE}
             >
@@ -194,9 +245,23 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                   transition={{ duration: 0.16, ease: "easeOut" }}
                 >
                   <div className="flex min-h-12 items-center justify-between gap-3 px-3 py-2">
+                    {/* A label moves focus to its control from the click
+                        default action, not from mousedown, so the surface's
+                        mousedown guard alone can't keep the editor focused
+                        here. Cancel the forwarding and drive the switch
+                        directly; the association still names the control for
+                        assistive tech, which reaches the switch by keyboard
+                        without going through this label. */}
+                    {/* biome-ignore lint/a11y/useKeyWithClickEvents: pointer-only affordance; the switch it labels is the keyboard-accessible path. */}
                     <label
                       className="flex min-w-0 flex-col"
                       htmlFor={keepPinnedSwitchId}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        onKeepMentionedAgentsPinnedChange?.(
+                          !keepMentionedAgentsPinned,
+                        );
+                      }}
                     >
                       <span className="text-sm font-medium">
                         Automatically mention agents
@@ -222,6 +287,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
                 aria-controls={optionsId}
                 aria-expanded={optionsOpen}
                 className="flex h-8 w-full items-center justify-between gap-1 px-2.5 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-popover-foreground"
+                data-mention-options-trigger
                 data-testid="mention-options-trigger"
                 onClick={() => setOptionsOpen((open) => !open)}
                 onMouseDown={(event) => event.preventDefault()}
@@ -239,6 +305,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
             </div>
           </div>
         ) : null}
+        {/* biome-ignore lint/a11y/noStaticElementInteractions: pointer-only guard, same as the options surface — here it covers presses on the scrollbar and the list's padding ring. */}
         <div
           className={cn(
             "max-h-48 w-full overflow-y-auto rounded-xl p-1",
@@ -249,6 +316,7 @@ export const MentionAutocomplete = React.memo(function MentionAutocomplete({
             POPOVER_SURFACE_CLASS,
           )}
           data-testid="mention-autocomplete"
+          onMouseDown={(event) => event.preventDefault()}
           onScroll={handleScroll}
           ref={listRef}
           style={POPOVER_SHADOW_STYLE}

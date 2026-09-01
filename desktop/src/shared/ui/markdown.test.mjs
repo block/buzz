@@ -1272,6 +1272,44 @@ test("authored Buzz permalink labels remain ordinary links", () => {
   assert.equal((html.match(/underline-offset-4/g) ?? []).length, 4);
 });
 
+test("generic audio attachments render outside paragraph markup", () => {
+  const href = "https://relay.example/media/meeting.mp3";
+  const markdown = renderCachedMarkdown({
+    components: createMarkdownComponents(true, false),
+    content: `[meeting.mp3](${href})`,
+    variant: "generic-audio-block-integration-test",
+  });
+  const html = renderToStaticMarkup(
+    React.createElement(
+      MarkdownRuntimeContext.Provider,
+      {
+        value: {
+          channels: [],
+          imetaByUrl: new Map([
+            [
+              href,
+              {
+                duration: 42,
+                filename: "meeting.mp3",
+                m: "audio/mpeg",
+              },
+            ],
+          ]),
+          onOpenChannel: () => {},
+          onOpenEntityLink: () => {},
+          onOpenMessageLink: () => {},
+          relayOrigin: "https://relay.example",
+        },
+      },
+      markdown,
+    ),
+  );
+
+  assert.match(html, /data-testid="audio-message-attachment"/);
+  assert.match(html, /aria-label="Download meeting.mp3"/);
+  assert.doesNotMatch(html, /<p[^>]*>\s*<div/);
+});
+
 test("bare Buzz permalinks shorten unavailable channel identifiers", () => {
   const channelId = "580ca78b-9dae-46f3-8854-bd671853ba32";
   const markdown = renderCachedMarkdown({

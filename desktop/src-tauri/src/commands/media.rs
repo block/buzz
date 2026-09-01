@@ -8,12 +8,16 @@ use tokio_util::sync::CancellationToken;
 use crate::app_state::AppState;
 use crate::relay::{parse_json_response, relay_api_base_url_with_override, relay_error_message};
 
+use super::media_filename::sanitize_filename;
 use super::media_transcode::{
     has_heic_extension, is_heic_file, is_video_file, transcode_and_extract_poster,
     transcode_and_extract_poster_with_cancellation, transcode_heic_path_to_jpeg_bytes,
     transcode_heic_path_to_jpeg_bytes_with_cancellation,
 };
 use super::media_upload_progress::{emit_media_upload_phase, send_upload_attempt, UploadAttempt};
+use super::media_voice_note::{
+    is_voice_note_filename, prepare_voice_note_for_upload, voice_note_mp4_filename,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobDescriptor {
@@ -133,24 +137,6 @@ const BLOCKED_MIME: &[&str] = &[
     "application/vnd.android.package-archive",
     "application/x-apple-diskimage",
 ];
-
-/// Sanitize a filename for use as a display label in the imeta `filename` field.
-///
-/// Strips any directory components (keeps only the final path segment), removes
-/// control characters, and bounds length to 255. Mirrors the relay's filename
-/// validation so a sanitized name always passes ingest. Returns a fallback when
-/// the result would be empty.
-pub(crate) fn sanitize_filename(name: &str) -> String {
-    // Keep only the final path segment — defend against `../` and absolute paths
-    // regardless of separator style.
-    let base = name.rsplit(['/', '\\']).next().unwrap_or(name).trim();
-    let cleaned: String = base.chars().filter(|c| !c.is_control()).take(255).collect();
-    if cleaned.is_empty() {
-        "file".to_string()
-    } else {
-        cleaned
-    }
-}
 
 /// Return true when a PNG/WebP payload declares animation.
 ///
@@ -724,8 +710,12 @@ pub(super) async fn upload_media_bytes_inner(
     let heic_by_extension = filename
         .as_deref()
         .is_some_and(|name| has_heic_extension(std::path::Path::new(name)));
+    let is_voice_note = is_voice_note_filename(filename.as_deref());
 
-    let (body, poster_bytes) = if is_video_file(&data) {
+    let (body, poster_bytes) = if is_voice_note {
+        emit_media_upload_phase(&app, progress_id.as_deref(), "processing-audio");
+        prepare_voice_note_for_upload(data, cancellation).await?
+    } else if is_video_file(&data) {
         emit_media_upload_phase(&app, progress_id.as_deref(), "processing-video");
         // Video: write to temp → transcode + extract poster → read results.
         // All blocking I/O runs off the async runtime via spawn_blocking.
@@ -790,7 +780,14 @@ pub(super) async fn upload_media_bytes_inner(
         }
     }
 
-    descriptor.filename = filename.as_deref().map(sanitize_filename);
+    descriptor.filename = filename.as_deref().map(|name| {
+        let upload_name = if is_voice_note {
+            voice_note_mp4_filename(name)
+        } else {
+            name.to_string()
+        };
+        sanitize_filename(&upload_name)
+    });
 
     Ok(descriptor)
 }
@@ -980,19 +977,5 @@ mod tests {
         assert!(!should_retry_legacy_upload(
             reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
         ));
-    }
-
-    #[test]
-    fn test_sanitize_filename() {
-        assert_eq!(sanitize_filename("report.pdf"), "report.pdf");
-        // Strips directory components and traversal.
-        assert_eq!(sanitize_filename("../../etc/passwd"), "passwd");
-        assert_eq!(sanitize_filename("/abs/path/notes.txt"), "notes.txt");
-        assert_eq!(sanitize_filename(r"C:\Users\me\doc.docx"), "doc.docx");
-        // Empty / separator-only falls back.
-        assert_eq!(sanitize_filename(""), "file");
-        assert_eq!(sanitize_filename("/"), "file");
-        // Control chars removed.
-        assert_eq!(sanitize_filename("a\nb\tc.txt"), "abc.txt");
     }
 }

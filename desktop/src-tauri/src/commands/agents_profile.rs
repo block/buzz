@@ -206,7 +206,7 @@ pub(crate) async fn reconcile_agent_profile(
     );
 
     if !state
-        .managed_agent_profile_reconcile_enabled
+        .managed_agent_profile_reconcile_enabled()
         .load(std::sync::atomic::Ordering::Acquire)
     {
         return Ok(ProfileReconcileOutcome::SkippedDisabled);
@@ -273,7 +273,7 @@ pub(crate) async fn reconcile_agent_profile(
         .map_err(|e| format!("failed to parse agent keys: {e}"))?;
 
     if !state
-        .managed_agent_profile_reconcile_enabled
+        .managed_agent_profile_reconcile_enabled()
         .load(std::sync::atomic::Ordering::Acquire)
     {
         return Ok(ProfileReconcileOutcome::SkippedDisabled);

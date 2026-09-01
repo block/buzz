@@ -444,14 +444,11 @@ export type ManagedAgentLog = {
   logPath: string;
 };
 
-export type CancelManagedAgentTurnResult = {
-  status: "sent" | "no_active_turn";
-};
-
 /** Outcome of a live `switch_model` control frame; `failure` lands late. */
 export type SwitchManagedAgentModelStatus =
   | "sent"
   | "turn_ending"
+  | "ambiguous_target"
   | "switched"
   | "unsupported_model"
   | "no_active_turn"

@@ -546,7 +546,7 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     //! Pin the load-bearing contract for `Db::communities_of_channels`:
     //! a channel id that does NOT exist MUST be absent from the result
     //! map, never mapped to a default. The relay-side read-row emitter
@@ -557,11 +557,8 @@ mod tests {
     use super::*;
     use sqlx::PgPool;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
-
     async fn setup_db() -> Db {
-        let database_url =
-            std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
+        let database_url = crate::test_support::database_url();
         let pool = PgPool::connect(&database_url)
             .await
             .expect("connect to test DB");
@@ -847,8 +844,8 @@ mod tests {
         let db = setup_db().await;
         let owner = format!("{:064x}", Uuid::new_v4().as_u128());
 
-        // Create 3 communities for this owner (the max).
-        for i in 0..3 {
+        // Fill the configured default ownership limit.
+        for i in 0..crate::relay_members::MAX_COMMUNITIES_PER_OWNER {
             let host = format!("limit-test-{}-{}.example", i, Uuid::new_v4().simple());
             assert!(matches!(
                 db.create_community_with_owner(&host, &owner)
@@ -858,7 +855,7 @@ mod tests {
             ));
         }
 
-        let host = format!("limit-test-3-{}.example", Uuid::new_v4().simple());
+        let host = format!("limit-test-overflow-{}.example", Uuid::new_v4().simple());
         assert_eq!(
             db.create_community_with_owner(&host, &owner)
                 .await

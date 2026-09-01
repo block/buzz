@@ -586,7 +586,7 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use crate::{event, migration, replaceable};
     use sqlx::postgres::PgPoolOptions;
@@ -601,6 +601,11 @@ mod tests {
         let pool = PgPool::connect(&database_url)
             .await
             .expect("connect to test DB");
+        if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() == Ok("migration") {
+            migration::run_migrations(&pool)
+                .await
+                .expect("apply migration schema");
+        }
         Db::from_pool(pool)
     }
 
@@ -994,7 +999,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn nip_rs_transaction_operation_restores_hard_delete_opt_in() {
+    async fn migration_schema_nip_rs_transaction_operation_restores_hard_delete_opt_in() {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
         let db = setup_db().await;
@@ -1444,7 +1449,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn mesh_status_replacement_keeps_one_physical_row() {
+    async fn migration_schema_mesh_status_replacement_keeps_one_physical_row() {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
         let db = setup_db().await;
@@ -1607,7 +1612,8 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn nip_rs_hard_delete_fence_fails_closed_and_scopes_opt_in_to_transaction() {
+    async fn migration_schema_nip_rs_hard_delete_fence_fails_closed_and_scopes_opt_in_to_transaction(
+    ) {
         use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
         let db = setup_db().await;
