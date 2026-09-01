@@ -5,6 +5,7 @@ import { installMockBridge } from "../helpers/bridge";
 
 const SHOTS = "test-results/persistent-agent-audience";
 const CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
+const RANDOM_CHANNEL_ID = "9dae0116-799b-5071-a0a8-fdd30a91a35d";
 const AGENT_A = "a".repeat(64);
 const AGENT_B = "b".repeat(64);
 const THREAD_ROOT_ID = "mock-general-welcome";
