@@ -1,0 +1,22 @@
+[package]
+name = "buzz-image"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Image metadata sanitization and validation for Buzz uploads"
+
+# Deliberately a leaf crate: pure bytes in, bytes out, no I/O and no web
+# framework. The sanitizer and the metadata validator are two halves of one
+# contract — every upload client must produce what the relay will accept — so
+# they live together here and are shared by the relay (via buzz-media), the
+# CLI, and the desktop app. Keep this dependency list minimal; anything that
+# drags in axum or a storage client belongs in buzz-media instead.
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+infer = "0.19"
+thiserror = { workspace = true }
+
+[dev-dependencies]
+png = "0.18"

@@ -1138,7 +1138,21 @@ impl BuzzClient {
             return Err(CliError::Usage(format!("unsupported file type: {mime}")));
         }
 
-        // 3. Size check
+        // 3. Strip metadata the relay refuses to accept.
+        //
+        // This must happen before the SHA-256 below: Blossom is
+        // content-addressed, so the upload auth event commits to the hash of
+        // the bytes actually sent, and the relay therefore cannot strip
+        // metadata on our behalf. Without this, every macOS screenshot
+        // (iCCP/eXIf/iTXt) and every matplotlib figure (tEXt/pHYs) fails with
+        // a 422 that says nothing actionable.
+        //
+        // Already-clean files are returned untouched, so their on-disk hash is
+        // still the hash we upload.
+        let bytes = buzz_image::prepare_for_upload(bytes)
+            .map_err(|e| CliError::Usage(format!("cannot prepare {file_path} for upload: {e}")))?;
+
+        // 4. Size check — against the bytes we will actually send.
         let max = if mime.starts_with("video/") {
             MAX_VIDEO_BYTES
         } else {
@@ -1152,10 +1166,10 @@ impl BuzzClient {
             )));
         }
 
-        // 4. SHA-256
+        // 5. SHA-256
         let sha256 = hex::encode(Sha256::digest(&bytes));
 
-        // 5. PUT request to the BUD-02 /upload endpoint with a generous timeout.
+        // 6. PUT request to the BUD-02 /upload endpoint with a generous timeout.
         // Auth is signed per attempt — matches the per-attempt signing pattern in download_media.
         let upload_timeout = if mime.starts_with("video/") {
             Duration::from_secs(600)

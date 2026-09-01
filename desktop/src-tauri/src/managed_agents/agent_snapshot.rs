@@ -50,7 +50,7 @@ use crate::managed_agents::types::ManagedAgentRecord;
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// tEXt chunk keyword used in `.agent.png` files.
-pub const PNG_CHUNK_KEYWORD: &str = "buzz_agent_snapshot";
+pub const PNG_CHUNK_KEYWORD: &str = buzz_image::AGENT_SNAPSHOT_KEYWORD;
 
 /// Maximum avatar size (bytes) to inline as a data URL. Avatars larger than
 /// this are stored as a URL reference instead.

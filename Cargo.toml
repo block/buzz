@@ -18,6 +18,7 @@ members = [
     "crates/buzz-deletion",
     "crates/buzz-workflow",
     "crates/buzz-media",
+    "crates/buzz-image",
     "crates/buzz-cli",
     "crates/buzz-pairing-cli",
     "crates/buzz-sdk",
@@ -146,6 +147,7 @@ buzz-search = { path = "crates/buzz-search" }
 buzz-audit = { path = "crates/buzz-audit" }
 buzz-workflow = { path = "crates/buzz-workflow" }
 buzz-media = { path = "crates/buzz-media" }
+buzz-image = { path = "crates/buzz-image" }
 buzz-sdk = { path = "crates/buzz-sdk" }
 buzz-ws-client = { path = "crates/buzz-ws-client" }
 buzz-relay-mesh = { path = "crates/buzz-relay-mesh" }
