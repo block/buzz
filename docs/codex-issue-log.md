@@ -44,7 +44,7 @@
 - 定位：退出流程先等待 NIP-43 leave 请求被 Relay 接受；`leaveCommunity` 的网络超时直接向上抛出，`communities.removeCommunity` 因此不会执行。
 - 处理：将超时、Relay unreachable、WebSocket/网络连接失败归类为连接故障，连接故障时继续完成本地退出；权限拒绝、协议错误等非连接错误仍然保留原有阻止退出行为。
 - 验证：退出流程相关单元测试 8/8 通过，TypeScript 类型检查和 Biome 检查通过；全量桌面测试有 1 个既有环境相关失败，其余 4873 项通过。
-- 版本/提交：待提交。
+- 版本/提交：`0.5.18` / 本次修复提交。
 
 ## 2026-08-29：启动更新日志弹窗卡住应用
 
@@ -173,3 +173,11 @@
 - 处理：删除绑定 Codex task 的最后一个实例时，仅对非内置、非团队、未共享且非共享目录副本的人格自动设为 inactive；普通自定义人格、内置人格和仍被其他实例使用的人格不受影响。删除完成后同时刷新 managed agents、relay agents 和 personas 查询。
 - 验证：待运行 Tauri Rust 测试、桌面 TypeScript/格式检查，并验证删除任务 Agent 后不会出现重复卡片。
 - 版本/提交：待提交。
+
+## 2026-09-01：Codex Code Mode host 缺失导致运行时警告
+
+- 现象：Agent Activity 中出现 `Code Mode is unavailable because failed to spawn code-mode host ...\\codex-code-mode-host.exe: host executable was not found`，但普通 Codex 对话仍可能继续返回结果。
+- 定位：Windows Codex 更新会在 `%LOCALAPPDATA%\\OpenAI\\Codex\\bin` 中短暂或长期留下只有 `codex.exe` 的版本目录；Buzz 之前始终传入 `-c features.code_mode_host=true`，Codex 随后按当前运行时版本哈希查找同目录 sidecar，找不到就把该警告作为 Agent 输出返回。该 sidecar 是 Codex Desktop/CLI 的可选安装组件，不属于 Buzz 安装包，Buzz 不应假定每台机器都有它。
+- 处理：将 app-server 主程序和 Code Mode host 解耦探测。只要 `codex.exe` 存在即可启动共享 app-server；仅在同目录存在匹配 `codex-code-mode-host(.exe)` 时传入 `features.code_mode_host=true`。启动日志新增 `code_mode_host=enabled|unavailable`，便于区分可选能力缺失与运行时本身启动失败。
+- 验证：Tauri Codex runtime 单元测试 9/9、桌面 TypeScript typecheck 通过；本次文件 rustfmt 通过。缺少 sidecar 时验证不再带 Code Mode 开关，有 sidecar 时保持原行为。
+- 版本/提交：`0.5.18` / `b63e8ed5`。

@@ -473,19 +473,26 @@ pub async fn codex_shared_runtime_status(
 #[cfg(windows)]
 fn is_usable_codex_app_server_executable(path: &Path) -> bool {
     path.is_file()
-        && path
-            .parent()
-            .map(|parent| parent.join("codex-code-mode-host.exe").is_file())
-            .unwrap_or(false)
 }
 
 #[cfg(not(windows))]
 fn is_usable_codex_app_server_executable(path: &Path) -> bool {
     path.is_file()
-        && path
-            .parent()
-            .map(|parent| parent.join("codex-code-mode-host").is_file())
-            .unwrap_or(false)
+}
+
+fn codex_code_mode_host_available(path: &Path) -> bool {
+    path.parent()
+        .map(|parent| {
+            #[cfg(windows)]
+            {
+                parent.join("codex-code-mode-host.exe").is_file()
+            }
+            #[cfg(not(windows))]
+            {
+                parent.join("codex-code-mode-host").is_file()
+            }
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "macos")]
@@ -607,9 +614,12 @@ fn find_codex_app_server_executable() -> Result<PathBuf, String> {
                 .filter(|path| is_usable_codex_app_server_executable(path))
                 .collect::<Vec<_>>();
             candidates.sort_by_key(|path| {
-                path.metadata()
-                    .and_then(|metadata| metadata.modified())
-                    .ok()
+                (
+                    codex_code_mode_host_available(path),
+                    path.metadata()
+                        .and_then(|metadata| metadata.modified())
+                        .ok(),
+                )
             });
             if let Some(path) = candidates.pop() {
                 return Ok(path);
@@ -631,20 +641,24 @@ fn find_codex_app_server_executable() -> Result<PathBuf, String> {
     )
 }
 
-fn codex_shared_runtime_args(url: &str) -> Vec<String> {
-    vec![
-        "-c".to_string(),
-        CODEX_CODE_MODE_HOST_FLAG.to_string(),
+fn codex_shared_runtime_args(url: &str, code_mode_host_available: bool) -> Vec<String> {
+    let mut args = Vec::with_capacity(if code_mode_host_available { 5 } else { 3 });
+    if code_mode_host_available {
+        args.extend(["-c".to_string(), CODEX_CODE_MODE_HOST_FLAG.to_string()]);
+    }
+    args.extend([
         "app-server".to_string(),
         "--listen".to_string(),
         url.to_string(),
-    ]
+    ]);
+    args
 }
 
 fn append_shared_runtime_launch_log(
     log_path: &Path,
     executable: &Path,
     url: &str,
+    code_mode_host_available: bool,
     process_id: Option<u32>,
 ) -> Result<(), String> {
     let timestamp = SystemTime::now()
@@ -658,17 +672,19 @@ fn append_shared_runtime_launch_log(
         .map_err(|error| format!("failed to open {}: {error}", log_path.display()))?;
     writeln!(
         log,
-        "buzz shared runtime launch: timestamp={timestamp} method=direct pid={} executable={} url={url}",
+        "buzz shared runtime launch: timestamp={timestamp} method=direct pid={} executable={} code_mode_host={} url={url}",
         process_id
             .map(|id| id.to_string())
             .unwrap_or_else(|| "pending".to_string()),
-        executable.display()
+        executable.display(),
+        if code_mode_host_available { "enabled" } else { "unavailable" },
     )
     .map_err(|error| format!("failed to write {}: {error}", log_path.display()))
 }
 
 fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<(), String> {
     let executable = find_codex_app_server_executable()?;
+    let code_mode_host_available = codex_code_mode_host_available(&executable);
 
     #[cfg(windows)]
     {
@@ -684,7 +700,13 @@ fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<(), String> 
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
 
-        append_shared_runtime_launch_log(&stderr_log, &executable, url, None)?;
+        append_shared_runtime_launch_log(
+            &stderr_log,
+            &executable,
+            url,
+            code_mode_host_available,
+            None,
+        )?;
         let stdout = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -696,7 +718,7 @@ fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<(), String> 
             .open(&stderr_log)
             .map_err(|error| format!("failed to open {}: {error}", stderr_log.display()))?;
         let child = Command::new(&executable)
-            .args(codex_shared_runtime_args(url))
+            .args(codex_shared_runtime_args(url, code_mode_host_available))
             .current_dir(working_directory)
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
@@ -732,7 +754,13 @@ fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<(), String> 
                 return Err(format!("failed to start {}: {error}", executable.display()));
             }
         };
-        append_shared_runtime_launch_log(&stderr_log, &executable, url, Some(child.id()))?;
+        append_shared_runtime_launch_log(
+            &stderr_log,
+            &executable,
+            url,
+            code_mode_host_available,
+            Some(child.id()),
+        )?;
         Ok(())
     }
 
@@ -753,7 +781,10 @@ fn spawn_codex_shared_runtime(app: &AppHandle, url: &str) -> Result<(), String> 
             .map_err(|error| format!("failed to open Codex runtime error log: {error}"))?;
         let mut command = Command::new(&executable);
         command
-            .args(codex_shared_runtime_args(url))
+            .args(codex_shared_runtime_args(
+                url,
+                codex_code_mode_host_available(&executable),
+            ))
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::from(stderr));
@@ -1085,37 +1116,49 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn windows_shared_runtime_requires_matching_code_mode_host() {
+    fn windows_shared_runtime_accepts_codex_without_code_mode_host() {
         let dir = tempfile::tempdir().unwrap();
         let codex = dir.path().join("codex.exe");
         fs::write(&codex, []).unwrap();
 
-        assert!(!is_usable_codex_app_server_executable(&codex));
+        assert!(is_usable_codex_app_server_executable(&codex));
+        assert!(!codex_code_mode_host_available(&codex));
 
         fs::write(dir.path().join("codex-code-mode-host.exe"), []).unwrap();
         assert!(is_usable_codex_app_server_executable(&codex));
+        assert!(codex_code_mode_host_available(&codex));
     }
 
     #[cfg(not(windows))]
     #[test]
-    fn unix_shared_runtime_requires_matching_code_mode_host() {
+    fn unix_shared_runtime_accepts_codex_without_code_mode_host() {
         let dir = tempfile::tempdir().unwrap();
         let codex = dir.path().join("codex");
         fs::write(&codex, []).unwrap();
 
-        assert!(!is_usable_codex_app_server_executable(&codex));
+        assert!(is_usable_codex_app_server_executable(&codex));
+        assert!(!codex_code_mode_host_available(&codex));
 
         fs::write(dir.path().join("codex-code-mode-host"), []).unwrap();
         assert!(is_usable_codex_app_server_executable(&codex));
+        assert!(codex_code_mode_host_available(&codex));
     }
 
     #[test]
     fn shared_runtime_launch_args_enable_code_mode_host() {
         assert_eq!(
-            codex_shared_runtime_args(DEFAULT_CODEX_SHARED_APP_SERVER_URL),
+            codex_shared_runtime_args(DEFAULT_CODEX_SHARED_APP_SERVER_URL, true),
             vec![
                 "-c",
                 CODEX_CODE_MODE_HOST_FLAG,
+                "app-server",
+                "--listen",
+                DEFAULT_CODEX_SHARED_APP_SERVER_URL,
+            ]
+        );
+        assert_eq!(
+            codex_shared_runtime_args(DEFAULT_CODEX_SHARED_APP_SERVER_URL, false),
+            vec![
                 "app-server",
                 "--listen",
                 DEFAULT_CODEX_SHARED_APP_SERVER_URL,
@@ -1285,6 +1328,7 @@ mod tests {
             &log_path,
             &executable,
             DEFAULT_CODEX_SHARED_APP_SERVER_URL,
+            true,
             Some(1234),
         )
         .unwrap();
