@@ -516,6 +516,35 @@ test("markdown tables overflow wide content and fill the message when narrow", a
     .toBeLessThanOrEqual(1);
 });
 
+test("an ordered list keeps the number it starts from", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+
+  // Emitting the event directly keeps the stored content exactly as written.
+  // Typing it would route through the composer's own list handling, which is
+  // not what this asserts.
+  await page.evaluate(() => {
+    window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "general",
+      content: "42. ORDERED START ANSWER",
+      createdAt: Math.floor(Date.now() / 1000),
+    });
+  });
+
+  // CommonMark: the first item's number sets where the list starts. Dropping
+  // it renumbers the item to 1, which reads as a different answer than the
+  // one that was sent.
+  const orderedList = page
+    .getByTestId("message-row")
+    .filter({ hasText: "ORDERED START ANSWER" })
+    .locator("ol");
+  await expect(orderedList).toHaveAttribute("start", "42");
+});
+
 test("sent link preview media uses the authenticated proxy in compact and rich cards", async ({
   page,
 }) => {
