@@ -170,6 +170,7 @@ fn local_agent() -> ManagedAgentRecord {
         private_key_nsec: "nsec1localsecret".to_string(),
         auth_tag: Some("localauthtag".to_string()),
         relay_url: "wss://relay.local".to_string(),
+        working_directory: None,
         avatar_url: None,
         acp_command: "buzz-acp".to_string(),
         agent_command: "goose".to_string(),

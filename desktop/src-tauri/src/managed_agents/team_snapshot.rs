@@ -262,6 +262,7 @@ mod tests {
             private_key_nsec: "nsec1secret".to_string(),         // MUST NOT appear
             auth_tag: Some("auth-tag-secret".to_string()),       // MUST NOT appear
             relay_url: "wss://relay.example.com".to_string(),    // MUST NOT appear
+            working_directory: None,
             avatar_url: Some(format!("https://example.com/{name}.png")),
             acp_command: "/usr/local/bin/acp".to_string(), // MUST NOT appear
             agent_command: "goose".to_string(),            // MUST NOT appear

@@ -5,12 +5,15 @@ import { coerceConfigValues } from "./ProviderConfigFields";
 /** Draft state of the optional remote-backend selector. */
 export type WhereToRunDraft = {
   runOn: "local" | string;
+  /** Per-instance local CWD. Never included in provider-backed requests. */
+  workingDirectory: string;
   providerConfig: Record<string, string>;
   probedProvider: BackendProviderProbeResult | null;
 };
 
 export const emptyWhereToRunDraft: WhereToRunDraft = {
   runOn: "local",
+  workingDirectory: "",
   providerConfig: {},
   probedProvider: null,
 };
@@ -58,6 +61,11 @@ export function providerConfigComplete(draft: WhereToRunDraft): boolean {
 
 export function canSubmitWhereToRun(draft: WhereToRunDraft): boolean {
   return providerConfigComplete(draft);
+}
+
+export function localWorkingDirectory(draft: WhereToRunDraft): string | null {
+  if (draft.runOn !== "local") return null;
+  return draft.workingDirectory.trim() || null;
 }
 
 export function resolveBackendIntent(

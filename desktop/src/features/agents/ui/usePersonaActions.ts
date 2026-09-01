@@ -175,6 +175,7 @@ export function usePersonaActions() {
     input: CreatePersonaInput | UpdatePersonaInput,
     intent?: AgentCreateIntent,
     backendIntent?: BackendIntent | null,
+    workingDirectory?: string | null,
     targetChannel?: Pick<Channel, "id" | "name"> | null,
     options?: { publishCatalogUpdates?: boolean },
   ): Promise<boolean> {
@@ -241,6 +242,7 @@ export function usePersonaActions() {
           runtime,
           undefined,
           startIntent ?? undefined,
+          workingDirectory ?? undefined,
         );
 
         try {

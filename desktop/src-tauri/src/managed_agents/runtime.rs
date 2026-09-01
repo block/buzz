@@ -305,6 +305,7 @@ pub fn build_managed_agent_summary(
         runtime: record.runtime.clone(),
         team_id: record.team_id.clone(),
         relay_url: record.relay_url.clone(),
+        working_directory: record.working_directory.clone(),
         acp_command: record.acp_command.clone(),
         agent_command: descriptor.command,
         agent_command_override: record.agent_command_override.clone(),
@@ -501,6 +502,11 @@ pub fn spawn_agent_child(
     // The caller supplies the explicit canonical pair relay. This is the only
     // relay this child may connect to, regardless of the record/workspace default.
     let effective_relay_url = runtime_key.relay_url.clone();
+    // Revalidate the persisted override at the last responsible moment. A
+    // directory may have disappeared since create/edit; spawning must then
+    // fail rather than silently falling back to another project context.
+    let effective_working_directory = super::effective_agent_workdir(record)?;
+
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink
     //   - nvm-managed node/npm (nvm initializes only in interactive shells)
@@ -519,8 +525,8 @@ pub fn spawn_agent_child(
     );
 
     let mut command = std::process::Command::new(&resolved_acp_command);
-    if let Some(home) = super::default_agent_workdir() {
-        command.current_dir(home);
+    if let Some(ref working_directory) = effective_working_directory {
+        command.current_dir(working_directory);
     }
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::from(stdout));
@@ -856,6 +862,7 @@ pub fn spawn_agent_child(
             record,
             descriptor: &descriptor,
             relay_url: &effective_relay_url,
+            working_directory: effective_working_directory.as_deref(),
             team_instructions: team_instructions.as_deref(),
             system_prompt: effective_prompt.as_deref(),
             model: effective_model.as_deref(),

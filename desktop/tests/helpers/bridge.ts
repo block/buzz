@@ -219,6 +219,8 @@ type MockBridgeOptions = {
     acp?: MockCommandAvailability;
     mcp?: MockCommandAvailability;
   };
+  /** Native working-folder picker result; null models cancelling. */
+  agentWorkingDirectoryPick?: string | null;
   managedAgents?: MockManagedAgentSeed[];
   /** Result returned by the mocked `add_agent_to_huddle` command. */
   addAgentToHuddleResult?: {

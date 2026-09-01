@@ -12,6 +12,7 @@ fn agent(persona_id: &str, name: &str, display_name: Option<&str>) -> ManagedAge
         private_key_nsec: String::new(),
         auth_tag: None,
         relay_url: String::new(),
+        working_directory: None,
         avatar_url: None,
         acp_command: String::new(),
         agent_command: String::new(),

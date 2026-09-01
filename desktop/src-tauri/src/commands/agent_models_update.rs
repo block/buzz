@@ -109,6 +109,12 @@ pub async fn update_managed_agent(
         if let Some(relay_url) = input.relay_url {
             record.relay_url = relay_url.trim().to_string();
         }
+        if let Some(working_directory) = input.working_directory {
+            record.working_directory = crate::managed_agents::validate_backend_working_directory(
+                &record.backend,
+                working_directory.as_deref(),
+            )?;
+        }
         if let Some(acp_command) = input.acp_command {
             record.acp_command = acp_command;
         }

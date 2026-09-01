@@ -314,6 +314,8 @@ export type ManagedAgent = {
   runtime: string | null;
   teamId?: string | null;
   relayUrl: string;
+  /** Canonical local CWD override. `null` keeps the Buzz nest fallback. */
+  workingDirectory: string | null;
   acpCommand: string;
   /** Resolved/effective harness command (persona-wins, override-honored). */
   agentCommand: string;
@@ -399,6 +401,8 @@ export type CreateManagedAgentInput = {
   /** Team this instance was deployed from; controls runtime team instructions. */
   teamId?: string;
   relayUrl?: string;
+  /** Optional local process CWD. Omit/blank to use the Buzz nest fallback. */
+  workingDirectory?: string;
   acpCommand?: string;
   agentCommand?: string;
   /**
@@ -684,6 +688,8 @@ export type UpdateManagedAgentInput = {
   parallelism?: number;
   turnTimeoutSeconds?: number;
   relayUrl?: string;
+  /** Absent = don't touch. `null` or blank = restore the Buzz nest fallback. */
+  workingDirectory?: string | null;
   acpCommand?: string;
   agentCommand?: string;
   /**

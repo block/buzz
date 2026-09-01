@@ -54,7 +54,9 @@ const { isRateLimited, resetRateLimitGate } = await import(
 
 // Import the production classifier from tauri.ts — tests must exercise the
 // real function, not a local copy, so a logic change is always caught here.
-const { applyTauriRateLimitIfNeeded } = await import("./tauri.ts");
+const { applyTauriRateLimitIfNeeded, fromRawManagedAgent } = await import(
+  "./tauri.ts"
+);
 
 function resetGate(startMs = 0) {
   pendingTimers.clear();
@@ -254,6 +256,53 @@ test("fromRawAcpRuntimeCatalogEntry omits maxParallelism when max_parallelism is
     entry.maxParallelism,
     undefined,
     "uncapped harness must have maxParallelism: undefined",
+  );
+});
+
+test("fromRawManagedAgent preserves the local working-directory override", () => {
+  const raw = {
+    pubkey: "a".repeat(64),
+    name: "Workspace Agent",
+    persona_id: null,
+    relay_url: "wss://relay.example",
+    working_directory: "/tmp/agent-workspace",
+    acp_command: "buzz-acp",
+    agent_command: "buzz-agent",
+    agent_args: [],
+    mcp_command: "",
+    turn_timeout_seconds: 0,
+    idle_timeout_seconds: null,
+    max_turn_duration_seconds: null,
+    parallelism: 1,
+    system_prompt: null,
+    model: null,
+    provider: null,
+    persona_out_of_date: false,
+    persona_orphaned: false,
+    needs_restart: false,
+    status: "stopped",
+    pid: null,
+    created_at: "now",
+    updated_at: "now",
+    last_started_at: null,
+    last_stopped_at: null,
+    last_exit_code: null,
+    last_error: null,
+    last_error_code: null,
+    log_path: "/tmp/agent.log",
+    start_on_app_launch: false,
+    backend: { type: "local" },
+    backend_agent_id: null,
+  };
+
+  assert.equal(
+    fromRawManagedAgent(raw).workingDirectory,
+    "/tmp/agent-workspace",
+  );
+  assert.equal(
+    fromRawManagedAgent({ ...raw, working_directory: undefined })
+      .workingDirectory,
+    null,
   );
 });
 

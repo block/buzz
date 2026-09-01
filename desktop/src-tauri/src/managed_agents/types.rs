@@ -116,6 +116,7 @@ impl AgentDefinition {
             private_key_nsec: String::new(),
             auth_tag: None,
             relay_url: String::new(),
+            working_directory: None,
             avatar_url: self.avatar_url,
             acp_command: DEFAULT_ACP_COMMAND.to_string(),
             agent_command: String::new(),
@@ -255,6 +256,11 @@ pub struct ManagedAgentRecord {
     #[serde(default)]
     pub auth_tag: Option<String>,
     pub relay_url: String,
+    /// Canonical absolute CWD override for local managed agents. `None` keeps
+    /// the historical Buzz nest/home fallback. This is local-only state and
+    /// must never be projected into public events or provider payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
     /// Avatar URL resolved at creation time (user-supplied input, else the
     /// command-based fallback). Persisted so startup reconciliation compares
     /// against what was actually published rather than re-deriving it from
@@ -515,6 +521,9 @@ pub struct ManagedAgentSummary {
     pub runtime: Option<String>,
     pub team_id: Option<String>,
     pub relay_url: String,
+    /// Canonical local working-directory override. Paths remain device-local
+    /// and are never published in managed-agent events.
+    pub working_directory: Option<String>,
     pub acp_command: String,
     pub agent_command: String,
     /// Mirrors `ManagedAgentRecord.agent_command_override`: `Some` when the user

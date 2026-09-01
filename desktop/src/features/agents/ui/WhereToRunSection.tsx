@@ -5,6 +5,7 @@ import { useBackendProvidersQuery } from "@/features/agents/hooks";
 import { probeBackendProvider } from "@/shared/api/tauri";
 
 import { ProviderConfigFields } from "./ProviderConfigFields";
+import { AgentWorkingFolderField } from "./AgentWorkingFolderField";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import {
   applyProbeResult,
@@ -83,28 +84,40 @@ export function WhereToRunSection({
     };
   }, [selectedBinaryPath, draft.probedProvider]);
 
-  if (backendProviders.length === 0) return null;
-
   return (
     <div className="space-y-4">
-      <div className="space-y-1.5">
-        <label className="text-sm font-medium" htmlFor="agent-run-on">
-          Run on
-        </label>
-        <PersonaDropdownField
+      {backendProviders.length > 0 ? (
+        <div className="space-y-1.5">
+          <label className="text-sm font-medium" htmlFor="agent-run-on">
+            Run on
+          </label>
+          <PersonaDropdownField
+            disabled={isPending}
+            id="agent-run-on"
+            onValueChange={(runOn) =>
+              onDraftChange({
+                ...emptyWhereToRunDraft,
+                runOn,
+                workingDirectory:
+                  runOn === "local" ? draft.workingDirectory : "",
+              })
+            }
+            options={runOnOptions}
+            placeholder="Choose where to run"
+            value={draft.runOn}
+          />
+        </div>
+      ) : null}
+
+      {!isProviderMode ? (
+        <AgentWorkingFolderField
           disabled={isPending}
-          id="agent-run-on"
-          onValueChange={(runOn) =>
-            onDraftChange({
-              ...emptyWhereToRunDraft,
-              runOn,
-            })
+          onChange={(workingDirectory) =>
+            onDraftChange({ ...draft, workingDirectory })
           }
-          options={runOnOptions}
-          placeholder="Choose where to run"
-          value={draft.runOn}
+          value={draft.workingDirectory}
         />
-      </div>
+      ) : null}
 
       {isProviderMode && selectedBackendProvider ? (
         <div className="space-y-4">

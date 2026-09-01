@@ -571,6 +571,7 @@ pub async fn confirm_team_snapshot_import(
             private_key_nsec: private_key_nsec.clone(),
             auth_tag: auth_tag.clone(),
             relay_url: String::new(),
+            working_directory: None,
             avatar_url: effective_avatar_url.clone(),
             acp_command: crate::managed_agents::DEFAULT_ACP_COMMAND.to_string(),
             agent_command: String::new(),

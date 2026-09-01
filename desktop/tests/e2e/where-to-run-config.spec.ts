@@ -87,6 +87,26 @@ async function selectRunOnOption(
   await expect(trigger).toHaveAttribute("aria-expanded", "false");
 }
 
+async function configureRunnableLocalAgent(
+  page: Page,
+  dialog: import("@playwright/test").Locator,
+) {
+  await page.getByRole("tab", { name: "Customize for this agent" }).click();
+  const provider = dialog.locator("#persona-llm-provider");
+  await expect(provider).toBeVisible({ timeout: 10_000 });
+  await provider.press("Enter");
+  await page
+    .getByRole("menuitemradio", { exact: true, name: "Anthropic" })
+    .click();
+  const model = dialog.locator("#persona-model");
+  await model.click();
+  await page
+    .getByRole("button", { name: "Custom model...", exact: true })
+    .click();
+  await page.getByLabel("Custom model ID").fill("claude-opus-4-5");
+  await page.getByLabel("Anthropic API Key").fill("sk-working-folder-e2e");
+}
+
 /** Open Advanced in the create-agent dialog and select the mocked provider. */
 async function openCreateDialogOnProvider(page: Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -203,6 +223,87 @@ test("collapsed Advanced marks incomplete remote setup as required", async ({
     dialog.getByTestId("persona-advanced-required-badge"),
   ).toHaveText("Required");
   await expect(submit).toBeDisabled();
+});
+
+test("local create picks a working folder and includes it only in the instance request", async ({
+  page,
+}) => {
+  const workingDirectory = "/Users/dev/projects/alpha";
+  await installMockBridge(page, {
+    agentWorkingDirectoryPick: workingDirectory,
+  });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-agents-view").click();
+  await page.getByTestId("new-agent-card").click();
+  const dialog = page.getByTestId("persona-dialog");
+  await dialog.locator("#persona-display-name").fill("Working folder agent");
+  await configureRunnableLocalAgent(page, dialog);
+  await dialog.getByRole("button", { name: "Advanced", exact: true }).click();
+
+  const folder = dialog.getByTestId("agent-working-folder-field");
+  await expect(folder).toBeVisible();
+  await folder.getByRole("button", { name: "Choose working folder" }).click();
+  await expect(folder.getByTestId("agent-working-folder-path")).toHaveText(
+    workingDirectory,
+  );
+  await dialog.getByTestId("persona-dialog-submit").click();
+
+  const createPayload = await page.evaluate(() => {
+    const log = (
+      window as Window & {
+        __BUZZ_E2E_COMMAND_LOG__?: Array<{
+          command: string;
+          payload: { input?: Record<string, unknown> };
+        }>;
+      }
+    ).__BUZZ_E2E_COMMAND_LOG__;
+    return log?.find((entry) => entry.command === "create_managed_agent")
+      ?.payload.input;
+  });
+  expect(createPayload?.workingDirectory).toBe(workingDirectory);
+  expect(createPayload?.backend).toEqual({ type: "local" });
+});
+
+test("provider create drops a previously selected local working folder", async ({
+  page,
+}) => {
+  const agentName = `Provider folder agent ${Date.now()}`;
+  await installMockBridge(page, {
+    agentWorkingDirectoryPick: "/Users/dev/projects/alpha",
+    backendProviders: [PROVIDER],
+    backendProviderProbeResult: PROBE_RESULT,
+  });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-agents-view").click();
+  await page.getByTestId("new-agent-card").click();
+  const dialog = page.getByTestId("persona-dialog");
+  await dialog.locator("#persona-display-name").fill(agentName);
+  await configureRunnableLocalAgent(page, dialog);
+  await dialog.getByRole("button", { name: "Advanced", exact: true }).click();
+  const folder = dialog.getByTestId("agent-working-folder-field");
+  await folder.getByRole("button", { name: "Choose working folder" }).click();
+  await expect(folder).toBeVisible();
+
+  await selectRunOnOption(page, dialog, PROVIDER.id);
+  await expect(folder).toHaveCount(0);
+  await expect(dialog.locator("#provider-cfg-namespace")).toBeVisible();
+  await dialog.getByTestId("persona-dialog-submit").click();
+
+  const createPayload = await page.evaluate((name) => {
+    const log = (
+      window as Window & {
+        __BUZZ_E2E_COMMAND_LOG__?: Array<{
+          command: string;
+          payload: { input?: Record<string, unknown> };
+        }>;
+      }
+    ).__BUZZ_E2E_COMMAND_LOG__;
+    return log
+      ?.filter((entry) => entry.command === "create_managed_agent")
+      .find((entry) => entry.payload.input?.name === name)?.payload.input;
+  }, agentName);
+  expect(createPayload?.workingDirectory).toBeUndefined();
+  expect(createPayload?.backend).toMatchObject({ type: "provider" });
 });
 
 test("provider → local → provider re-probes and resets the config", async ({

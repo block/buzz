@@ -79,7 +79,8 @@ with a TypeScript lookup table or an id comparison in a component.
 7. **Onboarding setup detects readiness; it does not select defaults.** The
    setup page derives visible and ready harnesses from the runtime catalog and
    only offers install or sign-in actions. The following defaults page is the
-   sole onboarding surface that chooses `preferred_runtime`. Its complete draft
+   sole onboarding surface that chooses `preferred_runtime`, automatically
+   preferring ready OpenCode and falling back to ready Buzz Agent. Its complete draft
    lives in machine-onboarding session state, so Back performs no write and
    restores even incomplete edits when the user returns. Skip abandons that
    draft and advances with zero config writes. Next is the only persistence
@@ -104,8 +105,9 @@ with a TypeScript lookup table or an id comparison in a component.
    harness has empty discovery` (and the failed-discovery counterpart) in
    `onboarding-agent-defaults.spec.ts`.
 9. **The defaults modal is progressively disclosed.** An unset global config
-   starts on the Buzz Agent-first deployment fallback and carries that visible
-   harness into the next saved edit. The `progressive-defaults` disclosure
+   starts on OpenCode when it is available and otherwise falls back to the
+   bundled Buzz Agent, carrying that visible harness into the next saved
+   edit. The `progressive-defaults` disclosure
    preset therefore begins at Provider for Buzz Agent, then reveals Model,
    Effort, and Advanced only after a provider is configured. Harnesses whose
    runtime metadata has no provider field skip that gate. Reveals animate their
@@ -282,6 +284,12 @@ with a TypeScript lookup table or an id comparison in a component.
     invalidate the remote relay directory.
 
 17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. UC FQNs are catalog data and always use the MLflow Chat Completions route, regardless of family-looking text in their components. Global Defaults preserves the discovered model ID as the selected value while its closed trigger renders the provider-scoped display label; do not force the raw persisted ID over that label.
+18. **A working folder belongs to a local managed instance.** It is never persona
+    metadata, never published, and never sent to provider backends. Create and
+    instance-edit use the native folder picker; blank preserves the historical
+    Buzz nest fallback. Persist only the backend-canonical absolute directory,
+    revalidate it immediately before spawn, and include the effective CWD in
+    restart drift while redacting the path from diagnostics.
 
 ## The tests that enforce this
 

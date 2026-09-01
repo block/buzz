@@ -24,6 +24,7 @@ import { WhereToRunSection } from "./WhereToRunSection";
 import {
   canSubmitWhereToRun,
   emptyWhereToRunDraft,
+  localWorkingDirectory,
   resolveBackendIntent,
 } from "./whereToRunIntent";
 
@@ -42,6 +43,8 @@ type AgentDialogCreateProps = {
     input: CreatePersonaInput | UpdatePersonaInput,
     intent: AgentCreateIntent,
     backendIntent: BackendIntent | null,
+    /** Local instance CWD; `null` keeps the historical Buzz workspace. */
+    workingDirectory: string | null,
   ) => Promise<boolean>;
 };
 
@@ -134,6 +137,8 @@ function AgentCreateDialogRouter({
   onDirtyChange,
   onSubmitDefinition,
 }: AgentDialogCreateProps) {
+  // The create router remains mounted only for the lifetime of one create
+  // flow, so its run destination and folder draft cannot leak into the next.
   const [runDraft, setRunDraft] = React.useState(emptyWhereToRunDraft);
   const initialValues = React.useMemo(
     () => providedInitialValues ?? createPersonaDialogState().initialValues,
@@ -170,6 +175,7 @@ function AgentCreateDialogRouter({
             input,
             "definition_start",
             resolveBackendIntent(runDraft),
+            localWorkingDirectory(runDraft),
           );
           if (submitted) {
             onDirtyChange?.(false);

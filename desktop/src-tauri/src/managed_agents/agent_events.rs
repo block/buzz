@@ -171,6 +171,7 @@ mod tests {
             private_key_nsec: "nsec1secretdonotpublish".to_string(),
             auth_tag: Some("authtagsecret".to_string()),
             relay_url: "wss://relay.example".to_string(),
+            working_directory: None,
             avatar_url: Some("https://example.com/a.png".to_string()),
             acp_command: "buzz-acp".to_string(),
             agent_command: "goose".to_string(),
@@ -284,7 +285,9 @@ mod tests {
     /// carry secrets, the provider backend blob, env vars, or runtime fields.
     #[test]
     fn content_excludes_secrets_and_runtime_fields() {
-        let json = serde_json::to_string(&agent_event_content(&sample_agent())).unwrap();
+        let mut agent = sample_agent();
+        agent.working_directory = Some("/Users/private/agent-workspace".into());
+        let json = serde_json::to_string(&agent_event_content(&agent)).unwrap();
 
         // Secrets — must never appear.
         assert!(
@@ -324,6 +327,8 @@ mod tests {
         assert!(!json.contains("backend_agent_id"));
         assert!(!json.contains("provider_binary_path"));
         assert!(!json.contains("relay_url"));
+        assert!(!json.contains("working_directory"));
+        assert!(!json.contains("private/agent-workspace"));
 
         // Identity fields — must appear.
         assert!(json.contains("\"name\""));

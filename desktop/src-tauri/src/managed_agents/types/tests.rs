@@ -724,6 +724,7 @@ fn summary_fixture(
         runtime: None,
         team_id: None,
         relay_url: String::new(),
+        working_directory: None,
         acp_command: "buzz-acp".into(),
         agent_command: "goose".into(),
         agent_command_override: None,

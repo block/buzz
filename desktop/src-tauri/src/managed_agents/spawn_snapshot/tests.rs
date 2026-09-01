@@ -49,6 +49,7 @@ fn record() -> ManagedAgentRecord {
         private_key_nsec: "nsec1fake".into(),
         auth_tag: None,
         relay_url: "ws://localhost:3000".into(),
+        working_directory: None,
         avatar_url: None,
         acp_command: "buzz-acp".into(),
         agent_command: "goose".into(),
@@ -386,6 +387,89 @@ fn allowlist_content_edit_still_changes_snapshot() {
     assert_ne!(
         snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
         snapshot(&edited, &[], &[], "wss://ws.example", &Default::default())
+    );
+}
+
+#[test]
+fn explicit_working_directory_changes_snapshot() {
+    let temp_a = tempfile::tempdir().unwrap();
+    let temp_b = tempfile::tempdir().unwrap();
+    let mut before = record();
+    before.working_directory = Some(
+        temp_a
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let mut after = before.clone();
+    after.working_directory = Some(
+        temp_b
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+    );
+
+    assert_ne!(snap(&before), snap(&after));
+}
+
+#[test]
+fn unavailable_configured_working_directory_does_not_fabricate_drift() {
+    let temp = tempfile::tempdir().unwrap();
+    let configured = temp.path().join("project");
+    std::fs::create_dir(&configured).unwrap();
+    let mut rec = record();
+    rec.working_directory = Some(
+        configured
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let stamped = snap(&rec);
+
+    std::fs::remove_dir(&configured).unwrap();
+
+    assert_eq!(
+        stamped,
+        snapshot(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        "a temporarily unavailable configured path must not trigger auto-restart drift"
+    );
+    assert!(
+        super::super::effective_agent_workdir(&rec).is_err(),
+        "the next manual spawn must still fail closed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn available_symlink_retarget_changes_effective_working_directory_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let first = temp.path().join("first");
+    let second = temp.path().join("second");
+    std::fs::create_dir(&first).unwrap();
+    std::fs::create_dir(&second).unwrap();
+    let configured = temp.path().join("project");
+    std::os::unix::fs::symlink(&first, &configured).unwrap();
+
+    let mut rec = record();
+    rec.working_directory = Some(configured.to_string_lossy().into_owned());
+    let before = snap(&rec);
+
+    std::fs::remove_file(&configured).unwrap();
+    std::os::unix::fs::symlink(&second, &configured).unwrap();
+    let after = snap(&rec);
+
+    assert_ne!(
+        before, after,
+        "an available symlink retarget changes the effective CWD and must badge"
+    );
+    assert_eq!(
+        after["working_directory"].as_str(),
+        second.canonicalize().unwrap().to_str()
     );
 }
 

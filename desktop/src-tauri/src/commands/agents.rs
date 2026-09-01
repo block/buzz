@@ -396,6 +396,10 @@ pub async fn create_managed_agent(
         }
     }
     crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
+    let working_directory = crate::managed_agents::validate_backend_working_directory(
+        &input.backend,
+        input.working_directory.as_deref(),
+    )?;
 
     // Validate & normalize the respond-to allowlist BEFORE any side effects.
     // The harness has its own validator (buzz-acp/src/config.rs) but we want
@@ -646,6 +650,7 @@ pub async fn create_managed_agent(
             private_key_nsec: private_key_nsec.clone(),
             auth_tag: auth_tag.clone(),
             relay_url: resolved_relay_url.clone(),
+            working_directory: working_directory.clone(),
             avatar_url: resolved_avatar_url.clone(),
             acp_command: input
                 .acp_command

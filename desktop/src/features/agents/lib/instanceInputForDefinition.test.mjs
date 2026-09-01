@@ -16,6 +16,7 @@ import {
 //   row 2: harnessOverride = !persona.runtime || persona.runtime === runtime.id
 //   row 3: avatar through resolveManagedAgentAvatarUrl (injectable upload)
 //   row 4: create input NEVER contains definition env vars
+//   row 5: local working-directory state is included only for local instances
 //   row 6: runtime list acquisition is refetch-aware
 
 const gooseRuntime = {
@@ -38,6 +39,15 @@ const claudeRuntime = {
   id: "claude",
   label: "Claude",
   command: "claude-cmd",
+  mcpCommand: null,
+};
+
+const openCodeRuntime = {
+  ...gooseRuntime,
+  id: "opencode",
+  label: "OpenCode",
+  command: "opencode",
+  defaultArgs: ["acp"],
   mcpCommand: null,
 };
 
@@ -222,12 +232,35 @@ test("provider intent forces startOnAppLaunch off and omits local commands", asy
     "model",
     "provider",
     "envVars",
+    "workingDirectory",
     "relayMesh",
   ]) {
     assert.equal(key in input, false, `provider intent must omit ${key}`);
   }
   assert.equal(input.personaId, "p-1", "definition link is kept");
   assert.equal(input.systemPrompt, "prompt");
+});
+
+test("local mapping carries a selected working folder", async () => {
+  const input = await buildInstanceInputForDefinition(
+    persona(),
+    gooseRuntime,
+    undefined,
+    undefined,
+    "  /work/project  ",
+  );
+  assert.equal(input.workingDirectory, "/work/project");
+});
+
+test("provider mapping omits a selected working folder", async () => {
+  const input = await buildInstanceInputForDefinition(
+    persona(),
+    gooseRuntime,
+    undefined,
+    { type: "provider", id: "blox", config: {} },
+    "/work/project",
+  );
+  assert.equal("workingDirectory" in input, false);
 });
 
 test("row 1: refuses when the configured runtime is not available", () => {
@@ -298,32 +331,23 @@ test("row 6: unfetched query refetches instead of resolving empty", async () => 
   );
 });
 
-// ── item-13 regression: buzz-agent-first default runtime ─────────────────────
-//
-// Before this fix, resolveStartRuntimeForDefinition used runtimes[0] (catalog
-// order: goose, claude, codex, buzz-agent), so an installed goose would beat
-// the bundled buzz-agent sidecar as the default for runtime-less personas.
-// The fix applies the preference order: buzz-agent → goose → first available.
+// ── New-local-agent default runtime ─────────────────────────────────────────
 
-test("item-13: goose+buzz-agent both available — persona with no runtime resolves buzz-agent", () => {
+test("OpenCode wins for a new runtime-less persona when available", () => {
   const { runtime, warnings } = resolveStartRuntimeForDefinition(
     persona({ runtime: undefined }),
-    [gooseRuntime, claudeRuntime, buzzAgentRuntime],
+    [gooseRuntime, buzzAgentRuntime, openCodeRuntime],
   );
-  assert.equal(
-    runtime.id,
-    "buzz-agent",
-    "buzz-agent must win over catalog-first goose for runtime-less personas",
-  );
+  assert.equal(runtime.id, "opencode");
   assert.deepEqual(warnings, []);
 });
 
-test("item-13: goose-only available — persona with no runtime resolves goose", () => {
+test("buzz-agent is the fallback when OpenCode is unavailable", () => {
   const { runtime, warnings } = resolveStartRuntimeForDefinition(
     persona({ runtime: undefined }),
-    [gooseRuntime, claudeRuntime],
+    [gooseRuntime, buzzAgentRuntime],
   );
-  assert.equal(runtime.id, "goose");
+  assert.equal(runtime.id, "buzz-agent");
   assert.deepEqual(warnings, []);
 });
 

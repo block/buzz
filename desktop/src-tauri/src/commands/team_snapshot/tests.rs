@@ -202,6 +202,7 @@ fn team_export_with_instance_and_memory_level_uses_supplied_entries() {
         private_key_nsec: String::new(),
         auth_tag: None,
         relay_url: String::new(),
+        working_directory: None,
         avatar_url: None,
         acp_command: crate::managed_agents::DEFAULT_ACP_COMMAND.to_string(),
         agent_command: String::new(),

@@ -12,6 +12,26 @@ const BUILTIN_EDIT_BASE = {
   initialModelProviderEditableWithoutRuntime: false,
 };
 
+// ── create auto-seed ──────────────────────────────────────────────────────────
+//
+// A new local agent must persist the resolved runtime (OpenCode when available,
+// with Buzz Agent fallback). Auto-seed omission is edit-only.
+
+test("create persists its auto-seeded runtime", () => {
+  const result = buildRuntimeModelProviderPayload({
+    runtime: "opencode",
+    model: "",
+    provider: "",
+    isEditMode: false,
+    isAutoSeeded: true,
+    initialPreviousRuntime: "",
+    initialModel: null,
+    initialProvider: null,
+    initialModelProviderEditableWithoutRuntime: false,
+  });
+  assert.equal(result.runtime, "opencode");
+});
+
 // ── edit-untouched ─────────────────────────────────────────────────────────────
 //
 // User opens a null-runtime builtin, doesn't change model or provider, submits.

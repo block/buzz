@@ -8,6 +8,10 @@ import type {
   ManagedAgentRuntimeStatus,
 } from "@/shared/api/types";
 
+export async function pickAgentWorkingDirectory(): Promise<string | null> {
+  return invokeTauri<string | null>("pick_agent_working_directory");
+}
+
 export async function startManagedAgent(
   pubkey: string,
   options?: {

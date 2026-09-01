@@ -3,7 +3,7 @@ import { installMockBridge } from "../helpers/bridge";
 import { passThroughBackupStep } from "../helpers/onboarding";
 
 function runtime(
-  id: "buzz-agent" | "claude" | "codex" | "goose",
+  id: "buzz-agent" | "claude" | "codex" | "goose" | "opencode",
   availability: string,
   authStatus: Record<string, unknown>,
   overrides: Record<string, unknown> = {},
@@ -13,11 +13,13 @@ function runtime(
     label:
       id === "buzz-agent"
         ? "Buzz Agent"
-        : id === "claude"
-          ? "Claude Code"
-          : id === "codex"
-            ? "Codex"
-            : "Goose",
+        : id === "opencode"
+          ? "OpenCode"
+          : id === "claude"
+            ? "Claude Code"
+            : id === "codex"
+              ? "Codex"
+              : "Goose",
     avatar_url: "",
     availability,
     command: availability === "available" ? id : null,
@@ -81,6 +83,7 @@ test("setup shows all bundled harnesses as detected", async ({ page }) => {
     {
       acpRuntimesCatalog: [
         runtime("buzz-agent", "available", { status: "not_applicable" }),
+        runtime("opencode", "available", { status: "not_applicable" }),
         runtime("goose", "available", { status: "not_applicable" }),
         runtime("codex", "available", { status: "logged_in" }),
         runtime("claude", "available", { status: "logged_in" }),
@@ -91,6 +94,7 @@ test("setup shows all bundled harnesses as detected", async ({ page }) => {
   await page.goto("/");
   await navigateToSetupPage(page);
 
+  await expect(page.getByTestId("onboarding-runtime-opencode")).toBeVisible();
   await expect(page.getByTestId("onboarding-runtime-claude")).toBeVisible();
   await expect(page.getByTestId("onboarding-runtime-codex")).toBeVisible();
   await expect(page.getByTestId("onboarding-runtime-goose")).toBeVisible();
@@ -848,7 +852,7 @@ test("Next keeps the draft and retries after a save failure", async ({
   expect(await readGlobalConfigSetterCallCount(page)).toBe(2);
 });
 
-test("defaults requires a choice when multiple visible harnesses are ready", async ({
+test("defaults selects and persists OpenCode ahead of Buzz Agent", async ({
   page,
 }) => {
   await installMockBridge(
@@ -856,6 +860,40 @@ test("defaults requires a choice when multiple visible harnesses are ready", asy
     {
       acpRuntimesCatalog: [
         runtime("buzz-agent", "available", { status: "not_applicable" }),
+        runtime("opencode", "available", { status: "not_applicable" }),
+      ],
+      globalAgentConfig: {
+        env_vars: {},
+        provider: null,
+        model: null,
+        preferred_runtime: null,
+      },
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+  await page.getByTestId("onboarding-setup-next").click();
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+
+  await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
+    "OpenCode",
+  );
+  await expect(page.getByTestId("onboarding-finish")).toBeEnabled();
+  await page.getByTestId("onboarding-finish").click();
+  await expect(page.getByText("Join or create a community")).toBeVisible();
+  expect(await readSavedRuntime(page)).toBe("opencode");
+});
+
+test("defaults auto-selects the recommended runtime when multiple harnesses are ready", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("buzz-agent", "available", { status: "not_applicable" }),
+        runtime("opencode", "available", { status: "not_applicable" }),
         runtime("goose", "available", { status: "not_applicable" }),
         runtime("claude", "available", { status: "logged_in" }),
         runtime("codex", "available", { status: "logged_in" }),
@@ -875,9 +913,12 @@ test("defaults requires a choice when multiple visible harnesses are ready", asy
   await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
 
   const harness = page.getByTestId("global-agent-default-harness");
-  await expect(harness).toHaveText("Select a harness");
-  await expect(page.getByTestId("onboarding-finish")).toBeDisabled();
+  await expect(harness).toHaveText("OpenCode");
+  await expect(page.getByTestId("onboarding-finish")).toBeEnabled();
   await harness.click();
+  await expect(
+    page.getByTestId("global-agent-default-harness-option-opencode"),
+  ).toBeVisible();
   await expect(
     page.getByTestId("global-agent-default-harness-option-claude"),
   ).toBeVisible();

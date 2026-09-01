@@ -46,6 +46,7 @@ mod team_repair;
 pub(crate) use team_repair::team_persona_key;
 mod teams;
 mod types;
+mod working_directory;
 
 // Shared guard for tests that mutate or read process-global PATH.
 #[cfg(test)]
@@ -92,6 +93,7 @@ pub use runtime_types::*;
 pub use storage::*;
 pub use teams::*;
 pub use types::*;
+pub use working_directory::*;
 
 #[cfg(test)]
 pub(crate) use teams::delete_catalog_team_at;

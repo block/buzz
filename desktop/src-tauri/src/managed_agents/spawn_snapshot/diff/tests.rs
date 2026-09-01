@@ -17,6 +17,7 @@ fn base() -> SpawnConfigSnapshot {
             ("BUZZ_LOG".to_string(), "info".to_string()),
         ]),
         relay_url: "wss://relay.example".into(),
+        working_directory: Some("/Users/private/secret-project".into()),
         team_instructions: Some("Team says hello.".into()),
         system_prompt: Some("You are a test agent.".into()),
         model: Some("gpt-5".into()),
@@ -58,6 +59,7 @@ fn mutations() -> Vec<Mutation> {
                 .insert("OPENAI_API_KEY".into(), "sk-live-rotated-9999".into());
         }),
         ("relay_url", |s| s.relay_url = "wss://other.example".into()),
+        ("working_directory", |s| s.working_directory = None),
         ("team_instructions", |s| s.team_instructions = None),
         ("system_prompt", |s| s.system_prompt = None),
         ("model", |s| s.model = None),
@@ -361,6 +363,19 @@ fn relay_url_is_masked_without_any_suffix() {
 }
 
 #[test]
+fn working_directory_is_masked_without_any_path_content() {
+    let mut after = base();
+    after.working_directory = Some("/Users/another/private-project".into());
+    assert_eq!(
+        change_at(&diff(&base(), &after), "working_directory"),
+        &RestartChange::Masked {
+            before: Some("••••".into()),
+            after: Some("••••".into()),
+        }
+    );
+}
+
+#[test]
 fn auth_tag_is_masked_with_a_suffix() {
     let mut after = base();
     after.auth_tag = Some("tag-ijklmnop".into());
@@ -403,6 +418,7 @@ fn seeded_with_sentinels() -> SpawnConfigSnapshot {
     snapshot.relay_url = RELAY_WITH_TOKEN.into();
     snapshot.args = vec![format!("--token={SECRET}")];
     snapshot.auth_tag = Some(SECRET.into());
+    snapshot.working_directory = Some(format!("/Users/{SECRET}/project"));
     snapshot.env.insert("OPENAI_API_KEY".into(), SECRET.into());
     snapshot
 }
@@ -414,6 +430,7 @@ fn rotated_sentinels() -> SpawnConfigSnapshot {
     snapshot.relay_url = format!("{RELAY_WITH_TOKEN}2");
     snapshot.args = vec![format!("--token={SECRET}2")];
     snapshot.auth_tag = Some(format!("{SECRET}2"));
+    snapshot.working_directory = Some(format!("/Users/{SECRET}2/project"));
     snapshot
         .env
         .insert("OPENAI_API_KEY".into(), format!("{SECRET}2"));

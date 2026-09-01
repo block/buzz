@@ -609,6 +609,7 @@ pub async fn confirm_agent_snapshot_import(
             private_key_nsec: private_key_nsec.clone(),
             auth_tag: auth_tag.clone(),
             relay_url: String::new(), // resolves to workspace relay at runtime
+            working_directory: None,
             avatar_url: effective_avatar.clone(),
             // Machine-local commands: derive from the runtime catalog at
             // spawn time — never manufacture from snapshot data.

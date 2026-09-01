@@ -100,6 +100,7 @@ export type MockManagedAgentSeed = {
   personaId?: string | null;
   /** Harness/runtime id pin; `null` = inherit from persona (native default). */
   runtime?: string | null;
+  workingDirectory?: string | null;
   status?: RawManagedAgent["status"];
   channelNames?: string[];
   channelIds?: string[];
@@ -291,6 +292,8 @@ type E2eConfig = {
       acp?: MockCommandAvailability;
       mcp?: MockCommandAvailability;
     };
+    /** Native working-folder picker result; null models cancelling. */
+    agentWorkingDirectoryPick?: string | null;
     managedAgents?: MockManagedAgentSeed[];
     /** Result returned by the mocked `add_agent_to_huddle` command. */
     addAgentToHuddleResult?: {
@@ -912,6 +915,7 @@ type RawManagedAgent = {
   /** Record-level harness/runtime pin (`null` when inheriting from the persona). */
   runtime: string | null;
   relay_url: string;
+  working_directory: string | null;
   acp_command: string;
   agent_command: string;
   agent_args: string[];
@@ -1794,6 +1798,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     persona_id: agent.persona_id,
     runtime: agent.runtime ?? null,
     relay_url: agent.relay_url,
+    working_directory: agent.working_directory ?? null,
     acp_command: agent.acp_command,
     agent_command: agent.agent_command,
     agent_args: [...agent.agent_args],
@@ -2337,6 +2342,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     { command: string; args: string[] }
   > = {
     goose: { command: "goose", args: ["acp"] },
+    opencode: { command: "opencode", args: ["acp"] },
     "buzz-agent": { command: "buzz-agent", args: [] },
     claude: { command: "claude", args: [] },
     codex: { command: "codex", args: [] },
@@ -2355,6 +2361,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     // must mirror the wire shape, not omit the key.
     runtime: seed.runtime ?? null,
     relay_url: DEFAULT_RELAY_WS_URL,
+    working_directory: seed.workingDirectory ?? null,
     acp_command: "buzz-acp",
     agent_command: agentCommand,
     agent_args: agentArgs,
@@ -9265,6 +9272,7 @@ async function handleCreateManagedAgent(
       name: string;
       personaId?: string;
       relayUrl?: string;
+      workingDirectory?: string;
       acpCommand?: string;
       agentCommand?: string;
       agentArgs?: string[];
@@ -9322,6 +9330,10 @@ async function handleCreateManagedAgent(
       : (mockPersonas.find((persona) => persona.id === args.input.personaId)
           ?.avatar_url ?? null);
   const avatarUrl = args.input.avatarUrl?.trim() || personaAvatarUrl;
+  const backend = args.input.backend ?? { type: "local" as const };
+  if (backend.type === "provider" && args.input.workingDirectory?.trim()) {
+    throw new Error("working directory is only supported for local agents");
+  }
   const name = args.input.name.trim();
   const now = new Date().toISOString();
   const pubkey = crypto
@@ -9343,6 +9355,10 @@ async function handleCreateManagedAgent(
     // Create never pins a harness id — the record inherits from the persona.
     runtime: null,
     relay_url: args.input.relayUrl ?? DEFAULT_RELAY_WS_URL,
+    working_directory:
+      backend.type === "local"
+        ? args.input.workingDirectory?.trim() || null
+        : null,
     acp_command: args.input.acpCommand ?? "buzz-acp",
     agent_command: agentCommand,
     agent_args: agentArgs,
@@ -9368,7 +9384,7 @@ async function handleCreateManagedAgent(
     log_path: `/tmp/mock-agent-${pubkey}.log`,
     start_on_app_launch: args.input.startOnAppLaunch ?? true,
     auto_restart_on_config_change: true,
-    backend: args.input.backend ?? { type: "local" as const },
+    backend,
     backend_agent_id: null,
     respond_to: mintRespondTo,
     respond_to_allowlist: [...mintRespondToAllowlist],
@@ -9627,6 +9643,7 @@ async function handleUpdateManagedAgent(args: {
     name?: string;
     model?: string | null;
     systemPrompt?: string | null;
+    workingDirectory?: string | null;
     envVars?: Record<string, string>;
     respondTo?: "owner-only" | "allowlist" | "anyone";
     respondToAllowlist?: string[];
@@ -9641,6 +9658,12 @@ async function handleUpdateManagedAgent(args: {
   }
   if (args.input.systemPrompt !== undefined) {
     agent.system_prompt = args.input.systemPrompt;
+  }
+  if (args.input.workingDirectory !== undefined) {
+    if (agent.backend.type !== "local" && args.input.workingDirectory?.trim()) {
+      throw new Error("working directory is only supported for local agents");
+    }
+    agent.working_directory = args.input.workingDirectory?.trim() || null;
   }
   if (args.input.envVars !== undefined) {
     agent.env_vars = { ...args.input.envVars };
@@ -13498,6 +13521,8 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleCreateManagedAgent>[0],
           activeConfig,
         );
+      case "pick_agent_working_directory":
+        return activeConfig?.mock?.agentWorkingDirectoryPick ?? null;
       case "start_managed_agent":
         return handleStartManagedAgent(
           payload as Parameters<typeof handleStartManagedAgent>[0],

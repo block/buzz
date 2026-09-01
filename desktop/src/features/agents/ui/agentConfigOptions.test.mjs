@@ -75,7 +75,7 @@ test("getPersonaProviderOptions appends (current) tail for an unknown saved prov
   assert.equal(tail?.label, "my-custom-llm (current)");
 });
 
-// ── getDefaultPersonaRuntime — buzz-agent first ───────────────────────────────
+// ── getDefaultPersonaRuntime — OpenCode first, buzz-agent fallback ───────────
 
 test("getDefaultPersonaRuntime honors an available global preference", () => {
   const runtimes = [
@@ -89,38 +89,41 @@ test("getDefaultPersonaRuntime honors an available global preference", () => {
 test("getDefaultPersonaRuntime ignores an unavailable global preference", () => {
   const runtimes = [
     makeRuntime("buzz-agent"),
+    makeRuntime("opencode"),
     makeRuntime("claude", "not_installed"),
   ];
-  assert.equal(getDefaultPersonaRuntime(runtimes, "claude")?.id, "buzz-agent");
+  assert.equal(getDefaultPersonaRuntime(runtimes, "claude")?.id, "opencode");
 });
 
-test("getDefaultPersonaRuntime returns buzz-agent over goose when both are available", () => {
+test("getDefaultPersonaRuntime returns OpenCode over bundled buzz-agent", () => {
   const runtimes = [
     makeRuntime("goose"),
     makeRuntime("buzz-agent"),
-    makeRuntime("claude"),
+    makeRuntime("opencode"),
+  ];
+  const result = getDefaultPersonaRuntime(runtimes);
+  assert.equal(result?.id, "opencode");
+});
+
+test("getDefaultPersonaRuntime falls back to buzz-agent when OpenCode is unavailable", () => {
+  const runtimes = [
+    makeRuntime("opencode", "not_installed"),
+    makeRuntime("goose"),
+    makeRuntime("buzz-agent"),
   ];
   const result = getDefaultPersonaRuntime(runtimes);
   assert.equal(result?.id, "buzz-agent");
 });
 
-test("getDefaultPersonaRuntime falls back to goose when buzz-agent is unavailable", () => {
+test("getDefaultPersonaRuntime returns first available when neither OpenCode nor buzz-agent is available", () => {
   const runtimes = [
-    makeRuntime("buzz-agent", "not_installed"),
-    makeRuntime("goose"),
-  ];
-  const result = getDefaultPersonaRuntime(runtimes);
-  assert.equal(result?.id, "goose");
-});
-
-test("getDefaultPersonaRuntime returns first available when neither buzz-agent nor goose is available", () => {
-  const runtimes = [
+    makeRuntime("opencode", "cli_missing"),
     makeRuntime("buzz-agent", "adapter_missing"),
-    makeRuntime("goose", "cli_missing"),
+    makeRuntime("goose"),
     makeRuntime("claude"),
   ];
   const result = getDefaultPersonaRuntime(runtimes);
-  assert.equal(result?.id, "claude");
+  assert.equal(result?.id, "goose");
 });
 
 test("getDefaultPersonaRuntime returns null for an empty list", () => {

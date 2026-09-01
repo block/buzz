@@ -187,6 +187,41 @@ test.describe("edit agent dialog", () => {
     );
   });
 
+  test("edits and clears a local agent working folder", async ({ page }) => {
+    const workingDirectory = "/Users/dev/projects/alpha";
+    await installMockBridge(page, {
+      agentWorkingDirectoryPick: workingDirectory,
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+    });
+
+    await openEditDialog(page);
+    const folder = page.getByTestId("agent-working-folder-field");
+    await folder.getByRole("button", { name: "Choose working folder" }).click();
+    await expect(folder.getByTestId("agent-working-folder-path")).toHaveText(
+      workingDirectory,
+    );
+    await page.getByTestId("edit-agent-dialog-submit").click();
+
+    await page.getByTestId("user-profile-edit-agent").click();
+    await expect(page.getByTestId("agent-working-folder-path")).toHaveText(
+      workingDirectory,
+    );
+    await page.getByRole("button", { name: "Clear working folder" }).click();
+    await page.getByTestId("edit-agent-dialog-submit").click();
+
+    await page.getByTestId("user-profile-edit-agent").click();
+    await expect(page.getByTestId("agent-working-folder-path")).toHaveText(
+      "Buzz workspace (default)",
+    );
+  });
+
   test("changes the model via custom entry and persists it", async ({
     page,
   }) => {

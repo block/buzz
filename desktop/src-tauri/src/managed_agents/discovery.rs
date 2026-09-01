@@ -102,7 +102,6 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_instructions_url: "",
         cli_install_hint: "Buzz talks to Goose through the Goose CLI.",
         adapter_install_hint: "",
-        skill_dir: Some(".goose/skills"),
         supports_acp_model_switching: false,
         model_env_var: Some("GOOSE_MODEL"),
         provider_env_var: Some("GOOSE_PROVIDER"),
@@ -135,7 +134,6 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_instructions_url: "https://github.com/agentclientprotocol/claude-agent-acp",
         cli_install_hint: "Buzz talks to Claude Code through the Claude Code CLI.",
         adapter_install_hint: "Buzz talks to the Claude Code CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/claude-agent-acp.",
-        skill_dir: Some(".claude/skills"),
         supports_acp_model_switching: false,
         model_env_var: None,
         provider_env_var: None,
@@ -168,7 +166,6 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_instructions_url: "https://github.com/agentclientprotocol/codex-acp",
         cli_install_hint: "Buzz talks to Codex through the Codex CLI.",
         adapter_install_hint: "Buzz talks to the Codex CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/codex-acp.",
-        skill_dir: Some(".codex/skills"),
         supports_acp_model_switching: false,
         model_env_var: None,
         provider_env_var: None,
@@ -202,7 +199,6 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_instructions_url: "https://github.com/block/buzz",
         cli_install_hint: "Ships with the Buzz desktop app.",
         adapter_install_hint: "",
-        skill_dir: None,
         supports_acp_model_switching: true,
         model_env_var: Some("BUZZ_AGENT_MODEL"),
         provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
@@ -220,11 +216,6 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         auth_probe_args: None,
     },
 ];
-
-/// Skill discovery directories declared by known runtimes.
-pub(crate) fn known_skill_dirs() -> impl Iterator<Item = &'static str> {
-    KNOWN_ACP_RUNTIMES.iter().filter_map(|p| p.skill_dir)
-}
 
 fn workspace_root_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")

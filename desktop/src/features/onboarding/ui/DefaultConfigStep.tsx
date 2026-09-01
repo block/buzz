@@ -30,6 +30,7 @@ import {
 import {
   getReadyOnboardingRuntimes,
   getVisibleOnboardingRuntimes,
+  resolveDefaultOnboardingRuntime,
 } from "./onboardingRuntimeSelection";
 import type { DefaultConfigDraft, DefaultConfigStepActions } from "./types";
 
@@ -191,8 +192,9 @@ function AgentDefaultsSection({
 
   React.useEffect(() => {
     if (configSurfaceLoading || selectedRuntimeId) return;
-    if (readyRuntimes.length !== 1) return;
-    handleHarnessChange(readyRuntimes[0].id);
+    const defaultRuntime = resolveDefaultOnboardingRuntime(readyRuntimes);
+    if (!defaultRuntime) return;
+    handleHarnessChange(defaultRuntime.id);
   }, [
     configSurfaceLoading,
     handleHarnessChange,

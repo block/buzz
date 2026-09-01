@@ -26,6 +26,7 @@ import { Dialog } from "@/shared/ui/dialog";
 import { Input } from "@/shared/ui/input";
 import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
 import { EffortPickerField } from "./EffortPickerField";
+import { AgentWorkingFolderField } from "./AgentWorkingFolderField";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import {
   ADVANCED_FIELDS_MOTION_TRANSITION,
@@ -138,6 +139,9 @@ export function AgentInstanceEditDialog({
   const [systemPrompt, setSystemPrompt] = React.useState(
     agent.systemPrompt ?? "",
   );
+  const [workingDirectory, setWorkingDirectory] = React.useState(
+    agent.workingDirectory ?? "",
+  );
   const [model, setModel] = React.useState(agent.model ?? "");
   const [isCustomModelEditing, setIsCustomModelEditing] = React.useState(false);
   const [provider, setProvider] = React.useState(agent.provider ?? "");
@@ -189,6 +193,7 @@ export function AgentInstanceEditDialog({
       setAgentArgs(agent.agentArgs.join(","));
       setParallelism(String(agent.parallelism));
       setSystemPrompt(agent.systemPrompt ?? "");
+      setWorkingDirectory(agent.workingDirectory ?? "");
       setModel(agent.model ?? "");
       setIsCustomModelEditing(false);
       setProvider(agent.provider ?? "");
@@ -711,6 +716,10 @@ export function AgentInstanceEditDialog({
         envVars: envVarsEqual(submitEnvVars, agent.envVars)
           ? undefined
           : submitEnvVars,
+        workingDirectory:
+          workingDirectory.trim() !== (agent.workingDirectory ?? "")
+            ? workingDirectory.trim() || null
+            : undefined,
         respondTo: respondTo !== agent.respondTo ? respondTo : undefined,
         // The allowlist is preserved across mode toggles in local UI state
         // (so a user can flip away from allowlist and back without losing
@@ -943,6 +952,13 @@ export function AgentInstanceEditDialog({
               onModeChange={setRespondTo}
             />
             <RunOnSummarySection backend={agent.backend} />
+            {agent.backend.type === "local" ? (
+              <AgentWorkingFolderField
+                disabled={updateMutation.isPending}
+                onChange={setWorkingDirectory}
+                value={workingDirectory}
+              />
+            ) : null}
 
             {/* Provider (runtime) */}
             <div className="space-y-1.5">

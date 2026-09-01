@@ -26,7 +26,7 @@
 //! The snapshot never crosses a process or persistence boundary — it is
 //! runtime state only, held on the running `ManagedAgentProcess`.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
 use serde::Serialize;
 
@@ -69,6 +69,8 @@ pub(crate) struct SpawnConfigInputs<'a> {
     pub descriptor: &'a EffectiveHarnessDescriptor,
     /// Resolved workspace/pair relay — never the record's legacy pin.
     pub relay_url: &'a str,
+    /// Effective process CWD, including the compatibility fallback.
+    pub working_directory: Option<&'a Path>,
     pub team_instructions: Option<&'a str>,
     pub system_prompt: Option<&'a str>,
     pub model: Option<&'a str>,
@@ -107,6 +109,9 @@ pub(crate) struct SpawnConfigSnapshot {
     /// definition -> global -> persona -> agent.
     pub env: BTreeMap<String, String>,
     pub relay_url: String,
+    /// The effective process CWD. This path is compared for restart drift but
+    /// redacted from diagnostics because it can contain usernames/project names.
+    pub working_directory: Option<String>,
     pub team_instructions: Option<String>,
     pub system_prompt: Option<String>,
     pub model: Option<String>,
@@ -161,6 +166,7 @@ impl SpawnConfigSnapshot {
             record,
             descriptor,
             relay_url,
+            working_directory,
             team_instructions,
             system_prompt,
             model,
@@ -189,6 +195,7 @@ impl SpawnConfigSnapshot {
                 env
             },
             relay_url: relay_url.to_string(),
+            working_directory: super::path_for_snapshot(working_directory),
             team_instructions: team_instructions.map(str::to_string),
             system_prompt: system_prompt.map(str::to_string),
             model: model.map(str::to_string),
@@ -298,12 +305,23 @@ pub(crate) fn prospective_spawn_config_snapshot(
         EffectiveConfigResult::OrphanedInstance { .. } => (None, None, None),
     };
 
+    // Snapshot the effective canonical CWD while it is available, so a symlink
+    // retarget badges. If validation fails because the configured directory is
+    // temporarily unavailable, preserve its stored canonical spelling instead
+    // of fabricating a change to `None` that could trigger a destructive
+    // auto-restart; the next actual spawn still revalidates and fails closed.
+    let working_directory = match super::effective_agent_workdir(record) {
+        Ok(path) => path.and_then(|path| path.into_os_string().into_string().ok()),
+        Err(_) => record.working_directory.clone(),
+    };
+
     SpawnConfigSnapshot::from_inputs(SpawnConfigInputs {
         record,
         descriptor: &descriptor,
         // Resolved, not stored: every record spawns on the workspace relay
         // (legacy pins ignored), so a workspace relay change must badge.
         relay_url: &crate::relay::effective_agent_relay_url(&record.relay_url, workspace_relay),
+        working_directory: working_directory.as_deref().map(Path::new),
         team_instructions: effective_team_instructions(record, teams).as_deref(),
         system_prompt: prompt.as_deref(),
         model: model.as_deref(),

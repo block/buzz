@@ -1,6 +1,7 @@
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 
 export const ONBOARDING_RUNTIME_ORDER = [
+  "opencode",
   "claude",
   "codex",
   "goose",
@@ -20,6 +21,17 @@ export function runtimeIsReadyForOnboarding(runtime: AcpRuntimeCatalogEntry) {
     runtime.availability === "available" &&
     (runtime.authStatus.status === "logged_in" ||
       runtime.authStatus.status === "not_applicable")
+  );
+}
+
+export function resolveDefaultOnboardingRuntime<
+  T extends AcpRuntimeCatalogEntry,
+>(runtimes: readonly T[]): T | null {
+  return (
+    runtimes.find((runtime) => runtime.id === "opencode") ??
+    runtimes.find((runtime) => runtime.id === "buzz-agent") ??
+    runtimes[0] ??
+    null
   );
 }
 

@@ -47,9 +47,9 @@ export function resolveStartRuntimeForDefinition(
   runtimes: readonly AcpRuntime[],
   preferredRuntimeId?: string | null,
 ): { runtime: AcpRuntime; warnings: string[] } {
-  // Use the buzz-agent-first preference (buzz-agent → goose → first available)
-  // so a freshly installed goose never beats the bundled buzz-agent sidecar
-  // for runtime-less personas (item 13 regression guard).
+  // Use the OpenCode-first preference (opencode → buzz-agent → first available)
+  // for runtime-less personas. An explicit available global preference still
+  // wins; existing runtime-pinned definitions are resolved separately below.
   const defaultRuntime = getDefaultPersonaRuntime(runtimes, preferredRuntimeId);
   const { runtime, warnings, isOverridden }: ResolvePersonaRuntimeResult =
     resolvePersonaRuntime(persona.runtime, runtimes, defaultRuntime);
@@ -106,12 +106,15 @@ export type BackendIntent = {
  *   later definition edits made before the first spawn. (Mesh preset env is
  *   the deliberate exception: it is instance-override state, not
  *   definition env.)
+ * - workingDirectory is local instance state. It is trimmed into local create
+ *   requests and omitted entirely from provider-backed requests.
  */
 export async function buildInstanceInputForDefinition(
   persona: AgentPersona,
   runtime: AcpRuntime,
   upload?: UploadMediaBytes,
   backendIntent?: BackendIntent,
+  workingDirectory?: string,
 ): Promise<CreateManagedAgentInput> {
   const avatarUrl = await resolveManagedAgentAvatarUrl(
     persona.avatarUrl,
@@ -154,6 +157,9 @@ export async function buildInstanceInputForDefinition(
     harnessOverride: !persona.runtime || persona.runtime === runtime.id,
     model: persona.model ?? undefined,
     provider: persona.provider ?? undefined,
+    ...(workingDirectory?.trim()
+      ? { workingDirectory: workingDirectory.trim() }
+      : {}),
     spawnAfterCreate: true,
     startOnAppLaunch: true,
     backend: { type: "local" },

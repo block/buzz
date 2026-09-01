@@ -5,6 +5,7 @@ import {
   applyProbeResult,
   canSubmitWhereToRun,
   emptyWhereToRunDraft,
+  localWorkingDirectory,
   providerConfigComplete,
   resolveBackendIntent,
 } from "./whereToRunIntent.ts";
@@ -50,6 +51,26 @@ test("local never gates submit", () => {
 
 test("local draft resolves to null intent", () => {
   assert.equal(resolveBackendIntent(emptyWhereToRunDraft), null);
+});
+
+test("local draft resolves the trimmed working folder", () => {
+  assert.equal(
+    localWorkingDirectory({
+      ...emptyWhereToRunDraft,
+      workingDirectory: "  /work/project  ",
+    }),
+    "/work/project",
+  );
+  assert.equal(localWorkingDirectory(emptyWhereToRunDraft), null);
+});
+
+test("provider draft omits a stale local working folder", () => {
+  assert.equal(
+    localWorkingDirectory(
+      providerDraft({ workingDirectory: "/work/should-not-leak" }),
+    ),
+    null,
+  );
 });
 
 test("provider draft resolves with coerced config values", () => {
