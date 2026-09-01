@@ -349,10 +349,31 @@ fn retryable_image_cooldown(
 }
 
 async fn fetch_sanitized_image(
-    mut url: Url,
+    url: Url,
     preserve_transparency: bool,
 ) -> Result<(String, String), ImageFetchError> {
-    validate_public_https_url(&url)
+    fetch_sanitized_image_using(
+        url,
+        preserve_transparency,
+        |url| async move { validate_public_https_url(&url).await },
+        |url, accept| async move { send_pinned_request(&url, accept).await },
+    )
+    .await
+}
+
+async fn fetch_sanitized_image_using<V, VFut, F, Fut>(
+    mut url: Url,
+    preserve_transparency: bool,
+    mut validate_url: V,
+    mut send_request: F,
+) -> Result<(String, String), ImageFetchError>
+where
+    V: FnMut(Url) -> VFut,
+    VFut: std::future::Future<Output = Result<(), String>>,
+    F: FnMut(Url, &'static str) -> Fut,
+    Fut: std::future::Future<Output = Result<reqwest::Response, String>>,
+{
+    validate_url(url.clone())
         .await
         .map_err(|_| ImageFetchError::Rejected)?;
     let mut redirect_count = 0;
@@ -373,7 +394,7 @@ async fn fetch_sanitized_image(
         if image_host_cooldown_remaining(&url).is_some() {
             continue;
         }
-        let response = send_pinned_request(&url, "image/jpeg,image/png,image/webp")
+        let response = send_request(url.clone(), "image/jpeg,image/png,image/webp")
             .await
             .map_err(|_| ImageFetchError::Transient {
                 retry_after: None,
@@ -389,7 +410,7 @@ async fn fetch_sanitized_image(
                 .and_then(|value| value.to_str().ok())
                 .ok_or(ImageFetchError::Rejected)?;
             url = url.join(location).map_err(|_| ImageFetchError::Rejected)?;
-            validate_public_https_url(&url)
+            validate_url(url.clone())
                 .await
                 .map_err(|_| ImageFetchError::Rejected)?;
             redirect_count += 1;
