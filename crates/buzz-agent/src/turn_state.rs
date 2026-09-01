@@ -15,8 +15,6 @@ pub struct TurnSession {
     pub id: String,
     /// Working directory used by prompt discovery and tool hints.
     pub working_dir: std::path::PathBuf,
-    /// Model configuration used by the temporary legacy compaction adapter.
-    pub model_config: Option<goose_providers::model::ModelConfig>,
     /// Latest provider-reported occupancy for the current conversation.
     pub total_tokens: Option<i32>,
     conversation: Conversation,
@@ -38,16 +36,11 @@ pub struct TurnState {
 }
 
 impl TurnState {
-    pub fn new(
-        id: String,
-        working_dir: std::path::PathBuf,
-        model_config: Option<goose_providers::model::ModelConfig>,
-    ) -> Self {
+    pub fn new(id: String, working_dir: std::path::PathBuf) -> Self {
         Self {
             session: TurnSession {
                 id,
                 working_dir,
-                model_config,
                 total_tokens: None,
                 conversation: Conversation::new_unvalidated(Vec::new()),
             },
@@ -82,7 +75,7 @@ mod tests {
     use super::*;
 
     fn state() -> TurnState {
-        TurnState::new("s1".to_string(), std::path::PathBuf::from("/tmp"), None)
+        TurnState::new("s1".to_string(), std::path::PathBuf::from("/tmp"))
     }
 
     #[test]
@@ -110,7 +103,7 @@ mod tests {
 
     #[test]
     fn runtime_metadata_is_preserved() {
-        let mut state = TurnState::new("abc".to_string(), std::path::PathBuf::from("/work"), None);
+        let mut state = TurnState::new("abc".to_string(), std::path::PathBuf::from("/work"));
         state.set_total_tokens(Some(1234));
         assert_eq!(state.session().id, "abc");
         assert_eq!(

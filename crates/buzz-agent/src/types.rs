@@ -7,7 +7,7 @@
 //! `context_pressure_bytes`) that fed the bespoke handoff heuristic.
 //!
 //! Goose owns all of that now: conversation state is `goose::conversation`,
-//! tool plumbing is `rmcp`, and compaction is `goose::context_mgmt`. What
+//! tool plumbing is `rmcp`, and compaction is `goose_context_management`. What
 //! survives here is only what crosses the ACP wire.
 
 use serde::Deserialize;

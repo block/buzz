@@ -1202,6 +1202,7 @@ dependencies = [
  "getrandom 0.4.3",
  "goose",
  "goose-agent",
+ "goose-context-management",
  "goose-provider-types",
  "goose-providers",
  "goose-sdk-types",

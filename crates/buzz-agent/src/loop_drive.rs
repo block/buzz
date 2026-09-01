@@ -13,7 +13,7 @@
 //! | tool surface | `Agent::list_tools` |
 //! | tool execution | `Agent::dispatch_tool_call` |
 //! | system prompt | `Agent::build_turn_system_prompt` → `PromptManager` |
-//! | compaction | `goose::context_mgmt::{check_if_compaction_needed, compact_messages}` |
+//! | compaction | `goose_context_management` with buzz threshold policy |
 //! | conversation store | buzz's own [`crate::turn_state::TurnState`], in memory |
 //!
 //! Everything that decides *turn shape* stays here: round structure, the
@@ -158,13 +158,8 @@ pub async fn run_turn(
 
     // The turn's conversation lives here, not in a database. See
     // `crate::turn_state` for why goose never needed one.
-    let (_provider, model_config, _model_id) = ctx.model.snapshot().await;
-    let model_config = Some(model_config);
-    let mut state = crate::turn_state::TurnState::new(
-        ctx.session_id.to_string(),
-        ctx.working_dir.clone(),
-        model_config,
-    );
+    let mut state =
+        crate::turn_state::TurnState::new(ctx.session_id.to_string(), ctx.working_dir.clone());
     for message in ctx.history.iter().cloned() {
         state.push(message);
     }
@@ -203,7 +198,6 @@ pub async fn run_turn(
             ctx.model.clone(),
             Arc::clone(ctx.mcp),
             ctx.hook_extension.map(str::to_string),
-            ctx.session_id.to_string(),
         ),
         ctx.cancel.clone(),
     );
@@ -716,7 +710,7 @@ mod tests {
     use super::*;
 
     fn turn_state() -> crate::turn_state::TurnState {
-        crate::turn_state::TurnState::new("s".to_string(), std::path::PathBuf::from("/tmp"), None)
+        crate::turn_state::TurnState::new("s".to_string(), std::path::PathBuf::from("/tmp"))
     }
 
     fn usage(

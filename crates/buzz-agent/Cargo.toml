@@ -34,6 +34,7 @@ goose = { git = "https://github.com/aaif-goose/goose", rev = "0a9749b1cbf38d1820
 # exact same Goose revision as `goose` so shared conversation types stay unified.
 goose-agent = { git = "https://github.com/aaif-goose/goose", rev = "0a9749b1cbf38d182080a53286c4942629f66565" }
 goose-provider-types = { git = "https://github.com/aaif-goose/goose", rev = "0a9749b1cbf38d182080a53286c4942629f66565" }
+goose-context-management = { git = "https://github.com/aaif-goose/goose", rev = "0a9749b1cbf38d182080a53286c4942629f66565" }
 goose-sdk-types = { git = "https://github.com/aaif-goose/goose", rev = "0a9749b1cbf38d182080a53286c4942629f66565" }
 # ModelConfig: goose re-exports it from goose-providers; goose::model_config
 # keeps its own copy private.

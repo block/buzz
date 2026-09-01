@@ -112,9 +112,7 @@ fn databricks_v2_with_buzz_oauth(host: String) -> Result<Arc<dyn Provider>, Agen
                 .ok()
                 .filter(|token| !token.trim().is_empty())
         })),
-        // Keeps the `agent-session-id` request header goose attaches for
-        // provider-side attribution; dropping it would silently lose that.
-        Some(goose::session_context::session_id_request_builder()),
+        None,
         refresh_hook,
     )
     .map_err(|e| AgentError::Llm(format!("databricks provider: {e}")))?;

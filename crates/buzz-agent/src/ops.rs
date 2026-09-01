@@ -29,8 +29,10 @@ use goose_agent::operation::{
     applied, assistant_turn_count, messages_since_kickoff, not_applicable, yielded,
     ConversationEffect, Emitter, Operation, OperationResult,
 };
-use goose_provider_types::conversation::message::{Message, ToolRequest};
-use goose_provider_types::conversation::Conversation;
+use goose_provider_types::conversation::message::{
+    Message, MessageContent, MessageMetadata, ToolRequest,
+};
+use goose_provider_types::conversation::{merge_consecutive_messages, Conversation};
 
 use crate::types::StopReason;
 
@@ -413,12 +415,131 @@ impl Operation<TurnSession, ConversationEffect> for BuzzSteerOperation {
     }
 }
 
+fn auto_compact_threshold() -> f64 {
+    std::env::var("GOOSE_AUTO_COMPACT_THRESHOLD")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(goose_context_management::DEFAULT_COMPACTION_THRESHOLD)
+}
+
+fn context_limit_override() -> Result<Option<usize>> {
+    std::env::var("GOOSE_CONTEXT_LIMIT")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .map_err(|error| anyhow::anyhow!("invalid GOOSE_CONTEXT_LIMIT {value:?}: {error}"))
+        })
+        .transpose()
+}
+
+fn needs_compaction(
+    provider_manages_context: bool,
+    total_tokens: Option<i32>,
+    context_limit: usize,
+    threshold: f64,
+) -> bool {
+    if provider_manages_context || threshold <= 0.0 || threshold >= 1.0 {
+        return false;
+    }
+    context_limit > 0
+        && total_tokens.is_some_and(|tokens| {
+            let current_tokens = tokens.max(0) as f64;
+            current_tokens / context_limit as f64 > threshold
+        })
+}
+
+fn compacted_conversation(conversation: &Conversation, summary: Message) -> Conversation {
+    const CONTINUATION: &str = "Your context was compacted. The previous message contains a summary of the conversation so far.\nDo not mention that you read a summary or that conversation summarization occurred.\nJust continue the conversation naturally based on the summarized context.";
+    const TOOL_CONTINUATION: &str = "Your context was compacted. The previous message contains a summary of the conversation so far.\nDo not mention that you read a summary or that conversation summarization occurred.\nContinue calling tools as necessary to complete the task.";
+
+    let messages = conversation.messages();
+    let preserved = messages
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, message)| {
+            if !message.is_agent_visible()
+                || message.is_turn_context()
+                || message.role != rmcp::model::Role::User
+            {
+                return None;
+            }
+            let projected = message.agent_visible_content();
+            let has_text = projected
+                .content
+                .iter()
+                .any(|content| matches!(content, MessageContent::Text(_)));
+            let has_tool_content = projected.content.iter().any(|content| {
+                matches!(
+                    content,
+                    MessageContent::ToolRequest(_) | MessageContent::ToolResponse(_)
+                )
+            });
+            if !has_text || has_tool_content {
+                return None;
+            }
+            let message = projected
+                .content
+                .into_iter()
+                .filter(|content| matches!(content, MessageContent::Text(_)))
+                .fold(
+                    Message::user().with_metadata(MessageMetadata::agent_only()),
+                    Message::with_content,
+                );
+            Some((index, message))
+        });
+
+    let is_most_recent = preserved
+        .as_ref()
+        .is_some_and(|(index, _)| messages[*index + 1..].iter().all(Message::is_turn_context));
+    let continuation_text = if is_most_recent {
+        CONTINUATION
+    } else {
+        TOOL_CONTINUATION
+    };
+
+    let mut compacted = messages
+        .iter()
+        .cloned()
+        .map(|message| {
+            let metadata = message.metadata.clone().with_agent_invisible();
+            message.with_metadata(metadata)
+        })
+        .collect::<Vec<_>>();
+    let summary = summary.with_metadata(MessageMetadata::agent_only());
+    let continuation = Message::assistant()
+        .with_text(continuation_text)
+        .with_metadata(MessageMetadata::agent_only());
+    let continuation_created = continuation.created;
+    let (continuation, _) = merge_consecutive_messages(vec![summary, continuation]);
+    compacted.extend(continuation);
+
+    if let Some((index, mut message)) = preserved {
+        message.created = continuation_created;
+        compacted.push(message);
+        if let Some(turn_context) = messages[index + 1..]
+            .iter()
+            .rev()
+            .find(|message| message.is_turn_context() && message.is_agent_visible())
+        {
+            let mut carried = turn_context.clone();
+            carried.id = None;
+            if let Some(latest) = compacted.iter().map(|message| message.created).max() {
+                carried.created = carried.created.max(latest);
+            }
+            compacted.push(carried);
+        }
+    }
+
+    Conversation::new_unvalidated(compacted)
+}
+
 /// Compacts the conversation when it approaches the context limit.
 ///
-/// The mechanism is entirely goose's (`check_if_compaction_needed` /
-/// `compact_messages`); this operation is the buzz-specific part around it:
-/// the `_PostCompact` hook that re-injects buzz-dev-mcp's todo state, which is
-/// what buzz-agent's old context-handoff existed to preserve.
+/// Summarization comes from the standalone Goose context-management crate.
+/// This operation owns the threshold policy and the Buzz-specific
+/// `_PostCompact` hook that re-injects buzz-dev-mcp's todo state.
 ///
 /// Not goose's `CompactionOperation`: that one yields to the client and emits
 /// its own user-facing notification. In buzz a yield ends the turn and the
@@ -428,7 +549,6 @@ pub struct BuzzCompactionOperation {
     model: crate::model::SessionModel,
     mcp: Arc<McpRegistry>,
     hook_extension: Option<String>,
-    session_id: String,
 }
 
 impl BuzzCompactionOperation {
@@ -436,13 +556,11 @@ impl BuzzCompactionOperation {
         model: crate::model::SessionModel,
         mcp: Arc<McpRegistry>,
         hook_extension: Option<String>,
-        session_id: String,
     ) -> Self {
         Self {
             model,
             mcp,
             hook_extension,
-            session_id,
         }
     }
 }
@@ -460,39 +578,35 @@ impl Operation<TurnSession, ConversationEffect> for BuzzCompactionOperation {
         _emit: &Emitter,
     ) -> Result<OperationResult<ConversationEffect>> {
         let (provider, model_config, _model_id) = self.model.snapshot().await;
-        // Goose's legacy threshold facade still takes its application Session.
-        // Keep that coupling at this single adapter until the granular context
-        // crate exposes thresholding over model config + token occupancy.
-        let legacy_session = goose::session::Session {
-            id: session.id.clone(),
-            working_dir: session.working_dir.clone(),
-            model_config: session.model_config.clone(),
-            usage: goose_provider_types::conversation::token_usage::Usage {
-                total_tokens: session.total_tokens,
-                ..Default::default()
-            },
-            conversation: Some(conversation.clone()),
-            ..Default::default()
-        };
-        if !goose::context_mgmt::check_if_compaction_needed(
-            provider.as_ref(),
-            conversation,
-            None,
-            &legacy_session,
-        )
-        .await?
-        {
+        let threshold = auto_compact_threshold();
+        let context_limit_override = context_limit_override()?;
+        let context_limit = provider
+            .get_context_limit(&model_config.model_name, context_limit_override)
+            .await;
+        if !needs_compaction(
+            provider.manages_own_context(),
+            session.total_tokens,
+            context_limit,
+            threshold,
+        ) {
             return not_applicable();
         }
 
-        let result = goose::context_mgmt::compact_messages(
-            provider.as_ref(),
-            &model_config,
-            &self.session_id,
-            conversation,
-            false,
+        let visible_messages = conversation
+            .messages()
+            .iter()
+            .filter(|message| message.is_agent_visible() && !message.is_turn_context())
+            .cloned()
+            .collect::<Vec<_>>();
+        let model = goose_context_management::ProviderModel::new(provider, model_config);
+        let summary = goose_context_management::summarize(
+            &model,
+            None,
+            &goose_context_management::Templates::default(),
+            &visible_messages,
         )
         .await?;
+        let compacted = compacted_conversation(conversation, summary.message);
 
         tracing::info!(target: "buzz_agent::compaction", "history compacted");
 
@@ -500,7 +614,7 @@ impl Operation<TurnSession, ConversationEffect> for BuzzCompactionOperation {
         // the running total is reset by the driving loop's `apply_effects`
         // instead: the old total described a conversation that no longer
         // exists, and carrying it forward would re-trigger compaction at once.
-        let mut effects = vec![ConversationEffect::ReplaceConversation(result.conversation)];
+        let mut effects = vec![ConversationEffect::ReplaceConversation(compacted)];
 
         if let Some(extension) = &self.hook_extension {
             if let Some(reported) = crate::hooks::post_compact_state(&self.mcp, extension).await {
@@ -624,6 +738,47 @@ mod tests {
         Message::user()
             .with_text("tool output")
             .with_visibility(false, true)
+    }
+
+    #[test]
+    fn compaction_threshold_requires_reported_occupancy_above_the_boundary() {
+        assert!(!needs_compaction(false, None, 100_000, 0.8));
+        assert!(!needs_compaction(false, Some(80_000), 100_000, 0.8));
+        assert!(needs_compaction(false, Some(80_001), 100_000, 0.8));
+        assert!(!needs_compaction(true, Some(90_000), 100_000, 0.8));
+        assert!(!needs_compaction(false, Some(90_000), 100_000, 0.0));
+        assert!(!needs_compaction(false, Some(90_000), 100_000, 1.0));
+        assert!(!needs_compaction(false, Some(1), 0, 0.8));
+    }
+
+    #[test]
+    fn compaction_preserves_the_latest_prompt_and_turn_context() {
+        let first = Message::user().with_text("old prompt");
+        let answer = Message::assistant().with_text("old answer");
+        let latest = Message::user().with_text("latest prompt");
+        let mut turn_context = Message::user()
+            .with_text("current context")
+            .with_visibility(false, true);
+        turn_context.metadata.turn_context = true;
+        let compacted = compacted_conversation(
+            &Conversation::new_unvalidated(vec![first, answer, latest, turn_context]),
+            Message::assistant().with_text("summary"),
+        );
+        let visible = compacted
+            .messages()
+            .iter()
+            .filter(|message| message.is_agent_visible())
+            .collect::<Vec<_>>();
+
+        assert!(visible
+            .iter()
+            .any(|message| message.as_concat_text().contains("summary")));
+        assert!(visible
+            .iter()
+            .any(|message| message.as_concat_text() == "latest prompt"));
+        assert!(visible.iter().any(|message| message.is_turn_context()));
+        assert!(!compacted.messages()[0].is_agent_visible());
+        assert!(!compacted.messages()[1].is_agent_visible());
     }
 
     #[tokio::test]
