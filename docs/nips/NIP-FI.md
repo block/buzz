@@ -67,10 +67,17 @@ Policy selects exactly one token class before parsing claims:
 - **`nip-fi+jwt`**: a dedicated assertion whose protected `typ` is exactly
   `nip-fi+jwt`.
 - **`at+jwt` access token**: a resource access token whose protected `typ` is
-  exactly `at+jwt`.  When this class is selected the assertion MUST contain a
-  non-empty `client_id` claim.  The issuer MUST guarantee that
-  resource-owner-subject tokens and client-subject tokens cannot share `(iss,
-  sub)` coordinates.
+  exactly `at+jwt`.  When this class is selected:
+  - The assertion MUST contain a non-empty `client_id` claim.
+  - The issuer policy MUST name exactly one authenticated marker claim and two
+    non-empty, disjoint value sets: one for resource-owner subjects and one for
+    client-subject tokens.  A token whose marker value matches neither set, both
+    sets, or whose marker claim is absent is ambiguous and denies.
+  - When client-subject tokens are admitted, the issuer policy MUST record the
+    non-collision posture: the issuer MUST guarantee that resource-owner and
+    client-subject `(iss, sub)` coordinates are disjoint.
+  - Absent, unknown, or ambiguous classification always denies; no fallback to
+    the other class is attempted.
 
 OIDC ID tokens always deny, even when `iss`, `aud`, and `sub` match.  A
 generic or absent `typ` has no accepted class.  Failure under one class never
@@ -78,13 +85,17 @@ triggers validation under another.  [FI-TRACE-TOKEN-CLASS]
 
 ### Time bounds
 
-The relay enforces all of the following.  Each configures a positive finite
-value; a missing configuration denies.
+**Required claims:** `iat` and `exp` MUST be present; absence denies.
+
+**Policy knobs:** the relay enforces the following rules.  `maximum_assertion_age`
+is a required positive finite configuration; a missing or non-positive
+configuration denies.  `skew` is a non-negative finite maximum with default `0`;
+it narrows acceptable bounds and cannot be omitted to mean "unchecked".
 
 - `now < exp` — equality at expiry is expired
-- `iat <= now + skew` — `skew` is a non-negative finite maximum, default 0
+- `iat <= now + skew` — issuance is not in the future beyond allowable skew
 - `now < iat + maximum_assertion_age` — caps total assertion age independent of `exp`
-- `nbf <= now + skew` — when `nbf` is present
+- `nbf <= now + skew` — when `nbf` is present (optional claim; absence is not an error)
 
 [FI-TRACE-ASSERTION-VALIDATION]
 
@@ -135,13 +146,18 @@ snapshots.  No IdP contact occurs at admission time.
 
 ### Multi-issuer registry
 
-The relay maintains one [`IssuerRegistry`](../crates/buzz-auth/src/nip_fi/config.rs):
+The relay maintains one [`IssuerRegistry`](../../crates/buzz-auth/src/nip_fi/config.rs):
 a map from exact `iss` strings to issuer policies.  The `iss` carried in the
 signed token selects exactly one policy; unknown issuers deny.  A
 single-issuer deployment is a registry of length one.  [FI-TRACE-CROSS-DOMAIN-COLLISION]
 
 The existing `FederatedAssertionVerifier<S>` and `ProductionJwksSource<F>`
-(merged in PR 3 / `70895b355`) implement this section.
+(merged in PR 3 / `70895b355`) implement the verification procedure described
+here.  The `require_attested_key` flag in `IssuerPolicy` is the per-issuer
+enforcement primitive for the unconditional `nostr_pubkey` requirement in this
+section; conformance to NIP-FI v2 requires startup validation that forces this
+flag true for every configured issuer.  That integration is a follow-on code
+change outside this PR.
 
 ### JWKS snapshot
 
@@ -263,11 +279,22 @@ reconnect immediately.
 
 > **Non-normative note — open product question for Will/Tyler:**
 >
-> The session-only model means a revoked employee can reconnect until their
-> assertion TTL expires and the adapter stops issuing new assertions.  The
-> residual window equals at most `max_connection_lifetime_seconds` (for an
-> existing session) plus the remaining JWT TTL (for an immediate reconnect
-> after being booted).
+> The session-only model means a revoked employee retains access until the
+> relay closes their connection and they can no longer obtain a fresh
+> assertion.  There are two distinct residual sub-windows:
+>
+> - **Existing session:** a live session that received a disconnect call
+>   continues until the relay closes it (bounded by whatever session deadline
+>   applies — at most `max_connection_lifetime_seconds` from connection time).
+> - **Immediate reconnect:** after being disconnected, a client holding a
+>   still-valid assertion can reconnect immediately.  That new session is
+>   bounded by `min(remaining assertion TTL, max_connection_lifetime_seconds)`.
+>
+> These windows are sequential, not additive.  The worst-case window after a
+> disconnect call is `max_connection_lifetime_seconds` (for the live session)
+> followed immediately by a new session bounded by `min(remaining assertion TTL,
+> max_connection_lifetime_seconds)`.  The reconnect window closes when the
+> adapter stops issuing new assertions.
 >
 > The alternative is a **deny-until-TTL** model: the relay holds a
 > memory-resident deny-list entry for the pubkey keyed to the adapter's stated
@@ -284,33 +311,61 @@ reconnect immediately.
 ### Transport
 
 The disconnect endpoint is an authenticated adapter→relay API, not a public
-Nostr protocol.  Authentication MUST use the same JWKS verification surface
-the relay uses for client assertions: the adapter call carries a
-`Nostr-Federated-Identity` header whose assertion is verified against the
-configured adapter issuer policy before any action is taken.
+Nostr protocol.
+
+### Request binding
+
+Authentication MUST use a short-lived signed command JWT.  The adapter mints
+a compact JWS verified by the relay against the same configured per-issuer JWKS
+snapshot it uses for client assertions — no additional key material or Nostr
+key is required.
+
+The command JWT MUST carry the following claims:
+
+| Claim | Requirement |
+|---|---|
+| `iss` | Exact issuer URI matching an authorized adapter issuer in the registry. |
+| `sub` | Adapter principal identifier.  The relay checks this is an authorized adapter principal. |
+| `aud` | Audience matching the relay's configured audience value for this issuer. |
+| `iat` | Issuance time.  MUST satisfy `now < iat + command_ttl` and `iat <= now + skew`. |
+| `exp` | Expiry time.  MUST be finite; relay enforces `now < exp`. |
+| `jti` | Unique, non-guessable identifier for this command.  The relay rejects any command whose `jti` has already been seen within its expiry window (replay denial). |
+| `cmd` | Exactly `"disconnect"` (literal string). |
+| `target_pubkey` | Lowercase hexadecimal encoding of the target 32-byte Nostr public key — the same encoding required for the assertion `nostr_pubkey` claim. |
+
+The relay verifies the command JWT using `VerifyAssertion` (selecting the
+adapter issuer policy), then asserts:
+
+1. `cmd == "disconnect"` — any other value denies.
+2. `target_pubkey` matches the pubkey in the request body — mismatch denies `403`.
+3. `jti` has not been seen within its expiry window — replay denies `403`.
+4. Caller identity is an authorized adapter principal — unauthorized caller denies `403`.
+
+Any failure is fail-closed: the relay takes no action and returns the
+appropriate error.  The command TTL MUST be short (deployment policy governs;
+60 seconds is a reasonable upper bound).
 
 ### Request
 
-The adapter sends a signed request naming the target pubkey:
-
 ```text
 POST /api/nip-fi/disconnect HTTP/1.1
-Nostr-Federated-Identity: Bearer <adapter-signed-compact-JWS>
+Nostr-Federated-Identity: Bearer <compact-command-JWS>
 Content-Type: application/json
 
 {"pubkey": "<lowercase-hex-32-byte-pubkey>"}
 ```
 
-The relay verifies the assertion, confirms the caller identity is an authorized
-adapter principal, then closes all matching live connections.  An unknown or
-unprovable pubkey is not an error; the relay responds `200` with `{"disconnected": 0}`.
+The relay verifies the command JWT, confirms `target_pubkey` in the JWT matches
+the body `pubkey` field, confirms the caller is an authorized adapter principal,
+then closes all matching live connections.  An unknown or unprovable pubkey is
+not an error; the relay responds `200` with `{"disconnected": 0}`.
 
 ### Response
 
 | Condition | Status | Body |
 |---|---|---|
 | Authorized; action taken or no-op | `200` | `{"disconnected": <n>}` where `n` is the count of sessions closed |
-| Missing or invalid assertion | `401` / `403` | Per the rejection table |
+| Missing or invalid command JWT | `401` / `403` | Per the rejection table |
 | Malformed request body | `400` | `bad request\n` |
 
 ## Rejection and privacy
@@ -397,8 +452,19 @@ is the primary control against assertion replay across keys.
 cannot observe IdP-side revocation until the current assertion expires.  The
 deployment adapter MUST configure a `max_connection_lifetime_seconds` and
 assertion TTL consistent with the organization's acceptable revocation latency.
-For the session-only disconnect model, the residual window is bounded by max(
-existing session remaining lifetime, assertion TTL ).
+
+For upstream revocation without an explicit disconnect call (adapter stops
+issuing assertions; no active session termination), the residual window is
+`max(existing session remaining lifetime, assertion TTL)`: whichever is
+longer governs when access finally ceases.
+
+For the session-only disconnect model (adapter issues a disconnect call that
+closes the live session), the residual window has two sequential parts: the
+live session closes within `max_connection_lifetime_seconds`, after which a
+reconnect is bounded by `min(remaining assertion TTL, max_connection_lifetime_seconds)`.
+The reconnect window closes when the adapter stops issuing new assertions.
+See the non-normative note in the Admin disconnect section for the open product
+question on the deny-until-TTL alternative.
 
 **SSRF.** The JWKS fetcher implements SSRF protection: HTTPS-only URI
 validation, DNS resolution with IP deny-list enforcement, address pinning to
@@ -406,7 +472,7 @@ prevent DNS rebinding TOCTOU, and redirect denial.  The complete IANA
 Special-Purpose address deny table is implemented; see `crates/buzz-core/src/network.rs`.
 
 **Issuer compromise.** A compromised assertion issuer can impersonate any
-identity but cannot prove possession of an enrolled Nostr key.  The NIP-42
+identity but cannot prove possession of the assertion-named Nostr key.  The NIP-42
 proof remains an independent control.
 
 **Algorithm confusion.** The verifier enforces asymmetric algorithms only;
