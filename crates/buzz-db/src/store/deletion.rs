@@ -3355,7 +3355,9 @@ mod postgres_tests {
         })
         .await
         .expect("connect deletion test DB");
-        db.migrate().await.expect("migrate deletion test DB");
+        if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+            db.migrate().await.expect("migrate deletion test DB");
+        }
         let store = db.deletion_store();
         (db, store)
     }

@@ -183,7 +183,7 @@ async fn reject_legacy_nip_rs_cardinality_ambiguity(conn: &mut PgConnection) -> 
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use std::{
         collections::BTreeSet,

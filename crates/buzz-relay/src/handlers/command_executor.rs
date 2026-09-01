@@ -1367,21 +1367,23 @@ async fn resume_workflow_after_approval(
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     async fn persistence_test_context() -> (buzz_db::Db, TenantContext) {
         let url = std::env::var("BUZZ_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
-            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1 -- local test-only credentials
         let pool = sqlx::PgPool::connect(&url)
             .await
             .expect("connect workflow persistence test database");
         let db = buzz_db::Db::from_pool(pool);
-        db.migrate()
-            .await
-            .expect("migrate workflow persistence test database");
+        if std::env::var("BUZZ_TEST_SCHEMA_MODE").as_deref() != Ok("desired") {
+            db.migrate()
+                .await
+                .expect("migrate workflow persistence test database");
+        }
         let host = format!("workflow-cas-{}.example", Uuid::new_v4().simple());
         let community = db
             .ensure_configured_community(&host)
@@ -1509,7 +1511,9 @@ mod tests {
         ));
 
         let create_revision = create.id.to_hex();
-        let mut updates = (0..64).map(|index| {
+        // Event IDs are hashes, so keep sampling instead of imposing a finite
+        // cutoff that makes this same-second ordering check probabilistic.
+        let mut updates = (0_u64..).map(|index| {
             workflow_event(
                 &keys,
                 workflow_id,
@@ -1521,7 +1525,7 @@ mod tests {
         let update = updates
             .find(|candidate| candidate.id.as_bytes() < create.id.as_bytes())
             .expect("find same-second update that wins NIP-33 ordering");
-        let dominated_update = (64..256)
+        let dominated_update = (64_u64..)
             .map(|index| {
                 workflow_event(
                     &keys,

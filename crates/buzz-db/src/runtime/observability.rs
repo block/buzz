@@ -426,14 +426,15 @@ mod tests {
         }
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    #[ignore = "requires Postgres"]
     async fn pool_acquire_records_success_timeout_and_error_with_wait_time() {
+        // This timeout also bounds the pool's initial connection. Leave enough
+        // headroom for a cold PostgreSQL start under the lane's eight workers;
+        // the assertion below cares about classification, not a 75 ms budget.
         let database_url = std::env::var("TEST_DATABASE_URL")
             .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_owned()); // sadscan:disable np.postgres.1 -- local test-only credentials
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
-            .acquire_timeout(Duration::from_millis(75))
+            .acquire_timeout(Duration::from_secs(1))
             .connect(&database_url)
             .await
             .expect("connect size-one test pool");
@@ -490,8 +491,6 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    #[ignore = "requires Postgres"]
     async fn advisory_lock_records_success_contention_timeout_and_error() {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_owned()); // sadscan:disable np.postgres.1 -- local test-only credentials
@@ -632,5 +631,19 @@ mod tests {
             contention.iter().any(|sample| *sample >= 0.04),
             "lock timer must include the holder wait: {contention:?}"
         );
+    }
+
+    mod postgres_tests {
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres"]
+        async fn pool_acquire_records_success_timeout_and_error_with_wait_time() {
+            super::pool_acquire_records_success_timeout_and_error_with_wait_time().await;
+        }
+
+        #[tokio::test(flavor = "current_thread")]
+        #[ignore = "requires Postgres"]
+        async fn advisory_lock_records_success_contention_timeout_and_error() {
+            super::advisory_lock_records_success_contention_timeout_and_error().await;
+        }
     }
 }

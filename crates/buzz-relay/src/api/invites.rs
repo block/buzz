@@ -541,7 +541,7 @@ fn claim_key_rate_limited(
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
