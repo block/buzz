@@ -1736,8 +1736,17 @@ test("copy a rendered code block and paste it back as code", async ({
   await codeBlock.hover();
   await expect(copyButton).toHaveCSS("opacity", "1");
   await copyButton.click();
+  // Chromium hands back CRLF when it reads text/plain off the Windows
+  // clipboard, so compare logical lines rather than the platform separator.
+  // The app writes LF: `copyCodeBlockToClipboard` puts `code` in the blob
+  // verbatim.
   await expect
-    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .poll(async () =>
+      (await page.evaluate(() => navigator.clipboard.readText())).replace(
+        /\r\n/g,
+        "\n",
+      ),
+    )
     .toBe(code);
 
   await input.click();
