@@ -10,6 +10,7 @@ import {
   usePersonasQuery,
   useStartManagedAgentMutation,
   useUpdateManagedAgentMutation,
+  useUpdatePersonaMutation,
 } from "@/features/agents/hooks";
 import { useAgentAccessOwnerOnlyQuery } from "@/features/agents/useAgentAccessOwnerOnly";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
@@ -52,6 +53,7 @@ import {
 } from "./relayMeshModelPicker";
 import {
   computeEditAgentFormValidity,
+  computeLinkedPersonaProviderModelPatch,
   envVarsEqual,
   isEditAgentProviderSaveValid,
   resolveAgentCommandUpdate,
@@ -115,6 +117,7 @@ export function AgentInstanceEditDialog({
   onUpdated?: (agent: ManagedAgent) => void;
 }) {
   const updateMutation = useUpdateManagedAgentMutation();
+  const updatePersonaMutation = useUpdatePersonaMutation();
   const startMutation = useStartManagedAgentMutation();
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
   const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
@@ -726,6 +729,28 @@ export function AgentInstanceEditDialog({
       };
 
       const result = await updateMutation.mutateAsync(input);
+      // #4157: for a linked persona, propagate provider/model edits to the
+      // definition so the config survives restart. Built-in personas (e.g.
+      // Honey, Bumble) ship with provider/model unset; without this write the
+      // edited value is silently dropped and the agent shows "needs
+      // configuration" after restart.
+      if (linkedPersona != null) {
+        const patch = computeLinkedPersonaProviderModelPatch({
+          hasLinkedPersona: linkedPersona != null,
+          provider,
+          model,
+          personaProvider: linkedPersona.provider,
+          personaModel: linkedPersona.model,
+        });
+        if (patch != null) {
+          await updatePersonaMutation.mutateAsync({
+            id: linkedPersona.id,
+            displayName: linkedPersona.displayName,
+            systemPrompt: linkedPersona.systemPrompt,
+            ...patch,
+          });
+        }
+      }
       if (autoRestartOnConfigChange !== agent.autoRestartOnConfigChange) {
         // Standalone setter (mirrors start-on-app-launch) — not part of
         // UpdateManagedAgentInput, so the frozen update shape stays frozen.
