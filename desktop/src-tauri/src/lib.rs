@@ -702,6 +702,7 @@ pub fn run() {
             start_managed_agent,
             stop_managed_agent,
             set_agent_managed_profiles,
+            set_thread_scoped_acp_sessions,
             set_managed_agent_start_on_app_launch,
             set_managed_agent_auto_restart,
             delete_managed_agent,

@@ -283,6 +283,31 @@ with a TypeScript lookup table or an id comparison in a component.
 
 17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. UC FQNs are catalog data and always use the MLflow Chat Completions route, regardless of family-looking text in their components. Global Defaults preserves the discovered model ID as the selected value while its closed trigger renders the provider-scoped display label; do not force the raw persisted ID over that label.
 
+## Channel-only runtime controls
+
+Desktop observer controls identify a channel, not a thread session. The harness
+rejects `cancel_turn` and `switch_model` with `ambiguous_target` when that channel
+has multiple known session scopes, including retained idle scopes. Do not treat
+that result as success or a deferred model switch. Stop feedback waits for the
+harness result matching the control type, channel, and request ID; relay delivery
+alone does not prove that a turn was signalled. A missing result is unconfirmed,
+not success. The activity pane must use its resolved `sessionChannelId` for
+both the outgoing control and result correlation, even without a loaded
+`Channel` object. Stop is unavailable in an unscoped all-channel pane.
+
+Per-thread observer controls remain a separate protocol/UI change. Do not tell
+users to type `!cancel` beside an inline mention: the owner command requires
+kind 9, body exactly `!cancel` after trimming, and the agent's separate `p` tag.
+The automatic-mention picker also inserts literal `@Name` into the body, so it
+does not provide an exact-command workaround. The UI must state this limitation
+rather than offer an ineffective command. An authorized owner can instead use
+the CLI with the channel and target thread root:
+
+```sh
+buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
+  --mention <agent-pubkey> --content '!cancel'
+```
+
 ## The tests that enforce this
 
 - `lib/agentConfigCore.test.mjs` — field model per harness × scope, clearing

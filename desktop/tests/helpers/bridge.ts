@@ -300,6 +300,14 @@ type MockBridgeOptions = {
   closeChannelLiveSubscriptionOnce?: boolean;
   /** Reject successive kind-9 sends with these messages, then resume. */
   sendMessageErrors?: string[];
+  /** Test-only observer control results emitted after mock control publishes. */
+  observerControlResults?: Array<{
+    type: "cancel_turn" | "switch_model";
+    status: string;
+    channelId?: string | null;
+    requestId?: string;
+    modelId?: string;
+  }>;
   /** Reject successive managed-agent starts, then resume. */
   startManagedAgentErrors?: string[];
   /** Delay (ms) after snapshotting a thread-replies page so E2E tests can

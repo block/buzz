@@ -29,6 +29,7 @@ fn base() -> SpawnConfigSnapshot {
         max_turn_duration_seconds: Some(7200),
         parallelism: 1,
         effort_level: Some("high".into()),
+        session_policy: "channel".into(),
     }
 }
 
@@ -72,6 +73,7 @@ fn mutations() -> Vec<Mutation> {
         }),
         ("parallelism", |s| s.parallelism = 8),
         ("effort_level", |s| s.effort_level = None),
+        ("session_policy", |s| s.session_policy = "thread".into()),
     ]
 }
 

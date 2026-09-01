@@ -1012,7 +1012,7 @@ pub async fn start_managed_agent(
     // with no persisted avatar, this also backfills the avatar from the relay.
     if result.is_ok()
         && state
-            .managed_agent_profile_reconcile_enabled
+            .managed_agent_profile_reconcile_enabled()
             .load(std::sync::atomic::Ordering::Acquire)
     {
         let reconcile_pubkey = pubkey.clone();

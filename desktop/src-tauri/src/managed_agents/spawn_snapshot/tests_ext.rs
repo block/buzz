@@ -187,3 +187,77 @@ fn canonical_effort_edit_changes_snapshot() {
         "a canonical effort edit must trip the restart badge"
     );
 }
+
+use crate::managed_agents::spawn_snapshot::{
+    eligible_restart_diff, prospective_spawn_config_snapshot, RestartDiffEntry,
+    SpawnConfigSnapshot, TrackedSpawnState,
+};
+use crate::managed_agents::AcpSessionPolicy;
+
+/// Build the prospective snapshot for a bare record under one session policy.
+fn snapshot_under(policy: AcpSessionPolicy) -> SpawnConfigSnapshot {
+    prospective_spawn_config_snapshot(
+        &record(),
+        &[],
+        &[],
+        "wss://ws.example",
+        &Default::default(),
+        false,
+        policy,
+    )
+}
+
+/// Restart-badge entries for a stamped→current session-policy transition,
+/// exercising the real badge path (`eligible_restart_diff`).
+fn policy_transition_diff(
+    stamped: &SpawnConfigSnapshot,
+    current: &SpawnConfigSnapshot,
+) -> Vec<RestartDiffEntry> {
+    eligible_restart_diff(
+        false,
+        Some(TrackedSpawnState {
+            stamped,
+            current,
+            stamped_availability: None,
+            current_availability: None,
+        }),
+    )
+}
+
+#[test]
+fn toggling_session_policy_while_running_requires_restart() {
+    // Regression: flipping the desktop experiment must reach the config-drift
+    // path so a running agent restarts onto the new policy. The harness reads
+    // BUZZ_ACP_SESSION_POLICY only at launch, so without the snapshot field the
+    // badge stayed dark and the process silently kept the old policy.
+    let channel = snapshot_under(AcpSessionPolicy::Channel);
+    let thread = snapshot_under(AcpSessionPolicy::Thread);
+
+    // channel -> thread lights exactly the session_policy entry.
+    let forward = policy_transition_diff(&channel, &thread);
+    assert_eq!(
+        forward.iter().map(|e| e.field.as_str()).collect::<Vec<_>>(),
+        vec!["session_policy"],
+    );
+
+    // thread -> channel is equally visible (rollback also restarts).
+    let reverse = policy_transition_diff(&thread, &channel);
+    assert_eq!(
+        reverse.iter().map(|e| e.field.as_str()).collect::<Vec<_>>(),
+        vec!["session_policy"],
+    );
+}
+
+#[test]
+fn unchanged_session_policy_does_not_require_restart() {
+    // An unchanged policy must not badge — the default (channel) case must stay
+    // byte-for-byte inert so existing running agents don't flash a spurious
+    // restart badge after this change ships.
+    let channel = snapshot_under(AcpSessionPolicy::Channel);
+    assert!(
+        policy_transition_diff(&channel, &snapshot_under(AcpSessionPolicy::Channel)).is_empty()
+    );
+
+    let thread = snapshot_under(AcpSessionPolicy::Thread);
+    assert!(policy_transition_diff(&thread, &snapshot_under(AcpSessionPolicy::Thread)).is_empty());
+}
