@@ -14,7 +14,12 @@ const emojiNames = (items) => items.map((item) => item.emoji);
 
 async function harness(
   t,
-  { scope = "community-a", palette = [], recents = [] } = {},
+  {
+    scope = "community-a",
+    palette = [],
+    recents = [],
+    actionBars = false,
+  } = {},
 ) {
   const dom = new JSDOM(
     "<!doctype html><html><body><div id='root'></div></body></html>",
@@ -66,6 +71,33 @@ async function harness(
   const { recordQuickReactionEmoji } = await import(
     "./useQuickReactionEmojis.ts"
   );
+  // Real action bars keep their query hooks, quick buttons and closed menus.
+  // Only fetching is disabled below; the production observer path is not mocked.
+  const { MessageActionBar } = actionBars
+    ? await import("./MessageActionBar.tsx")
+    : {};
+  const { TooltipProvider } = actionBars
+    ? await import("@/shared/ui/tooltip.tsx")
+    : {};
+  const selectReaction = async () => {};
+  function ActionBar({ id }) {
+    return React.createElement(MessageActionBar, {
+      message: {
+        id: `message-${id}`,
+        author: "Test author",
+        pubkey: "a".repeat(64),
+        createdAt: 1,
+        time: "12:00",
+        body: "Quick-reaction sharing regression",
+        depth: 0,
+        pending: false,
+        kind: 9,
+        tags: [],
+      },
+      reactions: [],
+      onReactionSelect: selectReaction,
+    });
+  }
   const makeClient = (data) => {
     const client = new QueryClient({
       defaultOptions: {
@@ -142,12 +174,16 @@ async function harness(
           React.createElement(
             QuickReactionProvider,
             { communityScope: options.scope },
-            Array.from({ length: options.count }, (_, id) =>
-              React.createElement(Consumer, {
-                id,
-                key: id,
-                tick: options.tick,
-              }),
+            React.createElement(
+              actionBars ? TooltipProvider : React.Fragment,
+              null,
+              Array.from({ length: options.count }, (_, id) =>
+                React.createElement(actionBars ? ActionBar : Consumer, {
+                  id,
+                  key: id,
+                  tick: options.tick,
+                }),
+              ),
             ),
           ),
         ),
@@ -241,6 +277,62 @@ test("many quick-reaction consumers reuse one preparation, query observer and st
   assert.strictEqual(h.items(), prepared);
   await h.storageEvent("community-a");
   assert.strictEqual(h.items(), prepared);
+  await h.unmount();
+  assert.equal(h.query().getObserversCount(), 0);
+  assert.equal(h.storageListeners.size, 0);
+});
+
+test("real MessageActionBars share quick-tray preparation, observer and storage listener", async (t) => {
+  let paletteReads = 0;
+  const palette = Array.from({ length: 128 }, (_, index) => ({
+    get shortcode() {
+      paletteReads += 1;
+      return index === 0 ? "shipit" : `custom_${index}`;
+    },
+    url: `https://cdn.example.test/emoji/${index}.png`,
+  }));
+  const h = await harness(t, {
+    actionBars: true,
+    palette,
+    recents: [entry(":shipit:", 4)],
+  });
+  await h.render();
+  const readsAfterPreparation = paletteReads;
+  assert.ok(readsAfterPreparation > 0);
+  for (const count of [16, 16, 1, 16]) {
+    await h.render({ count });
+    const bars = h.dom.window.document.querySelectorAll(
+      '[data-testid^="message-action-bar-"]',
+    );
+    assert.equal(bars.length, count, "mount the real production action bars");
+    for (const bar of bars) {
+      const buttons = bar.querySelectorAll('button[aria-label^="React with "]');
+      assert.equal(buttons.length, 3, "render the actual quick buttons");
+      assert.equal(
+        buttons[0].querySelector("img")?.getAttribute("alt"),
+        ":shipit:",
+      );
+      assert.equal(
+        buttons[0].querySelector("img")?.getAttribute("src"),
+        palette[0].url,
+      );
+    }
+    assert.equal(
+      h.query().getObserversCount(),
+      1,
+      "real rows must not add palette observers",
+    );
+    assert.equal(
+      h.storageListeners.size,
+      1,
+      "real rows must not add storage listeners",
+    );
+    assert.equal(
+      paletteReads,
+      readsAfterPreparation,
+      "real row mounts/rerenders must not prepare the palette",
+    );
+  }
   await h.unmount();
   assert.equal(h.query().getObserversCount(), 0);
   assert.equal(h.storageListeners.size, 0);
