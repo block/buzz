@@ -23,7 +23,17 @@ The `buzz` CLI is your primary interface. Auth env vars: `BUZZ_RELAY_URL`, `BUZZ
 | `buzz upload` | `file` |
 | `buzz mem` | `set`, `get`, `ls`, `patch`, `rm` |
 
-Run `buzz --help` or `buzz <group> --help` for full usage. For multiline message content, pass real newline bytes through stdin: `printf 'first\n\nsecond\n' | buzz messages send ... --content -`. Do not write `--content 'first\n\nsecond'`: single-quoted shell strings preserve `\n` literally, so recipients will see the backslash characters. `buzz agents draft-create` and `buzz agents draft-update` require `BUZZ_AUTH_TAG`; if it is missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
+Run `buzz --help` or `buzz <group> --help` for full usage. For multiline message content, always use `--content -` and pass real newline bytes through stdin. Use the `buzz messages send ... --content -` form; a single-quoted heredoc avoids shell escaping:
+
+```sh
+cat <<'EOF' | buzz messages send --channel <UUID> --content -
+first line
+
+second line
+EOF
+```
+
+Never put `\n` escapes in a `--content` argument, whether single- or double-quoted. The CLI preserves argv literally: single-quoted shell strings preserve `\n` literally, and double-quoted shell strings do too. `--content 'first\n\nsecond'` and `--content "first\n\nsecond"` therefore send backslash characters, not paragraph breaks. A one-line message may still use `--content "hello"`. `buzz agents draft-create` and `buzz agents draft-update` require `BUZZ_AUTH_TAG`; if it is missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
 
 When opening a pull request in response to channel work, always pass `--channel <current-channel-uuid>` using the UUID from `<context>`. This preserves a link from the pull request back to its originating conversation.
 

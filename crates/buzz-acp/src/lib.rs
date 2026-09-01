@@ -5078,6 +5078,10 @@ mod agent_draft_prompt_tests {
         assert!(prompt.contains("pass real newline bytes through stdin"));
         assert!(prompt.contains("single-quoted shell strings preserve `\\n` literally"));
         assert!(prompt.contains("buzz messages send ... --content -"));
+        assert!(prompt.contains("always use `--content -`"));
+        assert!(prompt.contains("single- or double-quoted"));
+        assert!(prompt.contains("The CLI preserves argv literally"));
+        assert!(prompt.contains("cat <<'EOF'"));
     }
 
     #[test]
