@@ -148,6 +148,16 @@ export type RunOutcome =
       truncated: boolean;
     };
 
+/** The daemon omits empty selection arrays on the wire (serde
+ * `skip_serializing_if`); restore them so `Selection` is total in the app. */
+function normalizeSelection(s: Partial<Selection> | undefined): Selection {
+  return {
+    channels: s?.channels ?? [],
+    authors: s?.authors ?? [],
+    kinds: s?.kinds ?? [],
+  };
+}
+
 const BASE = "/api";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -180,8 +190,14 @@ export const api = {
   status: () => request<Status>("/status"),
   channels: () => request<{ channels: Channel[] }>("/channels"),
   event: (id: string) => request<EventItem>(`/events/${id}`),
-  preview: (selection: Selection, window: TimeWindow) =>
-    request<Preview>("/select/preview", post({ selection, ...window })),
+  preview: async (selection: Selection, window: TimeWindow) => {
+    const p = await request<Preview>(
+      "/select/preview",
+      post({ selection, ...window }),
+    );
+    p.selection = normalizeSelection(p.selection);
+    return p;
+  },
   events: (
     selection: Selection,
     window: TimeWindow,
@@ -192,7 +208,13 @@ export const api = {
       "/select/events",
       post({ selection, ...window, limit, after }),
     ),
-  folds: () => request<{ folds: FoldRow[] }>("/folds"),
+  folds: async () => {
+    const r = await request<{ folds: FoldRow[] }>("/folds");
+    for (const f of r.folds) {
+      f.spec.selection = normalizeSelection(f.spec.selection);
+    }
+    return r;
+  },
   putFold: (
     name: string,
     body: {
@@ -212,8 +234,11 @@ export const api = {
     request<{ fold: string; artifacts: ArtifactSummary[] }>(
       `/folds/${name}/artifacts`,
     ),
-  artifact: (name: string, version: number) =>
-    request<Artifact>(`/folds/${name}/artifacts/${version}`),
+  artifact: async (name: string, version: number) => {
+    const a = await request<Artifact>(`/folds/${name}/artifacts/${version}`);
+    a.selection = normalizeSelection(a.selection);
+    return a;
+  },
 };
 
 export function selectionIsRunnable(s: Selection): boolean {
