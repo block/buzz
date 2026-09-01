@@ -7430,8 +7430,8 @@ mod error_outcome_emission_tests {
         let Ok(command) = std::env::var("BUZZ_TEST_HERMES_ACP") else {
             return;
         };
-        let profile = std::env::var("BUZZ_TEST_HERMES_PROFILE")
-            .unwrap_or_else(|_| "jake".to_string());
+        let profile =
+            std::env::var("BUZZ_TEST_HERMES_PROFILE").unwrap_or_else(|_| "jake".to_string());
         let args = vec!["--profile".to_string(), profile.clone()];
         let mut client = AcpClient::spawn(&command, &args, &[], false)
             .await
