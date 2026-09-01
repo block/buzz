@@ -909,14 +909,14 @@ mod postgres_tests {
         assert!(!migrations[0].sql.as_str().contains("30179"));
 
         // Accumulator kinds 30640 (fold spec) + 4640 (artifact version) FTS
-        // exclusion (0041): author-only NIP-44 ciphertext, same
+        // exclusion (0043): author-only NIP-44 ciphertext, same
         // wrap-the-existing-expression shape as 0014/0033.
-        assert_eq!(migrations[40].version, 41);
-        assert!(migrations[40]
+        assert_eq!(migrations[42].version, 43);
+        assert!(migrations[42]
             .sql
             .as_str()
             .contains("kind IN (4640, 30640)"));
-        assert!(migrations[40].sql.as_str().contains("search_tsv"));
+        assert!(migrations[42].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30640"));
         assert!(include_str!("../../../../schema/schema.sql").contains(
             "kind IN (1059, 4640, 30179, 30300, 30350, 30622, 30640, 44100, 44101, 44200)"
