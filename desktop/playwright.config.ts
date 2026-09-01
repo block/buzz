@@ -133,6 +133,7 @@ export default defineConfig({
         "**/buzz-theme-screenshots.spec.ts",
         "**/appearance-previews.spec.ts",
         "**/channel-sort.spec.ts",
+        "**/sidebar-drag-activation.spec.ts",
         "**/identity-lost.spec.ts",
         "**/deep-link-invite.spec.ts",
         "**/invite-link-copy.spec.ts",
