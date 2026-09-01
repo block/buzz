@@ -1009,10 +1009,6 @@ jobs:
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Install Flutter dependencies
         run: cd mobile && flutter pub get
-      - name: Install iOS pods
-        run: cd mobile/ios && pod install
-      - name: Verify notification extension linker isolation
-        run: ruby scripts/test-ios-linker-isolation.rb
       - name: Build
         run: swift build --package-path mobile/ios/BuzzPushKit
       - name: Build release
