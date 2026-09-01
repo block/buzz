@@ -304,7 +304,7 @@ jobs:
     name: Desktop
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [changes, desktop-core, desktop-smoke-e2e]
+    needs: [changes, desktop-core, desktop-smoke-e2e, desktop-windows-build]
     if: always() && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
     permissions:
       contents: read
@@ -317,6 +317,10 @@ jobs:
           fi
           if [ "${{ needs.desktop-smoke-e2e.result }}" != "success" ]; then
             echo "Desktop Smoke E2E shards finished with: ${{ needs.desktop-smoke-e2e.result }}"
+            exit 1
+          fi
+          if [ "${{ needs.desktop-windows-build.result }}" != "success" ]; then
+            echo "Desktop Windows Build finished with: ${{ needs.desktop-windows-build.result }}"
             exit 1
           fi
           echo "Desktop jobs passed"
@@ -380,6 +384,7 @@ jobs:
             -p buzz-relay \
             -p buzz-test-client \
             --lib \
+            --bin buzz-relay \
             --test e2e_event_reminder \
             --archive-file target/ci/backend-integration-tests.tar.zst
       - name: Save relay artifacts cache
@@ -684,6 +689,18 @@ jobs:
           VALUES ('00000000-0000-4000-8000-00000000c0de', 'localhost:3000')
           ON CONFLICT (lower(host)) DO NOTHING
           ;"
+      - name: Workflow message provenance tests
+        # The relay's workflow_sink suite is not selected by the infra-free
+        # unit job. Run both its pure tests and ignored PostgreSQL tests here so
+        # authored-template provenance cannot regress behind a green CI build.
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and test(/workflow_sink/)' \
+            --run-ignored all
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+          TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
       - name: Replaceable persistence PostgreSQL tests
         # Transaction, concurrency, and mention-index coverage for the
         # replaceable-event store seam. These tests require real Postgres and
@@ -709,6 +726,31 @@ jobs:
         env:
           DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
           TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+      - name: Writer session timeout guardrails
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-db) and test(session_timeouts_install_through_db_new_and_bound_lock_waits)' \
+            --run-ignored ignored-only
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+          TEST_DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+      - name: Audit writer session timeout guardrails
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and test(audit_writer_pool_installs_timeouts_and_bounds_advisory_lock_waits)' \
+            --run-ignored ignored-only
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
+      - name: Audit worker lock-timeout recovery
+        run: |
+          cargo nextest run \
+            --archive-file target/ci/backend-integration-tests.tar.zst \
+            -E 'package(buzz-relay) and test(audit_worker_retries_lock_timeout_until_original_entry_is_appended_once)' \
+            --run-ignored ignored-only
+        env:
+          DATABASE_URL: postgres://buzz:${{ env.BUZZ_TEST_POSTGRES_PASSWORD }}@localhost:5432/buzz
       - name: Start relay
         run: |
           chmod +x ./target/ci/buzz-relay
@@ -1094,6 +1136,36 @@ jobs:
             -p buzz-dev-mcp \
             -p git-credential-nostr \
             -p git-sign-nostr
+
+  desktop-windows-build:
+    name: Desktop Windows Build
+    runs-on: windows-latest
+    timeout-minutes: 20
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.14.1
+          package-manager-cache: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 11.4.0
+      - name: Install desktop dependencies
+        shell: bash
+        run: pnpm install --frozen-lockfile
+      - name: Build both protected-feature selections
+        shell: pwsh
+        run: |
+          Remove-Item Env:VITE_BUZZ_BESTIE -ErrorAction SilentlyContinue
+          pnpm -C desktop build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:VITE_BUZZ_BESTIE = "1"
+          pnpm -C desktop build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   windows-rust:
     name: Windows Rust (x86_64-pc-windows-msvc)

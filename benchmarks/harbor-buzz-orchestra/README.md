@@ -69,8 +69,8 @@ directory of this harness, not a subdirectory of it — scores Buzz product
 behavior alongside task correctness. It covers direct thread replies, callback
 user mentions, targeted reads of named paths, exact channel membership,
 multiline delivery, non-waking narrative names, batched reports, cross-thread
-isolation, and ambiguous identities. Run one task with the production base
-prompt from the checked-out source build:
+isolation, ambiguous identities, and explicit cold-memory retrieval. Run one
+task with the production base prompt from the checked-out source build:
 
 ```bash
 just benchmark \

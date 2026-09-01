@@ -342,6 +342,7 @@ function AuthorOption({
       <UserAvatar
         avatarUrl={candidate.avatarUrl}
         displayName={label}
+        shape={candidate.isAgent ? "squircle" : "circle"}
         size="md"
       />
       <span className="min-w-0 max-w-full">

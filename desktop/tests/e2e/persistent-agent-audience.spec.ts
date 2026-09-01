@@ -690,6 +690,188 @@ test("always-mentioned agents remain selected without replaying their animation 
   ).toHaveCount(1);
 });
 
+test("the unfocused main composer keeps its dismissed mention menu closed through a thread send", async ({
+  page,
+}) => {
+  await installAudienceFixtures(page, { sendMessageDelayMs: 1_500 });
+  await openGeneral(page);
+
+  const mainComposer = channelComposer(page);
+  const mainInput = mainComposer.getByTestId("message-input");
+  await automaticallyMention(mainComposer, "Morgarita");
+  await mainInput.fill("@Morgarita earlier message");
+  await mainInput.press("Enter");
+  await expect(mainInput).toHaveText("@Morgarita ");
+  await mainInput.fill("@Morgarita");
+  await expect(mainInput).toHaveText("@Morgarita");
+  await expect(mainComposer.getByTestId("mention-autocomplete")).toBeVisible();
+  await mainInput.press("Escape");
+  await expect(mainComposer.getByTestId("mention-autocomplete")).toHaveCount(0);
+
+  const rootMessage = page.locator(
+    `[data-testid="message-row"][data-message-id="${THREAD_ROOT_ID}"]`,
+  );
+  await rootMessage
+    .getByRole("button", { name: "Reply" })
+    .evaluate((button: HTMLButtonElement) => button.click());
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+  const threadInput = threadPanel.getByTestId("message-input");
+  await threadInput.click();
+  await expect(threadInput).toBeFocused();
+  await expect(mainComposer.getByTestId("mention-autocomplete")).toHaveCount(0);
+  await mainComposer.evaluate((element) => {
+    element.dataset.mentionMenuReopened = "false";
+    new MutationObserver(() => {
+      if (element.querySelector('[data-testid="mention-autocomplete"]')) {
+        element.dataset.mentionMenuReopened = "true";
+      }
+    }).observe(element, { childList: true, subtree: true });
+  });
+
+  const reply = `Thread reply ${Date.now()}`;
+  await threadInput.fill(reply);
+  await threadInput.press("Enter");
+  await expect(mainInput).toHaveAttribute("contenteditable", "false");
+  await expect(threadPanel).toContainText(reply);
+  await expect(mainInput).toHaveAttribute("contenteditable", "true");
+
+  expect(await mainComposer.getAttribute("data-mention-menu-reopened")).toBe(
+    "false",
+  );
+  await expect(mainComposer.getByTestId("mention-autocomplete")).toHaveCount(0);
+
+  // Refocusing the drafted composer must not resurrect the menu the user
+  // dismissed with Escape: the setEditable toggles around the send used to
+  // emit a phantom update that replayed the stale "@Morgarita" query and
+  // flipped the mention state back open, so a bare click brought the menu
+  // back without any typing.
+  await mainInput.click();
+  await expect(mainInput).toBeFocused();
+  await expect(mainComposer.getByTestId("mention-autocomplete")).toHaveCount(0);
+  expect(await mainComposer.getAttribute("data-mention-menu-reopened")).toBe(
+    "false",
+  );
+});
+
+test("pressing a mention overlay's own container keeps it open", async ({
+  page,
+}) => {
+  await keepMentionedAgentsPinned(page);
+  await installAudienceFixtures(page);
+  await openGeneral(page);
+
+  const composer = channelComposer(page);
+  const input = composer.getByTestId("message-input");
+  await composer.getByTestId("message-insert-mention").click();
+  const list = composer.getByTestId("mention-autocomplete");
+  await expect(list).toBeVisible();
+  await expect(input).toBeFocused();
+
+  // A mousedown landing on the list container itself — its padding ring here,
+  // a native scrollbar on platforms that render one — steals focus from the
+  // editor unless the default is prevented, and the focus gate would then
+  // unmount the menu mid-press.
+  const listBox = await list.boundingBox();
+  if (!listBox) throw new Error("mention list is not laid out");
+  await list.click({ position: { x: 2, y: listBox.height / 2 } });
+  await expect(input).toBeFocused();
+  await expect(list).toBeVisible();
+
+  // Same hazard on the options surface, where it needs no exotic scrollbar
+  // setting to reproduce: the switch's label text is a container press, so the
+  // overlay used to vanish before the forwarded click reached the switch.
+  await composer.getByTestId("mention-options-trigger").click();
+  const preference = composer.getByTestId("mention-keep-agents-pinned-toggle");
+  await expect(preference).toHaveAttribute("data-state", "checked");
+  await composer
+    .getByText("Automatically mention agents", { exact: true })
+    .click();
+  await expect(preference).toHaveAttribute("data-state", "unchecked");
+  await expect(input).toBeFocused();
+  await expect(list).toBeVisible();
+});
+
+test("the mention Options controls are reachable and operable by keyboard", async ({
+  page,
+}) => {
+  await keepMentionedAgentsPinned(page);
+  await installAudienceFixtures(page);
+  await openThread(page);
+
+  const mainComposer = channelComposer(page);
+  const mainInput = mainComposer.getByTestId("message-input");
+  await mainInput.click();
+  await mainInput.fill("@Mor");
+  const list = mainComposer.getByTestId("mention-autocomplete");
+  await expect(list).toBeVisible();
+  await expect(mainInput).toBeFocused();
+
+  // Trip a flag if the overlay ever unmounts from here on — "operable while
+  // the surface stays mounted" has to hold through every focus handoff below,
+  // not just at the polled assertion boundaries.
+  await mainComposer.evaluate((element) => {
+    element.dataset.mentionMenuUnmounted = "false";
+    new MutationObserver(() => {
+      if (!element.querySelector('[data-testid="mention-autocomplete"]')) {
+        element.dataset.mentionMenuUnmounted = "true";
+      }
+    }).observe(element, { childList: true, subtree: true });
+  });
+
+  // Forward Tab still selects the highlighted suggestion, so Shift+Tab is the
+  // route into the overlay. It only reaches the Options controls if the focus
+  // gate treats them as composer-owned focus rather than unmounting on the
+  // editor's blur.
+  await mainInput.press("Shift+Tab");
+  const optionsTrigger = mainComposer.getByTestId("mention-options-trigger");
+  await expect(optionsTrigger).toBeFocused();
+
+  await page.keyboard.press("Enter");
+  const preference = mainComposer.getByTestId(
+    "mention-keep-agents-pinned-toggle",
+  );
+  await expect(preference).toBeVisible();
+  await expect(preference).toHaveAttribute("data-state", "checked");
+
+  // The switch sits before its trigger in the expanded surface's tab order.
+  await page.keyboard.press("Shift+Tab");
+  await expect(preference).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(preference).toHaveAttribute("data-state", "unchecked");
+
+  await expect(list).toBeVisible();
+  expect(await mainComposer.getAttribute("data-mention-menu-unmounted")).toBe(
+    "false",
+  );
+
+  // Escape is the way back out: focus returns to the editor and the menu
+  // closes, rather than stranding focus on a control that just unmounted.
+  await page.keyboard.press("Escape");
+  await expect(mainInput).toBeFocused();
+  await expect(list).toHaveCount(0);
+
+  // Forward Tab is unchanged by the Shift+Tab route.
+  await mainInput.fill("@Morg");
+  await expect(list).toBeVisible();
+  await mainInput.press("Tab");
+  await expect(mainInput).toHaveText("@Morgarita ");
+  await expect(list).toHaveCount(0);
+
+  // Ownership is still per-composer: focus moving to a sibling composer hides
+  // this composer's menu, which is what stops a background composer from
+  // resurrecting a stale one. Programmatic focus, not a click — a pointerdown
+  // would dismiss the menu through its outside-press handler and mask the gate
+  // under test.
+  await mainInput.fill("@Mor");
+  await expect(list).toBeVisible();
+  const threadInput = threadComposer(page).getByTestId("message-input");
+  await threadInput.focus();
+  await expect(threadInput).toBeFocused();
+  await expect(list).toHaveCount(0);
+});
+
 test("a failed always-mentioned send shakes the composer avatar without replaying its selection animation", async ({
   page,
 }) => {

@@ -745,6 +745,7 @@ class _NewDirectMessageSheet extends HookConsumerWidget {
                               fontWeight: FontWeight.w600,
                             ),
                           ),
+                          isAgent: user.isAgent,
                         ),
                         title: Text(
                           user.label,
@@ -847,6 +848,7 @@ class _SelectedDmRecipientChip extends StatelessWidget {
                           fontWeight: FontWeight.w600,
                         ),
                       ),
+                      isAgent: user.isAgent,
                     ),
                     const SizedBox(width: Grid.xxs),
                     Flexible(

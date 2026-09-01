@@ -422,6 +422,7 @@ export function AgentSessionThreadPanel({
           avatarUrl={agentProfile?.avatarUrl ?? null}
           className="size-9"
           label={agentLabel}
+          shape="squircle"
           testId="agent-session-agent-avatar"
         />
         <div className="min-w-0 flex-1">

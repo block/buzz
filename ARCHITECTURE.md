@@ -325,6 +325,15 @@ This prevents a race where a non-member receives live fan-out events from a priv
 
 After registering, the REQ handler queries Postgres for stored events matching the filters (up to 500 per filter, hard cap). These are sent as `["EVENT", sub_id, event]` frames before `["EOSE", sub_id]`. New events arriving after EOSE are delivered via the fan-out path.
 
+**Client consumption invariant.** A client rebuilding channel state must
+open its live subscription before (or overlapping) the finite history
+REQ — a gap between the last backfill page and live delivery silently
+drops events and rebuilds stale state (PR #3995). When the relay sends a
+terminal CLOSED, the subscription is removed server-side; any client-side
+ownership tied to it (chunk/scope fences) must be released in the same
+step, or live delivery stops permanently while the client believes it is
+subscribed (PR #6996).
+
 ---
 
 ## 6. Crate Reference

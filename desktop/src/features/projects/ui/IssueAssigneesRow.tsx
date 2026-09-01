@@ -68,7 +68,10 @@ export function IssueAssigneeFacepile({
         const label = labelForPubkey(pubkey, profiles);
         return (
           <span
-            className="inline-flex rounded-full ring-1 ring-background"
+            className={cn(
+              "inline-flex ring-1 ring-background",
+              profile?.isAgent ? "rounded-[30%]" : "rounded-full",
+            )}
             key={pubkey}
             title={`Assigned to ${label}`}
           >
@@ -76,6 +79,7 @@ export function IssueAssigneeFacepile({
               accent={profile?.isAgent === true}
               avatarUrl={profile?.avatarUrl ?? null}
               displayName={label}
+              shape={profile?.isAgent ? "squircle" : "circle"}
               size="xs"
             />
           </span>
@@ -232,6 +236,7 @@ export function IssueAssigneesRow({
             accent={profile?.isAgent === true}
             avatarUrl={profile?.avatarUrl ?? null}
             displayName={label}
+            shape={profile?.isAgent ? "squircle" : "circle"}
             size="xs"
           />
         );
@@ -241,7 +246,10 @@ export function IssueAssigneesRow({
               {canUnassign ? (
                 <button
                   aria-label={`Unassign ${label}`}
-                  className="group relative inline-flex rounded-full"
+                  className={cn(
+                    "group relative inline-flex",
+                    profile?.isAgent ? "rounded-[30%]" : "rounded-full",
+                  )}
                   data-testid={`${testIdPrefix}-unassign-${normalizePubkey(pubkey)}`}
                   disabled={unassignMutation.isPending}
                   onClick={() => {
@@ -250,7 +258,12 @@ export function IssueAssigneesRow({
                   type="button"
                 >
                   {avatar}
-                  <span className="absolute inset-0 flex items-center justify-center rounded-full bg-background/80 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100">
+                  <span
+                    className={cn(
+                      "absolute inset-0 flex items-center justify-center bg-background/80 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100",
+                      profile?.isAgent ? "rounded-[30%]" : "rounded-full",
+                    )}
+                  >
                     <X className="h-3 w-3 text-foreground" />
                   </span>
                 </button>
@@ -361,6 +374,7 @@ export function IssueAssigneesRow({
                         accent={candidate.isAgent}
                         avatarUrl={candidate.avatarUrl}
                         displayName={label}
+                        shape={candidate.isAgent ? "squircle" : "circle"}
                         size="xs"
                       />
                       <span className="min-w-0 flex-1">

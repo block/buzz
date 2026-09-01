@@ -5,6 +5,7 @@ import { ChevronDown } from "lucide-react";
 import { buildOutgoingMessage } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useChannelLinks } from "@/features/messages/lib/useChannelLinks";
 import type { ChannelSuggestion } from "@/features/messages/lib/useChannelLinks";
+import { useComposerFocusOwnership } from "@/features/messages/lib/useComposerFocusOwnership";
 import { useMediaUpload } from "@/features/messages/lib/useMediaUpload";
 import { isMentionCodeContext } from "@/features/messages/lib/mentionCodeContext";
 import { useMentions } from "@/features/messages/lib/useMentions";
@@ -101,6 +102,8 @@ export function ForumComposer({
     mentions.isMentionOpen || channelLinks.isChannelOpen;
 
   const submitMessageRef = React.useRef<() => void>(() => {});
+  const formRef = React.useRef<HTMLFormElement>(null);
+  const composerOwnsFocus = useComposerFocusOwnership(formRef);
 
   // Set after `useLinkEditor` exists; the editor's link-click handler
   // delegates through this ref to break the hook ordering cycle.
@@ -500,6 +503,7 @@ export function ForumComposer({
         }}
         onFocusCapture={expandCompactComposer}
         onSubmit={handleSubmit}
+        ref={formRef}
       >
         {media.isDragOver && <DropZoneOverlay />}
         {isCompactLayout ? (
@@ -526,6 +530,7 @@ export function ForumComposer({
                   ? channelLinks.channelSuggestions
                   : []
               }
+              composerOwnsFocus={composerOwnsFocus}
               mentionSelectedIndex={mentions.mentionSelectedIndex}
               mentionSuggestions={
                 mentions.isMentionOpen ? mentions.suggestions : []

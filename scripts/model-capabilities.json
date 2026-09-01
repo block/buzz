@@ -603,6 +603,24 @@
     },
     {
       "provider": "databricks_v2",
+      "raw_model_id": "goose-claude-4-7-opus",
+      "registry_label": "Claude Opus 4.7",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes copied from equivalent registry endpoint databricks-claude-opus-4-7 for the discovered Goose endpoint id",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
       "raw_model_id": "databricks-gpt-5-6-luna",
       "registry_label": "GPT-5.6 Luna",
       "thinking_mode": "none",
@@ -759,6 +777,23 @@
       "databricks_v2_wire_route": "anthropic-messages",
       "normalization_policy": "none",
       "_provenance": "all axes materialized from family:anthropic-adaptive-no-xhigh-sonnet-4-6",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "goose-claude-4-6-sonnet",
+      "registry_label": "Claude Sonnet 4.6",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes copied from equivalent registry endpoint databricks-claude-sonnet-4-6 for the discovered Goose endpoint id",
       "_source": "registry_labels"
     },
     {
@@ -1030,6 +1065,25 @@
       "_reconciliation": "adopt",
       "_reconciliation_note": "The exact databricks endpoint is absent from the models.dev databricks catalog, but the first-party deepseek entry advertises a reasoning toggle plus effort [high, max]. Per the Kimi-K3 precedent, adopt the model-level effort list despite endpoint absence. The toggle is not representable on the MLflow Chat request schema (reasoning_effort only), so thinking_mode stays none and default_effort is null — mirroring the kimi-k3 record.",
       "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.deepseek.models[\"deepseek-v4-pro\"].reasoning_options=[{\"type\":\"toggle\"},{\"type\":\"effort\",\"values\":[\"high\",\"max\"]}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-glm-5-3",
+      "registry_label": "GLM-5.3",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
     },
     {
       "provider": "databricks_v2",
@@ -1384,6 +1438,25 @@
       "_reconciliation": "adopt",
       "_reconciliation_note": "models.dev advertises toggleable reasoning with [low, high, max], but no default. The Databricks endpoint is absent from its provider catalog, so retain the established MLflow Chat route, adopt the upstream capability set, and leave the effort unset rather than invent a Databricks default. The MLflow Chat request schema cannot express a reasoning toggle (only reasoning_effort is representable), so thinking_mode maps to none rather than the upstream toggle, matching the kimi-k2-7-code precedent.",
       "_reconciliation_doc": "https://models.dev/api.json (retrieved 2026-08-20, SHA-256 7ccb5635f682e4248ad8d39f515fbe3f2bb10e67bbc7fa1b94e66dddb00779e5): providers.moonshotai.models[\"kimi-k3\"].reasoning_options=[{\"type\":\"toggle\"},{\"type\":\"effort\",\"values\":[\"low\",\"high\",\"max\"]}]; Databricks endpoint absent from providers.databricks.models"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-kimi-2-7",
+      "registry_label": "Kimi 2.7",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
     },
     {
       "provider": "databricks_v2",

@@ -66,7 +66,11 @@ export function AgentActivityCard({
             className="relative flex shrink-0 rounded-xl pt-1 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
             type="button"
           >
-            <UserAvatar avatarUrl={avatarUrl} displayName={displayName} />
+            <UserAvatar
+              avatarUrl={avatarUrl}
+              displayName={displayName}
+              shape="squircle"
+            />
             <Bot className="absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full bg-background p-0.5 text-muted-foreground" />
           </button>
         </UserProfilePopover>

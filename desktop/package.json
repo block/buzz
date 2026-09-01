@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsc && node ./scripts/build-protected-feature-artifacts.mjs",
     "build:e2e": "tsc && vite build --mode e2e",
     "typecheck": "tsc --noEmit",
     "check:file-sizes": "node ./scripts/check-file-sizes.mjs",
@@ -14,15 +14,15 @@
     "lint": "biome lint .",
     "check": "biome check . && pnpm check:px-text && pnpm check:pubkey-truncation",
     "format": "biome format --write .",
-    "test": "node --import ./test-loader.mjs --experimental-strip-types --test \"src/**/*.test.mjs\"",
+    "test": "node --import ./test-loader.mjs --experimental-strip-types --test \"src/**/*.test.mjs\" \"scripts/*.test.mjs\"",
     "preview": "vite preview",
-    "tauri": "tauri",
+    "tauri": "node ./scripts/tauri-command.mjs",
     "test:e2e": "pnpm build:e2e && playwright test",
     "test:e2e:smoke": "pnpm build:e2e && playwright test --project=smoke",
     "test:e2e:integration": "pnpm build:e2e && playwright test --project=integration",
     "test:e2e:release-smoke": "pnpm build:e2e && playwright test --config=playwright.release-smoke.config.ts",
     "test:e2e:report": "playwright show-report",
-    "tauri:build": "tauri build"
+    "tauri:build": "node ./scripts/tauri-command.mjs build"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

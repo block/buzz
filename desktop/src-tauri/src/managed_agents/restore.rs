@@ -454,6 +454,10 @@ pub async fn restore_managed_agents_on_launch(
                         pubkey: record.pubkey.clone(),
                         agent_command: effective_command,
                         persona_id: record.persona_id.clone(),
+                        about: crate::managed_agents::record_effective_description(
+                            record,
+                            &reconcile_personas,
+                        ),
                     },
                 ))
             })

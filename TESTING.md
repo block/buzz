@@ -16,6 +16,21 @@ just test               # unit + integration (starts Docker if needed)
 cargo test -p buzz-test-client -- --ignored
 ```
 
+### Review-Proven Test Standards
+
+Mined from the last 25 PRs' review threads (see Review-Proven Rules in
+[AGENTS.md](AGENTS.md)); this is the test-quality rule reviewers litigated
+most:
+
+**Regression tests must bind the production seam and be falsifiable.**
+A guard whose removal doesn't fail any test protects nothing — mutations
+survived the full mobile suite twice (PRs #6996, #7013). Don't bind a
+regression test to a test-only helper instead of the production code
+path (PR #7013). Give pure predicates a table test over the full input
+combination space (PR #6807). Scope Playwright locators — unscoped
+`getByText` in a required smoke test is a strict-mode flake (PR #6980).
+(PRs #6807, #6980, #6996, #7013)
+
 ---
 
 ## Live Local Relay

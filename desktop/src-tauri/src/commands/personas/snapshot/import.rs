@@ -21,7 +21,7 @@ use crate::{
         load_managed_agents, load_personas, save_managed_agents, save_personas, AgentDefinition,
         ManagedAgentRecord, RespondTo,
     },
-    relay::{effective_agent_relay_url, relay_ws_url_with_override, sync_managed_agent_profile},
+    relay::{effective_agent_relay_url, relay_ws_url_with_override},
     util::now_iso,
 };
 
@@ -557,12 +557,14 @@ pub async fn confirm_agent_snapshot_import(
 
         let now = now_iso();
         let persona_id = uuid::Uuid::new_v4().to_string();
-
         // Build persona from snapshot definition.
         let persona = AgentDefinition {
             id: persona_id.clone(),
             display_name: display_name.clone(),
             avatar_url: effective_avatar.clone(),
+            description: crate::managed_agents::effective_agent_description(
+                snapshot.profile.about.as_deref(),
+            ),
             system_prompt: snapshot
                 .definition
                 .system_prompt
@@ -592,13 +594,16 @@ pub async fn confirm_agent_snapshot_import(
 
         // Enqueue the kind:30175 persona event via the retention path.
         super::super::pending::retain_persona_pending(&app, &state, &persona);
-
         // Build the managed agent record — no machine-local commands, no
         // secrets, no lineage from the snapshot.
         let record = ManagedAgentRecord {
             pubkey: pubkey.clone(),
             name: display_name.clone(),
             display_name: None,
+            // Linked definitions remain the sole description authority. Do
+            // not persist a second instance copy that can go stale after an
+            // edit or survive a later definition deletion.
+            description: None,
             slug: None,
             persona_id: Some(persona_id.clone()),
             private_key_nsec: private_key_nsec.clone(),
@@ -680,16 +685,16 @@ pub async fn confirm_agent_snapshot_import(
     // ── Phase 3b: publish kind:0 profile (async, outside lock) ───────────────
     let relay_url =
         effective_agent_relay_url(&record.relay_url, &relay_ws_url_with_override(&state));
-    let profile_sync_error = sync_managed_agent_profile(
+    let profile_sync_error = crate::commands::agents::publish_persona_profile(
         &state,
-        &relay_url,
+        &record.relay_url,
         &agent_keys,
         &display_name,
         effective_avatar.as_deref(),
+        &persona,
         auth_tag.as_deref(),
     )
-    .await
-    .err();
+    .await;
 
     // ── Phase 4: restore memory (async, outside lock) ─────────────────────────
     let memory_total = snapshot.memory.entries.len();

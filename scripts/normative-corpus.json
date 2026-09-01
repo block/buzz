@@ -535,6 +535,45 @@
     }
   },
   {
+    "id": "dbv2-goose-claude-4-6-sonnet-alias-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "goose-claude-4-6-sonnet",
+    "_note": "Probes the discovered Goose Sonnet 4.6 endpoint spelling and label.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": "Claude Sonnet 4.6"
+    }
+  },
+  {
+    "id": "dbv2-goose-claude-4-7-opus-alias-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "goose-claude-4-7-opus",
+    "_note": "Probes the discovered Goose Opus 4.7 endpoint spelling and label.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": "Claude Opus 4.7"
+    }
+  },
+  {
     "id": "dbv2-team-prefix-probe",
     "provider": "databricks_v2",
     "raw_model_id": "team-x-claude-opus-4-7",
@@ -838,6 +877,27 @@
       "databricks_v2_wire_route": "anthropic-messages",
       "normalization_policy": "none",
       "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-kimi-2-7-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-kimi-2-7",
+    "_note": "Probes the canonical Databricks Kimi 2.7 endpoint record.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": "Kimi 2.7"
     }
   },
   {
@@ -2399,6 +2459,27 @@
       "databricks_v2_wire_route": "mlflow-chat",
       "normalization_policy": "openai-standard",
       "registry_label": "DeepSeek V4 Pro"
+    }
+  },
+  {
+    "id": "dbv2-glm-5-3-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-glm-5-3",
+    "_note": "Probes the GLM-5.3 endpoint record and label.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": "GLM-5.3"
     }
   },
   {

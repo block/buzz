@@ -214,7 +214,7 @@ jobs:
     if: needs.prepare-review.outputs.authorized == 'true'
     runs-on: ubuntu-latest
     environment: codex-review
-    timeout-minutes: 30
+    timeout-minutes: 40
     concurrency:
       group: codex-security-review-${{ needs.prepare-review.outputs.pr_number }}
       cancel-in-progress: true
@@ -228,7 +228,7 @@ jobs:
       REVIEW_REPOSITORY: review-target
       REVIEW_DIFF_FILE: .git/codex-review.diff
     outputs:
-      review_json: ${{ steps.run_codex.outputs.final-message }}
+      review_json: ${{ steps.salvage.outputs.review_json }}
     steps:
       - name: Checkout exact pull request head
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -287,6 +287,12 @@ jobs:
       # action's local proxy rather than entering the Codex subprocess.
       - name: Review pull request
         id: run_codex
+        # Codex CLI ≥0.149.x can leave a PTY descendant holding inherited stdio
+        # after the turn completes, stalling the action indefinitely. The output
+        # file is written before the hang, so a timeout here wastes at most 30
+        # minutes instead of the full 40, and the salvage step recovers the result.
+        timeout-minutes: 30
+        continue-on-error: true
         uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e # v1.12
         env:
           # Checkout and fetch are complete. Remove runner credentials from the
@@ -306,6 +312,8 @@ jobs:
           safety-strategy: drop-sudo
           permission-profile: ':read-only'
           working-directory: ${{ github.workspace }}/${{ env.REVIEW_CONTEXT }}
+          # Written before the hang; salvaged below if the step times out.
+          output-file: ${{ runner.temp }}/codex-review.json
           output-schema: |
             {
               "type": "object",
@@ -441,6 +449,51 @@ jobs:
             `overall_risk` of `NONE`. Use `notes` only for material limitations or
             assumptions. Review only the authorized PR range and ground every finding
             in a changed hunk and a plausible failure or abuse path.
+
+      # Salvage the finished review whether the Codex step completed cleanly or
+      # timed out due to the PTY-shutdown hang. Prefer the action's final-message
+      # output (set on a clean exit); fall back to the output file written by the
+      # CLI before the hang. Fail the job only when neither source is available or
+      # the recovered JSON is not a valid review shape.
+      - name: Salvage review output
+        id: salvage
+        if: always()
+        env:
+          FINAL_MESSAGE: ${{ steps.run_codex.outputs.final-message }}
+          CODEX_OUTPUT_FILE: ${{ runner.temp }}/codex-review.json
+        run: |
+          json=""
+
+          # Prefer the action output set on a clean exit.
+          if [ -n "$FINAL_MESSAGE" ]; then
+            json="$FINAL_MESSAGE"
+            echo "source=action-output" >> "$GITHUB_STEP_SUMMARY"
+          elif [ -s "$CODEX_OUTPUT_FILE" ]; then
+            json="$(cat "$CODEX_OUTPUT_FILE")"
+            echo "source=output-file" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No review output from action or output file." >&2
+            exit 1
+          fi
+
+          # Minimal shape validation: non-empty JSON object with overall_risk.
+          if ! echo "$json" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          assert isinstance(d, dict), 'not an object'
+          assert 'overall_risk' in d, 'missing overall_risk'
+          "; then
+            echo "Review JSON failed shape validation." >&2
+            exit 1
+          fi
+
+          # Write as a multiline output (GitHub-safe delimiter).
+          EOF=$(dd if=/dev/urandom bs=15 count=1 2>/dev/null | base64)
+          {
+            echo "review_json<<${EOF}"
+            echo "$json"
+            echo "${EOF}"
+          } >> "$GITHUB_OUTPUT"
 
   post-review:
     name: Post Codex Security Review

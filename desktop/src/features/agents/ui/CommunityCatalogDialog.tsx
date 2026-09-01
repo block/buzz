@@ -2,6 +2,7 @@ import * as React from "react";
 import { ChevronDown, Plus, Upload } from "lucide-react";
 
 import { isCatalogPersonaSelected } from "@/features/agents/lib/catalog";
+import { effectiveAgentDescription } from "@/features/agents/lib/agentDescription";
 import { isCatalogPersona } from "@/features/agents/lib/personaCatalogRelay";
 import type { CatalogTeam } from "@/features/agents/lib/teamCatalogRelay";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
@@ -376,6 +377,7 @@ export function CommunityCatalogDialog({
                       {personas.map((persona) => {
                         const key = personaKey(persona);
                         const isCurrent = key === selection;
+                        const description = effectiveAgentDescription(persona);
                         return (
                           <button
                             aria-current={isCurrent ? "true" : undefined}
@@ -399,8 +401,18 @@ export function CommunityCatalogDialog({
                               label={persona.displayName}
                               untrusted
                             />
-                            <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                              {persona.displayName}
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-sm font-medium">
+                                {persona.displayName}
+                              </span>
+                              {description ? (
+                                <span
+                                  className="line-clamp-2 block break-all text-xs leading-4 text-sidebar-foreground/60"
+                                  data-testid={`community-catalog-agent-description-${persona.id}`}
+                                >
+                                  {description}
+                                </span>
+                              ) : null}
                             </span>
                           </button>
                         );
@@ -710,6 +722,7 @@ export function AgentInstructionReview({
 }
 
 function PersonaCatalogDetail({ persona }: { persona: AgentPersona }) {
+  const description = effectiveAgentDescription(persona);
   const isCommunityEntry =
     isCatalogPersona(persona) && !persona.catalogSource.isOwn;
   const ownerPubkey = isCommunityEntry
@@ -747,6 +760,15 @@ function PersonaCatalogDetail({ persona }: { persona: AgentPersona }) {
           )}
         </div>
       </div>
+
+      {description ? (
+        <p
+          className="min-w-0 max-w-prose break-all text-sm leading-6 text-muted-foreground"
+          data-testid="persona-catalog-description"
+        >
+          {description}
+        </p>
+      ) : null}
 
       <AgentDefinitionMetadata
         isBuiltIn={persona.isBuiltIn}

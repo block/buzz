@@ -50,6 +50,7 @@ function RepositoryOwnerReference({
             accent={ownerIsAgent}
             avatarUrl={ownerAvatarUrl ?? null}
             displayName={ownerName}
+            shape={ownerIsAgent ? "squircle" : "circle"}
             fallbackDelayMs={0}
             size="xs"
             testId="repository-owner-avatar"

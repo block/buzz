@@ -25,10 +25,10 @@ const corpus = JSON.parse(readFileSync(fileURLToPath(corpusUrl), "utf8"));
 // (`_group`) are skipped. Mirrors the Rust corpus filter.
 const executable = corpus.filter((entry) => entry.expect != null);
 
-test("corpus has exactly 135 executable vectors", () => {
+test("corpus has exactly 139 executable vectors", () => {
   // Locks the vector count so a silent corpus edit can't quietly drop coverage;
   // must equal the gate in the Rust suite (model_capabilities.rs).
-  assert.equal(executable.length, 135);
+  assert.equal(executable.length, 139);
 });
 
 test("registry label aliases refuse an unprefixed query", () => {
@@ -50,6 +50,9 @@ test("UC model-family FQNs and goose- aliases humanize onto their base records",
   // must resolve onto the same base databricks_v2 records via the new family
   // tokens. Mirrors the Rust `test_databricks_registry_label_lookup` coverage.
   const cases = [
+    ["goose-claude-4-6-sonnet", "Claude Sonnet 4.6"],
+    ["goose-claude-4-7-opus", "Claude Opus 4.7"],
+    ["goose-kimi-2-7", "Kimi 2.7"],
     ["system.ai.gemini-3-5-flash", "Gemini 3.5 Flash"],
     ["system.ai.gemini-3-pro-image", "Gemini 3 Pro Image"],
     ["system.ai.deepseek-v4-pro-0813", "DeepSeek V4 Pro"],
@@ -65,6 +68,7 @@ test("UC model-family FQNs and goose- aliases humanize onto their base records",
       "data_workflow_tools.goose.goose-deepseek-v4-flash-0731",
       "DeepSeek V4 Flash",
     ],
+    ["data_workflow_tools.goose.goose-glm-5-3", "GLM-5.3"],
     ["data_workflow_tools.goose.goose-glm-5-3-flash", "GLM-5.3 Flash"],
     ["data_workflow_tools.goose.goose-grok-4-6", "Grok 4.6"],
   ];

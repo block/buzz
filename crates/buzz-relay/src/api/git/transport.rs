@@ -200,22 +200,21 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
 
         let event: nostr::Event = serde_json::from_str(&event_json)
             .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid auth event").into_response())?;
+        let signed_auth_created_at = event.created_at.as_secs();
 
         // Relay membership gate (NIP-43). Git cannot carry a standalone
         // x-auth-tag header through the credential-helper protocol, so agents
         // attach their NIP-OA attestation to the signed NIP-98 event, matching
         // the WebSocket NIP-42 flow.
         let event_auth_tag = crate::handlers::auth::extract_auth_tag_json(&event);
-        let header_auth_tag = parts
-            .headers
-            .get("x-auth-tag")
-            .and_then(|value| value.to_str().ok());
+        let header_auth_tag = crate::api::relay_members::extract_auth_tag_header(&parts.headers);
         let auth_tag = event_auth_tag.as_deref().or(header_auth_tag);
         if crate::api::relay_members::enforce_relay_membership(
             state,
             tenant.community(),
             pubkey.as_bytes(),
             auth_tag,
+            Some(signed_auth_created_at),
         )
         .await
         .is_err()
@@ -224,7 +223,14 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             return Err((StatusCode::FORBIDDEN, "restricted: not a relay member").into_response());
         }
 
-        deny_banned_git_principal(&state.db, tenant.community(), &pubkey, auth_tag).await?;
+        deny_banned_git_principal(
+            &state.db,
+            tenant.community(),
+            &pubkey,
+            auth_tag,
+            Some(signed_auth_created_at),
+        )
+        .await?;
 
         Ok(GitAuth { pubkey, tenant })
     }
@@ -246,6 +252,7 @@ async fn deny_banned_git_principal(
     community: buzz_core::CommunityId,
     pubkey: &nostr::PublicKey,
     auth_tag: Option<&str>,
+    signed_auth_created_at: Option<u64>,
 ) -> Result<(), Response> {
     let agent = git_restriction_state(db, community, pubkey).await?;
 
@@ -254,7 +261,11 @@ async fn deny_banned_git_principal(
     let owner = if agent.banned {
         None
     } else {
-        crate::api::relay_members::extract_nip_oa_owner(pubkey.as_bytes(), auth_tag)
+        crate::api::relay_members::extract_nip_oa_owner(
+            pubkey.as_bytes(),
+            auth_tag,
+            signed_auth_created_at,
+        )
     };
     let owner_state = match owner {
         Some(owner) => Some(git_restriction_state(db, community, &owner).await?),
@@ -3652,7 +3663,7 @@ mod sec005_read_gate_tests {
         db.ensure_user(community, &member_pk).await.expect("member");
 
         assert!(
-            deny_banned_git_principal(&db, community, &member.public_key(), None)
+            deny_banned_git_principal(&db, community, &member.public_key(), None, None)
                 .await
                 .is_ok(),
             "precondition: an unbanned member passes the git ban gate"
@@ -3663,7 +3674,7 @@ mod sec005_read_gate_tests {
             .expect("ban");
 
         let (status, body) = denial_parts(
-            deny_banned_git_principal(&db, community, &member.public_key(), None).await,
+            deny_banned_git_principal(&db, community, &member.public_key(), None, None).await,
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -3686,9 +3697,15 @@ mod sec005_read_gate_tests {
             .expect("auth tag");
 
         assert!(
-            deny_banned_git_principal(&db, community, &agent.public_key(), Some(&auth_tag))
-                .await
-                .is_ok(),
+            deny_banned_git_principal(
+                &db,
+                community,
+                &agent.public_key(),
+                Some(&auth_tag),
+                Some(200),
+            )
+            .await
+            .is_ok(),
             "precondition: neither agent nor owner is banned"
         );
 
@@ -3698,7 +3715,14 @@ mod sec005_read_gate_tests {
             .expect("ban owner");
 
         let (status, _) = denial_parts(
-            deny_banned_git_principal(&db, community, &agent.public_key(), Some(&auth_tag)).await,
+            deny_banned_git_principal(
+                &db,
+                community,
+                &agent.public_key(),
+                Some(&auth_tag),
+                Some(200),
+            )
+            .await,
         )
         .await;
         assert_eq!(
@@ -3710,7 +3734,7 @@ mod sec005_read_gate_tests {
         // An unattested request from the same agent key is unaffected: the
         // cascade must follow a verified owner, not punish every agent.
         assert!(
-            deny_banned_git_principal(&db, community, &agent.public_key(), None)
+            deny_banned_git_principal(&db, community, &agent.public_key(), None, None)
                 .await
                 .is_ok(),
             "without an attestation there is no owner to inherit from"
@@ -3732,7 +3756,8 @@ mod sec005_read_gate_tests {
 
         let community = buzz_core::CommunityId::from_uuid(uuid::Uuid::new_v4());
         let (status, body) = denial_parts(
-            deny_banned_git_principal(&db, community, &Keys::generate().public_key(), None).await,
+            deny_banned_git_principal(&db, community, &Keys::generate().public_key(), None, None)
+                .await,
         )
         .await;
         assert_eq!(

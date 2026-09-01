@@ -92,6 +92,14 @@ pub struct PersonaEventContent {
     pub respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
+    /// Optional short, PUBLIC description (max 280 chars). Appended after the
+    /// pre-existing fields so records without one serialize byte-identically
+    /// to the pre-description era — existing content bytes and event ids are
+    /// unchanged. EXCLUDED from [`persona_content_hash`]: description is
+    /// display metadata, not spawn-relevant config, so a description-only edit
+    /// must not badge linked instances as needing a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// Derive the d-tag (persona slug) from a `AgentDefinition`.
@@ -229,6 +237,7 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, Strin
         id: d_tag.clone(),
         display_name: content.display_name,
         avatar_url: content.avatar_url,
+        description: content.description,
         system_prompt: content.system_prompt.unwrap_or_default(),
         runtime: content.runtime,
         model: content.model,
@@ -492,9 +501,18 @@ fn redate_tombstone(
 /// clock skew and export/import round-trips. `PersonaEventContent` field order
 /// is fixed by the struct definition, so `serde_json` produces a stable
 /// canonical encoding.
+///
+/// `description` is deliberately EXCLUDED from the hashed projection: it is
+/// public display metadata, not spawn-relevant config, so a description-only
+/// edit must not flip the "restart required" drift badge on linked instances.
+/// Guarded by `description_change_does_not_change_content_hash`.
 pub fn persona_content_hash(content: &PersonaEventContent) -> String {
     use sha2::{Digest, Sha256};
-    let json = serde_json::to_vec(content).unwrap_or_default();
+    let hashed = PersonaEventContent {
+        description: None,
+        ..content.clone()
+    };
+    let json = serde_json::to_vec(&hashed).unwrap_or_default();
     let digest = Sha256::digest(&json);
     hex::encode(digest)
 }
@@ -522,6 +540,7 @@ pub fn persona_event_content(record: &AgentDefinition) -> PersonaEventContent {
         respond_to: record.respond_to.clone(),
         respond_to_allowlist: record.respond_to_allowlist.clone(),
         parallelism: record.parallelism,
+        description: record.description.clone(),
     }
 }
 

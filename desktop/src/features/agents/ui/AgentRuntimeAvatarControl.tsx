@@ -229,6 +229,7 @@ export function AgentRuntimeAvatarControl({
               : "bg-primary",
       )}
       className="h-24 w-24"
+      cornerRadius={AGENT_AVATAR_SIZE * 0.3}
       curve={showRunningDot ? STATUS_DOT_MASK_CURVE : ACTION_MASK_CURVE}
       cutout={badge.cutout}
       cutoutWidth={actionCutoutWidth}
@@ -241,6 +242,7 @@ export function AgentRuntimeAvatarControl({
           className="h-full w-full bg-muted shadow-none"
           iconClassName="h-8 w-8"
           label={label}
+          shape="squircle"
         />
       ) : (
         <IdentityInitialsAvatar

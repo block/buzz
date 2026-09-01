@@ -38,11 +38,8 @@ import {
 } from "@/shared/api/relayClosedRecovery";
 import { getChannelReconnectRepairEvents } from "@/shared/api/channelReconnectRepair";
 import { replayLiveSubscriptions } from "@/shared/api/relayReconnectReplay";
-import {
-  activateRateLimit,
-  parseRateLimitHint,
-  waitForRateLimit,
-} from "@/shared/api/relayRateLimitGate";
+import { publishSessionEvent } from "@/shared/api/relayEventPublisher";
+import { activateRateLimitIfSignalled } from "@/shared/api/relayRateLimitGate";
 import {
   fetchChunkedHistory,
   requestFirstEventGated,
@@ -64,7 +61,6 @@ import {
   BACKOFF_RESET_STABLE_MS,
   EVENT_BATCH_MS,
   HISTORY_TIMEOUT_MS,
-  PUBLISH_TIMEOUT_MS,
   RECONNECT_BASE_DELAY_MS,
   RECONNECT_MAX_DELAY_MS,
   STALL_CHECK_INTERVAL_MS,
@@ -82,7 +78,7 @@ import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
 export class RelayClient {
   private wsId: number | null = null;
   private relayUrl: string | null = null;
-  private connectPromise: Promise<void> | null = null;
+  private connectPromise: Promise<number> | null = null;
   private reconnectTimeout: number | null = null;
   private reconnectWaiters = new RelayReconnectWaiters();
   private reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
@@ -97,6 +93,7 @@ export class RelayClient {
   private notifyReconnectListeners = false;
   private onMessageChannel: Channel<unknown> | null = null;
   private connectionGeneration = 0;
+  private sessionEpoch = 0;
   private stabilityTimer: number | null = null;
   private visibleChannelId: string | null = null;
   private authOkTracker = new AuthOkTracker();
@@ -126,6 +123,7 @@ export class RelayClient {
       this.stabilityTimer = null;
     }
     this.stallWatchdog.stop();
+    this.sessionEpoch++;
     this.connectionGeneration++;
     this.keepAliveRequested = false;
     this.relayUrl = null;
@@ -496,7 +494,7 @@ export class RelayClient {
     }
 
     if (this.wsId !== null) {
-      return;
+      return this.connectionGeneration;
     }
 
     if (
@@ -507,14 +505,14 @@ export class RelayClient {
       // The reconnect coordinator owns outage pacing. Query, publish, and
       // subscription callers must wait for its scheduled attempt instead of
       // clearing the timer and creating an immediate reconnect storm.
-      return this.reconnectWaiters.wait();
+      return this.reconnectWaiters.wait().then(() => this.connectionGeneration);
     }
 
     const connectPromise = this.connect();
     this.connectPromise = connectPromise;
 
     try {
-      await connectPromise;
+      return await connectPromise;
     } finally {
       if (this.connectPromise === connectPromise) {
         this.connectPromise = null;
@@ -584,6 +582,7 @@ export class RelayClient {
       await this.replayLiveSubscriptions();
       this.stallWatchdog.start();
       this.emitReconnectIfNeeded();
+      return generation;
     } catch (error) {
       const connectionError = this.normalizeRelayError(
         error,
@@ -663,6 +662,17 @@ export class RelayClient {
     });
   }
 
+  private async sendRawForGeneration(payload: unknown[], generation: number) {
+    if (generation !== this.connectionGeneration || this.wsId === null) {
+      throw new Error("Relay publish was superseded by a session change.");
+    }
+    const wsId = this.wsId;
+    await invoke("plugin:websocket|send", {
+      id: wsId,
+      message: { type: "Text", data: JSON.stringify(payload) },
+    });
+  }
+
   private normalizeRelayError(error: unknown, fallbackMessage: string) {
     return error instanceof Error ? error : new Error(fallbackMessage);
   }
@@ -712,47 +722,23 @@ export class RelayClient {
     timeoutMessage: string,
     sendErrorMessage: string,
   ) {
-    // Await the gate before sending EVENT; op timeout starts after the wait.
-    await waitForRateLimit();
-
-    return new Promise<RelayEvent>((resolve, reject) => {
-      const timeout = window.setTimeout(() => {
-        this.pendingEvents.delete(event.id);
-        reject(new Error(timeoutMessage));
-      }, PUBLISH_TIMEOUT_MS);
-
-      this.pendingEvents.set(event.id, {
-        event,
-        resolve,
-        reject,
-        timeout,
-      });
-
-      void this.sendRaw(["EVENT", event]).catch(async (error) => {
-        const pendingEvent = this.pendingEvents.get(event.id);
-        this.pendingEvents.delete(event.id);
-        const normalizedError = this.recoverFromSocketFailure(
-          error,
-          sendErrorMessage,
-        );
-
-        try {
-          await this.ensureConnected();
-          if (!pendingEvent) {
-            throw normalizedError;
-          }
-
-          this.pendingEvents.set(event.id, pendingEvent);
-          await this.sendRaw(["EVENT", event]);
-        } catch (retryError) {
-          window.clearTimeout(timeout);
-          this.pendingEvents.delete(event.id);
-          reject(
-            this.recoverFromSocketFailure(retryError, normalizedError.message),
-          );
-        }
-      });
-    });
+    return publishSessionEvent(
+      {
+        generation: () => this.connectionGeneration,
+        ownership: () => this.sessionEpoch,
+        pendingEvents: this.pendingEvents,
+        send: (payload, generation) =>
+          this.sendRawForGeneration(payload, generation),
+        reconnect: () => this.ensureConnected(),
+        normalizeError: (error, fallback) =>
+          this.normalizeRelayError(error, fallback),
+        recoverSocketFailure: (error, fallback) =>
+          this.recoverFromSocketFailure(error, fallback),
+      },
+      event,
+      timeoutMessage,
+      sendErrorMessage,
+    );
   }
 
   private async handleWsMessage(message: unknown, generation: number) {
@@ -829,11 +815,8 @@ export class RelayClient {
     }
 
     if (type === "NOTICE" && typeof rest[0] === "string") {
-      const notice: string = rest[0];
-      // Relay back-pressure — arm the gate until the window expires.
-      if (notice.startsWith("rate-limited:")) {
-        activateRateLimit(parseRateLimitHint(notice));
-      }
+      // Connection-scoped back-pressure — arm the gate until it expires.
+      activateRateLimitIfSignalled(rest[0]);
     }
   }
 
@@ -922,6 +905,10 @@ export class RelayClient {
     if (success) {
       pendingEvent.resolve(pendingEvent.event);
     } else {
+      // Back-pressure now arrives here rather than as a NOTICE: the relay
+      // rejects an over-quota EVENT on the OK channel so this pending publish
+      // can be settled at all. Unarmed, the send retries into the same quota.
+      activateRateLimitIfSignalled(message);
       pendingEvent.reject(new Error(message || "Relay rejected the event."));
     }
   }

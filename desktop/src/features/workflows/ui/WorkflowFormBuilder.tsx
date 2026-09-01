@@ -632,6 +632,7 @@ export const WorkflowFormBuilder = React.forwardRef<
     <WorkflowRichTriggerDescription
       avatarUrl={triggerPresentation.avatarUrl}
       description={compactTriggerDescription}
+      isAgent={triggerPresentation.isAgent}
       label={triggerPresentation.label}
       loading={triggerPresentation.loading}
     />

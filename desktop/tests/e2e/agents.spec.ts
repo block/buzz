@@ -20,6 +20,7 @@ function createCatalogEvent(input: {
   createdAt?: number;
   shared?: boolean;
   avatarUrl?: string;
+  description?: string;
 }): RelayEvent {
   const ownerPrivateKey =
     input.ownerPrivateKey ??
@@ -43,6 +44,7 @@ function createCatalogEvent(input: {
         display_name: input.displayName,
         system_prompt: input.systemPrompt,
         avatar_url: input.avatarUrl ?? null,
+        description: input.description ?? null,
         runtime: null,
         model: null,
         provider: null,
@@ -309,6 +311,7 @@ test("built-in persona edits persist", async ({ page }) => {
 
   const dialog = page.getByTestId("persona-dialog");
   await dialog.getByLabel("Agent name").fill("My Fizz");
+  await dialog.getByLabel("Description").fill("Helps teams ship reliably.");
   await dialog.getByLabel("Agent instruction").fill("User-edited instructions");
   await dialog.getByRole("button", { name: "Save changes" }).click();
 
@@ -316,13 +319,22 @@ test("built-in persona edits persist", async ({ page }) => {
   await expect(page.getByTestId("agents-library-personas")).toContainText(
     "My Fizz",
   );
+  await expect(
+    page.getByTestId("persona-agent-row-builtin:fizz"),
+  ).toContainText("Helps teams ship reliably.");
   const personas = await invokeTauri<
-    Array<{ id: string; display_name: string; system_prompt: string }>
+    Array<{
+      id: string;
+      display_name: string;
+      description: string | null;
+      system_prompt: string;
+    }>
   >(page, "list_personas");
   expect(
     personas.find((persona) => persona.id === "builtin:fizz"),
   ).toMatchObject({
     display_name: "My Fizz",
+    description: "Helps teams ship reliably.",
     system_prompt: "User-edited instructions",
   });
 });
@@ -624,8 +636,38 @@ test("team cards use the thread-style overlapping avatar stack", async ({
   );
   expect(boxes[1]?.left).toBeLessThan(boxes[0]?.right ?? 0);
   expect(boxes[2]?.left).toBeLessThan(boxes[1]?.right ?? 0);
-  await expect(avatars.first()).not.toHaveCSS("mask-image", "none");
-  await expect(avatars.last()).toHaveCSS("mask-image", "none");
+  const overlapStyles = await avatars.evaluateAll((elements) =>
+    elements.map((element) => {
+      const styles = getComputedStyle(element);
+      const outline = getComputedStyle(element, "::before");
+      return {
+        maskImage: styles.maskImage,
+        outlineBackground: outline.backgroundColor,
+        outlineBorderRadius: outline.borderRadius,
+        outlineInset: outline.inset,
+      };
+    }),
+  );
+  expect(overlapStyles).toEqual([
+    {
+      maskImage: "none",
+      outlineBackground: "rgb(255, 255, 255)",
+      outlineBorderRadius: "calc(30% + 2px)",
+      outlineInset: "-2px",
+    },
+    {
+      maskImage: "none",
+      outlineBackground: "rgb(255, 255, 255)",
+      outlineBorderRadius: "calc(30% + 2px)",
+      outlineInset: "-2px",
+    },
+    {
+      maskImage: "none",
+      outlineBackground: "rgb(255, 255, 255)",
+      outlineBorderRadius: "calc(30% + 2px)",
+      outlineInset: "-2px",
+    },
+  ]);
   const avatarSurfaceStyles = await avatars
     .locator(":scope > *")
     .evaluateAll((elements) =>
@@ -704,7 +746,7 @@ test("agent defaults stays in the header without an actions menu", async ({
     defaultsDialog.getByTestId("global-agent-model"),
   ).toHaveAttribute("data-value", "gpt-5.5[high]");
   await expect(defaultsDialog.getByTestId("global-agent-model")).toContainText(
-    "gpt-5.5[high]",
+    "GPT-5.5 (high)",
   );
   await page.keyboard.press("Escape");
   await expect(defaultsDialog).toHaveCount(0);
@@ -806,34 +848,55 @@ test("agent catalog chooser order stays stable when selection changes", async ({
   expect(await getCatalogOrder(page)).toEqual(before);
 });
 
-test("catalog detail pane shows the full persona details", async ({ page }) => {
-  const personaId = "custom:researcher";
-  await seedActiveIdentity(page, TEST_IDENTITIES.tyler);
+test("catalog detail pane shows the full persona details before Add agent", async ({
+  page,
+}) => {
+  const personaId = "remote-researcher";
+  const remoteCatalogId = `catalog:${TEST_IDENTITIES.alice.pubkey}:${personaId}`;
+  const description = `Maps evidence across systems: ${"界".repeat(180)}`;
   await installMockBridge(page, {
-    personas: [
-      {
-        id: personaId,
-        displayName: "Researcher",
+    personaCatalogEvents: [
+      createCatalogEvent({
+        ownerPubkey: TEST_IDENTITIES.alice.pubkey,
+        sourcePersonaId: personaId,
+        displayName: "Alice’s Researcher",
+        description,
         systemPrompt: "Research the question and cite the evidence.",
-      },
+      }),
     ],
   });
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
-  await sharePersonaToCatalog(page, "Researcher");
   await openPersonaCatalog(page);
 
-  await selectCatalogPersona(page, personaId);
-  const useAgentTarget = page.getByTestId(
-    `community-catalog-use-agent-${personaId}`,
+  const catalogRow = page.getByTestId(
+    `community-catalog-agent-${remoteCatalogId}`,
   );
+  await expect(catalogRow).toContainText("Alice’s Researcher");
+  const rowDescription = page.getByTestId(
+    `community-catalog-agent-description-${remoteCatalogId}`,
+  );
+  await expect(rowDescription).toHaveText(description);
+  await expect(rowDescription).toHaveCSS("overflow", "hidden");
+  await catalogRow.click();
+
+  const useAgentTarget = page.getByTestId(
+    `community-catalog-use-agent-${remoteCatalogId}`,
+  );
+  const detailDescription = page.getByTestId("persona-catalog-description");
 
   await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
-    "Researcher",
+    "Alice’s Researcher",
   );
   await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
-    "Added by You",
+    "Added by alice",
   );
+  await expect(detailDescription).toHaveText(description);
+  const detailWidth = await detailDescription.evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+  }));
+  expect(detailWidth.scrollWidth).toBeLessThanOrEqual(detailWidth.clientWidth);
   await expect(page.getByTestId("community-catalog-detail-pane")).toContainText(
     "Research the question and cite the evidence.",
   );
@@ -851,10 +914,10 @@ test("catalog detail pane shows the full persona details", async ({ page }) => {
   );
   await expect(useAgentTarget).toHaveAttribute(
     "aria-label",
-    "Researcher is already in My Agents",
+    "Add Alice’s Researcher from Community Catalog",
   );
-  await expect(useAgentTarget).toHaveText("Added to My Agents");
-  await expect(useAgentTarget).toBeDisabled();
+  await expect(useAgentTarget).toHaveText("Add agent");
+  await expect(useAgentTarget).toBeEnabled();
 });
 
 type AgentShareCommand = { command: string; payload: unknown };

@@ -244,8 +244,16 @@ pub async fn update_managed_agent(
                 .avatar_url
                 .clone()
                 .or_else(|| managed_agent_avatar_url(&effective_command));
+            let about = crate::managed_agents::record_effective_description(record, &personas);
             let auth_tag = record.auth_tag.clone();
-            Some((agent_keys, relay_url, display_name, avatar_url, auth_tag))
+            Some((
+                agent_keys,
+                relay_url,
+                display_name,
+                avatar_url,
+                about,
+                auth_tag,
+            ))
         } else {
             None
         };
@@ -291,13 +299,14 @@ pub async fn update_managed_agent(
     // A rename is committed only when profile sync succeeds; otherwise restore
     // the complete pre-edit record so Desktop and the relay keep one
     // authoritative name.
-    if let Some((agent_keys, relay_url, display_name, avatar_url, auth_tag)) = sync_params {
+    if let Some((agent_keys, relay_url, display_name, avatar_url, about, auth_tag)) = sync_params {
         if let Err(sync_error) = sync_managed_agent_profile(
             &state,
             &relay_url,
             &agent_keys,
             &display_name,
             avatar_url.as_deref(),
+            about.as_deref(),
             auth_tag.as_deref(),
         )
         .await

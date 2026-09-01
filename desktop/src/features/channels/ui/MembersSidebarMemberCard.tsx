@@ -168,6 +168,7 @@ export function MembersSidebarMemberCard({
           className="h-8 w-8 text-xs shadow-none"
           iconClassName="h-4 w-4"
           label={memberAvatarLabel}
+          shape={memberIsBot ? "squircle" : "circle"}
         />
         {presenceStatus ? (
           <span

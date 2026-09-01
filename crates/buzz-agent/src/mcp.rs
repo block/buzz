@@ -45,6 +45,9 @@ const PASSTHROUGH_ENV: &[&str] = &[
     "LC_ALL",
     "TMPDIR",
     "XDG_CONFIG_HOME",
+    // Explicit Buzz-owned OAuth root for named demo builds. The agent may spawn
+    // auth-capable child tools after clearing its ambient environment.
+    "BUZZ_AGENT_CONFIG_DIR",
     // SSH — required for git clone/push over SSH (git@github.com:...)
     "SSH_AUTH_SOCK",
     "SSH_AGENT_PID",

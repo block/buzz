@@ -15,6 +15,7 @@ export type TimelineThreadSummaryParticipant = {
   id: string;
   author: string;
   avatarUrl: string | null;
+  isAgent?: boolean;
 };
 
 export type TimelineThreadSummary = {
@@ -152,6 +153,9 @@ export function buildDescendantStatsByMessageId(
       id: participantKey,
       author: message.author,
       avatarUrl: message.avatarUrl ?? null,
+      ...(message.isAgent === true || message.role === "bot"
+        ? { isAgent: true }
+        : {}),
     };
 
     let ancestorId = message.parentId ?? null;
@@ -233,6 +237,9 @@ function participantFromMessage(
     id: message.pubkey ?? message.id,
     author: message.author,
     avatarUrl: message.avatarUrl ?? null,
+    ...(message.isAgent === true || message.role === "bot"
+      ? { isAgent: true }
+      : {}),
   };
 }
 
@@ -403,6 +410,9 @@ function buildRelayThreadSummary(
         id: pubkey,
         author: profiles?.[pubkey.toLowerCase()]?.displayName ?? pubkey,
         avatarUrl: profiles?.[pubkey.toLowerCase()]?.avatarUrl ?? null,
+        ...(profiles?.[pubkey.toLowerCase()]?.isAgent === true
+          ? { isAgent: true }
+          : {}),
       })),
   };
 }

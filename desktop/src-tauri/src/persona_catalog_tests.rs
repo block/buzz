@@ -127,6 +127,31 @@ fn parser_rejects_malformed_and_invisible_definition_text() {
     ] {
         assert!(parse_agent(&content).is_none());
     }
+    // A description that violates the shared visible-text policy or the
+    // 280-char cap rejects the whole entry — never silently stripped.
+    for bad_description in [
+        "hidden\u{200b}text".to_string(),
+        "description\n".to_string(),
+        "a".repeat(281),
+    ] {
+        let mut content = valid_content("Reviewer");
+        content["description"] = json!(bad_description);
+        assert!(parse_agent(&content.to_string()).is_none());
+    }
+    for malformed_description in [json!(7), json!([]), json!({})] {
+        let mut content = valid_content("Reviewer");
+        content["description"] = malformed_description;
+        assert!(parse_agent(&content.to_string()).is_none());
+    }
+    let mut content = valid_content("Reviewer");
+    content["description"] = json!("A careful reviewer.");
+    assert_eq!(
+        parse_agent(&content.to_string())
+            .unwrap()
+            .description
+            .as_deref(),
+        Some("A careful reviewer.")
+    );
     let visible = parse_agent(
         &json!({
             "display_name": "Reviewer 🐝",
@@ -204,6 +229,7 @@ fn serialized_catalog_matches_the_typescript_contract() {
         agent: CatalogAgentProjection {
             display_name: "Ada".into(),
             avatar_url: Some("https://example.com/a.png".into()),
+            description: Some("A kind agent.".into()),
             system_prompt: "be kind".into(),
             runtime: Some("acp".into()),
             model: Some("m1".into()),
@@ -222,6 +248,7 @@ fn serialized_catalog_matches_the_typescript_contract() {
         "agent": {
             "displayName": "Ada",
             "avatarUrl": "https://example.com/a.png",
+            "description": "A kind agent.",
             "systemPrompt": "be kind",
             "runtime": "acp",
             "model": "m1",

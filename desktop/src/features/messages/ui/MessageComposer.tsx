@@ -25,6 +25,7 @@ import {
   takeQueuedAttachmentsForDraft,
   useBackgroundMediaUpload,
 } from "@/features/messages/lib/backgroundMediaUploadStore";
+import { useComposerFocusOwnership } from "@/features/messages/lib/useComposerFocusOwnership";
 import { isMentionCodeContext } from "@/features/messages/lib/mentionCodeContext";
 import { useMentions } from "@/features/messages/lib/useMentions";
 import {
@@ -46,11 +47,10 @@ import { useLinkEditor } from "@/features/messages/lib/useLinkEditor";
 import { useComposerSpoilerParticles } from "@/features/messages/lib/useComposerSpoilerParticles";
 import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
 import { cn } from "@/shared/lib/cn";
-import { ChannelAutocomplete } from "./ChannelAutocomplete";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
 import { ComposerAttachments, DropZoneOverlay } from "./ComposerAttachments";
-import { EmojiAutocomplete } from "./EmojiAutocomplete";
-import { MentionAutocomplete } from "./MentionAutocomplete";
+import { focusMentionOptionsTrigger } from "./MentionAutocomplete";
+import { MessageComposerAutocompletes } from "./MessageComposerAutocompletes";
 import { ComposerDockToolbar } from "./ComposerDockToolbar";
 import { ComposerUploadProgressPill } from "./ComposerUploadProgressPill";
 import { NonMemberMentionDialog } from "./NonMemberMentionDialog";
@@ -260,6 +260,8 @@ function MessageComposerImpl({
     emojiAutocomplete.isEmojiAutocompleteOpen;
   const submitMessageRef = React.useRef<() => void>(() => {});
   const composerScrollRef = React.useRef<HTMLDivElement>(null);
+  const formRef = React.useRef<HTMLFormElement>(null);
+  const composerOwnsFocus = useComposerFocusOwnership(formRef);
   const onEditLinkRef = React.useRef<
     ((info: LinkSelectionInfo) => void) | null
   >(null);
@@ -735,6 +737,19 @@ function MessageComposerImpl({
         }
         return;
       }
+      // Shift+Tab is the keyboard route from the editor into the mention
+      // overlay's Options controls — forward Tab is consumed below to select
+      // the highlighted suggestion. Falls through (e.g. a composer with no
+      // audience controls) to the browser's native backward focus move.
+      if (
+        event.key === "Tab" &&
+        event.shiftKey &&
+        mentions.isMentionOpen &&
+        focusMentionOptionsTrigger(formRef.current)
+      ) {
+        event.preventDefault();
+        return;
+      }
       const { handled, suggestion } = mentions.handleMentionKeyDown(event, {
         isCodeContext: () => isMentionCodeContext(richText.editor),
       });
@@ -769,6 +784,7 @@ function MessageComposerImpl({
       applyEmojiInsert,
       channelLinks.handleChannelKeyDown,
       applyChannelInsert,
+      mentions.isMentionOpen,
       mentions.handleMentionKeyDown,
       richText.editor,
       selectMentionSuggestion,
@@ -852,46 +868,25 @@ function MessageComposerImpl({
             onSubmit={(event) => {
               handleSubmit(event);
             }}
+            ref={formRef}
           >
             {acceptsDrop && media.isDragOver && <DropZoneOverlay />}
-            <EmojiAutocomplete
-              onSelect={applyEmojiInsert}
-              selectedIndex={emojiAutocomplete.emojiSelectedIndex}
-              suggestions={
-                emojiAutocomplete.isEmojiAutocompleteOpen
-                  ? emojiAutocomplete.emojiSuggestions
-                  : []
-              }
-            />
-            <ChannelAutocomplete
-              onSelect={applyChannelInsert}
-              selectedIndex={channelLinks.channelSelectedIndex}
-              suggestions={
-                channelLinks.isChannelOpen
-                  ? channelLinks.channelSuggestions
-                  : []
-              }
-            />
-            <MentionAutocomplete
+            <MessageComposerAutocompletes
+              audienceControlsEnabled={Boolean(
+                audienceScope && editTarget == null,
+              )}
+              channelLinks={channelLinks}
+              composerOwnsFocus={composerOwnsFocus}
+              emojiAutocomplete={emojiAutocomplete}
               keepMentionedAgentsPinned={keepMentionedAgentsPinned}
               lockedAgentPubkeys={lockedAgentPubkeys}
+              mentions={mentions}
               openOptionsRequest={openMentionOptionsRequest}
-              onKeepMentionedAgentsPinnedChange={
-                audienceScope && editTarget == null
-                  ? setKeepMentionedAgentsPinned
-                  : undefined
-              }
+              onChannelSelect={applyChannelInsert}
+              onEmojiSelect={applyEmojiInsert}
+              onMentionSelect={selectMentionSuggestion}
               onOptionsRevealComplete={completeMentionOptionsReveal}
-              onToggleAlwaysAddressAgent={
-                audienceScope && editTarget == null
-                  ? toggleAlwaysAddressAgent
-                  : undefined
-              }
-              onFetchMore={mentions.fetchMoreSuggestions}
-              onDismiss={mentions.cancelMentionAutocomplete}
-              onSelect={selectMentionSuggestion}
-              selectedIndex={mentions.mentionSelectedIndex}
-              suggestions={mentions.isMentionOpen ? mentions.suggestions : []}
+              onToggleAlwaysAddressAgent={toggleAlwaysAddressAgent}
             />
             {media.uploadState.status === "error" ? (
               <div className="mb-2 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">

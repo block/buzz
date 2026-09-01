@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -2033,7 +2034,10 @@ where
     )))
 }
 
-pub(crate) fn databricks_pkce_config(host: &str) -> PkceOAuthConfig {
+pub(crate) fn databricks_pkce_config(
+    host: &str,
+    cache_dir_override: Option<PathBuf>,
+) -> PkceOAuthConfig {
     PkceOAuthConfig {
         discovery_url: format!(
             "{}/oidc/.well-known/oauth-authorization-server",
@@ -2045,7 +2049,7 @@ pub(crate) fn databricks_pkce_config(host: &str) -> PkceOAuthConfig {
             .map(|scope| (*scope).into())
             .collect(),
         cache_namespace: "databricks".into(),
-        cache_dir_override: None,
+        cache_dir_override,
     }
 }
 
@@ -2070,6 +2074,7 @@ pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, A
             }
             Ok(PkceOAuthTokenSource::new(databricks_pkce_config(
                 &cfg.base_url,
+                None,
             ))?)
         }
     }

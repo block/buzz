@@ -40,6 +40,9 @@ class _ThreadMessage extends HookConsumerWidget {
         ref.watch(userCacheProvider.select((cache) => cache[pk])) ??
         ref.read(userCacheProvider.notifier).get(pk);
     final displayName = profile?.label ?? shortPubkey(message.pubkey);
+    final isAgent =
+        ref.watch(agentMentionPubkeysProvider(channelId)).contains(pk) ||
+        profile?.ownerPubkey != null;
     final canManageMessage =
         currentPubkey?.toLowerCase() == pk ||
         (profile?.ownerPubkey != null &&
@@ -158,6 +161,7 @@ class _ThreadMessage extends HookConsumerWidget {
                             child: _Avatar(
                               profile: profile,
                               pubkey: message.pubkey,
+                              isAgent: isAgent,
                             ),
                           )
                         else

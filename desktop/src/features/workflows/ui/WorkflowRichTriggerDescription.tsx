@@ -6,11 +6,13 @@ import { splitWorkflowAuthorDescription } from "./workflowTriggerDescription";
 export function WorkflowRichTriggerDescription({
   avatarUrl,
   description,
+  isAgent,
   label,
   loading,
 }: {
   avatarUrl?: string | null;
   description: string;
+  isAgent?: boolean;
   label?: string | null;
   loading?: boolean;
 }) {
@@ -41,6 +43,7 @@ export function WorkflowRichTriggerDescription({
         className="h-4 w-4"
         displayName={label}
         fallbackDelayMs={0}
+        shape={isAgent ? "squircle" : "circle"}
         size="xs"
         testId="workflow-trigger-author-avatar"
       />

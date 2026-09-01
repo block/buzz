@@ -16,6 +16,7 @@ willing to read.
 | [`interleaved-agent-reports`](interleaved-agent-reports) | Workflow | Retains and synthesizes every report in a batch of agent messages |
 | [`cross-thread-requests`](cross-thread-requests) | Workflow | Keeps simultaneous top-level requests isolated and replies to both exact threads |
 | [`ambiguous-user-mention`](ambiguous-user-mention) | Workflow | Resolves duplicate display names and notifies only the intended pubkey |
+| [`memory-retrieval`](memory-retrieval) | Regression | Answers from harness-seeded cold memory without the value appearing in channel history |
 
 For `reply-to-thread` and `user-mention` the graded behavior is **deliberately
 absent from `instruction.md`** — it has to come from `buzz-acp`'s production

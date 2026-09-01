@@ -129,10 +129,9 @@ pub fn run_boot_migrations_after_reset(app: &tauri::AppHandle) {
 }
 
 fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
-    // Initialize the process-lifetime nest directory before any filesystem
-    // operation that calls nest_dir(). The discriminator matches the existing
-    // pattern used by reconcile_target_dir: dev instances have an app-data-dir
-    // name starting with CANONICAL_DEV_IDENTIFIER.
+    // Initialize the process-lifetime nest directory before filesystem access
+    // that calls nest_dir(). The discriminator matches reconcile_target_dir:
+    // dev instances have an app-data-dir name starting with CANONICAL_DEV_IDENTIFIER.
     let is_dev = if let Ok(data_dir) = app.path().app_data_dir() {
         let dev = data_dir
             .file_name()
@@ -144,18 +143,18 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
         false
     };
 
-    // On dev builds, copy `.repos-dir` from ~/.buzz → ~/.buzz-dev BEFORE
-    // control returns to lib.rs where resolve_repos_at_boot() reads it. This
-    // ensures the dev nest boots with the correct workspace on its first launch,
-    // matching what the prod nest had configured. Skip-if-dest-exists so it is
-    // idempotent and never clobbers a value the dev nest already set explicitly.
-    // Uses the composed helper so gate + migration share the tested code path.
+    // On dev builds, copy `.repos-dir` from ~/.buzz → ~/.buzz-dev before
+    // resolve_repos_at_boot() reads it. Skip-if-dest-exists so it is idempotent
+    // and never clobbers a value the dev nest already set explicitly.
+    // The composed helper keeps gate + migration on the tested code path.
     if let (Some(home), Some(dev_nest)) = (dirs::home_dir(), crate::managed_agents::nest_dir()) {
         maybe_migrate_dev_repos_dir(is_dev, reset_completed, &home, &dev_nest);
     }
 
-    migrate_legacy_app_data_dir(app);
-    sync_shared_agent_data(app);
+    if !crate::build_identity::is_demo_build() {
+        migrate_legacy_app_data_dir(app);
+        sync_shared_agent_data(app);
+    }
     // Dev-build-only: copy any agent keys that exist in the production
     // keyring ("buzz-desktop") into the dev service ("buzz-desktop-dev")
     // so existing agents don't lose their keys after the service-name split.

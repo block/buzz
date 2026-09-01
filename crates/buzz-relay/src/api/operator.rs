@@ -75,7 +75,11 @@ async fn authorize_operator_request(
         _ => path.to_string(),
     };
     let url = format!("{origin}{path_with_query}");
-    let (pubkey, event_id_bytes) = bridge::verify_bridge_auth_with_options(
+    let bridge::VerifiedBridgeAuth {
+        pubkey,
+        event_id_bytes,
+        ..
+    } = bridge::verify_bridge_auth_with_options(
         headers,
         method,
         &url,

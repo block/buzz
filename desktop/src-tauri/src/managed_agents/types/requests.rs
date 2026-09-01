@@ -76,6 +76,9 @@ pub fn apply_persona_behavior(
 pub struct CreatePersonaRequest {
     pub display_name: String,
     pub avatar_url: Option<String>,
+    /// Optional short, PUBLIC description (max 280 chars).
+    #[serde(default)]
+    pub description: Option<String>,
     pub system_prompt: String,
     #[serde(default)]
     pub runtime: Option<String>,
@@ -103,6 +106,10 @@ pub struct UpdatePersonaRequest {
     pub id: String,
     pub display_name: String,
     pub avatar_url: Option<String>,
+    /// Optional short, PUBLIC description (max 280 chars). The dialog always
+    /// sends the current value, so absent and empty both clear it.
+    #[serde(default)]
+    pub description: Option<String>,
     pub system_prompt: String,
     #[serde(default)]
     pub runtime: Option<String>,
@@ -269,6 +276,7 @@ mod tests {
 
     fn record_without_quad() -> AgentDefinition {
         AgentDefinition {
+            description: None,
             id: "p-1".to_string(),
             display_name: "Test".to_string(),
             avatar_url: None,
