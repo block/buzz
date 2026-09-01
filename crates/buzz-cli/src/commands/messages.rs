@@ -6,7 +6,7 @@ use crate::client::{normalize_events, normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::{
     infer_language, parse_event_id, parse_uuid, read_or_stdin, truncate_diff,
-    validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
+    validate_content_size, validate_hex64, validate_uuid, MAX_CONTENT_BYTES, MAX_DIFF_BYTES,
 };
 use buzz_sdk::mentions::{
     extract_at_mentions_with_known, extract_nostr_uris, strip_code_regions, MENTION_CAP,
@@ -608,6 +608,99 @@ pub struct SendMessageParams {
     pub mentions: Vec<String>,
 }
 
+fn safe_attachment_filename(file_path: &str) -> String {
+    let basename = std::path::Path::new(file_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let safe: String = basename.chars().filter(|ch| !ch.is_control()).collect();
+    let trimmed = safe.trim();
+    if trimmed.is_empty() {
+        return "file".to_string();
+    }
+
+    const MAX_FILENAME_BYTES: usize = 255;
+    if trimmed.len() <= MAX_FILENAME_BYTES {
+        return trimmed.to_string();
+    }
+
+    if let Some((stem, extension)) = trimmed.rsplit_once('.') {
+        let suffix = format!(".{extension}");
+        if !stem.is_empty() && !extension.is_empty() && suffix.len() < MAX_FILENAME_BYTES {
+            let truncated_stem = truncate_utf8_bytes(stem, MAX_FILENAME_BYTES - suffix.len());
+            let truncated_stem = truncated_stem.trim_end();
+            if !truncated_stem.is_empty() {
+                return format!("{truncated_stem}{suffix}");
+            }
+        }
+    }
+
+    let truncated = truncate_utf8_bytes(trimmed, MAX_FILENAME_BYTES);
+    let truncated = truncated.trim();
+    if truncated.is_empty() {
+        "file".to_string()
+    } else {
+        truncated.to_string()
+    }
+}
+
+fn truncate_utf8_bytes(value: &str, max_bytes: usize) -> String {
+    value
+        .chars()
+        .scan(0usize, |bytes, ch| {
+            let next = *bytes + ch.len_utf8();
+            if next > max_bytes {
+                None
+            } else {
+                *bytes = next;
+                Some(ch)
+            }
+        })
+        .collect()
+}
+
+fn escape_markdown_label(label: &str) -> String {
+    let mut escaped = String::with_capacity(label.len());
+    for ch in label.chars() {
+        if matches!(ch, '\\' | '[' | ']') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+fn validate_attachment_content_budget(
+    content: &str,
+    files: &[String],
+    relay_url: &str,
+) -> Result<(), CliError> {
+    // Upload descriptors are restricted to this relay's `/media/{sha256}[.ext]`
+    // URLs. Reserve the longest permitted URL and the longest markdown form for
+    // each filename before any upload so a later content-size failure cannot
+    // orphan a blob. Short filenames make image/video markup longer than generic
+    // file markup, while long escaped filenames make the generic form longer.
+    let mut max_media_url = url::Url::parse(relay_url)
+        .map_err(|e| CliError::Usage(format!("invalid relay URL: {e}")))?;
+    max_media_url.set_path(&format!("/media/{}.{}", "a".repeat(64), "a".repeat(8)));
+    max_media_url.set_query(None);
+    max_media_url.set_fragment(None);
+    let max_url_bytes = max_media_url.as_str().len();
+    let attachment_bytes = files.iter().try_fold(0usize, |total, file_path| {
+        let label = escape_markdown_label(&safe_attachment_filename(file_path));
+        let generic_markdown_bytes = "\n[]()".len() + label.len();
+        let inline_media_markdown_bytes = "\n![image]()".len();
+        total.checked_add(generic_markdown_bytes.max(inline_media_markdown_bytes) + max_url_bytes)
+    });
+    let final_bytes = attachment_bytes.and_then(|bytes| content.len().checked_add(bytes));
+    if final_bytes.is_none_or(|bytes| bytes > MAX_CONTENT_BYTES) {
+        return Err(CliError::Usage(format!(
+            "content plus attachment links exceeds maximum size (max {MAX_CONTENT_BYTES} bytes)"
+        )));
+    }
+    Ok(())
+}
+
 pub async fn cmd_send_message(
     client: &BuzzClient,
     mut p: SendMessageParams,
@@ -647,6 +740,8 @@ pub async fn cmd_send_message(
         ));
     }
 
+    validate_attachment_content_budget(&p.content, &p.files, client.relay_url())?;
+
     // Upload files and build imeta tags
     let mut media_tags: Vec<Vec<String>> = Vec::new();
     let mut media_content = String::new();
@@ -655,20 +750,32 @@ pub async fn cmd_send_message(
             .upload_file(file_path)
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
-        media_tags.push(crate::client::build_imeta_tag(&desc));
+        let filename = safe_attachment_filename(file_path);
+        let mut imeta = crate::client::build_imeta_tag(&desc);
+        imeta.push(format!("filename {filename}"));
+        media_tags.push(imeta);
         if desc.mime_type.starts_with("video/") {
             media_content.push_str("\n![video](");
-        } else {
+            media_content.push_str(&desc.url);
+            media_content.push(')');
+        } else if desc.mime_type.starts_with("image/") {
             media_content.push_str("\n![image](");
+            media_content.push_str(&desc.url);
+            media_content.push(')');
+        } else {
+            media_content.push_str("\n[");
+            media_content.push_str(&escape_markdown_label(&filename));
+            media_content.push_str("](");
+            media_content.push_str(&desc.url);
+            media_content.push(')');
         }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
     } else {
         format!("{}{media_content}", p.content)
     };
+    validate_content_size(&final_content)?;
 
     // Build thread ref if replying. `--reply-to` is the immediate parent; the
     // thread root is derived from the parent's NIP-10 tags via the relay.
@@ -1056,12 +1163,14 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
-        format_events, match_profiles_by_name, merge_message_mentions, missing_members,
-        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
-        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
-        CliError, Uuid,
+        channel_id_from_event, cmd_get_thread, escape_markdown_label, event_mention_pubkeys,
+        find_root_from_tags, format_events, match_profiles_by_name, merge_message_mentions,
+        missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        resolve_names_to_pubkeys, resolve_thread_target, safe_attachment_filename,
+        thread_ref_from_event, thread_ref_from_parent_tags, validate_attachment_content_budget,
+        BuzzClient, CliError, Uuid,
     };
+    use crate::validate::MAX_CONTENT_BYTES;
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
@@ -1188,6 +1297,62 @@ mod tests {
             )
             .unwrap(),
             ID_A
+        );
+    }
+
+    #[test]
+    fn attachment_filename_uses_a_safe_basename() {
+        assert_eq!(
+            safe_attachment_filename("/tmp/reports/closing\nstatement.pdf"),
+            "closingstatement.pdf"
+        );
+        assert_eq!(safe_attachment_filename("/tmp/   "), "file");
+    }
+
+    #[test]
+    fn attachment_filename_truncation_preserves_utf8_extension() {
+        let long_name = format!("{}.pdf", "é".repeat(200));
+        let safe = safe_attachment_filename(&long_name);
+        assert!(safe.len() <= 255);
+        assert!(safe.ends_with(".pdf"));
+        assert!(safe.is_char_boundary(safe.len()));
+    }
+
+    #[test]
+    fn attachment_budget_is_checked_before_upload() {
+        let relay = "https://relay.example";
+        let files = vec!["report.pdf".to_string()];
+        assert!(validate_attachment_content_budget("ok", &files, relay).is_ok());
+        assert!(
+            validate_attachment_content_budget(&"x".repeat(MAX_CONTENT_BYTES), &files, relay)
+                .is_err()
+        );
+
+        // A one-character filename makes inline image/video markdown longer than
+        // the generic-file form. The boundary must still be conservative so an
+        // image cannot upload and then fail the final content-size check.
+        let short_name = vec!["a".to_string()];
+        let max_url_bytes = relay.len() + "/media/".len() + 64 + 1 + 8;
+        let reserved_bytes = "\n![image]()".len() + max_url_bytes;
+        assert!(validate_attachment_content_budget(
+            &"x".repeat(MAX_CONTENT_BYTES - reserved_bytes),
+            &short_name,
+            relay
+        )
+        .is_ok());
+        assert!(validate_attachment_content_budget(
+            &"x".repeat(MAX_CONTENT_BYTES - reserved_bytes + 1),
+            &short_name,
+            relay
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn attachment_filename_is_safe_as_a_markdown_label() {
+        assert_eq!(
+            escape_markdown_label(r"report[final]\\copy.pdf"),
+            r"report\[final\]\\\\copy.pdf"
         );
     }
 
