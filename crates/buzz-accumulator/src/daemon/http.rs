@@ -15,7 +15,7 @@ use axum::{Json, Router};
 use serde_json::{json, Value};
 
 use crate::runner::FoldRunner;
-use crate::{schema, FoldSpec, Selection};
+use crate::{FoldSpec, Selection};
 
 use super::folds::{self, FoldError, RunGuard};
 use super::status::StatusRegistry;
@@ -279,9 +279,9 @@ async fn get_fold(
 struct PutFoldBody {
     selection: Selection,
     model: String,
-    /// Defaults to the built-in channel digest prompt.
+    /// Defaults to the built-in running-digest task.
     instructions: Option<String>,
-    /// Defaults to `channel-digest@v1` (the only schema).
+    /// Provenance label recorded on artifacts; defaults to `freeform@v1`.
     schema: Option<String>,
     /// Free-form client-owned JSON, stored verbatim and never read by the
     /// engine (see [`FoldSpec::meta`]).
@@ -298,12 +298,12 @@ async fn put_fold(
         selection: body.selection,
         schema: body
             .schema
-            .unwrap_or_else(|| schema::CHANNEL_DIGEST_V1.name.to_string()),
+            .unwrap_or_else(|| crate::spec::FREEFORM_SCHEMA.to_string()),
         model: body.model,
         instructions: body
             .instructions
             .filter(|i| !i.trim().is_empty())
-            .unwrap_or_else(|| schema::CHANNEL_DIGEST_PROMPT.to_string()),
+            .unwrap_or_else(|| crate::spec::DEFAULT_INSTRUCTIONS.to_string()),
         meta: body.meta,
     };
     spec.validate()?;
@@ -327,15 +327,24 @@ async fn delete_fold(
     Ok(Json(json!({ "deleted": name })))
 }
 
+#[derive(Debug, Default, serde::Deserialize)]
+struct PreflightBody {
+    #[serde(flatten)]
+    window: WindowBody,
+    /// When true, the Ready plan carries the exact string the model would
+    /// receive — the "show me what's behind the curtain" seam.
+    #[serde(default)]
+    include_input: bool,
+}
+
 async fn preflight_fold(
     State(s): State<AppState>,
     Path(name): Path<String>,
-    body: Option<Json<WindowBody>>,
+    body: Option<Json<PreflightBody>>,
 ) -> Result<Json<Value>, ApiError> {
-    let (since, until) = body
-        .map(|Json(w)| w.resolve())
-        .unwrap_or_else(|| WindowBody::default().resolve());
-    let out = folds::preflight(&s.store, &name, since, until).await?;
+    let Json(body) = body.unwrap_or_default();
+    let (since, until) = body.window.resolve();
+    let out = folds::preflight(&s.store, &name, since, until, body.include_input).await?;
     Ok(Json(
         serde_json::to_value(out).unwrap_or_else(|_| json!({})),
     ))
@@ -454,7 +463,7 @@ mod tests {
         let resp = app.clone().oneshot(put).await.expect("resp");
         assert_eq!(resp.status(), StatusCode::OK);
         let saved = body_json(resp).await;
-        assert_eq!(saved["saved"]["schema"], "channel-digest@v1");
+        assert_eq!(saved["saved"]["schema"], "freeform@v1");
         assert!(!saved["saved"]["instructions"]
             .as_str()
             .unwrap_or("")

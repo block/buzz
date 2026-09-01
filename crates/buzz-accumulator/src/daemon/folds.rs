@@ -28,14 +28,6 @@ pub enum RunOutcome {
         /// New (uncovered) signals waiting in the window.
         pending: usize,
     },
-    /// Model output broke the artifact contract; nothing persisted.
-    /// The paid-for output is salvaged here rather than discarded.
-    Refused {
-        /// The validator's refusal.
-        reason: String,
-        /// Raw model output for inspection.
-        model_output: String,
-    },
     /// A concurrent run appended this version first; nothing persisted.
     Unpublished {
         /// What happened.
@@ -83,6 +75,11 @@ pub enum PreflightOutcome {
         estimate: crate::estimate::Estimate,
         /// Window actually queried, `[since, until_exclusive)`.
         window: (i64, i64),
+        /// The exact string the model would receive — the transparency seam
+        /// ("what's happening behind the curtain"). Present only when the
+        /// caller asked for it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model_input: Option<String>,
     },
 }
 
@@ -164,12 +161,14 @@ async fn plan(
 }
 
 /// Zero-spend preflight: what would a run over this window do, and at what
-/// estimated cost?
+/// estimated cost? With `include_input`, the Ready outcome carries the exact
+/// string the model would receive.
 pub async fn preflight(
     store: &Store,
     name: &str,
     since: i64,
     until_exclusive: i64,
+    include_input: bool,
 ) -> Result<PreflightOutcome, FoldError> {
     let (_, _, plan) = plan(store, name, since, until_exclusive).await?;
     Ok(match plan {
@@ -181,6 +180,7 @@ pub async fn preflight(
             truncated: rp.truncated,
             estimate: rp.estimate,
             window: (since, until_exclusive),
+            model_input: include_input.then_some(rp.model_input),
         },
     })
 }
@@ -209,18 +209,10 @@ pub async fn run_fold(
         .await
         .map_err(|e| crate::Error::Runner(format!("runner task panicked: {e}")))??;
 
-    // Post-spend: every failure from here on salvages the paid-for output.
+    // Post-spend: the response IS the artifact; only the version fence can
+    // still reject it, and that path salvages the paid-for output.
     let now = chrono::Utc::now().timestamp();
-    let artifact = match complete_run(&spec, chain.last(), &run_plan, &output, now) {
-        Ok(a) => a,
-        Err(crate::Error::Nonconforming(reason)) => {
-            return Ok(RunOutcome::Refused {
-                reason,
-                model_output: output,
-            });
-        }
-        Err(e) => return Err(e.into()),
-    };
+    let artifact = complete_run(&spec, chain.last(), &run_plan, &output, now);
     if let Err(e) = store.insert_artifact(&artifact).await {
         // The (fold, version) primary key is the fence; a violation means a
         // concurrent writer won. Nothing forked, nothing persisted here.
@@ -291,26 +283,49 @@ mod tests {
     #[tokio::test]
     async fn preflight_prices_before_any_spend() {
         let store = store_with_fold_and_signal().await;
-        let out = preflight(&store, "weekly", 0, 1_000)
+        let out = preflight(&store, "weekly", 0, 1_000, false)
             .await
             .expect("preflight");
         match out {
-            PreflightOutcome::Ready { shown, pending, .. } => {
+            PreflightOutcome::Ready {
+                shown,
+                pending,
+                model_input,
+                ..
+            } => {
                 assert_eq!(shown, 1);
                 // Engine semantics: pending counts every new signal in the
                 // window, including the ones that would be shown.
                 assert_eq!(pending, 1);
+                assert!(model_input.is_none(), "input only rides when asked for");
             }
             other => panic!("expected ready, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn run_persists_conforming_output_and_caches_next() {
+    async fn preflight_can_expose_the_exact_model_input() {
+        let store = store_with_fold_and_signal().await;
+        let out = preflight(&store, "weekly", 0, 1_000, true)
+            .await
+            .expect("preflight");
+        match out {
+            PreflightOutcome::Ready { model_input, .. } => {
+                let input = model_input.expect("requested input");
+                assert!(input.contains("digest the channel"), "task rides in input");
+                assert!(input.contains("hello world"), "events ride in input");
+            }
+            other => panic!("expected ready, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_persists_output_verbatim_and_caches_next() {
         let store = store_with_fold_and_signal().await;
         let id = "e".repeat(64);
-        let output = format!("# Working Context\nsummary\n\n# Log\n- hello [event:{id}]\n");
-        let runner = Arc::new(FakeRunner(output));
+        // Free-form output — any shape the task asked for persists verbatim.
+        let output = format!("Just a paragraph citing [event:{id}], no headings.");
+        let runner = Arc::new(FakeRunner(output.clone()));
         let guard = RunGuard::default();
         let out = run_fold(&store, runner.clone(), &guard, "weekly", 0, 1_000)
             .await
@@ -322,6 +337,7 @@ mod tests {
                 assert_eq!(artifact.version, 1);
                 assert_eq!(shown, 1);
                 assert_eq!(artifact.shown_ids, vec![id.clone()]);
+                assert_eq!(artifact.output, output, "response persists verbatim");
             }
             other => panic!("expected folded, got {other:?}"),
         }
@@ -334,25 +350,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nonconforming_output_is_refused_and_salvaged() {
-        let store = store_with_fold_and_signal().await;
-        let runner = Arc::new(FakeRunner("no headings at all".into()));
-        let out = run_fold(&store, runner, &RunGuard::default(), "weekly", 0, 1_000)
-            .await
-            .expect("run");
-        match out {
-            RunOutcome::Refused { model_output, .. } => {
-                assert_eq!(model_output, "no headings at all");
-            }
-            other => panic!("expected refused, got {other:?}"),
-        }
-        assert!(store.artifacts("weekly").await.expect("chain").is_empty());
-    }
-
-    #[tokio::test]
     async fn unknown_fold_is_not_found() {
         let store = Store::open(":memory:").await.expect("open");
-        let err = preflight(&store, "nope", 0, 10)
+        let err = preflight(&store, "nope", 0, 10, false)
             .await
             .expect_err("missing fold");
         assert!(matches!(err, FoldError::NotFound(_)));

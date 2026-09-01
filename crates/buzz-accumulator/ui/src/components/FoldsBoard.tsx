@@ -84,7 +84,7 @@ function CreateFold({ selection }: { selection: Selection }) {
         <label>Instructions</label>
         <textarea
           rows={2}
-          placeholder="task focus, e.g. 'track decisions and blockers' — the Working Context / Log output contract always applies"
+          placeholder="the task — instructions + context go to the model; its response IS the artifact, any shape you ask for"
           value={instructions}
           onChange={(e) => setInstructions(e.target.value)}
         />
@@ -120,7 +120,9 @@ function FoldCard({
   const [outcome, setOutcome] = useState<RunOutcome | null>(null);
 
   const preflight = useMutation({
-    mutationFn: () => api.preflight(fold.name, {}),
+    // Always ask for the exact model input: the plan box offers it behind a
+    // disclosure so a run is never a mystery.
+    mutationFn: () => api.preflight(fold.name, {}, true),
     onSuccess: (p) => {
       setPlan(p);
       setOutcome(null);
@@ -162,6 +164,9 @@ function FoldCard({
         {fold.versions > 0
           ? `v${fold.latest_version} · updated ${fmtTime(fold.updated_at)}`
           : "never run"}
+      </div>
+      <div className="desc" style={{ whiteSpace: "pre-wrap" }}>
+        <span className="faint">task:</span> {fold.spec.instructions}
       </div>
       <div className="actions">
         <button
@@ -210,14 +215,28 @@ function PlanBox({ plan }: { plan: Preflight }) {
   const fits = est.window_fit.fits;
   return (
     <div className="plan-box ok">
-      Ready: {plan.shown} shown / {plan.pending} pending
-      {plan.truncated ? " (chunked)" : ""} · ~
+      Ready: {plan.shown} new event(s) to fold / {plan.pending} not yet covered
+      {plan.truncated ? " (chunked — the rest stays pending)" : ""} · ~
       {fmtTokens(est.est_input_tokens)} input tokens
       {fits === false ? " · OVER the model window" : ""}
       <br />
       <span className="faint">
-        Run is pinned to this priced window; press run to spend.
+        Each run folds only events no earlier version covered; the prior
+        version rides along as context. Run is pinned to this priced window.
       </span>
+      {plan.model_input !== undefined && (
+        <details style={{ marginTop: 6 }}>
+          <summary className="faint" style={{ cursor: "pointer" }}>
+            show the exact model input ({plan.model_input.length.toLocaleString()} chars)
+          </summary>
+          <pre
+            className="mono"
+            style={{ whiteSpace: "pre-wrap", maxHeight: 320, overflow: "auto" }}
+          >
+            {plan.model_input}
+          </pre>
+        </details>
+      )}
     </div>
   );
 }
@@ -230,16 +249,6 @@ function OutcomeBox({ outcome }: { outcome: RunOutcome }) {
       return (
         <div className="plan-box warn">
           Stalled: {outcome.reason} ({outcome.pending} pending)
-        </div>
-      );
-    case "refused":
-      return (
-        <div className="plan-box err">
-          Model output refused ({outcome.reason}). Nothing persisted; raw
-          output:
-          <pre className="mono" style={{ whiteSpace: "pre-wrap" }}>
-            {outcome.model_output.slice(0, 2000)}
-          </pre>
         </div>
       );
     case "unpublished":

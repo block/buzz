@@ -10,8 +10,8 @@ type Props = {
   onVersion: (v: number) => void;
 };
 
-/** Renders one artifact version: Working Context + Log with citation chips,
- * a version scrubber, and a pinned-evidence rail. */
+/** Renders one artifact version: the model's free-form response with citation
+ * chips, a version scrubber, and a pinned-evidence rail. */
 export function ArtifactReader({ fold, version, onVersion }: Props) {
   const [pinned, setPinned] = useState<string[]>([]);
 
@@ -50,12 +50,21 @@ export function ArtifactReader({ fold, version, onVersion }: Props) {
       </div>
       {a && (
         <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
-          {fmtTime(a.created_at)} · model {a.model} · {a.shown_ids.length} shown
-          {a.truncated ? " · chunked window" : ""}
+          {fmtTime(a.created_at)} · model {a.model} · folded{" "}
+          {a.shown_ids.length} new event(s)
+          {a.truncated ? " · chunked (more remained pending)" : ""}
           {a.coverage_since !== null && a.coverage_until !== null && (
             <>
               {" "}
-              · covers {fmtTime(a.coverage_since)} → {fmtTime(a.coverage_until)}
+              · this run's new events span {fmtTime(a.coverage_since)} →{" "}
+              {fmtTime(a.coverage_until)}
+            </>
+          )}
+          {a.version > 1 && (
+            <>
+              {" "}
+              · built on v{a.version - 1} (earlier versions' events aren't
+              re-read — they ride along in the prior version)
             </>
           )}
         </div>

@@ -7,21 +7,20 @@
 //!    call, no I/O.
 //! 2. The caller shows the estimate (priced before spend), invokes a
 //!    [`crate::runner::FoldRunner`] with `RunPlan::model_input`, then
-//! 3. [`complete_run`] — validate the output against the artifact contract,
-//!    splice history, and produce the next [`ArtifactPayload`]. Nonconforming
-//!    output returns an error and nothing persists.
+//! 3. [`complete_run`] — record the output verbatim with engine-computed
+//!    provenance (exactly the shown signals and their window) as the next
+//!    [`ArtifactPayload`]. The output's shape is the task's business, not the
+//!    engine's.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::artifact::ArtifactPayload;
 use crate::error::Error;
 use crate::estimate::{self, Estimate};
-use crate::schema;
 use crate::selection::materialize;
 use crate::signal::Signal;
 use crate::spec::FoldSpec;
 use crate::transcript::{render_transcript, ShownSignal};
-use crate::validate::{splice_append_sections, validate_output};
 
 /// Hard character budget for one run's model input (prior digest + transcript).
 pub const MAX_CONTEXT_CHARS: usize = 120_000;
@@ -36,6 +35,17 @@ pub const MAX_SHOWN_PER_RUN: usize = 250;
 /// erodes the transcript budget until runs fold nothing; stalling here keeps
 /// that failure priced-before-spend instead of a wasted model call.
 pub const MAX_PRIOR_OUTPUT_BYTES: usize = 40_000;
+
+/// Engine note composed into every model input between the task and the
+/// context: what the context is, and how citations work. The output shape is
+/// deliberately unconstrained — provenance is engine-owned, so citations are
+/// reader-verifiable links, not a contract.
+const ENGINE_GUIDANCE: &str = "The context below is your evidence: the prior version of this \
+document (when one exists) followed by new time-ordered events. Produce the next version of \
+the document — whatever shape the task asks for. Where useful, cite the events behind a claim \
+as [event:<id>], one id per bracket, copied in full from the SOURCE EVENT IDS list; citations \
+render as clickable links to the source, so a wrong or invented id shows readers a dead link. \
+Do not invent facts. Output only the document.";
 
 /// The outcome of planning a run.
 #[derive(Debug, Clone, PartialEq)]
@@ -110,7 +120,7 @@ pub fn plan_run(
     }
     let parent = match prior {
         Some(p) => format!(
-            "--- PRIOR DIGEST ({} v{}) ---\n{}",
+            "--- PRIOR VERSION ({} v{}) ---\n{}",
             spec.name, p.version, p.output
         ),
         None => String::new(),
@@ -136,14 +146,11 @@ pub fn plan_run(
         transcript.push_str("\n\n--- SOURCE EVENT IDS ---\n");
         transcript.push_str(&ids.join("\n"));
     }
-    // Instructions are the task; the schema contract is non-negotiable and
-    // travels with every run — otherwise custom instructions silently drop
-    // the structural rules that complete_run() will refuse on.
+    // Instructions are the task and the output is free-form; the engine only
+    // explains what the context is and how citations render.
     let model_input = format!(
         "--- TASK ---\n{}\n\n{}\n\n--- CONTEXT (time-ordered events) ---\n{}\n",
-        spec.instructions,
-        schema::CHANNEL_DIGEST_V1.contract_prompt(),
-        transcript
+        spec.instructions, ENGINE_GUIDANCE, transcript
     );
     let est = estimate::estimate(&spec.model, model_input.chars().count());
     Ok(Plan::Ready(RunPlan {
@@ -155,25 +162,19 @@ pub fn plan_run(
     }))
 }
 
-/// Validate model `output` for `plan` and produce the next artifact version.
+/// Record model `output` for `plan` verbatim as the next artifact version.
 ///
-/// On a structural violation (wrong H1 sections) this returns
-/// [`Error::Nonconforming`] and the caller must persist nothing. Coverage is
-/// computed from exactly the signals the plan showed — provenance is
-/// engine-owned, not read from the output — and append-section history from
-/// `prior` is spliced back mechanically, so it survives regardless of what
-/// the model emitted.
+/// The output's shape is the task's business — nothing about the text is
+/// judged. Provenance is engine-owned: coverage is computed from exactly the
+/// signals the plan showed, never from what the output claims.
 pub fn complete_run(
     spec: &FoldSpec,
     prior: Option<&ArtifactPayload>,
     plan: &RunPlan,
     output: &str,
     created_at: i64,
-) -> Result<ArtifactPayload, Error> {
-    let sch = &schema::CHANNEL_DIGEST_V1;
+) -> ArtifactPayload {
     let shown_ids: Vec<String> = plan.shown.iter().map(|s| s.id.clone()).collect();
-    validate_output(sch, output)?;
-    let spliced = splice_append_sections(sch, prior.map(|p| p.output.as_str()), output);
     // Taint travels with the chain: once a channel's events fold in, every
     // later version keeps carrying that channel, even after a selection edit.
     let channels: BTreeSet<String> = prior
@@ -182,10 +183,10 @@ pub fn complete_run(
         .union(&spec.selection.channels.iter().cloned().collect())
         .cloned()
         .collect();
-    Ok(ArtifactPayload {
+    ArtifactPayload {
         fold: spec.name.clone(),
         version: prior.map_or(1, |p| p.version + 1),
-        output: spliced,
+        output: output.to_string(),
         coverage_since: plan.shown.iter().map(|s| s.created_at).min(),
         coverage_until: plan.shown.iter().map(|s| s.created_at).max().map(|t| t + 1),
         selection: spec.selection.clone(),
@@ -196,7 +197,7 @@ pub fn complete_run(
         prompt_sha256: spec.prompt_sha256(),
         truncated: plan.truncated,
         created_at,
-    })
+    }
 }
 
 #[cfg(test)]
@@ -295,15 +296,21 @@ mod tests {
         assert!(!run.model_input.contains("--- SOURCE EVENT IDS ---"));
         assert!(run
             .model_input
-            .contains("--- PRIOR DIGEST (team-digest v1) ---"));
-        // No shown signals → citation contract not demanded, coverage stays empty.
-        let v2 = complete_run(&spec, Some(&prior), &run, &digest(""), 1_700_000_200).expect("v2");
+            .contains("--- PRIOR VERSION (team-digest v1) ---"));
+        // No shown signals → nothing new to cover, coverage stays empty.
+        let v2 = complete_run(
+            &spec,
+            Some(&prior),
+            &run,
+            "rewritten under new task",
+            1_700_000_200,
+        );
         assert_eq!(v2.version, 2);
         assert!(v2.shown_ids.is_empty());
         assert_eq!(v2.coverage_since, None);
         assert_eq!(v2.coverage_until, None);
-        // The engine splice still carried the prior Log forward.
-        assert!(v2.output.contains("- prior entry"));
+        // The response persists verbatim — retention is the model's job now.
+        assert_eq!(v2.output, "rewritten under new task");
     }
 
     #[test]
@@ -371,7 +378,7 @@ mod tests {
             panic!("expected Ready");
         };
         let out = digest(&format!("- new entry [event:{b}]"));
-        let v2 = complete_run(&spec, Some(&prior), &run, &out, 1_700_000_500).expect("v2");
+        let v2 = complete_run(&spec, Some(&prior), &run, &out, 1_700_000_500);
         assert_eq!(v2.channels, vec!["ch1".to_string(), "ch2".to_string()]);
         assert_eq!(v2.selection, spec.selection);
     }
@@ -403,9 +410,9 @@ mod tests {
     }
 
     #[test]
-    fn custom_instructions_cannot_drop_the_output_contract() {
-        // A task-only prompt ("what is this project about?") must still carry
-        // the schema's structural rules, or validation is a guaranteed refusal.
+    fn every_run_carries_the_task_and_the_engine_guidance() {
+        // The engine explains what the context is and how citations render;
+        // the task is the caller's, verbatim.
         let mut spec = spec();
         spec.instructions = "what is this project trying to accomplish".to_string();
         let plan = plan_run(
@@ -422,9 +429,8 @@ mod tests {
         assert!(run
             .model_input
             .contains("what is this project trying to accomplish"));
-        assert!(run.model_input.contains("OUTPUT CONTRACT"));
-        assert!(run.model_input.contains("Working Context, Log"));
-        assert!(run.model_input.contains("Log is append-only"));
+        assert!(run.model_input.contains("whatever shape the task asks for"));
+        assert!(run.model_input.contains("SOURCE EVENT IDS"));
     }
 
     #[test]
@@ -445,7 +451,7 @@ mod tests {
         // Coverage seals only what was shown; the rest stays pending.
         let cited = run.shown[0].id.clone();
         let out = digest(&format!("- chunk one [event:{cited}]"));
-        let v1 = complete_run(&spec, None, &run, &out, 1_700_000_300).expect("v1");
+        let v1 = complete_run(&spec, None, &run, &out, 1_700_000_300);
         assert_eq!(v1.shown_ids.len(), run.shown.len());
         assert!(v1.truncated);
     }
@@ -466,7 +472,7 @@ mod tests {
             panic!("expected Ready");
         };
         let out = digest(&format!("- said hello [event:{b}]"));
-        let v1 = complete_run(&spec, None, &run, &out, 1_700_000_300).expect("v1");
+        let v1 = complete_run(&spec, None, &run, &out, 1_700_000_300);
         assert_eq!(v1.version, 1);
         assert_eq!(v1.shown_ids, vec![b]);
         assert_eq!(v1.coverage_since, Some(200));
@@ -475,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_run_splices_prior_history_and_increments_version() {
+    fn output_is_verbatim_and_the_prior_rides_in_the_input() {
         let spec = spec();
         let a = hex_id('a');
         let b = hex_id('b');
@@ -492,38 +498,16 @@ mod tests {
         let Plan::Ready(run) = plan else {
             panic!("expected Ready");
         };
-        // Model returns ONLY the new entry; engine must carry the prior Log.
-        let out = digest(&format!("- new entry [event:{b}]"));
-        let v2 = complete_run(&spec, Some(&prior), &run, &out, 1_700_000_400).expect("v2");
+        // The prior version is the model's context, labeled as such…
+        assert!(run
+            .model_input
+            .contains("--- PRIOR VERSION (team-digest v1) ---"));
+        // …and the model's response IS the artifact: any shape, verbatim, no
+        // splice. Provenance (version, coverage) is engine bookkeeping.
+        let out = "A totally free-form rewrite that dropped the prior entry.";
+        let v2 = complete_run(&spec, Some(&prior), &run, out, 1_700_000_400);
         assert_eq!(v2.version, 2);
-        assert!(v2.output.contains("- prior entry"));
-        assert!(v2.output.contains("- new entry"));
-    }
-
-    #[test]
-    fn wrong_sections_are_refused_but_citations_never_are() {
-        let spec = spec();
-        let b = hex_id('b');
-        let plan = plan_run(
-            &spec,
-            None,
-            &BTreeSet::new(),
-            vec![sig(&b, 200, "hello")],
-            &BTreeMap::new(),
-        )
-        .expect("plan");
-        let Plan::Ready(run) = plan else {
-            panic!("expected Ready");
-        };
-        // Wrong sections: the structure is the contract, still refused.
-        assert!(matches!(
-            complete_run(&spec, None, &run, "# Nope\n\nbody\n", 0),
-            Err(Error::Nonconforming(_))
-        ));
-        // An unshown citation persists: coverage still seals exactly what the
-        // plan showed, independent of what the text cites.
-        let unshown = digest(&format!("- quoted id [event:{}]", hex_id('c')));
-        let v1 = complete_run(&spec, None, &run, &unshown, 0).expect("v1");
-        assert_eq!(v1.shown_ids, vec![b]);
+        assert_eq!(v2.output, out);
+        assert_eq!(v2.shown_ids, vec![b]);
     }
 }

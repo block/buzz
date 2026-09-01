@@ -105,6 +105,9 @@ export type Preflight =
       truncated: boolean;
       estimate: Estimate;
       window: [number, number];
+      /** The exact string the model would receive; present only when the
+       * preflight asked for it (`include_input`). */
+      model_input?: string;
     };
 
 export type Artifact = {
@@ -138,7 +141,6 @@ export type ArtifactSummary = {
 export type RunOutcome =
   | { status: "cached" }
   | { status: "stalled"; reason: string; pending: number }
-  | { status: "refused"; reason: string; model_output: string }
   | { status: "unpublished"; reason: string; model_output: string }
   | {
       status: "folded";
@@ -226,8 +228,11 @@ export const api = {
   ) => request<{ saved: FoldSpec }>(`/folds/${name}`, { method: "PUT", ...json(body) }),
   deleteFold: (name: string) =>
     request<{ deleted: string }>(`/folds/${name}`, { method: "DELETE" }),
-  preflight: (name: string, window: TimeWindow) =>
-    request<Preflight>(`/folds/${name}/preflight`, post(window)),
+  preflight: (name: string, window: TimeWindow, includeInput = false) =>
+    request<Preflight>(
+      `/folds/${name}/preflight`,
+      post({ ...window, include_input: includeInput }),
+    ),
   run: (name: string, window: TimeWindow) =>
     request<RunOutcome>(`/folds/${name}/run`, post(window)),
   artifacts: (name: string) =>

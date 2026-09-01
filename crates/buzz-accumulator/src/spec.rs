@@ -9,11 +9,20 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::Error;
-use crate::schema;
 use crate::selection::Selection;
 
 /// Maximum fold-name length (also the `d` tag value).
 pub const MAX_NAME_LEN: usize = 64;
+
+/// Default schema label for new folds. The output is free-form — the label is
+/// provenance on artifacts (which prompt regime produced them), not a
+/// validated contract; chains created under `channel-digest@v1` keep their
+/// historical label.
+pub const FREEFORM_SCHEMA: &str = "freeform@v1";
+
+/// Default fold *task* instructions when the caller supplies none.
+pub const DEFAULT_INSTRUCTIONS: &str = "Maintain a running digest of the selection: rewrite the \
+prior version in light of the new events. Keep it concise, concrete, and factual.";
 
 /// One fold definition.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22,7 +31,8 @@ pub struct FoldSpec {
     pub name: String,
     /// What to read.
     pub selection: Selection,
-    /// Schema name; the only one is [`crate::schema::CHANNEL_DIGEST_V1`].
+    /// Schema label recorded on artifacts as provenance ([`FREEFORM_SCHEMA`]
+    /// by default). Output is free-form; the label is not a validated shape.
     pub schema: String,
     /// Model alias passed to the runner and priced by [`crate::estimate`].
     pub model: String,
@@ -55,12 +65,10 @@ impl FoldSpec {
                 self.name
             )));
         }
-        if self.schema != schema::CHANNEL_DIGEST_V1.name {
-            return Err(Error::InvalidSpec(format!(
-                "unknown schema {:?}; the only schema is {:?}",
-                self.schema,
-                schema::CHANNEL_DIGEST_V1.name
-            )));
+        if self.schema.trim().is_empty() {
+            return Err(Error::InvalidSpec(
+                "schema label must be non-empty (it is recorded on artifacts as provenance)".into(),
+            ));
         }
         if self.model.trim().is_empty() {
             return Err(Error::InvalidSpec(
@@ -116,9 +124,13 @@ mod tests {
     }
 
     #[test]
-    fn unknown_schema_and_empty_fields_are_rejected() {
+    fn empty_fields_are_rejected_but_any_schema_label_passes() {
+        // Schema is a provenance label, not a validated shape.
         let mut s = valid();
-        s.schema = "nope@v1".to_string();
+        s.schema = "my-custom-regime@v3".to_string();
+        assert!(s.validate().is_ok());
+        let mut s = valid();
+        s.schema = "  ".to_string();
         assert!(s.validate().is_err());
         let mut s = valid();
         s.model = " ".to_string();
