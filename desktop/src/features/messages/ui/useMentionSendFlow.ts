@@ -171,10 +171,10 @@ export function useMentionSendFlow({
       let wroteRelayState = false;
       // Reported for the send-perf summary: an agent wake is detached, so a
       // send that fired one should still read as fast as one that did not.
+      // Only real fires count — a wake already in flight is suppressed.
       let detachedStarts = 0;
       const countDetachedStart = (agent: ManagedAgent) => {
-        detachedStarts += 1;
-        startAgentDetached(agent);
+        if (startAgentDetached(agent)) detachedStarts += 1;
       };
       for (const pubkey of uniqueNormalizedPubkeys(mentionPubkeys)) {
         const agent = managedAgentsByPubkey.get(pubkey);
