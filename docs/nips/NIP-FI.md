@@ -50,6 +50,7 @@ The assertion is a compact JWS carrying the following claims.
 | `iss` | string | Exact issuer URI.  The relay selects an issuer policy by exact match; no normalization is applied. |
 | `sub` | string | Opaque, stable, non-reassignable subject identifier for the account lifetime.  Never an email address or display name. |
 | `nostr_pubkey` | string | Lowercase hexadecimal encoding of exactly one 32-byte Nostr public key.  Other encodings deny. |
+| `aud` | string or array | Audience.  MUST be present.  The relay requires an exact match to the configured audience value for this issuer. |
 | `iat` | NumericDate | Issuance time. |
 | `exp` | NumericDate | Expiry time.  MUST be finite.  The deployment MUST configure a positive finite maximum TTL; the relay enforces both the token `exp` and the configured `maximum_assertion_age`. |
 
@@ -57,7 +58,6 @@ The assertion is a compact JWS carrying the following claims.
 
 | Claim | Type | Semantics |
 |---|---|---|
-| `aud` | string or array | Required when configured; the relay requires an exact match to the configured audience value. |
 | `nbf` | NumericDate | Not-before time.  When present, the relay enforces `nbf <= now + skew`. |
 
 ### Token type
@@ -280,26 +280,28 @@ reconnect immediately.
 > **Non-normative note — open product question for Will/Tyler:**
 >
 > The session-only model means a revoked employee retains access until the
-> relay closes their connection and they can no longer obtain a fresh
-> assertion.  There are two distinct residual sub-windows:
+> adapter stops issuing new assertions.  After a successful disconnect call
+> (all matching sessions closed), there is no surviving old-session window.
+> The only remaining access window is a **reconnect** using a still-valid
+> assertion: that new session is bounded by
 >
-> - **Existing session:** a live session that received a disconnect call
->   continues until the relay closes it (bounded by whatever session deadline
->   applies — at most `max_connection_lifetime_seconds` from connection time).
-> - **Immediate reconnect:** after being disconnected, a client holding a
->   still-valid assertion can reconnect immediately.  That new session is
->   bounded by `min(remaining assertion TTL, max_connection_lifetime_seconds)`.
+> ```
+> min(
+>     remaining assertion authority,   // min(remaining exp, remaining iat + maximum_assertion_age)
+>     max_connection_lifetime_seconds,
+>     remaining key-snapshot hard deadline
+> )
+> ```
 >
-> These windows are sequential, not additive.  The worst-case window after a
-> disconnect call is `max_connection_lifetime_seconds` (for the live session)
-> followed immediately by a new session bounded by `min(remaining assertion TTL,
-> max_connection_lifetime_seconds)`.  The reconnect window closes when the
-> adapter stops issuing new assertions.
+> This window closes when the adapter stops issuing new assertions for the
+> identity.  If the disconnect call is asynchronous or best-effort, the spec
+> would need to define a completion-bound contract; the current normative text
+> assumes synchronous close.
 >
 > The alternative is a **deny-until-TTL** model: the relay holds a
 > memory-resident deny-list entry for the pubkey keyed to the adapter's stated
 > TTL, and any reconnect attempt for that key is denied `authorization_denied`
-> until the entry expires.  This closes the reconnect window at the cost of
+> until the entry expires.  This eliminates the reconnect window at the cost of
 > relay in-memory state and a TTL-propagation contract between adapter and relay.
 >
 > This document intentionally leaves that decision unresolved.  The current
@@ -313,12 +315,17 @@ reconnect immediately.
 The disconnect endpoint is an authenticated adapter→relay API, not a public
 Nostr protocol.
 
-### Request binding
+### Command JWT
 
-Authentication MUST use a short-lived signed command JWT.  The adapter mints
-a compact JWS verified by the relay against the same configured per-issuer JWKS
-snapshot it uses for client assertions — no additional key material or Nostr
-key is required.
+Authentication uses a short-lived signed command JWT with a dedicated token
+type.  The relay verifies it with a **dedicated command verifier** that reuses
+the same `IssuerRegistry`, bounded JWS parsing, issuer-bound JWKS snapshots,
+signature verification, audience, and time-bound primitives as assertion
+verification, but operates over a distinct token type and produces a closed
+command result.  The `VerifyAssertion` primitive is not used here.
+
+The command JWT protected header MUST carry `"typ": "nip-fi-command+jwt"`.
+Any other `typ` value denies before claim parsing.
 
 The command JWT MUST carry the following claims:
 
@@ -327,23 +334,67 @@ The command JWT MUST carry the following claims:
 | `iss` | Exact issuer URI matching an authorized adapter issuer in the registry. |
 | `sub` | Adapter principal identifier.  The relay checks this is an authorized adapter principal. |
 | `aud` | Audience matching the relay's configured audience value for this issuer. |
-| `iat` | Issuance time.  MUST satisfy `now < iat + command_ttl` and `iat <= now + skew`. |
+| `iat` | Issuance time.  MUST satisfy `iat <= now + skew`. |
 | `exp` | Expiry time.  MUST be finite; relay enforces `now < exp`. |
-| `jti` | Unique, non-guessable identifier for this command.  The relay rejects any command whose `jti` has already been seen within its expiry window (replay denial). |
-| `cmd` | Exactly `"disconnect"` (literal string). |
+| `jti` | Unique, non-guessable identifier for this command.  Used for replay prevention; see below. |
+| `method` | Exactly `"POST"` (uppercase literal).  Binds the command to the HTTP method. |
+| `path` | Exactly `"/api/nip-fi/disconnect"` (literal string).  Binds the command to the endpoint. |
+| `cmd` | Exactly `"disconnect"` (literal string).  Operation selector. |
 | `target_pubkey` | Lowercase hexadecimal encoding of the target 32-byte Nostr public key — the same encoding required for the assertion `nostr_pubkey` claim. |
 
-The relay verifies the command JWT using `VerifyAssertion` (selecting the
-adapter issuer policy), then asserts:
+The `maximum_command_age` policy knob is a required positive finite
+configuration per authorized adapter issuer.  The relay enforces
+`now < iat + maximum_command_age` in addition to `now < exp`.  A missing or
+non-positive configuration denies.
 
-1. `cmd == "disconnect"` — any other value denies.
-2. `target_pubkey` matches the pubkey in the request body — mismatch denies `403`.
-3. `jti` has not been seen within its expiry window — replay denies `403`.
-4. Caller identity is an authorized adapter principal — unauthorized caller denies `403`.
+The `VerifyCommandJwt` procedure:
 
-Any failure is fail-closed: the relay takes no action and returns the
-appropriate error.  The command TTL MUST be short (deployment policy governs;
-60 seconds is a reasonable upper bound).
+```text
+VerifyCommandJwt(token, request_method, request_path):
+  // 1. Bounded decode and type check
+  (header, claims) := BoundedJwsDecode(token) or DENY(evidence_rejected)
+  assert header.typ == "nip-fi-command+jwt" or DENY(evidence_rejected)
+
+  // 2. Select issuer policy; verify signature
+  policy := IssuerRegistry[claims.iss] or DENY(evidence_rejected)
+  AssertAsymmetricAlgorithm(header.alg) or DENY(evidence_rejected)
+  snapshot := policy.key_source.get_snapshot() or DENY(authorization_unavailable)
+  key := snapshot.find(header.kid) or DENY(evidence_rejected)
+  VerifySignature(token, key) or DENY(evidence_rejected)
+
+  // 3. Validate claims
+  AssertExactIss(claims.iss, policy.iss) or DENY(evidence_rejected)
+  AssertAudienceMatch(claims.aud, policy.aud) or DENY(evidence_rejected)
+  AssertCommandTimeBounds(claims, policy) or DENY(evidence_rejected)
+      // enforces: now < exp, iat <= now + skew, now < iat + maximum_command_age
+  assert claims.method == request_method or DENY(evidence_rejected)
+  assert claims.path   == request_path   or DENY(evidence_rejected)
+  assert claims.cmd    == "disconnect"   or DENY(evidence_rejected)
+  target_k := ParseHexKey(claims.target_pubkey) or DENY(evidence_rejected)
+
+  // 4. Atomically reserve jti to prevent replay
+  // The reservation is keyed by (iss, jti) and held until the command's
+  // effective expiry: min(exp, iat + maximum_command_age).  The check and
+  // insert MUST be atomic; a non-atomic "seen then insert" permits concurrent
+  // replay.
+  AtomicReserveJti(claims.iss, claims.jti, effective_expiry) or DENY(authorization_denied)
+
+  // 5. Authorize caller
+  AssertAuthorizedAdapterPrincipal(claims.iss, claims.sub) or DENY(authorization_denied)
+
+  return CommandResult(target_pubkey=target_k, caller=(claims.iss, claims.sub))
+```
+
+The relay then asserts that `CommandResult.target_pubkey` matches the `pubkey`
+field in the request body; mismatch denies `403`.  Any failure at any step is
+fail-closed: no action is taken.
+
+The command TTL MUST be short; deployment policy governs.  A maximum of 60
+seconds is a reasonable upper bound for `maximum_command_age`.
+
+This verifier and the disconnect API endpoint are follow-on code changes
+outside this PR, in the same way that the `require_attested_key` enforcement
+integration is.
 
 ### Request
 
@@ -403,7 +454,7 @@ normative behavior for them:
 - SCIM, HR system integration, employee offboarding automation: adapter-side.
 - Audit logging beyond what the relay operator chooses to retain: adapter-side.
 - Delegation: out of scope.
-- Companion profiles (NIP-FI-EDGE, NIP-FI-LIFECYCLE, NIP-FI-DELEG, NIP-FI-CONF): removed.
+- Companion profiles (NIP-FI-EDGE, NIP-FI-LIFECYCLE, NIP-FI-DELEG, NIP-FI-CONF, NIP-FI-MODEL): removed.
 
 ## Discovery
 
@@ -454,17 +505,29 @@ deployment adapter MUST configure a `max_connection_lifetime_seconds` and
 assertion TTL consistent with the organization's acceptable revocation latency.
 
 For upstream revocation without an explicit disconnect call (adapter stops
-issuing assertions; no active session termination), the residual window is
-`max(existing session remaining lifetime, assertion TTL)`: whichever is
-longer governs when access finally ceases.
+issuing assertions; no active session termination), access persists until the
+earliest of the live session's remaining authority deadlines, bounded by
+`max_connection_lifetime_seconds`.  After the session closes, a reconnect
+is bounded by the remaining assertion authority and `max_connection_lifetime_seconds`
+(and the key-snapshot hard deadline); once the adapter stops issuing assertions
+for the identity, no reconnect can succeed.
 
-For the session-only disconnect model (adapter issues a disconnect call that
-closes the live session), the residual window has two sequential parts: the
-live session closes within `max_connection_lifetime_seconds`, after which a
-reconnect is bounded by `min(remaining assertion TTL, max_connection_lifetime_seconds)`.
-The reconnect window closes when the adapter stops issuing new assertions.
-See the non-normative note in the Admin disconnect section for the open product
-question on the deny-until-TTL alternative.
+For the session-only disconnect model (adapter issues a successful disconnect
+call that closes all matching sessions), there is no surviving old-session
+window.  The only remaining access is a reconnect using a still-valid assertion,
+bounded by:
+
+```
+min(
+    remaining assertion authority,   // min(remaining exp, remaining iat + maximum_assertion_age)
+    max_connection_lifetime_seconds,
+    remaining key-snapshot hard deadline
+)
+```
+
+This window closes when the adapter stops issuing new assertions.  See the
+non-normative note in the Admin disconnect section for the open product question
+on the deny-until-TTL alternative.
 
 **SSRF.** The JWKS fetcher implements SSRF protection: HTTPS-only URI
 validation, DNS resolution with IP deny-list enforcement, address pinning to
