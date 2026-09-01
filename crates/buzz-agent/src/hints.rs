@@ -201,7 +201,30 @@ fn collect_supporting_files_impl(
     }
 }
 
-fn discover_skills_impl(cwd: &Path, home: Option<&Path>) -> Vec<SkillEntry> {
+/// Filter discovered skills down to the per-agent allowlist.
+///
+/// `Some(allow)` means only skills whose `name` is in `allow` are offered;
+/// an empty set therefore disables all skills (the default, so agents start
+/// with zero skills). `None` keeps every discovered skill (used by tests and
+/// callers that perform no per-agent gating).
+fn apply_allowlist(
+    skills: Vec<SkillEntry>,
+    allowed: Option<&HashSet<String>>,
+) -> Vec<SkillEntry> {
+    match allowed {
+        Some(allow) => skills
+            .into_iter()
+            .filter(|s| allow.contains(&s.name))
+            .collect(),
+        None => skills,
+    }
+}
+
+fn discover_skills_impl(
+    cwd: &Path,
+    home: Option<&Path>,
+    allowed: Option<&HashSet<String>>,
+) -> Vec<SkillEntry> {
     let mut seen = HashSet::new();
     let mut skills = Vec::new();
 
@@ -213,16 +236,23 @@ fn discover_skills_impl(cwd: &Path, home: Option<&Path>) -> Vec<SkillEntry> {
         scan_skill_dir(&home.join(".agents/skills"), &mut seen, &mut skills);
     }
 
-    skills
+    apply_allowlist(skills, allowed)
 }
 
-pub fn build_hints_section(cwd: &Path) -> (String, Vec<SkillEntry>) {
-    build_hints_section_impl(cwd, home_dir().as_deref())
+pub fn build_hints_section(
+    cwd: &Path,
+    allowed: Option<&HashSet<String>>,
+) -> (String, Vec<SkillEntry>) {
+    build_hints_section_impl(cwd, home_dir().as_deref(), allowed)
 }
 
-fn build_hints_section_impl(cwd: &Path, home: Option<&Path>) -> (String, Vec<SkillEntry>) {
+fn build_hints_section_impl(
+    cwd: &Path,
+    home: Option<&Path>,
+    allowed: Option<&HashSet<String>>,
+) -> (String, Vec<SkillEntry>) {
     let hints_text = load_hint_files_impl(cwd, home);
-    let skills = discover_skills_impl(cwd, home);
+    let skills = discover_skills_impl(cwd, home, allowed);
 
     if hints_text.is_empty() && skills.is_empty() {
         return (String::new(), skills);
@@ -368,7 +398,7 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover_skills_impl(cwd, None);
+        let skills = discover_skills_impl(cwd, None, None);
         assert_eq!(skills.len(), 2);
         let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"my-skill"), "missing my-skill");
@@ -402,7 +432,7 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover_skills_impl(cwd, None);
+        let skills = discover_skills_impl(cwd, None, None);
         assert_eq!(skills.len(), 1, "duplicate name should be deduplicated");
         assert_eq!(
             skills[0].description, "from agents",
@@ -429,14 +459,64 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover_skills_impl(cwd, None);
+        let skills = discover_skills_impl(cwd, None, None);
         assert!(skills.is_empty(), "entry without name should be skipped");
+    }
+
+    fn setup_two_skills(cwd: &Path) {
+        let a = cwd.join(".agents/skills/alpha");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::write(
+            a.join("SKILL.md"),
+            "---\nname: alpha\ndescription: Alpha\n---\nAlpha body.\n",
+        )
+        .unwrap();
+
+        let b = cwd.join(".agents/skills/beta");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(
+            b.join("SKILL.md"),
+            "---\nname: beta\ndescription: Beta\n---\nBeta body.\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn discover_skills_empty_allowlist_gives_zero_skills() {
+        let tmp = TempDir::new().unwrap();
+        setup_two_skills(tmp.path());
+
+        // The default state: an empty allowlist means NO skills are offered.
+        let allowed = HashSet::new();
+        let skills = discover_skills_impl(tmp.path(), None, Some(&allowed));
+        assert!(skills.is_empty(), "empty allowlist should yield zero skills");
+    }
+
+    #[test]
+    fn discover_skills_allowlist_keeps_only_members() {
+        let tmp = TempDir::new().unwrap();
+        setup_two_skills(tmp.path());
+
+        let mut allowed = HashSet::new();
+        allowed.insert("beta".to_string());
+        let skills = discover_skills_impl(tmp.path(), None, Some(&allowed));
+        assert_eq!(skills.len(), 1, "only allowlisted skill should be kept");
+        assert_eq!(skills[0].name, "beta");
+    }
+
+    #[test]
+    fn discover_skills_none_keeps_all() {
+        let tmp = TempDir::new().unwrap();
+        setup_two_skills(tmp.path());
+
+        let skills = discover_skills_impl(tmp.path(), None, None);
+        assert_eq!(skills.len(), 2, "None allowlist keeps every discovered skill");
     }
 
     #[test]
     fn build_hints_section_empty() {
         let tmp = TempDir::new().unwrap();
-        let (result, skills) = build_hints_section_impl(tmp.path(), None);
+        let (result, skills) = build_hints_section_impl(tmp.path(), None, None);
         assert_eq!(result, "");
         assert!(skills.is_empty());
     }
@@ -456,7 +536,7 @@ mod tests {
         )
         .unwrap();
 
-        let (result, skills) = build_hints_section_impl(cwd, None);
+        let (result, skills) = build_hints_section_impl(cwd, None, None);
 
         assert!(
             result.contains("# Additional Instructions"),
@@ -567,7 +647,7 @@ mod tests {
             "---\nname: global-skill\ndescription: A global skill\n---\nGlobal body.\n",
         )
         .unwrap();
-        let skills = discover_skills_impl(cwd.path(), Some(home.path()));
+        let skills = discover_skills_impl(cwd.path(), Some(home.path()), None);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "global-skill");
     }
@@ -593,7 +673,7 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover_skills_impl(cwd.path(), Some(home.path()));
+        let skills = discover_skills_impl(cwd.path(), Some(home.path()), None);
         assert_eq!(skills.len(), 1, "duplicate name should be deduplicated");
         assert_eq!(
             skills[0].description, "from project",
@@ -611,7 +691,7 @@ mod tests {
             "---\nname: local\ndescription: Local skill\n---\nBody.\n",
         )
         .unwrap();
-        let skills = discover_skills_impl(cwd.path(), None);
+        let skills = discover_skills_impl(cwd.path(), None, None);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "local");
     }
@@ -713,7 +793,7 @@ mod tests {
         std::fs::create_dir_all(&refs).unwrap();
         std::fs::write(refs.join("guide.md"), "guide content").unwrap();
 
-        let skills = discover_skills_impl(cwd, None);
+        let skills = discover_skills_impl(cwd, None, None);
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "with-refs");
         assert_eq!(skills[0].supporting_files.len(), 1);
