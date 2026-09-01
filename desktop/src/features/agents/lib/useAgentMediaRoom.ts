@@ -14,6 +14,7 @@ import {
   type AgentMediaSession,
   trackBelongsToSessionAgent,
 } from "./agentMediaSession";
+import { createMicRequestQueue, type MicRequestQueue } from "./micRequestQueue";
 
 /** Bound the token request so an unreachable gateway surfaces in seconds. */
 const TOKEN_REQUEST_TIMEOUT_MS = 15_000;
@@ -125,6 +126,16 @@ export function useAgentMediaRoom(
   const [audioBlocked, setAudioBlocked] = React.useState(false);
   const [micEnabled, setMicEnabledState] = React.useState(false);
   const roomRef = React.useRef<Room | null>(null);
+  // One queue for the hook's lifetime, reading the room at apply time rather
+  // than capturing it, so a room swap does not need a second queue.
+  const micQueueRef = React.useRef<MicRequestQueue | null>(null);
+  if (!micQueueRef.current) {
+    micQueueRef.current = createMicRequestQueue(async (enabled) => {
+      const room = roomRef.current;
+      if (!room) return;
+      await room.localParticipant.setMicrophoneEnabled(enabled);
+    });
+  }
 
   const canPublishAudio = session?.viewer.publish.includes("audio") ?? false;
 
@@ -141,6 +152,9 @@ export function useAgentMediaRoom(
     let disposed = false;
     const room = new Room();
     roomRef.current = room;
+    // Supersede any request still in flight for the previous room, so its
+    // outcome cannot write state that describes a connection now gone.
+    micQueueRef.current?.supersede();
     setMicEnabledState(false);
 
     const onSubscribed = (
@@ -272,13 +286,19 @@ export function useAgentMediaRoom(
     void room.startAudio().catch(() => {});
   }, []);
 
+  /**
+   * Turn this viewer's microphone on or off.
+   *
+   * The indicator moves at once, because the member asked and waiting on the
+   * device to agree makes the button feel broken. Reverting it is left to the
+   * queue, which reverts only on behalf of the request still speaking for the
+   * member — see {@link createMicRequestQueue} for why a stale revert here
+   * would be a microphone somebody believes is off.
+   */
   const setMicEnabled = React.useCallback((enabled: boolean) => {
-    const room = roomRef.current;
-    if (!room) return;
+    if (!roomRef.current) return;
     setMicEnabledState(enabled);
-    void room.localParticipant.setMicrophoneEnabled(enabled).catch(() => {
-      setMicEnabledState(false);
-    });
+    void micQueueRef.current?.request(enabled, () => setMicEnabledState(false));
   }, []);
 
   return {
