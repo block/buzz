@@ -1553,6 +1553,7 @@ mod postgres_tests {
             _community_id: CommunityId,
             _channel_id: &str,
             text: &str,
+            _authored_text: &str,
             _author_pubkey: &str,
             _reply_to: Option<&str>,
         ) -> std::pin::Pin<
