@@ -11,6 +11,51 @@ import { MENTION_REFERENCE_TAG } from "@/shared/lib/resolveMentionNames";
 
 export { MENTION_REFERENCE_TAG };
 
+/**
+ * A detached managed-agent wake queued while the send path prepared a
+ * message. Queued wakes are flushed fire-and-forget only after the relay
+ * accepts the publish: firing earlier lets a fast start failure toast "your
+ * message was sent" before the publish outcome is known, and every abort
+ * path (cancel, readiness error, prompt dismissal, publish rejection) would
+ * strand a wake for a message that never landed.
+ */
+export type QueuedAgentWake = {
+  agent: ManagedAgent;
+  /**
+   * Unix seconds captured at enqueue time — before the publish — so the
+   * floor can never exceed the published message's `created_at`. Stamping at
+   * flush time instead could push the spawned harness's startup watermark
+   * past the very message the floor exists to cover: a background upload
+   * makes the enqueue-to-flush gap arbitrarily long.
+   */
+  replayFloorUnix: number;
+};
+
+/** Queue a wake for `agent`, stamping its replay floor now (enqueue time). */
+export function enqueueAgentWake(
+  queue: QueuedAgentWake[],
+  agent: ManagedAgent,
+): void {
+  queue.push({ agent, replayFloorUnix: Math.floor(Date.now() / 1000) });
+}
+
+/**
+ * Collapse queued wakes to one per agent, keeping the first: the earliest
+ * enqueue carries the earliest replay floor, and the floor is a lower bound,
+ * so the first wake covers every later mention in the same send.
+ */
+export function dedupeQueuedAgentWakes(
+  wakes: readonly QueuedAgentWake[],
+): QueuedAgentWake[] {
+  const seen = new Set<string>();
+  return wakes.filter((wake) => {
+    const pubkey = normalizePubkey(wake.agent.pubkey);
+    if (seen.has(pubkey)) return false;
+    seen.add(pubkey);
+    return true;
+  });
+}
+
 export type PendingNonMemberMentionSend = {
   addressedAgentPubkeys: string[];
   inlineAgentMentionPubkeys: string[];
@@ -25,6 +70,12 @@ export type PendingNonMemberMentionSend = {
   outgoingTags?: string[][];
   preparedLinkPreviews?: PreparedBackgroundLinkPreviews | null;
   preparedManagedAgents?: ManagedAgent[];
+  /**
+   * Wakes queued while creating mentioned persona agents, carried on the
+   * draft so they survive the non-member prompt and flush with the readiness
+   * pass's queue after the publish succeeds — a dismissed prompt drops them.
+   */
+  queuedAgentWakes?: QueuedAgentWake[];
   readyAgentPubkeys?: string[];
   savedContent: string;
   savedImeta: ImetaMedia[];

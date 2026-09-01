@@ -39,10 +39,11 @@ export type AttachManagedAgentToChannelInput = {
   /**
    * When set, a needed start/deploy is handed to this callback instead of
    * being awaited: the attach resolves as soon as the membership write lands
-   * and the callback owns the fire-and-forget start, including surfacing its
-   * failure. The message-send path uses this so a publish never blocks on an
-   * agent start — the spawned harness replays the already-published message
-   * via its startup replay floor.
+   * and the callback owns the start, including surfacing its failure. The
+   * message-send path passes a queue collector here — the wake it records is
+   * flushed fire-and-forget only after the relay accepts the publish, with a
+   * replay floor stamped at queue time, so the spawned harness replays the
+   * published message and an aborted send leaves no orphan wake.
    */
   detachedStart?: (agent: ManagedAgent) => void;
 };

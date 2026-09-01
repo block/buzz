@@ -3,9 +3,11 @@ import { applyReusableAgentAccessPolicy } from "@/features/agents/channelAgents"
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
+  enqueueAgentWake,
   getErrorMessage,
   isManagedAgentRunning,
   isProviderBackedAgent,
+  type QueuedAgentWake,
   uniqueNormalizedPubkeys,
 } from "./useMentionSendFlow.helpers";
 
@@ -18,6 +20,14 @@ export type EnsureAgentMentionsReadyResult = {
    * something separated it from the pre-side-effect authorization pass.
    */
   wroteRelayState: boolean;
+  /**
+   * Detached wakes this pass queued instead of firing. The caller flushes
+   * them only after the relay accepts the publish, so a wake — and its
+   * failure toast claiming "your message was sent" — can never precede the
+   * publish outcome, and an aborted send simply drops the queue. Each entry's
+   * replay floor was stamped at enqueue time (see `QueuedAgentWake`).
+   */
+  agentsToWake: QueuedAgentWake[];
 };
 
 export type EnsureAgentMentionsReady = (
@@ -39,23 +49,23 @@ type UseEnsureAgentMentionsReadyOptions = {
   getManagedAgentsByPubkey: () => Promise<Map<string, ManagedAgent>>;
   getPersonas: () => Promise<AgentPersona[]>;
   memberPubkeys: ReadonlySet<string>;
-  startAgentDetached: (agent: ManagedAgent) => boolean;
 };
 
 /**
  * Reconcile every mentioned managed agent into a state where it will see the
  * message about to be published: access policy applied, channel membership
- * written, and — for an agent that is not already up — a detached wake fired.
+ * written, and — for an agent that is not already up — a detached wake
+ * queued on the result for the caller to flush once the publish succeeds.
  *
  * The membership write is awaited because the harness only subscribes to
- * channels it belongs to; only the start itself is detached.
+ * channels it belongs to; only the start itself is detached, and it is
+ * queued rather than fired so it cannot outrun the publish it exists for.
  */
 export function useEnsureAgentMentionsReady({
   attachAgentToChannel,
   getManagedAgentsByPubkey,
   getPersonas,
   memberPubkeys,
-  startAgentDetached,
 }: UseEnsureAgentMentionsReadyOptions): EnsureAgentMentionsReady {
   return React.useCallback(
     async (
@@ -69,6 +79,7 @@ export function useEnsureAgentMentionsReady({
           errors: [] as string[],
           pubkeys: [] as string[],
           wroteRelayState: false,
+          agentsToWake: [] as QueuedAgentWake[],
         };
       }
       const [managedAgentsByPubkey, personas] = await Promise.all([
@@ -86,6 +97,7 @@ export function useEnsureAgentMentionsReady({
       const errors: string[] = [];
       const pubkeys: string[] = [];
       let wroteRelayState = false;
+      const agentsToWake: QueuedAgentWake[] = [];
       for (const pubkey of uniqueNormalizedPubkeys(mentionPubkeys)) {
         const agent = managedAgentsByPubkey.get(pubkey);
         if (!agent) continue;
@@ -109,14 +121,15 @@ export function useEnsureAgentMentionsReady({
               (!isProviderBackedAgent(readyAgent) &&
                 !isManagedAgentRunning(readyAgent))
             ) {
-              startAgentDetached(readyAgent);
+              enqueueAgentWake(agentsToWake, readyAgent);
             }
           } else {
             await attachAgentToChannel({
               channelId: capturedChannelId,
               agent: readyAgent,
               role: "bot",
-              detachedStart: startAgentDetached,
+              detachedStart: (agentToWake) =>
+                enqueueAgentWake(agentsToWake, agentToWake),
             });
             wroteRelayState = true;
           }
@@ -131,6 +144,7 @@ export function useEnsureAgentMentionsReady({
         errors,
         pubkeys: uniqueNormalizedPubkeys(pubkeys),
         wroteRelayState,
+        agentsToWake,
       };
     },
     [
@@ -138,7 +152,6 @@ export function useEnsureAgentMentionsReady({
       getManagedAgentsByPubkey,
       getPersonas,
       memberPubkeys,
-      startAgentDetached,
     ],
   );
 }

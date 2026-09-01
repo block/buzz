@@ -229,6 +229,42 @@ test("a detached start carries the active community and identity as its scope", 
   rendered.unmount();
 });
 
+test("an explicit replay floor reaches the start payload verbatim", async () => {
+  // The send path stamps the floor when it queues the wake (pre-publish, so
+  // the floor can never exceed the published message's created_at) and only
+  // flushes the wake after the relay accepts the publish — a flush-time
+  // stamp could push the harness's startup watermark past that message.
+  const { act, rendered } = await renderDetachedStart();
+
+  await act(async () => {
+    rendered.result.current.startDetached(AGENT_RECORD, 1_234_567);
+    await settle();
+  });
+
+  assert.equal(startCalls.length, 1);
+  assert.equal(startCalls[0].replayFloorUnix, 1_234_567);
+  rendered.unmount();
+});
+
+test("a wake with no queued floor captures fire time", async () => {
+  const { act, rendered } = await renderDetachedStart();
+  const before = Math.floor(Date.now() / 1000);
+
+  await act(async () => {
+    rendered.result.current.startDetached(AGENT_RECORD);
+    await settle();
+  });
+
+  const after = Math.floor(Date.now() / 1000);
+  assert.equal(startCalls.length, 1);
+  assert.ok(
+    startCalls[0].replayFloorUnix >= before &&
+      startCalls[0].replayFloorUnix <= after,
+    "callers with no queued floor keep the fire-time capture",
+  );
+  rendered.unmount();
+});
+
 test("a start captured before a community switch keeps the pre-switch scope", async () => {
   const { act, rendered } = await renderDetachedStart();
   // What a send in flight holds: the callback from the render that fired it.

@@ -48,10 +48,11 @@ function detachedStartFailureDetail(error: unknown): string {
 }
 
 /**
- * The one wording for "the wake did not happen". Publish-first means the
- * message went out either way, so both the refused-before-firing and the
- * failed-after-firing cases owe the user the same warning, differing only in
- * the detail that follows it.
+ * The one wording for "the wake did not happen". The send path flushes its
+ * queued wakes only after the relay accepts the publish, so whenever this
+ * toast can appear the message really was sent — both the refused-before-
+ * firing and the failed-after-firing cases owe the user the same warning,
+ * differing only in the detail that follows it.
  */
 function warnAgentMayNotRespond(agentName: string, detail: string): void {
   toast.error(
@@ -93,8 +94,19 @@ function warnAgentMayNotRespond(agentName: string, detail: string): void {
  * for the same agent in the same tenant is suppressed, since the wake is
  * per-agent rather than per-message and the first start's replay floor is
  * earlier than the second message.
+ *
+ * `replayFloorUnix` lets a caller pass a floor captured earlier than this
+ * call — the send path queues its wakes during preparation and flushes them
+ * only after the publish succeeds, so the floor must be the enqueue-time
+ * capture (≤ the message's `created_at` by construction), not flush time,
+ * which could exceed it and push the harness's startup watermark past the
+ * very message the floor exists to cover. Callers with no queued floor omit
+ * it and get fire time.
  */
-export function useDetachedAgentStart(): (agent: ManagedAgent) => boolean {
+export function useDetachedAgentStart(): (
+  agent: ManagedAgent,
+  replayFloorUnix?: number,
+) => boolean {
   const startAgentMutateAsync = useStartManagedAgentMutation().mutateAsync;
   const { activeCommunity } = useCommunities();
   const identityQuery = useIdentityQuery();
@@ -112,7 +124,7 @@ export function useDetachedAgentStart(): (agent: ManagedAgent) => boolean {
   const expectedSignerPubkey =
     normalizePubkey(identityQuery.data?.pubkey ?? "") || undefined;
   return React.useCallback(
-    (agent: ManagedAgent) => {
+    (agent: ManagedAgent, replayFloorUnix?: number) => {
       if (!expectedRelayUrl || !expectedSignerPubkey) {
         // Fail closed: an unscoped start resolves the relay and the signing
         // identity at execution time, so it can land on whichever tenant is
@@ -137,14 +149,15 @@ export function useDetachedAgentStart(): (agent: ManagedAgent) => boolean {
       }
       // Publish-first: the send no longer waits for the agent start. The
       // replay floor tells the spawned harness to replay at least back to
-      // this moment, so the about-to-publish message is inside its first
-      // subscription window however long the spawn takes.
-      const replayFloorUnix = Math.floor(Date.now() / 1000);
+      // the message that wanted this wake — the enqueue-time capture when the
+      // send path queued it, or this moment for a caller with no queue — so
+      // that message is inside the harness's first subscription window
+      // however long the spawn takes.
       const started = startAgentMutateAsync({
         pubkey: agent.pubkey,
         expectedRelayUrl,
         expectedSignerPubkey,
-        replayFloorUnix,
+        replayFloorUnix: replayFloorUnix ?? Math.floor(Date.now() / 1000),
       })
         .catch((error: unknown) => {
           warnAgentMayNotRespond(agent.name, detachedStartFailureDetail(error));

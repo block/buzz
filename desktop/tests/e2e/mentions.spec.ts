@@ -2740,6 +2740,16 @@ test("mentioning an in-channel stopped managed agent publishes first and starts 
     expectedRelayUrl: activeRelayUrl,
     expectedSignerPubkey: MOCK_VIEWER_PUBKEY,
   });
+  // The wake is queued during send preparation and flushed only after the
+  // relay accepts the publish, so the sign always precedes the start — a
+  // wake can never exist (nor its failure toast "your message was sent"
+  // appear) for a message whose publish outcome is still unknown.
+  const commandsAfterSend = (await readCommandLog(page)).slice(
+    baselineCommands.length,
+  );
+  expect(commandsAfterSend.indexOf("sign_event")).toBeLessThan(
+    commandsAfterSend.indexOf("start_managed_agent"),
+  );
 
   const mentionChip = page
     .getByTestId("message-row")
@@ -2854,6 +2864,63 @@ test("a detached agent start failure surfaces as a toast after the message sends
   // failed-send restore.)
   await expect(page.getByText(startError, { exact: false })).toBeVisible();
   await expect(input).not.toContainText("can you help");
+});
+
+test("a failed publish drops the queued agent wake and never claims the message was sent", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: IN_CHANNEL_MANAGED_AGENT_PUBKEY,
+        name: "fizz",
+        status: "stopped",
+        channelNames: ["general"],
+      },
+    ],
+    // Reject the publish itself. The wake is queued behind it, so a publish
+    // that never lands must fire no wake at all — before this ordering, the
+    // wake fired during send preparation, rejected fast (the injected start
+    // error below), and toasted "your message was sent" while the publish
+    // went on to fail with no corrective message.
+    sendMessageErrors: ["Mock relay rejected the event."],
+    // Armed so that IF a wake still fired it would reject immediately and
+    // raise the false-success toast whose absence this spec pins.
+    startManagedAgentErrors: ["Mock agent startup failed."],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Hey @fizz");
+  await expect(autocomplete(page).getByText("fizz")).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" do X");
+
+  const baselineStartCount = commandCount(
+    await readCommandLog(page),
+    "start_managed_agent",
+  );
+  await page.getByTestId("send-message").click();
+
+  // Deterministic completion signal: the failed send restores the draft into
+  // the composer. On the pre-fix ordering the wake had already fired — and
+  // toasted — before this point, so the assertions below need no timing games.
+  await expect(input).toContainText("do X");
+
+  // The message never landed: the optimistic row was rolled back...
+  await expect(
+    page.getByTestId("message-row").filter({ hasText: "do X" }),
+  ).toHaveCount(0);
+  // ...so the queued wake was dropped rather than flushed...
+  expect(commandCount(await readCommandLog(page), "start_managed_agent")).toBe(
+    baselineStartCount,
+  );
+  // ...and nothing on screen claims the message was sent.
+  await expect(
+    page.getByText("your message was sent", { exact: false }),
+  ).toHaveCount(0);
 });
 
 test("a detached start fired before a community switch fails closed instead of waking the agent in the new tenant", async ({
