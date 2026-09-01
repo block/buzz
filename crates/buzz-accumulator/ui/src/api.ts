@@ -45,7 +45,8 @@ export type Preview = {
   total_chars: number;
   oldest_ts: number | null;
   newest_ts: number | null;
-  buckets: Bucket[];
+  /** Absent when the daemon predates the /select/events micro-batch. */
+  buckets?: Bucket[];
 };
 
 export type EventItem = {

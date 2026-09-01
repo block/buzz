@@ -77,8 +77,16 @@ export function Explore({ selection, window }: Props) {
         </div>
       )}
 
-      {p && p.buckets.length > 0 && <RhythmStrip buckets={p.buckets} />}
+      {p?.buckets && p.buckets.length > 0 && <RhythmStrip buckets={p.buckets} />}
 
+      {events.isError && (
+        <div className="error-box">
+          {(events.error as Error).message.startsWith("404")
+            ? "The daemon is running an older build without /select/events — " +
+              "restart it with `cargo run -p buzz-accumulator` to rebuild."
+            : (events.error as Error).message}
+        </div>
+      )}
       {allEvents.map((ev) => (
         <EventRow
           key={ev.id}
