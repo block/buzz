@@ -96,7 +96,7 @@ async fn setup_with_search_policy(apply_fresh_allowlist: bool) -> (PgPool, Strin
         .expect("apply 0033 migration");
     pool.execute(MIGRATION_0042_SQL)
         .await
-        .expect("apply 0036 migration");
+        .expect("apply 0042 migration");
     (pool, schema)
 }
 
@@ -1442,7 +1442,17 @@ async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
     // Exercise the brownfield negative skip-set. The fresh-install positive
     // allowlist would make every unknown kind unsearchable and let a missing
     // per-kind migration pass vacuously.
-    let (pool, schema) = setup_with_search_policy(false).await;
+    assert_p_gated_storage_null(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
+async fn fresh_p_gated_persistent_kinds_have_storage_null_tsvector() {
+    assert_p_gated_storage_null(true).await;
+}
+
+async fn assert_p_gated_storage_null(apply_fresh_allowlist: bool) {
+    let (pool, schema) = setup_with_search_policy(apply_fresh_allowlist).await;
 
     let c = mk_community(&pool, "p-gated-tripwire.example").await;
     let token = "pgated_tripwire_marker_qwerty";
@@ -1482,7 +1492,45 @@ async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
             1_700_000_100 + i as i64,
         )
         .await;
+        // Empty content is the canonical wake payload, but an empty vector is
+        // not NULL: it matches a NOT-only query. Exercise both payload shapes.
+        insert_event(
+            &pool,
+            c,
+            rand_bytes32(),
+            rand_bytes32(),
+            kind as i32,
+            "",
+            None,
+            1_700_000_200 + i as i64,
+        )
+        .await;
     }
+
+    let persistent_kinds: Vec<i32> = persistent.iter().map(|&kind| kind as i32).collect();
+    let nonnull: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM events WHERE community_id = $1 AND kind = ANY($2) \
+         AND search_tsv IS NOT NULL",
+    )
+    .bind(c.as_uuid())
+    .bind(&persistent_kinds)
+    .fetch_one(&pool)
+    .await
+    .expect("read raw vectors");
+    assert_eq!(nonnull, 0, "private vectors must be SQL NULL, not empty");
+
+    // Deliberately bypass SearchService: a query-layer exclusion must not make
+    // this storage-contract test pass. The public control proves the negative
+    // query itself is capable of matching rows in this fixture.
+    let negative_kinds: Vec<i32> = sqlx::query_scalar(
+        "SELECT kind FROM events WHERE community_id = $1 \
+         AND search_tsv @@ websearch_to_tsquery('simple', '-neverpresentqzx')",
+    )
+    .bind(c.as_uuid())
+    .fetch_all(&pool)
+    .await
+    .expect("NOT-only raw FTS query");
+    assert_eq!(negative_kinds, vec![9], "only the public control may match");
 
     let svc = SearchService::new(pool.clone());
     let result = svc
