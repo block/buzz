@@ -105,6 +105,17 @@ test("parseAgentMediaSession returns null without usable connect params", () => 
     { url: "wss://x" },
     { room: "r" },
     { url: "", room: "r" },
+    // Schemes this client would never dial.
+    { url: "javascript:alert(1)", room: "r" },
+    { url: "file:///etc/passwd", room: "r" },
+    // An allowed scheme in front of nothing dialable. A prefix test admits
+    // every one of these, which is why the check parses.
+    { url: "wss://", room: "r" },
+    { url: "https://", room: "r" },
+    { url: "wss://[", room: "r" },
+    // A room of spaces is as unjoinable as an empty one, and fails later —
+    // at the provider, after a token has already been minted for it.
+    { url: "wss://x", room: "   " },
   ]) {
     const content = JSON.stringify({
       provider: "livekit",
@@ -119,13 +130,42 @@ test("parseAgentMediaSession returns null without usable connect params", () => 
   }
 });
 
-test("parseAgentMediaSession drops a non-http token endpoint but keeps the session", () => {
+test("parseAgentMediaSession drops an unfetchable token endpoint but keeps the session", () => {
   // A session with no endpoint is one this viewer cannot get a token for —
-  // still worth surfacing, unlike a javascript:/file: URL we would ever fetch.
-  const content = body({ token_endpoint: "javascript:alert(1)" });
-  const session = parseAgentMediaSession(announcement({ content }));
-  assert.ok(session);
-  assert.equal(session.tokenEndpoint, null);
+  // still worth surfacing, unlike a URL we would never fetch or could not.
+  for (const endpoint of [
+    "javascript:alert(1)",
+    "file:///etc/passwd",
+    // Hostless and malformed, which a prefix test admits.
+    "https://",
+    "https://[",
+    // Dialable as a transport, but a token is fetched over HTTP.
+    "wss://x",
+  ]) {
+    const content = body({ token_endpoint: endpoint });
+    const session = parseAgentMediaSession(announcement({ content }));
+    assert.ok(session, `expected ${endpoint} to leave the session standing`);
+    assert.equal(
+      session.tokenEndpoint,
+      null,
+      `expected ${endpoint} to be dropped`,
+    );
+  }
+});
+
+test("parseAgentMediaSession keeps a token endpoint it can fetch", () => {
+  // The refusals above only mean something next to this: a check that
+  // tightened until it dropped every endpoint would satisfy all of them.
+  for (const endpoint of [
+    "https://gateway.example/token",
+    "http://127.0.0.1:8080/token",
+    "https://gateway.example:8443/v1/token?x=1",
+  ]) {
+    const content = body({ token_endpoint: endpoint });
+    const session = parseAgentMediaSession(announcement({ content }));
+    assert.ok(session);
+    assert.equal(session.tokenEndpoint, endpoint);
+  }
 });
 
 test("parseAgentMediaSession ignores track kinds it does not know", () => {

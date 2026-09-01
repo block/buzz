@@ -632,13 +632,21 @@ pub const KIND_HUDDLE_GUIDELINES: u32 = 48106;
 /// | Field | Type | Relay | Client |
 /// |---|---|---|---|
 /// | `provider` | string | required; must be a known provider | required; unknown ⇒ event ignored |
-/// | `connect.url` | string | required, non-empty, `ws(s)`/`http(s)` | required, non-empty |
-/// | `connect.room` | string | required, non-empty | required, non-empty |
+/// | `connect.url` | string | required; a `ws(s)`/`http(s)` URL with a host | required; same rule |
+/// | `connect.room` | string | required, non-blank | required, non-blank |
 /// | `expires_at` | integer | required; `> created_at`, at most one hour after it | required; `> created_at` |
-/// | `token_endpoint` | string | optional; `http(s)` when present | optional; dropped unless `http(s)` |
+/// | `token_endpoint` | string | optional; an `http(s)` URL with a host | optional; dropped unless it is one |
 /// | `participants` | array | not validated | see below — decides what renders |
 /// | `viewer.subscribe`, `viewer.publish` | arrays | not validated | unknown names dropped |
 /// | `v` | integer | not validated | not read |
+///
+/// Both URLs are parsed, not prefix-matched, on both sides. `"wss://"` and
+/// `"https://["` name an allowed scheme and no host, and an announcement
+/// carrying one is refused rather than stored: it would fan out to the whole
+/// channel for every client to fail on separately, which is the outcome
+/// validating the field exists to prevent. `connect.room` is checked after
+/// trimming, because a room of spaces fails at the provider exactly as an
+/// empty one does.
 ///
 /// Track kinds are `avatar_video`, `camera`, `screen` and `audio`; anything
 /// else is discarded. `avatar_video` is an agent's rendered face.
@@ -663,9 +671,9 @@ pub const KIND_HUDDLE_GUIDELINES: u32 = 48106;
 /// An announcer serving `token_endpoint` owes three things the relay cannot
 /// check: verify the caller's NIP-98 signature over the exact request URL,
 /// confirm the caller is a member of the channel in the `h` tag before minting
-/// anything, and answer CORS preflight (below). The relay validates only the
-/// scheme, so an endpoint that skips the first two is an open credential mint
-/// reachable from a world-readable event.
+/// anything, and answer CORS preflight (below). The relay validates only that
+/// the endpoint is a fetchable URL, so an endpoint that skips the first two is
+/// an open credential mint reachable from a world-readable event.
 ///
 /// The CORS obligation is worth expanding, because it is the one whose failure
 /// misleads. A viewer authenticates its token request with a NIP-98

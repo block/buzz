@@ -41,6 +41,7 @@ use buzz_core::tenant::TenantContext;
 use buzz_core::verification::verify_event;
 use buzz_core::CommunityId;
 use nostr::Event;
+use url::Url;
 
 use crate::state::AppState;
 
@@ -101,7 +102,31 @@ const KNOWN_MEDIA_PROVIDERS: &[&str] = &["livekit"];
 /// accepts the websocket and the http form and converts between them, so both
 /// are admissible, and the unencrypted variants stay in so a self-hosted
 /// gateway can be reached on a LAN.
-const MEDIA_TRANSPORT_SCHEMES: &[&str] = &["wss://", "ws://", "https://", "http://"];
+const MEDIA_TRANSPORT_SCHEMES: &[&str] = &["wss", "ws", "https", "http"];
+
+/// Schemes a viewer may fetch a room credential from.
+const TOKEN_ENDPOINT_SCHEMES: &[&str] = &["https", "http"];
+
+/// Whether `candidate` is a URL with one of `schemes` that a client can dial.
+///
+/// Parsed rather than prefix-matched. A prefix test answers a different
+/// question than the one being asked: `"wss://"` and `"https://["` both begin
+/// with an allowed scheme and neither addresses anything, so both would be
+/// stored and fanned out for every client in the channel to fail on
+/// separately. That is the failure this validation exists to prevent, so
+/// admitting it by inspection is worse than not checking at all.
+///
+/// The four admissible schemes are all WHATWG special schemes, so the parser
+/// requires an authority for each and an empty or malformed host is a parse
+/// error rather than something to test for afterwards. The host is checked
+/// anyway: the rule being enforced is "a client can dial this", and reading it
+/// off the guard should not require knowing which schemes are special.
+fn is_dialable_url(candidate: &str, schemes: &[&str]) -> bool {
+    let Ok(parsed) = Url::parse(candidate) else {
+        return false;
+    };
+    schemes.contains(&parsed.scheme()) && parsed.host_str().is_some_and(|host| !host.is_empty())
+}
 
 /// Collect the pubkeys named by `p` tags.
 fn p_tag_pubkeys(event: &Event) -> Vec<String> {
@@ -286,18 +311,20 @@ fn validate_agent_media_session_shape(
             "invalid: agent media session connect.url must be a non-empty string".into(),
         ));
     }
-    if !MEDIA_TRANSPORT_SCHEMES
-        .iter()
-        .any(|scheme| url.starts_with(scheme))
-    {
+    if !is_dialable_url(url, MEDIA_TRANSPORT_SCHEMES) {
         return Err(IngestError::Rejected(
-            "invalid: agent media session connect.url must be ws(s) or http(s)".into(),
+            "invalid: agent media session connect.url must be a ws(s) or http(s) URL with a host"
+                .into(),
         ));
     }
+    // Trimmed before the emptiness test: a room of spaces is not a room, and
+    // it fails at the provider rather than here, which is the same silent
+    // unjoinable session an empty one would be.
     if connect
         .get("room")
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
+        .trim()
         .is_empty()
     {
         return Err(IngestError::Rejected(
@@ -321,9 +348,10 @@ fn validate_agent_media_session_shape(
                 "invalid: agent media session token_endpoint must be a string".into(),
             )
         })?;
-        if !endpoint.starts_with("https://") && !endpoint.starts_with("http://") {
+        if !is_dialable_url(endpoint, TOKEN_ENDPOINT_SCHEMES) {
             return Err(IngestError::Rejected(
-                "invalid: agent media session token_endpoint must be http(s)".into(),
+                "invalid: agent media session token_endpoint must be an http(s) URL with a host"
+                    .into(),
             ));
         }
     }
@@ -6033,6 +6061,18 @@ mod postgres_tests {
         format!(r#"{{"v":1,"provider":"livekit","connect":{connect},"expires_at":{expires_at}}}"#)
     }
 
+    /// A start body carrying `token_endpoint`, valid in every other respect.
+    ///
+    /// The `connect` object has to be a usable one, or the endpoint is never
+    /// reached: shape validation returns on the first failure, so a body that
+    /// is also missing a transport passes its test whatever the endpoint says.
+    fn livekit_body_with_token_endpoint(endpoint: &str) -> String {
+        let expires_at = nostr::Timestamp::now().as_secs() as i64 + 600;
+        format!(
+            r#"{{"v":1,"provider":"livekit","connect":{{"url":"wss://x","room":"r"}},"token_endpoint":"{endpoint}","expires_at":{expires_at}}}"#
+        )
+    }
+
     const RELAY_KEY: [u8; 32] = [7u8; 32];
 
     #[test]
@@ -6073,6 +6113,15 @@ mod postgres_tests {
             r#"{"url":"javascript:alert(1)","room":"r"}"#,
             r#"{"url":"file:///etc/passwd","room":"r"}"#,
             r#"{"url":"data:text/html,x","room":"r"}"#,
+            // An allowed scheme in front of nothing dialable. A prefix test
+            // accepts every one of these, which is why the guard parses.
+            r#"{"url":"wss://","room":"r"}"#,
+            r#"{"url":"https://","room":"r"}"#,
+            r#"{"url":"wss://[","room":"r"}"#,
+            r#"{"url":"wss:// /r","room":"r"}"#,
+            // A room of spaces fails at the provider exactly as an empty one
+            // does, so it is the same unjoinable session.
+            r#"{"url":"wss://x","room":"   "}"#,
         ] {
             let event = media_session_event(
                 &keys,
@@ -6239,19 +6288,52 @@ mod postgres_tests {
     }
 
     #[test]
+    fn media_session_start_accepts_a_usable_token_endpoint() {
+        // The refusals above are only meaningful next to this: a guard that
+        // tightened until it rejected every endpoint would pass all of them.
+        let keys = nostr::Keys::generate();
+        for endpoint in [
+            "https://gateway.example/token",
+            "http://127.0.0.1:8080/token",
+            "https://gateway.example:8443/v1/token?x=1",
+        ] {
+            let event = media_session_event(
+                &keys,
+                KIND_AGENT_MEDIA_SESSION_STARTED,
+                &livekit_body_with_token_endpoint(endpoint),
+                vec![],
+            );
+            assert!(
+                validate_agent_media_session_shape(
+                    &RELAY_KEY,
+                    &event,
+                    KIND_AGENT_MEDIA_SESSION_STARTED
+                )
+                .is_ok(),
+                "expected {endpoint} to be accepted"
+            );
+        }
+    }
+
+    #[test]
     fn media_session_start_rejects_non_http_token_endpoint() {
         let keys = nostr::Keys::generate();
         for endpoint in [
             "javascript:alert(1)",
             "file:///etc/passwd",
             "data:text/html,x",
+            // Hostless and malformed, which a prefix test admits.
+            "https://",
+            "http://",
+            "https://[",
+            // A websocket transport is dialable, but a viewer fetches its
+            // credential over HTTP and hands this to `fetch`.
+            "wss://x",
         ] {
             let event = media_session_event(
                 &keys,
                 KIND_AGENT_MEDIA_SESSION_STARTED,
-                &format!(
-                    r#"{{"provider":"livekit","connect":{{}},"token_endpoint":"{endpoint}"}}"#
-                ),
+                &livekit_body_with_token_endpoint(endpoint),
                 vec![],
             );
             assert!(

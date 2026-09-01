@@ -76,6 +76,36 @@ function asTrackKinds(value: unknown): MediaTrackKind[] {
   );
 }
 
+/** Protocols a media transport URL may use. Mirrors the relay's allowlist. */
+const MEDIA_TRANSPORT_PROTOCOLS = ["wss:", "ws:", "https:", "http:"] as const;
+
+/** Protocols a viewer may fetch a room credential from. */
+const TOKEN_ENDPOINT_PROTOCOLS = ["https:", "http:"] as const;
+
+/**
+ * Whether `candidate` is a URL with one of `protocols` that this client can
+ * dial.
+ *
+ * Parsed rather than prefix-matched, for the reason the relay parses: `"wss://"`
+ * and `"https://["` both start with an allowed scheme and address nothing. The
+ * relay refuses both, and this check exists precisely for announcements that
+ * did not come through a relay running that ingest — so matching on a prefix
+ * would leave it agreeing with the relay only on the cases the relay already
+ * caught.
+ */
+function isDialableUrl(
+  candidate: string,
+  protocols: readonly string[],
+): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    return false;
+  }
+  return protocols.includes(parsed.protocol) && parsed.hostname.length > 0;
+}
+
 function firstTagValue(event: RelayEvent, name: string): string | null {
   for (const tag of event.tags ?? []) {
     if (tag[0] === name && typeof tag[1] === "string" && tag[1].length > 0) {
@@ -120,7 +150,10 @@ export function parseAgentMediaSession(
   if (typeof connect !== "object" || connect === null) return null;
   const { url, room } = connect as Record<string, unknown>;
   if (typeof url !== "string" || typeof room !== "string") return null;
-  if (url.length === 0 || room.length === 0) return null;
+  if (!isDialableUrl(url, MEDIA_TRANSPORT_PROTOCOLS)) return null;
+  // A room of whitespace is as unjoinable as an empty one, and fails later and
+  // less legibly — at the provider, after a token has already been minted.
+  if (room.trim().length === 0) return null;
 
   // The relay already rejects a non-http(s) token endpoint, but this client
   // must not depend on that: an announcement can also arrive from a relay
@@ -129,7 +162,7 @@ export function parseAgentMediaSession(
   const rawEndpoint = record.token_endpoint;
   const tokenEndpoint =
     typeof rawEndpoint === "string" &&
-    (rawEndpoint.startsWith("https://") || rawEndpoint.startsWith("http://"))
+    isDialableUrl(rawEndpoint, TOKEN_ENDPOINT_PROTOCOLS)
       ? rawEndpoint
       : null;
 
