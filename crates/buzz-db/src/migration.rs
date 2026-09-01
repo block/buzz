@@ -1215,7 +1215,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations[34].version, 41);
+        assert_eq!(migrations[34].version, 43);
         let sql = migrations[34].sql.as_str();
         assert!(sql.contains("CREATE TABLE tasks"));
         assert!(sql.contains("CREATE TABLE task_events"));
