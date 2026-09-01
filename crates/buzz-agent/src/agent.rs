@@ -1187,7 +1187,7 @@ async fn emit_failed(wire: &WireSender, sid: &str, call: &ToolCall, err: &str) {
     .await;
 }
 
-fn prompt_to_text(prompt: Vec<ContentBlock>) -> Result<String, AgentError> {
+pub(crate) fn prompt_to_text(prompt: Vec<ContentBlock>) -> Result<String, AgentError> {
     let mut parts = Vec::with_capacity(prompt.len());
     for block in prompt {
         match block {
