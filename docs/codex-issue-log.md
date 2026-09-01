@@ -180,4 +180,4 @@
 - 定位：Windows Codex 更新会在 `%LOCALAPPDATA%\\OpenAI\\Codex\\bin` 中短暂或长期留下只有 `codex.exe` 的版本目录；Buzz 之前始终传入 `-c features.code_mode_host=true`，Codex 随后按当前运行时版本哈希查找同目录 sidecar，找不到就把该警告作为 Agent 输出返回。该 sidecar 是 Codex Desktop/CLI 的可选安装组件，不属于 Buzz 安装包，Buzz 不应假定每台机器都有它。
 - 处理：将 app-server 主程序和 Code Mode host 解耦探测。只要 `codex.exe` 存在即可启动共享 app-server；仅在同目录存在匹配 `codex-code-mode-host(.exe)` 时传入 `features.code_mode_host=true`。启动日志新增 `code_mode_host=enabled|unavailable`，便于区分可选能力缺失与运行时本身启动失败。
 - 验证：Tauri Codex runtime 单元测试 9/9、桌面 TypeScript typecheck 通过；本次文件 rustfmt 通过。缺少 sidecar 时验证不再带 Code Mode 开关，有 sidecar 时保持原行为。
-- 版本/提交：`0.5.18` / `b63e8ed5`。
+- 版本/提交：`0.5.18` / `45e2e9b4`。
