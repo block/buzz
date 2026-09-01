@@ -419,6 +419,77 @@ test("buzz dark sidebar gradient", async ({ page }) => {
     .screenshot({ path: `${SHOTS}/02-buzz-dark-sidebar.png` });
 });
 
+for (const { theme, color } of [
+  { theme: "buzz", color: { red: 246, green: 246, blue: 246 } },
+  { theme: "buzz-dark", color: { red: 23, green: 26, blue: 29 } },
+] as const) {
+  test(`macOS window backing follows ${theme}`, async ({ page }) => {
+    await seedTheme(page, theme);
+    await page.addInitScript(() => {
+      (window as typeof window & { isTauri?: boolean }).isTauri = true;
+      Object.defineProperty(navigator, "platform", {
+        configurable: true,
+        get: () => "MacIntel",
+      });
+    });
+    await installMockBridge(page);
+    await openChannel(page);
+
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).find(
+            (entry) => entry.command === "set_window_backing_color",
+          ),
+        ),
+      )
+      .toMatchObject({
+        command: "set_window_backing_color",
+        payload: color,
+      });
+  });
+}
+
+test("macOS reveal waits for the themed window backing", async ({ page }) => {
+  await seedTheme(page, "buzz");
+  await page.addInitScript(() => {
+    (window as typeof window & { isTauri?: boolean }).isTauri = true;
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      get: () => "MacIntel",
+    });
+  });
+  await installMockBridge(page, { windowBackingColorDelayMs: 500 });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).some(
+          (entry) => entry.command === "set_window_backing_color",
+        ),
+      ),
+    )
+    .toBe(true);
+  expect(
+    await page.evaluate(() =>
+      (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).some(
+        (entry) => entry.command === "initial-render-ready",
+      ),
+    ),
+  ).toBe(false);
+
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).some(
+          (entry) => entry.command === "initial-render-ready",
+        ),
+      ),
+    )
+    .toBe(true);
+});
+
 test("custom section icon and name align with channel columns", async ({
   page,
 }) => {
