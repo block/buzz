@@ -19,6 +19,7 @@ export async function revalidateAgentMentionPubkeys({
   agentPubkeys,
   currentPubkey,
   eligibilityScope,
+  channelMemberAgentPubkeys = new Set(),
   sharedChannelIds,
   refetchManagedAgents,
   fetchRelayAgents,
@@ -27,6 +28,7 @@ export async function revalidateAgentMentionPubkeys({
   agentPubkeys: ReadonlySet<string>;
   currentPubkey: string | null;
   eligibilityScope: AgentEligibilityScope;
+  channelMemberAgentPubkeys?: ReadonlySet<string>;
   sharedChannelIds: ReadonlySet<string>;
   refetchManagedAgents: () => Promise<DirectoryResult<ManagedAgent[]>>;
   fetchRelayAgents: (pubkeys: string[]) => Promise<RelayAgent[]>;
@@ -54,13 +56,18 @@ export async function revalidateAgentMentionPubkeys({
     currentPubkey,
     eligibilityScope,
     managedAgentPubkeys: managedPubkeys,
+    channelMemberAgentPubkeys,
     relayAgents: relayDirectoryReady ? relayAgents : [],
     sharedChannelIds,
   });
   const admittedPubkeys = new Set(
     [...agentPubkeys].filter((pubkey) => {
       const isManagedAgent = managedPubkeys.has(normalizePubkey(pubkey));
-      const directoryReady = isManagedAgent || relayDirectoryReady;
+      const isChannelMemberAgent = channelMemberAgentPubkeys.has(
+        normalizePubkey(pubkey),
+      );
+      const directoryReady =
+        isManagedAgent || isChannelMemberAgent || relayDirectoryReady;
       return (
         getAgentMentionAdmission({
           isAgent: true,
@@ -79,6 +86,7 @@ export function useAgentMentionRevalidation({
   getSelectedAgentPubkeys,
   currentPubkey,
   eligibilityScope,
+  channelMemberAgentPubkeys = new Set(),
   sharedChannelIds,
   refetchManagedAgents,
 }: {
@@ -86,6 +94,7 @@ export function useAgentMentionRevalidation({
   getSelectedAgentPubkeys: () => ReadonlySet<string>;
   currentPubkey: string | null;
   eligibilityScope: AgentEligibilityScope;
+  channelMemberAgentPubkeys?: ReadonlySet<string>;
   sharedChannelIds: ReadonlySet<string>;
   refetchManagedAgents: () => Promise<DirectoryResult<ManagedAgent[]>>;
 }) {
@@ -96,6 +105,7 @@ export function useAgentMentionRevalidation({
         agentPubkeys: new Set([...agentPubkeys, ...getSelectedAgentPubkeys()]),
         currentPubkey,
         eligibilityScope,
+        channelMemberAgentPubkeys,
         sharedChannelIds,
         refetchManagedAgents,
         fetchRelayAgents: (requestedPubkeys) =>
@@ -110,6 +120,7 @@ export function useAgentMentionRevalidation({
       agentPubkeys,
       currentPubkey,
       eligibilityScope,
+      channelMemberAgentPubkeys,
       getSelectedAgentPubkeys,
       refetchManagedAgents,
       sharedChannelIds,

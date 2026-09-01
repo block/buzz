@@ -34,6 +34,24 @@ test("relay policy revalidation admits an authorized external agent", async () =
   ]);
 });
 
+test("channel revalidation preserves a signed bot member without a directory record", async () => {
+  const pubkey = "d".repeat(64);
+  const result = await revalidateAgentMentionPubkeys({
+    pubkeys: [pubkey],
+    agentPubkeys: new Set([pubkey]),
+    currentPubkey: "a".repeat(64),
+    eligibilityScope: { type: "channel", channelId: "general" },
+    channelMemberAgentPubkeys: new Set([pubkey]),
+    sharedChannelIds: new Set(["general"]),
+    refetchManagedAgents: async () => ({ data: [], error: null }),
+    fetchRelayAgents: async () => {
+      throw new Error("directory unavailable");
+    },
+  });
+
+  assert.deepEqual(result, [pubkey]);
+});
+
 test("fresh managed evidence survives unrelated relay authorization errors", async () => {
   const result = await revalidateAgentMentionPubkeys({
     ...options(),
