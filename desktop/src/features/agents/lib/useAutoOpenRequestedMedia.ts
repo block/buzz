@@ -1,12 +1,13 @@
 import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
+import type { RelayEvent } from "@/shared/api/types";
 import {
   KIND_STREAM_MESSAGE,
   KIND_STREAM_MESSAGE_V2,
 } from "@/shared/constants/kinds";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { planAutoOpen } from "./agentMediaAutoOpen";
+import { type AutoOpenSource, planAutoOpen } from "./agentMediaAutoOpen";
 import type { AgentMediaSession } from "./agentMediaSession";
 
 /**
@@ -23,10 +24,38 @@ export function resetAutoOpenedAgentMedia() {
   autoOpened.clear();
 }
 
-/** Value stored for a source event that was looked up but has no author. */
-const NO_AUTHOR = "";
+/**
+ * Stored for a source event that was asked about but did not come back.
+ *
+ * An empty author matches no pubkey, so this refuses the session outright
+ * rather than leaving it pending and looked up again on every arrival.
+ */
+const UNREADABLE_SOURCE: AutoOpenSource = {
+  author: "",
+  channelId: null,
+  addressed: new Set(),
+};
 
-const EMPTY_REQUESTERS: ReadonlyMap<string, string> = new Map();
+const EMPTY_SOURCES: ReadonlyMap<string, AutoOpenSource> = new Map();
+
+/**
+ * Reduce a source message to the facts the auto-open decision checks.
+ *
+ * Both message kinds carry the channel in `h` and address people with `p`,
+ * so one reader covers them. `p` is read as a set because a message addresses
+ * everyone it names — its author included, on the reply path — and the
+ * decision only ever asks whether a particular agent is among them.
+ */
+function readSource(event: RelayEvent): AutoOpenSource {
+  let channelId: string | null = null;
+  const addressed = new Set<string>();
+  for (const tag of event.tags ?? []) {
+    if (typeof tag[1] !== "string" || tag[1].length === 0) continue;
+    if (tag[0] === "h" && channelId === null) channelId = tag[1];
+    else if (tag[0] === "p") addressed.add(normalizePubkey(tag[1]));
+  }
+  return { author: normalizePubkey(event.pubkey), channelId, addressed };
+}
 
 /**
  * Open an agent's session panel when this member's own mention started it.
@@ -37,10 +66,11 @@ const EMPTY_REQUESTERS: ReadonlyMap<string, string> = new Map();
  * warranted rather than presumptuous: they asked a moment ago, so the panel
  * they were going to click opens itself.
  *
- * The requester is read from the announcement's `e` tag, which names the
- * message that caused the session. That message's author is fetched by id when
- * it is not already known, because the member may have sent it from another
- * device — the local composer's memory would not cover that.
+ * The announcement's `e` tag names the message that caused the session, and
+ * that message is fetched by id — not read from the local composer, which
+ * would miss a mention this member sent from another device. What the fetched
+ * message has to prove is in {@link planAutoOpen}; fetching it is the only
+ * reason this hook exists, because the announcement alone cannot establish it.
  *
  * `panelOpen` suppresses the takeover when a panel is already on screen, and
  * the session is marked handled anyway. Pulling somebody out of an agent panel
@@ -62,8 +92,8 @@ export function useAutoOpenRequestedAgentMedia({
   // Normalized here rather than trusted from the caller: a mixed-case pubkey
   // would compare unequal to the event author and quietly open nothing.
   const me = currentPubkey ? normalizePubkey(currentPubkey) : null;
-  const [requesters, setRequesters] =
-    React.useState<ReadonlyMap<string, string>>(EMPTY_REQUESTERS);
+  const [sources, setSources] =
+    React.useState<ReadonlyMap<string, AutoOpenSource>>(EMPTY_SOURCES);
   // Kept in refs so a new callback identity or a panel opening does not re-run
   // the decision; only the sessions and what is known about them should.
   const openRef = React.useRef(openAgentSession);
@@ -76,7 +106,7 @@ export function useAutoOpenRequestedAgentMedia({
       currentPubkey: me,
       handled: autoOpened,
       nowSeconds: Math.floor(Date.now() / 1000),
-      requesterOf: (sourceEventId) => requesters.get(sourceEventId),
+      sourceOf: (sourceEventId) => sources.get(sourceEventId),
       sessions,
     });
 
@@ -102,14 +132,12 @@ export function useAutoOpenRequestedAgentMedia({
           limit: plan.resolve.length,
         });
         if (cancelled) return;
-        setRequesters((previous) => {
+        setSources((previous) => {
           const next = new Map(previous);
           // Record every id that was asked about, found or not, so a message
           // this member cannot read is not looked up again on every arrival.
-          for (const id of plan.resolve) next.set(id, NO_AUTHOR);
-          for (const event of events) {
-            next.set(event.id, normalizePubkey(event.pubkey));
-          }
+          for (const id of plan.resolve) next.set(id, UNREADABLE_SOURCE);
+          for (const event of events) next.set(event.id, readSource(event));
           return next;
         });
       } catch (error) {
@@ -124,5 +152,5 @@ export function useAutoOpenRequestedAgentMedia({
     return () => {
       cancelled = true;
     };
-  }, [me, requesters, sessions]);
+  }, [me, sources, sessions]);
 }
