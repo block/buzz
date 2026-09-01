@@ -180,16 +180,16 @@ export function useMentionSendFlow({
         const agent = managedAgentsByPubkey.get(pubkey);
         if (!agent) continue;
         try {
-          const readyAgent = existingMembers.has(pubkey)
-            ? agent
+          const { agent: readyAgent, wrote } = existingMembers.has(pubkey)
+            ? { agent, wrote: false }
             : await applyReusableAgentAccessPolicy(
                 agent,
                 {},
                 personas.find((persona) => persona.id === agent.personaId),
               );
-          if (readyAgent !== agent) {
-            // A distinct record back means the access-policy update hit the
-            // relay; a matching policy returns `agent` itself without writing.
+          if (wrote) {
+            // The access-policy reconciliation hit the relay; a matching
+            // policy reports `wrote: false` and stays on the fast path.
             wroteRelayState = true;
           }
           if (participants.has(pubkey)) {

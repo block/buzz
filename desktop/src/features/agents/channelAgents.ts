@@ -132,11 +132,25 @@ type ChannelAgentReuseContext = {
   >[];
 };
 
+export type ApplyReusableAgentAccessPolicyResult = {
+  agent: ManagedAgent;
+  /**
+   * True when reconciling the policy required a relay write. Callers that
+   * sequence authorization around this call — the message-send path revalidates
+   * mention authorization at the publish boundary whenever an awaited relay
+   * round-trip separated it from its earlier pass — depend on this flag rather
+   * than on comparing the returned record's identity against the input, so the
+   * signal survives any future change to whether an update returns a fresh
+   * object.
+   */
+  wrote: boolean;
+};
+
 export async function applyReusableAgentAccessPolicy(
   agent: ManagedAgent,
   request: Pick<CreateManagedAgentInput, "respondTo" | "respondToAllowlist">,
   persona?: Pick<AgentPersona, "respondTo" | "respondToAllowlist">,
-) {
+): Promise<ApplyReusableAgentAccessPolicyResult> {
   const policy = resolveReusableAgentAccessPolicy(request, persona);
   const matches =
     agent.respondTo === policy.respondTo &&
@@ -144,14 +158,13 @@ export async function applyReusableAgentAccessPolicy(
     agent.respondToAllowlist.every(
       (pubkey, index) => pubkey === policy.respondToAllowlist[index],
     );
-  if (matches) return agent;
+  if (matches) return { agent, wrote: false };
 
-  return (
-    await updateManagedAgent({
-      pubkey: agent.pubkey,
-      ...policy,
-    })
-  ).agent;
+  const { agent: updatedAgent } = await updateManagedAgent({
+    pubkey: agent.pubkey,
+    ...policy,
+  });
+  return { agent: updatedAgent, wrote: true };
 }
 
 export async function attachManagedAgentToChannel(
@@ -329,7 +342,7 @@ export async function provisionChannelManagedAgent(
       const definition = context.personas.find(
         (persona) => persona.id === input.personaId,
       );
-      const updatedAgent = await applyReusableAgentAccessPolicy(
+      const { agent: updatedAgent } = await applyReusableAgentAccessPolicy(
         reusable,
         input,
         definition,
@@ -358,7 +371,7 @@ export async function provisionChannelManagedAgent(
       context.channelMemberPubkeys,
     );
     if (reusable) {
-      const updatedAgent = await applyReusableAgentAccessPolicy(
+      const { agent: updatedAgent } = await applyReusableAgentAccessPolicy(
         reusable,
         input,
       );
