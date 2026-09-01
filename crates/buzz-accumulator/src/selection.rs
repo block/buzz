@@ -1,4 +1,4 @@
-//! Selections: saveable queries over signals, compiled to relay filters.
+//! Selections: frozen-or-live descriptions of a set of signals.
 
 use serde::{Deserialize, Serialize};
 
@@ -8,15 +8,18 @@ use crate::signal::Signal;
 /// Kinds a selection reads when none are specified: chat messages.
 pub const DEFAULT_SIGNAL_KINDS: &[u32] = &[9];
 
-/// A named-able query over signals.
+/// A named-able description of a set of signals: who × what × when.
 ///
-/// v1 supports the shapes the relay can answer directly: channels (`#h`),
-/// authors, and kinds. DMs are deliberately excluded — a selection never
-/// reads them. Time is not part of the selection; each run supplies its own
-/// half-open window so the same selection replays deterministically.
+/// The *when* is part of the selection. A pinned `until_exclusive` makes the
+/// selection **frozen** — it describes a fixed set that a fold works through
+/// and is then done with forever. An open `until_exclusive` makes it **live**
+/// — it keeps extending to "now", so a fold over it is never done.
+///
+/// v1 supports the shapes the mirror can answer directly: channels, authors,
+/// and kinds. DMs are deliberately excluded — a selection never reads them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Selection {
-    /// Channel ids (NIP-29 `h` tags). One relay filter is emitted per channel.
+    /// Channel ids (NIP-29 `h` tags).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub channels: Vec<String>,
     /// Author pubkeys (hex).
@@ -25,6 +28,13 @@ pub struct Selection {
     /// Event kinds; empty means [`DEFAULT_SIGNAL_KINDS`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kinds: Vec<u32>,
+    /// Window start (unix seconds, inclusive). `None` = beginning of time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<i64>,
+    /// Window end (unix seconds, exclusive). `None` = live: the selection
+    /// keeps extending to "now". Pinned = frozen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_exclusive: Option<i64>,
 }
 
 impl Selection {
@@ -64,10 +74,23 @@ impl Selection {
                 "kind {k} is outside the event-kind range"
             )));
         }
+        if let (Some(s), Some(u)) = (self.since, self.until_exclusive) {
+            if s >= u {
+                return Err(Error::InvalidSpec(format!(
+                    "window is empty: since {s} must be before until_exclusive {u}"
+                )));
+            }
+        }
         Ok(())
     }
 
-    /// Effective kinds for relay filters (relay queries must always name kinds).
+    /// Whether the selection describes a fixed set (pinned end) rather than a
+    /// live one that keeps extending to "now".
+    pub fn is_frozen(&self) -> bool {
+        self.until_exclusive.is_some()
+    }
+
+    /// Effective kinds for signal queries (queries must always name kinds).
     pub fn effective_kinds(&self) -> Vec<u32> {
         if self.kinds.is_empty() {
             DEFAULT_SIGNAL_KINDS.to_vec()
@@ -76,57 +99,26 @@ impl Selection {
         }
     }
 
-    /// Compile to NIP-01 relay filters over the half-open window
-    /// `[since, until_exclusive)`.
+    /// The concrete half-open window `[since, until_exclusive)` a run over
+    /// this selection reads, optionally narrowed by a caller clamp.
     ///
-    /// One filter is emitted **per channel** rather than a single multi-`#h`
-    /// filter: per-channel requests match the relay's fan-out expectations and
-    /// avoid union-filter edge cases. Nostr `since`/`until` are inclusive, so
-    /// the exclusive end is mapped to `until_exclusive - 1`.
-    pub fn compile_filters(
+    /// The clamp is how a run stays pinned to its priced preflight window: a
+    /// live selection resolves `until` to "now" at preflight time, and the run
+    /// passes that resolved window back as the clamp. Clamps can only narrow —
+    /// the intersection with the selection's own window is taken, so a frozen
+    /// selection never reads outside its freeze.
+    pub fn resolve_window(
         &self,
-        since: i64,
-        until_exclusive: i64,
-        limit: usize,
-    ) -> Vec<serde_json::Value> {
-        let kinds = self.effective_kinds();
-        let until = until_exclusive.saturating_sub(1);
-        let base = |extra: &mut serde_json::Map<String, serde_json::Value>| {
-            extra.insert("kinds".into(), serde_json::json!(kinds));
-            extra.insert("since".into(), serde_json::json!(since));
-            extra.insert("until".into(), serde_json::json!(until));
-            extra.insert("limit".into(), serde_json::json!(limit));
-            if !self.authors.is_empty() {
-                extra.insert("authors".into(), serde_json::json!(self.authors));
-            }
-        };
-        if self.channels.is_empty() {
-            let mut m = serde_json::Map::new();
-            base(&mut m);
-            return vec![serde_json::Value::Object(m)];
-        }
-        self.channels
-            .iter()
-            .map(|ch| {
-                let mut m = serde_json::Map::new();
-                base(&mut m);
-                m.insert("#h".into(), serde_json::json!([ch]));
-                serde_json::Value::Object(m)
-            })
-            .collect()
-    }
-
-    /// Human-readable one-line description.
-    pub fn describe(&self) -> String {
-        let mut parts = Vec::new();
-        if !self.channels.is_empty() {
-            parts.push(format!("{} channel(s)", self.channels.len()));
-        }
-        if !self.authors.is_empty() {
-            parts.push(format!("{} author(s)", self.authors.len()));
-        }
-        parts.push(format!("kinds {:?}", self.effective_kinds()));
-        parts.join(" · ")
+        clamp_since: Option<i64>,
+        clamp_until_exclusive: Option<i64>,
+        now: i64,
+    ) -> (i64, i64) {
+        let since = self.since.unwrap_or(0).max(clamp_since.unwrap_or(0));
+        let until = self
+            .until_exclusive
+            .unwrap_or(now + 1)
+            .min(clamp_until_exclusive.unwrap_or(i64::MAX));
+        (since, until)
     }
 }
 
@@ -185,6 +177,13 @@ mod tests {
     const CH_A: &str = "59ca5528-71ea-4a53-a7f5-90c9fb2b1729";
     const CH_B: &str = "a2228687-0000-4000-8000-000000000000";
 
+    fn channels(ids: &[&str]) -> Selection {
+        Selection {
+            channels: ids.iter().map(|s| s.to_string()).collect(),
+            ..Selection::default()
+        }
+    }
+
     #[test]
     fn empty_selection_is_rejected() {
         let mut s = Selection::default();
@@ -194,9 +193,8 @@ mod tests {
     #[test]
     fn canonicalize_lowercases_sorts_and_dedupes() {
         let mut s = Selection {
-            channels: vec![CH_B.into(), CH_A.to_uppercase(), CH_B.into()],
-            authors: vec![],
             kinds: vec![40002, 9, 9],
+            ..channels(&[CH_B, &CH_A.to_uppercase(), CH_B])
         };
         s.canonicalize().expect("valid");
         assert_eq!(s.channels, vec![CH_A.to_string(), CH_B.to_string()]);
@@ -205,51 +203,74 @@ mod tests {
 
     #[test]
     fn malformed_ids_and_out_of_range_kinds_are_rejected() {
+        assert!(channels(&["not-a-uuid"]).canonicalize().is_err());
         let mut s = Selection {
-            channels: vec!["not-a-uuid".into()],
-            authors: vec![],
-            kinds: vec![],
-        };
-        assert!(s.canonicalize().is_err());
-        let mut s = Selection {
-            channels: vec![],
             authors: vec!["abc123".into()],
-            kinds: vec![],
+            ..Selection::default()
         };
         assert!(s.canonicalize().is_err());
         let mut s = Selection {
-            channels: vec![CH_A.into()],
-            authors: vec![],
             kinds: vec![70_000],
+            ..channels(&[CH_A])
         };
         assert!(s.canonicalize().is_err());
     }
 
     #[test]
-    fn one_filter_per_channel_with_half_open_window() {
-        let s = Selection {
-            channels: vec!["ch1".into(), "ch2".into()],
-            authors: vec!["p1".into()],
-            kinds: vec![],
+    fn empty_window_is_rejected_but_open_ends_pass() {
+        let mut s = Selection {
+            since: Some(200),
+            until_exclusive: Some(200),
+            ..channels(&[CH_A])
         };
-        let filters = s.compile_filters(100, 200, 500);
-        assert_eq!(filters.len(), 2);
-        assert_eq!(filters[0]["#h"], serde_json::json!(["ch1"]));
-        assert_eq!(filters[0]["kinds"], serde_json::json!([9]));
-        assert_eq!(filters[0]["since"], serde_json::json!(100));
-        assert_eq!(filters[0]["until"], serde_json::json!(199));
-        assert_eq!(filters[0]["authors"], serde_json::json!(["p1"]));
+        assert!(s.canonicalize().is_err());
+        let mut s = Selection {
+            since: Some(100),
+            until_exclusive: Some(200),
+            ..channels(&[CH_A])
+        };
+        assert!(s.canonicalize().is_ok());
+        assert!(s.is_frozen());
+        let mut s = Selection {
+            since: Some(100),
+            ..channels(&[CH_A])
+        };
+        assert!(s.canonicalize().is_ok());
+        assert!(!s.is_frozen());
     }
 
     #[test]
-    fn author_only_selection_compiles_one_filter() {
+    fn live_selection_resolves_to_now_and_clamps_narrow() {
+        let s = channels(&[CH_A]);
+        assert_eq!(s.resolve_window(None, None, 1000), (0, 1001));
+        // The run-pins-to-priced-window clamp.
+        assert_eq!(s.resolve_window(Some(10), Some(900), 1000), (10, 900));
+    }
+
+    #[test]
+    fn frozen_selection_never_reads_outside_its_freeze() {
         let s = Selection {
-            channels: vec![],
-            authors: vec!["p1".into()],
-            kinds: vec![9],
+            since: Some(100),
+            until_exclusive: Some(200),
+            ..channels(&[CH_A])
         };
-        let filters = s.compile_filters(0, 10, 5);
-        assert_eq!(filters.len(), 1);
-        assert!(filters[0].get("#h").is_none());
+        // No clamp: the freeze is the window, even as "now" moves on.
+        assert_eq!(s.resolve_window(None, None, 10_000), (100, 200));
+        // A wider clamp cannot widen; a narrower one narrows.
+        assert_eq!(s.resolve_window(Some(0), Some(10_000), 10_000), (100, 200));
+        assert_eq!(s.resolve_window(Some(150), Some(180), 10_000), (150, 180));
+    }
+
+    #[test]
+    fn selection_json_without_window_still_loads_as_live() {
+        // Specs saved before the when moved into the selection must keep
+        // loading — and must compare equal to a live selection, so existing
+        // chains stay cached.
+        let legacy = format!(r#"{{"channels":["{CH_A}"]}}"#);
+        let loaded: Selection = serde_json::from_str(&legacy).expect("deserialize");
+        assert_eq!(loaded, channels(&[CH_A]));
+        assert!(!loaded.is_frozen());
+        let out = serde_json::to_string(&loaded).expect("serialize");
+        assert!(!out.contains("until"), "open ends must not serialize");
     }
 }

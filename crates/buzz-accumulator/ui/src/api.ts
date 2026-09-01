@@ -4,9 +4,14 @@ export type Selection = {
   channels: string[];
   authors: string[];
   kinds: number[];
+  /** Selection's own window (who × what × when). A pinned `until_exclusive`
+   * freezes the selection; open ends mean live ("and whatever comes next"). */
+  since?: number;
+  until_exclusive?: number;
 };
 
-/** Half-open run window; omitted bounds mean "everything up to now". */
+/** Optional clamp sent with preview/preflight/run; it can only narrow the
+ * selection's own window (this pins a run to its priced preflight window). */
 export type TimeWindow = { since?: number; until_exclusive?: number };
 
 export type Status = {
@@ -71,7 +76,6 @@ export type EventsPage = {
 export type FoldSpec = {
   name: string;
   selection: Selection;
-  schema: string;
   model: string;
   instructions: string;
   meta?: unknown;
@@ -120,7 +124,6 @@ export type Artifact = {
   selection: Selection;
   channels: string[];
   model: string;
-  schema: string;
   prompt_sha256: string;
   truncated: boolean;
   created_at: number;
@@ -134,7 +137,6 @@ export type ArtifactSummary = {
   coverage_until: number | null;
   channels: string[];
   model: string;
-  schema: string;
   truncated: boolean;
 };
 
@@ -157,6 +159,8 @@ function normalizeSelection(s: Partial<Selection> | undefined): Selection {
     channels: s?.channels ?? [],
     authors: s?.authors ?? [],
     kinds: s?.kinds ?? [],
+    since: s?.since,
+    until_exclusive: s?.until_exclusive,
   };
 }
 

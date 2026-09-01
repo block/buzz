@@ -135,17 +135,25 @@ impl Drop for RunToken {
     }
 }
 
-/// Loads spec + chain and plans a run over `[since, until_exclusive)`.
+/// An optional narrowing of the selection's own window, `[since,
+/// until_exclusive)`. This is how a run stays pinned to the exact window its
+/// preflight priced; it can only narrow, never widen (the selection's window
+/// wins by intersection).
+pub type WindowClamp = (Option<i64>, Option<i64>);
+
+/// Loads spec + chain and plans a run over the selection's window (narrowed
+/// by `clamp`). Returns the resolved window alongside the plan.
 async fn plan(
     store: &Store,
     name: &str,
-    since: i64,
-    until_exclusive: i64,
-) -> Result<(FoldSpec, Vec<ArtifactPayload>, Plan), FoldError> {
+    clamp: WindowClamp,
+) -> Result<(FoldSpec, Vec<ArtifactPayload>, Plan, (i64, i64)), FoldError> {
     let spec = store
         .get_fold(name)
         .await?
         .ok_or_else(|| FoldError::NotFound(name.to_string()))?;
+    let now = chrono::Utc::now().timestamp();
+    let (since, until_exclusive) = spec.selection.resolve_window(clamp.0, clamp.1, now);
     let chain = store.artifacts(name).await?;
     let covered: BTreeSet<String> = chain
         .iter()
@@ -157,20 +165,19 @@ async fn plan(
     let authors: BTreeSet<String> = fetched.iter().map(|s| s.pubkey.clone()).collect();
     let names = store.names(&authors).await?;
     let plan = plan_run(&spec, chain.last(), &covered, fetched, &names)?;
-    Ok((spec, chain, plan))
+    Ok((spec, chain, plan, (since, until_exclusive)))
 }
 
-/// Zero-spend preflight: what would a run over this window do, and at what
-/// estimated cost? With `include_input`, the Ready outcome carries the exact
-/// string the model would receive.
+/// Zero-spend preflight: what would a run do, and at what estimated cost?
+/// With `include_input`, the Ready outcome carries the exact string the model
+/// would receive.
 pub async fn preflight(
     store: &Store,
     name: &str,
-    since: i64,
-    until_exclusive: i64,
+    clamp: WindowClamp,
     include_input: bool,
 ) -> Result<PreflightOutcome, FoldError> {
-    let (_, _, plan) = plan(store, name, since, until_exclusive).await?;
+    let (_, _, plan, window) = plan(store, name, clamp).await?;
     Ok(match plan {
         Plan::Cached => PreflightOutcome::Cached,
         Plan::Stalled { reason, pending } => PreflightOutcome::Stalled { reason, pending },
@@ -179,23 +186,22 @@ pub async fn preflight(
             pending: rp.pending,
             truncated: rp.truncated,
             estimate: rp.estimate,
-            window: (since, until_exclusive),
+            window,
             model_input: include_input.then_some(rp.model_input),
         },
     })
 }
 
-/// Runs one fold turn over `[since, until_exclusive)`.
+/// Runs one fold turn over the selection's window (narrowed by `clamp`).
 pub async fn run_fold(
     store: &Store,
     runner: Arc<dyn FoldRunner + Send + Sync>,
     guard: &RunGuard,
     name: &str,
-    since: i64,
-    until_exclusive: i64,
+    clamp: WindowClamp,
 ) -> Result<RunOutcome, FoldError> {
     let _token = guard.acquire(name)?;
-    let (spec, chain, plan) = plan(store, name, since, until_exclusive).await?;
+    let (spec, chain, plan, _) = plan(store, name, clamp).await?;
     let run_plan = match plan {
         Plan::Cached => return Ok(RunOutcome::Cached),
         Plan::Stalled { reason, pending } => return Ok(RunOutcome::Stalled { reason, pending }),
@@ -229,12 +235,6 @@ pub async fn run_fold(
     })
 }
 
-/// Default window for preflight/run when the caller does not narrow it:
-/// everything up to now.
-pub fn default_window() -> (i64, i64) {
-    (0, chrono::Utc::now().timestamp() + 1)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,10 +255,8 @@ mod tests {
             name: "weekly".into(),
             selection: Selection {
                 channels: vec![CHANNEL.into()],
-                authors: vec![],
-                kinds: vec![],
+                ..Selection::default()
             },
-            schema: "channel-digest@v1".into(),
             model: "test-model".into(),
             instructions: "digest the channel".into(),
             meta: None,
@@ -283,7 +281,7 @@ mod tests {
     #[tokio::test]
     async fn preflight_prices_before_any_spend() {
         let store = store_with_fold_and_signal().await;
-        let out = preflight(&store, "weekly", 0, 1_000, false)
+        let out = preflight(&store, "weekly", (None, None), false)
             .await
             .expect("preflight");
         match out {
@@ -306,7 +304,7 @@ mod tests {
     #[tokio::test]
     async fn preflight_can_expose_the_exact_model_input() {
         let store = store_with_fold_and_signal().await;
-        let out = preflight(&store, "weekly", 0, 1_000, true)
+        let out = preflight(&store, "weekly", (None, None), true)
             .await
             .expect("preflight");
         match out {
@@ -327,7 +325,7 @@ mod tests {
         let output = format!("Just a paragraph citing [event:{id}], no headings.");
         let runner = Arc::new(FakeRunner(output.clone()));
         let guard = RunGuard::default();
-        let out = run_fold(&store, runner.clone(), &guard, "weekly", 0, 1_000)
+        let out = run_fold(&store, runner.clone(), &guard, "weekly", (None, None))
             .await
             .expect("run");
         match out {
@@ -342,7 +340,7 @@ mod tests {
             other => panic!("expected folded, got {other:?}"),
         }
         // Same window again: engine reports cached, no new version.
-        let again = run_fold(&store, runner, &guard, "weekly", 0, 1_000)
+        let again = run_fold(&store, runner, &guard, "weekly", (None, None))
             .await
             .expect("rerun");
         assert!(matches!(again, RunOutcome::Cached), "got {again:?}");
@@ -350,9 +348,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn frozen_fold_completes_then_stays_cached_forever() {
+        let store = store_with_fold_and_signal().await;
+        // Freeze the selection around the seeded signal (created_at = 100).
+        let mut spec = store
+            .get_fold("weekly")
+            .await
+            .expect("get")
+            .expect("present");
+        spec.selection.since = Some(0);
+        spec.selection.until_exclusive = Some(1_000);
+        spec.validate().expect("valid");
+        store.put_fold(&spec, 2).await.expect("update");
+
+        let runner = Arc::new(FakeRunner("the day, summarized".into()));
+        let guard = RunGuard::default();
+        let out = run_fold(&store, runner.clone(), &guard, "weekly", (None, None))
+            .await
+            .expect("run");
+        assert!(matches!(out, RunOutcome::Folded { .. }), "got {out:?}");
+
+        // Fully covered: the frozen fold is done forever — no clamp needed,
+        // and later events outside the freeze must never wake it.
+        store
+            .upsert_events(&[super::super::store::StoredEvent {
+                id: "f".repeat(64),
+                channel: Some(CHANNEL.into()),
+                pubkey: "a".repeat(64),
+                kind: 9,
+                created_at: 5_000,
+                content: "after the freeze".into(),
+                raw: "{}".into(),
+            }])
+            .await
+            .expect("late event");
+        let pf = preflight(&store, "weekly", (None, None), false)
+            .await
+            .expect("preflight");
+        assert!(matches!(pf, PreflightOutcome::Cached), "got {pf:?}");
+        // A clamp can only narrow, never widen past the freeze.
+        let pf = preflight(&store, "weekly", (Some(0), Some(10_000)), false)
+            .await
+            .expect("preflight");
+        assert!(matches!(pf, PreflightOutcome::Cached), "got {pf:?}");
+    }
+
+    #[tokio::test]
     async fn unknown_fold_is_not_found() {
         let store = Store::open(":memory:").await.expect("open");
-        let err = preflight(&store, "nope", 0, 10, false)
+        let err = preflight(&store, "nope", (None, None), false)
             .await
             .expect_err("missing fold");
         assert!(matches!(err, FoldError::NotFound(_)));

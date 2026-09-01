@@ -585,8 +585,7 @@ mod tests {
     fn selection(channels: &[&str]) -> Selection {
         Selection {
             channels: channels.iter().map(|s| s.to_string()).collect(),
-            authors: vec![],
-            kinds: vec![],
+            ..Selection::default()
         }
     }
 
@@ -635,7 +634,6 @@ mod tests {
             selection: selection(&[]),
             channels: vec![],
             model: "m".into(),
-            schema: "channel-digest@v1".into(),
             prompt_sha256: "0".repeat(64),
             truncated: false,
             created_at: 1,
@@ -670,12 +668,7 @@ mod tests {
         let store = Store::open(":memory:").await.expect("open");
         let mut spec = FoldSpec {
             name: "weekly".into(),
-            selection: Selection {
-                channels: vec!["6ba7b810-9dad-11d1-80b4-00c04fd430c8".into()],
-                authors: vec![],
-                kinds: vec![],
-            },
-            schema: "channel-digest@v1".into(),
+            selection: selection(&["6ba7b810-9dad-11d1-80b4-00c04fd430c8"]),
             model: "haiku".into(),
             instructions: "digest".into(),
             meta: None,

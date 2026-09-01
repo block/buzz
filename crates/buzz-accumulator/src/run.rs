@@ -96,7 +96,6 @@ pub fn plan_run(
         .collect();
     let config_matches = prior.is_some_and(|p| {
         p.model == spec.model
-            && p.schema == spec.schema
             && p.prompt_sha256 == spec.prompt_sha256()
             && p.selection == spec.selection
     });
@@ -193,7 +192,6 @@ pub fn complete_run(
         channels: channels.into_iter().collect(),
         shown_ids,
         model: spec.model.clone(),
-        schema: spec.schema.clone(),
         prompt_sha256: spec.prompt_sha256(),
         truncated: plan.truncated,
         created_at,
@@ -214,10 +212,8 @@ mod tests {
             name: "team-digest".to_string(),
             selection: Selection {
                 channels: vec!["ch1".to_string()],
-                authors: vec![],
-                kinds: vec![],
+                ..Selection::default()
             },
-            schema: "channel-digest@v1".to_string(),
             model: "haiku".to_string(),
             instructions: "Maintain the digest.".to_string(),
             meta: None,
@@ -250,7 +246,6 @@ mod tests {
             selection: spec.selection.clone(),
             channels: spec.selection.channels.clone(),
             model: spec.model.clone(),
-            schema: spec.schema.clone(),
             prompt_sha256: spec.prompt_sha256(),
             truncated: false,
             created_at: 1_700_000_100,

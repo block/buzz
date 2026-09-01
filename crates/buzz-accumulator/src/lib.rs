@@ -6,14 +6,21 @@
 //! is a function of the previous artifact plus only the signals that arrived
 //! since the last run — never a re-read of history.
 //!
-//! Five nouns, one recurrence:
-//! - **signal** — a raw relay event, never rewritten; the source of truth.
-//! - **selection** — a saveable query over signals (channels, authors, kinds).
-//! - **fold** — `artifact' = fold(artifact, new_signals, spec)`.
+//! Three nouns, one recurrence (signals — raw relay events, never rewritten —
+//! are the substrate underneath all three):
+//! - **selection** — a frozen-or-live description of a signal set: who ×
+//!   what × when (channels, authors, kinds, and the selection's own window).
+//!   A pinned `until_exclusive` freezes it; an open end means "and whatever
+//!   comes next".
+//! - **fold** — name + selection + model + instructions: a factory for
+//!   artifacts. `artifact' = fold(artifact, new_signals, spec)`. A frozen
+//!   selection makes the fold run until covered, then done forever; a live
+//!   one is never done.
 //! - **artifact** — the model's response, verbatim and free-form, persisted
 //!   locally as an immutable, append-only version chain whose provenance
-//!   (exactly which signals went in, and when) is engine-computed.
-//! - (a **lens** renders artifacts into UI; rendering is out of scope here.)
+//!   (exactly which signals went in, and when) is engine-computed. Publishing
+//!   an artifact back into a channel makes it a signal again — later folds
+//!   can select it, so composition needs no extra machinery.
 //!
 //! The engine modules are deliberately **pure**: they plan runs, price them,
 //! and render transcripts — but perform no relay I/O and hold no storage.

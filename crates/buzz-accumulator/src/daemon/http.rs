@@ -17,7 +17,8 @@ use serde_json::{json, Value};
 use crate::runner::FoldRunner;
 use crate::{FoldSpec, Selection};
 
-use super::folds::{self, FoldError, RunGuard};
+use super::folds::{self, FoldError, RunGuard, WindowClamp};
+use super::publish::Publisher;
 use super::status::StatusRegistry;
 use super::store::Store;
 
@@ -32,6 +33,8 @@ pub struct AppState {
     pub runner: Arc<dyn FoldRunner + Send + Sync>,
     /// Per-fold run serialization (concurrent runs 409 instead of racing).
     pub runs: RunGuard,
+    /// Publishes artifacts back into channels as messages.
+    pub publisher: Arc<dyn Publisher>,
 }
 
 /// Builds the router. Separated from serving for tests.
@@ -51,6 +54,10 @@ pub fn router(state: AppState) -> Router {
         .route("/folds/{name}/run", post(run_fold))
         .route("/folds/{name}/artifacts", get(list_artifacts))
         .route("/folds/{name}/artifacts/{version}", get(get_artifact))
+        .route(
+            "/folds/{name}/artifacts/{version}/publish",
+            post(publish_artifact),
+        )
         .with_state(state)
 }
 
@@ -116,8 +123,9 @@ async fn get_channels(State(s): State<AppState>) -> Result<Json<Value>, ApiError
     Ok(Json(json!({ "channels": channels })))
 }
 
-/// Window bounds shared by preview/preflight/run bodies. Omitted bounds mean
-/// "everything up to now".
+/// Optional window clamp shared by preview/preflight/run bodies. The
+/// selection's own window is authoritative; these bounds can only narrow it
+/// (this is how a run stays pinned to its priced preflight window).
 #[derive(Debug, Default, serde::Deserialize)]
 struct WindowBody {
     since: Option<i64>,
@@ -125,12 +133,8 @@ struct WindowBody {
 }
 
 impl WindowBody {
-    fn resolve(&self) -> (i64, i64) {
-        let (default_since, default_until) = folds::default_window();
-        (
-            self.since.unwrap_or(default_since),
-            self.until_exclusive.unwrap_or(default_until),
-        )
+    fn clamp(&self) -> WindowClamp {
+        (self.since, self.until_exclusive)
     }
 }
 
@@ -149,7 +153,9 @@ async fn select_preview(
 ) -> Result<Json<Value>, ApiError> {
     let mut selection = body.selection;
     selection.canonicalize()?;
-    let (since, until) = body.window.resolve();
+    let now = chrono::Utc::now().timestamp();
+    let (since, until) =
+        selection.resolve_window(body.window.since, body.window.until_exclusive, now);
     let signals = s.store.query_signals(&selection, since, until).await?;
     let total_chars: usize = signals.iter().map(|sig| sig.content.len()).sum();
     // Daily histogram (UTC day starts). Sparse: days with no matches are absent.
@@ -199,7 +205,9 @@ async fn select_events(
 ) -> Result<Json<Value>, ApiError> {
     let mut selection = body.selection;
     selection.canonicalize()?;
-    let (since, until) = body.window.resolve();
+    let now = chrono::Utc::now().timestamp();
+    let (since, until) =
+        selection.resolve_window(body.window.since, body.window.until_exclusive, now);
     let limit = body.limit.unwrap_or(100).clamp(1, 500);
     let after = body.after.as_ref().map(|c| (c.created_at, c.id.as_str()));
     // Fetch one extra row purely to learn whether a next page exists.
@@ -281,8 +289,6 @@ struct PutFoldBody {
     model: String,
     /// Defaults to the built-in running-digest task.
     instructions: Option<String>,
-    /// Provenance label recorded on artifacts; defaults to `freeform@v1`.
-    schema: Option<String>,
     /// Free-form client-owned JSON, stored verbatim and never read by the
     /// engine (see [`FoldSpec::meta`]).
     meta: Option<serde_json::Value>,
@@ -296,9 +302,6 @@ async fn put_fold(
     let mut spec = FoldSpec {
         name,
         selection: body.selection,
-        schema: body
-            .schema
-            .unwrap_or_else(|| crate::spec::FREEFORM_SCHEMA.to_string()),
         model: body.model,
         instructions: body
             .instructions
@@ -343,8 +346,7 @@ async fn preflight_fold(
     body: Option<Json<PreflightBody>>,
 ) -> Result<Json<Value>, ApiError> {
     let Json(body) = body.unwrap_or_default();
-    let (since, until) = body.window.resolve();
-    let out = folds::preflight(&s.store, &name, since, until, body.include_input).await?;
+    let out = folds::preflight(&s.store, &name, body.window.clamp(), body.include_input).await?;
     Ok(Json(
         serde_json::to_value(out).unwrap_or_else(|_| json!({})),
     ))
@@ -355,10 +357,8 @@ async fn run_fold(
     Path(name): Path<String>,
     body: Option<Json<WindowBody>>,
 ) -> Result<Json<Value>, ApiError> {
-    let (since, until) = body
-        .map(|Json(w)| w.resolve())
-        .unwrap_or_else(|| WindowBody::default().resolve());
-    let out = folds::run_fold(&s.store, s.runner.clone(), &s.runs, &name, since, until).await?;
+    let clamp = body.map(|Json(w)| w.clamp()).unwrap_or((None, None));
+    let out = folds::run_fold(&s.store, s.runner.clone(), &s.runs, &name, clamp).await?;
     Ok(Json(
         serde_json::to_value(out).unwrap_or_else(|_| json!({})),
     ))
@@ -373,7 +373,6 @@ fn artifact_summary(a: &crate::ArtifactPayload) -> Value {
         "coverage_until": a.coverage_until,
         "channels": a.channels,
         "model": a.model,
-        "schema": a.schema,
         "truncated": a.truncated,
     })
 }
@@ -404,6 +403,65 @@ async fn get_artifact(
     ))
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct PublishBody {
+    /// Channel UUID to post into.
+    channel: String,
+    /// The taint guard requires the artifact's chain to have read only the
+    /// target channel; set this to cross that line deliberately.
+    #[serde(default)]
+    allow_cross_channel: bool,
+}
+
+/// Publishes an artifact version into a channel as an ordinary message —
+/// the composition verb. The mirror's live tail picks the message back up,
+/// so a later fold can select it: folds all the way down.
+async fn publish_artifact(
+    State(s): State<AppState>,
+    Path((name, version)): Path<(String, u32)>,
+    Json(body): Json<PublishBody>,
+) -> Result<Json<Value>, ApiError> {
+    let artifact = s.store.artifact(&name, version).await?.ok_or_else(|| {
+        ApiError(
+            StatusCode::NOT_FOUND,
+            format!("artifact not found: {name} v{version}"),
+        )
+    })?;
+    let channel = body.channel.trim().to_lowercase();
+    // Taint guard: the chain-union `channels` is what this artifact has ever
+    // read. Publishing into a channel it didn't come from can leak another
+    // channel's content, so that path is opt-in only.
+    if !body.allow_cross_channel && artifact.channels != vec![channel.clone()] {
+        return Err(ApiError(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "artifact provenance covers channels {:?}, not just {channel} — \
+                 pass allow_cross_channel to publish it there deliberately",
+                artifact.channels
+            ),
+        ));
+    }
+    let content = format!(
+        "{}\n\n— fold {} v{} · folded {} event(s) · {}",
+        artifact.output.trim_end(),
+        artifact.fold,
+        artifact.version,
+        artifact.shown_ids.len(),
+        artifact.model,
+    );
+    let event_id = s
+        .publisher
+        .publish(&channel, &content)
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e))?;
+    Ok(Json(json!({
+        "published": event_id,
+        "channel": channel,
+        "fold": name,
+        "version": version,
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,12 +478,38 @@ mod tests {
         }
     }
 
+    /// Records publishes instead of touching a relay.
+    #[derive(Default)]
+    struct FakePublisher {
+        calls: std::sync::Mutex<Vec<(String, String)>>,
+    }
+    impl Publisher for FakePublisher {
+        fn publish<'a>(
+            &'a self,
+            channel: &'a str,
+            content: &'a str,
+        ) -> futures_util::future::BoxFuture<'a, Result<String, String>> {
+            Box::pin(async move {
+                self.calls
+                    .lock()
+                    .expect("lock")
+                    .push((channel.to_string(), content.to_string()));
+                Ok("e".repeat(64))
+            })
+        }
+    }
+
     async fn test_state() -> AppState {
+        test_state_with(Arc::new(FakePublisher::default())).await
+    }
+
+    async fn test_state_with(publisher: Arc<FakePublisher>) -> AppState {
         AppState {
             store: Store::open(":memory:").await.expect("open"),
             registry: StatusRegistry::new("wss://test", "ab", ":memory:", 0),
             runner: Arc::new(NoRunner),
             runs: RunGuard::default(),
+            publisher,
         }
     }
 
@@ -463,7 +547,6 @@ mod tests {
         let resp = app.clone().oneshot(put).await.expect("resp");
         assert_eq!(resp.status(), StatusCode::OK);
         let saved = body_json(resp).await;
-        assert_eq!(saved["saved"]["schema"], "freeform@v1");
         assert!(!saved["saved"]["instructions"]
             .as_str()
             .unwrap_or("")
@@ -665,6 +748,99 @@ mod tests {
                     .body(Body::empty())
                     .expect("req"),
             )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    fn artifact(channels: &[&str]) -> crate::ArtifactPayload {
+        crate::ArtifactPayload {
+            fold: "weekly".into(),
+            version: 1,
+            output: "the digest".into(),
+            shown_ids: vec!["s".repeat(64), "t".repeat(64)],
+            coverage_since: Some(100),
+            coverage_until: Some(201),
+            selection: Selection {
+                channels: channels.iter().map(|s| s.to_string()).collect(),
+                ..Selection::default()
+            },
+            channels: channels.iter().map(|s| s.to_string()).collect(),
+            model: "haiku".into(),
+            prompt_sha256: "0".repeat(64),
+            truncated: false,
+            created_at: 1,
+        }
+    }
+
+    fn publish_req(body: Value) -> Request<Body> {
+        Request::post("/folds/weekly/artifacts/1/publish")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("req")
+    }
+
+    #[tokio::test]
+    async fn publish_posts_artifact_with_provenance_footer() {
+        let fake = Arc::new(FakePublisher::default());
+        let state = test_state_with(fake.clone()).await;
+        state
+            .store
+            .insert_artifact(&artifact(&[CHANNEL]))
+            .await
+            .expect("seed artifact");
+        let app = router(state);
+        let resp = app
+            .oneshot(publish_req(json!({ "channel": CHANNEL })))
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["published"], "e".repeat(64));
+        assert_eq!(v["channel"], CHANNEL);
+        let calls = fake.calls.lock().expect("lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, CHANNEL);
+        assert!(calls[0].1.starts_with("the digest\n\n— fold weekly v1"));
+        assert!(calls[0].1.contains("2 event(s)"));
+        assert!(calls[0].1.contains("haiku"));
+    }
+
+    #[tokio::test]
+    async fn publish_refuses_cross_channel_unless_deliberate() {
+        let state = test_state().await;
+        // Chain has read a second channel; sharing into CHANNEL alone leaks it.
+        let other = "0e415c05-98cc-4c39-9a10-e07ba0479560";
+        let mut a = artifact(&[CHANNEL]);
+        a.channels = vec![other.to_string(), CHANNEL.to_string()];
+        state.store.insert_artifact(&a).await.expect("seed");
+        let app = router(state);
+        let resp = app
+            .clone()
+            .oneshot(publish_req(json!({ "channel": CHANNEL })))
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let v = body_json(resp).await;
+        assert!(v["error"]
+            .as_str()
+            .expect("error string")
+            .contains("allow_cross_channel"));
+        // The same publish goes through when crossed deliberately.
+        let resp = app
+            .oneshot(publish_req(
+                json!({ "channel": CHANNEL, "allow_cross_channel": true }),
+            ))
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn publish_of_missing_artifact_is_404() {
+        let app = router(test_state().await);
+        let resp = app
+            .oneshot(publish_req(json!({ "channel": CHANNEL })))
             .await
             .expect("resp");
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);

@@ -15,6 +15,7 @@
 
 pub mod folds;
 pub mod http;
+pub mod publish;
 pub mod status;
 pub mod store;
 pub mod sync;
@@ -152,6 +153,11 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         chrono::Utc::now().timestamp(),
     );
 
+    let publisher = Arc::new(publish::RelayPublisher {
+        relay_url: cfg.relay.clone(),
+        keys: keys.clone(),
+        auth_tag: auth_tag.clone(),
+    });
     let sync_cfg = sync::SyncConfig {
         relay_url: cfg.relay.clone(),
         keys,
@@ -164,6 +170,7 @@ pub async fn run(cfg: Config) -> anyhow::Result<()> {
         registry,
         runner: Arc::new(crate::SubprocessRunner::new()),
         runs: folds::RunGuard::default(),
+        publisher,
     };
     let addr: std::net::SocketAddr = cfg
         .http_addr

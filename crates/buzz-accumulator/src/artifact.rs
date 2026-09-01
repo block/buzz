@@ -19,7 +19,7 @@ pub struct ArtifactPayload {
     pub fold: String,
     /// 1-based version number; each run of the fold increments it.
     pub version: u32,
-    /// Full artifact document (after the engine splice).
+    /// The model's response, verbatim.
     pub output: String,
     /// Exactly the signal ids the model was shown this run.
     pub shown_ids: Vec<String>,
@@ -45,8 +45,6 @@ pub struct ArtifactPayload {
     pub channels: Vec<String>,
     /// Model that produced this version.
     pub model: String,
-    /// Schema the output conforms to.
-    pub schema: String,
     /// SHA-256 of the instructions used (provenance + cache key).
     pub prompt_sha256: String,
     /// True when the context budget dropped or trimmed pending signals — the
