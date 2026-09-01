@@ -24,6 +24,7 @@ test("focus idle drawers yield to every higher-priority auxiliary surface", () =
     hasIdleAuxiliaryPanel: true,
     hasIdlePanelCloseHandler: true,
     hasProfilePanel: false,
+    hasMarkdownDoc: false,
     hasThreadSurface: false,
     useSplitAuxiliaryPane: true,
   };
@@ -32,6 +33,7 @@ test("focus idle drawers yield to every higher-priority auxiliary surface", () =
   for (const surface of [
     "channelManagementOpen",
     "hasAgentSession",
+    "hasMarkdownDoc",
     "hasProfilePanel",
     "hasThreadSurface",
   ]) {
@@ -51,6 +53,7 @@ test("an explicit thread override keeps the idle panel in its own focus drawer",
       hasIdleAuxiliaryPanel: true,
       hasIdlePanelCloseHandler: true,
       hasProfilePanel: false,
+      hasMarkdownDoc: false,
       hasThreadSurface: true,
       overrideThread: true,
       useSplitAuxiliaryPane: false,

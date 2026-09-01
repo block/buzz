@@ -84,6 +84,7 @@ import { useChannelTargetReset } from "./useChannelTargetReset";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import { useChannelOpenReadState } from "./useChannelOpenReadState";
 import { useChannelUnreadState } from "./useChannelUnreadState";
+import { useChannelPaneOpeners } from "./useChannelPaneOpeners";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
 import { GuardedChannelPane } from "./GuardedChannelPane"; import { useNavigationGuard } from "./useNavigationGuard"; import * as searchForwarding from "./searchTargetForwarding";
 const EMPTY_RELAY_EVENTS: RelayEvent[] = [];
@@ -127,6 +128,10 @@ export function ChannelScreen({
     channelManagementOpen,
     clearAutoSend,
     clearMessageRouteTarget,
+    closeMarkdownDoc,
+    markdownDocName,
+    markdownDocUrl,
+    openMarkdownDoc,
     openAgentSessionChannelId,
     openAgentSessionPubkey,
     openProfilePanel,
@@ -677,7 +682,8 @@ export function ChannelScreen({
     effectiveOpenThreadHeadId ||
       openAgentSessionPubkey ||
       profilePanelPubkey ||
-      channelManagementOpen,
+      channelManagementOpen ||
+      (markdownDocUrl && markdownDocName),
   );
   const displayedThreadHeadMessage = threadPanelData.threadHead;
   const displayedThreadAllMessages = threadPanelData.messages;
@@ -706,33 +712,20 @@ export function ChannelScreen({
     resetKey: activeChannelId,
     enabled: !isSinglePanelView,
   });
-  const handleManageChannel = React.useCallback(() => {
-    if (!requireThreadEditResolution()) return;
-    if (activeChannel?.channelType === "forum") {
-      openGlobalChannelManagement();
-      return;
-    }
-    if (channelManagementOpen) {
-      setChannelManagementOpen(false);
-      return;
-    }
-    setOpenThreadHeadId(null);
-    setExpandedThreadReplyIds(new Set());
-    setThreadScrollTargetId(null);
-    setThreadReplyTargetId(null);
-    handleCloseAgentSession();
-    setProfilePanelPubkey(null);
-    setChannelManagementOpen(true);
-  }, [
-    activeChannel?.channelType,
+  const { handleManageChannel, handleOpenMarkdownDoc } = useChannelPaneOpeners({
+    channelType: activeChannel?.channelType,
     channelManagementOpen,
+    closeAgentSession: handleCloseAgentSession,
     openGlobalChannelManagement,
+    openMarkdownDoc,
     requireThreadEditResolution,
     setChannelManagementOpen,
+    setExpandedThreadReplyIds,
     setOpenThreadHeadId,
-    handleCloseAgentSession,
     setProfilePanelPubkey,
-  ]);
+    setThreadReplyTargetId,
+    setThreadScrollTargetId,
+  });
   const handleToggleMembers = React.useCallback(
     () => setIsMembersSidebarOpen((prev) => !prev),
     [],
@@ -838,6 +831,7 @@ export function ChannelScreen({
               >
                 {searchForwarding.renderSearchAwareChannel(
                   <GuardedChannelPane
+                  onOpenMarkdownDoc={handleOpenMarkdownDoc}
                   activeChannel={activeChannel}
                   activityAgents={channelAgentSessionAgents}
                   agentPubkeys={agentPubkeys}
@@ -945,6 +939,9 @@ export function ChannelScreen({
                   shouldShowThreadSkeleton={shouldShowThreadSkeleton}
                   onProfilePanelViewChange={setProfilePanelView}
                   onProfilePanelTabChange={setProfilePanelTab}
+                  markdownDocName={markdownDocName}
+                  markdownDocUrl={markdownDocUrl}
+                  onCloseMarkdownDoc={closeMarkdownDoc}
                   profilePanelPubkey={profilePanelPubkey}
                   profilePanelTab={profilePanelTab}
                   profilePanelView={profilePanelView}

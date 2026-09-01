@@ -72,6 +72,34 @@ export async function fetchMediaBytes(
   return new Uint8Array(bytes);
 }
 
+/**
+ * Fetch a markdown document attachment for the in-app viewer.
+ *
+ * Unlike the generic `fetchMediaBytes` (50 MiB cap), the Rust command
+ * enforces the viewer's 2 MiB ceiling natively — refusing an oversized
+ * Content-Length before the body is read and aborting mid-stream when the
+ * header is missing or dishonest — so a forged imeta `size` can never buy
+ * a 50 MiB download and IPC copy.
+ */
+export async function fetchMarkdownDocBytes(
+  url: string,
+): Promise<Uint8Array<ArrayBuffer>> {
+  const bytes = await invokeTauri<ArrayBuffer>("fetch_markdown_doc_bytes", {
+    url,
+  });
+  return new Uint8Array(bytes);
+}
+
+/**
+ * Whether a markdown-doc fetch failure is the native size-cap refusal, as
+ * opposed to a network or relay error. Matches the stable "file too large"
+ * prefix produced by the Rust cap checks.
+ */
+export function isMediaTooLargeError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.includes("file too large");
+}
+
 /** Read plain text without depending on embedded-webview clipboard grants. */
 export async function readTextFromSystemClipboard(): Promise<string> {
   // E2E installs Tauri's mocked IPC surface in a browser page, where the SDK's

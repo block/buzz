@@ -95,6 +95,7 @@ export type ChannelPaneProps = {
   onCloseChannelManagement?: () => void;
   onChannelManagementDeleted?: () => void;
   onCloseIdleAuxiliaryPanel?: () => void;
+  onCloseMarkdownDoc?: () => void;
   onCloseProfilePanel: () => void;
   onAddAgent?: (options?: { beforeSend?: () => void }) => void;
   onAddFiles?: () => void;
@@ -180,6 +181,8 @@ export type ChannelPaneProps = {
     tab: ProfilePanelTab,
     options?: { replace?: boolean },
   ) => void;
+  markdownDocName?: string | null;
+  markdownDocUrl?: string | null;
   profilePanelPubkey?: string | null;
   profilePanelTab: ProfilePanelTab;
   profilePanelView: ProfilePanelView;

@@ -14167,6 +14167,18 @@ export function maybeInstallE2eTauriMocks() {
         if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
         return await response.arrayBuffer();
       }
+      case "fetch_markdown_doc_bytes": {
+        // Mirrors the real command's native 2 MiB viewer cap (enforced in
+        // Rust during the streamed fetch) so specs can prove the oversized
+        // fallback: the refusal message must match the Rust cap error shape.
+        const response = await fetch((payload as { url: string }).url);
+        if (!response.ok) throw new Error(`fetch failed: ${response.status}`);
+        const buffer = await response.arrayBuffer();
+        if (buffer.byteLength > 2 * 1024 * 1024) {
+          throw new Error("file too large (max 2 MiB)");
+        }
+        return buffer;
+      }
       case "fetch_snapshot_bytes": {
         // The real command fetches + validates a snapshot attachment in memory
         // (size cap, SHA-256, decode). In E2E the bridge returns a minimal
