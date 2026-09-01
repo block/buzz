@@ -286,11 +286,15 @@ reconnect immediately.
 > that point, cumulative residual access is bounded by:
 >
 > ```
-> max(0, min(exp, iat + maximum_assertion_age, key_snapshot_hard_deadline) - now)
+> max(0, min(exp, iat + maximum_assertion_age) - now)
 > ```
 >
 > `max_connection_lifetime_seconds` only partitions that interval into
-> individual sessions; it does not shorten the total window.  If the adapter
+> individual sessions; it does not shorten the total window.  A snapshot
+> refresh failure, hard-deadline expiry without key replacement, or signing-key
+> removal can terminate access earlier, but these are not reliable protocol-level
+> bounds: the JWKS snapshot deadline renews on each refresh even when content is
+> unchanged, so it does not cap cumulative access.  If the adapter
 > continues issuing new assertions after the disconnect call, cumulative
 > access extends indefinitely — the session-only protocol places no
 > protocol-level bound on that case.
@@ -511,9 +515,10 @@ assertion TTL consistent with the organization's acceptable revocation latency.
 For upstream revocation without an explicit disconnect call (adapter stops
 issuing assertions; no active session termination), access persists until the
 live session's effective authority deadlines expire.  After the session closes
-naturally, a reconnect requires a fresh assertion; if the adapter has stopped
-issuing, no fresh assertion can be obtained and no reconnect can succeed.  If
-the adapter continues issuing assertions, access continues.
+naturally, a reconnect requires an assertion that remains valid when reverified;
+if the adapter has stopped issuing, no valid assertion can be obtained and no
+reconnect can succeed.  If the adapter continues issuing assertions, access
+continues.
 
 For the session-only disconnect model (adapter issues a successful disconnect
 call that closes all matching sessions synchronously), there is no surviving
@@ -521,15 +526,19 @@ old-session window.  If the adapter also stops issuing new assertions at that
 point, cumulative residual access is bounded by:
 
 ```
-max(0, min(exp, iat + maximum_assertion_age, key_snapshot_hard_deadline) - now)
+max(0, min(exp, iat + maximum_assertion_age) - now)
 ```
 
 `max_connection_lifetime_seconds` only partitions that interval into individual
-sessions; it does not shorten the total window.  If the adapter continues
-issuing new assertions after the disconnect call, cumulative access extends
-indefinitely — the session-only protocol places no protocol-level bound on that
-case.  See the non-normative note in the Admin disconnect section for the open
-product question on the deny-until-TTL alternative.
+sessions; it does not shorten the total window.  A snapshot refresh failure,
+hard-deadline expiry without key replacement, or signing-key removal can
+terminate access earlier, but these are not reliable protocol-level bounds: the
+JWKS snapshot deadline renews on each refresh even when content is unchanged.
+If the adapter continues issuing new assertions after the disconnect call,
+cumulative access extends indefinitely — the session-only protocol places no
+protocol-level bound on that case.  See the non-normative note in the Admin
+disconnect section for the open product question on the deny-until-TTL
+alternative.
 
 **SSRF.** The JWKS fetcher implements SSRF protection: HTTPS-only URI
 validation, DNS resolution with IP deny-list enforcement, address pinning to
