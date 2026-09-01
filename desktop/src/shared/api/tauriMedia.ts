@@ -72,6 +72,14 @@ export async function fetchMediaBytes(
   return new Uint8Array(bytes);
 }
 
+/** Download a verified relay attachment and open it in the OS default app. */
+export async function openArtifactFile(
+  url: string,
+  filename: string,
+): Promise<void> {
+  await invokeTauri("open_artifact", { filename, url });
+}
+
 /** Read plain text without depending on embedded-webview clipboard grants. */
 export async function readTextFromSystemClipboard(): Promise<string> {
   // E2E installs Tauri's mocked IPC surface in a browser page, where the SDK's

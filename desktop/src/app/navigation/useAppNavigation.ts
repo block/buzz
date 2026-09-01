@@ -82,6 +82,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goOutbox = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/outbox",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goAgents = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -467,6 +478,7 @@ export function useAppNavigation() {
     goNewMessage,
     goNewWorkflow,
     goNewWorkflowForChannel,
+    goOutbox,
     goProject,
     goProjects,
     goPulse,

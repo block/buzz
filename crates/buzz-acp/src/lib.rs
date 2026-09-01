@@ -5081,6 +5081,14 @@ mod agent_draft_prompt_tests {
     }
 
     #[test]
+    fn shared_base_prompt_routes_completed_files_to_outbox() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("buzz messages send --file <path> --outbox"));
+        assert!(prompt.contains("marker makes completed files appear"));
+        assert!(prompt.contains("local path mentioned only in message text does not"));
+    }
+
+    #[test]
     fn shared_base_prompt_teaches_repo_context_and_learning_loop() {
         let prompt = include_str!("base_prompt.md");
         assert!(prompt.contains("read its root `AGENTS.md`"));

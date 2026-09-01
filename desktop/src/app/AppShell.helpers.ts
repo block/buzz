@@ -4,6 +4,7 @@ import type { SearchHit } from "@/shared/api/types";
 
 export type AppView =
   | "home"
+  | "outbox"
   | "channel"
   | "messages"
   | "agents"
@@ -230,6 +231,13 @@ export function deriveShellRoute(pathname: string): {
     return {
       selectedChannelId: null,
       selectedView: "messages",
+    };
+  }
+
+  if (pathname === "/outbox") {
+    return {
+      selectedChannelId: null,
+      selectedView: "outbox",
     };
   }
 

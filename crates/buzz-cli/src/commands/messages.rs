@@ -1,5 +1,6 @@
 use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
-use nostr::PublicKey;
+use nostr::{PublicKey, Tag};
+use std::path::Path;
 use uuid::Uuid;
 
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
@@ -605,6 +606,7 @@ pub struct SendMessageParams {
     pub reply_to: Option<String>,
     pub broadcast: bool,
     pub files: Vec<String>,
+    pub outbox: bool,
     pub mentions: Vec<String>,
 }
 
@@ -655,7 +657,10 @@ pub async fn cmd_send_message(
             .upload_file(file_path)
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
-        media_tags.push(crate::client::build_imeta_tag(&desc));
+        let filename = Path::new(file_path)
+            .file_name()
+            .and_then(|value| value.to_str());
+        media_tags.push(crate::client::build_imeta_tag(&desc, filename));
         if desc.mime_type.starts_with("video/") {
             media_content.push_str("\n![video](");
         } else {
@@ -680,7 +685,7 @@ pub async fn cmd_send_message(
 
     let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
 
-    let builder = match p.kind {
+    let mut builder = match p.kind {
         Some(45001) => {
             buzz_sdk::build_forum_post(channel_uuid, &final_content, &mention_refs, &media_tags)
                 .map_err(|e| CliError::Other(format!("build_forum_post failed: {e}")))?
@@ -713,6 +718,12 @@ pub async fn cmd_send_message(
             )))
         }
     };
+    if p.outbox {
+        builder = builder.tag(
+            Tag::parse(["buzz-outbox", "1"])
+                .map_err(|error| CliError::Other(format!("build outbox tag failed: {error}")))?,
+        );
+    }
 
     let event = client.sign_event(builder)?;
     let emitted_mentions = event_mention_pubkeys(&event);
@@ -916,6 +927,7 @@ pub async fn dispatch(
             reply_to,
             broadcast,
             files,
+            outbox,
             mentions,
         } => {
             cmd_send_message(
@@ -927,6 +939,7 @@ pub async fn dispatch(
                     reply_to,
                     broadcast,
                     files,
+                    outbox,
                     mentions,
                 },
             )
