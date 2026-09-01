@@ -9,7 +9,6 @@ import {
   usePersonasQuery,
   useProvisionChannelManagedAgentMutation,
 } from "@/features/agents/hooks";
-import { applyReusableAgentAccessPolicy } from "@/features/agents/channelAgents";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import { useAddChannelMembersMutation } from "@/features/channels/hooks";
 import { useCanAddChannelMembers } from "@/features/channels/useCanAddChannelMembers";
@@ -25,6 +24,7 @@ import {
 } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useActivePreparedLinkPreviews } from "./useActivePreparedLinkPreviews";
 import { useDetachedAgentStart } from "./useDetachedAgentStart";
+import { useEnsureAgentMentionsReady } from "./useEnsureAgentMentionsReady";
 import { createSendPerfTimer } from "./sendPerfLog";
 import { invokeTauri } from "@/shared/api/tauri";
 import type { AcpRuntime, ManagedAgent } from "@/shared/api/types";
@@ -33,8 +33,6 @@ import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import {
   formatMessageSendError,
   getErrorMessage,
-  isManagedAgentRunning,
-  isProviderBackedAgent,
   mergeMentionRecipients,
   MENTION_REFERENCE_TAG,
   mergeOutgoingTagsWithReferenceMentions,
@@ -135,106 +133,13 @@ export function useMentionSendFlow({
     availableRuntimesQuery.isLoading,
     availableRuntimesQuery.refetch,
   ]);
-  const ensureManagedAgentMentionsReady = React.useCallback(
-    async (
-      mentionPubkeys: string[],
-      capturedChannelId: string,
-      preparedParticipantPubkeys: string[] = [],
-      preparedManagedAgents: ManagedAgent[] = [],
-    ) => {
-      if (!capturedChannelId || mentionPubkeys.length === 0) {
-        return {
-          detachedStarts: 0,
-          errors: [] as string[],
-          pubkeys: [] as string[],
-          wroteRelayState: false,
-        };
-      }
-      const [managedAgentsByPubkey, personas] = await Promise.all([
-        getManagedAgentsByPubkey(),
-        getPersonas(),
-      ]);
-      for (const agent of preparedManagedAgents) {
-        managedAgentsByPubkey.set(normalizePubkey(agent.pubkey), agent);
-      }
-      const existingMembers = new Set(
-        [...mentions.memberPubkeys].map(normalizePubkey),
-      );
-      const participants = new Set([
-        ...existingMembers,
-        ...preparedParticipantPubkeys.map(normalizePubkey),
-      ]);
-      const errors: string[] = [];
-      const pubkeys: string[] = [];
-      // Reported to the caller so the publish boundary knows whether awaited
-      // relay writes separated it from the pre-side-effect authorization pass.
-      let wroteRelayState = false;
-      // Reported for the send-perf summary: an agent wake is detached, so a
-      // send that fired one should still read as fast as one that did not.
-      // Only real fires count — a wake already in flight is suppressed.
-      let detachedStarts = 0;
-      const countDetachedStart = (agent: ManagedAgent) => {
-        if (startAgentDetached(agent)) detachedStarts += 1;
-      };
-      for (const pubkey of uniqueNormalizedPubkeys(mentionPubkeys)) {
-        const agent = managedAgentsByPubkey.get(pubkey);
-        if (!agent) continue;
-        try {
-          const { agent: readyAgent, wrote } = existingMembers.has(pubkey)
-            ? { agent, wrote: false }
-            : await applyReusableAgentAccessPolicy(
-                agent,
-                {},
-                personas.find((persona) => persona.id === agent.personaId),
-              );
-          if (wrote) {
-            // The access-policy reconciliation hit the relay; a matching
-            // policy reports `wrote: false` and stays on the fast path.
-            wroteRelayState = true;
-          }
-          if (participants.has(pubkey)) {
-            if (
-              (isProviderBackedAgent(readyAgent) &&
-                readyAgent.status !== "deployed") ||
-              (!isProviderBackedAgent(readyAgent) &&
-                !isManagedAgentRunning(readyAgent))
-            ) {
-              countDetachedStart(readyAgent);
-            }
-          } else {
-            // The membership write must land before the publish (the harness
-            // only subscribes to channels it's a member of); only the start
-            // itself is detached.
-            await attachAgentMutation.mutateAsync({
-              channelId: capturedChannelId,
-              agent: readyAgent,
-              role: "bot",
-              detachedStart: countDetachedStart,
-            });
-            wroteRelayState = true;
-          }
-          pubkeys.push(pubkey);
-        } catch (error) {
-          errors.push(
-            `${agent.name}: ${getErrorMessage(error, "Could not prepare agent.")}`,
-          );
-        }
-      }
-      return {
-        detachedStarts,
-        errors,
-        pubkeys: uniqueNormalizedPubkeys(pubkeys),
-        wroteRelayState,
-      };
-    },
-    [
-      attachAgentMutation,
-      getManagedAgentsByPubkey,
-      getPersonas,
-      mentions.memberPubkeys,
-      startAgentDetached,
-    ],
-  );
+  const ensureManagedAgentMentionsReady = useEnsureAgentMentionsReady({
+    attachAgentToChannel: attachAgentMutation.mutateAsync,
+    getManagedAgentsByPubkey,
+    getPersonas,
+    memberPubkeys: mentions.memberPubkeys,
+    startAgentDetached,
+  });
   const createMentionedPersonaAgents = React.useCallback(
     async (trimmed: string, capturedChannelId: string) => {
       const personaMentions = mentions.extractMentionPersonas(trimmed);
