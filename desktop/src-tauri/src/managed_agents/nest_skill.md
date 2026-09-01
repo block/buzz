@@ -1,7 +1,7 @@
 ---
 name: buzz-cli
 description: >
-  Buzz CLI for relay operations: owner-reviewed agent drafts, messaging,
+  Buzz CLI for relay operations: granted direct creation, owner-reviewed agent drafts, messaging,
   channels, DMs, users, workflows, feed, reactions, canvas, social, repos,
   uploads, and agent memory.
 version: 1
@@ -15,13 +15,27 @@ version: 1
 
 `BUZZ_RELAY_URL` defaults to `http://localhost:3000`. In development, the user may need to set this to a staging or production relay URL.
 
-`BUZZ_AUTH_TAG` is required for `buzz agents draft-create` and `buzz agents draft-update` because those commands send owner-reviewed Desktop drafts. If missing, explain that this managed agent cannot open owner-reviewed agent drafts from chat.
+`BUZZ_AUTH_TAG` is required for `buzz agents create`, `buzz agents draft-create`, and `buzz agents draft-update` because those commands send owner-addressed Desktop requests. If missing, explain that this managed agent cannot send agent-management requests from chat.
 
 Run the bundled CLI with `--help` and `<command> <subcommand> --help` to discover all flags, arguments, and usage. This skill documents only what `--help` cannot tell you.
 
 ## Conversational Agent Management
 
-When someone naturally asks to create an agent, ask for at most two things: the agent's **name** and **what it should do day-to-day**. Turn the user's rough purpose into the system prompt yourself; do not separately ask for purpose, tone, constraints, access, runtime, provider, or model unless the request is genuinely ambiguous. Then run:
+When someone naturally asks to create an agent, ask for at most two things: the agent's **name** and **what it should do day-to-day**. Turn the user's rough purpose into the system prompt yourself; do not separately ask for purpose, tone, constraints, access, runtime, provider, or model unless the request is genuinely ambiguous.
+
+When the owner explicitly authorized direct creation and granted this agent permission in Desktop, run:
+
+```bash
+buzz agents create \
+  --channel <current-channel-uuid> \
+  --display-name "Research helper" \
+  --system-prompt "Find reliable sources and summarize them concisely." \
+  --reply-to <current-thread-root>
+```
+
+The command waits for an owner-signed completion message. Report creation only when it returns `created: true`. If acknowledgement times out, retry with the same `--request-id` printed by the error so Desktop cannot create a duplicate. A direct-created agent uses the owner's saved runtime/provider/model defaults, starts as **Only me**, and is added to the source channel. The grant is per requesting agent and revocable in Desktop Settings.
+
+Without explicit authorization or a direct-creation grant, run:
 
 ```bash
 buzz agents draft-create \
@@ -53,7 +67,7 @@ Output varies by command group — `--help` shows flags but not response shapes.
 
 **Read commands** return JSON arrays. Event reads (`messages get/thread/search`, `feed get`) return normalized, complete signed Nostr events with `{id, pubkey, kind, content, created_at, tags, sig}`. Other reads use command-specific shapes for channels (`{channel_id, name, description, created_at}`), users (kind:0 profile JSON with `pubkey` injected), and workflows (`{workflow_id, content, created_at, pubkey}`).
 
-**Write commands**: all return `{event_id, accepted, message}`. Create commands add the generated entity ID: `channels create` → `channel_id`, `dms open` → `dm_id`, `workflows create` → `workflow_id`. Agent draft commands add `{request_id, action, saved: false}` because they only open an owner-reviewed Desktop draft.
+**Write commands**: all return `{event_id, accepted, message}`. Create commands add the generated entity ID: `channels create` → `channel_id`, `dms open` → `dm_id`, `workflows create` → `workflow_id`. `agents create` returns the owner result event, request ID, and created agent pubkey only after verified completion. Agent draft commands add `{request_id, action, saved: false}` because they only open an owner-reviewed Desktop draft.
 
 **Exceptions to the above patterns:**
 

@@ -36,6 +36,8 @@ export type AttachManagedAgentToChannelInput = {
   agent: ManagedAgent;
   role?: Exclude<ChannelRole, "owner">;
   ensureRunning?: boolean;
+  expectedRelayUrl?: string;
+  expectedSignerPubkey?: string;
 };
 
 export type AttachManagedAgentToChannelResult = {
@@ -153,6 +155,8 @@ export async function attachManagedAgentToChannel(
     channelId,
     pubkeys: [input.agent.pubkey],
     role,
+    expectedRelayUrl: input.expectedRelayUrl,
+    expectedSignerPubkey: input.expectedSignerPubkey,
   });
   const membershipError = membershipResult.errors.find(
     (error) => normalizePubkey(error.pubkey) === agentPubkey,
@@ -178,14 +182,20 @@ export async function attachManagedAgentToChannel(
     // another community's.
     const isRemote = input.agent.backend.type === "provider";
     if (isRemote && input.agent.status !== "deployed") {
-      agent = await startManagedAgent(input.agent.pubkey);
+      agent = await startManagedAgent(input.agent.pubkey, {
+        expectedRelayUrl: input.expectedRelayUrl,
+        expectedSignerPubkey: input.expectedSignerPubkey,
+      });
       started = true;
     } else if (
       !isRemote &&
       input.agent.status !== "running" &&
       input.agent.status !== "deployed"
     ) {
-      agent = await startManagedAgent(input.agent.pubkey);
+      agent = await startManagedAgent(input.agent.pubkey, {
+        expectedRelayUrl: input.expectedRelayUrl,
+        expectedSignerPubkey: input.expectedSignerPubkey,
+      });
       started = true;
     }
   }

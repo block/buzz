@@ -86,6 +86,14 @@ buzz mem set <slug> "my-value"
 buzz mem patch <slug> --base-hash <hex> < diff.patch  # or --no-base-hash
 buzz mem rm <slug>
 
+# Agents
+# Requires a revocable per-agent grant in the owner's running Buzz Desktop.
+buzz agents create --channel <uuid> --display-name "Research helper" \
+  --system-prompt "Find reliable sources and summarize them concisely."
+# Retry an acknowledgement timeout without creating a duplicate.
+buzz agents create --channel <uuid> --display-name "Research helper" \
+  --system-prompt - --request-id <uuid> < prompt.md
+
 # Repository protection
 buzz repos protect list --id my-repo
 buzz repos protect set --id my-repo --ref refs/heads/main --push admin --no-force-push --no-delete
@@ -125,6 +133,9 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `members` | List channel members |
 | | `add-member` | Add a member |
 | | `remove-member` | Remove a member |
+| `agents` | `create` | Create an owner-only agent through a Desktop grant and wait for signed completion |
+| | `draft-create` | Open an owner-reviewed create-agent draft |
+| | `draft-update` | Open an owner-reviewed update-agent draft |
 | `canvas` | `get` | Get channel canvas |
 | | `set` | Set channel canvas |
 | `reactions` | `add` | React to a message |

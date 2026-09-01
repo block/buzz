@@ -24,6 +24,14 @@ function createPayload(overrides = {}) {
   };
 }
 
+function directCreatePayload(overrides = {}) {
+  return createPayload({
+    action: "create_direct",
+    requestId: "2fd826e1-3958-4f39-afbe-c12a83925334",
+    ...overrides,
+  });
+}
+
 test("parses the narrow no-secret create request", () => {
   assert.deepEqual(
     parseAgentManagementRequest(createPayload()),
@@ -59,6 +67,29 @@ test("chat creation leaves advanced behavior unset so the form stays collapsed",
     displayName: "Research helper",
     systemPrompt: "Find reliable sources and summarize them.",
   });
+});
+
+test("direct creation accepts only a UUID request and optional hex reply target", () => {
+  const replyTo = "a".repeat(64);
+  const payload = directCreatePayload({
+    request: { ...directCreatePayload().request, replyTo },
+  });
+  assert.deepEqual(parseAgentManagementRequest(payload), payload);
+
+  assert.equal(
+    parseAgentManagementRequest(
+      directCreatePayload({ requestId: "not-a-request-uuid" }),
+    ),
+    null,
+  );
+  assert.equal(
+    parseAgentManagementRequest(
+      directCreatePayload({
+        request: { ...directCreatePayload().request, replyTo: "not-an-event" },
+      }),
+    ),
+    null,
+  );
 });
 
 test("requires the originating channel for profile updates", () => {

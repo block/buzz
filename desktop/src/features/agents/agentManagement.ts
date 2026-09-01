@@ -17,6 +17,18 @@ export type AgentManagementCreateRequest = {
   };
 };
 
+export type AgentManagementDirectCreateRequest = {
+  type: typeof AGENT_MANAGEMENT_REQUEST;
+  action: "create_direct";
+  requestId: string;
+  request: {
+    channelId: string;
+    displayName: string;
+    systemPrompt: string;
+    replyTo?: string;
+  };
+};
+
 export type AgentManagementUpdateRequest = {
   type: typeof AGENT_MANAGEMENT_REQUEST;
   action: "update";
@@ -35,11 +47,16 @@ export type AgentManagementUpdateRequest = {
 
 export type AgentManagementRequest =
   | AgentManagementCreateRequest
+  | AgentManagementDirectCreateRequest
   | AgentManagementUpdateRequest;
 
 function isText(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
+
+const UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const HEX_EVENT_ID = /^[0-9a-f]{64}$/i;
 
 function isRespondTo(value: unknown): value is RespondToMode | undefined {
   return value === undefined || value === "owner-only" || value === "anyone";
@@ -61,7 +78,9 @@ export function parseAgentManagementRequest(
   if (
     payload.type !== AGENT_MANAGEMENT_REQUEST ||
     !isText(payload.requestId) ||
-    (payload.action !== "create" && payload.action !== "update") ||
+    (payload.action !== "create" &&
+      payload.action !== "create_direct" &&
+      payload.action !== "update") ||
     typeof payload.request !== "object" ||
     payload.request === null
   ) {
@@ -69,8 +88,12 @@ export function parseAgentManagementRequest(
   }
   const request = payload.request as Record<string, unknown>;
 
-  if (payload.action === "create") {
-    if (!hasOnlyKeys(request, ["channelId", "displayName", "systemPrompt"])) {
+  if (payload.action === "create" || payload.action === "create_direct") {
+    const allowedKeys =
+      payload.action === "create_direct"
+        ? ["channelId", "displayName", "systemPrompt", "replyTo"]
+        : ["channelId", "displayName", "systemPrompt"];
+    if (!hasOnlyKeys(request, allowedKeys)) {
       return null;
     }
     if (
@@ -80,14 +103,26 @@ export function parseAgentManagementRequest(
     ) {
       return null;
     }
+    if (
+      payload.action === "create_direct" &&
+      (!UUID.test(payload.requestId) ||
+        (request.replyTo !== undefined &&
+          (typeof request.replyTo !== "string" ||
+            !HEX_EVENT_ID.test(request.replyTo))))
+    ) {
+      return null;
+    }
     return {
       type: AGENT_MANAGEMENT_REQUEST,
-      action: "create",
+      action: payload.action,
       requestId: payload.requestId,
       request: {
         channelId: request.channelId,
         displayName: request.displayName,
         systemPrompt: request.systemPrompt,
+        ...(payload.action === "create_direct" && isText(request.replyTo)
+          ? { replyTo: request.replyTo }
+          : {}),
       },
     };
   }
@@ -141,7 +176,10 @@ export function requestTargetsEditablePersona(
 }
 
 export function createInputFromRequest(
-  request: Extract<AgentManagementRequest, { action: "create" }>,
+  request: Extract<
+    AgentManagementRequest,
+    { action: "create" | "create_direct" }
+  >,
 ): CreatePersonaInput {
   return {
     displayName: request.request.displayName,

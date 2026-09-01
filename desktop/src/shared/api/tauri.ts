@@ -808,6 +808,8 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         backend: input.backend,
         respondTo: input.respondTo,
         respondToAllowlist: input.respondToAllowlist,
+        expectedRelayUrl: input.expectedRelayUrl,
+        expectedSignerPubkey: input.expectedSignerPubkey,
         relayMesh: input.relayMesh,
       },
     },
@@ -819,7 +821,6 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
     spawnError: response.spawn_error,
   };
 }
-
 export async function deleteManagedAgent(
   pubkey: string,
   forceRemoteDelete?: boolean,
@@ -829,7 +830,6 @@ export async function deleteManagedAgent(
     forceRemoteDelete: forceRemoteDelete ?? null,
   });
 }
-
 export async function getManagedAgentLog(pubkey: string, lineCount?: number) {
   const response = await invokeTauri<RawManagedAgentLog>(
     "get_managed_agent_log",

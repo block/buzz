@@ -262,6 +262,27 @@ impl RespondToArg {
 
 #[derive(Subcommand)]
 pub enum AgentsCmd {
+    /// Create an owner-only agent through a standing grant in the owner's running Desktop
+    Create {
+        /// Origin channel UUID; the new agent is added here
+        #[arg(long)]
+        channel: String,
+        /// Agent name
+        #[arg(long)]
+        display_name: String,
+        /// Agent instructions; use '-' to read from stdin
+        #[arg(long)]
+        system_prompt: String,
+        /// Optional thread root for the signed result message
+        #[arg(long)]
+        reply_to: Option<String>,
+        /// Reuse this UUID after an acknowledgement timeout to avoid duplicates
+        #[arg(long)]
+        request_id: Option<String>,
+        /// Seconds to wait for the owner's Desktop result
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+    },
     /// Open a prefilled create-agent form in the owner's Buzz Desktop
     DraftCreate {
         /// Current channel UUID; the new agent is added here after save
@@ -2291,6 +2312,7 @@ mod tests {
             vec![
                 "archive",
                 "archived",
+                "create",
                 "draft-create",
                 "draft-update",
                 "unarchive"
@@ -2432,7 +2454,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 5),
+            ("agents", 6),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),

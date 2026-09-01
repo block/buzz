@@ -382,6 +382,7 @@ pub async fn create_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CreateManagedAgentResponse, String> {
+    let create_scope = CapturedCreateScope::bind(&input, &state)?;
     let name = input.name.trim().to_string();
     let requested_persona_id = input
         .persona_id
@@ -751,7 +752,7 @@ pub async fn create_managed_agent(
     // ── Phase 3b: local spawn (async preflight outside store lock) ───────────
     let mut spawn_error = None;
     let agent = if input.spawn_after_create && input.backend == BackendKind::Local {
-        match start_local_agent_with_preflight(&app, &state, &pubkey, true, None, None).await {
+        match create_scope.start_local(&app, &state, &pubkey).await {
             Ok(agent) => agent,
             Err(error) => {
                 let _store_guard = state
@@ -799,22 +800,9 @@ pub async fn create_managed_agent(
 
     let spawn_error = if input.spawn_after_create && input.backend != BackendKind::Local {
         if let BackendKind::Provider { ref id, ref config } = input.backend {
-            let agent_json = {
-                let _g = state
-                    .managed_agents_store_lock
-                    .lock()
-                    .map_err(|e| e.to_string())?;
-                let records = load_managed_agents(&app)?;
-                let rec = records
-                    .iter()
-                    .find(|r| r.pubkey == pubkey)
-                    .ok_or_else(|| "agent disappeared".to_string())?;
-                build_deploy_payload(&app, &state, rec)?
-            };
-            match deploy_to_provider(
-                &app, &state, &pubkey, id, config, agent_json, None, None, None,
-            )
-            .await
+            match create_scope
+                .deploy_provider(&app, &state, &pubkey, id, config)
+                .await
             {
                 Ok(()) => spawn_error,
                 Err(e) => Some(e),
@@ -1168,7 +1156,10 @@ pub async fn delete_managed_agent(
 #[path = "agents_deploy.rs"]
 mod deploy;
 pub(super) mod provider_access;
+mod create_scope;
 mod provider_deploy;
+
+use create_scope::CapturedCreateScope;
 pub(super) use deploy::build_deploy_payload;
 #[cfg(test)]
 use deploy::{deploy_payload_json, DeployProjections};
