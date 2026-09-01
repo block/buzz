@@ -9,6 +9,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use crate::channel::ChannelRecord;
+use crate::channel_members;
 use crate::error::{DbError, Result};
 use crate::Db;
 use buzz_core::CommunityId;
@@ -38,6 +39,17 @@ pub struct DmParticipant {
     pub display_name: Option<String>,
     /// Member role string (always "member" for DMs).
     pub role: String,
+}
+
+/// Outcome of opening a direct-message participant set.
+#[derive(Debug, Clone)]
+pub struct OpenDmResult {
+    /// The existing or newly created DM channel.
+    pub channel: ChannelRecord,
+    /// Whether this call created the channel.
+    pub was_created: bool,
+    /// Participants whose missing or soft-removed memberships were restored.
+    pub restored_participants: Vec<Vec<u8>>,
 }
 
 // -- Pure helpers -------------------------------------------------------------
@@ -352,15 +364,15 @@ pub async fn list_dms_for_user(
 /// `created_by` is automatically added to `pubkeys` if not already present,
 /// ensuring the caller is always a participant in their own DM.
 ///
-/// Returns `(channel, was_created)`:
-/// - `was_created = true`  -- a new DM was created.
-/// - `was_created = false` -- an existing DM was returned.
+/// An active participant reopening an existing immutable participant set also
+/// restores any missing or soft-removed peer memberships. A removed caller
+/// cannot use this path to restore themselves or anyone else.
 pub async fn open_dm(
     pool: &PgPool,
     community_id: CommunityId,
     pubkeys: &[&[u8]],
     created_by: &[u8],
-) -> Result<(ChannelRecord, bool)> {
+) -> Result<OpenDmResult> {
     // Merge created_by into the participant set (dedup handled by compute_participant_hash).
     let mut all: Vec<&[u8]> = pubkeys.to_vec();
     if !all.contains(&created_by) {
@@ -378,15 +390,113 @@ pub async fn open_dm(
 
     // Check for existing DM first (fast path, no transaction).
     if let Some(existing) = find_dm_by_participants(pool, community_id, &hash).await? {
-        // Clear hidden_at for the caller so the DM reappears in their sidebar.
-        unhide_dm(pool, community_id, existing.id, created_by).await?;
-        return Ok((existing, false));
+        let restored_participants =
+            reopen_existing_dm(pool, community_id, existing.id, &all, created_by).await?;
+        return Ok(OpenDmResult {
+            channel: existing,
+            was_created: false,
+            restored_participants,
+        });
     }
 
     // Create new DM.
     let channel = create_dm(pool, community_id, &all, created_by).await?;
 
-    Ok((channel, true))
+    Ok(OpenDmResult {
+        channel,
+        was_created: true,
+        restored_participants: Vec::new(),
+    })
+}
+
+/// Reopen an existing immutable DM participant set under the same membership
+/// serialization lock used by normal channel membership changes.
+async fn reopen_existing_dm(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    participants: &[&[u8]],
+    opened_by: &[u8],
+) -> Result<Vec<Vec<u8>>> {
+    let mut tx = pool.begin().await?;
+    channel_members::acquire_channel_membership_lock(&mut tx, community_id, channel_id).await?;
+
+    let opener_is_active: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM channel_members
+            WHERE community_id = $1
+              AND channel_id = $2
+              AND pubkey = $3
+              AND removed_at IS NULL
+        )
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(opened_by)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    if !opener_is_active {
+        return Err(DbError::AccessDenied(
+            "only an active DM participant may restore the participant set".to_string(),
+        ));
+    }
+
+    let participant_bytes: Vec<Vec<u8>> = participants.iter().map(|pk| pk.to_vec()).collect();
+    let rows = sqlx::query(
+        r#"
+        WITH requested(pubkey) AS (
+            SELECT DISTINCT unnest($3::bytea[])
+        )
+        INSERT INTO channel_members
+            (community_id, channel_id, pubkey, role, invited_by)
+        SELECT $1, $2, requested.pubkey, 'member', $4
+        FROM requested
+        ON CONFLICT (community_id, channel_id, pubkey) DO UPDATE SET
+            removed_at = NULL,
+            removed_by = NULL,
+            hidden_at = NULL,
+            role = EXCLUDED.role,
+            invited_by = EXCLUDED.invited_by
+        WHERE channel_members.removed_at IS NOT NULL
+        RETURNING pubkey
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(&participant_bytes)
+    .bind(opened_by)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    // Reopening always resurfaces the DM for its active caller. Active peers'
+    // independent hidden preferences remain untouched.
+    sqlx::query(
+        r#"
+        UPDATE channel_members
+        SET hidden_at = NULL
+        WHERE community_id = $1
+          AND channel_id = $2
+          AND pubkey = $3
+          AND removed_at IS NULL
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(opened_by)
+    .execute(&mut *tx)
+    .await?;
+
+    let mut restored = rows
+        .into_iter()
+        .map(|row| row.try_get::<Vec<u8>, _>("pubkey").map_err(Into::into))
+        .collect::<Result<Vec<_>>>()?;
+    restored.sort_unstable();
+    tx.commit().await?;
+    Ok(restored)
 }
 
 // -- Hide / unhide ------------------------------------------------------------
@@ -559,7 +669,7 @@ impl Db {
         community_id: CommunityId,
         pubkeys: &[&[u8]],
         created_by: &[u8],
-    ) -> Result<(ChannelRecord, bool)> {
+    ) -> Result<OpenDmResult> {
         crate::dm::open_dm(&self.pool, community_id, pubkeys, created_by).await
     }
 
@@ -605,6 +715,25 @@ impl Db {
 mod tests {
     use super::*;
 
+    type MembershipRemovalState = (
+        Option<DateTime<Utc>>,
+        Option<Vec<u8>>,
+        Option<DateTime<Utc>>,
+    );
+
+    async fn setup_pool() -> PgPool {
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_owned());
+        let pool = PgPool::connect(&database_url)
+            .await
+            .expect("connect to test database");
+        crate::migration::run_migrations(&pool)
+            .await
+            .expect("migrate test database");
+        pool
+    }
+
     #[test]
     fn participant_hash_is_order_independent() {
         let a = [1u8; 32];
@@ -638,5 +767,353 @@ mod tests {
         let b = [255u8; 32];
         let h = compute_participant_hash(&[&a, &b]);
         assert_eq!(h.len(), 32);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn active_participant_reopening_dm_restores_removed_peer() {
+        let pool = setup_pool().await;
+        let community_uuid = Uuid::new_v4();
+        let community = CommunityId::from_uuid(community_uuid);
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_uuid)
+            .bind(format!("dm-recovery-{}.example", community_uuid.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert test community");
+
+        let opener = [1u8; 32];
+        let peer = [2u8; 32];
+        let opened = open_dm(&pool, community, &[&peer], &opener)
+            .await
+            .expect("create dm");
+        assert!(opened.was_created, "fixture must create a fresh DM");
+        let channel = opened.channel;
+
+        sqlx::query(
+            r#"
+            UPDATE channel_members
+            SET removed_at = NOW(), removed_by = $4, hidden_at = NOW()
+            WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3
+            "#,
+        )
+        .bind(community_uuid)
+        .bind(channel.id)
+        .bind(peer.as_slice())
+        .bind(opener.as_slice())
+        .execute(&pool)
+        .await
+        .expect("soft-remove peer fixture");
+
+        let reopened = open_dm(&pool, community, &[&peer], &opener)
+            .await
+            .expect("reopen existing dm");
+        assert_eq!(
+            reopened.channel.id, channel.id,
+            "reopen must preserve DM history"
+        );
+        assert!(
+            !reopened.was_created,
+            "reopen must not create a replacement DM"
+        );
+        assert_eq!(reopened.restored_participants, vec![peer.to_vec()]);
+
+        let restored: MembershipRemovalState = sqlx::query_as(
+            r#"
+                SELECT removed_at, removed_by, hidden_at
+                FROM channel_members
+                WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3
+                "#,
+        )
+        .bind(community_uuid)
+        .bind(channel.id)
+        .bind(peer.as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("read restored peer membership");
+
+        assert_eq!(restored, (None, None, None));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn removed_participant_cannot_reopen_dm_or_restore_peer() {
+        let pool = setup_pool().await;
+        let community_uuid = Uuid::new_v4();
+        let community = CommunityId::from_uuid(community_uuid);
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_uuid)
+            .bind(format!(
+                "dm-recovery-denied-{}.example",
+                community_uuid.simple()
+            ))
+            .execute(&pool)
+            .await
+            .expect("insert test community");
+
+        let removed_caller = [3u8; 32];
+        let removed_peer = [4u8; 32];
+        let opened = open_dm(&pool, community, &[&removed_peer], &removed_caller)
+            .await
+            .expect("create dm");
+        assert!(opened.was_created, "fixture must create a fresh DM");
+        let channel = opened.channel;
+
+        sqlx::query(
+            r#"
+            UPDATE channel_members
+            SET removed_at = NOW(), removed_by = $4
+            WHERE community_id = $1 AND channel_id = $2 AND pubkey = ANY($3)
+            "#,
+        )
+        .bind(community_uuid)
+        .bind(channel.id)
+        .bind(vec![removed_caller.to_vec(), removed_peer.to_vec()])
+        .bind(removed_caller.as_slice())
+        .execute(&pool)
+        .await
+        .expect("soft-remove caller and peer fixtures");
+
+        let error = open_dm(&pool, community, &[&removed_peer], &removed_caller)
+            .await
+            .expect_err("removed caller must not resurrect the DM participant set");
+        assert!(matches!(error, DbError::AccessDenied(_)));
+
+        let active_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*)
+            FROM channel_members
+            WHERE community_id = $1 AND channel_id = $2 AND removed_at IS NULL
+            "#,
+        )
+        .bind(community_uuid)
+        .bind(channel.id)
+        .fetch_one(&pool)
+        .await
+        .expect("count active memberships");
+        assert_eq!(active_count, 0, "denied reopen must not restore any peer");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reopening_dm_restores_missing_peer_without_unhiding_active_peer() {
+        let pool = setup_pool().await;
+        let community_uuid = Uuid::new_v4();
+        let community = CommunityId::from_uuid(community_uuid);
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_uuid)
+            .bind(format!(
+                "dm-recovery-hidden-{}.example",
+                community_uuid.simple()
+            ))
+            .execute(&pool)
+            .await
+            .expect("insert test community");
+
+        let opener = [5u8; 32];
+        let missing_peer = [6u8; 32];
+        let hidden_active_peer = [7u8; 32];
+        let opened = open_dm(
+            &pool,
+            community,
+            &[&missing_peer, &hidden_active_peer],
+            &opener,
+        )
+        .await
+        .expect("create group dm");
+        assert!(opened.was_created, "fixture must create a fresh DM");
+
+        sqlx::query(
+            r#"
+            DELETE FROM channel_members
+            WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3
+            "#,
+        )
+        .bind(community_uuid)
+        .bind(opened.channel.id)
+        .bind(missing_peer.as_slice())
+        .execute(&pool)
+        .await
+        .expect("delete peer membership fixture");
+        sqlx::query(
+            r#"
+            UPDATE channel_members
+            SET hidden_at = NOW()
+            WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3
+            "#,
+        )
+        .bind(community_uuid)
+        .bind(opened.channel.id)
+        .bind(hidden_active_peer.as_slice())
+        .execute(&pool)
+        .await
+        .expect("hide active peer fixture");
+
+        let reopened = open_dm(
+            &pool,
+            community,
+            &[&missing_peer, &hidden_active_peer],
+            &opener,
+        )
+        .await
+        .expect("reopen group dm");
+        assert_eq!(reopened.restored_participants, vec![missing_peer.to_vec()]);
+
+        let hidden_at: Option<DateTime<Utc>> = sqlx::query_scalar(
+            r#"
+            SELECT hidden_at
+            FROM channel_members
+            WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3
+            "#,
+        )
+        .bind(community_uuid)
+        .bind(opened.channel.id)
+        .bind(hidden_active_peer.as_slice())
+        .fetch_one(&pool)
+        .await
+        .expect("read active peer visibility");
+        assert!(
+            hidden_at.is_some(),
+            "reopening must preserve an active peer's hidden preference"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn reopening_group_dm_restores_multiple_missing_and_removed_peers() {
+        let pool = setup_pool().await;
+        let community_uuid = Uuid::new_v4();
+        let community = CommunityId::from_uuid(community_uuid);
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_uuid)
+            .bind(format!(
+                "dm-recovery-multiple-{}.example",
+                community_uuid.simple()
+            ))
+            .execute(&pool)
+            .await
+            .expect("insert test community");
+
+        let opener = [8u8; 32];
+        let missing_peer = [9u8; 32];
+        let removed_peer = [10u8; 32];
+        let opened = open_dm(&pool, community, &[&missing_peer, &removed_peer], &opener)
+            .await
+            .expect("create group dm");
+
+        sqlx::query(
+            r#"
+            DELETE FROM channel_members
+            WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3
+            "#,
+        )
+        .bind(community_uuid)
+        .bind(opened.channel.id)
+        .bind(missing_peer.as_slice())
+        .execute(&pool)
+        .await
+        .expect("delete missing peer fixture");
+        sqlx::query(
+            r#"
+            UPDATE channel_members
+            SET removed_at = NOW(), removed_by = $4, hidden_at = NOW()
+            WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3
+            "#,
+        )
+        .bind(community_uuid)
+        .bind(opened.channel.id)
+        .bind(removed_peer.as_slice())
+        .bind(opener.as_slice())
+        .execute(&pool)
+        .await
+        .expect("soft-remove peer fixture");
+
+        let reopened = open_dm(&pool, community, &[&missing_peer, &removed_peer], &opener)
+            .await
+            .expect("reopen group dm");
+
+        assert_eq!(
+            reopened.restored_participants,
+            vec![missing_peer.to_vec(), removed_peer.to_vec()]
+        );
+        let active_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*)
+            FROM channel_members
+            WHERE community_id = $1 AND channel_id = $2 AND removed_at IS NULL
+            "#,
+        )
+        .bind(community_uuid)
+        .bind(opened.channel.id)
+        .fetch_one(&pool)
+        .await
+        .expect("count active memberships");
+        assert_eq!(active_count, 3);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn concurrent_reopens_restore_peer_exactly_once() {
+        let pool = setup_pool().await;
+        let community_uuid = Uuid::new_v4();
+        let community = CommunityId::from_uuid(community_uuid);
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_uuid)
+            .bind(format!(
+                "dm-recovery-concurrent-{}.example",
+                community_uuid.simple()
+            ))
+            .execute(&pool)
+            .await
+            .expect("insert test community");
+
+        let opener = [11u8; 32];
+        let peer = [12u8; 32];
+        let opened = open_dm(&pool, community, &[&peer], &opener)
+            .await
+            .expect("create dm");
+        sqlx::query(
+            r#"
+            UPDATE channel_members
+            SET removed_at = NOW(), removed_by = $4
+            WHERE community_id = $1 AND channel_id = $2 AND pubkey = $3
+            "#,
+        )
+        .bind(community_uuid)
+        .bind(opened.channel.id)
+        .bind(peer.as_slice())
+        .bind(opener.as_slice())
+        .execute(&pool)
+        .await
+        .expect("soft-remove peer fixture");
+
+        let first_participants = [&peer[..]];
+        let second_participants = [&peer[..]];
+        let (first, second) = tokio::join!(
+            open_dm(&pool, community, &first_participants, &opener),
+            open_dm(&pool, community, &second_participants, &opener)
+        );
+        let first = first.expect("first concurrent reopen");
+        let second = second.expect("second concurrent reopen");
+
+        let restoration_count = [first, second]
+            .into_iter()
+            .filter(|result| result.restored_participants == vec![peer.to_vec()])
+            .count();
+        assert_eq!(restoration_count, 1, "peer must be restored exactly once");
+
+        let active_count: i64 = sqlx::query_scalar(
+            r#"
+            SELECT count(*)
+            FROM channel_members
+            WHERE community_id = $1 AND channel_id = $2 AND removed_at IS NULL
+            "#,
+        )
+        .bind(community_uuid)
+        .bind(opened.channel.id)
+        .fetch_one(&pool)
+        .await
+        .expect("count active memberships");
+        assert_eq!(active_count, 2);
     }
 }

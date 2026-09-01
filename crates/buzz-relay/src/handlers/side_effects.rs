@@ -905,6 +905,11 @@ pub fn emit_live_thread_summary(
     });
 }
 
+fn membership_transition_tag(transition_id: Uuid) -> anyhow::Result<Tag> {
+    Tag::parse(["transition", &transition_id.to_string()])
+        .map_err(|e| anyhow::anyhow!("failed to build transition tag: {e}"))
+}
+
 /// Emit a relay-signed membership notification event stored globally (channel_id = None).
 ///
 /// kind:44100 = member added, kind:44101 = member removed.
@@ -926,6 +931,7 @@ pub async fn emit_membership_notification(
         .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?;
     let h_tag = Tag::parse(["h", &channel_id_str])
         .map_err(|e| anyhow::anyhow!("failed to build h tag: {e}"))?;
+    let transition_tag = membership_transition_tag(Uuid::new_v4())?;
 
     let event_type = match notification_kind {
         KIND_MEMBER_ADDED_NOTIFICATION => "member_added",
@@ -944,8 +950,12 @@ pub async fn emit_membership_notification(
     })
     .to_string();
 
+    // A member can be removed and restored in the same second as the original
+    // add. Give every actual transition a collision-resistant tag so concurrent
+    // emitters cannot sign the same Nostr event and suppress one fan-out as a
+    // duplicate.
     let event = EventBuilder::new(Kind::Custom(notification_kind as u16), content)
-        .tags([p_tag, h_tag])
+        .tags([p_tag, h_tag, transition_tag])
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign membership notification: {e}"))?;
 
@@ -1695,12 +1705,6 @@ async fn handle_edit_metadata(
                             // remove/re-add uses to recover. Humans self-heal via the re-emitted
                             // kind:39000 discovery, so this is intentionally agent-scoped.
                             //
-                            // Known limitation: emit_membership_notification builds a created_at=now
-                            // event with no nonce, and insert_event skips fan-out on a duplicate id.
-                            // Four sub-second toggles (archive->unarchive->archive->unarchive) on the
-                            // same channel by the same actor could collide ids and skip a fan-out.
-                            // Not reachable in practice — unarchive has a single human-driven caller;
-                            // the reaper only auto-archives — so we don't engineer around it.
                             for member in
                                 state.db.get_members(tenant.community(), channel_id).await?
                             {
@@ -3474,6 +3478,61 @@ pub async fn publish_nipia_archival_list(
     )
 }
 
+/// Refresh relay and client state after an existing DM repairs inactive
+/// participant memberships.
+pub async fn emit_dm_membership_recovery_side_effects(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    restored_participants: &[Vec<u8>],
+    actor: &[u8],
+) {
+    if restored_participants.is_empty() {
+        return;
+    }
+
+    for participant in restored_participants {
+        state.invalidate_membership(tenant, channel_id, participant);
+    }
+
+    if let Err(error) = emit_group_discovery_events(tenant, state, channel_id).await {
+        warn!(
+            channel = %channel_id,
+            error = %error,
+            "DM membership recovery discovery emission failed"
+        );
+    }
+
+    for participant in restored_participants {
+        if let Err(error) = emit_membership_notification(
+            tenant,
+            state,
+            channel_id,
+            participant,
+            actor,
+            KIND_MEMBER_ADDED_NOTIFICATION,
+        )
+        .await
+        {
+            warn!(
+                channel = %channel_id,
+                participant = %hex::encode(participant),
+                error = %error,
+                "DM membership recovery notification failed"
+            );
+        }
+
+        if let Err(error) = publish_dm_visibility_snapshot(tenant, state, participant).await {
+            warn!(
+                channel = %channel_id,
+                participant = %hex::encode(participant),
+                error = %error,
+                "DM membership recovery visibility snapshot failed"
+            );
+        }
+    }
+}
+
 /// NIP-DV: publish the relay-signed, per-viewer DM visibility snapshot for
 /// `viewer`. The event is parameterized-replaceable (`d` = viewer pubkey) and
 /// carries one `h` tag per DM the viewer currently has hidden. Called after any
@@ -3683,6 +3742,31 @@ pub async fn publish_nipia_unarchived(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn membership_transition_tag_changes_same_second_event_identity() {
+        let keys = nostr::Keys::generate();
+        let timestamp = nostr::Timestamp::from(1_700_000_000);
+        let base_tags = || {
+            vec![
+                Tag::parse(["p", &"01".repeat(32)]).expect("p tag"),
+                Tag::parse(["h", &Uuid::nil().to_string()]).expect("h tag"),
+            ]
+        };
+        let build = |transition_id| {
+            let mut tags = base_tags();
+            tags.push(membership_transition_tag(transition_id).expect("transition tag"));
+            EventBuilder::new(Kind::Custom(KIND_MEMBER_ADDED_NOTIFICATION as u16), "same")
+                .tags(tags)
+                .custom_created_at(timestamp)
+                .sign_with_keys(&keys)
+                .expect("sign notification")
+        };
+
+        let first = build(Uuid::from_u128(1));
+        let second = build(Uuid::from_u128(2));
+        assert_ne!(first.id, second.id);
+    }
 
     #[test]
     fn group_members_snapshot_keeps_members_past_one_thousand() {

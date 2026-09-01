@@ -29,7 +29,7 @@ use buzz_core::kind::{event_kind_u32, KIND_STREAM_MESSAGE};
 use buzz_core::tenant::TenantContext;
 
 use super::event::dispatch_persistent_event;
-use super::side_effects::emit_group_discovery_events;
+use super::side_effects::{emit_dm_membership_recovery_side_effects, emit_group_discovery_events};
 use crate::state::AppState;
 
 /// Tag naming the moderation source row (report/action) a notice was derived
@@ -106,7 +106,7 @@ pub async fn send_moderation_notice(
     // 1. Create/reuse the two-party DM channel {relay mod key, recipient}.
     //    `open_dm` is participant-hash idempotent, so re-delivery to the same
     //    user reuses the one thread per (community, user).
-    let (dm_channel, was_created) = state
+    let opened = state
         .db
         .open_dm(
             tenant.community(),
@@ -114,6 +114,9 @@ pub async fn send_moderation_notice(
             relay_pubkey_bytes.as_slice(),
         )
         .await?;
+    let dm_channel = opened.channel;
+    let was_created = opened.was_created;
+    let restored_participants = opened.restored_participants;
     let dm_channel_id = dm_channel.id;
 
     // Count new DM creation; side-effect gates below intentionally do not
@@ -135,6 +138,14 @@ pub async fn send_moderation_notice(
         .db
         .unhide_dm(tenant.community(), dm_channel_id, recipient_pubkey)
         .await?;
+    emit_dm_membership_recovery_side_effects(
+        tenant,
+        state,
+        dm_channel_id,
+        &restored_participants,
+        relay_pubkey_bytes.as_slice(),
+    )
+    .await;
 
     // 2. Ensure the relay's "{host} Moderation" kind:0 profile exists, and 3.
     //    the DM's kind:39000 discovery (with `hidden` / `t=dm` / `p`). Both are
