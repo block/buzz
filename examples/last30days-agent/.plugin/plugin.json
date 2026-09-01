@@ -1,0 +1,22 @@
+{
+  "$schema": "https://open-plugin-spec.org/schema/v1/plugin.json",
+  "id": "com.example.last30days-agent",
+  "name": "Last30Days Agent",
+  "version": "0.1.0",
+  "description": "Provider-agnostic multi-worker research agent that implements /last30days via existing ACP slash pass-through (#919). Default model slug deepseek/deepseek-v4-pro; adopters supply their own API key.",
+  "keywords": ["research", "last30days", "slash-command", "multi-worker"],
+  "personas": [
+    "agents/last30days.persona.md"
+  ],
+  "pack_instructions": "instructions.md",
+  "defaults": {
+    "temperature": 0.3,
+    "triggers": {
+      "mentions": true,
+      "keywords": ["/last30days", "last30days"],
+      "all_messages": false
+    },
+    "thread_replies": true,
+    "broadcast_replies": false
+  }
+}
