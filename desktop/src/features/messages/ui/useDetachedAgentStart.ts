@@ -48,6 +48,18 @@ function detachedStartFailureDetail(error: unknown): string {
 }
 
 /**
+ * The one wording for "the wake did not happen". Publish-first means the
+ * message went out either way, so both the refused-before-firing and the
+ * failed-after-firing cases owe the user the same warning, differing only in
+ * the detail that follows it.
+ */
+function warnAgentMayNotRespond(agentName: string, detail: string): void {
+  toast.error(
+    `Could not start ${agentName} — your message was sent, but the agent may not respond. ${detail}`,
+  );
+}
+
+/**
  * Fire-and-forget managed-agent start for the publish-first mention send,
  * bound to the tenant scope that was active when the send fired.
  *
@@ -67,6 +79,16 @@ function detachedStartFailureDetail(error: unknown): string {
  * that were active when the composer last rendered, which is the send the
  * user pressed — never a value re-read after the switch it guards against.
  *
+ * If either half of that scope is not yet known — no active community, or an
+ * identity query that has not resolved — the wake is refused rather than fired
+ * unscoped. The backend reads a missing value as "no assertion", so an
+ * unscoped detached start is exactly the cross-tenant spawn this hook exists
+ * to prevent, and its dedupe key would collapse to a relay-less one shared
+ * across communities. Waiting for the query instead of refusing is not an
+ * option: reading the scope once it resolves is a post-send read, which is the
+ * thing the per-render capture rules out. Refusing is visible (a toast, and no
+ * wake counted) and the user's next send re-fires it.
+ *
  * Returns whether this call actually fired a wake: a start already in flight
  * for the same agent in the same tenant is suppressed, since the wake is
  * per-agent rather than per-message and the first start's replay floor is
@@ -81,18 +103,32 @@ export function useDetachedAgentStart(): (agent: ManagedAgent) => boolean {
   // through `relay_http_base_url` (trim, strip trailing slash, ws→http), and
   // that comparison is case-sensitive. Lowercasing here — as the shared
   // storage-key normalizer does — would turn a stored `wss://Relay.Example`
-  // into a permanent spurious mismatch that refuses every wake.
-  const expectedRelayUrl = activeCommunity?.relayUrl || undefined;
-  // The signer check is case-insensitive, so canonicalizing is free here.
-  const expectedSignerPubkey = identityQuery.data?.pubkey
-    ? normalizePubkey(identityQuery.data.pubkey)
+  // into a permanent spurious mismatch that refuses every wake. Emptiness is
+  // judged on the trimmed form because the backend does the same, and reads a
+  // blank scope as no assertion at all.
+  const expectedRelayUrl = activeCommunity?.relayUrl?.trim()
+    ? activeCommunity.relayUrl
     : undefined;
+  // The signer check is case-insensitive, so canonicalizing is free here.
+  const expectedSignerPubkey =
+    normalizePubkey(identityQuery.data?.pubkey ?? "") || undefined;
   return React.useCallback(
     (agent: ManagedAgent) => {
+      if (!expectedRelayUrl || !expectedSignerPubkey) {
+        // Fail closed: an unscoped start resolves the relay and the signing
+        // identity at execution time, so it can land on whichever tenant is
+        // active by then — and its dedupe key would be shared across
+        // communities.
+        warnAgentMayNotRespond(
+          agent.name,
+          "Buzz is still connecting to this community — mention the agent again in a moment.",
+        );
+        return false;
+      }
       // No synchronisation is needed or possible: the check, the call and the
       // registration below sit in one synchronous block, so no other send can
       // interleave between "is it in the set?" and "put it in the set".
-      const key = `${expectedRelayUrl ?? ""}\u0000${normalizePubkey(agent.pubkey)}`;
+      const key = `${expectedRelayUrl}\u0000${normalizePubkey(agent.pubkey)}`;
       if (inFlightDetachedStarts.has(key)) {
         // One wake serves both messages. A local duplicate is a backend no-op
         // anyway, but a provider redeploy can replace a harness that had just
@@ -112,11 +148,7 @@ export function useDetachedAgentStart(): (agent: ManagedAgent) => boolean {
         replayFloorUnix,
       })
         .catch((error: unknown) => {
-          toast.error(
-            `Could not start ${agent.name} — your message was sent, but the agent may not respond. ${detachedStartFailureDetail(
-              error,
-            )}`,
-          );
+          warnAgentMayNotRespond(agent.name, detachedStartFailureDetail(error));
         })
         .finally(() => {
           // Identity-guarded: `resetDetachedAgentStarts` may have cleared the
