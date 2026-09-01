@@ -371,7 +371,7 @@ buzz agents archived"
 pub enum MessagesCmd {
     /// Send a message to a channel
     #[command(
-        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -"
+        after_help = "Examples:\n  buzz messages send --channel <UUID> --content \"hello\"\n  buzz messages send --channel <UUID> --content \"@alice check this\"\n  echo \"hello from stdin\" | buzz messages send --channel <UUID> --content -\n\nArgv --content decodes JSON-style \\n at Markdown paragraph/list boundaries (so `--content 'a\\n\\nb'` publishes real line breaks). `--content -` reads stdin byte-exact."
     )]
     Send {
         /// Channel UUID (from 'buzz channels list')
