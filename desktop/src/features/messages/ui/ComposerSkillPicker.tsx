@@ -43,17 +43,13 @@ export const ComposerSkillPicker = React.memo(function ComposerSkillPicker({
     Math.max(filteredSkills.length - 1, 0),
   );
 
-  const handleOpenChange = React.useCallback(
-    (nextOpen: boolean) => {
-      setOpen(nextOpen);
-      if (!nextOpen) {
-        setQuery("");
-        setHighlightedIndex(0);
-        requestAnimationFrame(onClose);
-      }
-    },
-    [onClose],
-  );
+  const handleOpenChange = React.useCallback((nextOpen: boolean) => {
+    setOpen(nextOpen);
+    if (!nextOpen) {
+      setQuery("");
+      setHighlightedIndex(0);
+    }
+  }, []);
 
   const selectSkill = React.useCallback(
     (skill: ComposerAgentSkill) => {
@@ -113,8 +109,11 @@ export const ComposerSkillPicker = React.memo(function ComposerSkillPicker({
       <PopoverContent
         align="start"
         className="w-80 overflow-hidden p-0"
-        onCloseAutoFocus={(event) => event.preventDefault()}
         onOpenAutoFocus={(event) => event.preventDefault()}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          onClose();
+        }}
         side="top"
         sideOffset={10}
       >
