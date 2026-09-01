@@ -97,6 +97,8 @@ jobs:
         run: |
           scripts/test-rust-cache-contract.sh
           scripts/test-rust-cache-contract-regressions.sh
+      - name: CI required-context isolation contract
+        run: scripts/test-ci-required-context-isolation.sh
       - name: File size policy
         run: just file-size-check
 
@@ -136,6 +138,16 @@ jobs:
     needs: [changes]
     if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
     uses: ./.github/workflows/_ci-desktop.yml
+    with:
+      rust: ${{ needs.changes.outputs.rust == 'true' }}
+      desktop: ${{ needs.changes.outputs.desktop == 'true' }}
+      desktop_rust: ${{ needs.changes.outputs.desktop-rust == 'true' }}
+
+  desktop-macos-domain:
+    name: Desktop macOS Domain
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true'
+    uses: ./.github/workflows/_ci-desktop-macos.yml
     with:
       rust: ${{ needs.changes.outputs.rust == 'true' }}
       desktop: ${{ needs.changes.outputs.desktop == 'true' }}
@@ -223,14 +235,14 @@ jobs:
   desktop-build-macos:
     name: Desktop Build (macOS)
     if: always() && needs.changes.result == 'success' && (github.event_name == 'push' || needs.changes.outputs.desktop == 'true' || needs.changes.outputs.desktop-rust == 'true' || needs.changes.outputs.rust == 'true')
-    needs: [changes, desktop-domain]
+    needs: [changes, desktop-macos-domain]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
     steps:
       - name: Check Desktop Build (macOS) result
         env:
-          RESULT: ${{ needs.desktop-domain.outputs.desktop_macos_result }}
+          RESULT: ${{ needs.desktop-macos-domain.outputs.desktop_macos_result }}
         run: test "$RESULT" = success
 
   desktop-e2e-relay:
