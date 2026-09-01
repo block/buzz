@@ -6,7 +6,8 @@
 #   buzz-acp       link to sprig (ACP harness)
 #   buzz-agent     link to sprig (ACP-compliant agent)
 #   buzz-dev-mcp   link to sprig (developer MCP server; also dispatches
-#                    rg/tree/buzz/git-credential-nostr/git-sign-nostr)
+#                    rg/tree/buzz/git-credential-nostr/git-sign-nostr/
+#                    buzz-provision-agent)
 #
 # Usage:
 #   ./scripts/build-sprig.sh [version] [target]
@@ -145,7 +146,7 @@ Commands:
 - `buzz-agent` — ACP-compliant agent (spawns MCP servers, calls LLMs).
 - `buzz-dev-mcp` — Developer MCP server (shell, str_replace, todo) and
   multicall entrypoint for `rg`, `tree`, `buzz`, `git-credential-nostr`,
-  `git-sign-nostr`.
+  `git-sign-nostr`, and `buzz-provision-agent`.
 
 See `sprig.json` for SHA-256s, sizes, target, and source git SHA.
 
