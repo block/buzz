@@ -75,6 +75,8 @@ jobs:
               - '.github/workflows/ci.yml'
       - name: Release workflow source contract
         run: scripts/test-release-ref-contract.sh
+      - name: Buzz read packaging contract
+        run: scripts/test-buzz-read-packaging.sh
       - name: Relay image eligibility contract
         run: scripts/test-relay-image-eligibility-workflow.sh
       - name: Desktop release candidate contract
@@ -1278,6 +1280,7 @@ jobs:
           touch "desktop/src-tauri/binaries/buzz-backend-kubernetes-$TARGET"
           touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
           touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
+          touch "desktop/src-tauri/binaries/buzz-read-$TARGET"
           touch "desktop/src-tauri/binaries/buzz-$TARGET"
       # Mesh rev is derived from Cargo.lock so a dependency bump needs no
       # lockstep edit here; the cache key tracks it automatically.

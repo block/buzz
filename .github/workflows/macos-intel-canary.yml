@@ -84,6 +84,7 @@ jobs:
       - name: Build Intel sidecars
         run: |
           cargo build --release --target "$TARGET" -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          cargo build --manifest-path desktop/src-tauri/Cargo.toml --target-dir target --release --target "$TARGET" --bin buzz-read
           ./scripts/bundle-sidecars.sh "$TARGET"
 
       - name: Build unsigned Intel DMG

@@ -15,12 +15,12 @@ use crate::huddle::HuddleState;
 pub(crate) use crate::identity_storage::{IdentityStorage, RecoveryState, ResolvedIdentity};
 use crate::managed_agents::config_bridge::SessionConfigCache;
 use crate::managed_agents::{ManagedAgentPairRuntime, ManagedAgentRuntimeKey};
-
 pub struct AppState {
     pub keys: Mutex<Keys>,
     /// Durable backend holding `keys`. Updated after the key write and before
     /// recovery flags are cleared so `get_identity` reports a consistent state.
     pub(crate) identity_storage: AtomicU8,
+    pub(crate) identity_generation: AtomicU64,
     pub http_client: reqwest::Client,
     /// A no-redirect client for authenticated relay media fetches (download,
     /// clipboard copy, snapshot, editor). Every caller pre-validates the URL
@@ -188,10 +188,10 @@ pub fn build_app_state() -> AppState {
         }
         None => (Keys::generate(), IdentityStorage::Ephemeral),
     };
-
     AppState {
         keys: Mutex::new(keys),
         identity_storage: AtomicU8::new(identity_storage as u8),
+        identity_generation: AtomicU64::new(0),
         http_client: reqwest::Client::builder()
             .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
             .pool_idle_timeout(std::time::Duration::from_secs(300))

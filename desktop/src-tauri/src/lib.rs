@@ -34,6 +34,8 @@ mod native_websocket_batch;
 mod nostr_bind;
 pub mod nostr_convert;
 mod observed_unread;
+#[cfg(unix)]
+mod operator_read;
 mod persona_catalog;
 mod prevent_sleep;
 mod ptt_shortcut;
@@ -85,6 +87,9 @@ use managed_agents::{
 };
 #[cfg(not(feature = "mesh-llm"))]
 use mesh_llm_stubs::*;
+#[cfg(unix)]
+#[doc(hidden)]
+pub use operator_read::run_operator_read_cli;
 #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
 use shutdown::{hard_exit_after_mesh_shutdown, relaunch_after_mesh_shutdown};
 use shutdown::{is_restart_request, shut_down_app};
@@ -414,6 +419,18 @@ pub fn run() {
             let is_dev_nest = managed_agents::nest_dir()
                 .and_then(|p| p.file_name().map(|n| n.to_os_string()))
                 .is_some_and(|n| n == ".buzz-dev");
+
+            // Keep authenticated operator reads inside the already-running
+            // production Desktop process that owns the in-memory identity.
+            // The external `buzz-read` client is credentialless and can only
+            // submit a bounded read request through this owner-only socket.
+            // Start only after ensure_nest() has created the socket parent.
+            #[cfg(unix)]
+            if !recovery_mode && !is_dev_nest {
+                if let Err(error) = operator_read::start_operator_read_server(app_handle.clone()) {
+                    eprintln!("buzz-desktop: operator read service unavailable: {error}");
+                }
+            }
             if !reset_outcome.completed && is_dev_nest {
                 migration::migrate_dev_nest();
             }
@@ -424,6 +441,14 @@ pub fn run() {
                 if let Some(parent) = exe.parent() {
                     if let Err(error) = managed_agents::ensure_cli_symlink(parent, is_dev_nest) {
                         eprintln!("buzz-desktop: failed to create CLI symlink: {error}");
+                    }
+                    #[cfg(unix)]
+                    if operator_read::is_trusted_production_owner(&app_handle) {
+                        if let Err(error) = operator_read::ensure_client_symlink(parent) {
+                            eprintln!(
+                                "buzz-desktop: failed to create Buzz read client symlink: {error}"
+                            );
+                        }
                     }
                 }
             }

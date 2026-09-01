@@ -15,6 +15,8 @@ grep -Fq 'block/apple-codesign-action@' "$workflow"
 grep -Fq 'actions/upload-artifact@' "$workflow"
 grep -Fq 'retention-days: 7' "$workflow"
 grep -Fq '"createUpdaterArtifacts": false' "$workflow"
+grep -Fq 'cargo build --manifest-path desktop/src-tauri/Cargo.toml --target-dir target --release --bin buzz-read' "$workflow"
+grep -Fq './scripts/bundle-sidecars.sh' "$workflow"
 
 if grep -Eq 'contents: write|gh release|buzz-desktop-latest|latest\.json|TAURI_SIGNING_PRIVATE_KEY|verify-release-ref\.sh|refs/tags/' "$workflow"; then
   echo "signed canary workflow gained a release or publishing capability" >&2
