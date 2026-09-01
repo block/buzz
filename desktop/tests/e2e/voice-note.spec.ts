@@ -431,6 +431,39 @@ test("generic audio retains the relay-native download action", async ({
     });
 });
 
+test("voice notes omit the relay-native download action", async ({ page }) => {
+  const audioUrl = `http://localhost:3000/media/${"e".repeat(64)}.mp4`;
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await waitForMockLiveSubscription(page, "general");
+  await page.evaluate(
+    ({ href }) => {
+      const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) throw new Error("Mock message emitter is unavailable.");
+      emit({
+        channelName: "general",
+        content: `[voice-note-123.mp4](${href})`,
+        extraTags: [
+          [
+            "imeta",
+            `url ${href}`,
+            "m video/mp4",
+            "duration 9.4",
+            "filename voice-note-123.mp4",
+          ],
+        ],
+      });
+    },
+    { href: audioUrl },
+  );
+
+  const card = page.getByTestId("audio-message-attachment").last();
+  await expect(card).toBeVisible();
+  await expect(
+    card.getByRole("button", { name: "Download voice-note-123.mp4" }),
+  ).toHaveCount(0);
+});
+
 test("hard-caps audio work and cancels active and queued loads on unmount", async ({
   page,
 }) => {

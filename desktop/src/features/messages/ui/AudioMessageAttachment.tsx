@@ -5,6 +5,7 @@ import { toast } from "sonner";
 
 import {
   formatVoiceNoteDuration,
+  isVoiceNoteAttachment,
   nextVoiceNotePlaybackRate,
   resolveAudioAttachment,
   summarizeWaveform,
@@ -51,7 +52,10 @@ export function renderAudioMessageAttachment(
 ) {
   const attachment = resolveAudioAttachment(entry, href, label);
   return attachment ? (
-    <AudioMessageAttachment {...attachment} downloadUrl={downloadUrl} />
+    <AudioMessageAttachment
+      {...attachment}
+      downloadUrl={isVoiceNoteAttachment(entry) ? undefined : downloadUrl}
+    />
   ) : null;
 }
 
