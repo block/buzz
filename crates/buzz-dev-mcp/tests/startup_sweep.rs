@@ -221,7 +221,10 @@ fn call_shell(server: &mut Child, command: &str) {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         use std::io::BufRead as _;
-        for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
             if tx.send(line).is_err() {
                 return;
             }
@@ -242,10 +245,7 @@ fn call_shell(server: &mut Child, command: &str) {
         }),
     );
     let hello = read_line_or_timeout(&rx, "initialize response");
-    assert!(
-        hello.contains("\"result\""),
-        "initialize failed: {hello}"
-    );
+    assert!(hello.contains("\"result\""), "initialize failed: {hello}");
 
     send(
         server,
@@ -302,7 +302,11 @@ fn a_command_that_outlives_a_hard_killed_server_keeps_its_shim_until_it_exits() 
         .chain(session)
         .filter(|d| owner_pid_of(d) == Some(server_pid))
         .collect();
-    assert_eq!(own.len(), 2, "expected a shim dir and a session dir: {own:?}");
+    assert_eq!(
+        own.len(),
+        2,
+        "expected a shim dir and a session dir: {own:?}"
+    );
 
     // Resolve a shim binary through PATH now, announce, wait for the test,
     // then check that same binary is still there. `-x` rather than running it
@@ -341,9 +345,10 @@ fn a_command_that_outlives_a_hard_killed_server_keeps_its_shim_until_it_exits() 
     // yet looked at.
     let canary = plant_dir(root.path(), "canary-first", dead_pid());
     let mut replacement = start_server(root.path());
-    wait_until("the replacement's startup sweep to reclaim the canary", || {
-        !canary.exists()
-    });
+    wait_until(
+        "the replacement's startup sweep to reclaim the canary",
+        || !canary.exists(),
+    );
     for dir in &own {
         assert!(
             dir.exists(),
@@ -356,7 +361,9 @@ fn a_command_that_outlives_a_hard_killed_server_keeps_its_shim_until_it_exits() 
     std::fs::write(&go, b"").expect("write the go signal");
     wait_until("the command to finish", || verdict.exists());
     assert_eq!(
-        std::fs::read_to_string(&verdict).expect("read verdict").trim(),
+        std::fs::read_to_string(&verdict)
+            .expect("read verdict")
+            .trim(),
         "present",
         "the surviving command lost the shim binary it resolved before its server died"
     );

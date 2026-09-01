@@ -1416,7 +1416,9 @@ mod tests {
     #[test]
     fn claiming_a_directory_creates_an_empty_registry() {
         let root = tempdir().expect("tempdir");
-        let dir = root.path().join(format!("{OWNER_PREFIX}test-claim-registry"));
+        let dir = root
+            .path()
+            .join(format!("{OWNER_PREFIX}test-claim-registry"));
         std::fs::create_dir(&dir).expect("mkdir");
 
         let _claim = claim_dir(&dir).expect("claim");
