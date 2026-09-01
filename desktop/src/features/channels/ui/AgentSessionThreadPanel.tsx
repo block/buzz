@@ -537,9 +537,16 @@ export function AgentSessionThreadPanel({
             channelId={sessionChannelId}
             className="border-0 bg-transparent px-0 py-2 shadow-none"
             emptyDescription={
-              sessionChannelId
-                ? `Mention ${agent.name} in the channel to see its work here.`
-                : `Mention ${agent.name} in any channel to see its work here.`
+              // A live media session already answers "mention it to see
+              // something" — the member is watching the agent right now, and
+              // repeating the instruction reads as though nothing happened.
+              // The block still renders, because a media agent may also do ACP
+              // work, and that work belongs here rather than in the video.
+              mediaSession
+                ? `${agent.name} is live above. Tool calls and edits appear here.`
+                : sessionChannelId
+                  ? `Mention ${agent.name} in the channel to see its work here.`
+                  : `Mention ${agent.name} in any channel to see its work here.`
             }
             profiles={profiles}
             rawLayout="exclusive"
