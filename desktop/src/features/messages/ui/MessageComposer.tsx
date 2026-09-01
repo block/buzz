@@ -560,7 +560,12 @@ function MessageComposerImpl({
     const trimmed = syncComposerContentFromEditor().trim();
     // Edit mode
     if (editTargetRef.current && onEditSaveRef.current) {
-      if (isEditSubmissionLocked) return;
+      // A live recording must be finished or discarded explicitly; never let an
+      // edit save snapshot text while a voice note is mid-capture (the editor's
+      // Enter shortcut bypasses the toolbar's Finish/Discard controls).
+      if (isEditSubmissionLocked || voiceNote.statusRef.current !== "idle") {
+        return;
+      }
       // Empty edits delete the message through handleEditSave.
       await submitMessageEdit({
         content: trimmed,

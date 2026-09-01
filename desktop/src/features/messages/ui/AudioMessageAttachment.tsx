@@ -1,5 +1,5 @@
 import * as React from "react";
-import { AlertCircle, Download, X } from "lucide-react";
+import { AlertCircle, Download, Loader2, X } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import { toast } from "sonner";
 
@@ -7,6 +7,7 @@ import {
   formatVoiceNoteDuration,
   nextVoiceNotePlaybackRate,
   resolveAudioAttachment,
+  summarizeWaveform,
   voiceNoteBarHeight,
   waveformPeaks,
   type AudioAttachmentImetaEntry,
@@ -145,7 +146,10 @@ export function AudioMessageAttachment({
   const [playbackRate, setPlaybackRate] = React.useState(1);
   const [playbackError, setPlaybackError] = React.useState(false);
   const [waveformError, setWaveformError] = React.useState(false);
-  const [decodedSamples, setDecodedSamples] = React.useState<
+  // A Play click before the source is fetched is remembered here so playback
+  // starts automatically once loading resolves, instead of silently no-opping.
+  const [pendingPlay, setPendingPlay] = React.useState(false);
+  const [waveformSummary, setWaveformSummary] = React.useState<
     Float32Array | undefined
   >();
   const [peaks, setPeaks] = React.useState(() => dotPeaks(INITIAL_BAR_COUNT));
@@ -235,14 +239,14 @@ export function AudioMessageAttachment({
     let active = true;
     setWaveformReady(false);
     setWaveformError(false);
-    setDecodedSamples(undefined);
+    setWaveformSummary(undefined);
     const load = scheduleAudioMediaLoad((signal) =>
       decodeSamples(playbackHref, signal),
     );
     void load.promise
       .then((samples) => {
         if (!active) return;
-        setDecodedSamples(samples);
+        setWaveformSummary(summarizeWaveform(samples));
       })
       .catch((error: unknown) => {
         if (active && !isAbortError(error)) setWaveformError(true);
@@ -255,12 +259,12 @@ export function AudioMessageAttachment({
 
   React.useEffect(() => {
     setPeaks(
-      decodedSamples
-        ? waveformPeaks(decodedSamples, barCount)
+      waveformSummary
+        ? waveformPeaks(waveformSummary, barCount)
         : dotPeaks(barCount),
     );
-    if (decodedSamples) setWaveformReady(true);
-  }, [barCount, decodedSamples]);
+    if (waveformSummary) setWaveformReady(true);
+  }, [barCount, waveformSummary]);
 
   React.useEffect(() => {
     const handleOtherPlayback = (event: Event) => {
@@ -313,25 +317,49 @@ export function AudioMessageAttachment({
     };
   }, [isPlaying, paintProgress]);
 
+  const startPlayback = React.useCallback(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    window.dispatchEvent(new CustomEvent(PLAY_EVENT, { detail: playbackId }));
+    void audio.play().catch(() => {
+      setIsPlaying(false);
+      setPlaybackError(true);
+    });
+  }, [playbackId]);
+
   const togglePlayback = React.useCallback(() => {
     const audio = audioRef.current;
     if (!audio) return;
     if (!playbackHref) {
+      // Source not fetched yet: request the load and remember the intent so
+      // playback begins as soon as it arrives, rather than dropping the click.
+      setPendingPlay(true);
       setLoadRequest((request) =>
         request?.href === href ? request : { attempt: 0, href },
       );
       return;
     }
     if (audio.paused) {
-      window.dispatchEvent(new CustomEvent(PLAY_EVENT, { detail: playbackId }));
-      void audio.play().catch(() => {
-        setIsPlaying(false);
-        setPlaybackError(true);
-      });
+      startPlayback();
     } else {
+      setPendingPlay(false);
       audio.pause();
     }
-  }, [href, playbackHref, playbackId]);
+  }, [href, playbackHref, startPlayback]);
+
+  // Fulfill a Play click that landed before the source finished loading.
+  React.useEffect(() => {
+    if (!pendingPlay || !playbackHref) return;
+    setPendingPlay(false);
+    startPlayback();
+  }, [pendingPlay, playbackHref, startPlayback]);
+
+  // Drop a pending intent if playback itself fails, so the button leaves its
+  // loading state and the user can retry. Waveform decode failure is unrelated
+  // to playback and must not cancel the intent.
+  React.useEffect(() => {
+    if (playbackError) setPendingPlay(false);
+  }, [playbackError]);
 
   const retryPlayback = React.useCallback(() => {
     setPlaybackError(false);
@@ -391,9 +419,11 @@ export function AudioMessageAttachment({
           aria-label={
             playbackError
               ? "Retry voice note"
-              : isPlaying
-                ? "Pause voice note"
-                : "Play voice note"
+              : pendingPlay
+                ? "Loading voice note"
+                : isPlaying
+                  ? "Pause voice note"
+                  : "Play voice note"
           }
           className="flex h-full w-full items-center justify-center rounded-md focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
           onClick={playbackError ? retryPlayback : togglePlayback}
@@ -401,6 +431,8 @@ export function AudioMessageAttachment({
         >
           {playbackError ? (
             <AlertCircle aria-hidden="true" />
+          ) : pendingPlay ? (
+            <Loader2 aria-hidden="true" className="animate-spin" />
           ) : (
             <MorphingPlayPauseIcon isPlaying={isPlaying} />
           )}

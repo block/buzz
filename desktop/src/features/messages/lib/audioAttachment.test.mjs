@@ -8,9 +8,11 @@ import {
   isVoiceNoteFile,
   nextVoiceNotePlaybackRate,
   resolveAudioAttachment,
+  summarizeWaveform,
   VOICE_NOTE_MAX_DURATION_SECONDS,
   voiceNoteBarHeight,
   waveformPeaks,
+  WAVEFORM_SUMMARY_RESOLUTION,
 } from "./audioAttachment.ts";
 
 test("isVoiceNoteFile scopes deferred audio uploads to recorder output", () => {
@@ -143,4 +145,27 @@ test("voiceNoteBarHeight keeps quiet samples circular", () => {
   assert.equal(voiceNoteBarHeight(0.12), 3);
   assert.equal(voiceNoteBarHeight(0.16), 3);
   assert.equal(voiceNoteBarHeight(1), 20);
+});
+
+test("summarizeWaveform bounds retained data regardless of clip length", () => {
+  const longClip = new Float32Array(48_000 * 300).map(() => 0.5);
+  const summary = summarizeWaveform(longClip);
+  assert.equal(summary.length, WAVEFORM_SUMMARY_RESOLUTION);
+  assert.ok(
+    summary.length < longClip.length,
+    "summary must be far smaller than the decoded clip",
+  );
+
+  const short = new Float32Array([0.2, 0.9]);
+  assert.equal(summarizeWaveform(short).length, 2);
+  assert.equal(summarizeWaveform(new Float32Array()).length, 1);
+});
+
+test("resampling the summary matches pooling the raw samples", () => {
+  const samples = new Float32Array([0, 0.25, -0.5, 1, -0.3, 0.8]);
+  const summary = summarizeWaveform(samples, 6);
+  assert.deepEqual(
+    Array.from(waveformPeaks(summary, 2)),
+    Array.from(waveformPeaks(samples, 2)),
+  );
 });

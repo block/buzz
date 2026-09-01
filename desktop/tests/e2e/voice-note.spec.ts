@@ -179,6 +179,46 @@ test("discards an active recording when entering edit mode", async ({
   await expect(page.getByTestId("composer-voice-note-card")).toHaveCount(0);
 });
 
+test("editor Enter never saves an edit while a voice note is recording", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  // Enter edit mode first, then start recording — the mic is available in edit
+  // mode, so this is the ordering the recorder submission gate must cover.
+  await openMoreActionsMenu(page, "mock-general-welcome");
+  await page.getByTestId("edit-message-mock-general-welcome").click();
+  await expect(page.getByTestId("edit-target")).toBeVisible();
+  const input = page.getByTestId("message-input");
+  await expect(input).not.toBeEmpty();
+
+  // Change the text so a save (if it wrongly happened) is observable, then
+  // start recording.
+  const editedContent = `Edited mid-recording ${Date.now()}`;
+  await input.click();
+  await page.keyboard.press("ControlOrMeta+A");
+  await page.keyboard.type(editedContent);
+
+  await page.getByRole("button", { name: "Record voice note" }).click();
+  await expect(page.getByTestId("voice-note-recorder")).toBeVisible();
+  await page.waitForTimeout(100);
+
+  // The editor's Enter shortcut must not slip past the Finish/Discard flow: the
+  // edit stays unsaved and the recording stays live until explicitly resolved.
+  await input.press("Enter");
+
+  await expect(page.getByTestId("edit-target")).toBeVisible();
+  await expect(page.getByTestId("voice-note-recorder")).toBeVisible();
+  await expect(page.getByTestId("message-timeline")).not.toContainText(
+    editedContent,
+  );
+
+  // Finishing the recording still works, proving the note was never discarded.
+  await page.getByRole("button", { name: "Finish voice note" }).click();
+  await expect(page.getByTestId("composer-voice-note-card")).toBeVisible();
+});
+
 test("discards while voice-note processing is pending", async ({ page }) => {
   await page.addInitScript(() => {
     const pendingDecodes: Array<(buffer: AudioBuffer) => void> = [];
@@ -284,6 +324,70 @@ test("surfaces waveform and playback failures with retry", async ({ page }) => {
   ).toBeVisible();
   await card.locator("audio").dispatchEvent("error");
   await expect(card.getByRole("alert")).toContainText("Audio unavailable");
+});
+
+test("resumes a Play click that landed before the source finished loading", async ({
+  page,
+}) => {
+  let releaseFetch: (() => void) | undefined;
+  const fetchGate = new Promise<void>((resolve) => {
+    releaseFetch = resolve;
+  });
+  // Gate the media fetch so the received card has no playback source when the
+  // user first clicks Play.
+  await page.route(AUDIO_URL, async (route) => {
+    await fetchGate;
+    await route.continue();
+  });
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await waitForMockLiveSubscription(page, "general");
+  await page.evaluate(
+    ({ audioUrl }) => {
+      const emit = (
+        window as Window & {
+          __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+            channelName: string;
+            content: string;
+            extraTags: string[][];
+          }) => unknown;
+        }
+      ).__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) throw new Error("Mock message emitter is unavailable.");
+      emit({
+        channelName: "general",
+        content: `[voice-note-123.mp4](${audioUrl})`,
+        extraTags: [
+          [
+            "imeta",
+            `url ${audioUrl}`,
+            "m video/mp4",
+            "duration 9.4",
+            "filename voice-note-123.mp4",
+          ],
+        ],
+      });
+    },
+    { audioUrl: AUDIO_URL },
+  );
+
+  const card = page.getByTestId("audio-message-attachment").last();
+  await expect(card).toBeVisible();
+
+  // Click Play while the fetch is still held: the intent must be remembered and
+  // surfaced as a loading state, not silently dropped.
+  await card.getByRole("button", { name: "Play voice note" }).click();
+  await expect(
+    card.getByRole("button", { name: "Loading voice note" }),
+  ).toBeVisible();
+
+  // Releasing the fetch resolves the source; playback starts without a second
+  // click.
+  releaseFetch?.();
+  await expect(
+    card.getByRole("button", { name: "Pause voice note" }),
+  ).toBeVisible();
 });
 
 test("generic audio retains the relay-native download action", async ({

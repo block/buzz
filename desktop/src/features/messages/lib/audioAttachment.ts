@@ -79,6 +79,38 @@ export function nextVoiceNotePlaybackRate(currentRate: number): number {
 
 const QUIET_LEVEL_THRESHOLD = 0.16;
 
+// Waveform cards keep only this many peak buckets, not the full decoded clip.
+// 256 matches the maximum bar count a card can display, so a resampled envelope
+// is visually indistinguishable while retaining a fixed ~1KB regardless of clip
+// duration (a 5-minute 48kHz mono note would otherwise pin ~57MB per card).
+export const WAVEFORM_SUMMARY_RESOLUTION = 256;
+
+// Reduce decoded PCM to a bounded peak envelope via max-pooling. Downstream
+// display resamples this envelope to the (smaller) bar count; because 256 far
+// exceeds the bars a card renders, the resampled result is visually
+// indistinguishable from pooling the original samples directly.
+export function summarizeWaveform(
+  samples: Float32Array,
+  resolution: number = WAVEFORM_SUMMARY_RESOLUTION,
+): Float32Array {
+  const buckets = Math.max(1, Math.min(resolution, samples.length || 1));
+  const summary = new Float32Array(buckets);
+  if (samples.length === 0) return summary;
+  for (let index = 0; index < buckets; index += 1) {
+    const start = Math.floor((index * samples.length) / buckets);
+    const end = Math.max(
+      start + 1,
+      Math.floor(((index + 1) * samples.length) / buckets),
+    );
+    let peak = 0;
+    for (let sampleIndex = start; sampleIndex < end; sampleIndex += 1) {
+      peak = Math.max(peak, Math.abs(samples[sampleIndex] ?? 0));
+    }
+    summary[index] = peak;
+  }
+  return summary;
+}
+
 export function voiceNoteBarHeight(level: number): number {
   const audibleLevel = Math.max(
     0,
