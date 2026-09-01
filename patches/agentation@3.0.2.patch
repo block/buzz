@@ -2,14 +2,12 @@ diff --git a/dist/index.d.mts b/dist/index.d.mts
 index 74302421cdde73d3b1d58952473adb0d744a2b8c..cfeddf7977489cd84257cf18980d8b0da0d61cee 100644
 --- a/dist/index.d.mts
 +++ b/dist/index.d.mts
-@@ -101,7 +101,13 @@ type PageFeedbackToolbarCSSProps = {
+@@ -101,7 +101,11 @@ type PageFeedbackToolbarCSSProps = {
      /** Callback fired when the copy button is clicked. Receives the markdown output. */
      onCopy?: (markdown: string) => void;
      /** Callback fired when "Send to Agent" is clicked. Receives the markdown output and annotations. */
 -    onSubmit?: (output: string, annotations: Annotation[]) => void;
-+    onSubmit?: (output: string, annotations: Annotation[]) => Promise<{ ok: boolean; eventId?: string; error?: string; acceptedAnnotationIds?: string[] }>;
-+    /** Whether the current submit destination is valid. */
-+    submitEnabled?: boolean;
++    onSubmit?: (output: string, annotations: Annotation[]) => Promise<{ ok: boolean; eventId?: string; error?: string; acceptedAnnotations?: Annotation[] }>;
 +    /** Whether the current submit destination is valid. Defaults to callback/webhook availability. */
 +    submitEnabled?: boolean;
 +    /** Scope local annotation storage to one signed-in identity/community. */
@@ -30,14 +28,12 @@ diff --git a/dist/index.d.ts b/dist/index.d.ts
 index 74302421cdde73d3b1d58952473adb0d744a2b8c..cfeddf7977489cd84257cf18980d8b0da0d61cee 100644
 --- a/dist/index.d.ts
 +++ b/dist/index.d.ts
-@@ -101,7 +101,13 @@ type PageFeedbackToolbarCSSProps = {
+@@ -101,7 +101,11 @@ type PageFeedbackToolbarCSSProps = {
      /** Callback fired when the copy button is clicked. Receives the markdown output. */
      onCopy?: (markdown: string) => void;
      /** Callback fired when "Send to Agent" is clicked. Receives the markdown output and annotations. */
 -    onSubmit?: (output: string, annotations: Annotation[]) => void;
-+    onSubmit?: (output: string, annotations: Annotation[]) => Promise<{ ok: boolean; eventId?: string; error?: string; acceptedAnnotationIds?: string[] }>;
-+    /** Whether the current submit destination is valid. */
-+    submitEnabled?: boolean;
++    onSubmit?: (output: string, annotations: Annotation[]) => Promise<{ ok: boolean; eventId?: string; error?: string; acceptedAnnotations?: Annotation[] }>;
 +    /** Whether the current submit destination is valid. Defaults to callback/webhook availability. */
 +    submitEnabled?: boolean;
 +    /** Scope local annotation storage to one signed-in identity/community. */
@@ -89,7 +85,7 @@ index 07036659fc11b8a3c9d300536631056ec3f58297..1dafc5d19d1970120ab2ee3546c7f552
      }
    }, [
      annotations,
-@@ -10483,16 +10489,32 @@ function PageFeedbackToolbarCSS({
+@@ -10483,16 +10489,30 @@ function PageFeedbackToolbarCSS({
          output += "\n" + rearrangeOutput;
        }
      }
@@ -105,9 +101,8 @@ index 07036659fc11b8a3c9d300536631056ec3f58297..1dafc5d19d1970120ab2ee3546c7f552
 +      if (onSubmit) {
 +        const result = await onSubmit(output, annotations);
 +        success = result.ok;
-+        if (result.acceptedAnnotationIds) {
-+          const acceptedIds = new Set(result.acceptedAnnotationIds);
-+          acceptedAnnotations = annotations.filter((annotation) => acceptedIds.has(annotation.id));
++        if (result.acceptedAnnotations) {
++          acceptedAnnotations = result.acceptedAnnotations;
 +        }
 +      } else {
 +        await new Promise((resolve) => originalSetTimeout(resolve, 150));
@@ -122,8 +117,7 @@ index 07036659fc11b8a3c9d300536631056ec3f58297..1dafc5d19d1970120ab2ee3546c7f552
 -      originalSetTimeout(() => clearAll(), 500);
 +    if (success) {
 +      originalSetTimeout(() => {
-+        const acceptedIds = new Set(acceptedAnnotations.map((annotation) => annotation.id));
-+        setAnnotations((current) => current.filter((annotation) => !acceptedIds.has(annotation.id)));
++        setAnnotations((current) => current.filter((annotation) => !acceptedAnnotations.some((accepted) => accepted.id === annotation.id && JSON.stringify(accepted) === JSON.stringify(annotation))));
 +        onAnnotationsClear?.(acceptedAnnotations);
 +      }, 500);
      }
@@ -206,7 +200,7 @@ index b6662bd6b8bcc9555e22a4d1a0de99198e0c11b5..44fd920d43b8f6a53f130d1ebf6fb92b
      }
    }, [
      annotations,
-@@ -10399,16 +10405,32 @@ function PageFeedbackToolbarCSS({
+@@ -10399,16 +10405,30 @@ function PageFeedbackToolbarCSS({
          output += "\n" + rearrangeOutput;
        }
      }
@@ -222,9 +216,8 @@ index b6662bd6b8bcc9555e22a4d1a0de99198e0c11b5..44fd920d43b8f6a53f130d1ebf6fb92b
 +      if (onSubmit) {
 +        const result = await onSubmit(output, annotations);
 +        success = result.ok;
-+        if (result.acceptedAnnotationIds) {
-+          const acceptedIds = new Set(result.acceptedAnnotationIds);
-+          acceptedAnnotations = annotations.filter((annotation) => acceptedIds.has(annotation.id));
++        if (result.acceptedAnnotations) {
++          acceptedAnnotations = result.acceptedAnnotations;
 +        }
 +      } else {
 +        await new Promise((resolve) => originalSetTimeout(resolve, 150));
@@ -239,8 +232,7 @@ index b6662bd6b8bcc9555e22a4d1a0de99198e0c11b5..44fd920d43b8f6a53f130d1ebf6fb92b
 -      originalSetTimeout(() => clearAll(), 500);
 +    if (success) {
 +      originalSetTimeout(() => {
-+        const acceptedIds = new Set(acceptedAnnotations.map((annotation) => annotation.id));
-+        setAnnotations((current) => current.filter((annotation) => !acceptedIds.has(annotation.id)));
++        setAnnotations((current) => current.filter((annotation) => !acceptedAnnotations.some((accepted) => accepted.id === annotation.id && JSON.stringify(accepted) === JSON.stringify(annotation))));
 +        onAnnotationsClear?.(acceptedAnnotations);
 +      }, 500);
      }

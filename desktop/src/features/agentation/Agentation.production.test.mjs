@@ -109,6 +109,91 @@ test("production Send and S shortcut follow explicit destination eligibility", a
   rendered.unmount();
 });
 
+test("ambiguous retry clears only the accepted annotation version", async () => {
+  const { createElement } = await import("react");
+  const { fireEvent, render, waitFor } = await import("@testing-library/react");
+  const { Agentation } = await import("agentation");
+  const target = document.createElement("div");
+  target.id = "retry-edit-target";
+  target.textContent = "Retry edit";
+  document.body.append(target);
+  document.elementFromPoint = () => target;
+  let retainedBatch;
+  let attempts = 0;
+  const rendered = render(
+    createElement(Agentation, {
+      copyToClipboard: false,
+      demoAnnotations: [
+        { selector: "#retry-edit-target", comment: "Original A" },
+      ],
+      demoDelay: 250,
+      enableDemoMode: true,
+      onSubmit: async (_output, batch) => {
+        attempts += 1;
+        retainedBatch ??= batch;
+        return attempts === 1
+          ? { ok: false }
+          : { ok: true, acceptedAnnotations: retainedBatch };
+      },
+      storageScope: "retry-edit-scope",
+      submitEnabled: true,
+    }),
+  );
+  const send = await waitFor(() => {
+    const candidate = document.querySelector("[data-agentation-send]");
+    assert.ok(candidate);
+    assert.equal(candidate.disabled, false);
+    return candidate;
+  });
+  fireEvent.click(send);
+  await waitFor(() => assert.equal(attempts, 1));
+
+  const marker = await waitFor(() => {
+    const candidate = document.querySelector("[data-annotation-marker]");
+    assert.ok(candidate);
+    return candidate;
+  });
+  fireEvent.click(marker);
+  const editor = await waitFor(() => {
+    const candidate = document.querySelector(
+      'textarea[placeholder="Edit your feedback..."]',
+    );
+    assert.ok(candidate);
+    return candidate;
+  });
+  fireEvent.change(editor, { target: { value: "Edited A" } });
+  const save = await waitFor(() => {
+    const candidate = [...document.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Save",
+    );
+    assert.ok(candidate);
+    return candidate;
+  });
+  fireEvent.click(save);
+  await waitFor(() => {
+    const scoped = JSON.parse(
+      localStorage.getItem(
+        "feedback-annotations-/buzz/retry-edit-scope/channel/test",
+      ) ?? "[]",
+    );
+    assert.equal(scoped[0]?.comment, "Edited A");
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 2_600));
+  fireEvent.click(send);
+  await waitFor(() => assert.equal(attempts, 2));
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  const scoped = JSON.parse(
+    localStorage.getItem(
+      "feedback-annotations-/buzz/retry-edit-scope/channel/test",
+    ) ?? "[]",
+  );
+  assert.equal(scoped.length, 1);
+  assert.equal(scoped[0].id, retainedBatch[0].id);
+  assert.equal(scoped[0].comment, "Edited A");
+  rendered.unmount();
+});
+
 test("accepted submit clears its snapshot but preserves annotations added in flight", async () => {
   const { createElement } = await import("react");
   const { fireEvent, render, waitFor } = await import("@testing-library/react");

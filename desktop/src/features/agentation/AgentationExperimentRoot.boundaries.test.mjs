@@ -26,10 +26,14 @@ test("scope changes remount the stateful submission owner, not only Agentation",
   }
 });
 
-test("retained ambiguous event owns retry destination and accepted annotation ids", () => {
+test("retained ambiguous event owns retry destination and accepted annotation snapshots", () => {
   assert.match(source, /const retainedSubmission = batchSubmission\.current/);
   assert.match(source, /submitDestination = retainedSubmission/);
   assert.match(source, /retained\?\.event\.content \?\?/);
-  assert.match(source, /acceptedAnnotationIds:/);
-  assert.match(source, /retained\?\.annotationIds \?\?/);
+  assert.match(source, /acceptedAnnotations,/);
+  assert.match(source, /retained\?\.annotations \?\? batch/);
+  assert.match(
+    source,
+    /JSON\.stringify\(accepted\) === JSON\.stringify\(annotation\)/,
+  );
 });

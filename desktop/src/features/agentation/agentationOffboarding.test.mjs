@@ -35,7 +35,7 @@ test("export bundle includes retained signed payload and discard clears both sto
   retainAgentationSubmission(scope, {
     fingerprint: "batch",
     submissionId: "submission",
-    annotationIds: ["annotation-a"],
+    annotations: [{ id: "annotation-a", comment: "original" }],
     channelId: "channel",
     agentPubkey: "agent",
     event,

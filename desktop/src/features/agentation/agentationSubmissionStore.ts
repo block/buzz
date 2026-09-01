@@ -1,9 +1,10 @@
+import type { Annotation } from "agentation";
 import type { RelayEvent } from "@/shared/api/types";
 
 export type RetainedAgentationSubmission = {
   fingerprint: string;
   submissionId: string;
-  annotationIds: string[];
+  annotations: Annotation[];
   channelId: string;
   agentPubkey: string;
   event: RelayEvent;
@@ -22,8 +23,13 @@ export function readRetainedAgentationSubmission(
     const parsed = JSON.parse(raw) as Partial<RetainedAgentationSubmission>;
     return typeof parsed.fingerprint === "string" &&
       typeof parsed.submissionId === "string" &&
-      Array.isArray(parsed.annotationIds) &&
-      parsed.annotationIds.every((id) => typeof id === "string") &&
+      Array.isArray(parsed.annotations) &&
+      parsed.annotations.every(
+        (annotation) =>
+          typeof annotation === "object" &&
+          annotation !== null &&
+          typeof annotation.id === "string",
+      ) &&
       typeof parsed.channelId === "string" &&
       typeof parsed.agentPubkey === "string" &&
       typeof parsed.event?.id === "string"

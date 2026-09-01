@@ -9,7 +9,7 @@ overrides:
   linkify-it: ^5.0.2
 
 patchedDependencies:
-  agentation@3.0.2: fde9dc45b9b08a7cdf76bf6e1dfc1ef667c581df703d1a38d3249f1a65757e08
+  agentation@3.0.2: 2672eab0929543b0570a1661d6bf116151e53d816e47ebc190dca8b55013f488
   isomorphic-git: e9b414a60d4cf1d8aa18f7a779483984e821989967c235662566e94ef0238d3f
   virtua@0.49.3: 30a7a92b94800ec37be8d36546ea98c04a05dcd0637f9fac27a06f016ba2eff4
 
@@ -177,7 +177,7 @@ importers:
         version: 3.22.5
       agentation:
         specifier: 3.0.2
-        version: 3.0.2(patch_hash=fde9dc45b9b08a7cdf76bf6e1dfc1ef667c581df703d1a38d3249f1a65757e08)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+        version: 3.0.2(patch_hash=2672eab0929543b0570a1661d6bf116151e53d816e47ebc190dca8b55013f488)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       class-variance-authority:
         specifier: ^0.7.1
         version: 0.7.1
@@ -5436,7 +5436,7 @@ snapshots:
 
   agent-base@7.1.4: {}
 
-  agentation@3.0.2(patch_hash=fde9dc45b9b08a7cdf76bf6e1dfc1ef667c581df703d1a38d3249f1a65757e08)(react-dom@19.2.8(react@19.2.8))(react@19.2.8):
+  agentation@3.0.2(patch_hash=2672eab0929543b0570a1661d6bf116151e53d816e47ebc190dca8b55013f488)(react-dom@19.2.8(react@19.2.8))(react@19.2.8):
     optionalDependencies:
       react: 19.2.8
       react-dom: 19.2.8(react@19.2.8)

@@ -75,12 +75,12 @@ function ScopedAgentationExperimentRoot({
   const inFlight = React.useRef<Promise<{
     ok: boolean;
     eventId?: string;
-    acceptedAnnotationIds?: string[];
+    acceptedAnnotations?: Annotation[];
   }> | null>(null);
   const batchSubmission = React.useRef<{
     fingerprint: string;
     submissionId: string;
-    annotationIds: string[];
+    annotations: Annotation[];
     channelId: string;
     agentPubkey: string;
     event: RelayEvent;
@@ -146,7 +146,7 @@ function ScopedAgentationExperimentRoot({
               const submission = {
                 fingerprint,
                 submissionId,
-                annotationIds: batch.map((annotation) => annotation.id),
+                annotations: batch,
                 channelId: channel.id,
                 agentPubkey: agent.pubkey,
                 event,
@@ -174,21 +174,21 @@ function ScopedAgentationExperimentRoot({
           });
           batchSubmission.current = null;
           clearRetainedAgentationSubmission(storageScope);
-          setAnnotations((existing) => {
-            const accepted = new Set(
-              retained?.annotationIds ??
-                batch.map((annotation) => annotation.id),
-            );
-            return existing.filter(
-              (annotation) => !accepted.has(annotation.id),
-            );
-          });
+          const acceptedAnnotations = retained?.annotations ?? batch;
+          setAnnotations((existing) =>
+            existing.filter(
+              (annotation) =>
+                !acceptedAnnotations.some(
+                  (accepted) =>
+                    accepted.id === annotation.id &&
+                    JSON.stringify(accepted) === JSON.stringify(annotation),
+                ),
+            ),
+          );
           return {
             ok: true,
             eventId: event.id,
-            acceptedAnnotationIds:
-              retained?.annotationIds ??
-              batch.map((annotation) => annotation.id),
+            acceptedAnnotations,
           };
         })
         .catch((error: unknown) => {
@@ -239,11 +239,15 @@ function ScopedAgentationExperimentRoot({
           )
         }
         onAnnotationsClear={(cleared) => {
-          const clearedIds = new Set(
-            cleared.map((annotation) => annotation.id),
-          );
           setAnnotations((current) =>
-            current.filter((annotation) => !clearedIds.has(annotation.id)),
+            current.filter(
+              (annotation) =>
+                !cleared.some(
+                  (accepted) =>
+                    accepted.id === annotation.id &&
+                    JSON.stringify(accepted) === JSON.stringify(annotation),
+                ),
+            ),
           );
         }}
         onSubmit={submit}
