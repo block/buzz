@@ -122,7 +122,12 @@ export function AgentMediaSurface({
 
   return (
     <section
-      aria-label={`${agentLabel} live video`}
+      // Names the region, not the video inside it. A named `section` is a
+      // landmark, so a label restating the `<video>`'s own gives a screen
+      // reader two stops a word apart for one thing. This region also holds
+      // the disclosure line and the microphone control, so naming the session
+      // is both more accurate and audibly distinct.
+      aria-label={`${agentLabel} media session`}
       className={cn("flex flex-col gap-2", className)}
       data-testid="agent-media-surface"
     >
