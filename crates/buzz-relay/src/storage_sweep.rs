@@ -320,6 +320,10 @@ pub async fn emit_storage_metrics(
     metrics::gauge!("buzz_storage_orphan_sidecars").set(snapshot.orphan_sidecar_count as f64);
     metrics::gauge!("buzz_storage_multi_variant_shas").set(snapshot.multi_variant_shas as f64);
     metrics::gauge!("buzz_storage_multi_variant_bytes").set(snapshot.multi_variant_bytes as f64);
+    metrics::gauge!("buzz_storage_duplicate_layout_variants")
+        .set(snapshot.duplicate_layout_variants as f64);
+    metrics::gauge!("buzz_storage_duplicate_layout_bytes")
+        .set(snapshot.duplicate_layout_bytes as f64);
     metrics::gauge!("buzz_storage_unknown_key_bytes").set(snapshot.unknown_key_bytes as f64);
     metrics::gauge!("buzz_storage_unknown_key_objects").set(snapshot.unknown_key_objects as f64);
 

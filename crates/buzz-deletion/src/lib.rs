@@ -572,6 +572,7 @@ async fn connect_services_with_store(store: DeletionStore) -> Result<Services> {
             .unwrap_or_else(|_| "path".to_string())
             .parse()
             .map_err(anyhow::Error::msg)?,
+        migration_phase: buzz_media::MediaMigrationPhase::LegacyOnly,
         max_image_bytes: 1,
         max_gif_bytes: 1,
         max_video_bytes: 1,
@@ -1703,6 +1704,7 @@ mod postgres_tests {
                     s3_bucket: "unused".to_string(),
                     s3_region: "us-east-1".to_string(),
                     s3_addressing_style: buzz_media::S3AddressingStyle::Path,
+                    migration_phase: buzz_media::MediaMigrationPhase::LegacyOnly,
                     max_image_bytes: 1,
                     max_gif_bytes: 1,
                     max_video_bytes: 1,
@@ -1806,6 +1808,7 @@ mod postgres_tests {
                     .or_else(|_| std::env::var("BUZZ_S3_REGION"))
                     .unwrap_or_else(|_| "us-east-1".to_string()),
                 s3_addressing_style: buzz_media::S3AddressingStyle::Path,
+                migration_phase: buzz_media::MediaMigrationPhase::LegacyOnly,
                 max_image_bytes: 1,
                 max_gif_bytes: 1,
                 max_video_bytes: 1,

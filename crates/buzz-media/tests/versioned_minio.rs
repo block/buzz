@@ -35,6 +35,7 @@ fn minio_config(bucket: String) -> MediaConfig {
         s3_addressing_style: env_or("BUZZ_S3_ADDRESSING_STYLE", "path")
             .parse()
             .expect("BUZZ_S3_ADDRESSING_STYLE must be path or virtual"),
+        migration_phase: buzz_media::MediaMigrationPhase::LegacyOnly,
         max_image_bytes: 50 * 1024 * 1024,
         max_gif_bytes: 10 * 1024 * 1024,
         max_video_bytes: 524_288_000,

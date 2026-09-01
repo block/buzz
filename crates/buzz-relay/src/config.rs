@@ -835,6 +835,15 @@ impl Config {
                 ));
             }
         };
+        let media_migration_phase = match std::env::var("BUZZ_MEDIA_MIGRATION_PHASE") {
+            Ok(value) => value.parse().map_err(ConfigError::InvalidValue)?,
+            Err(std::env::VarError::NotPresent) => buzz_media::MediaMigrationPhase::default(),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err(ConfigError::InvalidValue(
+                    "BUZZ_MEDIA_MIGRATION_PHASE must be valid Unicode".to_string(),
+                ));
+            }
+        };
         let media = buzz_media::MediaConfig {
             s3_endpoint: std::env::var("BUZZ_S3_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
@@ -847,6 +856,7 @@ impl Config {
                 .or_else(|_| std::env::var("AWS_REGION"))
                 .unwrap_or_else(|_| "us-east-1".to_string()),
             s3_addressing_style,
+            migration_phase: media_migration_phase,
             max_image_bytes: std::env::var("BUZZ_MAX_IMAGE_BYTES")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1376,6 +1386,11 @@ mod tests {
             buzz_media::config::S3AddressingStyle::Path,
             "S3 addressing must default to path style for bundled MinIO compatibility"
         );
+        assert_eq!(
+            config.media.migration_phase,
+            buzz_media::MediaMigrationPhase::LegacyOnly,
+            "media layout must default to behavior-preserving legacy reads and writes"
+        );
         assert!(
             config.join_policy.is_none(),
             "join_policy should default to None so policy prompts and acceptance receipts are opt-in"
@@ -1769,6 +1784,37 @@ mod tests {
             invalid,
             Err(ConfigError::InvalidValue(ref message))
                 if message.contains("BUZZ_S3_ADDRESSING_STYLE must be 'path' or 'virtual'")
+        ));
+    }
+
+    #[test]
+    fn media_migration_phase_env_accepts_dual_read_and_write_and_rejects_removed_phase() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_MEDIA_MIGRATION_PHASE");
+
+        std::env::set_var("BUZZ_MEDIA_MIGRATION_PHASE", "dual-read-and-write");
+        let configured = Config::from_env()
+            .expect("dual-read-and-write media config")
+            .media
+            .migration_phase;
+
+        std::env::set_var("BUZZ_MEDIA_MIGRATION_PHASE", "dual-read-legacy-write");
+        let invalid = Config::from_env();
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_MEDIA_MIGRATION_PHASE", value);
+        } else {
+            std::env::remove_var("BUZZ_MEDIA_MIGRATION_PHASE");
+        }
+
+        assert_eq!(
+            configured,
+            buzz_media::MediaMigrationPhase::DualReadAndWrite
+        );
+        assert!(matches!(
+            invalid,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_MEDIA_MIGRATION_PHASE must be 'legacy-only'")
         ));
     }
 

@@ -32,6 +32,10 @@ tempfile = "3"
 tokio-util = { version = "0.7", features = ["io"] }
 futures-util = "0.3"
 futures-core = "0.3"
+metrics = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+anyhow = { workspace = true }
+tracing-subscriber = { workspace = true }
 quick-xml = { version = "0.38", features = ["serialize"] }
 
 [dev-dependencies]

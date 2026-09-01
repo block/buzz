@@ -1,0 +1,26 @@
+# Run this while relays are in dual-read-and-write, before switching them to
+# sharded-only. Pin the same image tag as the relay and supply its S3
+# environment/IRSA. Re-running is safe: existing sharded objects are skipped.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: buzz-media-layout-backfill
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      serviceAccountName: buzz-relay
+      containers:
+        - name: backfill
+          image: ghcr.io/block/buzz:REPLACE_WITH_RELAY_TAG
+          command: ["/usr/local/bin/buzz-media-layout-backfill"]
+          envFrom:
+            - secretRef:
+                name: buzz-relay-env
+          env:
+            - name: BUZZ_MEDIA_MIGRATION_REQUESTS_PER_SECOND
+              value: "25"
+            # Set true for a no-write inventory pass.
+            - name: BUZZ_MEDIA_MIGRATION_DRY_RUN
+              value: "false"
