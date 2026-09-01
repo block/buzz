@@ -902,7 +902,7 @@ async fn cancel_session(app: &Arc<App>, params: Value) {
 /// Construct the goose provider. See [`crate::provider`].
 async fn build_provider(
     provider_name: &str,
-) -> Result<Arc<dyn goose::providers::base::Provider>, AgentError> {
+) -> Result<Arc<dyn goose_providers::base::Provider>, AgentError> {
     crate::provider::build(provider_name).await
 }
 

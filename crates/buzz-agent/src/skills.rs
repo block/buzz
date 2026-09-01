@@ -12,7 +12,7 @@
 //! model the tool is worth calling. The wording matches goose's own so the two
 //! do not drift into describing the same tool differently.
 
-use goose::custom_requests::{SourceEntry, SourceType};
+use goose_sdk_types::custom_requests::{SourceEntry, SourceType};
 
 /// Provider-native definition for the in-process skill loader.
 pub fn load_skill_tool() -> rmcp::model::Tool {

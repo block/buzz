@@ -32,7 +32,7 @@
 
 use std::sync::Arc;
 
-use goose::providers::base::Provider;
+use goose_providers::base::Provider;
 use goose_providers::databricks_auth::{
     DatabricksAuth, DatabricksOauthTokenProvider, DatabricksRefreshHook,
 };

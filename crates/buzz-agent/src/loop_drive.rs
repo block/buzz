@@ -621,7 +621,7 @@ fn warn_if_silent_turn(published: bool, text_is_empty: bool, output_tokens: Opti
 
 fn accumulate_usage(
     tokens: &mut super::agent::TurnTokens,
-    usage: &goose::providers::base::ProviderUsage,
+    usage: &goose_provider_types::conversation::token_usage::ProviderUsage,
 ) {
     let u = &usage.usage;
     if let Some(i) = u.input_tokens {
@@ -726,7 +726,7 @@ mod tests {
         total: Option<i32>,
         read: Option<i32>,
         write: Option<i32>,
-    ) -> goose::providers::base::ProviderUsage {
+    ) -> goose_provider_types::conversation::token_usage::ProviderUsage {
         let mut provider_usage = goose_provider_types::conversation::token_usage::Usage::new(
             Some(input),
             Some(output),
@@ -736,7 +736,10 @@ mod tests {
         // `Usage::new` synthesizes a total when absent; tests need to exercise
         // a provider response that genuinely omitted it.
         provider_usage.total_tokens = total;
-        goose::providers::base::ProviderUsage::new(model.to_string(), provider_usage)
+        goose_provider_types::conversation::token_usage::ProviderUsage::new(
+            model.to_string(),
+            provider_usage,
+        )
     }
 
     #[test]

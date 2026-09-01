@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use goose::agents::PromptManager;
-use goose::config::GooseMode;
+use goose_provider_types::goose_mode::GooseMode;
 use tokio::sync::Mutex;
 
 /// The system prompt for one session.

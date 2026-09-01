@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use goose::providers::base::Provider;
+use goose_providers::base::Provider;
 use goose_providers::model::ModelConfig;
 use tokio::sync::RwLock;
 
@@ -97,7 +97,7 @@ mod tests {
             _system: &str,
             _messages: &[Message],
             _tools: &[rmcp::model::Tool],
-        ) -> Result<goose::providers::base::MessageStream, ProviderError> {
+        ) -> Result<goose_provider_types::base::MessageStream, ProviderError> {
             unreachable!("tests never call the model")
         }
     }

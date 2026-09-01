@@ -166,7 +166,7 @@ pub struct McpRegistry {
     init_timeout: Duration,
     tool_timeout: Duration,
     hook_timeout: Duration,
-    skills: Vec<goose::custom_requests::SourceEntry>,
+    skills: Vec<goose_sdk_types::custom_requests::SourceEntry>,
 }
 
 impl McpRegistry {
@@ -219,7 +219,7 @@ impl McpRegistry {
             skills: goose::skills::discover_skills(Some(std::path::Path::new(cwd)))
                 .into_iter()
                 .filter(|skill| {
-                    skill.source_type != goose::custom_requests::SourceType::BuiltinSkill
+                    skill.source_type != goose_sdk_types::custom_requests::SourceType::BuiltinSkill
                 })
                 .collect(),
         };
@@ -370,7 +370,7 @@ impl McpRegistry {
         tools
     }
 
-    pub fn skills(&self) -> &[goose::custom_requests::SourceEntry] {
+    pub fn skills(&self) -> &[goose_sdk_types::custom_requests::SourceEntry] {
         &self.skills
     }
 

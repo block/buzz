@@ -1204,6 +1204,7 @@ dependencies = [
  "goose-agent",
  "goose-provider-types",
  "goose-providers",
+ "goose-sdk-types",
  "hex",
  "idna_adapter",
  "nix 0.31.3",
