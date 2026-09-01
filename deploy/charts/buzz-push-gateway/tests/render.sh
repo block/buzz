@@ -10,6 +10,7 @@ helm template push deploy/charts/buzz-push-gateway >"$out"
 # HTTPRoute. The environment-owned inputs remain mandatory.
 production_args=(
   -f deploy/charts/buzz-push-gateway/values-production.yaml
+  --set 'image.digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
   --set 'profiles.dogfood.appAttestAppId=REALTEAM.xyz.block.buzz.dogfood.mobile'
   --set 'networkPolicy.postgresEgressCidrs[0]=10.42.0.0/16'
 )
@@ -94,12 +95,9 @@ ingress_ports = np.dig("spec", "ingress")
 assert!(ingress_ports == Set[8080], ingress_ports.inspect)
 production = YAML.load_stream(File.read(ARGV[1])).compact
 assert!(!production.any? { |x| x["kind"] == "HTTPRoute" })
-production_values = YAML.load_file("deploy/charts/buzz-push-gateway/values-production.yaml")
-reviewed_digest = production_values.dig("image", "digest")
-assert!(reviewed_digest.match?(/\Asha256:[0-9a-f]{64}\z/), reviewed_digest.inspect)
 production_deployment = production.find { |x| x["kind"] == "Deployment" }
 production_image = production_deployment.dig("spec", "template", "spec", "containers", 0, "image")
-assert!(production_image == "ghcr.io/block/buzz-push-gateway@#{reviewed_digest}", production_image.inspect)
+assert!(production_image == "ghcr.io/block/buzz-push-gateway@sha256:#{"a" * 64}", production_image.inspect)
 route = YAML.load_stream(File.read(ARGV[2])).compact.find { |x| x["kind"] == "HTTPRoute" }
 assert!(!route.dig("spec", "parentRefs").empty?)
 assert!(route.dig("spec", "hostnames").include?("push.buzz.xyz"))

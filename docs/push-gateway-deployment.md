@@ -224,7 +224,17 @@ gh attestation verify \
   --source-digest <40-lowercase-hex-source-commit>
 ```
 
-Only after that command succeeds, record the exact digest as `image.digest`; the chart then renders `ghcr.io/block/buzz-push-gateway@sha256:...` and ignores the mutable tag. The `0.2.0` production values pin `sha256:3936cad2d5cb0f6711c749024b96e56969d7e4506eb35d3519e3ef126fa6636d`, the amd64/arm64 index built from `4a9de1a3a121285ef475d630b2b5764044c02cde` by the successful [main image workflow](https://github.com/block/buzz/actions/runs/33457946099). Its SLSA provenance was verified against `block/buzz/.github/workflows/docker.yml` and that source digest. `values-production.yaml` remains an intentionally invalid production-input contract: deployment CI must inject the provisioned dogfood Apple application identifier and the actual PostgreSQL network. In an environment with an existing ingress or service mesh route, keep `httpRoute.enabled=false`. If this chart owns a Gateway API route, enable it and inject an environment-owned `parentRef`; schema validation rejects an enabled route with no parent. The render guard proves both rejection of missing required inputs and fully injected renders.
+Only after that command succeeds, inject the exact digest as `image.digest` in
+the environment's GitOps values; the chart then renders
+`ghcr.io/block/buzz-push-gateway@sha256:...` and ignores the mutable tag.
+`values-production.yaml` remains an intentionally invalid production-input
+contract: deployment CI must inject the verified image digest, the provisioned
+dogfood Apple application identifier, and the actual PostgreSQL network. In an
+environment with an existing ingress or service mesh route, keep
+`httpRoute.enabled=false`. If this chart owns a Gateway API route, enable it and
+inject an environment-owned `parentRef`; schema validation rejects an enabled
+route with no parent. The render guard proves both rejection of missing required
+inputs and fully injected renders.
 
 Network policy keeps APNs HTTPS and PostgreSQL egress in separate CIDR lists. APNs currently requires broad TCP/443 reachability; `networkPolicy.postgresEgressCidrs` must be narrowed to the production database network, and the DNS namespace/pod selectors must match the cluster DNS deployment. The sample private CIDR is not a claim about the production topology.
 
@@ -233,8 +243,9 @@ Kubernetes does not restart pods when referenced Secret bytes change. AEAD or AP
 ## Gateway chart release
 
 The gateway chart has a collision-free release lane separate from the main
-`buzz` chart. To publish version `X.Y.Z`, update both `version` and `appVersion`
-in `deploy/charts/buzz-push-gateway/Chart.yaml`, validate the chart, and open a
+`buzz` chart. To publish chart version `X.Y.Z`, update `version` in
+`deploy/charts/buzz-push-gateway/Chart.yaml` and keep `appVersion` equal to the
+gateway binary's workspace package version. Validate the chart, then open a
 same-repository PR whose branch is exactly `push-chart-release/X.Y.Z`:
 
 ```bash

@@ -4,16 +4,19 @@ env -u GEM_HOME -u GEM_PATH -u RUBYLIB -u RUBYOPT ruby -ryaml <<'RUBY'
 auto_text = File.read('.github/workflows/auto-tag-on-release-pr-merge.yml')
 publish_text = File.read('.github/workflows/push-gateway-helm-chart.yml')
 chart = YAML.load_file('deploy/charts/buzz-push-gateway/Chart.yaml')
-production = YAML.load_file('deploy/charts/buzz-push-gateway/values-production.yaml')
 # Parse first, then pin the tag producer and consumer strings whose agreement
 # makes this a reachable lane rather than an orphan publisher.
 YAML.load(auto_text)
 YAML.load(publish_text)
 version = chart.fetch('version').to_s
 raise "gateway chart version is not semver: #{version}" unless version.match?(/\A\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\z/)
-raise "gateway chart version/appVersion drift" unless chart.fetch('appVersion').to_s == version
-digest = production.dig('image', 'digest').to_s
-raise "production image digest is not immutable: #{digest}" unless digest.match?(/\Asha256:[0-9a-f]{64}\z/)
+workspace_package = File.read('Cargo.toml').match(/\[workspace\.package\](.*?)(?=\n\[|\z)/m)
+raise "workspace package metadata is missing" unless workspace_package
+binary_version = workspace_package[1].match(/^version\s*=\s*"([^"]+)"/)&.[](1)
+raise "workspace package version is missing" unless binary_version
+unless chart.fetch('appVersion').to_s == binary_version
+  raise "gateway chart appVersion does not match packaged binary #{binary_version}"
+end
 [
   'push-chart-release/*)',
   'VERSION="${BRANCH#push-chart-release/}"',
