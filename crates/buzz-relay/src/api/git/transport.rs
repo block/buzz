@@ -14,9 +14,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::{
-    body::Body,
+    body::{to_bytes, Body},
     extract::{Path as AxumPath, Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderValue, Method, Request, StatusCode},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
     Router,
@@ -59,6 +60,65 @@ const INFO_REFS_MAX_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
 /// with a million refs stays far under this.
 const UPLOAD_PACK_MAX_DECODED_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Git's unauthenticated large-push probe body.
+///
+/// When a request exceeds `http.postBuffer`, Git sends this empty pkt-line
+/// request before retrying with an authenticated, chunked receive-pack POST.
+const RECEIVE_PACK_AUTH_PROBE: &[u8] = b"0000";
+const RECEIVE_PACK_REQUEST_CONTENT_TYPE: &str = "application/x-git-receive-pack-request";
+const RECEIVE_PACK_RESULT_CONTENT_TYPE: &str = "application/x-git-receive-pack-result";
+
+fn missing_git_authorization_response(method: &Method) -> Response {
+    let challenge = HeaderValue::from_str(&format!("Nostr realm=\"buzz\", method=\"{method}\""))
+        .unwrap_or_else(|_| HeaderValue::from_static("Nostr realm=\"buzz\""));
+    let mut response = Response::new(Body::from("missing Authorization header"));
+    *response.status_mut() = StatusCode::UNAUTHORIZED;
+    response
+        .headers_mut()
+        .insert(header::WWW_AUTHENTICATE, challenge);
+    response
+}
+
+/// Admit Git's four-byte receive-pack discovery probe without consulting repo
+/// state. Git follows a successful probe with the real, Nostr-authenticated
+/// chunked POST. Every other request continues to [`GitAuth`].
+///
+/// This middleware is installed only on the receive-pack POST route, so the
+/// route itself supplies the method and path constraints. The deliberately
+/// path-independent response avoids disclosing whether a repository exists.
+async fn allow_receive_pack_auth_probe(request: Request<Body>, next: Next) -> Response {
+    let headers = request.headers();
+    let is_candidate = !headers.contains_key(header::AUTHORIZATION)
+        && headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            == Some(RECEIVE_PACK_REQUEST_CONTENT_TYPE)
+        && headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            == Some("4")
+        && !headers.contains_key(header::TRANSFER_ENCODING);
+
+    if !is_candidate {
+        return next.run(request).await;
+    }
+
+    let method = request.method().clone();
+    let body = request.into_body();
+    match to_bytes(body, RECEIVE_PACK_AUTH_PROBE.len()).await {
+        Ok(bytes) if bytes.as_ref() == RECEIVE_PACK_AUTH_PROBE => (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, RECEIVE_PACK_RESULT_CONTENT_TYPE),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            (),
+        )
+            .into_response(),
+        _ => missing_git_authorization_response(&method),
+    }
+}
+
 /// NIP-98 auth extractor for git routes.
 ///
 /// Validates the `Authorization: Nostr <base64>` header before the request body
@@ -89,16 +149,7 @@ impl axum::extract::FromRequestParts<Arc<AppState>> for GitAuth {
             .headers
             .get(header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| {
-                Response::builder()
-                    .status(StatusCode::UNAUTHORIZED)
-                    .header(
-                        "WWW-Authenticate",
-                        format!("Nostr realm=\"buzz\", method=\"{method}\""),
-                    )
-                    .body(Body::from("missing Authorization header"))
-                    .unwrap()
-            })?;
+            .ok_or_else(|| missing_git_authorization_response(&parts.method))?;
 
         let token = auth_header.strip_prefix("Nostr ").ok_or_else(|| {
             Response::builder()
@@ -2117,7 +2168,10 @@ pub fn git_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/git/{owner}/{repo}/info/refs", get(info_refs))
         .route("/git/{owner}/{repo}/git-upload-pack", post(upload_pack))
-        .route("/git/{owner}/{repo}/git-receive-pack", post(receive_pack))
+        .route(
+            "/git/{owner}/{repo}/git-receive-pack",
+            post(receive_pack).route_layer(middleware::from_fn(allow_receive_pack_auth_probe)),
+        )
         .layer(RequestBodyLimitLayer::new(body_limit))
         .with_state(state)
 }
@@ -2131,8 +2185,422 @@ mod track_c_tests {
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use std::collections::BTreeMap;
     use std::io::Write;
+    use std::path::PathBuf;
     use std::process::Output;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::TempDir;
+    use tower::ServiceExt;
+
+    async fn receive_pack_probe_fallback() -> Response {
+        let mut response = missing_git_authorization_response(&Method::POST);
+        response
+            .headers_mut()
+            .insert("x-probe-fallback", HeaderValue::from_static("true"));
+        response
+    }
+
+    fn receive_pack_probe_test_router() -> Router {
+        Router::new().route(
+            "/git/{owner}/{repo}/git-receive-pack",
+            post(receive_pack_probe_fallback)
+                .route_layer(middleware::from_fn(allow_receive_pack_auth_probe)),
+        )
+    }
+
+    fn receive_pack_probe_request(
+        path: &str,
+        content_type: &str,
+        content_length: &str,
+        body: &'static [u8],
+    ) -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header(header::CONTENT_TYPE, content_type)
+            .header(header::CONTENT_LENGTH, content_length)
+            .body(Body::from(body))
+            .expect("probe request")
+    }
+
+    #[tokio::test]
+    async fn receive_pack_probe_is_the_only_unauthenticated_request_admitted() {
+        let paths = [
+            "/git/alice/existing/git-receive-pack",
+            "/git/not-a-valid-owner/missing/git-receive-pack",
+        ];
+        for path in paths {
+            let response = receive_pack_probe_test_router()
+                .oneshot(receive_pack_probe_request(
+                    path,
+                    RECEIVE_PACK_REQUEST_CONTENT_TYPE,
+                    "4",
+                    RECEIVE_PACK_AUTH_PROBE,
+                ))
+                .await
+                .expect("probe response");
+
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.headers().get(header::CONTENT_TYPE),
+                Some(&HeaderValue::from_static(RECEIVE_PACK_RESULT_CONTENT_TYPE))
+            );
+            assert_eq!(
+                response.headers().get(header::CACHE_CONTROL),
+                Some(&HeaderValue::from_static("no-cache"))
+            );
+            assert!(!response.headers().contains_key("x-probe-fallback"));
+            assert!(to_bytes(response.into_body(), 1)
+                .await
+                .expect("probe response body")
+                .is_empty());
+        }
+
+        let mut mutations = vec![
+            receive_pack_probe_request(
+                paths[0],
+                "application/octet-stream",
+                "4",
+                RECEIVE_PACK_AUTH_PROBE,
+            ),
+            receive_pack_probe_request(
+                paths[0],
+                RECEIVE_PACK_REQUEST_CONTENT_TYPE,
+                "5",
+                RECEIVE_PACK_AUTH_PROBE,
+            ),
+        ];
+        let mut authenticated = receive_pack_probe_request(
+            paths[0],
+            RECEIVE_PACK_REQUEST_CONTENT_TYPE,
+            "4",
+            RECEIVE_PACK_AUTH_PROBE,
+        );
+        authenticated.headers_mut().insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Nostr invalid"),
+        );
+        mutations.push(authenticated);
+
+        let mut transfer_encoded = receive_pack_probe_request(
+            paths[0],
+            RECEIVE_PACK_REQUEST_CONTENT_TYPE,
+            "4",
+            RECEIVE_PACK_AUTH_PROBE,
+        );
+        transfer_encoded.headers_mut().insert(
+            header::TRANSFER_ENCODING,
+            HeaderValue::from_static("chunked"),
+        );
+        mutations.push(transfer_encoded);
+
+        for request in mutations {
+            let response = receive_pack_probe_test_router()
+                .oneshot(request)
+                .await
+                .expect("mutated probe response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(response.headers().contains_key("x-probe-fallback"));
+            assert_eq!(
+                response.headers().get(header::WWW_AUTHENTICATE),
+                Some(&HeaderValue::from_static(
+                    "Nostr realm=\"buzz\", method=\"POST\""
+                ))
+            );
+        }
+
+        for body in [b"1111".as_slice(), b"000".as_slice()] {
+            let response = receive_pack_probe_test_router()
+                .oneshot(receive_pack_probe_request(
+                    paths[0],
+                    RECEIVE_PACK_REQUEST_CONTENT_TYPE,
+                    "4",
+                    body,
+                ))
+                .await
+                .expect("invalid probe body response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(!response.headers().contains_key("x-probe-fallback"));
+            assert_eq!(
+                response.headers().get(header::WWW_AUTHENTICATE),
+                Some(&HeaderValue::from_static(
+                    "Nostr realm=\"buzz\", method=\"POST\""
+                ))
+            );
+        }
+    }
+
+    #[derive(Clone)]
+    struct LargePushTestState {
+        repo: Arc<PathBuf>,
+        saw_probe: Arc<AtomicBool>,
+        saw_authenticated_pack: Arc<AtomicBool>,
+    }
+
+    async fn record_large_push_requests(
+        State(state): State<LargePushTestState>,
+        request: Request<Body>,
+        next: Next,
+    ) -> Response {
+        if !request.headers().contains_key(header::AUTHORIZATION)
+            && request
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                == Some(RECEIVE_PACK_REQUEST_CONTENT_TYPE)
+            && request
+                .headers()
+                .get(header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok())
+                == Some("4")
+        {
+            state.saw_probe.store(true, Ordering::SeqCst);
+        }
+        next.run(request).await
+    }
+
+    async fn large_push_info_refs(
+        State(state): State<LargePushTestState>,
+        headers: axum::http::HeaderMap,
+    ) -> Response {
+        if !headers.contains_key(header::AUTHORIZATION) {
+            return missing_git_authorization_response(&Method::GET);
+        }
+
+        let repo = Arc::clone(&state.repo);
+        let output = tokio::task::spawn_blocking(move || {
+            run_test_git(
+                repo.as_path(),
+                &["receive-pack", "--stateless-rpc", "--advertise-refs", "."],
+                &[],
+            )
+        })
+        .await
+        .expect("advertisement task");
+        if !output.status.success() {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            )
+                .into_response();
+        }
+
+        let service_line = b"# service=git-receive-pack\n";
+        let mut body = format!("{:04x}", service_line.len() + 4).into_bytes();
+        body.extend_from_slice(service_line);
+        body.extend_from_slice(b"0000");
+        body.extend_from_slice(&output.stdout);
+        (
+            StatusCode::OK,
+            [
+                (
+                    header::CONTENT_TYPE,
+                    "application/x-git-receive-pack-advertisement",
+                ),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            body,
+        )
+            .into_response()
+    }
+
+    async fn large_push_receive_pack(
+        State(state): State<LargePushTestState>,
+        headers: axum::http::HeaderMap,
+        body: Body,
+    ) -> Response {
+        if !headers.contains_key(header::AUTHORIZATION) {
+            return missing_git_authorization_response(&Method::POST);
+        }
+        state.saw_authenticated_pack.store(true, Ordering::SeqCst);
+
+        let body = decode_git_request_body(&headers, body, 8 * 1024 * 1024);
+        let body = match to_bytes(body, 8 * 1024 * 1024).await {
+            Ok(body) => body,
+            Err(error) => {
+                return (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!("receive-pack body: {error}"),
+                )
+                    .into_response();
+            }
+        };
+        let repo = Arc::clone(&state.repo);
+        let output =
+            tokio::task::spawn_blocking(move || run_test_receive_pack(repo.as_path(), &body, &[]))
+                .await
+                .expect("receive-pack task");
+        if !output.status.success() {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            )
+                .into_response();
+        }
+
+        (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, RECEIVE_PACK_RESULT_CONTENT_TYPE),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            output.stdout,
+        )
+            .into_response()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn large_git_push_reaches_authenticated_pack_after_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let git_version = std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .expect("query git version");
+        let git_version = String::from_utf8(git_version.stdout).expect("utf-8 git version");
+        let mut version_parts = git_version
+            .trim()
+            .strip_prefix("git version ")
+            .expect("git version prefix")
+            .split('.');
+        let major = version_parts
+            .next()
+            .and_then(|part| part.parse::<u32>().ok())
+            .expect("git major version");
+        let minor = version_parts
+            .next()
+            .and_then(|part| part.parse::<u32>().ok())
+            .expect("git minor version");
+        if (major, minor) < (2, 47) {
+            eprintln!(
+                "skipping authtype large-push test on {}",
+                git_version.trim()
+            );
+            return;
+        }
+
+        let root = TempDir::new().expect("tempdir");
+        let remote = root.path().join("remote.git");
+        let source = root.path().join("source");
+        let remote_arg = remote.to_str().expect("utf-8 remote path");
+        let source_arg = source.to_str().expect("utf-8 source path");
+        assert_git_success(
+            run_test_git(
+                root.path(),
+                &["init", "--bare", "--initial-branch=main", remote_arg],
+                &[],
+            ),
+            "initialize bare remote",
+        );
+        assert_git_success(
+            run_test_git(
+                root.path(),
+                &["init", "--initial-branch=main", source_arg],
+                &[],
+            ),
+            "initialize source repository",
+        );
+        assert_git_success(
+            run_test_git(source.as_path(), &["config", "user.name", "Buzz Test"], &[]),
+            "configure user name",
+        );
+        assert_git_success(
+            run_test_git(
+                source.as_path(),
+                &["config", "user.email", "buzz-test@example.com"],
+                &[],
+            ),
+            "configure user email",
+        );
+
+        let mut value = 0x6a09e667f3bcc909_u64;
+        let mut payload = vec![0_u8; 2 * 1024 * 1024];
+        for byte in &mut payload {
+            value ^= value << 13;
+            value ^= value >> 7;
+            value ^= value << 17;
+            *byte = value as u8;
+        }
+        std::fs::write(source.join("payload.bin"), payload).expect("write payload");
+        assert_git_success(
+            run_test_git(source.as_path(), &["add", "payload.bin"], &[]),
+            "stage payload",
+        );
+        assert_git_success(
+            run_test_git(source.as_path(), &["commit", "-m", "large fixture"], &[]),
+            "commit payload",
+        );
+
+        let credential_helper = root.path().join("credential-helper");
+        std::fs::write(
+            &credential_helper,
+            "#!/bin/sh\nif [ \"$1\" = get ]; then\n  printf 'capability[]=authtype\\nauthtype=Nostr\\ncredential=dGVzdA==\\nephemeral=true\\nquit=true\\n\\n'\nfi\n",
+        )
+        .expect("write credential helper");
+        let mut permissions = std::fs::metadata(&credential_helper)
+            .expect("credential helper metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&credential_helper, permissions)
+            .expect("make credential helper executable");
+
+        let state = LargePushTestState {
+            repo: Arc::new(remote.clone()),
+            saw_probe: Arc::new(AtomicBool::new(false)),
+            saw_authenticated_pack: Arc::new(AtomicBool::new(false)),
+        };
+        let app = Router::new()
+            .route("/git/alice/repo/info/refs", get(large_push_info_refs))
+            .route(
+                "/git/alice/repo/git-receive-pack",
+                post(large_push_receive_pack)
+                    .route_layer(middleware::from_fn(allow_receive_pack_auth_probe)),
+            )
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                record_large_push_requests,
+            ))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test router");
+        });
+
+        let remote_url = format!("http://{address}/git/alice/repo");
+        let helper_config = format!("credential.helper={}", credential_helper.display());
+        let source_for_push = source.clone();
+        let push = tokio::task::spawn_blocking(move || {
+            run_test_git(
+                source_for_push.as_path(),
+                &[
+                    "-c",
+                    "credential.helper=",
+                    "-c",
+                    &helper_config,
+                    "-c",
+                    "credential.useHttpPath=true",
+                    "-c",
+                    "http.postBuffer=1048576",
+                    "push",
+                    &remote_url,
+                    "main:main",
+                ],
+                &[],
+            )
+        })
+        .await
+        .expect("push task");
+        server.abort();
+
+        assert_git_success(push, "large smart-HTTP push");
+        assert!(state.saw_probe.load(Ordering::SeqCst));
+        assert!(state.saw_authenticated_pack.load(Ordering::SeqCst));
+        let pushed_ref = run_test_git(remote.as_path(), &["rev-parse", "refs/heads/main"], &[]);
+        assert_git_success(pushed_ref, "verify pushed main ref");
+    }
 
     fn oid_sha1() -> String {
         "cb09a769da1c01f458fa6959d4e8eded38fac8d3".to_string()
