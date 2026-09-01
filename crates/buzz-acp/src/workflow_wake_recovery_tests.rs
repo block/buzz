@@ -3,6 +3,7 @@ use super::*;
 use buzz_core::kind::{KIND_STREAM_MESSAGE, KIND_WORKFLOW_DEF, KIND_WORKFLOW_MENTION_WAKE};
 use buzz_core::workflow_wake::WorkflowMentionWake;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::sync::Arc;
 
 #[tokio::test]
 async fn exhausted_authority_failure_replays_exact_wake_and_verifies_before_dispatch() {
@@ -263,4 +264,91 @@ async fn complete_malformed_authority_body_is_terminal() {
         );
     }
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn missing_identity_ingress_does_not_reopen_transport_dedup() {
+    assert_identity_ingress(true).await;
+}
+
+#[tokio::test]
+async fn pending_rotation_ingress_reopens_transport_dedup_until_identity_recovers() {
+    assert_identity_ingress(false).await;
+}
+
+async fn assert_identity_ingress(missing: bool) {
+    use crate::inbound_author_gate::InboundAuthorGate;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let agent = Keys::generate();
+    let old = Keys::generate();
+    let new = Keys::generate();
+    let channel = Uuid::new_v4();
+    let wake = WorkflowMentionWake::new(agent.public_key(), channel, Uuid::new_v4(),
+        nostr::EventId::from_byte_array([1; 32]), nostr::EventId::from_byte_array([2; 32]))
+        .sign(&new).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let probes = Arc::new(AtomicUsize::new(0));
+    let count = probes.clone();
+    let key = new.public_key();
+    let http_server = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let len = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..len]);
+            assert!(request.starts_with("GET / ") || request.starts_with("GET /info "));
+            let index = count.fetch_add(1, Ordering::SeqCst);
+            let (status, body) = if missing {
+                ("200 OK", json!({}).to_string())
+            } else if index == 1 || index == 2 {
+                ("500 Internal Server Error", String::new())
+            } else {
+                ("200 OK", json!({"self": if index == 0 { old.public_key() } else { key }.to_hex()}).to_string())
+            };
+            stream.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        }
+    });
+    let http = reqwest::Client::new();
+    let rest = RestClient { http: http.clone(), base_url: format!("http://{address}"), keys: agent.clone(), auth_tag_json: None };
+    let mut gate = InboundAuthorGate::connect(&rest, &agent.public_key().to_hex(), "test").await;
+    let (ws, mut server) = test_ws_pair().await;
+    let (event_tx, event_rx) = mpsc::channel(16);
+    let (observer_control_tx, observer_control_rx) = mpsc::channel(16);
+    let (cmd_tx, cmd_rx) = mpsc::channel(16);
+    let bg = tokio::spawn(run_background_task(ws, VecDeque::new(), event_tx, observer_control_tx,
+        cmd_rx, agent.clone(), "ws://unused".into(), agent.public_key().to_hex(), None));
+    let mut harness = HarnessRelay { event_rx, observer_control_rx: Some(observer_control_rx), cmd_tx,
+        http, relay_url: "ws://unused".into(), keys: agent, auth_tag: None, bg_handle: Some(bg) };
+    harness.subscribe_channel_from(channel, ChannelFilter { kinds: Some(vec![KIND_WORKFLOW_MENTION_WAKE]),
+        require_mention: false }, Some(wake.created_at.as_secs())).await.unwrap();
+    let initial = next_data_frame(&mut server).await;
+    let frame = json!(["EVENT", channel_sub_id(channel), wake]).to_string();
+    server.send(Message::Text(frame.clone().into())).await.unwrap();
+    let mut received = timeout(Duration::from_secs(2), harness.next_event()).await.unwrap().unwrap();
+    // Supply the reconnect generation at the production ingress seam. The
+    // transport below is real; its separate reconnect tests cover the counter.
+    received.connection_generation = u64::from(!missing);
+    let start = tokio::time::Instant::now();
+    assert!(crate::workflow_wake::authenticate_for_listener(&mut gate, &harness, &rest, &received).await.is_none());
+    if missing {
+        assert!(timeout(Duration::from_millis(100), server.next()).await.is_err(), "terminal absence must not issue replay REQ");
+        assert_eq!(probes.load(Ordering::SeqCst), 2);
+    } else {
+        assert!(start.elapsed() >= Duration::from_secs(1), "immediate discovery failures must be paced");
+        let replay = next_data_frame(&mut server).await;
+        assert_eq!(replay[0], "REQ");
+        assert_eq!(replay[1], initial[1]);
+        server.send(Message::Text(frame.clone().into())).await.unwrap();
+        let mut replayed = timeout(Duration::from_secs(2), harness.next_event()).await.unwrap().unwrap();
+        assert_eq!(replayed.event.id, wake.id);
+        replayed.connection_generation = 1;
+        let (_, current) = crate::workflow_wake::authenticate_for_listener(&mut gate, &harness, &rest, &replayed).await.expect("same wake recovers before definitive signer rejection");
+        assert_eq!(current, key);
+        assert_eq!(probes.load(Ordering::SeqCst), 4);
+    }
+    server.send(Message::Text(frame.into())).await.unwrap();
+    assert!(timeout(Duration::from_millis(100), harness.next_event()).await.is_err(), "terminal/successful ingress preserves dedup");
+    http_server.abort();
+    harness.shutdown().await;
 }

@@ -38,6 +38,37 @@ pub struct WorkflowWakeAuthority {
     pub message: Event,
 }
 
+/// Production wake ingress: resolve current identity before definitive signer
+/// rejection, and reopen transport dedup only for paced, pending discovery.
+pub(crate) async fn authenticate_for_listener(
+    gate: &mut crate::inbound_author_gate::InboundAuthorGate,
+    relay: &crate::relay::HarnessRelay,
+    rest: &crate::relay::RestClient,
+    event: &crate::relay::BuzzEvent,
+) -> Option<(WorkflowMentionWake, PublicKey)> {
+    use crate::inbound_author_gate::WakeIdentity;
+    match gate
+        .wake_identity_for_generation(rest, event.connection_generation)
+        .await
+    {
+        WakeIdentity::Ready(key) => authenticate(&event.event, key).map(|wake| (wake, key)),
+        WakeIdentity::Unavailable => None,
+        WakeIdentity::Retry => {
+            if let Err(error) = relay
+                .replay_event(
+                    event.channel_id,
+                    event.event.id.to_hex(),
+                    event.event.created_at.as_secs(),
+                )
+                .await
+            {
+                tracing::warn!(%error, "failed to arrange workflow identity replay");
+            }
+            None
+        }
+    }
+}
+
 /// Return whether a revision-labelled workflow message must dispatch only
 /// through its separately verified wake, regardless of relay key rotation.
 pub fn requires_verified_wake(event: &Event) -> bool {

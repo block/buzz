@@ -480,6 +480,20 @@ impl RestClient {
         .await
     }
 
+    async fn bridge_get(&self, path: &str) -> Result<reqwest::Response, RelayError> {
+        let url = format!("{}{}", self.base_url, path);
+        let auth_tag_header = self.auth_tag_json.clone();
+        self.request_with_retry("GET", path, || {
+            let auth = self.nip98_header("GET", &url, None).unwrap_or_default();
+            let mut request = self.http.get(&url).header("Authorization", auth);
+            if let Some(ref tag) = auth_tag_header {
+                request = request.header("x-auth-tag", tag);
+            }
+            request.send()
+        })
+        .await
+    }
+
     /// Fetch one exact workflow-wake authority bundle.
     pub async fn workflow_wake_authority(
         &self,

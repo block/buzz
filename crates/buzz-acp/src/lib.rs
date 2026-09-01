@@ -415,6 +415,15 @@ mod inbound_author_gate {
         .await
     }
 
+    /// Durable wakes require a current-generation identity, unlike ordinary
+    /// admission's availability-oriented retained-key policy.
+    #[derive(Debug, PartialEq, Eq)]
+    pub(crate) enum WakeIdentity {
+        Ready(nostr::PublicKey),
+        Unavailable,
+        Retry,
+    }
+
     pub(crate) struct InboundAuthorGate {
         agent_pubkey_hex: String,
         relay_self: Option<String>,
@@ -476,6 +485,26 @@ mod inbound_author_gate {
             self.relay_self
                 .as_deref()
                 .and_then(|key| nostr::PublicKey::from_hex(key).ok())
+        }
+
+        /// Resolve durable-wake identity without consuming a wake against a
+        /// stale key. Missing identity in a complete document is terminal for
+        /// this generation. Transient failures remain replayable, paced even
+        /// when discovery fails immediately (for example HTTP 500).
+        pub(crate) async fn wake_identity_for_generation(
+            &mut self,
+            rest_client: &relay::RestClient,
+            event_generation: u64,
+        ) -> WakeIdentity {
+            let key = self
+                .relay_identity_for_generation(rest_client, event_generation)
+                .await;
+            if refresh_needed(self.refreshed_generation, event_generation) {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                WakeIdentity::Retry
+            } else {
+                key.map_or(WakeIdentity::Unavailable, WakeIdentity::Ready)
+            }
         }
 
         /// Refresh relay identity, resolve channel trust, and apply trusted
@@ -3232,29 +3261,9 @@ async fn tokio_main() -> Result<()> {
                             let buzz_event = if kind_u32
                                 == buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE
                             {
-                                let Some(workflow_relay_pubkey) = author_gate_ctx
-                                    .relay_identity_for_generation(
-                                        &ctx.rest_client,
-                                        buzz_event.connection_generation,
-                                    )
-                                    .await
-                                else {
-                                    // Discovery can recover on the next delivery; reopen
-                                    // transport dedup just as for transient authority reads.
-                                    if let Err(error) = relay.replay_event(
-                                        buzz_event.channel_id,
-                                        buzz_event.event.id.to_hex(),
-                                        buzz_event.event.created_at.as_secs(),
-                                    ).await {
-                                        tracing::warn!(%error, "failed to arrange workflow identity replay");
-                                    }
-                                    continue;
-                                };
-                                let Some(wake) = workflow_wake::authenticate(
-                                    &buzz_event.event,
-                                    workflow_relay_pubkey,
-                                ) else {
-                                    tracing::warn!("workflow wake authentication failed");
+                                let Some((wake, workflow_relay_pubkey)) = workflow_wake::authenticate_for_listener(
+                                    &mut author_gate_ctx, &relay, &ctx.rest_client, &buzz_event,
+                                ).await else {
                                     continue;
                                 };
                                 let authority = match ctx
@@ -7219,6 +7228,75 @@ mod author_gate_tests {
             gate.relay_identity_for_test(),
             Some(new.public_key().to_hex().as_str())
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn wake_identity_missing_is_terminal_until_a_new_generation() {
+        use inbound_author_gate::WakeIdentity;
+        let keys = nostr::Keys::generate();
+        let (rest, server) = nip11_scripted_server(std::collections::VecDeque::from([
+            Ok(serde_json::json!({})),
+            Ok(serde_json::json!({})), // /info fallback also has no identity
+            Ok(serde_json::json!({"self": keys.public_key().to_hex()})),
+        ]))
+        .await;
+        let mut gate = InboundAuthorGate::connect(&rest, "agent", "test").await;
+        // The scripted valid key must remain unread: repeated deliveries on a
+        // completed generation cannot make progress and must not request replay.
+        for _ in 0..3 {
+            assert_eq!(
+                gate.wake_identity_for_generation(&rest, 0).await,
+                WakeIdentity::Unavailable
+            );
+        }
+        assert_eq!(
+            gate.wake_identity_for_generation(&rest, 1).await,
+            WakeIdentity::Ready(keys.public_key())
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn wake_identity_transient_rotation_is_paced_and_replayable() {
+        use inbound_author_gate::WakeIdentity;
+        let old = nostr::Keys::generate();
+        let new = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let (rest, server) = nip11_scripted_server(std::collections::VecDeque::from([
+            Ok(serde_json::json!({"self": old.public_key().to_hex()})),
+            Err(()),
+            Err(()), // /info fallback also fails
+            Ok(serde_json::json!({"self": new.public_key().to_hex()})),
+        ]))
+        .await;
+        let mut gate =
+            InboundAuthorGate::connect(&rest, &agent.public_key().to_hex(), "test").await;
+        let wake = buzz_core::workflow_wake::WorkflowMentionWake::new(
+            agent.public_key(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            nostr::EventId::from_byte_array([1; 32]),
+            nostr::EventId::from_byte_array([2; 32]),
+        )
+        .sign(&new)
+        .unwrap();
+        let started = tokio::time::Instant::now();
+        assert_eq!(
+            gate.wake_identity_for_generation(&rest, 1).await,
+            WakeIdentity::Retry
+        );
+        assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+        // Ordinary admission may retain A, but the durable-wake boundary must
+        // not authenticate against A and permanently consume B's wake.
+        assert_eq!(
+            gate.relay_identity_for_test(),
+            Some(old.public_key().to_hex().as_str())
+        );
+        let WakeIdentity::Ready(key) = gate.wake_identity_for_generation(&rest, 1).await else {
+            panic!("replayed wake must recover the new signing identity");
+        };
+        assert!(workflow_wake::authenticate(&wake, key).is_some());
         server.abort();
     }
 
