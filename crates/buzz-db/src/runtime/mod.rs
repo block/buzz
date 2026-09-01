@@ -963,6 +963,17 @@ impl Db {
     /// The query runs on the already-acquired connection so the two phases
     /// cannot be collapsed into a second implicit pool acquisition.
     pub async fn readiness_check(&self, deadline: tokio::time::Instant) -> DbReadinessOutcome {
+        self.readiness_check_sql(deadline, "SELECT 1").await
+    }
+
+    /// Production-bound seam for classifying failures after pool acquisition.
+    /// Tests vary only the SQL so timeout/error/cancellation paths execute the
+    /// same acquisition and classification code as [`Self::readiness_check`].
+    async fn readiness_check_sql(
+        &self,
+        deadline: tokio::time::Instant,
+        query: &'static str,
+    ) -> DbReadinessOutcome {
         let mut connection = match tokio::time::timeout_at(deadline, self.pool.acquire()).await {
             Err(_) => return DbReadinessOutcome::PoolTimeout,
             Ok(Err(sqlx::Error::PoolTimedOut)) => return DbReadinessOutcome::PoolTimeout,
@@ -973,8 +984,7 @@ impl Db {
             Ok(Ok(connection)) => connection,
         };
 
-        match tokio::time::timeout_at(deadline, sqlx::query("SELECT 1").execute(&mut *connection))
-            .await
+        match tokio::time::timeout_at(deadline, sqlx::query(query).execute(&mut *connection)).await
         {
             Err(_) => DbReadinessOutcome::QueryTimeout,
             Ok(Err(error)) => {

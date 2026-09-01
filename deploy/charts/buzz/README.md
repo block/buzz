@@ -115,6 +115,27 @@ disables that probe through `relay.extraEnv`, `/_readiness` does not test object
 storage; configuration is still parsed strictly, but reachability and addressing
 errors surface on the first storage operation.
 
+### Readiness telemetry contract
+
+Only requests served by the private health listener (`BUZZ_HEALTH_PORT`) emit
+rollout readiness telemetry. The compatibility `/_readiness` route on the public
+app listener returns health but does not change these metrics.
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `buzz_readiness_checks_total` | counter | `reason` from the closed readiness-reason set |
+| `buzz_readiness_dependency_checks_total` | counter | `dependency`, typed bounded `outcome` |
+| `buzz_readiness_check_duration_seconds` | histogram | `check` only |
+| `buzz_readiness_state` | gauge | `check` only; latest publishable generation |
+
+The schema has a ceiling of 99 raw Prometheus series per pod: 12 overall
+reasons, 11 valid dependency/outcome pairs, 72 histogram series, and 4 gauges.
+Do not add pod, ReplicaSet, version, rollout, error text, SQL, URL, tenant,
+user, community, pubkey, header, query, or other request-controlled labels.
+Shutdown without dependency evaluation increments only
+`buzz_readiness_checks_total{reason="shutting_down"}` and sets the overall
+state to zero; it does not fabricate dependency failures or latency samples.
+
 ## Relay Pod extensions
 
 The chart exposes narrow extension points for init containers, volumes, relay

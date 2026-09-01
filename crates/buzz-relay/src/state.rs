@@ -713,6 +713,8 @@ pub struct AppState {
     pub audio_rooms: Arc<AudioRoomManager>,
     /// Set to `true` on SIGTERM — readiness probe returns 503.
     pub shutting_down: Arc<AtomicBool>,
+    /// Orders readiness gauge publication against terminal shutdown.
+    pub(crate) readiness: Arc<crate::readiness::ReadinessCoordinator>,
     /// Process start time — used by `/_status` endpoint.
     pub started_at: Instant,
     /// Shared, community-scoped NIP-98 replay prevention.
@@ -914,6 +916,7 @@ impl AppState {
             git_pack_cache,
             audio_rooms: Arc::new(AudioRoomManager::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
+            readiness: Arc::new(crate::readiness::ReadinessCoordinator::default()),
             started_at: Instant::now(),
             nip98_replay,
             gif_http_client,
@@ -953,6 +956,23 @@ impl AppState {
                 handle: audit_worker_handle,
             },
         )
+    }
+
+    /// Atomically closes readiness publication before exposing shutdown to
+    /// the relay's other fast-path lifecycle checks.
+    pub fn begin_shutdown(&self) {
+        self.readiness.begin_shutdown();
+        self.shutting_down.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_readiness_evaluator(
+        &mut self,
+        evaluator: Arc<dyn crate::readiness::ReadinessEvaluator>,
+    ) {
+        self.readiness = Arc::new(crate::readiness::ReadinessCoordinator::with_evaluator(
+            evaluator,
+        ));
     }
 
     /// Inter-relay mesh handle. `None` ⇒ mesh-off / single-instance: callers
