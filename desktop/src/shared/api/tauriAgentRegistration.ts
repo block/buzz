@@ -1,4 +1,11 @@
 import { invokeTauri } from "@/shared/api/tauri";
+import type { RespondToMode } from "@/shared/api/types";
+
+export type RegisterExistingAgentInput = {
+  agentPubkey: string;
+  respondTo: RespondToMode;
+  respondToAllowlist: string[];
+};
 
 export type ExistingAgentRegistrationResult = {
   agentPubkey: string;
@@ -17,11 +24,11 @@ type RawExistingAgentRegistrationResult = {
 };
 
 export async function registerExistingAgent(
-  agentPubkey: string,
+  input: RegisterExistingAgentInput,
 ): Promise<ExistingAgentRegistrationResult> {
   const result = await invokeTauri<RawExistingAgentRegistrationResult>(
     "register_existing_agent",
-    { input: { agentPubkey } },
+    { input },
   );
   return {
     ...result,

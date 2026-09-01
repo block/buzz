@@ -307,10 +307,23 @@ test("registers an existing agent without creating a local persona", async ({
   );
 
   const agentPubkey = "A".repeat(64);
+  const ownerPubkey = "b".repeat(64);
+  const teammatePubkey = "c".repeat(64);
   const submit = page.getByTestId("register-existing-agent-submit");
   await expect(submit).toBeDisabled();
   await page.getByTestId("register-existing-agent-pubkey").fill(agentPubkey);
   await expect(submit).toBeEnabled();
+  await page
+    .getByTestId("register-existing-agent-respond-to")
+    .selectOption("allowlist");
+  await expect(submit).toBeDisabled();
+  await page
+    .getByTestId("register-existing-agent-allowlist")
+    .fill(`${ownerPubkey}\n${teammatePubkey}`);
+  await expect(submit).toBeEnabled();
+  await expect(
+    page.getByTestId("register-existing-agent-policy-summary"),
+  ).toHaveText("2 selected people can find this agent in mention suggestions.");
   await submit.click();
 
   await expect(page.getByTestId("register-existing-agent-result")).toHaveText(
@@ -326,7 +339,11 @@ test("registers an existing agent without creating a local persona", async ({
     ),
   );
   expect(registrationPayload?.payload).toEqual({
-    input: { agentPubkey },
+    input: {
+      agentPubkey,
+      respondTo: "allowlist",
+      respondToAllowlist: [ownerPubkey, teammatePubkey],
+    },
   });
   expect(await countCommandInvocations(page, "create_persona")).toBe(0);
 });

@@ -289,7 +289,7 @@ export function CommunityCatalogDialog({
     <>
       <Dialog
         onOpenChange={(nextOpen) => {
-          if (!nextOpen && personasPending) return;
+          if (!nextOpen && (personasPending || isRegistrationPending)) return;
           if (!nextOpen) {
             requestClose();
             return;

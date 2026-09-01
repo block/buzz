@@ -18,7 +18,7 @@ use crate::{
             get_retained_event, mark_synced, open_retention_db, retain_event, RetainedEvent,
             RetentionScope,
         },
-        RespondTo,
+        validate_respond_to_allowlist, RespondTo,
     },
     relay::{query_relay_at_with_keys, relay_http_base_url, submit_signed_event_at_with_keys},
 };
@@ -27,6 +27,10 @@ use crate::{
 #[serde(rename_all = "camelCase")]
 pub struct RegisterExistingAgentRequest {
     pub agent_pubkey: String,
+    #[serde(default)]
+    pub respond_to: RespondTo,
+    #[serde(default)]
+    pub respond_to_allowlist: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -60,6 +64,8 @@ fn has_valid_existing_registration(
     agent_pubkey: &str,
     owner_pubkey: &str,
     display_name: &str,
+    respond_to: RespondTo,
+    respond_to_allowlist: &[String],
 ) -> bool {
     crate::nostr_convert::relay_agents_from_managed_agent_events(
         events,
@@ -70,9 +76,44 @@ fn has_valid_existing_registration(
         agent.pubkey == agent_pubkey
             && agent.owner_pubkey.as_deref() == Some(owner_pubkey)
             && agent.name == display_name
-            && agent.respond_to == Some(RespondTo::OwnerOnly)
-            && agent.respond_to_allowlist.is_empty()
+            && agent.respond_to == Some(respond_to)
+            && agent.respond_to_allowlist == respond_to_allowlist
     })
+}
+
+fn normalize_registration_policy(
+    respond_to: RespondTo,
+    respond_to_allowlist: &[String],
+) -> Result<(RespondTo, Vec<String>), String> {
+    let normalized = validate_respond_to_allowlist(respond_to_allowlist)?;
+    if respond_to == RespondTo::Allowlist && normalized.is_empty() {
+        return Err("Selected people requires at least one 64-character public key.".to_string());
+    }
+
+    Ok((
+        respond_to,
+        if respond_to == RespondTo::Allowlist {
+            normalized
+        } else {
+            Vec::new()
+        },
+    ))
+}
+
+fn ensure_not_locally_managed<'a>(
+    managed_pubkeys: impl IntoIterator<Item = &'a str>,
+    agent_pubkey: &str,
+) -> Result<(), String> {
+    if managed_pubkeys
+        .into_iter()
+        .any(|pubkey| pubkey.eq_ignore_ascii_case(agent_pubkey))
+    {
+        return Err(
+            "This agent is already managed by this Desktop. Edit its access policy instead."
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn latest_registration_created_at(
@@ -134,6 +175,8 @@ fn prepare_registration_at(
     profile: &nostr::Event,
     agent_pubkey: &str,
     relay_created_at: Option<i64>,
+    respond_to: RespondTo,
+    respond_to_allowlist: Vec<String>,
 ) -> Result<PreparedExistingAgentRegistration, String> {
     let owner_pubkey = scope.owner_keys.public_key().to_hex();
     let display_name = verified_profile_name(profile, agent_pubkey, &owner_pubkey)?;
@@ -145,8 +188,8 @@ fn prepare_registration_at(
         provider: None,
         persona_source_version: None,
         parallelism: 1,
-        respond_to: RespondTo::OwnerOnly,
-        respond_to_allowlist: Vec::new(),
+        respond_to,
+        respond_to_allowlist,
     };
 
     let conn = open_retention_db(&scope.db_path)?;
@@ -187,6 +230,8 @@ pub async fn register_existing_agent(
     app: AppHandle,
 ) -> Result<RegisterExistingAgentResult, String> {
     let agent_pubkey = normalize_agent_pubkey(&input.agent_pubkey)?;
+    let (respond_to, respond_to_allowlist) =
+        normalize_registration_policy(input.respond_to, &input.respond_to_allowlist)?;
     let state = app.state::<AppState>();
     let scope = crate::managed_agents::retention::active_retention_scope(&app, &state)?;
     let owner_pubkey = scope.owner_keys.public_key().to_hex();
@@ -228,6 +273,8 @@ pub async fn register_existing_agent(
         &agent_pubkey,
         &owner_pubkey,
         &display_name,
+        respond_to,
+        &respond_to_allowlist,
     ) {
         return Ok(RegisterExistingAgentResult {
             agent_pubkey,
@@ -243,13 +290,26 @@ pub async fn register_existing_agent(
     let prepared = tokio::task::spawn_blocking({
         let app = app.clone();
         let agent_pubkey = agent_pubkey.clone();
+        let respond_to_allowlist = respond_to_allowlist.clone();
         move || {
             let state = app.state::<AppState>();
             let _store_guard = state
                 .managed_agents_store_lock
                 .lock()
                 .map_err(|error| error.to_string())?;
-            prepare_registration_at(scope, &profile, &agent_pubkey, relay_created_at)
+            let managed_agents = crate::managed_agents::load_managed_agents(&app)?;
+            ensure_not_locally_managed(
+                managed_agents.iter().map(|record| record.pubkey.as_str()),
+                &agent_pubkey,
+            )?;
+            prepare_registration_at(
+                scope,
+                &profile,
+                &agent_pubkey,
+                relay_created_at,
+                respond_to,
+                respond_to_allowlist,
+            )
         }
     })
     .await
@@ -327,6 +387,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let owner = nostr::Keys::generate();
         let agent = nostr::Keys::generate();
+        let viewer = nostr::Keys::generate().public_key().to_hex();
         let agent_pubkey = agent.public_key().to_hex();
         let profile = profile_for(&owner, &agent, "Tess");
 
@@ -335,6 +396,8 @@ mod tests {
             &profile,
             &agent_pubkey,
             None,
+            RespondTo::Allowlist,
+            vec![owner.public_key().to_hex(), viewer.clone()],
         )
         .unwrap();
 
@@ -347,7 +410,11 @@ mod tests {
         }));
         let content: serde_json::Value = serde_json::from_str(&prepared.event.content).unwrap();
         assert_eq!(content["name"], "Tess");
-        assert_eq!(content["respond_to"], "owner-only");
+        assert_eq!(content["respond_to"], "allowlist");
+        assert_eq!(
+            content["respond_to_allowlist"],
+            serde_json::json!([owner.public_key().to_hex(), viewer])
+        );
         assert_eq!(content["parallelism"], 1);
         assert!(content.get("private_key_nsec").is_none());
         assert!(content.get("auth_tag").is_none());
@@ -367,6 +434,8 @@ mod tests {
             &profile,
             &agent.public_key().to_hex(),
             None,
+            RespondTo::OwnerOnly,
+            Vec::new(),
         )
         .err()
         .unwrap();
@@ -392,6 +461,8 @@ mod tests {
             &profile,
             &agent.public_key().to_hex(),
             None,
+            RespondTo::OwnerOnly,
+            Vec::new(),
         )
         .err()
         .unwrap();
@@ -409,6 +480,48 @@ mod tests {
             normalize_agent_pubkey("not-a-pubkey").unwrap_err(),
             "Enter a valid 64-character agent public key."
         );
+    }
+
+    #[test]
+    fn registration_policy_normalizes_allowlist_and_requires_a_selected_person() {
+        let upper = "A".repeat(64);
+        let lower = "a".repeat(64);
+        assert_eq!(
+            normalize_registration_policy(
+                RespondTo::Allowlist,
+                &[format!(" {upper} "), lower.clone()],
+            )
+            .unwrap(),
+            (RespondTo::Allowlist, vec![lower])
+        );
+        assert_eq!(
+            normalize_registration_policy(RespondTo::Allowlist, &[]).unwrap_err(),
+            "Selected people requires at least one 64-character public key."
+        );
+    }
+
+    #[test]
+    fn registration_policy_clears_irrelevant_allowlist_entries() {
+        let pubkey = "a".repeat(64);
+        assert_eq!(
+            normalize_registration_policy(RespondTo::OwnerOnly, std::slice::from_ref(&pubkey))
+                .unwrap(),
+            (RespondTo::OwnerOnly, Vec::new())
+        );
+        assert_eq!(
+            normalize_registration_policy(RespondTo::Anyone, &[pubkey]).unwrap(),
+            (RespondTo::Anyone, Vec::new())
+        );
+    }
+
+    #[test]
+    fn registration_rejects_a_pubkey_already_managed_by_this_desktop() {
+        let managed_pubkey = "a".repeat(64);
+        assert_eq!(
+            ensure_not_locally_managed([managed_pubkey.as_str()], &managed_pubkey).unwrap_err(),
+            "This agent is already managed by this Desktop. Edit its access policy instead."
+        );
+        assert!(ensure_not_locally_managed([managed_pubkey.as_str()], &"b".repeat(64),).is_ok());
     }
 
     #[test]
@@ -440,11 +553,13 @@ mod tests {
             &agent.public_key().to_hex(),
             &owner.public_key().to_hex(),
             "Tess",
+            RespondTo::OwnerOnly,
+            &[],
         ));
     }
 
     #[test]
-    fn existing_registration_requires_owner_only_policy_and_current_name() {
+    fn existing_registration_requires_requested_policy_allowlist_and_current_name() {
         let owner = nostr::Keys::generate();
         let agent = nostr::Keys::generate();
         let agent_pubkey = agent.public_key().to_hex();
@@ -473,6 +588,8 @@ mod tests {
             &agent_pubkey,
             &owner_pubkey,
             "Tess",
+            RespondTo::OwnerOnly,
+            &[],
         ));
         assert!(!has_valid_existing_registration(
             std::slice::from_ref(&owner_only),
@@ -480,6 +597,8 @@ mod tests {
             &agent_pubkey,
             &owner_pubkey,
             "Renamed Tess",
+            RespondTo::OwnerOnly,
+            &[],
         ));
 
         let anyone = ManagedAgentEventContent {
@@ -496,23 +615,28 @@ mod tests {
             &agent_pubkey,
             &owner_pubkey,
             "Tess",
+            RespondTo::OwnerOnly,
+            &[],
         ));
 
-        let owner_only_with_allowlist = ManagedAgentEventContent {
-            respond_to_allowlist: vec![nostr::Keys::generate().public_key().to_hex()],
+        let allowlisted_pubkey = nostr::Keys::generate().public_key().to_hex();
+        let allowlist = ManagedAgentEventContent {
+            respond_to: RespondTo::Allowlist,
+            respond_to_allowlist: vec![allowlisted_pubkey.clone()],
             ..content
         };
-        let owner_only_with_allowlist =
-            build_agent_event_from_content(&agent_pubkey, &owner_only_with_allowlist)
-                .unwrap()
-                .sign_with_keys(&owner)
-                .unwrap();
-        assert!(!has_valid_existing_registration(
-            &[owner_only_with_allowlist],
+        let allowlist = build_agent_event_from_content(&agent_pubkey, &allowlist)
+            .unwrap()
+            .sign_with_keys(&owner)
+            .unwrap();
+        assert!(has_valid_existing_registration(
+            &[allowlist],
             &profile,
             &agent_pubkey,
             &owner_pubkey,
             "Tess",
+            RespondTo::Allowlist,
+            &[allowlisted_pubkey],
         ));
     }
 
@@ -530,6 +654,8 @@ mod tests {
             &profile,
             &agent_pubkey,
             Some(future_created_at),
+            RespondTo::OwnerOnly,
+            Vec::new(),
         )
         .unwrap();
 
