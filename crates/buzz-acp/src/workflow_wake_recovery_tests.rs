@@ -332,7 +332,9 @@ async fn assert_identity_ingress(missing: bool) {
     let start = tokio::time::Instant::now();
     assert!(crate::workflow_wake::authenticate_for_listener(&mut gate, &harness, &rest, &received).await.is_none());
     if missing {
-        assert!(timeout(Duration::from_millis(100), server.next()).await.is_err(), "terminal absence must not issue replay REQ");
+        // The transport heartbeat can send Ping independently of replay.
+        // Answer control frames and assert that no application REQ is sent.
+        assert!(timeout(Duration::from_millis(100), next_data_frame(&mut server)).await.is_err(), "terminal absence must not issue replay REQ");
         assert_eq!(probes.load(Ordering::SeqCst), 2);
     } else {
         assert!(start.elapsed() >= Duration::from_secs(1), "immediate discovery failures must be paced");
