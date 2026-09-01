@@ -1711,14 +1711,21 @@ fn build_project_owner_announcement_events(
     announcements
         .into_iter()
         .map(|template| {
-            if !matches!(template.kind, 30_617 | 30_621) {
+            if !matches!(template.kind, 30_617 | 30_621 | 47_001) {
                 anyhow::bail!("unsupported project announcement kind");
             }
-            if !template.tags.iter().any(|tag| {
-                tag.first().is_some_and(|value| value == "d")
-                    && tag.get(1).is_some_and(|value| !value.trim().is_empty())
-            }) {
-                anyhow::bail!("project announcement is missing its address");
+            let required_tags: &[&str] = if template.kind == 47_001 {
+                &["a", "e", "op", "channel"]
+            } else {
+                &["d"]
+            };
+            for required_tag in required_tags {
+                if !template.tags.iter().any(|tag| {
+                    tag.first().is_some_and(|value| value == required_tag)
+                        && tag.get(1).is_some_and(|value| !value.trim().is_empty())
+                }) {
+                    anyhow::bail!("project event is missing its {required_tag} tag");
+                }
             }
             let tags = template
                 .tags
@@ -6056,7 +6063,7 @@ mod owner_control_command_tests {
     }
 
     #[test]
-    fn project_owner_control_signs_only_addressable_project_events() {
+    fn project_owner_control_signs_only_project_events() {
         let keys = Keys::generate();
         let events = build_project_owner_announcement_events(
             vec![
@@ -6080,6 +6087,29 @@ mod owner_control_command_tests {
         assert_eq!(events.len(), 2);
         assert!(events.iter().all(|event| event.pubkey == keys.public_key()));
         assert!(events.iter().all(|event| event.verify().is_ok()));
+
+        let [revision] = build_project_owner_announcement_events(
+            vec![ProjectOwnerAnnouncementTemplate {
+                kind: 47_001,
+                content: String::new(),
+                created_at: Some(1),
+                tags: vec![
+                    vec!["a".to_string(), "30621:owner:project".to_string()],
+                    vec!["e".to_string(), "b".repeat(64)],
+                    vec!["op".to_string(), "add-related-channel".to_string()],
+                    vec![
+                        "channel".to_string(),
+                        "11111111-1111-4111-8111-111111111111".to_string(),
+                    ],
+                ],
+            }],
+            &keys,
+        )
+        .expect("valid project revision")
+        .try_into()
+        .expect("one revision event");
+        assert_eq!(revision.pubkey, keys.public_key());
+        assert!(revision.verify().is_ok());
     }
 
     #[test]

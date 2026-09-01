@@ -48,11 +48,11 @@ NIP-34 is the metadata and discovery layer. Git remains the transport. The trans
 
 Real work spans repositories. The platform is a relay, a desktop app, and a mobile app — three repos, one project. Render one card per repo and they look like three unrelated things.
 
-Grouping is the one forge semantic that per-repo tags cannot express, and it's worth being precise about why, because everything else here deliberately avoids a custom kind.
+Grouping is the one forge container semantic that per-repo tags cannot express, and it's worth being precise about why, because everything else here deliberately avoids a custom container kind.
 
 Put membership in each `kind:30617` and a project spanning Alice's and Bob's repos needs *both* of them to publish a tag naming the group. Alice can't enroll Bob's repo — she can't sign for his key. Cross-owner grouping becomes impossible, and the project's own name, description, and channel end up scattered across events with no single writer and no deletion story: dropping a repo from the group would mean editing an event you don't control.
 
-So there is exactly one custom kind — [NIP-MP](docs/nips/NIP-MP.md), `kind:30621`. One signer, one replaceable event, all group state in one place:
+So there is exactly one custom container kind — [NIP-MP](docs/nips/NIP-MP.md), `kind:30621`. One signer, one replaceable event, all group state in one place. NIP-MP also defines an actor-signed regular revision kind for the narrow case where authorized home-channel admins collaboratively manage related channels without holding the Project signer's key.
 
 ```json
 {

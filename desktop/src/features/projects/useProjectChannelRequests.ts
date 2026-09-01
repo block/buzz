@@ -4,10 +4,14 @@ import { toast } from "sonner";
 import { classifyAgentManagementOrigin } from "@/features/agents/agentManagementBuffer";
 import { subscribeProjectChannelRequests } from "@/features/agents/observerRelayStore";
 import { useManagedAgentsQuery } from "@/features/agents/hooks";
-import { useChannelsQuery } from "@/features/channels/hooks";
+import {
+  useChannelMembersQuery,
+  useChannelsQuery,
+} from "@/features/channels/hooks";
 import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
 import { useProjectsQuery } from "@/features/projects/hooks";
 import type { ProjectChannelRequest } from "@/features/projects/projectChannelRequest";
+import { projectChannelRequestApproval } from "@/features/projects/projectChannelRequestApproval";
 import {
   advanceProjectChannelRequestQueue,
   createProjectChannelRequestQueue,
@@ -119,6 +123,9 @@ export function useProjectChannelRequests() {
             candidate.name.trim().toLocaleLowerCase() ===
             request.request.templateName?.trim().toLocaleLowerCase(),
         ) ?? null);
+  const homeMembersQuery = useChannelMembersQuery(
+    project?.projectChannelId ?? null,
+  );
 
   function dismiss() {
     if (mutation.isPending) return;
@@ -133,10 +140,20 @@ export function useProjectChannelRequests() {
       return;
     }
     const identity = identityQuery.data?.pubkey;
-    const owner = normalizePubkey(project.owner);
-    const agent = normalizePubkey(sourceAgentPubkey);
-    if ((!identity || normalizePubkey(identity) !== owner) && agent !== owner) {
-      setError("Only the project owner can approve this channel.");
+    const viewerRole = homeMembersQuery.data?.find(
+      (member) =>
+        normalizePubkey(member.pubkey) === normalizePubkey(identity ?? ""),
+    )?.role;
+    const approval = projectChannelRequestApproval(
+      project,
+      identity,
+      viewerRole,
+      sourceAgentPubkey,
+    );
+    if (!approval) {
+      setError(
+        "Only the project owner or a home-channel admin can approve this channel.",
+      );
       return;
     }
     if (request.request.templateName && !template) {
@@ -150,8 +167,7 @@ export function useProjectChannelRequests() {
       await mutation.mutateAsync({
         description: request.request.description,
         name: request.request.name,
-        ownerControlAgentPubkey:
-          agent === owner ? sourceAgentPubkey : undefined,
+        ownerControlAgentPubkey: approval.ownerControlAgentPubkey,
         project,
         templateId: template?.id,
         ttlSeconds: request.request.ttlSeconds,

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  assertProjectRepositoryWriteCurrent,
   buildRepositoryChannelBindingTemplate,
   buildProjectPatchTemplate,
   buildAddedRepositoryEventTemplatesFromHead,
@@ -9,6 +10,64 @@ import {
 import { validateProjectEventEnvelope } from "./projectModels.ts";
 
 const OWNER = "a".repeat(64);
+
+function currentProject(overrides = {}) {
+  return {
+    baseRevisionId: "e".repeat(64),
+    effectiveRevisionId: "e".repeat(64),
+    projectAddress: `30621:${OWNER}:platform`,
+    ...overrides,
+  };
+}
+
+function currentProjectHead(overrides = {}) {
+  return {
+    id: "e".repeat(64),
+    kind: 30621,
+    pubkey: OWNER,
+    created_at: 100,
+    content: "",
+    tags: [["d", "platform"]],
+    sig: "0".repeat(128),
+    ...overrides,
+  };
+}
+
+test("repository writes reject a changed live base even at the same timestamp", () => {
+  assert.throws(
+    () =>
+      assertProjectRepositoryWriteCurrent({
+        liveHead: currentProjectHead({ id: "d".repeat(64) }),
+        project: currentProject(),
+        revisionHeads: [],
+      }),
+    /updated by another session/,
+  );
+});
+
+test("repository writes reject a concurrently advanced collaborative head", () => {
+  const revision = {
+    id: "c".repeat(64),
+    kind: 47_001,
+    pubkey: "b".repeat(64),
+    created_at: 101,
+    content: "",
+    tags: [
+      ["a", `30621:${OWNER}:platform`],
+      ["base", "e".repeat(64)],
+    ],
+    sig: "0".repeat(128),
+  };
+  assert.throws(
+    () =>
+      assertProjectRepositoryWriteCurrent({
+        liveHead: currentProjectHead(),
+        project: currentProject(),
+        revisionHeads: [revision],
+      }),
+    /channels were updated by another session/,
+  );
+});
 
 test("buildRepositoryChannelBindingTemplate preserves repository metadata", () => {
   const repository = {
@@ -86,6 +145,33 @@ test("buildProjectPatchTemplate preserves unknown tags from the live head", () =
   // New address must be added; sorted order maintained.
   const memberTags = template.tags.filter((t) => t[0] === "a").map((t) => t[1]);
   assert.deepEqual(memberTags.sort(), [existingAddress, newAddress].sort());
+});
+
+test("buildProjectPatchTemplate carries folded related channels into a new base", () => {
+  const related = "22222222-2222-4222-8222-222222222222";
+  const liveHead = {
+    id: "e".repeat(64),
+    kind: 30621,
+    pubkey: OWNER,
+    created_at: 100,
+    content: "",
+    tags: [
+      ["d", "platform"],
+      ["buzz-channel", "11111111-1111-4111-8111-111111111111"],
+    ],
+  };
+
+  const template = buildProjectPatchTemplate({
+    liveHead,
+    ownerPubkey: OWNER,
+    relatedChannelIds: [related.toUpperCase()],
+    repositoryAddresses: [],
+  });
+
+  assert.deepEqual(
+    template.tags.filter((tag) => tag[0] === "buzz-related-channel"),
+    [["buzz-related-channel", related]],
+  );
 });
 
 test("buildProjectPatchTemplate preserves relay hints on existing members", () => {

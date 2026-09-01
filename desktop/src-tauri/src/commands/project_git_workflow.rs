@@ -163,15 +163,29 @@ pub(crate) fn validate_repo_address(repo_address: &str, owner: &str) -> Result<(
 fn validate_project_owner_announcement(
     input: &ProjectOwnerAnnouncementInput,
 ) -> Result<(), String> {
-    if !matches!(input.kind, 30_617 | 30_621) {
-        return Err("Only project and repository announcements can be signed here.".to_string());
-    }
-    let has_valid_d_tag = input.tags.iter().any(|tag| {
-        tag.first().is_some_and(|value| value == "d")
-            && tag.get(1).is_some_and(|value| !value.trim().is_empty())
-    });
-    if !has_valid_d_tag {
-        return Err("Project and repository announcements require a non-empty d tag.".to_string());
+    if matches!(input.kind, 30_617 | 30_621) {
+        let has_valid_d_tag = input.tags.iter().any(|tag| {
+            tag.first().is_some_and(|value| value == "d")
+                && tag.get(1).is_some_and(|value| !value.trim().is_empty())
+        });
+        if !has_valid_d_tag {
+            return Err(
+                "Project and repository announcements require a non-empty d tag.".to_string(),
+            );
+        }
+    } else if input.kind == 47_001 {
+        for required_tag in ["a", "e", "op", "channel"] {
+            if !input.tags.iter().any(|tag| {
+                tag.first().is_some_and(|value| value == required_tag)
+                    && tag.get(1).is_some_and(|value| !value.trim().is_empty())
+            }) {
+                return Err(format!(
+                    "Project revisions require a non-empty {required_tag} tag."
+                ));
+            }
+        }
+    } else {
+        return Err("Only Project announcements and revisions can be signed here.".to_string());
     }
     if let Some(created_at) = input.created_at {
         // Mirror the ACP publish path (`build_project_owner_announcement_events`):
@@ -707,7 +721,7 @@ mod tests {
     }
 
     #[test]
-    fn project_owner_announcement_is_limited_to_addressable_project_kinds() {
+    fn project_owner_announcement_is_limited_to_project_events() {
         let valid = ProjectOwnerAnnouncementInput {
             target_owner: "a".repeat(64),
             kind: 30_621,
@@ -720,8 +734,29 @@ mod tests {
         let invalid_kind = ProjectOwnerAnnouncementInput { kind: 1, ..valid };
         assert_eq!(
             validate_project_owner_announcement(&invalid_kind),
-            Err("Only project and repository announcements can be signed here.".to_string())
+            Err("Only Project announcements and revisions can be signed here.".to_string())
         );
+    }
+
+    #[test]
+    fn project_owner_control_accepts_well_formed_project_revisions() {
+        let input = ProjectOwnerAnnouncementInput {
+            target_owner: "a".repeat(64),
+            kind: 47_001,
+            content: String::new(),
+            created_at: None,
+            tags: vec![
+                vec!["a".to_string(), "30621:owner:project".to_string()],
+                vec!["e".to_string(), "b".repeat(64)],
+                vec!["op".to_string(), "add-related-channel".to_string()],
+                vec![
+                    "channel".to_string(),
+                    "11111111-1111-4111-8111-111111111111".to_string(),
+                ],
+            ],
+        };
+
+        assert!(validate_project_owner_announcement(&input).is_ok());
     }
 
     #[test]

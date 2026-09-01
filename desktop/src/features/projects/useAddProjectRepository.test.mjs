@@ -21,9 +21,13 @@ const NEW_ADDRESS = `30617:${OWNER}:mobile`;
 function makeProject(overrides = {}) {
   return {
     id: `30621:${OWNER}:platform`,
+    baseRevisionId: "f".repeat(64),
     createdAt: 100,
     dtag: "platform",
+    effectiveRevisionId: "f".repeat(64),
     owner: OWNER,
+    projectAddress: `30621:${OWNER}:platform`,
+    relatedChannelIds: [],
     accessChannelId: ACCESS_CHANNEL,
     repositoryAddresses: [EXISTING_ADDRESS],
     repositories: [],
@@ -85,6 +89,7 @@ test("retry after a partial publish heals the dangling member instead of throwin
     },
     {
       fetchEvents: makeFetchEvents(makeDanglingLiveHead()),
+      fetchProjectRevisionHeads: async () => [],
       publishOwnerAnnouncement: async (input) => {
         published.push(input);
         return {
@@ -120,6 +125,7 @@ test("retry after a partial publish heals through the owner-agent path", async (
     },
     {
       fetchEvents: makeFetchEvents(makeDanglingLiveHead()),
+      fetchProjectRevisionHeads: async () => [],
       publishOwnedAgentAnnouncements: async (_agent, templates) => {
         batches.push(templates);
         return templates.map((template) =>
@@ -160,6 +166,7 @@ test("a genuinely dominated write (no dangling member) still throws", async () =
       },
       {
         fetchEvents: makeFetchEvents(liveHead),
+        fetchProjectRevisionHeads: async () => [],
         publishOwnerAnnouncement: async () => {
           throw new Error("must not publish past the dominated-write guard");
         },
@@ -167,6 +174,40 @@ test("a genuinely dominated write (no dangling member) still throws", async () =
     ),
     /updated by another session/,
   );
+});
+
+test("an equal-timestamp base replacement is rejected before publication", async () => {
+  const liveHead = {
+    ...makeDanglingLiveHead(),
+    id: "d".repeat(64),
+    created_at: 100,
+    tags: [
+      ["d", "platform"],
+      ["buzz-channel", ACCESS_CHANNEL],
+      ["a", EXISTING_ADDRESS],
+    ],
+  };
+  let publishCalls = 0;
+
+  await assert.rejects(
+    addProjectRepository(
+      {
+        accessChannelId: ACCESS_CHANNEL,
+        name: "Mobile",
+        project: makeProject(),
+      },
+      {
+        fetchEvents: makeFetchEvents(liveHead),
+        fetchProjectRevisionHeads: async () => [],
+        publishOwnerAnnouncement: async () => {
+          publishCalls += 1;
+          throw new Error("must not publish a stale base");
+        },
+      },
+    ),
+    /updated by another session/,
+  );
+  assert.equal(publishCalls, 0);
 });
 
 test("a dangling member with an unmoved head still resumes", async () => {
@@ -184,6 +225,7 @@ test("a dangling member with an unmoved head still resumes", async () => {
     },
     {
       fetchEvents: makeFetchEvents(liveHead),
+      fetchProjectRevisionHeads: async () => [],
       publishOwnerAnnouncement: async (input) => {
         published.push(input);
         return {

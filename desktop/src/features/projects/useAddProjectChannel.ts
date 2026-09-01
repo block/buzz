@@ -8,14 +8,20 @@ import {
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
 import { type Project, projectsQueryKey } from "@/features/projects/hooks";
 import { isUnsupportedProjectKindError } from "@/features/projects/projectCreation";
-import { buildProjectRelatedChannelPatchTemplate } from "@/features/projects/projectChannelCreation";
 import { addRelatedChannelToProject } from "@/features/projects/projectModels";
-import { publishOwnedAgentProjectAnnouncements } from "@/features/projects/projectOwnerControl";
+import {
+  ProjectRevisionPublicationError,
+  publishProjectRelatedChannelRevision,
+} from "@/features/projects/projectRelatedChannelRevision";
 import { markProjectDataAuthoritative } from "@/features/projects/projectSnapshot";
-import { publishProjectOwnerAnnouncement } from "@/shared/api/projectGit";
+import { getProjectRevisionHeads } from "@/shared/api/projectRevisions";
 import { relayClient } from "@/shared/api/relayClient";
 import { deleteChannel as deleteChannelApi } from "@/shared/api/tauriChannels";
-import type { Channel, ChannelVisibility } from "@/shared/api/types";
+import type {
+  Channel,
+  ChannelVisibility,
+  RelayEvent,
+} from "@/shared/api/types";
 import { KIND_PROJECT_ANNOUNCEMENT } from "@/shared/constants/kinds";
 
 export type AddProjectChannelInput = {
@@ -23,6 +29,7 @@ export type AddProjectChannelInput = {
   name: string;
   ownerControlAgentPubkey?: string;
   project: Project;
+  signAsManagedOwner?: boolean;
   templateId?: string;
   ttlSeconds?: number;
   visibility: ChannelVisibility;
@@ -43,8 +50,8 @@ export async function addProjectChannel(
     createChannel: ReturnType<typeof useCreateChannelMutation>["mutateAsync"];
     deleteChannel?: typeof deleteChannelApi;
     fetchEvents?: typeof relayClient.fetchEvents;
-    publishOwnedAgentAnnouncements?: typeof publishOwnedAgentProjectAnnouncements;
-    publishOwnerAnnouncement?: typeof publishProjectOwnerAnnouncement;
+    fetchRevisionHeads?: typeof getProjectRevisionHeads;
+    publishRevision?: typeof publishProjectRelatedChannelRevision;
   },
 ): Promise<{ channel: Channel; project: Project }> {
   const {
@@ -53,8 +60,8 @@ export async function addProjectChannel(
     createChannel,
     deleteChannel = deleteChannelApi,
     fetchEvents = relayClient.fetchEvents.bind(relayClient),
-    publishOwnedAgentAnnouncements = publishOwnedAgentProjectAnnouncements,
-    publishOwnerAnnouncement = publishProjectOwnerAnnouncement,
+    fetchRevisionHeads = getProjectRevisionHeads,
+    publishRevision = publishProjectRelatedChannelRevision,
   } = deps;
   const targetOwner = input.project.owner.toLowerCase();
 
@@ -114,42 +121,63 @@ export async function addProjectChannel(
     );
   }
 
-  const templates = buildProjectRelatedChannelPatchTemplate({
-    channelId: channel.id,
-    liveHead: confirmedLiveHead,
-    ownerPubkey: targetOwner,
-  });
-  let projectCreatedAt = confirmedLiveHead.created_at;
-  if (!templates.alreadyBound) {
-    const createdAt = Math.max(
-      Math.floor(Date.now() / 1_000),
-      confirmedLiveHead.created_at + 1,
-    );
-    try {
-      if (input.ownerControlAgentPubkey) {
-        const events = await publishOwnedAgentAnnouncements(
-          input.ownerControlAgentPubkey,
-          [{ ...templates.project, createdAt }],
-        );
-        projectCreatedAt =
-          events.find((event) => event.kind === KIND_PROJECT_ANNOUNCEMENT)
-            ?.created_at ?? createdAt;
-      } else {
-        const publication = await publishOwnerAnnouncement({
-          ...templates.project,
-          createdAt,
-          targetOwner,
-        });
-        if (publication.publicationError) {
-          throw new Error(publication.publicationError);
+  const controlledSigner =
+    input.ownerControlAgentPubkey || input.signAsManagedOwner
+      ? {
+          ownerControlAgentPubkey: input.ownerControlAgentPubkey,
+          signAsManagedOwner: input.signAsManagedOwner,
         }
-        projectCreatedAt = publication.event.created_at;
+      : undefined;
+  const revisionPromise = controlledSigner
+    ? publishRevision(
+        input.project,
+        channel.id,
+        "add-related-channel",
+        undefined,
+        controlledSigner,
+      )
+    : publishRevision(input.project, channel.id, "add-related-channel");
+  let revision: RelayEvent | undefined;
+  try {
+    revision = await revisionPromise;
+  } catch (error) {
+    if (error instanceof ProjectRevisionPublicationError) {
+      let storedRevision: RelayEvent | undefined;
+      try {
+        [storedRevision] = await fetchRevisionHeads([
+          input.project.projectAddress,
+        ]);
+      } catch (reconciliationError) {
+        throw new AggregateError(
+          [error, reconciliationError],
+          "Buzz could not confirm whether the Project channel change was accepted. The new channel was kept; refresh the Project before retrying.",
+        );
       }
-    } catch (error) {
+      const currentHeadIncludesChannel = storedRevision?.tags.some(
+        (tag) =>
+          tag[0] === "buzz-related-channel" &&
+          tag[1]?.toLowerCase() === channel.id.toLowerCase(),
+      );
+      if (
+        storedRevision &&
+        (storedRevision.id.toLowerCase() === error.event.id.toLowerCase() ||
+          currentHeadIncludesChannel)
+      ) {
+        revision = storedRevision;
+      } else {
+        await removeCreatedChannelAndThrow(
+          isUnsupportedProjectKindError(error)
+            ? new Error(
+                "This relay does not support collaborative Project channels yet, so the channel could not be linked.",
+              )
+            : error,
+        );
+      }
+    } else {
       await removeCreatedChannelAndThrow(
         isUnsupportedProjectKindError(error)
           ? new Error(
-              "This relay does not support projects yet, so the channel could not be linked.",
+              "This relay does not support collaborative Project channels yet, so the channel could not be linked.",
             )
           : error instanceof Error
             ? error
@@ -157,17 +185,23 @@ export async function addProjectChannel(
       );
     }
   }
+  if (!revision) {
+    throw new Error("Could not reconcile the Project channel change.");
+  }
 
   await applyCanvas(input.templateId, channel.id, input.name);
   void applyAgents(input.templateId, channel.id);
 
   return {
     channel,
-    project: addRelatedChannelToProject(
-      input.project,
-      channel.id,
-      projectCreatedAt,
-    ),
+    project: {
+      ...addRelatedChannelToProject(
+        input.project,
+        channel.id,
+        revision.created_at,
+      ),
+      effectiveRevisionId: revision.id.toLowerCase(),
+    },
   };
 }
 

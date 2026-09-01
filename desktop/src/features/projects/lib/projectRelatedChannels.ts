@@ -136,6 +136,11 @@ export type ProjectBoundChannel = {
   role: "home" | "related";
 };
 
+/** Whether this binding is explicit Project membership rather than repository-derived. */
+export function isExplicitProjectRelatedChannel(channel: ProjectBoundChannel) {
+  return channel.role === "related" && channel.repositoryId === null;
+}
+
 /**
  * Unique channels bound to one project: the home stream first, then each
  * repository channel that is not already the home channel.

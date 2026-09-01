@@ -23,6 +23,7 @@ type UseCreateChannelFormOptions = {
   active: boolean;
   initialName?: string;
   isCreating: boolean;
+  submitEnabled?: boolean;
   onCreate: (input: CreateChannelInput) => Promise<void>;
   onCreated?: () => void;
   autoFocusName?: boolean;
@@ -62,6 +63,7 @@ export function useCreateChannelForm({
   active,
   initialName,
   isCreating,
+  submitEnabled = true,
   onCreate,
   onCreated,
   autoFocusName = true,
@@ -214,7 +216,7 @@ export function useCreateChannelForm({
     templates,
     nameInputRef,
     isCreating,
-    canSubmit: name.trim().length > 0 && !isCreating,
+    canSubmit: submitEnabled && name.trim().length > 0 && !isCreating,
     handleSubmit,
   };
 }

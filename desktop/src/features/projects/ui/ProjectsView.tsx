@@ -54,7 +54,10 @@ import { ProjectCreationDialog } from "@/features/projects/ui/ProjectCreationDia
 import { CreateProjectIssueDialog } from "@/features/projects/ui/CreateProjectIssueDialog";
 import { CreatePullRequestDialog } from "@/features/projects/ui/CreatePullRequestDialog";
 import { ProjectAgentChatPanel } from "@/features/projects/ui/ProjectAgentChatPanel";
-import { ProjectsCategoryCreateDialogs } from "@/features/projects/ui/ProjectsCategoryCreateDialogs";
+import {
+  canOpenProjectChannelDialog,
+  ProjectsCategoryCreateDialogs,
+} from "@/features/projects/ui/ProjectsCategoryCreateDialogs";
 import { ProjectsIssuesList } from "@/features/projects/ui/ProjectsIssuesList";
 import { ProjectsWorkspaceChrome } from "@/features/projects/ui/ProjectDetailChrome";
 import { ProjectsPullRequestsList } from "@/features/projects/ui/ProjectsPullRequestsList";
@@ -648,7 +651,11 @@ export function ProjectsView() {
   );
 
   const contextPanelProps = {
-    canCreateTarget: editableProjects.length > 0,
+    canAddChannelTarget: canOpenProjectChannelDialog(
+      projects,
+      editableProjects,
+    ),
+    canAddRepositoryTarget: editableProjects.length > 0,
     filter,
     issues: contextIssues,
     onAddChannel: () => setCreateChannelOpen(true),
@@ -779,8 +786,10 @@ export function ProjectsView() {
             projects={projects}
           />
           <ProjectsCategoryCreateDialogs
+            channelCandidateProjects={projects}
             channelOpen={createChannelOpen}
             editableProjects={editableProjects}
+            identityPubkey={currentPubkey}
             onChannelOpenChange={setCreateChannelOpen}
             onRepositoryOpenChange={setCreateRepositoryOpen}
             ownerControlAgentPubkeyFor={ownerControlAgentPubkeyFor}

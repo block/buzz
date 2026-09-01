@@ -873,6 +873,45 @@ pub async fn soft_delete_by_coordinate(
 ) -> Result<bool> {
     let deletion_created_at = DateTime::from_timestamp(deletion_created_at_secs, 0)
         .ok_or(DbError::InvalidTimestamp(deletion_created_at_secs))?;
+    if kind == buzz_core::kind::KIND_PROJECT as i32 {
+        let mut tx = pool.begin().await?;
+        let lock_key = crate::replaceable::event_replacement_lock_key(
+            community_id,
+            kind,
+            pubkey,
+            Some(d_tag.as_bytes()),
+        );
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await?;
+        let result = sqlx::query(
+            "UPDATE events SET deleted_at = NOW() \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
+             AND created_at <= $5",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind)
+        .bind(pubkey)
+        .bind(d_tag)
+        .bind(deletion_created_at)
+        .execute(&mut *tx)
+        .await?;
+        let deleted = result.rows_affected() > 0;
+        if deleted {
+            sqlx::query(
+                "DELETE FROM project_revision_heads \
+                 WHERE community_id=$1 AND project_owner=$2 AND project_d_tag=$3",
+            )
+            .bind(community_id.as_uuid())
+            .bind(pubkey)
+            .bind(d_tag)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        return Ok(deleted);
+    }
     let result = sqlx::query(
         "UPDATE events SET deleted_at = NOW() \
          WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
@@ -887,6 +926,56 @@ pub async fn soft_delete_by_coordinate(
     .await?;
 
     Ok(result.rows_affected() > 0)
+}
+
+/// Soft-delete one Project base while serializing with Project revisions and
+/// clearing materialized state only when that exact event is the active base.
+pub async fn soft_delete_project_event(
+    pool: &PgPool,
+    community_id: CommunityId,
+    event_id: &[u8],
+    project_owner: &[u8],
+    project_d_tag: &str,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let lock_key = crate::replaceable::event_replacement_lock_key(
+        community_id,
+        buzz_core::kind::KIND_PROJECT as i32,
+        project_owner,
+        Some(project_d_tag.as_bytes()),
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(&mut *tx)
+        .await?;
+    let result = sqlx::query(
+        "UPDATE events SET deleted_at = NOW() \
+         WHERE community_id=$1 AND id=$2 AND kind=$3 AND pubkey=$4 AND d_tag=$5 \
+           AND deleted_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(event_id)
+    .bind(buzz_core::kind::KIND_PROJECT as i32)
+    .bind(project_owner)
+    .bind(project_d_tag)
+    .execute(&mut *tx)
+    .await?;
+    let deleted = result.rows_affected() > 0;
+    if deleted {
+        sqlx::query(
+            "DELETE FROM project_revision_heads \
+             WHERE community_id=$1 AND project_owner=$2 AND project_d_tag=$3 \
+               AND base_event_id=$4",
+        )
+        .bind(community_id.as_uuid())
+        .bind(project_owner)
+        .bind(project_d_tag)
+        .bind(event_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(deleted)
 }
 
 /// Atomically soft-delete an event and decrement thread reply counters.
@@ -1583,6 +1672,25 @@ impl Db {
             pubkey,
             d_tag,
             deletion_created_at_secs,
+        )
+        .await
+    }
+
+    /// Soft-delete one Project base under the Project lifecycle lock.
+    #[datastore_span(name = "soft_delete_project_event", system = "postgresql")]
+    pub async fn soft_delete_project_event(
+        &self,
+        community_id: CommunityId,
+        event_id: &[u8],
+        project_owner: &[u8],
+        project_d_tag: &str,
+    ) -> Result<bool> {
+        crate::event::soft_delete_project_event(
+            &self.pool,
+            community_id,
+            event_id,
+            project_owner,
+            project_d_tag,
         )
         .await
     }
@@ -2419,6 +2527,68 @@ mod tests {
             current_deleted,
             "a tombstone at the head's timestamp must delete it (NIP-09 is at-or-before)"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn project_event_delete_clears_only_its_materialized_revision_head() {
+        let db = Db::from_pool(setup_pool().await);
+        let community = CommunityId::from_uuid(make_test_community(&db.pool).await);
+        let keys = Keys::generate();
+        let d_tag = "project-event-delete";
+        let project = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_PROJECT as u16), "")
+            .tags(vec![Tag::parse(["d", d_tag]).expect("d tag")])
+            .sign_with_keys(&keys)
+            .expect("sign Project");
+        assert!(
+            db.replace_parameterized_event(community, &project, d_tag, None)
+                .await
+                .expect("store Project")
+                .1
+        );
+
+        let owner = project.pubkey.to_bytes().to_vec();
+        let revision_id = vec![9_u8; 32];
+        sqlx::query(
+            "INSERT INTO project_revision_heads \
+             (community_id, project_owner, project_d_tag, base_event_id, revision_event_id) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(community.as_uuid())
+        .bind(&owner)
+        .bind(d_tag)
+        .bind(project.id.as_bytes().as_slice())
+        .bind(&revision_id)
+        .execute(&db.pool)
+        .await
+        .expect("insert Project revision head");
+
+        assert!(db
+            .soft_delete_project_event(community, project.id.as_bytes().as_slice(), &owner, d_tag,)
+            .await
+            .expect("delete Project event"));
+
+        let live_project_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events \
+             WHERE community_id=$1 AND id=$2 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(project.id.as_bytes().as_slice())
+        .fetch_one(&db.pool)
+        .await
+        .expect("count live Project events");
+        let head_count: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM project_revision_heads \
+             WHERE community_id=$1 AND project_owner=$2 AND project_d_tag=$3",
+        )
+        .bind(community.as_uuid())
+        .bind(&owner)
+        .bind(d_tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count Project revision heads");
+        assert_eq!(live_project_count, 0);
+        assert_eq!(head_count, 0);
     }
 
     #[test]

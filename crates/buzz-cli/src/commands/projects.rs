@@ -17,11 +17,13 @@
 //!     not in scope.
 
 use buzz_core::kind::KIND_PROJECT;
+use buzz_core::project_revision::{apply_project_revision, ProjectCoordinate, ProjectRevision};
 use buzz_sdk::{
-    build_delete_addressable, build_project, build_project_with_tags, ProjectMemberCoord,
-    PROJECT_D_MAX_LEN,
+    build_delete_addressable, build_project, build_project_revision, build_project_with_tags,
+    ProjectMemberCoord, PROJECT_D_MAX_LEN,
 };
 use nostr::{Event, EventBuilder, PublicKey, Tag, Timestamp};
+use uuid::Uuid;
 
 use crate::agent_management::{build_project_channel, CreateProjectChannelDraft};
 use crate::client::BuzzClient;
@@ -193,9 +195,20 @@ pub async fn add_repos_to_own_project(
     let head = fetch_own_project(client, slug)
         .await?
         .ok_or_else(|| CliError::NotFound(format!("project {slug:?} not found")))?;
+    let effective_revision = current_project_revision(client, &head, slug).await?;
     let next_ts = next_timestamp(&head, Timestamp::now())?;
 
     let mut tags: Vec<Tag> = head.tags.iter().cloned().collect();
+    let home_channel = tags
+        .iter()
+        .find(|tag| tag_name(tag) == Some("buzz-channel"))
+        .and_then(tag_value)
+        .and_then(|value| value.parse::<Uuid>().ok());
+    carry_effective_related_channels(
+        &mut tags,
+        &effective_revision.related_channels,
+        home_channel,
+    )?;
     let existing_coords: std::collections::HashSet<String> = head
         .tags
         .iter()
@@ -276,6 +289,160 @@ async fn fetch_project(
 /// Fetch the caller's own live kind:30621 head for `slug`.
 async fn fetch_own_project(client: &BuzzClient, slug: &str) -> Result<Option<Event>, CliError> {
     fetch_project(client, slug, None).await
+}
+
+struct CurrentProjectRevision {
+    id: String,
+    related_channels: Vec<Uuid>,
+}
+
+fn carry_effective_related_channels(
+    tags: &mut Vec<Tag>,
+    related_channels: &[Uuid],
+    home_channel: Option<Uuid>,
+) -> Result<(), CliError> {
+    tags.retain(|tag| tag_name(tag) != Some("buzz-related-channel"));
+    for channel_id in related_channels {
+        if Some(*channel_id) != home_channel {
+            tags.push(make_tag(&[
+                "buzz-related-channel",
+                &channel_id.to_string(),
+            ])?);
+        }
+    }
+    Ok(())
+}
+
+async fn current_project_revision(
+    client: &BuzzClient,
+    project: &Event,
+    slug: &str,
+) -> Result<CurrentProjectRevision, CliError> {
+    let coordinate = ProjectCoordinate {
+        owner: project.pubkey.to_hex(),
+        slug: slug.to_owned(),
+    }
+    .as_string();
+    let filter = serde_json::json!({
+        "kinds": [buzz_core::kind::KIND_PROJECT_REVISION],
+        "#a": [coordinate],
+        "project_revision_heads": true,
+    });
+    let events = parse_events(&client.query(&filter).await?)?;
+    if events.len() > 1 {
+        return Err(CliError::Other(
+            "relay returned multiple current Project revisions".into(),
+        ));
+    }
+    let home_channel = project
+        .tags
+        .iter()
+        .find(|tag| tag_name(tag) == Some("buzz-channel"))
+        .and_then(tag_value)
+        .and_then(|value| value.parse::<Uuid>().ok());
+    let mut related_channels = Vec::new();
+    for channel in project
+        .tags
+        .iter()
+        .filter(|tag| tag_name(tag) == Some("buzz-related-channel"))
+        .filter_map(tag_value)
+        .filter_map(|value| value.parse::<Uuid>().ok())
+    {
+        if Some(channel) != home_channel
+            && !related_channels.contains(&channel)
+            && related_channels.len() < 64
+        {
+            related_channels.push(channel);
+        }
+    }
+    let current = if let Some(event) = events.first() {
+        let revision = ProjectRevision::parse(event).map_err(|error| {
+            CliError::Other(format!("invalid current Project revision: {error}"))
+        })?;
+        if revision.project.as_string() != coordinate
+            || revision.base_revision != project.id.to_hex()
+        {
+            return Err(CliError::Other(
+                "current Project revision does not match the Project base".into(),
+            ));
+        }
+        related_channels = revision.related_channels;
+        event.id.to_hex()
+    } else {
+        project.id.to_hex()
+    };
+    if related_channels
+        .iter()
+        .any(|channel| Some(*channel) == home_channel)
+    {
+        return Err(CliError::Other(
+            "current Project revision includes the home channel as related".into(),
+        ));
+    }
+    Ok(CurrentProjectRevision {
+        id: current,
+        related_channels,
+    })
+}
+
+async fn cmd_related_channel_revision(
+    client: &BuzzClient,
+    slug: &str,
+    owner: Option<&str>,
+    channel: &str,
+    operation: buzz_core::project_revision::ProjectRevisionOperation,
+) -> Result<(), CliError> {
+    validate_project_slug(slug)?;
+    let channel_id = crate::validate::parse_uuid(channel)?;
+    let project = fetch_project(client, slug, owner)
+        .await?
+        .ok_or_else(|| CliError::NotFound(format!("project {slug:?} not found")))?;
+    let current = current_project_revision(client, &project, slug).await?;
+    let mut related_channels = current.related_channels;
+    apply_project_revision(
+        &mut related_channels,
+        project
+            .tags
+            .iter()
+            .find(|tag| tag_name(tag) == Some("buzz-channel"))
+            .and_then(tag_value)
+            .and_then(|value| value.parse().ok()),
+        operation,
+        channel_id,
+    )
+    .map_err(|message| CliError::Usage(message.into()))?;
+    let coordinate = ProjectCoordinate {
+        owner: project.pubkey.to_hex(),
+        slug: slug.to_owned(),
+    }
+    .as_string();
+    let event = client.sign_event(
+        build_project_revision(
+            &coordinate,
+            &project.id.to_hex(),
+            &current.id,
+            operation,
+            channel_id,
+            &related_channels,
+        )
+        .map_err(crate::validate::sdk_err)?,
+    )?;
+    let raw = client
+        .submit_event(event)
+        .await
+        .map_err(map_project_revision_submit_error)?;
+    let response = parse_write_response(&raw, "Project changed concurrently; refresh and retry")?;
+    println!("{response}");
+    Ok(())
+}
+
+fn map_project_revision_submit_error(error: CliError) -> CliError {
+    match error {
+        CliError::Relay { body, .. } if body.starts_with("conflict:") => {
+            CliError::Conflict("Project changed concurrently; refresh and retry".into())
+        }
+        error => error,
+    }
 }
 
 // ── Tag helpers ───────────────────────────────────────────────────────────────
@@ -537,6 +704,7 @@ pub async fn cmd_remove_repo(
     let head = fetch_own_project(client, slug)
         .await?
         .ok_or_else(|| CliError::NotFound(format!("project {slug:?} not found")))?;
+    let effective_revision = current_project_revision(client, &head, slug).await?;
     let next_ts = next_timestamp(&head, Timestamp::now())?;
 
     // Verify all requested repos exist in the project.
@@ -559,7 +727,7 @@ pub async fn cmd_remove_repo(
         to_remove.iter().map(|m| m.coord.as_str()).collect();
 
     // Keep all tags except auth and the removed members.
-    let tags: Vec<Tag> = head
+    let mut tags: Vec<Tag> = head
         .tags
         .iter()
         .filter(|t| {
@@ -575,6 +743,16 @@ pub async fn cmd_remove_repo(
         })
         .cloned()
         .collect();
+    let home_channel = tags
+        .iter()
+        .find(|tag| tag_name(tag) == Some("buzz-channel"))
+        .and_then(tag_value)
+        .and_then(|value| value.parse::<Uuid>().ok());
+    carry_effective_related_channels(
+        &mut tags,
+        &effective_revision.related_channels,
+        home_channel,
+    )?;
 
     // Single rebuild validates the full envelope and strips any remaining auth.
     let builder = rebuild_project(&head.content, tags, next_ts)?;
@@ -629,6 +807,7 @@ pub async fn cmd_update(
     let head = fetch_own_project(client, slug)
         .await?
         .ok_or_else(|| CliError::NotFound(format!("project {slug:?} not found")))?;
+    let effective_revision = current_project_revision(client, &head, slug).await?;
     let next_ts = next_timestamp(&head, Timestamp::now())?;
 
     // Build the new tag set. For each singleton metadata field:
@@ -641,7 +820,7 @@ pub async fn cmd_update(
         .tags
         .iter()
         .filter(|t| {
-            if tag_name(t) == Some("auth") {
+            if tag_name(t) == Some("auth") || tag_name(t) == Some("buzz-related-channel") {
                 return false;
             }
             // Drop singletons we're replacing or clearing.
@@ -675,6 +854,16 @@ pub async fn cmd_update(
     if let Some(vis) = visibility {
         tags.push(make_tag(&["buzz-visibility", vis])?);
     }
+    let home_channel = tags
+        .iter()
+        .find(|tag| tag_name(tag) == Some("buzz-channel"))
+        .and_then(tag_value)
+        .and_then(|value| value.parse::<Uuid>().ok());
+    carry_effective_related_channels(
+        &mut tags,
+        &effective_revision.related_channels,
+        home_channel,
+    )?;
 
     let builder = build_project_with_tags(&head.content, tags)
         .map_err(|e| CliError::Other(format!("envelope validation failed: {e}")))?
@@ -842,6 +1031,34 @@ pub async fn dispatch(cmd: crate::ProjectsCmd, client: &BuzzClient) -> Result<()
             )
             .await
         }
+        ProjectsCmd::LinkChannel {
+            slug,
+            owner,
+            channel,
+        } => {
+            cmd_related_channel_revision(
+                client,
+                &slug,
+                owner.as_deref(),
+                &channel,
+                buzz_core::project_revision::ProjectRevisionOperation::AddRelatedChannel,
+            )
+            .await
+        }
+        ProjectsCmd::UnlinkChannel {
+            slug,
+            owner,
+            channel,
+        } => {
+            cmd_related_channel_revision(
+                client,
+                &slug,
+                owner.as_deref(),
+                &channel,
+                buzz_core::project_revision::ProjectRevisionOperation::RemoveRelatedChannel,
+            )
+            .await
+        }
         ProjectsCmd::RemoveRepo { slug, repo } => cmd_remove_repo(client, &slug, &repo).await,
         ProjectsCmd::Update {
             slug,
@@ -880,6 +1097,16 @@ mod tests {
     use nostr::Tag;
 
     use super::*;
+
+    #[test]
+    fn project_revision_http_conflict_uses_conflict_exit_category() {
+        let error = map_project_revision_submit_error(CliError::Relay {
+            status: 400,
+            body: "conflict: expected revision is stale".into(),
+        });
+        assert!(matches!(error, CliError::Conflict(_)));
+        assert_eq!(crate::error::exit_code(&error), 5);
+    }
 
     async fn run_default_repo_create_race(
         winning_channel: &str,
@@ -1292,6 +1519,26 @@ mod tests {
         }
         let ts = Timestamp::from(1_700_000_001u64);
         assert!(rebuild_project("", tags, ts).is_ok());
+    }
+
+    #[test]
+    fn carrying_revision_channels_replaces_stale_base_membership() {
+        let home = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
+        let stale = Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap();
+        let effective = Uuid::parse_str("33333333-3333-4333-8333-333333333333").unwrap();
+        let mut tags = vec![
+            make_test_tag(&["d", "platform"]),
+            make_test_tag(&["buzz-related-channel", &stale.to_string()]),
+        ];
+
+        carry_effective_related_channels(&mut tags, &[home, effective], Some(home)).unwrap();
+
+        let related: Vec<_> = tags
+            .iter()
+            .filter(|tag| tag_name(tag) == Some("buzz-related-channel"))
+            .filter_map(tag_value)
+            .collect();
+        assert_eq!(related, vec![effective.to_string()]);
     }
 
     // ── clear-flag semantics ──────────────────────────────────────────────────

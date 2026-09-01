@@ -187,6 +187,7 @@ async function ensureDefaultRepository({
   const patched = buildProjectPatchTemplate({
     liveHead,
     ownerPubkey,
+    relatedChannelIds: project.relatedChannelIds,
     repositoryAddresses: [
       ...new Set([
         ...project.repositoryAddresses,

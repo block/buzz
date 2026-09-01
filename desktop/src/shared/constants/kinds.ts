@@ -74,6 +74,8 @@ export const KIND_GIT_PATCH = 1617;
 export const KIND_GIT_PULL_REQUEST = 1618;
 export const KIND_GIT_PR_UPDATE = 1619;
 export const KIND_GIT_ISSUE = 1621;
+// NIP-MP: actor-signed, relay-authorized Project revision operation.
+export const KIND_PROJECT_REVISION = 47001;
 export const KIND_GIT_STATUS_OPEN = 1630;
 export const KIND_GIT_STATUS_MERGED = 1631;
 export const KIND_GIT_STATUS_CLOSED = 1632;

@@ -14,7 +14,7 @@ use base64::Engine;
 use serde_json::Value;
 
 use buzz_auth::{LimitType, Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS};
-use buzz_core::TenantContext;
+use buzz_core::{kind::KIND_PROJECT_REVISION, project_revision::ProjectCoordinate, TenantContext};
 
 use crate::handlers::ingest::{IngestAuth, IngestError};
 use crate::state::AppState;
@@ -269,6 +269,7 @@ fn extract_channel_from_filter(filter: &nostr::Filter) -> Option<uuid::Uuid> {
 
 const BRIDGE_FEED_MAX_LIMIT: i64 = 100;
 const BRIDGE_THREAD_MAX_LIMIT: u32 = 500;
+const BRIDGE_PROJECT_REVISION_HEAD_MAX_PROJECTS: usize = 100;
 
 /// The `before_id` extension field, with "present but malformed" kept distinct
 /// from "absent": NIP-CW's cursor grammar says a malformed value MUST reject
@@ -305,6 +306,56 @@ fn extract_buzz_channel(raw: &Value) -> Option<&str> {
 /// `include_summaries`, `include_aux`). Absent or non-boolean = false.
 fn extension_flag(raw: &Value, key: &str) -> bool {
     raw.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// Validate the bounded Project-revision-head bridge extension.
+fn extract_project_revision_head_projects(
+    raw: &Value,
+) -> Result<Option<Vec<ProjectCoordinate>>, &'static str> {
+    let Some(flag) = raw.get("project_revision_heads") else {
+        return Ok(None);
+    };
+    if flag.as_bool() != Some(true) {
+        return Err("project_revision_heads must be true");
+    }
+    let Some(object) = raw.as_object() else {
+        return Err("project_revision_heads requires a filter object");
+    };
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "project_revision_heads" | "kinds" | "#a"))
+    {
+        return Err("project_revision_heads only supports kinds and #a");
+    }
+    let kinds = raw
+        .get("kinds")
+        .and_then(Value::as_array)
+        .ok_or("project_revision_heads requires kinds:[47001]")?;
+    if kinds.len() != 1
+        || kinds.first().and_then(Value::as_u64) != Some(u64::from(KIND_PROJECT_REVISION))
+    {
+        return Err("project_revision_heads requires kinds:[47001]");
+    }
+    let coordinates = raw
+        .get("#a")
+        .and_then(Value::as_array)
+        .ok_or("project_revision_heads requires #a Project coordinates")?;
+    if coordinates.is_empty() || coordinates.len() > BRIDGE_PROJECT_REVISION_HEAD_MAX_PROJECTS {
+        return Err("project_revision_heads requires 1 to 100 Project coordinates");
+    }
+    let mut projects = Vec::with_capacity(coordinates.len());
+    for value in coordinates {
+        let coordinate = value
+            .as_str()
+            .ok_or("project_revision_heads contains an invalid Project coordinate")?;
+        let project = ProjectCoordinate::parse(coordinate)
+            .map_err(|_| "project_revision_heads contains an invalid Project coordinate")?;
+        if projects.contains(&project) {
+            return Err("project_revision_heads contains a duplicate Project coordinate");
+        }
+        projects.push(project);
+    }
+    Ok(Some(projects))
 }
 
 fn extract_depth_limit(raw: &Value) -> Option<u32> {
@@ -1401,7 +1452,7 @@ async fn query_events_authed(
     // skips and the `before_id` BAD_REQUEST are decided here, before any DB
     // work is issued (validation errors are deterministic client mistakes, so
     // surfacing them ahead of transient DB errors is strictly more predictable).
-    let mut catchall_queries: Vec<(usize, buzz_db::EventQuery)> = Vec::new();
+    let mut catchall_queries: Vec<(usize, buzz_db::EventQuery, bool)> = Vec::new();
     for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
         if handled.contains(&idx) {
             continue;
@@ -1420,6 +1471,20 @@ async fn query_events_authed(
             tenant.community(),
         )
         .await;
+        let project_revision_head_projects = extract_project_revision_head_projects(raw)
+            .map_err(|message| api_error(StatusCode::BAD_REQUEST, message))?;
+        if let Some(projects) = &project_revision_head_projects {
+            query.ids = Some(
+                state
+                    .db
+                    .project_revision_head_event_ids(tenant.community(), projects)
+                    .await
+                    .map_err(|error| {
+                        internal_error(&format!("Project revision head lookup: {error}"))
+                    })?,
+            );
+            query.limit = Some(projects.len() as i64);
+        }
         crate::handlers::req::apply_channel_scope_to_query(
             &mut query,
             filter,
@@ -1466,7 +1531,7 @@ async fn query_events_authed(
             query.offset = Some(offset);
         }
 
-        catchall_queries.push((idx, query));
+        catchall_queries.push((idx, query, project_revision_head_projects.is_some()));
     }
 
     // Phase 2 — DB reads, bounded-concurrent, order-preserving (`buffered`).
@@ -1474,10 +1539,19 @@ async fn query_events_authed(
     // and error semantics match the previous serial loop.
     use futures_util::stream::{self, StreamExt};
     let db = state.db.clone();
-    let mut catchall_results = stream::iter(catchall_queries.into_iter().map(|(idx, query)| {
-        let db = db.clone();
-        async move { (idx, db.query_events_routed("bridge_query", &query).await) }
-    }))
+    let mut catchall_results = stream::iter(catchall_queries.into_iter().map(
+        |(idx, query, writer_only)| {
+            let db = db.clone();
+            async move {
+                let result = if writer_only {
+                    db.query_events(&query).await
+                } else {
+                    db.query_events_routed("bridge_query", &query).await
+                };
+                (idx, result)
+            }
+        },
+    ))
     .buffered(crate::handlers::req::FILTER_QUERY_CONCURRENCY);
 
     // Phase 3 — post-processing, strictly in filter order.
@@ -3450,6 +3524,42 @@ mod tests {
     fn extract_before_id_non_string() {
         let raw = serde_json::json!({ "before_id": 12345 });
         assert!(matches!(extract_before_id(&raw), BeforeId::Malformed));
+    }
+
+    #[test]
+    fn project_revision_head_extension_is_strict_and_bounded() {
+        let coordinate = format!("30621:{}:buzz", "a".repeat(64));
+        let raw = serde_json::json!({
+            "kinds": [KIND_PROJECT_REVISION],
+            "#a": [coordinate],
+            "project_revision_heads": true,
+        });
+        let projects = extract_project_revision_head_projects(&raw)
+            .unwrap()
+            .unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].slug, "buzz");
+
+        for invalid in [
+            serde_json::json!({
+                "kinds": [KIND_PROJECT_REVISION],
+                "#a": [format!("30621:{}:buzz", "a".repeat(64))],
+                "project_revision_heads": false,
+            }),
+            serde_json::json!({
+                "kinds": [KIND_PROJECT_REVISION],
+                "#a": [],
+                "project_revision_heads": true,
+            }),
+            serde_json::json!({
+                "kinds": [KIND_PROJECT_REVISION],
+                "#a": [format!("30621:{}:buzz", "a".repeat(64))],
+                "limit": 1,
+                "project_revision_heads": true,
+            }),
+        ] {
+            assert!(extract_project_revision_head_projects(&invalid).is_err());
+        }
     }
 
     /// Extension flags opt in only on a literal JSON `true` — absent,

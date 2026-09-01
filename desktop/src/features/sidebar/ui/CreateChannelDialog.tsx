@@ -22,6 +22,7 @@ type CreateChannelDialogProps = {
   children?: ReactNode;
   description?: string;
   isCreating: boolean;
+  submitEnabled?: boolean;
   onOpenChange: (open: boolean) => void;
   onCreate: (input: {
     name: string;
@@ -39,6 +40,7 @@ export function CreateChannelDialog({
   children,
   description,
   isCreating,
+  submitEnabled,
   onOpenChange,
   onCreate,
   testId = "create-channel-dialog",
@@ -50,6 +52,7 @@ export function CreateChannelDialog({
     channelKind: channelKind ?? "stream",
     active: open,
     isCreating,
+    submitEnabled,
     onCreate: onCreate as (input: CreateChannelInput) => Promise<void>,
     onCreated: () => onOpenChange(false),
   });

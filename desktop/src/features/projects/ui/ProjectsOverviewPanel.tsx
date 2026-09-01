@@ -56,7 +56,8 @@ type ProjectsOverviewPanelProps = {
 
 type ProjectsOverviewContextPanelProps = {
   filter: ProjectsFilter;
-  canCreateTarget: boolean;
+  canAddChannelTarget: boolean;
+  canAddRepositoryTarget: boolean;
   issues: ProjectIssue[];
   onAddChannel: () => void;
   onAddRepository: () => void;
@@ -75,7 +76,8 @@ type ProjectsOverviewContextPanelProps = {
 
 function OverviewCreateButton({
   action,
-  canCreateTarget,
+  canAddChannelTarget,
+  canAddRepositoryTarget,
   onAddChannel,
   onAddRepository,
   onCreateIssue,
@@ -83,7 +85,8 @@ function OverviewCreateButton({
   onCreatePullRequest,
 }: {
   action: Exclude<OverviewContextAction, null>;
-  canCreateTarget: boolean;
+  canAddChannelTarget: boolean;
+  canAddRepositoryTarget: boolean;
   onAddChannel: () => void;
   onAddRepository: () => void;
   onCreateIssue: () => void;
@@ -100,14 +103,15 @@ function OverviewCreateButton({
           : action.kind === "channel"
             ? onAddChannel
             : onAddRepository;
-  const requiresProject =
-    action.kind === "channel" || action.kind === "repository";
+  const disabled =
+    (action.kind === "channel" && !canAddChannelTarget) ||
+    (action.kind === "repository" && !canAddRepositoryTarget);
   return (
     <Button
       aria-label={action.label}
       className="h-6 w-6 shrink-0 rounded-md text-muted-foreground hover:bg-muted/70 hover:text-foreground"
       data-testid={action.testId}
-      disabled={requiresProject && !canCreateTarget}
+      disabled={disabled}
       onClick={actionHandler}
       size="icon"
       title={action.label}
@@ -198,7 +202,8 @@ export function ProjectsActivityIntro({
 }
 
 export function ProjectsOverviewContextPanel({
-  canCreateTarget,
+  canAddChannelTarget,
+  canAddRepositoryTarget,
   filter,
   issues,
   onAddChannel,
@@ -271,7 +276,8 @@ export function ProjectsOverviewContextPanel({
             {context.action ? (
               <OverviewCreateButton
                 action={context.action}
-                canCreateTarget={canCreateTarget}
+                canAddChannelTarget={canAddChannelTarget}
+                canAddRepositoryTarget={canAddRepositoryTarget}
                 onAddChannel={onAddChannel}
                 onAddRepository={onAddRepository}
                 onCreateIssue={onCreateIssue}

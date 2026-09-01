@@ -11,6 +11,7 @@ import {
   publishOwnedAgentProjectAnnouncements,
 } from "@/features/projects/projectOwnerControl";
 import {
+  assertProjectRepositoryWriteCurrent,
   buildAddedRepositoryEventTemplatesFromHead,
   repositoryDtagFromName,
 } from "@/features/projects/projectRepositoryCreation";
@@ -20,6 +21,7 @@ import {
 } from "@/features/projects/projectModels";
 import { markProjectDataAuthoritative } from "@/features/projects/projectSnapshot";
 import { publishProjectOwnerAnnouncement } from "@/shared/api/projectGit";
+import { getProjectRevisionHeads } from "@/shared/api/projectRevisions";
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
 import {
@@ -47,6 +49,7 @@ type FetchEventsInput = Parameters<(typeof relayClient)["fetchEvents"]>[0];
  */
 export type AddProjectRepositoryDeps = {
   fetchEvents: (filter: FetchEventsInput) => Promise<RelayEvent[]>;
+  fetchProjectRevisionHeads: typeof getProjectRevisionHeads;
   publishOwnedAgentAnnouncements: typeof publishOwnedAgentProjectAnnouncements;
   publishOwnerAnnouncement: typeof publishProjectOwnerAnnouncement;
 };
@@ -62,6 +65,7 @@ export async function addProjectRepository(
 }> {
   const {
     fetchEvents = relayClient.fetchEvents.bind(relayClient),
+    fetchProjectRevisionHeads = getProjectRevisionHeads,
     publishOwnedAgentAnnouncements = publishOwnedAgentProjectAnnouncements,
     publishOwnerAnnouncement = publishProjectOwnerAnnouncement,
   } = deps ?? {};
@@ -107,6 +111,7 @@ export async function addProjectRepository(
     existingRepositoryAddresses: project.repositoryAddresses,
     liveHead,
     ownerPubkey: targetOwner,
+    relatedChannelIds: project.relatedChannelIds,
     repositoryHeadExists: existingRepoHeads.length > 0,
   });
 
@@ -119,6 +124,14 @@ export async function addProjectRepository(
     throw new Error(
       `A repository named "${templates.repositoryDtag}" already exists (as a standalone repository or in another project). Choose a different name to avoid overwriting it.`,
     );
+  }
+
+  if (!templates.resume) {
+    assertProjectRepositoryWriteCurrent({
+      liveHead,
+      project,
+      revisionHeads: await fetchProjectRevisionHeads([project.projectAddress]),
+    });
   }
 
   // Dominated-write guard: if the live head is newer than our cached snapshot,
@@ -185,6 +198,7 @@ export async function addProjectRepository(
         project,
         repository,
         projectEvent.created_at,
+        projectEvent.id.toLowerCase(),
       ),
       repository,
     };
@@ -305,6 +319,7 @@ export async function addProjectRepository(
       project,
       repository,
       projectEvent.created_at,
+      projectEvent.id.toLowerCase(),
     ),
     repository,
   };

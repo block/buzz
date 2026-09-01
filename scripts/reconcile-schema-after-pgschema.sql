@@ -21,6 +21,7 @@ BEGIN
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p_past;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p_past;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p_past;
+        DROP TRIGGER IF EXISTS trg_events_guard_project_revision_soft_delete ON events_p_past;
         ALTER TABLE events ATTACH PARTITION events_p_past
             FOR VALUES FROM (MINVALUE) TO ('2026-01-01');
     END IF;
@@ -35,6 +36,7 @@ BEGIN
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_01;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_01;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_01;
+        DROP TRIGGER IF EXISTS trg_events_guard_project_revision_soft_delete ON events_p2026_01;
         ALTER TABLE events ATTACH PARTITION events_p2026_01
             FOR VALUES FROM ('2026-01-01') TO ('2026-02-01');
     END IF;
@@ -49,6 +51,7 @@ BEGIN
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_02;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_02;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_02;
+        DROP TRIGGER IF EXISTS trg_events_guard_project_revision_soft_delete ON events_p2026_02;
         ALTER TABLE events ATTACH PARTITION events_p2026_02
             FOR VALUES FROM ('2026-02-01') TO ('2026-03-01');
     END IF;
@@ -63,6 +66,7 @@ BEGIN
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_03;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_03;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_03;
+        DROP TRIGGER IF EXISTS trg_events_guard_project_revision_soft_delete ON events_p2026_03;
         ALTER TABLE events ATTACH PARTITION events_p2026_03
             FOR VALUES FROM ('2026-03-01') TO ('2026-04-01');
     END IF;
@@ -77,6 +81,7 @@ BEGIN
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_04;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_04;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_04;
+        DROP TRIGGER IF EXISTS trg_events_guard_project_revision_soft_delete ON events_p2026_04;
         ALTER TABLE events ATTACH PARTITION events_p2026_04
             FOR VALUES FROM ('2026-04-01') TO ('2026-05-01');
     END IF;
@@ -91,6 +96,7 @@ BEGIN
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_05;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_05;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_05;
+        DROP TRIGGER IF EXISTS trg_events_guard_project_revision_soft_delete ON events_p2026_05;
         ALTER TABLE events ATTACH PARTITION events_p2026_05
             FOR VALUES FROM ('2026-05-01') TO ('2026-06-01');
     END IF;
@@ -105,6 +111,7 @@ BEGIN
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p2026_06;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p2026_06;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p2026_06;
+        DROP TRIGGER IF EXISTS trg_events_guard_project_revision_soft_delete ON events_p2026_06;
         ALTER TABLE events ATTACH PARTITION events_p2026_06
             FOR VALUES FROM ('2026-06-01') TO ('2026-07-01');
     END IF;
@@ -119,6 +126,7 @@ BEGIN
         DROP TRIGGER IF EXISTS events_created_at_floor ON events_p_future;
         DROP TRIGGER IF EXISTS community_write_fence_events ON events_p_future;
         DROP TRIGGER IF EXISTS trg_events_guard_channel_roster_snapshot ON events_p_future;
+        DROP TRIGGER IF EXISTS trg_events_guard_project_revision_soft_delete ON events_p_future;
         ALTER TABLE events ATTACH PARTITION events_p_future
             FOR VALUES FROM ('2026-07-01') TO (MAXVALUE);
     END IF;

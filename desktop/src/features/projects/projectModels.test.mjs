@@ -48,6 +48,33 @@ function projectEvent(repositoryTags, overrides = {}) {
   };
 }
 
+function projectRevision(id, expected, operation, channelId, overrides = {}) {
+  const {
+    baseRevision = expected,
+    relatedChannelIds = [],
+    ...eventOverrides
+  } = overrides;
+  return {
+    id,
+    kind: 47001,
+    pubkey: "d".repeat(64),
+    created_at: 201,
+    content: "",
+    tags: [
+      ["a", `30621:${PROJECT_OWNER}:sprout`],
+      ["base", baseRevision],
+      ["e", expected],
+      ["op", operation],
+      ["channel", channelId],
+      ...relatedChannelIds.map((relatedChannelId) => [
+        "buzz-related-channel",
+        relatedChannelId,
+      ]),
+    ],
+    ...eventOverrides,
+  };
+}
+
 test("eventToRepository preserves repository-scoped identity and clone data", () => {
   const repository = eventToRepository(
     repositoryEvent(FRONTEND_OWNER, "frontend"),
@@ -115,6 +142,120 @@ test("buildProjectReadModels keeps extra related channel ids", () => {
   });
 
   assert.deepEqual(projects[0].relatedChannelIds, [relatedA, relatedB]);
+});
+
+test("buildProjectReadModels normalizes channel UUID tags before folding revisions", () => {
+  const home = "11111111-1111-4111-8111-111111111111";
+  const related = "abcdefab-cdef-4abc-8def-abcdefabcdef";
+  const base = projectEvent([["buzz-related-channel", related.toUpperCase()]], {
+    id: "a".repeat(64),
+    tags: [
+      ["d", "sprout"],
+      ["buzz-channel", home.toUpperCase()],
+      ["buzz-related-channel", related.toUpperCase()],
+    ],
+  });
+  const [project] = buildProjectReadModels({
+    projectEvents: [base],
+    projectRevisionEvents: [
+      projectRevision(
+        "b".repeat(64),
+        base.id,
+        "remove-related-channel",
+        related.toUpperCase(),
+        { baseRevision: base.id, relatedChannelIds: [] },
+      ),
+    ],
+    repositoryEvents: [],
+    relayOrigin: RELAY_ORIGIN,
+  });
+
+  assert.equal(project.projectChannelId, home);
+  assert.deepEqual(project.relatedChannelIds, []);
+});
+
+test("buildProjectReadModels folds the relay-authorized related-channel revision chain", () => {
+  const relatedA = "22222222-2222-4222-8222-222222222222";
+  const relatedB = "33333333-3333-4333-8333-333333333333";
+  const base = projectEvent([["buzz-related-channel", relatedA]], {
+    id: "a".repeat(64),
+  });
+  const addId = "b".repeat(64);
+  const removeId = "c".repeat(64);
+  const [project] = buildProjectReadModels({
+    projectEvents: [base],
+    projectRevisionEvents: [
+      projectRevision(removeId, addId, "remove-related-channel", relatedA, {
+        baseRevision: base.id,
+        relatedChannelIds: [relatedB],
+      }),
+    ],
+    repositoryEvents: [],
+    relayOrigin: RELAY_ORIGIN,
+  });
+
+  assert.deepEqual(project.relatedChannelIds, [relatedB]);
+  assert.equal(project.effectiveRevisionId, removeId);
+});
+
+test("buildProjectReadModels keeps project freshness monotonic across revisions", () => {
+  const related = "22222222-2222-4222-8222-222222222222";
+  const base = projectEvent([], {
+    id: "a".repeat(64),
+    created_at: 300,
+  });
+  const [project] = buildProjectReadModels({
+    projectEvents: [base],
+    projectRevisionEvents: [
+      projectRevision("b".repeat(64), base.id, "add-related-channel", related, {
+        baseRevision: base.id,
+        relatedChannelIds: [related],
+        created_at: 250,
+      }),
+    ],
+    repositoryEvents: [],
+    relayOrigin: RELAY_ORIGIN,
+  });
+
+  assert.equal(project.createdAt, 300);
+  assert.deepEqual(project.relatedChannelIds, [related]);
+});
+
+test("buildProjectReadModels ignores stale branches and malformed revisions", () => {
+  const relatedA = "22222222-2222-4222-8222-222222222222";
+  const relatedB = "33333333-3333-4333-8333-333333333333";
+  const base = projectEvent([], { id: "a".repeat(64) });
+  const [project] = buildProjectReadModels({
+    projectEvents: [base],
+    projectRevisionEvents: [
+      projectRevision(
+        "b".repeat(64),
+        "f".repeat(64),
+        "add-related-channel",
+        relatedA,
+      ),
+      projectRevision("c".repeat(64), base.id, "replace-all", relatedB),
+      projectRevision(
+        "d".repeat(64),
+        base.id,
+        "add-related-channel",
+        relatedA,
+        {
+          tags: [
+            ["a", `30621:${PROJECT_OWNER}:other-project`],
+            ["e", base.id],
+            ["op", "add-related-channel"],
+            ["channel", relatedA],
+          ],
+        },
+      ),
+    ],
+    repositoryEvents: [],
+    relayOrigin: RELAY_ORIGIN,
+  });
+
+  assert.deepEqual(project.relatedChannelIds, []);
+  assert.equal(project.effectiveRevisionId, base.id);
 });
 
 test("buildProjectReadModels keeps unclaimed repositories as implicit projects", () => {
@@ -185,11 +326,14 @@ test("addRepositoryToProject promotes a legacy repository route to a project coo
     legacyProject,
     attachedRepository,
     300,
+    "f".repeat(64),
   );
 
   assert.equal(updated.id, `30621:${PROJECT_OWNER}:sprout`);
   assert.equal(updated.legacy, false);
   assert.equal(updated.repositories.length, 2);
+  assert.equal(updated.baseRevisionId, "f".repeat(64));
+  assert.equal(updated.effectiveRevisionId, "f".repeat(64));
 });
 
 test("selectProjectRepository honors a request and falls back to primary", () => {

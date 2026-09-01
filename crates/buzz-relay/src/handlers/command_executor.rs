@@ -70,9 +70,65 @@ pub async fn handle_command(
         KIND_WORKFLOW_TRIGGER => handle_workflow_trigger(tenant, state, &event, &auth).await,
         KIND_APPROVAL_GRANT => handle_approval_grant(tenant, state, &event, &auth).await,
         KIND_APPROVAL_DENY => handle_approval_deny(tenant, state, &event, &auth).await,
+        KIND_PROJECT_REVISION => handle_project_revision(tenant, state, &event, &auth).await,
         _ => Err(IngestError::Rejected(format!(
             "unknown command kind: {kind}"
         ))),
+    }
+}
+
+async fn handle_project_revision(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    event: &Event,
+    auth: &IngestAuth,
+) -> Result<IngestResult, IngestError> {
+    use buzz_core::project_revision::ProjectRevision;
+    use buzz_db::project_revision::ProjectRevisionApplyResult;
+
+    let revision = ProjectRevision::parse(event)
+        .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
+    let result = state
+        .db
+        .apply_project_revision(tenant.community(), event, &revision)
+        .await
+        .map_err(|error| {
+            IngestError::Internal(format!("error: applying Project revision: {error}"))
+        })?;
+    match result {
+        ProjectRevisionApplyResult::Applied(stored) => {
+            super::event::dispatch_persistent_event(
+                tenant,
+                state,
+                &stored,
+                KIND_PROJECT_REVISION,
+                &auth.pubkey().to_hex(),
+                None,
+            )
+            .await;
+            Ok(IngestResult {
+                event_id: event.id.to_hex(),
+                accepted: true,
+                message: String::new(),
+            })
+        }
+        ProjectRevisionApplyResult::Duplicate => Ok(IngestResult {
+            event_id: event.id.to_hex(),
+            accepted: true,
+            message: String::new(),
+        }),
+        ProjectRevisionApplyResult::ProjectNotFound => Err(IngestError::Rejected(
+            "invalid: Project does not exist".into(),
+        )),
+        ProjectRevisionApplyResult::Conflict => Err(IngestError::Rejected(
+            "conflict: Project changed since it was loaded".into(),
+        )),
+        ProjectRevisionApplyResult::Forbidden => Err(IngestError::Rejected(
+            "restricted: Project owner or home-channel admin required".into(),
+        )),
+        ProjectRevisionApplyResult::InvalidMutation(message) => {
+            Err(IngestError::Rejected(format!("invalid: {message}")))
+        }
     }
 }
 

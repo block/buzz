@@ -37,6 +37,10 @@ pub enum DbError {
     #[error("access denied: {0}")]
     AccessDenied(String),
 
+    /// A compare-and-swap write was based on stale materialized state.
+    #[error("revision conflict: {0}")]
+    RevisionConflict(String),
+
     /// JSON serialization or deserialization failed.
     #[error("serialization error: {0}")]
     Serde(#[from] serde_json::Error),

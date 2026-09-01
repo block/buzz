@@ -3,6 +3,7 @@
 //! All functions return `Result<nostr::EventBuilder, SdkError>`.
 //! The caller signs: `builder.sign_with_keys(&keys)?`.
 
+use buzz_core::project_revision::{ProjectCoordinate, ProjectRevisionOperation};
 use buzz_core::{
     kind::{
         KIND_AGENT_OBSERVER_FRAME, KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_DELETION,
@@ -12,7 +13,7 @@ use buzz_core::{
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
         KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_PROJECT,
-        KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_PROJECT_REVISION, KIND_USER_STATUS, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -2223,6 +2224,52 @@ fn tag_value(tag: &Tag) -> Option<&str> {
 pub fn build_project_with_tags(content: &str, tags: Vec<Tag>) -> Result<EventBuilder, SdkError> {
     validate_project_envelope(&tags, content)?;
     Ok(EventBuilder::new(Kind::Custom(KIND_PROJECT as u16), content).tags(tags))
+}
+
+/// Build an actor-signed, relay-authorized Project revision.
+///
+/// The `expected_revision` is either the current `kind:30621` base event or
+/// the most recently accepted Project revision. The relay rejects a command
+/// when that exact revision is no longer current.
+pub fn build_project_revision(
+    project_coordinate: &str,
+    base_revision: &str,
+    expected_revision: &str,
+    operation: ProjectRevisionOperation,
+    channel_id: Uuid,
+    related_channels: &[Uuid],
+) -> Result<EventBuilder, SdkError> {
+    let project = ProjectCoordinate::parse(project_coordinate)
+        .map_err(|error| SdkError::InvalidInput(error.to_string()))?;
+    let base_revision = check_hex_exact(base_revision, 64, "base Project revision")?;
+    let expected_revision = check_hex_exact(expected_revision, 64, "expected Project revision")?;
+    if related_channels.len() > 64 {
+        return Err(SdkError::InvalidInput(
+            "Project revision snapshot exceeds 64 related channels".into(),
+        ));
+    }
+    let mut canonical_channels = related_channels.to_vec();
+    canonical_channels.sort_unstable();
+    canonical_channels.dedup();
+    if canonical_channels.len() != related_channels.len() {
+        return Err(SdkError::InvalidInput(
+            "Project revision snapshot contains duplicate related channels".into(),
+        ));
+    }
+    let mut tags = vec![
+        tag(&["a", &project.as_string()])?,
+        tag(&["base", &base_revision])?,
+        tag(&["e", &expected_revision])?,
+        tag(&["op", operation.as_str()])?,
+        tag(&["channel", &channel_id.to_string()])?,
+    ];
+    for related_channel in canonical_channels {
+        tags.push(tag(&[
+            "buzz-related-channel",
+            &related_channel.to_string(),
+        ])?);
+    }
+    Ok(EventBuilder::new(Kind::Custom(KIND_PROJECT_REVISION as u16), "").tags(tags))
 }
 
 /// **Layer B writer-policy builder**: Build a kind:30621 project event with
@@ -4779,6 +4826,42 @@ mod tests {
         assert!(
             ev.content.is_empty(),
             "Layer B must always emit empty content"
+        );
+    }
+
+    #[test]
+    fn build_project_revision_emits_canonical_cas_operation() {
+        let expected = "b".repeat(64);
+        let channel = Uuid::parse_str(VALID_UUID).unwrap();
+        let event = sign(
+            build_project_revision(
+                &format!("30621:{OWNER64}:my-proj"),
+                &"c".repeat(64),
+                &expected,
+                ProjectRevisionOperation::AddRelatedChannel,
+                channel,
+                &[channel],
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(event.kind.as_u16(), KIND_PROJECT_REVISION as u16);
+        assert!(event.content.is_empty());
+        let tags = event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tags,
+            vec![
+                vec!["a".into(), format!("30621:{OWNER64}:my-proj")],
+                vec!["base".into(), "c".repeat(64)],
+                vec!["e".into(), expected],
+                vec!["op".into(), "add-related-channel".into()],
+                vec!["channel".into(), VALID_UUID.into()],
+                vec!["buzz-related-channel".into(), VALID_UUID.into()],
+            ]
         );
     }
 

@@ -1,8 +1,10 @@
 import { relayClient } from "@/shared/api/relayClient";
+import { getProjectRevisionHeads } from "@/shared/api/projectRevisions";
 import type { RelayEvent } from "@/shared/api/types";
 import {
   KIND_DELETION,
   KIND_PROJECT_ANNOUNCEMENT,
+  KIND_PROJECT_REVISION,
   KIND_REPO_ANNOUNCEMENT,
 } from "@/shared/constants/kinds";
 import { absorbStandaloneProjectRepositories } from "./lib/projectCollection";
@@ -13,12 +15,13 @@ const PROJECT_ENUMERATION_PAGE_SIZE = 500;
 
 // Relays commonly cap filter tag-value lists; chunk `#a` scoping well below
 // any such cap.
-const TOMBSTONE_COORDINATE_CHUNK_SIZE = 100;
+const PROJECT_COORDINATE_CHUNK_SIZE = 100;
 
 /** Additional server-side scoping merged into every enumeration page. */
 export type ProjectEventExtraFilter = {
   "#a"?: string[];
   "#buzz-channel"?: string[];
+  project_revision_heads?: true;
 };
 
 type ProjectEventFilter = ProjectEventExtraFilter & {
@@ -105,6 +108,16 @@ export function fetchProjectEventsExhaustively(
   pageSize = PROJECT_ENUMERATION_PAGE_SIZE,
   signal?: AbortSignal,
 ): Promise<RelayEvent[]> {
+  if (extraFilter?.project_revision_heads) {
+    if (
+      kinds.length !== 1 ||
+      kinds[0] !== KIND_PROJECT_REVISION ||
+      !extraFilter["#a"]?.length
+    ) {
+      return Promise.reject(new Error("Invalid Project revision head query."));
+    }
+    return getProjectRevisionHeads(extraFilter["#a"]);
+  }
   return enumerateProjectEvents(
     (filter) => relayClient.fetchEvents(filter),
     kinds,
@@ -148,15 +161,48 @@ async function fetchScopedDeletionEvents(
   for (
     let index = 0;
     index < coordinates.length;
-    index += TOMBSTONE_COORDINATE_CHUNK_SIZE
+    index += PROJECT_COORDINATE_CHUNK_SIZE
   ) {
     chunks.push(
-      coordinates.slice(index, index + TOMBSTONE_COORDINATE_CHUNK_SIZE),
+      coordinates.slice(index, index + PROJECT_COORDINATE_CHUNK_SIZE),
     );
   }
 
   const pages = await Promise.all(
     chunks.map((chunk) => fetchExhaustively([KIND_DELETION], { "#a": chunk })),
+  );
+  return pages.flat();
+}
+
+async function fetchScopedProjectRevisionEvents(
+  fetchExhaustively: FetchProjectEventsExhaustively,
+  projectEvents: RelayEvent[],
+): Promise<RelayEvent[]> {
+  const coordinates = [
+    ...new Set(
+      projectEvents.flatMap((event) => {
+        const coordinate = eventCoordinate(event);
+        return coordinate ? [coordinate] : [];
+      }),
+    ),
+  ];
+  const chunks: string[][] = [];
+  for (
+    let index = 0;
+    index < coordinates.length;
+    index += PROJECT_COORDINATE_CHUNK_SIZE
+  ) {
+    chunks.push(
+      coordinates.slice(index, index + PROJECT_COORDINATE_CHUNK_SIZE),
+    );
+  }
+  const pages = await Promise.all(
+    chunks.map((chunk) =>
+      fetchExhaustively([KIND_PROJECT_REVISION], {
+        "#a": chunk,
+        project_revision_heads: true,
+      }),
+    ),
   );
   return pages.flat();
 }
@@ -183,6 +229,10 @@ export async function buildProjectsFromFetcher(
     fetchExhaustively([KIND_PROJECT_ANNOUNCEMENT]),
     fetchExhaustively([KIND_REPO_ANNOUNCEMENT]),
   ]);
+  const projectRevisionEvents = await fetchScopedProjectRevisionEvents(
+    fetchExhaustively,
+    projectEvents,
+  );
 
   // Tombstones are fetched second (not in parallel) because the `#a` scoping
   // needs the announcement coordinates; both announcement kinds are small,
@@ -207,6 +257,7 @@ export async function buildProjectsFromFetcher(
   return absorbStandaloneProjectRepositories(
     buildProjectReadModels({
       projectEvents,
+      projectRevisionEvents,
       repositoryEvents,
       deletionEvents: tombstoneResult.events,
       relayOrigin: options.relayOrigin ?? null,
@@ -233,7 +284,7 @@ export async function buildProjectHomeFromFetcher(
     (kinds, extraFilter) =>
       fetchExhaustively(
         kinds,
-        kinds.includes(KIND_DELETION)
+        kinds.includes(KIND_DELETION) || kinds.includes(KIND_PROJECT_REVISION)
           ? extraFilter
           : { ...extraFilter, "#buzz-channel": [channelId] },
       ),

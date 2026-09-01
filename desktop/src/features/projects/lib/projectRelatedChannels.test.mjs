@@ -4,6 +4,7 @@ import { test } from "node:test";
 import {
   collapseProjectRelatedChannelRows,
   collectProjectRelatedChannelRows,
+  isExplicitProjectRelatedChannel,
   listProjectBoundChannels,
   listProjectChildChannels,
   projectRelatedChannelRowKey,
@@ -298,6 +299,23 @@ test("listProjectBoundChannels includes extra related channels after home", () =
       },
     ],
   );
+});
+
+test("only explicit related membership can be removed from a Project", () => {
+  const related = "33333333-3333-4333-8333-333333333333";
+  const bindings = listProjectBoundChannels(
+    makeProject({
+      projectChannelId: CHANNEL_B,
+      relatedChannelIds: [related],
+      repositories: [makeRepository({ channelId: CHANNEL_A })],
+    }),
+  );
+
+  assert.deepEqual(bindings.map(isExplicitProjectRelatedChannel), [
+    false,
+    true,
+    false,
+  ]);
 });
 
 test("listProjectChildChannels omits the home channel", () => {

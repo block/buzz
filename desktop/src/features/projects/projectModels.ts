@@ -1,6 +1,7 @@
 import type { RelayEvent } from "@/shared/api/types";
 import {
   KIND_PROJECT_ANNOUNCEMENT,
+  KIND_PROJECT_REVISION,
   KIND_REPO_ANNOUNCEMENT,
 } from "@/shared/constants/kinds";
 import { effectiveCloneUrls } from "./lib/projectCloneUrl";
@@ -38,6 +39,10 @@ export type Project = {
    * unrecognized metadata, so older readers ignore it.
    */
   relatedChannelIds: string[];
+  /** Current base or collaborative revision id used as the next CAS token. */
+  effectiveRevisionId?: string;
+  /** Owner-signed Project event on which the collaborative revision is based. */
+  baseRevisionId?: string;
   status: string;
   projectAddress: string;
   primaryRepositoryAddress: string | null;
@@ -56,6 +61,7 @@ export function isExplicitProject(project: Project): boolean {
 
 type BuildProjectReadModelsInput = {
   projectEvents: RelayEvent[];
+  projectRevisionEvents?: RelayEvent[];
   repositoryEvents: RelayEvent[];
   /** NIP-09 kind:5 deletion events relevant to projects and repositories. */
   deletionEvents?: RelayEvent[];
@@ -124,6 +130,11 @@ export function isValidProjectChannelId(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     value,
   );
+}
+
+function normalizedProjectChannelId(value: string): string | null {
+  const normalized = value.trim().toLowerCase();
+  return isValidProjectChannelId(normalized) ? normalized : null;
 }
 
 /** Repeatable project tag naming an extra stream besides `buzz-channel`. */
@@ -362,14 +373,15 @@ export function eventToExplicitProject(
   const visibility =
     rawVisibility === "unlisted" ? ("unlisted" as const) : ("listed" as const);
   const channel = getTag(event, "buzz-channel");
-  const projectChannelId =
-    channel && isValidProjectChannelId(channel) ? channel : null;
+  const projectChannelId = channel ? normalizedProjectChannelId(channel) : null;
   const relatedChannelIds = [
     ...new Set(
-      getAllTags(event, PROJECT_RELATED_CHANNEL_TAG).filter(
-        (channelId) =>
-          isValidProjectChannelId(channelId) && channelId !== projectChannelId,
-      ),
+      getAllTags(event, PROJECT_RELATED_CHANNEL_TAG).flatMap((channelId) => {
+        const normalized = normalizedProjectChannelId(channelId);
+        return normalized && normalized !== projectChannelId
+          ? [normalized]
+          : [];
+      }),
     ),
   ].slice(0, MAX_PROJECT_RELATED_CHANNELS);
   return {
@@ -381,6 +393,8 @@ export function eventToExplicitProject(
     createdAt: event.created_at,
     projectChannelId,
     relatedChannelIds,
+    effectiveRevisionId: event.id.toLowerCase(),
+    baseRevisionId: event.id.toLowerCase(),
     status: visibility === "listed" ? "active" : "unlisted",
     projectAddress,
     primaryRepositoryAddress,
@@ -408,6 +422,7 @@ function repositoryToLegacyProject(repository: Repository): Project {
     createdAt: repository.createdAt,
     projectChannelId: null,
     relatedChannelIds: [],
+    effectiveRevisionId: repository.id.toLowerCase(),
     status: repository.status,
     projectAddress: repository.repoAddress,
     primaryRepositoryAddress: repository.repoAddress,
@@ -454,6 +469,7 @@ function projectIsListingEligible(
 
 export function buildProjectReadModels({
   projectEvents,
+  projectRevisionEvents = [],
   repositoryEvents,
   deletionEvents = [],
   relayOrigin,
@@ -501,7 +517,7 @@ export function buildProjectReadModels({
       return project &&
         projectIsListingEligible(project, viewerPubkey) &&
         !hiddenAddresses.has(project.projectAddress)
-        ? [project]
+        ? [applyProjectRevisionEvents(project, event.id, projectRevisionEvents)]
         : [];
     });
   const claimedRepositories = new Set(
@@ -523,6 +539,52 @@ export function buildProjectReadModels({
   return [...explicitProjects, ...legacyProjects].sort(
     (left, right) => right.createdAt - left.createdAt,
   );
+}
+
+function singletonRevisionTag(event: RelayEvent, name: string): string | null {
+  const matches = event.tags.filter(
+    (tag) => tag.length === 2 && tag[0] === name && Boolean(tag[1]),
+  );
+  return matches.length === 1 ? matches[0][1] : null;
+}
+
+/** Apply the relay-authorized signed snapshot for a Project's current head. */
+export function applyProjectRevisionEvents(
+  project: Project,
+  baseEventId: string,
+  events: RelayEvent[],
+): Project {
+  const baseRevisionId = baseEventId.toLowerCase();
+  const candidates = events.filter(
+    (event) =>
+      event.kind === KIND_PROJECT_REVISION &&
+      singletonRevisionTag(event, "a") === project.projectAddress,
+  );
+  if (candidates.length !== 1) return project;
+  const [head] = candidates;
+  if (singletonRevisionTag(head, "base")?.toLowerCase() !== baseRevisionId) {
+    return project;
+  }
+  const relatedChannelIds = head.tags
+    .filter((tag) => tag.length === 2 && tag[0] === PROJECT_RELATED_CHANNEL_TAG)
+    .flatMap((tag) => {
+      const channelId = normalizedProjectChannelId(tag[1]);
+      return channelId ? [channelId] : [];
+    });
+  if (
+    relatedChannelIds.length > MAX_PROJECT_RELATED_CHANNELS ||
+    new Set(relatedChannelIds).size !== relatedChannelIds.length ||
+    relatedChannelIds.includes(project.projectChannelId ?? "")
+  ) {
+    return project;
+  }
+  return {
+    ...project,
+    createdAt: Math.max(project.createdAt, head.created_at),
+    baseRevisionId,
+    effectiveRevisionId: head.id.toLowerCase(),
+    relatedChannelIds,
+  };
 }
 
 export function selectProjectRepository(
@@ -553,7 +615,9 @@ export function addRepositoryToProject(
   project: Project,
   repository: Repository,
   createdAt: number,
+  replacementEventId: string,
 ): Project {
+  const normalizedReplacementEventId = replacementEventId.toLowerCase();
   const projectAddress = `${KIND_PROJECT_ANNOUNCEMENT}:${project.owner}:${project.dtag}`;
   const repositoryAddresses = [
     ...new Set([...project.repositoryAddresses, repository.repoAddress]),
@@ -569,6 +633,8 @@ export function addRepositoryToProject(
     ...project,
     id: projectAddress,
     createdAt,
+    baseRevisionId: normalizedReplacementEventId,
+    effectiveRevisionId: normalizedReplacementEventId,
     legacy: false,
     projectAddress,
     primaryRepositoryAddress:
@@ -591,14 +657,19 @@ export function addRelatedChannelToProject(
   channelId: string,
   createdAt: number,
 ): Project {
+  const normalizedChannelId = normalizedProjectChannelId(channelId);
   const relatedChannelIds = [
-    ...new Set([...(project.relatedChannelIds ?? []), channelId]),
-  ].filter(
-    (id) => id !== project.projectChannelId && isValidProjectChannelId(id),
-  );
+    ...new Set([
+      ...(project.relatedChannelIds ?? []).flatMap((id) => {
+        const normalized = normalizedProjectChannelId(id);
+        return normalized ? [normalized] : [];
+      }),
+      ...(normalizedChannelId ? [normalizedChannelId] : []),
+    ]),
+  ].filter((id) => id !== project.projectChannelId?.toLowerCase());
   return {
     ...project,
-    createdAt,
+    createdAt: Math.max(project.createdAt, createdAt),
     relatedChannelIds: relatedChannelIds.slice(0, MAX_PROJECT_RELATED_CHANNELS),
   };
 }

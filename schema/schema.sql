@@ -3787,3 +3787,38 @@ CREATE CONSTRAINT TRIGGER authorization_event_receipt_cardinality
     AFTER INSERT ON authorization_events
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION authorization_operation_receipt_event_guard_v1();
+
+-- ── Collaborative Project revision heads ────────────────────────────────────
+-- The signed kind:47001 events remain in `events`; this is the transactional
+-- compare-and-swap head and materialized related-channel membership.
+
+CREATE TABLE project_revision_heads (
+    community_id UUID NOT NULL,
+    project_owner BYTEA NOT NULL CHECK (octet_length(project_owner) = 32),
+    project_d_tag TEXT NOT NULL,
+    base_event_id BYTEA NOT NULL CHECK (octet_length(base_event_id) = 32),
+    revision_event_id BYTEA NOT NULL CHECK (octet_length(revision_event_id) = 32),
+    related_channel_ids UUID[] NOT NULL DEFAULT '{}',
+    PRIMARY KEY (community_id, project_owner, project_d_tag)
+);
+
+SELECT attach_community_write_fence('project_revision_heads');
+
+-- Actor-signed Project revisions are an immutable audit trail. Enforce this
+-- below the relay process so older pods cannot soft-delete kind 47001 during a
+-- rolling deployment.
+CREATE FUNCTION guard_project_revision_soft_delete() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION 'kind 47001 Project revisions are immutable'
+        USING ERRCODE = 'check_violation';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_events_guard_project_revision_soft_delete
+    BEFORE UPDATE OF deleted_at ON events
+    FOR EACH ROW
+    WHEN (
+        OLD.kind = 47001
+        AND OLD.deleted_at IS DISTINCT FROM NEW.deleted_at
+    )
+    EXECUTE FUNCTION guard_project_revision_soft_delete();

@@ -699,7 +699,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 42);
+        assert_eq!(migrations.len(), 44);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1280,6 +1280,55 @@ mod tests {
             extract_excluded_table_array(desired_schema),
             "schema.sql exclusion list drifted from migration 0042"
         );
+
+        assert_eq!(migrations[42].version, 43);
+        let project_revisions = migrations[42].sql.as_str();
+        assert!(
+            project_revisions.contains("CREATE TABLE project_revision_heads"),
+            "migration 43 must create project_revision_heads"
+        );
+        assert!(
+            project_revisions.contains("attach_community_write_fence('project_revision_heads')"),
+            "migration 43 must fence project_revision_heads during community deletion"
+        );
+
+        assert_eq!(migrations[43].version, 44);
+        let project_revision_immutability = migrations[43].sql.as_str();
+        assert!(
+            project_revision_immutability.contains("LOCK TABLE events IN SHARE ROW EXCLUSIVE MODE"),
+            "migration 44 must exclude old writers between repair and trigger installation"
+        );
+        assert!(
+            project_revision_immutability.contains("UPDATE events\nSET deleted_at = NULL"),
+            "migration 44 must repair Project revisions soft-deleted during an upgrade window"
+        );
+        assert!(project_revision_immutability
+            .contains("CREATE TRIGGER trg_events_guard_project_revision_soft_delete"));
+        assert!(project_revision_immutability.contains("OLD.kind = 47001"));
+        assert!(project_revision_immutability
+            .contains("OLD.deleted_at IS DISTINCT FROM NEW.deleted_at"));
+
+        fn extract_project_revision_guard(sql: &str) -> &str {
+            let guard_start = "CREATE FUNCTION guard_project_revision_soft_delete()";
+            let guard_end = "    EXECUTE FUNCTION guard_project_revision_soft_delete();";
+            let start = sql
+                .find(guard_start)
+                .expect("Project revision guard function");
+            let relative_end = sql[start..]
+                .find(guard_end)
+                .expect("Project revision guard trigger");
+            &sql[start..start + relative_end + guard_end.len()]
+        }
+        assert_eq!(
+            extract_project_revision_guard(project_revision_immutability),
+            extract_project_revision_guard(desired_schema),
+            "migration 44 and schema.sql must install the same Project revision guard"
+        );
+        assert!(
+            pgschema_reconciliation
+                .contains("trg_events_guard_project_revision_soft_delete ON events_p_future"),
+            "pgschema reconciliation must remove cloned Project revision guards before attaching standalone event partitions"
+        );
     }
 
     #[test]
@@ -1813,6 +1862,9 @@ mod tests {
             );
         }
         let mut expected_fences = migration.fence_attachments.clone();
+        for later_migration in MIGRATOR.iter().filter(|migration| migration.version > 29) {
+            expected_fences.extend(surface(later_migration.sql.as_ref()).fence_attachments);
+        }
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
         assert_eq!(
@@ -2246,14 +2298,15 @@ mod tests {
             .await
             .expect("connect migrated probe database");
         MIGRATOR
-            .run_to(39, &migrated)
+            .run_to(44, &migrated)
             .await
-            .expect("apply migrations 1-39");
+            .expect("apply migrations 1-44");
 
         for table in [
             "relay_admin_actions",
             "relay_admin_outbox",
             "relay_operator_audit",
+            "project_revision_heads",
         ] {
             assert_eq!(
                 columns(&desired, table).await,
@@ -2281,6 +2334,107 @@ mod tests {
             .await
             .expect("drop probe database");
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn migration_0044_repairs_and_guards_project_revision_history() {
+        let pool = connect_test_pool().await;
+        reset_public_schema(&pool).await;
+        MIGRATOR
+            .run_to(43, &pool)
+            .await
+            .expect("apply migrations 1-43");
+
+        let community_id = uuid::Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_id)
+            .bind(format!(
+                "project-revision-immutability-{}.example",
+                community_id.simple()
+            ))
+            .execute(&pool)
+            .await
+            .expect("insert community");
+
+        let revision_id = vec![1_u8; 32];
+        let ordinary_id = vec![2_u8; 32];
+        for (event_id, kind, deleted) in [
+            (&revision_id, 47_001_i32, true),
+            (&ordinary_id, 1_i32, false),
+        ] {
+            sqlx::query(
+                "INSERT INTO events \
+                 (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, deleted_at) \
+                 VALUES ($1, $2, $3, NOW(), $4, '[]'::jsonb, '', $5, NOW(), \
+                         CASE WHEN $6 THEN NOW() ELSE NULL END)",
+            )
+            .bind(community_id)
+            .bind(event_id)
+            .bind(vec![3_u8; 32])
+            .bind(kind)
+            .bind(vec![4_u8; 64])
+            .bind(deleted)
+            .execute(&pool)
+            .await
+            .expect("insert pre-0044 event");
+        }
+
+        MIGRATOR
+            .run_to(44, &pool)
+            .await
+            .expect("apply migration 44");
+
+        let repaired: Option<chrono::DateTime<chrono::Utc>> =
+            sqlx::query_scalar("SELECT deleted_at FROM events WHERE community_id=$1 AND id=$2")
+                .bind(community_id)
+                .bind(&revision_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read repaired Project revision");
+        assert!(
+            repaired.is_none(),
+            "migration 44 must restore a previously soft-deleted Project revision"
+        );
+
+        let legacy_soft_delete =
+            sqlx::query("UPDATE events SET deleted_at=NOW() WHERE community_id=$1 AND id=$2")
+                .bind(community_id)
+                .bind(&revision_id)
+                .execute(&pool)
+                .await
+                .expect_err("the database must reject an old relay's Project revision soft-delete");
+        assert_eq!(
+            legacy_soft_delete
+                .as_database_error()
+                .and_then(|error| error.code().map(|code| code.into_owned()))
+                .as_deref(),
+            Some("23514")
+        );
+
+        let ordinary_soft_delete =
+            sqlx::query("UPDATE events SET deleted_at=NOW() WHERE community_id=$1 AND id=$2")
+                .bind(community_id)
+                .bind(&ordinary_id)
+                .execute(&pool)
+                .await
+                .expect("ordinary events retain the generic soft-delete behavior");
+        assert_eq!(ordinary_soft_delete.rows_affected(), 1);
+
+        let guarded_relations: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pg_trigger trigger \
+             JOIN pg_class relation ON relation.oid=trigger.tgrelid \
+             WHERE trigger.tgname='trg_events_guard_project_revision_soft_delete' \
+               AND NOT trigger.tgisinternal \
+               AND (relation.relname='events' OR relation.relispartition)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count Project revision guards");
+        assert_eq!(
+            guarded_relations, 9,
+            "the events parent and all eight existing partitions must carry the guard"
+        );
     }
 
     #[tokio::test]

@@ -2,13 +2,15 @@ import { Plus } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
-import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { useUsersBatchQuery } from "@/features/profile/hooks";
-import { ownsAuthorAgent } from "@/features/profile/lib/identity";
+import { useIsManagedAgent } from "@/features/agent-memory/hooks";
+import { useChannelMembersQuery } from "@/features/channels/hooks";
 import type { Project } from "@/features/projects/hooks";
 import { useAddProjectChannelMutation } from "@/features/projects/useAddProjectChannel";
+import { useUsersBatchQuery } from "@/features/profile/hooks";
+import { ownsAuthorAgent } from "@/features/profile/lib/identity";
 import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
+import type { ChannelMember } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 
 export function ProjectChannelManagement({
@@ -21,25 +23,8 @@ export function ProjectChannelManagement({
   const { goChannel } = useAppNavigation();
   const [createOpen, setCreateOpen] = React.useState(false);
   const createMutation = useAddProjectChannelMutation();
-  const ownerProfileQuery = useUsersBatchQuery([project.owner], {
-    enabled: Boolean(identityPubkey),
-  });
-  const projectOwnerProfile =
-    ownerProfileQuery.data?.profiles[project.owner.toLowerCase()];
-  const projectOwnerIsManaged = useIsManagedAgent(project.owner) === true;
-  const viewerIsProjectOwner =
-    identityPubkey?.toLowerCase() === project.owner.toLowerCase();
-  const viewerOwnsProjectAgent = ownsAuthorAgent(
-    projectOwnerProfile,
-    identityPubkey,
-  );
-  const canEdit =
-    !project.legacy &&
-    (viewerIsProjectOwner || projectOwnerIsManaged || viewerOwnsProjectAgent);
-  const ownerControlAgentPubkey =
-    viewerOwnsProjectAgent && !projectOwnerIsManaged && !viewerIsProjectOwner
-      ? project.owner
-      : undefined;
+  const access = useProjectChannelManagementAccess(project, identityPubkey);
+  const canEdit = access.canManage;
 
   return (
     <>
@@ -51,8 +36,9 @@ export function ProjectChannelManagement({
           onCreate={async (input) => {
             const result = await createMutation.mutateAsync({
               ...input,
-              ownerControlAgentPubkey,
+              ownerControlAgentPubkey: access.ownerControlAgentPubkey,
               project,
+              signAsManagedOwner: access.signAsManagedOwner,
             });
             toast.success(`Channel "#${result.channel.name}" created.`);
             await goChannel(result.channel.id);
@@ -70,7 +56,9 @@ export function ProjectChannelManagement({
         onClick={() => setCreateOpen(true)}
         size="icon"
         title={
-          canEdit ? "Add channel" : "Only the project owner can add channels"
+          canEdit
+            ? "Add channel"
+            : "Only the Project owner or a home-channel admin can add channels"
         }
         type="button"
         variant="ghost"
@@ -78,5 +66,70 @@ export function ProjectChannelManagement({
         <Plus className="h-4 w-4" />
       </Button>
     </>
+  );
+}
+
+export function useProjectChannelManagementAccess(
+  project: Project,
+  identityPubkey?: string,
+): {
+  canManage: boolean;
+  ownerControlAgentPubkey?: string;
+  signAsManagedOwner: boolean;
+} {
+  const homeMembersQuery = useChannelMembersQuery(project.projectChannelId);
+  const ownerProfileQuery = useUsersBatchQuery([project.owner], {
+    enabled: Boolean(identityPubkey),
+  });
+  const projectOwnerProfile =
+    ownerProfileQuery.data?.profiles[project.owner.toLowerCase()];
+  const projectOwnerIsManaged = useIsManagedAgent(project.owner) === true;
+  const viewerOwnsProjectAgent = ownsAuthorAgent(
+    projectOwnerProfile,
+    identityPubkey,
+  );
+  const viewerIsProjectOwner =
+    identityPubkey?.toLowerCase() === project.owner.toLowerCase();
+  const viewerHomeRole = homeMembersQuery.data?.find(
+    (member) => member.pubkey.toLowerCase() === identityPubkey?.toLowerCase(),
+  )?.role;
+  const viewerHasHomeRole =
+    viewerHomeRole === "owner" || viewerHomeRole === "admin";
+  const canManage = canManageProjectChannels(
+    project,
+    identityPubkey,
+    viewerHomeRole,
+    projectOwnerIsManaged || viewerOwnsProjectAgent,
+  );
+  return {
+    canManage,
+    ownerControlAgentPubkey:
+      canManage &&
+      !viewerIsProjectOwner &&
+      !viewerHasHomeRole &&
+      viewerOwnsProjectAgent &&
+      !projectOwnerIsManaged
+        ? project.owner
+        : undefined,
+    signAsManagedOwner:
+      canManage &&
+      !viewerIsProjectOwner &&
+      !viewerHasHomeRole &&
+      projectOwnerIsManaged,
+  };
+}
+
+export function canManageProjectChannels(
+  project: Project,
+  identityPubkey?: string,
+  viewerHomeRole?: ChannelMember["role"],
+  viewerCanControlOwner = false,
+): boolean {
+  return (
+    !project.legacy &&
+    (identityPubkey?.toLowerCase() === project.owner.toLowerCase() ||
+      viewerCanControlOwner ||
+      viewerHomeRole === "owner" ||
+      viewerHomeRole === "admin")
   );
 }

@@ -89,6 +89,9 @@ pub fn parse_write_response(raw: &str, conflict_msg: &str) -> Result<String, Cli
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
     if !accepted {
+        if message.starts_with("conflict:") {
+            return Err(CliError::Conflict(conflict_msg.to_string()));
+        }
         return Err(CliError::Other(format!("relay rejected event: {message}")));
     }
     if message == "duplicate" || message.starts_with("duplicate:") {

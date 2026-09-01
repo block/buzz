@@ -581,7 +581,7 @@ pub const KIND_WORKFLOW_APPROVAL_GRANTED: u32 = 46011;
 /// A pending workflow approval was denied.
 pub const KIND_WORKFLOW_APPROVAL_DENIED: u32 = 46012;
 
-// User groups (47000–47999)
+// Project collaboration and user groups (47000–47999)
 
 // System / admin custom range (48000–48999)
 /// An audit log entry was recorded.
@@ -613,6 +613,13 @@ pub const KIND_GIT_PULL_REQUEST: u32 = 1618;
 pub const KIND_GIT_PR_UPDATE: u32 = 1619;
 /// NIP-34: Issue.
 pub const KIND_GIT_ISSUE: u32 = 1621;
+/// NIP-MP: actor-signed, relay-authorized mutation of a Project container.
+///
+/// Project revisions are regular events. They reference the stable
+/// `kind:30621` Project coordinate and the exact effective revision they were
+/// based on, allowing the relay to authorize collaborative writes without
+/// forging a replacement under the Project owner's key.
+pub const KIND_PROJECT_REVISION: u32 = 47001;
 /// NIP-34: Status — Open.
 pub const KIND_GIT_STATUS_OPEN: u32 = 1630;
 /// NIP-34: Status — Applied / Merged.
@@ -758,6 +765,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_GIT_PULL_REQUEST,
     KIND_GIT_PR_UPDATE,
     KIND_GIT_ISSUE,
+    KIND_PROJECT_REVISION,
     KIND_GIT_STATUS_OPEN,
     KIND_GIT_STATUS_MERGED,
     KIND_GIT_STATUS_CLOSED,
@@ -822,6 +830,7 @@ pub const fn is_command_kind(kind: u32) -> bool {
             | KIND_WORKFLOW_TRIGGER
             | KIND_APPROVAL_GRANT
             | KIND_APPROVAL_DENY
+            | KIND_PROJECT_REVISION
     )
 }
 

@@ -7,9 +7,13 @@ import {
 } from "@/features/projects/hooks";
 import { publishOwnedAgentProjectAnnouncements } from "@/features/projects/projectOwnerControl";
 import { addRepositoryToProject } from "@/features/projects/projectModels";
-import { buildProjectPatchTemplate } from "@/features/projects/projectRepositoryCreation";
+import {
+  assertProjectRepositoryWriteCurrent,
+  buildProjectPatchTemplate,
+} from "@/features/projects/projectRepositoryCreation";
 import { markProjectDataAuthoritative } from "@/features/projects/projectSnapshot";
 import { publishProjectOwnerAnnouncement } from "@/shared/api/projectGit";
+import { getProjectRevisionHeads } from "@/shared/api/projectRevisions";
 import { relayClient } from "@/shared/api/relayClient";
 import { KIND_PROJECT_ANNOUNCEMENT } from "@/shared/constants/kinds";
 
@@ -19,15 +23,27 @@ export type AttachProjectRepositoryInput = {
   repository: Repository;
 };
 
-async function attachProjectRepository({
-  ownerControlAgentPubkey,
-  project,
-  repository,
-}: AttachProjectRepositoryInput) {
+type AttachProjectRepositoryDeps = {
+  fetchEvents: typeof relayClient.fetchEvents;
+  fetchProjectRevisionHeads: typeof getProjectRevisionHeads;
+};
+
+export async function attachProjectRepository(
+  {
+    ownerControlAgentPubkey,
+    project,
+    repository,
+  }: AttachProjectRepositoryInput,
+  deps?: Partial<AttachProjectRepositoryDeps>,
+) {
+  const fetchEvents =
+    deps?.fetchEvents ?? relayClient.fetchEvents.bind(relayClient);
+  const fetchRevisionHeads =
+    deps?.fetchProjectRevisionHeads ?? getProjectRevisionHeads;
   const targetOwner = project.owner.toLowerCase();
 
   // Fetch the live signed project head immediately before mutating.
-  const liveHeads = await relayClient.fetchEvents({
+  const liveHeads = await fetchEvents({
     kinds: [KIND_PROJECT_ANNOUNCEMENT],
     authors: [targetOwner],
     "#d": [project.dtag],
@@ -46,6 +62,11 @@ async function attachProjectRepository({
       "This project was updated by another session while you were working. Refresh and try again.",
     );
   }
+  assertProjectRepositoryWriteCurrent({
+    liveHead,
+    project,
+    revisionHeads: await fetchRevisionHeads([project.projectAddress]),
+  });
 
   const liveAddresses = liveHead.tags
     .filter((tag) => tag[0] === "a" && tag[1])
@@ -57,6 +78,7 @@ async function attachProjectRepository({
   const template = buildProjectPatchTemplate({
     liveHead,
     ownerPubkey: targetOwner,
+    relatedChannelIds: project.relatedChannelIds,
     repositoryAddresses: [...liveAddresses, repository.repoAddress],
   });
   const createdAt = Math.max(
@@ -79,6 +101,7 @@ async function attachProjectRepository({
         project,
         repository,
         projectEvent.created_at,
+        projectEvent.id.toLowerCase(),
       ),
       repository,
     };
@@ -100,6 +123,7 @@ async function attachProjectRepository({
       project,
       repository,
       projectEvent.created_at,
+      projectEvent.id.toLowerCase(),
     ),
     repository,
   };
@@ -108,7 +132,8 @@ async function attachProjectRepository({
 export function useAttachProjectRepositoryMutation() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: attachProjectRepository,
+    mutationFn: (input: AttachProjectRepositoryInput) =>
+      attachProjectRepository(input),
     onSuccess: ({ previousProjectId, project }) => {
       markProjectDataAuthoritative(project, "local-write");
       if (previousProjectId !== project.id) {

@@ -10,8 +10,8 @@ use buzz_core::kind::{
     event_kind_u32, is_parameterized_replaceable, KIND_AGENT_PROFILE, KIND_DM_VISIBILITY,
     KIND_GIT_REPO_ANNOUNCEMENT, KIND_IA_ARCHIVED, KIND_IA_ARCHIVED_LIST, KIND_IA_UNARCHIVED,
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_NIP29_GROUP_ADMINS,
-    KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_REACTION,
-    KIND_THREAD_SUMMARY,
+    KIND_NIP29_GROUP_MEMBERS, KIND_NIP29_GROUP_METADATA, KIND_NIP43_MEMBERSHIP_LIST, KIND_PROJECT,
+    KIND_PROJECT_REVISION, KIND_REACTION, KIND_THREAD_SUMMARY,
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
@@ -265,6 +265,10 @@ pub async fn validate_standard_deletion_event(
             .get_event_by_id_including_deleted(tenant.community(), &target_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("target event not found"))?;
+
+        if event_kind_u32(&target_event.event) == KIND_PROJECT_REVISION {
+            return Err(anyhow::anyhow!("Project revision events are immutable"));
+        }
 
         let target_author =
             effective_message_author(&target_event.event, &state.relay_keypair.public_key());
@@ -2336,15 +2340,38 @@ async fn handle_standard_deletion_event(
         let parent_id = meta.as_ref().and_then(|m| m.parent_event_id.clone());
         let root_id = meta.as_ref().and_then(|m| m.root_event_id.clone());
 
-        let deleted = state
-            .db
-            .soft_delete_event_and_update_thread(
-                tenant.community(),
-                &target_id,
-                parent_id.as_deref(),
-                root_id.as_deref(),
-            )
-            .await?;
+        let deleted = if event_kind_u32(&target_event.event) == KIND_PROJECT {
+            let project_d_tag = target_event
+                .event
+                .tags
+                .iter()
+                .find_map(|tag| {
+                    let parts = tag.as_slice();
+                    (parts.first().map(String::as_str) == Some("d"))
+                        .then(|| parts.get(1).cloned())
+                        .flatten()
+                })
+                .unwrap_or_default();
+            state
+                .db
+                .soft_delete_project_event(
+                    tenant.community(),
+                    &target_id,
+                    target_event.event.pubkey.to_bytes().as_slice(),
+                    &project_d_tag,
+                )
+                .await?
+        } else {
+            state
+                .db
+                .soft_delete_event_and_update_thread(
+                    tenant.community(),
+                    &target_id,
+                    parent_id.as_deref(),
+                    root_id.as_deref(),
+                )
+                .await?
+        };
 
         if !deleted {
             continue;

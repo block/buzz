@@ -54,6 +54,7 @@ import {
   KIND_MEMBER_REMOVED_NOTIFICATION,
   KIND_PERSONA,
   KIND_PROJECT_ANNOUNCEMENT,
+  KIND_PROJECT_REVISION,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
   KIND_STREAM_MESSAGE_EDIT,
@@ -5957,6 +5958,7 @@ const MOCK_PROJECT_SUBJECTS = [
 
 const MOCK_PROJECT_KINDS = new Set<number>([
   KIND_PROJECT_ANNOUNCEMENT,
+  KIND_PROJECT_REVISION,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
   KIND_GIT_PATCH,
@@ -6172,7 +6174,9 @@ function isMockProjectScopedEvent(event: RelayEvent): boolean {
     (tag) => tag[0] === "a" && (tag[1] ?? "").startsWith("30617:"),
   );
   return (
-    (event.kind === KIND_REPO_ANNOUNCEMENT || hasRepoAddressTag) &&
+    (event.kind === KIND_PROJECT_REVISION ||
+      event.kind === KIND_REPO_ANNOUNCEMENT ||
+      hasRepoAddressTag) &&
     (event.kind === 1 || MOCK_PROJECT_KINDS.has(event.kind))
   );
 }
@@ -12413,6 +12417,24 @@ export function maybeInstallE2eTauriMocks() {
         // Matches the "Thomas P" author on a mock snapshot commit so the
         // viewer-identity avatar attribution is exercised in e2e.
         return { name: "Thomas P", email: "thomasp@example.com" };
+      case "get_project_revision_heads": {
+        const coordinates = new Set(
+          (payload as { coordinates?: string[] } | null)?.coordinates ?? [],
+        );
+        const heads = new Map<string, RelayEvent>();
+        for (const event of getMockProjectEventStore()) {
+          if (event.kind !== KIND_PROJECT_REVISION) continue;
+          const coordinate = event.tags.find(
+            (tag) => tag.length === 2 && tag[0] === "a",
+          )?.[1];
+          if (coordinate && coordinates.has(coordinate)) {
+            // Accepted mock revisions are appended in relay order, so the
+            // final event for a coordinate is its current authorized head.
+            heads.set(coordinate, event);
+          }
+        }
+        return [...heads.values()];
+      }
       case "get_project_repo_snapshot":
         if (activeConfig?.mock?.projectRepoSnapshotDelayMs) {
           await new Promise((resolve) =>
