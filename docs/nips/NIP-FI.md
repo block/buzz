@@ -18,26 +18,28 @@ NIP-FI authorizes a Nostr key when two independent facts agree: a valid
 issuer-qualified identity assertion that names the key, and fresh NIP-42 proof
 of possession of that key.  No relay-side identity state is required.  The
 relay verifies the assertion offline against configured per-issuer JWKS
-snapshots; every identity decision beyond key verification is the deployment
-adapter's responsibility.
+snapshots; every identity decision beyond key verification is the assertion
+issuer's responsibility.
 
 This NIP defines the assertion contract, the offline verification procedure,
-session lifetime policy, and an authenticated adapter→relay disconnect API.
+session lifetime policy, and an authenticated issuer→relay disconnect API.
 Enrollment, rotation, revocation decisions, identity↔key registry, one-identity
-one-key enforcement, audit, and SCIM are adapter concerns outside this spec.
+one-key enforcement, audit, and directory integration are issuer concerns outside
+this spec.
 
 ## Terms
 
 - **identity** (`i`): the exact tuple `(iss, sub)` returned by assertion
-  validation.  Email, display name, employee number, and a bare `sub` are not
+  validation.  Email, display name, opaque user ID, and a bare `sub` are not
   identities.  Equal `sub` values under different `iss` values are distinct
   identities.  [FI-TRACE-CROSS-DOMAIN-COLLISION]
 - **actor** (`k`): the 32-byte public key returned by NIP-42 proof validation.
-- **assertion**: a compact JWS minted by the deployment adapter, binding `i`
+- **assertion**: a compact JWS minted by the assertion issuer, binding `i`
   to `k`.
-- **adapter**: the deployment-specific identity authority (e.g. an Okta OIDC
-  integration) that authenticates employees and mints assertions.  The relay
-  trusts only the adapter's assertion; it does not contact the IdP directly.
+- **assertion issuer**: the deployment-specific identity authority (e.g. an
+  OIDC identity provider integration) that authenticates users and mints
+  assertions.  The relay trusts only the issuer's assertion; it does not
+  contact the IdP directly.
 
 ## Assertion contract
 
@@ -106,7 +108,7 @@ denies any token whose `nostr_pubkey` does not match the NIP-42 `pubkey`.
 [FI-TRACE-ASSERTION-KEY-MISMATCH]
 
 This is the entire identity-to-key binding.  There is no relay-side binding
-ledger; the assertion is the binding claim, and it is the adapter's
+ledger; the assertion is the binding claim, and it is the assertion issuer's
 responsibility to ensure the assertion names the correct key.
 
 ### Policy identity
@@ -255,18 +257,18 @@ Equality at any deadline is expired.  Arithmetic is overflow-safe.
 There is **no in-band session renewal**.  When a session expires, the relay
 closes the WebSocket.  The client must open a new connection with a fresh
 assertion on the upgrade request and complete a fresh NIP-42 proof.  A silent
-re-mint riding an existing adapter/IdP session is an adapter implementation
+re-mint riding an existing issuer/IdP session is an issuer implementation
 detail; the relay never sees anything other than a new upgrade request.
 
 ### Reconnect after expiry
 
 A client whose session expired due to normal TTL expiry may reconnect
-immediately provided the adapter can issue a fresh assertion.  Session expiry
-does not imply key revocation or identity loss; that is the adapter's domain.
+immediately provided the issuer can supply a fresh assertion.  Session expiry
+does not imply key revocation or identity loss; that is the issuer's domain.
 
 ## Admin disconnect API
 
-The adapter can terminate live relay sessions for a specific public key via an
+The assertion issuer can terminate live relay sessions for a specific public key via an
 authenticated `disconnect` call.
 
 ### Semantics (session-only)
@@ -279,10 +281,10 @@ reconnect immediately.
 
 > **Non-normative note — open product question for Will/Tyler:**
 >
-> The session-only model means a revoked employee retains access until their
+> The session-only model means a revoked user retains access until their
 > assertion's effective authority expires.  After a successful disconnect call
 > (all matching sessions closed synchronously), there is no surviving
-> old-session window.  If the adapter also stops issuing new assertions at
+> old-session window.  If the issuer also stops issuing new assertions at
 > that point, cumulative residual access is bounded by:
 >
 > ```
@@ -294,7 +296,7 @@ reconnect immediately.
 > refresh failure, hard-deadline expiry without key replacement, or signing-key
 > removal can terminate access earlier, but these are not reliable protocol-level
 > bounds: the JWKS snapshot deadline renews on each refresh even when content is
-> unchanged, so it does not cap cumulative access.  If the adapter
+> unchanged, so it does not cap cumulative access.  If the issuer
 > continues issuing new assertions after the disconnect call, cumulative
 > access extends indefinitely — the session-only protocol places no
 > protocol-level bound on that case.
@@ -304,10 +306,10 @@ reconnect immediately.
 > synchronous close.
 >
 > The alternative is a **deny-until-TTL** model: the relay holds a
-> memory-resident deny-list entry for the pubkey keyed to the adapter's stated
+> memory-resident deny-list entry for the pubkey keyed to the issuer's stated
 > TTL, and any reconnect attempt for that key is denied `authorization_denied`
 > until the entry expires.  This eliminates the reconnect window at the cost of
-> relay in-memory state and a TTL-propagation contract between adapter and relay.
+> relay in-memory state and a TTL-propagation contract between issuer and relay.
 >
 > This document intentionally leaves that decision unresolved.  The current
 > normative text describes session-only.  If deny-until-TTL is chosen, Section 6
@@ -317,7 +319,7 @@ reconnect immediately.
 
 ### Transport
 
-The disconnect endpoint is an authenticated adapter→relay API, not a public
+The disconnect endpoint is an authenticated issuer→relay API, not a public
 Nostr protocol.
 
 ### Command JWT
@@ -336,8 +338,8 @@ The command JWT MUST carry the following claims:
 
 | Claim | Requirement |
 |---|---|
-| `iss` | Exact issuer URI matching an authorized adapter issuer in the registry. |
-| `sub` | Adapter principal identifier.  The relay checks this is an authorized adapter principal. |
+| `iss` | Exact issuer URI matching an authorized issuer in the registry. |
+| `sub` | Issuer principal identifier.  The relay checks this is an authorized issuer principal. |
 | `aud` | Audience matching the relay's configured audience value for this issuer. |
 | `iat` | Issuance time.  MUST satisfy `iat <= now + skew`. |
 | `exp` | Expiry time.  MUST be finite; relay enforces `now < exp`. |
@@ -348,7 +350,7 @@ The command JWT MUST carry the following claims:
 | `target_pubkey` | Lowercase hexadecimal encoding of the target 32-byte Nostr public key — the same encoding required for the assertion `nostr_pubkey` claim. |
 
 The `maximum_command_age` policy knob is a required positive finite
-configuration per authorized adapter issuer, with a normative upper bound of
+configuration per authorized issuer, with a normative upper bound of
 60 seconds.  The relay enforces `0 < maximum_command_age <= 60` and
 `now < iat + maximum_command_age` in addition to `now < exp`.  A missing,
 non-positive, or out-of-range configuration denies.
@@ -379,7 +381,7 @@ VerifyCommandJwt(token, request_method, request_path, request_body_pubkey):
   target_k := ParseHexKey(claims.target_pubkey) or DENY(evidence_rejected)
 
   // 4. Principal authorization (pure check — no side effects)
-  AssertAuthorizedAdapterPrincipal(claims.iss, claims.sub) or DENY(authorization_denied)
+  AssertAuthorizedIssuerPrincipal(claims.iss, claims.sub) or DENY(authorization_denied)
 
   // 5. Signed-target / request-body agreement (pure check — no side effects)
   assert target_k == request_body_pubkey or DENY(authorization_denied)
@@ -437,7 +439,7 @@ exception and reveals only that a required dependency is unreadable.
 |---|---|---|---|
 | assertion or proof absent | `missing_evidence` | `auth-required: authentication required` | `401`; `WWW-Authenticate: Nostr`; `Content-Type: text/plain; charset=utf-8`; body `authentication required\n` |
 | malformed, invalid, or expired evidence | `evidence_rejected` | `restricted: evidence rejected` | `403`; `Content-Type: text/plain; charset=utf-8`; body `evidence rejected\n` |
-| assertion–key mismatch; local policy denial; adapter-initiated disconnect (session-only model) | `authorization_denied` | `restricted: authorization denied` | `403`; `Content-Type: text/plain; charset=utf-8`; body `authorization denied\n` |
+| assertion–key mismatch; local policy denial; issuer-initiated disconnect (session-only model) | `authorization_denied` | `restricted: authorization denied` | `403`; `Content-Type: text/plain; charset=utf-8`; body `authorization denied\n` |
 | required JWKS snapshot unreadable | `authorization_unavailable` | `restricted: authorization unavailable` | `503`; `Content-Type: text/plain; charset=utf-8`; body `authorization unavailable\n` |
 
 A denial decided on a WebSocket upgrade is the HTTP response in place of `101`.
@@ -451,16 +453,16 @@ filters, discovery, logs, metrics, or traces.  [FI-TRACE-PRIVACY-NONPUBLIC]
 
 ## Out of scope
 
-The following are adapter and deployment concerns.  This spec defines no
+The following are issuer and deployment concerns.  This spec defines no
 normative behavior for them:
 
 - Identity↔key registry, key ownership records, and the one-identity one-key
-  constraint: adapter-side.
-- Key rotation, re-enrollment after device loss: adapter-side.
-- Revocation signaling to the adapter/IdP: adapter-side; the adapter stops
+  constraint: issuer-side.
+- Key rotation, re-enrollment after device loss: issuer-side.
+- Revocation signaling to the issuer/IdP: issuer-side; the issuer stops
   issuing assertions, which closes the relay window within assertion TTL.
-- SCIM, HR system integration, employee offboarding automation: adapter-side.
-- Audit logging beyond what the relay operator chooses to retain: adapter-side.
+- Directory integration and account-offboarding automation: issuer-side.
+- Audit logging beyond what the relay operator chooses to retain: issuer-side.
 - Delegation: out of scope.
 - Companion profiles (NIP-FI-EDGE, NIP-FI-LIFECYCLE, NIP-FI-DELEG, NIP-FI-CONF, NIP-FI-MODEL): removed.
 
@@ -509,20 +511,20 @@ is the primary control against assertion replay across keys.
 
 **TTL window after revocation.** Offline JWT verification means the relay
 cannot observe IdP-side revocation until the current assertion expires.  The
-deployment adapter MUST configure a `max_connection_lifetime_seconds` and
+deployment MUST configure a `max_connection_lifetime_seconds` and
 assertion TTL consistent with the organization's acceptable revocation latency.
 
-For upstream revocation without an explicit disconnect call (adapter stops
+For upstream revocation without an explicit disconnect call (issuer stops
 issuing assertions; no active session termination), access persists until the
 live session's effective authority deadlines expire.  After the session closes
 naturally, a reconnect requires an assertion that remains valid when reverified;
-if the adapter has stopped issuing, no valid assertion can be obtained and no
-reconnect can succeed.  If the adapter continues issuing assertions, access
+if the issuer has stopped issuing, no valid assertion can be obtained and no
+reconnect can succeed.  If the issuer continues issuing assertions, access
 continues.
 
-For the session-only disconnect model (adapter issues a successful disconnect
+For the session-only disconnect model (issuer issues a successful disconnect
 call that closes all matching sessions synchronously), there is no surviving
-old-session window.  If the adapter also stops issuing new assertions at that
+old-session window.  If the issuer also stops issuing new assertions at that
 point, cumulative residual access is bounded by:
 
 ```
@@ -534,7 +536,7 @@ sessions; it does not shorten the total window.  A snapshot refresh failure,
 hard-deadline expiry without key replacement, or signing-key removal can
 terminate access earlier, but these are not reliable protocol-level bounds: the
 JWKS snapshot deadline renews on each refresh even when content is unchanged.
-If the adapter continues issuing new assertions after the disconnect call,
+If the issuer continues issuing new assertions after the disconnect call,
 cumulative access extends indefinitely — the session-only protocol places no
 protocol-level bound on that case.  See the non-normative note in the Admin
 disconnect section for the open product question on the deny-until-TTL
