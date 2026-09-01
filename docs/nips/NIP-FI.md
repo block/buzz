@@ -510,11 +510,10 @@ assertion TTL consistent with the organization's acceptable revocation latency.
 
 For upstream revocation without an explicit disconnect call (adapter stops
 issuing assertions; no active session termination), access persists until the
-earliest of the live session's remaining authority deadlines, bounded by
-`max_connection_lifetime_seconds`.  After the session closes, a reconnect
-is bounded by the remaining assertion authority and `max_connection_lifetime_seconds`
-(and the key-snapshot hard deadline); once the adapter stops issuing assertions
-for the identity, no reconnect can succeed.
+live session's effective authority deadlines expire.  After the session closes
+naturally, a reconnect requires a fresh assertion; if the adapter has stopped
+issuing, no fresh assertion can be obtained and no reconnect can succeed.  If
+the adapter continues issuing assertions, access continues.
 
 For the session-only disconnect model (adapter issues a successful disconnect
 call that closes all matching sessions synchronously), there is no surviving
