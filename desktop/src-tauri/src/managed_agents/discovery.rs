@@ -33,6 +33,7 @@ const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/e
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
+const AGENTSKY_AVATAR_URL: &str = "https://agentsky.dev/asteroids-mark-2.png";
 fn common_binary_paths() -> &'static [PathBuf] {
     static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
     PATHS.get_or_init(|| {
@@ -217,6 +218,42 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         max_rounds_env_var: Some("BUZZ_AGENT_MAX_ROUNDS"),
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
+        auth_probe_args: None,
+    },
+    KnownAcpRuntime {
+        id: "agentsky",
+        label: "AgentSky",
+        commands: &["agentsky-acp"],
+        aliases: &["agent-sky"],
+        avatar_url: AGENTSKY_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        // The adapter proxies to an always-on AgentSky cloud agent over HTTPS;
+        // there is no local CLI or model runtime to install or probe.
+        underlying_cli: None,
+        cli_install_commands: &[],
+        cli_install_commands_windows: &[],
+        adapter_install_commands: &["npm install -g @agentsky/acp"],
+        cli_install_instructions_url: "https://agentsky.dev/docs",
+        adapter_install_instructions_url: "https://agentsky.dev/docs",
+        cli_install_hint: "Buzz talks to an AgentSky cloud agent through the @agentsky/acp adapter.",
+        adapter_install_hint: "Buzz talks to AgentSky through an ACP adapter. Install it with: npm install -g @agentsky/acp, then set SKY_API_TOKEN and pass your agent slug as the argument.",
+        skill_dir: None,
+        supports_acp_model_switching: false,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: true,
+        default_env: &[],
+        config_file_path: None,
+        config_file_format: None,
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: Some(
+            "Create an API token at https://agentsky.dev/settings?tab=tokens and set SKY_API_TOKEN.",
+        ),
         auth_probe_args: None,
     },
 ];
