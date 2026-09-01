@@ -436,11 +436,14 @@ pub enum MessagesCmd {
         reply_to: Option<String>,
     },
     /// Edit a previously sent message
+    #[command(
+        after_help = "Examples:\n  buzz messages edit --event <EVENT_ID> --content \"Updated text\"\n  printf 'first line\\n\\nsecond line\\n' | buzz messages edit --event <EVENT_ID> --content -"
+    )]
     Edit {
         /// Event ID of the message to edit (64-char hex)
         #[arg(long)]
         event: String,
-        /// New message content
+        /// New message content. Use '-' to read from stdin.
         #[arg(long)]
         content: String,
     },
