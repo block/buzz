@@ -31,7 +31,7 @@ const MIGRATION_0014_SQL: &str = include_str!("../../../migrations/0014_push_lea
 const MIGRATION_0033_SQL: &str =
     include_str!("../../../migrations/0033_private_managed_agent_fts.sql");
 const MIGRATION_0042_SQL: &str =
-    include_str!("../../../migrations/0042_workflow_mention_wake_fts.sql");
+    include_str!("../../../migrations/0044_workflow_mention_wake_fts.sql");
 
 async fn setup() -> (PgPool, String) {
     setup_with_search_policy(true).await
