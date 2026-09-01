@@ -26,6 +26,10 @@ const MAX_IMAGE_FETCH_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION: u32 = 4096;
 const MAX_IMAGE_PIXELS: u64 = 16_000_000;
 const MAX_SANITIZED_DIMENSION: u32 = 1200;
+const TRANSPORT_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const TRANSPORT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const DNS_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_INLINE_IMAGE_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_REDIRECTS: usize = 3;
 const MAX_METADATA_CHARS: usize = 180;
 const MAX_METADATA_DESCRIPTION_CHARS: usize = 280;
@@ -164,11 +168,15 @@ async fn validate_public_https_url(url: &Url) -> Result<(), String> {
 
 async fn resolve_public_addresses(host: &str) -> Result<Vec<IpAddr>, String> {
     let host = host.to_string();
-    let addresses = tokio::net::lookup_host((host.as_str(), 443))
-        .await
-        .map_err(|error| format!("link preview DNS resolution failed: {error}"))?
-        .map(|address| address.ip())
-        .collect::<Vec<_>>();
+    let addresses = tokio::time::timeout(
+        DNS_RESOLUTION_TIMEOUT,
+        tokio::net::lookup_host((host.as_str(), 443)),
+    )
+    .await
+    .map_err(|_| "link preview DNS resolution timed out".to_string())?
+    .map_err(|error| format!("link preview DNS resolution failed: {error}"))?
+    .map(|address| address.ip())
+    .collect::<Vec<_>>();
 
     if addresses.is_empty() {
         return Err("link preview DNS resolution returned no addresses".to_string());
@@ -193,6 +201,8 @@ async fn send_pinned_request(url: &Url, accept: &str) -> Result<reqwest::Respons
         .no_proxy()
         .redirect(Policy::none())
         .pool_max_idle_per_host(0)
+        .connect_timeout(TRANSPORT_CONNECT_TIMEOUT)
+        .read_timeout(TRANSPORT_IDLE_TIMEOUT)
         .resolve_to_addrs(host, &socket_addresses)
         .build()
         .map_err(|error| format!("link preview client failed: {error}"))?;
@@ -340,8 +350,11 @@ fn retryable_image_cooldown(
     waited_for_cooldown: &mut bool,
 ) -> Option<Duration> {
     let retry_after = retry_after?;
-    set_image_host_cooldown(url, retry_after);
     if *waited_for_cooldown {
+        return None;
+    }
+    set_image_host_cooldown(url, retry_after);
+    if retry_after > MAX_INLINE_IMAGE_COOLDOWN {
         return None;
     }
     *waited_for_cooldown = true;
@@ -380,7 +393,9 @@ where
     let mut waited_for_cooldown = false;
     while redirect_count <= MAX_REDIRECTS {
         if let Some(retry_after) = image_host_cooldown_remaining(&url) {
-            if !wait_for_image_host_cooldown(&mut waited_for_cooldown, retry_after).await {
+            if retry_after > MAX_INLINE_IMAGE_COOLDOWN
+                || !wait_for_image_host_cooldown(&mut waited_for_cooldown, retry_after).await
+            {
                 return Err(ImageFetchError::Transient {
                     retry_after: Some(retry_after),
                     retry_inline: false,
@@ -390,7 +405,7 @@ where
         }
 
         let host_gate = image_host_gate(&url);
-        let _host_guard = host_gate.lock().await;
+        let host_guard = host_gate.lock().await;
         if image_host_cooldown_remaining(&url).is_some() {
             continue;
         }
@@ -414,7 +429,6 @@ where
                 .await
                 .map_err(|_| ImageFetchError::Rejected)?;
             redirect_count += 1;
-            waited_for_cooldown = false;
             continue;
         }
         if !response.status().is_success() {
@@ -428,13 +442,15 @@ where
                 if let Some(retry_after) =
                     retryable_image_cooldown(&url, retry_after, &mut waited_for_cooldown)
                 {
-                    drop(_host_guard);
+                    drop(host_guard);
                     tokio::time::sleep(retry_after).await;
                     continue;
                 }
                 return Err(ImageFetchError::Transient {
                     retry_after,
-                    retry_inline: status != reqwest::StatusCode::TOO_MANY_REQUESTS,
+                    retry_inline: retry_after.is_none()
+                        && status != reqwest::StatusCode::TOO_MANY_REQUESTS
+                        && !waited_for_cooldown,
                 });
             }
             return Err(ImageFetchError::Rejected);

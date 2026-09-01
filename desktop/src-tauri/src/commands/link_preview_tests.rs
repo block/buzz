@@ -2,8 +2,9 @@ use super::rate_limit::MAX_IMAGE_RETRY_AFTER;
 use super::{
     apply_image_result, declares_animation, extract_favicon_url, extract_image_url,
     extract_link_preview_metadata, fetch_sanitized_image_using, is_html_response,
-    read_bytes_prefix, retry_after_duration, sanitize_image, ImageFetchError,
-    LinkPreviewImageFetchState, LinkPreviewMetadata, MAX_METADATA_DESCRIPTION_CHARS,
+    read_bytes_prefix, retry_after_duration, retryable_image_cooldown, sanitize_image,
+    ImageFetchError, LinkPreviewImageFetchState, LinkPreviewMetadata, MAX_INLINE_IMAGE_COOLDOWN,
+    MAX_METADATA_DESCRIPTION_CHARS,
 };
 use axum::{body::Body, http::Response, routing::get, Router};
 use base64::Engine as _;
@@ -15,6 +16,7 @@ use std::{
     io::Cursor,
     sync::{Arc, Mutex},
 };
+use tokio::sync::oneshot;
 use url::Url;
 
 async fn start_test_server(router: Router) -> std::net::SocketAddr {
@@ -35,39 +37,48 @@ async fn test_response(router: Router, path: &str) -> reqwest::Response {
 
 #[tokio::test(start_paused = true)]
 async fn first_rate_limit_and_queued_host_request_share_one_cooldown_boundary() {
-    let cooldown = std::time::Duration::from_secs(60);
-    let url = Url::parse("https://rate-limit-regression.example/image.png").unwrap();
+    let cooldown = std::time::Duration::from_secs(20);
+    let rate_limited_path = "/rate-limited.png";
+    let success_path = "/success.png";
+    let url = Url::parse(&format!(
+        "https://rate-limit-regression.example{rate_limited_path}"
+    ))
+    .unwrap();
     let attempts = Arc::new(Mutex::new(0));
+    let collision_attempts = Arc::new(Mutex::new(0));
     let image = DynamicImage::ImageRgb8(RgbImage::from_pixel(2, 2, Rgb([10, 20, 30])));
     let mut png = Cursor::new(Vec::new());
     image.write_to(&mut png, ImageFormat::Png).unwrap();
     let image_bytes = png.into_inner();
     let server_attempts = Arc::clone(&attempts);
     let address = start_test_server(Router::new().route(
-        "/image.png",
-        get(move || {
-            let image_bytes = image_bytes.clone();
-            let server_attempts = Arc::clone(&server_attempts);
-            async move {
-                let attempt = {
-                    let mut attempts = server_attempts.lock().unwrap();
-                    *attempts += 1;
-                    *attempts
-                };
-                if attempt == 1 {
-                    Response::builder()
-                        .status(429)
-                        .header("retry-after", cooldown.as_secs())
-                        .body(Body::empty())
-                        .unwrap()
-                } else {
+        "/{image}",
+        get(
+            move |axum::extract::Path(image): axum::extract::Path<String>| {
+                let image_bytes = image_bytes.clone();
+                let server_attempts = Arc::clone(&server_attempts);
+                async move {
+                    if image == "rate-limited.png" {
+                        let attempt = {
+                            let mut attempts = server_attempts.lock().unwrap();
+                            *attempts += 1;
+                            *attempts
+                        };
+                        if attempt == 1 {
+                            return Response::builder()
+                                .status(429)
+                                .header("retry-after", cooldown.as_secs())
+                                .body(Body::empty())
+                                .unwrap();
+                        }
+                    }
                     Response::builder()
                         .header("content-type", "image/png")
                         .body(Body::from(image_bytes))
                         .unwrap()
                 }
-            }
-        }),
+            },
+        ),
     ))
     .await;
     let test_client = reqwest::Client::new();
@@ -79,6 +90,22 @@ async fn first_rate_limit_and_queued_host_request_share_one_cooldown_boundary() 
                 .send()
                 .await
                 .map_err(|error| error.to_string())
+        }
+    };
+    let collision_request = {
+        let collision_attempts = Arc::clone(&collision_attempts);
+        let test_client = reqwest::Client::new();
+        move |url: Url, _accept: &'static str| {
+            let collision_attempts = Arc::clone(&collision_attempts);
+            let test_client = test_client.clone();
+            async move {
+                *collision_attempts.lock().unwrap() += 1;
+                test_client
+                    .get(format!("http://{address}{}", url.path()))
+                    .send()
+                    .await
+                    .map_err(|error| error.to_string())
+            }
         }
     };
     let validate = |_url: Url| async { Ok(()) };
@@ -95,6 +122,31 @@ async fn first_rate_limit_and_queued_host_request_share_one_cooldown_boundary() 
     assert_eq!(*attempts.lock().unwrap(), 1);
     assert_eq!(super::image_host_cooldown_remaining(&url), Some(cooldown));
 
+    let colliding_url = (0..10_000)
+        .map(|index| {
+            Url::parse(&format!("https://collision-{index}.example{success_path}")).unwrap()
+        })
+        .find(|candidate| {
+            std::ptr::eq(
+                super::image_host_gate(candidate),
+                super::image_host_gate(&url),
+            )
+        })
+        .expect("a different host sharing the bounded gate stripe");
+
+    let (collision_started_tx, collision_started_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        let collision =
+            fetch_sanitized_image_using(colliding_url, false, validate, collision_request);
+        tokio::pin!(collision);
+        assert!(futures_util::poll!(&mut collision).is_pending());
+        collision_started_tx.send(()).ok();
+        assert!(collision.await.is_ok());
+    });
+    collision_started_rx.await.unwrap();
+    assert_eq!(*collision_attempts.lock().unwrap(), 1);
+    assert_eq!(*attempts.lock().unwrap(), 1);
+
     let queued = tokio::spawn(fetch_sanitized_image_using(url, false, validate, request));
     tokio::task::yield_now().await;
     assert!(!queued.is_finished());
@@ -110,6 +162,32 @@ async fn first_rate_limit_and_queued_host_request_share_one_cooldown_boundary() 
     assert!(first.unwrap().is_ok());
     assert!(queued.unwrap().is_ok());
     assert_eq!(*attempts.lock().unwrap(), 3);
+}
+
+#[test]
+fn image_cooldown_wait_is_short_and_one_shot() {
+    let url = Url::parse("https://bounded-cooldown.example/image.png").unwrap();
+    let mut waited = false;
+    assert_eq!(
+        retryable_image_cooldown(&url, Some(MAX_INLINE_IMAGE_COOLDOWN), &mut waited,),
+        Some(MAX_INLINE_IMAGE_COOLDOWN)
+    );
+    assert!(waited);
+    assert_eq!(
+        retryable_image_cooldown(&url, Some(MAX_INLINE_IMAGE_COOLDOWN), &mut waited,),
+        None
+    );
+    let excessive_url = Url::parse("https://excessive-cooldown.example/image.png").unwrap();
+    let mut excessive_waited = false;
+    assert_eq!(
+        retryable_image_cooldown(
+            &excessive_url,
+            Some(MAX_INLINE_IMAGE_COOLDOWN + std::time::Duration::from_secs(1)),
+            &mut excessive_waited,
+        ),
+        None
+    );
+    assert!(!excessive_waited);
 }
 
 #[test]
