@@ -930,3 +930,14 @@
     animation: none;
   }
 }
+
+/* The shape stays fixed while a short dark stroke travels around its edge. */
+@keyframes mesh-compute-hex-trace {
+  to {
+    stroke-dashoffset: -100;
+  }
+}
+
+.mesh-compute-hex-trace {
+  animation: mesh-compute-hex-trace 1.1s linear infinite;
+}

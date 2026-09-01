@@ -3,6 +3,7 @@ const OPEN_CREATE_AGENT_EVENT = "buzz:open-create-agent";
 export type OpenCreateAgentOptions = {
   channelId?: string;
   channelName?: string;
+  preset?: "community-mesh";
 };
 
 let pendingOpenCreateAgent: OpenCreateAgentOptions | null = null;

@@ -724,6 +724,7 @@ pub fn run() {
             mesh_serving_usage,
             mesh_installed_models,
             mesh_model_catalog,
+            mesh_snapshot,
             update_managed_agent,
             discover_backend_providers,
             probe_backend_provider,

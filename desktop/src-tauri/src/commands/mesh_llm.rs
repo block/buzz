@@ -176,7 +176,7 @@ fn advance_mesh_status_cursor(
     Ok(cursor)
 }
 
-async fn query_mesh_discovery_events_at(
+pub(super) async fn query_mesh_discovery_events_at(
     state: &AppState,
     relay_url: &str,
 ) -> Result<Vec<nostr::Event>, String> {
@@ -484,7 +484,7 @@ pub async fn mesh_start_node(
     let started = mesh_llm::DesktopMeshRuntime::start(request)
         .await
         .map_err(|error| format!("{error:#}"))?;
-    let status = match started.status().await {
+    let mut status = match started.status().await {
         Ok(status) => status,
         Err(error) => {
             let cleanup = started.stop().await;
@@ -520,11 +520,23 @@ pub async fn mesh_start_node(
         // (leaves a warming node alone) can loop a slow-but-alive node, and an
         // unstartable config fails earlier in `start()`. Probe is informational.
         save_mesh_sharing_config(&app, config)?;
-        if let Err(error) = wait_for_mesh_inference(&config.model_id).await {
-            eprintln!(
-                "buzz-mesh: node started but inference is not ready yet ({error}); \
-                 leaving it to warm up (Share Compute stays armed for next launch)"
-            );
+        match wait_for_mesh_inference(&config.model_id).await {
+            Ok(()) => {
+                // The status captured immediately after runtime installation can
+                // still say `starting`. Re-read after the readiness probe so the
+                // command response reflects the successful boot the user waited
+                // for instead of pinning the UI's transition indicator.
+                let runtime = state.mesh_llm_runtime.lock().await;
+                if let Some(running) = runtime.as_ref() {
+                    status = running.status().await.map_err(|error| error.to_string())?;
+                }
+            }
+            Err(error) => {
+                eprintln!(
+                    "buzz-mesh: node started but inference is not ready yet ({error}); \
+                     leaving it to warm up (Share Compute stays armed for next launch)"
+                );
+            }
         }
     }
     mesh_llm::publish_current_status_once(&app, "start").await;

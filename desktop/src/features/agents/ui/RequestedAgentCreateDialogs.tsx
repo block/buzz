@@ -5,6 +5,7 @@ import {
   subscribeOpenCreateAgent,
   type OpenCreateAgentOptions,
 } from "@/features/agents/openCreateAgentEvent";
+import type { CreatePersonaInput } from "@/shared/api/types";
 import { AgentDialog } from "./AgentDialog";
 import { usePersonaActions } from "./usePersonaActions";
 
@@ -16,9 +17,23 @@ export function RequestedAgentCreateDialogs() {
     name: string;
   } | null>(null);
   const [isOpen, setIsOpen] = React.useState(false);
+  const [initialValues, setInitialValues] =
+    React.useState<CreatePersonaInput | null>(null);
 
   const openCreate = React.useEffectEvent((options: OpenCreateAgentOptions) => {
     personas.prepareCreate();
+    setInitialValues(
+      options.preset === "community-mesh"
+        ? {
+            displayName: "Community agent",
+            avatarUrl: "",
+            systemPrompt: "",
+            runtime: "buzz-agent",
+            provider: "relay-mesh",
+            model: "auto",
+          }
+        : null,
+    );
     setTargetChannel(
       options.channelId && options.channelName
         ? { id: options.channelId, name: options.channelName }
@@ -42,12 +57,14 @@ export function RequestedAgentCreateDialogs() {
               ? personas.createPersonaMutation.error
               : null
           }
+          initialValues={initialValues}
           isDefinitionPending={personas.isPending}
           mode="definition"
           onOpenChange={(open) => {
             if (!open) {
               setIsOpen(false);
               setTargetChannel(null);
+              setInitialValues(null);
             }
           }}
           onSubmitDefinition={(input, intent, backendIntent) =>

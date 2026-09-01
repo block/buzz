@@ -356,6 +356,8 @@ buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
 - Rust: `definition_validation` and inbound persona tests pin the shared
   Unicode/control-character policy at local, import, publish, and sync gates.
 
+16. **Community-mesh agent creation uses the normal create dialog with a named preset.** The Compute settings CTA requests the `community-mesh` create preset; the app-level create-dialog owner resolves it to Buzz Agent with the `relay-mesh` provider and `auto` model, then passes those values through `AgentDialog`. Keep this as a preset of the canonical create flow—never add a second mesh-specific form or bypass normal runtime catalog validation and persistence.
+
 ## Keep this file true
 
 **If you change how agent configuration is modeled, rendered, persisted,

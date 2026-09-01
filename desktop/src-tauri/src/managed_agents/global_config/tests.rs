@@ -509,7 +509,7 @@ fn inherited_shared_compute_translates_to_supported_agent_transport() {
     );
     assert_eq!(
         effective.env.get("BUZZ_AGENT_MODEL").map(String::as_str),
-        Some("auto")
+        Some(super::super::RELAY_MESH_VIRTUAL_MODEL_ID)
     );
     assert_eq!(
         effective
