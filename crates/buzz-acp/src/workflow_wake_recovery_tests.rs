@@ -42,6 +42,9 @@ async fn assert_authority_recovery(failure: AuthorityFailure) {
         .tags([
             Tag::parse(["h", &channel.to_string()]).unwrap(),
             Tag::public_key(agent.public_key()),
+            Tag::parse(["buzz:workflow", "true"]).unwrap(),
+            Tag::parse(["buzz:workflow-owner", &owner.public_key().to_hex()]).unwrap(),
+            Tag::parse(["buzz:workflow-mention", &agent.public_key().to_hex()]).unwrap(),
             Tag::parse(["workflow-run", &run.to_string()]).unwrap(),
             Tag::parse(["workflow-definition", &definition.id.to_hex()]).unwrap(),
             Tag::parse(["workflow-step", "notify"]).unwrap(),

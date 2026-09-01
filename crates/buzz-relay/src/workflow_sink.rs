@@ -392,11 +392,17 @@ impl ActionSink for RelayActionSink {
                 &named_members,
                 &author_pubkey_hex,
             )?;
-            let mentioned_pubkeys = tags.iter()
-                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz:workflow-mention"))
+            let mentioned_pubkeys = tags
+                .iter()
+                .filter(|tag| {
+                    tag.as_slice().first().map(String::as_str) == Some("buzz:workflow-mention")
+                })
                 .filter_map(|tag| tag.as_slice().get(1))
                 .filter(|pk| *pk != &author_pubkey_hex)
-                .map(|pk| nostr::PublicKey::from_hex(pk).map_err(|e| ActionSinkError::EventBuild(format!("mention pubkey: {e}"))))
+                .map(|pk| {
+                    nostr::PublicKey::from_hex(pk)
+                        .map_err(|e| ActionSinkError::EventBuild(format!("mention pubkey: {e}")))
+                })
                 .collect::<Result<Vec<_>, _>>()?;
 
             let definition_event_id = definition_event_id
@@ -915,6 +921,7 @@ pub(crate) mod postgres_tests {
     //!   `cargo test -p buzz-relay --lib workflow_sink -- --ignored`
     use super::*;
     use buzz_core::channel::{ChannelType, ChannelVisibility, MemberRole};
+    use buzz_core::CommunityId;
     use buzz_db::CreateCommunityWithOwnerResult;
     use std::sync::Arc;
 
@@ -1567,4 +1574,4 @@ pub(crate) mod postgres_tests {
 
 #[cfg(test)]
 #[path = "workflow_delivery_tests.rs"]
-mod workflow_delivery_tests;
+mod workflow_delivery_postgres_tests;

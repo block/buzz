@@ -1295,19 +1295,12 @@ async fn resume_workflow_after_approval(
         return;
     }
 
-    let workflow = match db.get_workflow(community_id, workflow_id).await {
-        Ok(w) => w,
+    let (run, def) = match engine.load_run_definition(community_id, run_id).await {
+        Ok(loaded) => loaded,
         Err(e) => {
-            tracing::error!("resume_workflow: failed to fetch workflow {workflow_id}: {e}");
-            return;
-        }
-    };
-
-    let def: buzz_workflow::WorkflowDef = match serde_json::from_value(workflow.definition.clone())
-    {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::error!("resume_workflow: failed to parse workflow definition: {e}");
+            tracing::error!(
+                "resume_workflow: failed to load signed definition for run {run_id}: {e}"
+            );
             if let Err(db_err) = db
                 .update_workflow_run(
                     community_id,
@@ -1317,7 +1310,7 @@ async fn resume_workflow_after_approval(
                     &run.execution_trace,
                     Some(buzz_db::workflow::WorkflowRunFailure {
                         code: "invalid_definition",
-                        message: &format!("definition parse error: {e}"),
+                        message: &format!("signed run definition unavailable: {e}"),
                     }),
                 )
                 .await
@@ -1327,6 +1320,30 @@ async fn resume_workflow_after_approval(
             return;
         }
     };
+
+    if run.workflow_id != workflow_id {
+        tracing::error!(
+            "resume_workflow: approval workflow {workflow_id} does not match run workflow {}",
+            run.workflow_id
+        );
+        if let Err(e) = db
+            .update_workflow_run(
+                community_id,
+                run_id,
+                RunStatus::Failed,
+                run.current_step,
+                &run.execution_trace,
+                Some(buzz_db::workflow::WorkflowRunFailure {
+                    code: "approval_binding_mismatch",
+                    message: "approval does not belong to the workflow run",
+                }),
+            )
+            .await
+        {
+            tracing::error!("resume_workflow: failed to mark mismatched run as failed: {e}");
+        }
+        return;
+    }
 
     // Reconstruct step_outputs from execution trace for template resolution
     let mut initial_outputs: std::collections::HashMap<String, serde_json::Value> =
@@ -1635,3 +1652,7 @@ mod postgres_tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "workflow_approval_tests.rs"]
+mod approval_postgres_tests;

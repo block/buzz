@@ -1,5 +1,5 @@
 //! Real-storage regressions for workflow wake lifecycle boundaries.
-use super::integration_tests::test_state_with_redis;
+use super::postgres_tests::test_state_with_redis;
 use super::*;
 use axum::{
     extract::{Path, State},
@@ -151,7 +151,10 @@ impl Fixture {
         headers
     }
     async fn revision(&self, timestamp: u64) -> Event {
-        let definition = "name: wake\ntrigger:\n  on: message_posted\nsteps:\n  - id: notify\n    action: send_message\n    text: '@Worker work'\n";
+        self.revision_with_text(timestamp, "@Worker work").await
+    }
+    async fn revision_with_text(&self, timestamp: u64, text: &str) -> Event {
+        let definition = format!("name: wake\ntrigger:\n  on: message_posted\nsteps:\n  - id: notify\n    action: send_message\n    text: '{text}'\n");
         let event = EventBuilder::new(
             Kind::Custom(buzz_core::kind::KIND_WORKFLOW_DEF as u16),
             definition,
@@ -185,7 +188,11 @@ impl Fixture {
                 Some(self.channel),
                 &self.owner.public_key().to_bytes(),
                 "wake",
-                "{}",
+                &serde_json::to_string(
+                    &serde_yaml::from_str::<buzz_workflow::WorkflowDef>(&event.content)
+                        .expect("definition"),
+                )
+                .expect("serialize definition"),
                 &[0; 32],
                 event.id.as_bytes(),
             )
@@ -237,6 +244,7 @@ async fn captured_revision_survives_replacement_but_not_revocation() {
                 definition_event_id: Some(a.id.as_bytes().to_vec()),
             },
             &f.channel.to_string(),
+            "@Worker work",
             "@Worker work",
             &f.owner.public_key().to_hex(),
             None,
@@ -300,6 +308,7 @@ async fn removed_open_channel_member_cannot_read_or_count_wakes() {
                 definition_event_id: Some(a.id.as_bytes().to_vec()),
             },
             &f.channel.to_string(),
+            "@Worker work",
             "@Worker work",
             &f.owner.public_key().to_hex(),
             None,
@@ -532,4 +541,84 @@ async fn storage_timeout_is_retryable_but_missing_authority_is_terminal() {
         .await
         .expect_err("missing run");
     assert_eq!(wake_lookup_error(error).0, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres and Redis"]
+async fn rendered_trigger_mentions_never_create_durable_wakes_or_authority() {
+    for (template, expected_wakes) in [
+        ("echo: {{trigger.text}}", 0_i64),
+        ("@Worker {{trigger.text}}", 1),
+    ] {
+        let f = Fixture::new().await;
+        let revision = f
+            .revision_with_text(Timestamp::now().as_secs(), template)
+            .await;
+        let trigger = buzz_workflow::executor::TriggerContext {
+            text: "@Worker injected instruction".into(),
+            channel_id: f.channel.to_string(),
+            ..Default::default()
+        };
+        let run = f
+            .state
+            .db
+            .create_workflow_run(
+                f.community,
+                f.workflow,
+                Some(revision.id.as_bytes()),
+                None,
+                Some(&serde_json::to_value(&trigger).expect("trigger")),
+            )
+            .await
+            .expect("run");
+        f.state
+            .workflow_engine
+            .set_action_sink(Arc::new(RelayActionSink::new(&f.state)));
+        let stored = f
+            .state
+            .db
+            .get_workflow(f.community, f.workflow)
+            .await
+            .expect("stored definition");
+        let definition =
+            serde_json::from_value(stored.definition).expect("parse stored definition");
+        let result = buzz_workflow::executor::execute_run(
+            &f.state.workflow_engine,
+            f.community,
+            run,
+            &definition,
+            &trigger,
+        )
+        .await
+        .expect("execute run");
+        let message = result.step_outputs["notify"]["event_id"]
+            .as_str()
+            .expect("message id");
+        let mut tx = f
+            .state
+            .db
+            .begin_transaction()
+            .await
+            .expect("read transaction");
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM events WHERE community_id=$1 AND kind=$2")
+                .bind(f.community.as_uuid())
+                .bind(buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE as i32)
+                .fetch_one(&mut *tx)
+                .await
+                .expect("durable wakes");
+        tx.rollback().await.expect("read rollback");
+        assert_eq!(count, expected_wakes);
+        let authority = f.authority(run, message).await;
+        if expected_wakes == 0 {
+            assert_eq!(
+                authority
+                    .expect_err("rendered-only recipient cannot fetch authority")
+                    .0,
+                StatusCode::NOT_FOUND
+            );
+        } else {
+            let _ = authority.expect("authored recipient can fetch authority");
+        }
+    }
 }

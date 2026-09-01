@@ -47,8 +47,10 @@ fence remains effective for ordinary writes.
   duration or throughput estimate is claimed by the small disposable tests.
 - Lock acquisition is limited to five seconds; a busy table makes the migration
   fail transactionally for a later controlled retry. Once acquired, an unsafe
-  policy holds ACCESS EXCLUSIVE for its rewrite. Existing operator
-  `statement_timeout` still applies. Even the safe skip path briefly blocks
+  policy holds ACCESS EXCLUSIVE for its rewrite. Normal relay startup explicitly
+  sets `statement_timeout = 0` on its migration connection, so it imposes no
+  rewrite-duration bound. A manually controlled SQL session may set its own
+  statement timeout, with transactional rollback on expiration. Even the safe skip path briefly blocks
   readers/writers while inspecting the tree; it is not lock-free.
 
 Fresh desired-state bootstrap already includes 44620 in its generated policy;

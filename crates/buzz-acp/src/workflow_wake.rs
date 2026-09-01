@@ -38,11 +38,10 @@ pub struct WorkflowWakeAuthority {
     pub message: Event,
 }
 
-/// Return whether a relay-signed workflow message must be dispatched only
-/// through its separately verified wake.
-pub fn requires_verified_wake(event: &Event, relay_pubkey: PublicKey) -> bool {
-    event.pubkey == relay_pubkey
-        && event.kind.as_u16() as u32 == KIND_STREAM_MESSAGE
+/// Return whether a revision-labelled workflow message must dispatch only
+/// through its separately verified wake, regardless of relay key rotation.
+pub fn requires_verified_wake(event: &Event) -> bool {
+    event.kind.as_u16() as u32 == KIND_STREAM_MESSAGE
         && single_tag(event, "workflow-run").is_some()
         && single_tag(event, "workflow-definition").is_some()
         && single_tag(event, "workflow-step").is_some()
@@ -89,6 +88,17 @@ pub fn verify(
         return None;
     }
     let message = authority.message;
+    // Use the same authored-mention boundary as ordinary listener admission.
+    // A legacy `p` tag can come entirely from trigger-controlled rendered text;
+    // even a signed wake must not turn it into the definition owner's authority.
+    let attributed_owner = crate::verified_workflow_owner(
+        &message,
+        Some(&relay_pubkey.to_hex()),
+        &agent_pubkey.to_hex(),
+    )?;
+    if attributed_owner != definition.pubkey.to_hex() {
+        return None;
+    }
     if message.verify().is_err()
         || message.pubkey != relay_pubkey
         || message.kind.as_u16() as u32 != KIND_STREAM_MESSAGE
@@ -188,6 +198,11 @@ mod tests {
                 .tags([
                     Tag::parse(["h", &channel.to_string()]).expect("h tag"),
                     Tag::parse(["p", &agent.public_key().to_hex()]).expect("p tag"),
+                    Tag::parse(["buzz:workflow", "true"]).expect("workflow marker"),
+                    Tag::parse(["buzz:workflow-owner", &owner.public_key().to_hex()])
+                        .expect("owner tag"),
+                    Tag::parse(["buzz:workflow-mention", &agent.public_key().to_hex()])
+                        .expect("authored mention"),
                     Tag::parse(["workflow-run", &run.to_string()]).expect("run tag"),
                     Tag::parse(["workflow-definition", &definition.id.to_hex()])
                         .expect("definition tag"),
@@ -250,26 +265,24 @@ mod tests {
     #[test]
     fn workflow_message_is_ineligible_for_direct_dispatch() {
         let fixture = Fixture::valid();
-        assert!(requires_verified_wake(
-            &fixture.message,
-            fixture.relay.public_key()
-        ));
-        assert!(!requires_verified_wake(
-            &fixture.message,
-            Keys::generate().public_key()
-        ));
+        assert!(requires_verified_wake(&fixture.message));
 
         let ordinary = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "ordinary")
             .tags([
                 Tag::parse(["h", &fixture.channel.to_string()]).expect("h tag"),
                 Tag::parse(["p", &fixture.agent.public_key().to_hex()]).expect("p tag"),
+                Tag::parse(["buzz:workflow", "true"]).expect("workflow marker"),
+                Tag::parse(["buzz:workflow-owner", &fixture.owner.public_key().to_hex()])
+                    .expect("owner tag"),
+                Tag::parse([
+                    "buzz:workflow-mention",
+                    &fixture.agent.public_key().to_hex(),
+                ])
+                .expect("authored mention"),
             ])
             .sign_with_keys(&fixture.relay)
             .expect("ordinary message");
-        assert!(!requires_verified_wake(
-            &ordinary,
-            fixture.relay.public_key()
-        ));
+        assert!(!requires_verified_wake(&ordinary));
     }
 
     #[test]
@@ -295,6 +308,48 @@ mod tests {
         let (message, author) = fixture.verify(fixture.authority()).expect("verified");
         assert_eq!(message.id, fixture.message.id);
         assert_eq!(author, fixture.owner.public_key().to_hex());
+    }
+
+    #[test]
+    fn signed_wake_cannot_promote_rendered_only_mentions_to_owner_authority() {
+        let fixture = Fixture::valid();
+        // Re-sign both objects so every existing signature, recipient and exact
+        // provenance edge is valid. Only the authored-mention boundary differs.
+        for replacement in [None, Some(Keys::generate().public_key().to_hex())] {
+            let mut tags: Vec<Tag> = fixture
+                .message
+                .tags
+                .iter()
+                .filter(|tag| tag.as_slice()[0] != "buzz:workflow-mention")
+                .cloned()
+                .collect();
+            if let Some(other) = replacement {
+                tags.push(Tag::parse(["buzz:workflow-mention", &other]).expect("other mention"));
+            }
+            let message = EventBuilder::new(fixture.message.kind, "@Agent injected by trigger")
+                .tags(tags)
+                .sign_with_keys(&fixture.relay)
+                .expect("signed message");
+            let wake = WorkflowMentionWake::new(
+                fixture.agent.public_key(),
+                fixture.channel,
+                fixture.run,
+                fixture.definition.id,
+                message.id,
+            )
+            .sign(&fixture.relay)
+            .expect("signed wake");
+            let mut authority = fixture.authority();
+            authority.message = message;
+            assert!(super::verify(
+                &wake,
+                authority,
+                fixture.relay.public_key(),
+                fixture.agent.public_key(),
+                fixture.channel
+            )
+            .is_none());
+        }
     }
 
     #[test]
@@ -368,6 +423,14 @@ mod tests {
                 .tags([
                     Tag::parse(["h", &fixture.channel.to_string()]).expect("h tag"),
                     Tag::parse(["p", &fixture.agent.public_key().to_hex()]).expect("p tag"),
+                    Tag::parse(["buzz:workflow", "true"]).expect("workflow marker"),
+                    Tag::parse(["buzz:workflow-owner", &fixture.owner.public_key().to_hex()])
+                        .expect("owner tag"),
+                    Tag::parse([
+                        "buzz:workflow-mention",
+                        &fixture.agent.public_key().to_hex(),
+                    ])
+                    .expect("authored mention"),
                     Tag::parse(["workflow-run", &fixture.run.to_string()]).expect("run tag"),
                     Tag::parse(["workflow-definition", &fixture.definition.id.to_hex()])
                         .expect("definition tag"),
@@ -432,6 +495,14 @@ mod tests {
             .tags([
                 Tag::parse(["h", &fixture.channel.to_string()]).expect("h tag"),
                 Tag::parse(["p", &fixture.agent.public_key().to_hex()]).expect("p tag"),
+                Tag::parse(["buzz:workflow", "true"]).expect("workflow marker"),
+                Tag::parse(["buzz:workflow-owner", &fixture.owner.public_key().to_hex()])
+                    .expect("owner tag"),
+                Tag::parse([
+                    "buzz:workflow-mention",
+                    &fixture.agent.public_key().to_hex(),
+                ])
+                .expect("authored mention"),
                 Tag::parse(["workflow-run", &fixture.run.to_string()]).expect("run tag"),
                 Tag::parse(["workflow-definition", &definition.id.to_hex()])
                     .expect("definition tag"),

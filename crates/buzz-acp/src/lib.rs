@@ -457,6 +457,27 @@ mod inbound_author_gate {
             self.relay_self.as_deref()
         }
 
+        /// Resolve the signing key through the same generation-fenced lifecycle
+        /// used by ordinary author admission. Durable wakes must not pin a
+        /// separate startup identity across relay reconnects.
+        pub(crate) async fn relay_identity_for_generation(
+            &mut self,
+            rest_client: &relay::RestClient,
+            event_generation: u64,
+        ) -> Option<nostr::PublicKey> {
+            if refresh_needed(self.refreshed_generation, event_generation) {
+                let (relay_self, completed) =
+                    refresh_relay_self(rest_client, self.relay_self.take(), "listener").await;
+                self.relay_self = relay_self;
+                if completed {
+                    self.refreshed_generation = Some(event_generation);
+                }
+            }
+            self.relay_self
+                .as_deref()
+                .and_then(|key| nostr::PublicKey::from_hex(key).ok())
+        }
+
         /// Refresh relay identity, resolve channel trust, and apply trusted
         /// workflow attribution and author policy for one listener event.
         ///
@@ -475,14 +496,8 @@ mod inbound_author_gate {
             // Retry failed startup discovery on generation 0 as well as failed
             // reconnect refreshes. Only an authoritative result completes the
             // generation; transient failure retains the last verified key.
-            if refresh_needed(self.refreshed_generation, buzz_event.connection_generation) {
-                let (relay_self, completed) =
-                    refresh_relay_self(rest_client, self.relay_self.take(), "listener").await;
-                self.relay_self = relay_self;
-                if completed {
-                    self.refreshed_generation = Some(buzz_event.connection_generation);
-                }
-            }
+            self.relay_identity_for_generation(rest_client, buzz_event.connection_generation)
+                .await;
             let is_dm = is_dm_channel(buzz_event.channel_id, channel_info).await;
             self.evaluate_with_channel_trust(
                 &buzz_event.event,
@@ -2582,12 +2597,6 @@ async fn tokio_main() -> Result<()> {
         tracing::warn!("failed to set startup watermark: {e}");
     }
 
-    let workflow_relay_pubkey = relay
-        .rest_client()
-        .relay_signing_pubkey()
-        .await
-        .map_err(|e| anyhow::anyhow!("relay signing identity error: {e}"))?;
-
     tracing::info!("connected to relay at {}", config.relay_url);
 
     let relay_rest_client = relay.rest_client();
@@ -3214,16 +3223,33 @@ async fn tokio_main() -> Result<()> {
                     match buzz_event {
                         Some(buzz_event) => {
                             let kind_u32 = buzz_event.event.kind.as_u16() as u32;
-                            if workflow_wake::requires_verified_wake(
-                                &buzz_event.event,
-                                workflow_relay_pubkey,
-                            ) {
+                            // Revision-labelled messages dispatch only through their
+                            // durable wake, even while identity discovery is unavailable.
+                            if workflow_wake::requires_verified_wake(&buzz_event.event) {
                                 continue;
                             }
 
-                            let (buzz_event, admission_author_override) = if kind_u32
+                            let buzz_event = if kind_u32
                                 == buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE
                             {
+                                let Some(workflow_relay_pubkey) = author_gate_ctx
+                                    .relay_identity_for_generation(
+                                        &ctx.rest_client,
+                                        buzz_event.connection_generation,
+                                    )
+                                    .await
+                                else {
+                                    // Discovery can recover on the next delivery; reopen
+                                    // transport dedup just as for transient authority reads.
+                                    if let Err(error) = relay.replay_event(
+                                        buzz_event.channel_id,
+                                        buzz_event.event.id.to_hex(),
+                                        buzz_event.event.created_at.as_secs(),
+                                    ).await {
+                                        tracing::warn!(%error, "failed to arrange workflow identity replay");
+                                    }
+                                    continue;
+                                };
                                 let Some(wake) = workflow_wake::authenticate(
                                     &buzz_event.event,
                                     workflow_relay_pubkey,
@@ -3266,7 +3292,7 @@ async fn tokio_main() -> Result<()> {
                                         continue;
                                     }
                                 };
-                                let Some((message, signed_author)) = workflow_wake::verify(
+                                let Some((message, _signed_author)) = workflow_wake::verify(
                                     &buzz_event.event,
                                     authority,
                                     workflow_relay_pubkey,
@@ -3276,15 +3302,13 @@ async fn tokio_main() -> Result<()> {
                                     tracing::warn!("workflow wake authority verification failed");
                                     continue;
                                 };
-                                (
-                                    relay::BuzzEvent {
-                                        channel_id: buzz_event.channel_id,
-                                        event: message,
-                                    },
-                                    Some(signed_author),
-                                )
+                                relay::BuzzEvent {
+                                    channel_id: buzz_event.channel_id,
+                                    connection_generation: buzz_event.connection_generation,
+                                    event: message,
+                                }
                             } else {
-                                (buzz_event, None)
+                                buzz_event
                             };
                             let kind_u32 = buzz_event.event.kind.as_u16() as u32;
 
@@ -7160,6 +7184,44 @@ mod author_gate_tests {
     /// The first authorized event after reconnect must restore attribution
     /// through the same decision boundary both listeners use, without a
     /// separate identity-refresh call.
+    #[tokio::test]
+    async fn durable_wake_identity_tracks_listener_generation_rotation() {
+        let old = nostr::Keys::generate();
+        let new = nostr::Keys::generate();
+        let agent = nostr::Keys::generate();
+        let (rest, server) = nip11_scripted_server(std::collections::VecDeque::from([
+            Ok(serde_json::json!({"self": old.public_key().to_hex()})),
+            Ok(serde_json::json!({"self": new.public_key().to_hex()})),
+        ]))
+        .await;
+        let mut gate =
+            InboundAuthorGate::connect(&rest, &agent.public_key().to_hex(), "test").await;
+        assert_eq!(
+            gate.relay_identity_for_generation(&rest, 0).await,
+            Some(old.public_key())
+        );
+        let channel = Uuid::new_v4();
+        let wake = buzz_core::workflow_wake::WorkflowMentionWake::new(
+            agent.public_key(),
+            channel,
+            Uuid::new_v4(),
+            nostr::EventId::from_byte_array([1; 32]),
+            nostr::EventId::from_byte_array([2; 32]),
+        )
+        .sign(&new)
+        .unwrap();
+        let key = gate.relay_identity_for_generation(&rest, 1).await.unwrap();
+        assert_eq!(key, new.public_key());
+        assert!(workflow_wake::authenticate(&wake, key).is_some());
+        assert!(workflow_wake::authenticate(&wake, old.public_key()).is_none());
+        // The ordinary gate consumes that exact identity, not a second startup cache.
+        assert_eq!(
+            gate.relay_identity_for_test(),
+            Some(new.public_key().to_hex().as_str())
+        );
+        server.abort();
+    }
+
     #[tokio::test]
     async fn test_gate_refresh_arms_attribution_after_reconnect() {
         let relay_keys = nostr::Keys::generate();

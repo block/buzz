@@ -55,23 +55,11 @@ fn ensure_channel_access(
 async fn enforce_current_channel_read(
     state: &Arc<AppState>,
     tenant: &TenantContext,
-    headers: &HeaderMap,
     pubkey: &nostr::PublicKey,
     channel_id: Uuid,
     error: &'static str,
 ) -> Result<(), (StatusCode, Json<Value>)> {
     let pubkey_bytes = pubkey.to_bytes().to_vec();
-    let auth_tag = headers
-        .get("x-auth-tag")
-        .and_then(|value| value.to_str().ok());
-    super::relay_members::enforce_relay_membership(
-        state,
-        tenant.community(),
-        &pubkey_bytes,
-        auth_tag,
-    )
-    .await?;
-
     let accessible = state
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)
         .await
@@ -136,7 +124,6 @@ async fn authorize_workflow_read(
     enforce_current_channel_read(
         state,
         &tenant,
-        headers,
         &pubkey,
         channel_id,
         "workflow is not accessible",
@@ -314,8 +301,11 @@ pub async fn workflow_wake_authority(
         .await
         .map_err(|_| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
     let url = bridge::nip98_expected_url(&state.config.relay_url, &tenant, &path);
-    let (recipient, auth_event_id) =
-        bridge::verify_bridge_auth(&headers, "GET", &url, None, state.config.require_auth_token)?;
+    let bridge::VerifiedBridgeAuth {
+        pubkey: recipient,
+        event_id_bytes: auth_event_id,
+        signed_created_at,
+    } = bridge::verify_bridge_auth(&headers, "GET", &url, None, state.config.require_auth_token)?;
     bridge::enforce_http_admission(&state, &tenant, &recipient).await?;
     bridge::check_nip98_replay(&state, &tenant, auth_event_id).await?;
 
@@ -359,14 +349,13 @@ pub async fn workflow_wake_authority(
     let message_channel = message
         .channel_id
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "workflow wake not found"))?;
-    let auth_tag = headers
-        .get("x-auth-tag")
-        .and_then(|value| value.to_str().ok());
+    let auth_tag = super::relay_members::extract_auth_tag_header(&headers);
     super::relay_members::enforce_relay_membership(
         &state,
         tenant.community(),
         &recipient.to_bytes(),
         auth_tag,
+        signed_created_at,
     )
     .await
     .map_err(|(status, body)| {
@@ -399,6 +388,12 @@ pub async fn workflow_wake_authority(
             let values = tag.as_slice();
             values.len() == 2 && values[0] == "p" && values[1].eq_ignore_ascii_case(&recipient_hex)
         })
+        || !exact_tag(&message.event, "buzz:workflow-mention", &recipient_hex)
+        || !exact_tag(
+            &message.event,
+            "buzz:workflow-owner",
+            &definition.event.pubkey.to_hex(),
+        )
         || !exact_tag(&message.event, "workflow-run", &run_id.to_string())
         || !exact_tag(
             &message.event,
