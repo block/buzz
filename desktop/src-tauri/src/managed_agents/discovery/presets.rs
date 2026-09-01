@@ -91,6 +91,15 @@ pub(super) fn preset_catalog_entry(
 
 pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
     PresetHarness {
+        id: "pi",
+        label: "Pi",
+        command: "pi-acp",
+        args: &[],
+        install_instructions_url: "https://github.com/svkozak/pi-acp",
+        install_hint: "Buzz talks to Pi through the pi-acp adapter. Install Pi with `npm install -g --ignore-scripts @earendil-works/pi-coding-agent`, then install the adapter with `npm install -g pi-acp`.",
+        underlying_cli: Some("pi"),
+    },
+    PresetHarness {
         id: "devin",
         label: "Devin",
         command: "devin",
@@ -116,15 +125,6 @@ pub(super) const PRESET_HARNESSES: &[PresetHarness] = &[
         install_instructions_url: "https://omp.sh/",
         install_hint: "Buzz talks to Oh My Pi through its CLI's ACP mode (omp acp).",
         underlying_cli: None,
-    },
-    PresetHarness {
-        id: "pi",
-        label: "Pi",
-        command: "pi-acp",
-        args: &[],
-        install_instructions_url: "https://github.com/svkozak/pi-acp",
-        install_hint: "Buzz talks to Pi through the pi-acp adapter. Install Pi with `npm install -g --ignore-scripts @earendil-works/pi-coding-agent`, then install the adapter with `npm install -g pi-acp`.",
-        underlying_cli: Some("pi"),
     },
     PresetHarness {
         id: "grok",
