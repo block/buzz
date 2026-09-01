@@ -263,7 +263,8 @@ version. The publisher verifies the checked-out commit is the tag target and the
 chart version equals `X.Y.Z` before pushing
 `oci://ghcr.io/block/buzz/charts/buzz-push-gateway`. A manually pushed
 `push-chart-vX.Y.Z` tag is the documented rescue path and runs the same checks.
-After the publisher succeeds, verify the immutable chart artifact before use:
+After the publisher succeeds, inspect and fetch the published chart version
+before use:
 
 ```bash
 helm show chart oci://ghcr.io/block/buzz/charts/buzz-push-gateway --version X.Y.Z

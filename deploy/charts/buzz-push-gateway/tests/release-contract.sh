@@ -3,6 +3,7 @@ set -euo pipefail
 env -u GEM_HOME -u GEM_PATH -u RUBYLIB -u RUBYOPT ruby -ryaml <<'RUBY'
 auto_text = File.read('.github/workflows/auto-tag-on-release-pr-merge.yml')
 publish_text = File.read('.github/workflows/push-gateway-helm-chart.yml')
+deployment_text = File.read('docs/push-gateway-deployment.md')
 chart = YAML.load_file('deploy/charts/buzz-push-gateway/Chart.yaml')
 # Parse first, then pin the tag producer and consumer strings whose agreement
 # makes this a reachable lane rather than an orphan publisher.
@@ -35,5 +36,15 @@ end
   'deploy/charts/buzz-push-gateway',
 ].each do |needle|
   raise "missing gateway chart publisher contract: #{needle}" unless publish_text.include?(needle)
+end
+[
+  'inspect and fetch the published chart version',
+  'helm show chart oci://ghcr.io/block/buzz/charts/buzz-push-gateway --version X.Y.Z',
+  'helm pull oci://ghcr.io/block/buzz/charts/buzz-push-gateway --version X.Y.Z',
+].each do |needle|
+  raise "missing gateway chart retrieval guidance: #{needle}" unless deployment_text.include?(needle)
+end
+if deployment_text.include?('verify the immutable chart artifact')
+  raise 'gateway chart retrieval guidance overstates authenticity verification'
 end
 RUBY
