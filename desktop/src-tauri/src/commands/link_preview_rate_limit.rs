@@ -1,16 +1,31 @@
 use std::{
-    collections::HashMap,
-    sync::{Mutex, OnceLock},
+    collections::{hash_map::DefaultHasher, HashMap},
+    hash::{Hash, Hasher},
+    sync::{LazyLock, Mutex, OnceLock},
     time::{Duration, Instant},
 };
 
 use reqwest::header::RETRY_AFTER;
+use tokio::sync::Mutex as AsyncMutex;
 use url::Url;
 
 pub(super) const MAX_IMAGE_RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
 const MAX_IMAGE_HOST_COOLDOWNS: usize = 128;
+const IMAGE_HOST_GATE_COUNT: usize = 64;
 
 static IMAGE_HOST_COOLDOWNS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+// A bounded stripe table serializes image requests by host without retaining an
+// unbounded attacker-controlled hostname map. Hash collisions only make two
+// unrelated hosts wait for one another; they never weaken the host boundary.
+static IMAGE_HOST_GATES: LazyLock<[AsyncMutex<()>; IMAGE_HOST_GATE_COUNT]> =
+    LazyLock::new(|| std::array::from_fn(|_| AsyncMutex::new(())));
+
+pub(super) fn image_host_gate(url: &Url) -> &'static AsyncMutex<()> {
+    let mut hasher = DefaultHasher::new();
+    url.host_str().unwrap_or_default().hash(&mut hasher);
+    let index = (hasher.finish() as usize) % IMAGE_HOST_GATE_COUNT;
+    &IMAGE_HOST_GATES[index]
+}
 
 pub(super) fn retry_after_duration(response: &reqwest::Response) -> Option<Duration> {
     response
