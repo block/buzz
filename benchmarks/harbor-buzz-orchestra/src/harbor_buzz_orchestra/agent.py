@@ -39,6 +39,7 @@ class BuzzOrchestraAgent(BaseAgent):
         buzz_cli_binary: str = "buzz",
         relay_gateway: str = "",
         forwarder_binary: str = "relay-forwarder",
+        ca_bundle: str = "",
         run_id: str | None = None,
         **kwargs: Any,
     ) -> None:
@@ -57,6 +58,7 @@ class BuzzOrchestraAgent(BaseAgent):
             buzz_cli_binary,
             relay_gateway,
             forwarder_binary,
+            ca_bundle,
         )
         self.run_id = run_id
 
@@ -116,6 +118,7 @@ class BuzzOrchestraAgent(BaseAgent):
         buzz_cli_binary: str,
         relay_gateway: str,
         forwarder_binary: str,
+        ca_bundle: str = "",
     ) -> OrchestraRuntime | None:
         endpoint_data = cls._load_mapping(endpoint_source)
         if endpoint_data is None and artifact_root is None:
@@ -142,6 +145,7 @@ class BuzzOrchestraAgent(BaseAgent):
             buzz_cli_binary=buzz_cli_binary,
             relay_gateway=relay_gateway,
             forwarder_binary=forwarder_binary,
+            ca_bundle_path=ca_bundle,
         )
 
     async def setup(self, environment: BaseEnvironment) -> None:

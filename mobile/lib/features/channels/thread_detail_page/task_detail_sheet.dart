@@ -101,10 +101,10 @@ class _TaskDetailSheet extends HookConsumerWidget {
     // timer: no polling, no live subscription, no background refresh.
     final retryTick = useState(0);
     final detailSnapshot = useFuture(
-      useMemoized(
-        () => ref.read(tasksApiProvider).getTask(taskId),
-        [taskId, retryTick.value],
-      ),
+      useMemoized(() => ref.read(tasksApiProvider).getTask(taskId), [
+        taskId,
+        retryTick.value,
+      ]),
     );
 
     if (detailSnapshot.hasError) {
@@ -123,10 +123,7 @@ class _TaskDetailSheet extends HookConsumerWidget {
         ),
       );
     }
-    return _TaskDetailView(
-      detail: detail,
-      onChanged: () => retryTick.value++,
-    );
+    return _TaskDetailView(detail: detail, onChanged: () => retryTick.value++);
   }
 }
 

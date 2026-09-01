@@ -238,14 +238,10 @@ fn push_descriptor(
             "pubkey": relay_keypair.public_key().to_hex(),
             "current": true
         }],
-        "app_profiles": [
-            {"id": "buzz-ios-production", "transport": "apns"},
-            {"id": "buzz-ios-sandbox", "transport": "apns"}
-        ],
+        "app_profiles": [{"id": "buzz-ios-dogfood", "transport": "apns"}],
         "push_kinds": crate::handlers::push_lease::PUSH_KINDS,
-        "urgent_kinds": crate::handlers::push_lease::URGENT_KINDS,
         "h_grammar": "uuid-v4-lowercase",
-        "class_support": {"apns": ["silent", "default", "time_sensitive"]},
+        "class_support": {"apns": ["default"]},
         "limitation": {
             "max_lease_ttl": 2592000,
             "max_leases_per_pubkey": 16,
@@ -281,7 +277,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         state.config.pairing_relay_url.as_deref(),
         state.config.klipy.as_ref().map(|_| "klipy"),
     );
-    let tenant_host = if state.config.push_gateway_delivery_url.is_some() {
+    let tenant_host = if state.config.push_enabled {
         crate::tenant::bind_community(&state.db, raw_host)
             .await
             .ok()
@@ -290,7 +286,7 @@ pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &st
         None
     };
     if let Some(push) = push_descriptor(
-        state.config.push_gateway_delivery_url.is_some(),
+        state.config.push_enabled,
         &state.config.relay_url,
         &state.config.push_executor_key_id,
         &state.relay_keypair,

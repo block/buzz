@@ -26,10 +26,7 @@ Future<List<TaskStatus>> _pumpPicker(
       child: MaterialApp(
         theme: AppTheme.light(),
         home: Scaffold(
-          body: TaskStatusPicker(
-            current: current,
-            onSelected: selected.add,
-          ),
+          body: TaskStatusPicker(current: current, onSelected: selected.add),
         ),
       ),
     ),

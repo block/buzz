@@ -1,0 +1,9 @@
+{
+  "hf.co/HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive:Q4_K_M": {
+    "provider": "openai",
+    "api_key_env": "OPENAI_COMPAT_API_KEY",
+    "env": {
+      "OPENAI_COMPAT_BASE_URL": "http://100.99.101.117:11434/v1"
+    }
+  }
+}

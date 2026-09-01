@@ -1,8 +1,9 @@
 //! Embedded SQLx migrations for Buzz.
 //!
-//! Fresh deployments apply the checked-in SQL files under `migrations/`. The
-//! multi-tenant rewrite owns a clean consolidated `0001`; legacy single-tenant
-//! cutover/backfill is a separate operator script, not startup migration state.
+//! Fresh deployments apply the checked-in additive SQL files under
+//! `migrations/`. The multi-tenant rewrite begins from a clean consolidated
+//! `0001`; legacy single-tenant cutover/backfill is a separate operator script,
+//! not startup migration state.
 
 use std::future::Future;
 
@@ -649,7 +650,8 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 35);
+        // product/main carries 35 consolidated migrations; NIP-PL adds one.
+        assert_eq!(migrations.len(), 36);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1215,8 +1217,11 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations[34].version, 43);
-        let sql = migrations[34].sql.as_str();
+        let task_migration = migrations
+            .iter()
+            .find(|migration| migration.version == 43)
+            .expect("task-system migration 0043");
+        let sql = task_migration.sql.as_str();
         assert!(sql.contains("CREATE TABLE tasks"));
         assert!(sql.contains("CREATE TABLE task_events"));
         assert!(sql.contains("SET LOCAL lock_timeout = '5s'"));
@@ -1258,6 +1263,25 @@ mod tests {
         // Deletion must not silently skip the new tenant tables.
         assert!(crate::deletion::EXPECTED_SCOPED_TABLES.contains(&"tasks"));
         assert!(crate::deletion::EXPECTED_SCOPED_TABLES.contains(&"task_events"));
+    }
+
+    #[test]
+    fn push_match_trigger_is_narrowed_to_message_kinds_additively() {
+        let mut migrations: Vec<_> = MIGRATOR.iter().collect();
+        migrations.sort_by_key(|migration| migration.version);
+
+        let push_migration = migrations
+            .iter()
+            .find(|migration| migration.version == 40)
+            .expect("push-message migration 0040");
+        let sql = push_migration.sql.as_str();
+        assert!(sql.contains("CREATE OR REPLACE FUNCTION enqueue_push_match_job"));
+        assert!(sql.contains("NEW.kind IN (9, 40002, 45001, 45003)"));
+        assert!(!sql.contains("NEW.kind IN (7, 9, 1059, 40007, 46010)"));
+
+        let desired_schema = include_str!("../../../schema/schema.sql");
+        assert!(desired_schema.contains("NEW.kind IN (9, 40002, 45001, 45003)"));
+        assert!(!desired_schema.contains("NEW.kind IN (7, 9, 1059, 40007, 46010)"));
     }
 
     #[test]

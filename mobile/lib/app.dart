@@ -29,6 +29,8 @@ import 'features/settings/settings_page.dart';
 import 'shared/auth/auth.dart';
 import 'shared/deeplink/pending_deep_link_provider.dart';
 import 'shared/emoji/emoji_burst.dart';
+import 'shared/push/push_subscription_provider.dart';
+import 'shared/push/push_relay_capability_provider.dart';
 import 'shared/relay/relay.dart';
 import 'shared/read_state/read_state_provider.dart';
 import 'shared/theme/theme.dart';
@@ -325,6 +327,11 @@ class App extends HookConsumerWidget {
       ref.watch(observerRelayProvider);
       ref.watch(appLifecycleProvider);
       ref.watch(userStatusCacheProvider);
+      if (ref.watch(activeCommunityProvider).value?.pushNotificationsEnabled ==
+              true &&
+          ref.watch(currentRelayPushDescriptorProvider).value != null) {
+        ref.watch(pushSubscriptionSyncProvider);
+      }
       hasUnreadInbox = ref.watch(_unreadInboxItemCountProvider) > 0;
     }
 

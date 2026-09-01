@@ -1,10 +1,20 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use std::{
-    collections::{HashMap, HashSet},
-    net::SocketAddr,
-    path::PathBuf,
-};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 use thiserror::Error;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApnsEnvironment {
+    Production,
+    Sandbox,
+}
+
+#[derive(Debug, Clone)]
+pub struct AppProfileConfig {
+    pub app_attest_app_id: String,
+    pub apns_cert_path: PathBuf,
+    pub apns_topic: String,
+    pub apns_environment: ApnsEnvironment,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyConfig {
@@ -21,19 +31,15 @@ pub struct Config {
     pub max_installation_lifetime_seconds: i64,
     pub endpoint_quota_window_seconds: i64,
     pub endpoint_quota_max_deliveries: i64,
-    pub enabled_profiles: HashSet<crate::model::AppProfile>,
+    /// Server-owned dogfood application identity and APNs transport.
+    pub profile: AppProfileConfig,
     pub database_url: String,
-    pub app_attest_app_id: String,
     pub app_attest_root_cert_path: PathBuf,
     /// Ordered current key first, followed by decrypt-only predecessors.
     pub grant_keys: Vec<KeyConfig>,
     /// Independent token-custody keyring. These keys MUST NOT be reused for
     /// externally presented delivery capabilities.
     pub token_keys: Vec<KeyConfig>,
-    pub apns_key_path: PathBuf,
-    pub apns_key_id: String,
-    pub apns_team_id: String,
-    pub apns_topic: String,
 }
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -75,6 +81,34 @@ fn parse_keyring(
     }
     Ok(keys)
 }
+
+fn parse_profile(e: &HashMap<String, String>) -> Result<AppProfileConfig, ConfigError> {
+    let app_id_key = "BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID";
+    let cert_key = "BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH";
+    let topic_key = "BUZZ_PUSH_DOGFOOD_APNS_TOPIC";
+    let environment_key = "BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT";
+    let required = |key: &'static str| {
+        e.get(key)
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or(ConfigError::Missing(key))
+    };
+    let app_attest_app_id = required(app_id_key)?.to_owned();
+    let apns_topic = required(topic_key)?.to_owned();
+    let apns_cert_path = PathBuf::from(required(cert_key)?);
+    let apns_environment = match e.get(environment_key).map(String::as_str) {
+        None | Some("production") => ApnsEnvironment::Production,
+        Some("sandbox") => ApnsEnvironment::Sandbox,
+        Some(_) => return Err(ConfigError::Invalid(environment_key)),
+    };
+    Ok(AppProfileConfig {
+        app_attest_app_id,
+        apns_cert_path,
+        apns_topic,
+        apns_environment,
+    })
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_map(&std::env::vars().collect())
@@ -141,45 +175,32 @@ impl Config {
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_WINDOW_SECONDS", 10, 86_400)?;
         let endpoint_quota_max_deliveries =
             bounded_positive("BUZZ_PUSH_ENDPOINT_QUOTA_MAX_DELIVERIES", 10, 10_000)?;
-        let enabled_profiles = req(e, "BUZZ_PUSH_ENABLED_PROFILES")?
-            .split(',')
-            .map(|profile| match profile {
-                "buzz-ios-production" => Ok(crate::model::AppProfile::BuzzIosProduction),
-                "buzz-ios-sandbox" => Ok(crate::model::AppProfile::BuzzIosSandbox),
-                _ => Err(ConfigError::Invalid("BUZZ_PUSH_ENABLED_PROFILES")),
-            })
-            .collect::<Result<HashSet<_>, _>>()?;
-        if enabled_profiles.is_empty() {
-            return Err(ConfigError::Invalid("BUZZ_PUSH_ENABLED_PROFILES"));
-        }
+        let profile = parse_profile(e)?;
+        let bind_addr = e
+            .get("BUZZ_PUSH_BIND_ADDR")
+            .map(String::as_str)
+            .unwrap_or("0.0.0.0:8080")
+            .parse::<SocketAddr>()
+            .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_BIND_ADDR"))?;
+        let health_addr = e
+            .get("BUZZ_PUSH_HEALTH_ADDR")
+            .map(String::as_str)
+            .unwrap_or("0.0.0.0:8081")
+            .parse::<SocketAddr>()
+            .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_HEALTH_ADDR"))?;
         Ok(Self {
-            bind_addr: e
-                .get("BUZZ_PUSH_BIND_ADDR")
-                .map(String::as_str)
-                .unwrap_or("0.0.0.0:8080")
-                .parse()
-                .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_BIND_ADDR"))?,
-            health_addr: e
-                .get("BUZZ_PUSH_HEALTH_ADDR")
-                .map(String::as_str)
-                .unwrap_or("0.0.0.0:8081")
-                .parse()
-                .map_err(|_| ConfigError::Invalid("BUZZ_PUSH_HEALTH_ADDR"))?,
+            bind_addr,
+            health_addr,
             public_delivery_url,
             max_grant_lifetime_seconds,
             max_installation_lifetime_seconds,
             endpoint_quota_window_seconds,
             endpoint_quota_max_deliveries,
-            enabled_profiles,
+            profile,
             database_url: req(e, "DATABASE_URL")?.to_owned(),
-            app_attest_app_id: req(e, "BUZZ_PUSH_APP_ATTEST_APP_ID")?.to_owned(),
             app_attest_root_cert_path: req(e, "BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH")?.into(),
             grant_keys,
             token_keys,
-            apns_key_path: req(e, "BUZZ_PUSH_APNS_KEY_PATH")?.into(),
-            apns_key_id: req(e, "BUZZ_PUSH_APNS_KEY_ID")?.to_owned(),
-            apns_team_id: req(e, "BUZZ_PUSH_APNS_TEAM_ID")?.to_owned(),
-            apns_topic: req(e, "BUZZ_PUSH_APNS_TOPIC")?.to_owned(),
         })
     }
 }
@@ -187,7 +208,6 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn base() -> HashMap<String, String> {
         HashMap::from([
             (
@@ -215,23 +235,54 @@ mod tests {
                 "2592000".into(),
             ),
             (
-                "BUZZ_PUSH_ENABLED_PROFILES".into(),
-                "buzz-ios-production".into(),
+                "DATABASE_URL".into(),
+                "postgres://buzz:test@localhost/buzz".into(), // sadscan:disable np.postgres.1
             ),
             (
-                "DATABASE_URL".into(),
-                "postgres://buzz:test@localhost/buzz".into(),
+                "BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID".into(),
+                "TEAM.xyz.block.buzz.dogfood.mobile".into(),
             ),
-            ("BUZZ_PUSH_APP_ATTEST_APP_ID".into(), "TEAM.app".into()),
             (
                 "BUZZ_PUSH_APP_ATTEST_ROOT_CERT_PATH".into(),
                 "/apple-root.pem".into(),
             ),
-            ("BUZZ_PUSH_APNS_KEY_PATH".into(), "/key.p8".into()),
-            ("BUZZ_PUSH_APNS_KEY_ID".into(), "key".into()),
-            ("BUZZ_PUSH_APNS_TEAM_ID".into(), "team".into()),
-            ("BUZZ_PUSH_APNS_TOPIC".into(), "app".into()),
+            (
+                "BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH".into(),
+                "/dogfood-identity.pem".into(),
+            ),
+            (
+                "BUZZ_PUSH_DOGFOOD_APNS_TOPIC".into(),
+                "xyz.block.buzz.dogfood.mobile".into(),
+            ),
+            (
+                "BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT".into(),
+                "production".into(),
+            ),
+            ("BUZZ_PUSH_BIND_ADDR".into(), "127.0.0.1:8080".into()),
+            ("BUZZ_PUSH_HEALTH_ADDR".into(), "127.0.0.1:8081".into()),
         ])
+    }
+
+    #[test]
+    fn dogfood_profile_requires_server_owned_identity_and_certificate() {
+        let config = Config::from_map(&base()).unwrap();
+        assert_eq!(
+            config.profile.apns_cert_path,
+            PathBuf::from("/dogfood-identity.pem")
+        );
+        assert_eq!(config.profile.apns_topic, "xyz.block.buzz.dogfood.mobile");
+
+        for variable in [
+            "BUZZ_PUSH_DOGFOOD_APNS_CERT_PATH",
+            "BUZZ_PUSH_DOGFOOD_APNS_TOPIC",
+            "BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID",
+        ] {
+            let mut env = base();
+            env.remove(variable);
+            assert!(
+                matches!(Config::from_map(&env), Err(ConfigError::Missing(key)) if key == variable)
+            );
+        }
     }
 
     #[test]
@@ -255,8 +306,8 @@ mod tests {
                 "BUZZ_PUSH_PUBLIC_DELIVERY_URL",
                 "https://push.example/v1/deliveries/apns",
             ),
-            ("BUZZ_PUSH_APP_ATTEST_APP_ID", ""),
-            ("BUZZ_PUSH_ENABLED_PROFILES", "unknown-profile"),
+            ("BUZZ_PUSH_DOGFOOD_APP_ATTEST_APP_ID", ""),
+            ("BUZZ_PUSH_DOGFOOD_APNS_ENVIRONMENT", "staging"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "0"),
             ("BUZZ_PUSH_MAX_GRANT_LIFETIME_SECONDS", "31536001"),
             ("BUZZ_PUSH_MAX_INSTALLATION_LIFETIME_SECONDS", "0"),
@@ -277,6 +328,17 @@ mod tests {
             env.insert("BUZZ_PUSH_TOKEN_KEYS".into(), token_keys);
             assert!(Config::from_map(&env).is_err());
         }
+    }
+
+    #[test]
+    fn listener_defaults_remain_public_when_addresses_are_absent() {
+        let mut env = base();
+        env.remove("BUZZ_PUSH_BIND_ADDR");
+        env.remove("BUZZ_PUSH_HEALTH_ADDR");
+
+        let config = Config::from_map(&env).unwrap();
+        assert_eq!(config.bind_addr, "0.0.0.0:8080".parse().unwrap());
+        assert_eq!(config.health_addr, "0.0.0.0:8081".parse().unwrap());
     }
 
     #[test]

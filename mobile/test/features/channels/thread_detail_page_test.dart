@@ -184,27 +184,31 @@ Widget _buildThreadPage({
       channelMessagesProvider(
         _channelId,
       ).overrideWith(() => _FakeMessagesNotifier([root])),
-      channelTypingProvider(_channelId).overrideWith(() => _FakeTypingNotifier()),
+      channelTypingProvider(
+        _channelId,
+      ).overrideWith(() => _FakeTypingNotifier()),
       userCacheProvider.overrideWith(
         () => _FakeUserCacheNotifier(const {
           'alice': UserProfile(pubkey: 'alice', displayName: 'Alice'),
         }),
       ),
       profileProvider.overrideWith(() => _FakeProfileNotifier()),
-      channelsProvider.overrideWith(() => _FakeChannelsNotifier([_testChannel])),
-      channelDetailsProvider(_channelId).overrideWith(
-        (ref) async => ChannelDetails.fromChannel(_testChannel),
+      channelsProvider.overrideWith(
+        () => _FakeChannelsNotifier([_testChannel]),
       ),
-      channelMembersProvider(_channelId).overrideWith(
-        (ref) async => const <ChannelMember>[],
-      ),
+      channelDetailsProvider(
+        _channelId,
+      ).overrideWith((ref) async => ChannelDetails.fromChannel(_testChannel)),
+      channelMembersProvider(
+        _channelId,
+      ).overrideWith((ref) async => const <ChannelMember>[]),
       channelBotPubkeysProvider(
         _channelId,
       ).overrideWith((ref) async => const <String>{}),
       agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
-      threadRepliesProvider(repliesArgs).overrideWith(
-        (ref) async => <NostrEvent>[],
-      ),
+      threadRepliesProvider(
+        repliesArgs,
+      ).overrideWith((ref) async => <NostrEvent>[]),
       threadLocalRepliesProvider(repliesArgs).overrideWith(
         () => _FakeThreadLocalRepliesNotifier(repliesArgs, const []),
       ),
@@ -286,7 +290,9 @@ void main() {
               url.queryParameters['source_ref'] == 'root') {
             // The chip's reverse lookup: this thread HAS produced a task.
             return http.Response(
-              jsonEncode({'tasks': [_taskJson()]}),
+              jsonEncode({
+                'tasks': [_taskJson()],
+              }),
               200,
             );
           }

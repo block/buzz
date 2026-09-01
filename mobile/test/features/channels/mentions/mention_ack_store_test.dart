@@ -129,9 +129,10 @@ void main() {
         _ack(status: mentionAckStatusDeclined, reason: 'agent is offline'),
       );
 
-      final declines = container
-          .read(mentionAckStoreProvider)
-          .declines(_mentionId, [_agentPubkey]);
+      final declines = container.read(mentionAckStoreProvider).declines(
+        _mentionId,
+        [_agentPubkey],
+      );
       expect(declines.single.reason, 'agent is offline');
       expect(
         container.read(mentionAckStoreProvider).isAccepted(_mentionId, [
@@ -175,18 +176,15 @@ void main() {
     test('an ack with no e tag is dropped', () {
       final container = _container();
 
-      expect(
-        _notifier(container).applyAck(_ack(targetEventId: '')),
-        isFalse,
-      );
+      expect(_notifier(container).applyAck(_ack(targetEventId: '')), isFalse);
     });
 
     test('an accept from any tagged agent outranks another agent decline', () {
       final container = _container();
 
-      _notifier(container).applyAck(
-        _ack(status: mentionAckStatusDeclined, reason: 'busy'),
-      );
+      _notifier(
+        container,
+      ).applyAck(_ack(status: mentionAckStatusDeclined, reason: 'busy'));
       _notifier(container).applyAck(_ack(signer: _otherPubkey));
 
       final state = container.read(mentionAckStoreProvider);
@@ -209,8 +207,10 @@ void main() {
 
       final state = container.read(mentionAckStoreProvider);
       expect(state.isAccepted(_mentionId, [_agentPubkey]), isFalse);
-      expect(state.declines(_mentionId, [_agentPubkey]).single.reason,
-          'changed my mind');
+      expect(
+        state.declines(_mentionId, [_agentPubkey]).single.reason,
+        'changed my mind',
+      );
     });
 
     test('acks for other mentions do not leak across event ids', () {
@@ -253,9 +253,9 @@ void main() {
       final container = _container();
 
       for (var i = 0; i < mentionAckMaxTrackedEvents + 25; i++) {
-        _notifier(container).applyAck(
-          _ack(targetEventId: 'mention-$i', id: 'ack-$i'),
-        );
+        _notifier(
+          container,
+        ).applyAck(_ack(targetEventId: 'mention-$i', id: 'ack-$i'));
       }
 
       final state = container.read(mentionAckStoreProvider);
@@ -287,10 +287,7 @@ void main() {
   group('kind wiring', () {
     test('44102 is subscribed and treated as an overlay, never a row', () {
       // Subscribed, so acks reach the client at all.
-      expect(
-        EventKind.channelEventKinds,
-        contains(EventKind.agentMentionAck),
-      );
+      expect(EventKind.channelEventKinds, contains(EventKind.agentMentionAck));
       // Aux, so it overlays instead of rendering as a timeline row.
       expect(
         EventKind.channelAuxEventKinds,

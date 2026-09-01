@@ -1,12 +1,21 @@
 #include? "Pods/Target Support Files/Pods-Runner/Pods-Runner.debug.xcconfig"
 #include "Generated.xcconfig"
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) DEBUG
 
 // Default app bundle identifier. Internal/custom builds can override this
 // without patching tracked files by writing
 // `mobile/ios/Flutter/AppOverrides.xcconfig` containing
 // `BUNDLE_IDENTIFIER = your.app.id` (gitignored).
-BUNDLE_IDENTIFIER = com.buzz.buzzMobile
+BUNDLE_IDENTIFIER = xyz.block.buzz.dogfood.mobile
 APP_DISPLAY_NAME = Buzz
+BUZZ_DEVELOPMENT_TEAM = JMTDPW9CG3
+
+// Push support is always present in the iOS artifact. The current relay's
+// fully validated NIP-11 descriptor is the runtime activation authority.
+BUZZ_APP_GROUP_IDENTIFIER = group.$(BUNDLE_IDENTIFIER)
+BUZZ_KEYCHAIN_ACCESS_GROUP = $(BUNDLE_IDENTIFIER)
+BUZZ_IOS_PUSH_ENVIRONMENT = development
+BUZZ_APP_ATTEST_ENVIRONMENT = development
 
 // Worktree-aware debug identity (gitignored, written by
 // scripts/mobile-worktree-overrides.sh): a per-worktree bundle identifier
@@ -15,7 +24,6 @@ APP_DISPLAY_NAME = Buzz
 #include? "WorktreeOverrides.xcconfig"
 
 // Developer app-specific overrides are included last: xcconfig
-// later-include-wins is per variable, so a personal BUNDLE_IDENTIFIER for
-// device signing beats the worktree default while unset variables still
-// fall through to the worktree values.
+// later-include-wins is per variable, so a personal signing identity beats the
+// worktree default while unset variables still fall through to tracked values.
 #include? "AppOverrides.xcconfig"

@@ -79,11 +79,7 @@ class ThreadTaskChip extends StatelessWidget {
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
-                LucideIcons.circleCheckBig,
-                size: 15,
-                color: colors.primary,
-              ),
+              Icon(LucideIcons.circleCheckBig, size: 15, color: colors.primary),
               const SizedBox(width: 8),
               Flexible(
                 child: Text(
@@ -102,9 +98,9 @@ class ThreadTaskChip extends StatelessWidget {
               Text(
                 threadTaskStatusLabel(task.status),
                 key: const ValueKey('thread-task-chip-status'),
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: colors.onSurfaceVariant,
-                ),
+                style: Theme.of(
+                  context,
+                ).textTheme.bodySmall?.copyWith(color: colors.onSurfaceVariant),
               ),
               if (additionalCount > 0) ...[
                 const SizedBox(width: 6),

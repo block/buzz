@@ -57,7 +57,7 @@ async fn backfill_push_match_jobs(
         "INSERT INTO push_match_queue (community_id, event_id) \
          SELECT community_id, id FROM events \
          WHERE community_id = $1 \
-           AND kind IN (7, 9, 1059, 40007, 46010) \
+           AND kind IN (9, 40002, 45001, 45003) \
            AND deleted_at IS NULL \
            AND received_at > now() - make_interval(secs => $2) \
          ON CONFLICT DO NOTHING",
@@ -160,6 +160,8 @@ pub struct ClaimedWake {
     pub class: String,
     /// Delivery deadline, in Unix seconds.
     pub expires_at: i64,
+    /// Time this durable wake entered the relay outbox.
+    pub queued_at: DateTime<Utc>,
     /// Attempt number, starting at one for the first claim.
     pub attempt: i32,
 }
@@ -234,11 +236,17 @@ pub async fn accept_lease_event(
     address_lock.extend_from_slice(community.as_uuid().as_bytes());
     address_lock.extend_from_slice(author);
     address_lock.extend_from_slice(installation_id.as_bytes());
-    let address_lock = i64::from_le_bytes(Sha256::digest(&address_lock)[..8].try_into().unwrap());
+    let address_digest = Sha256::digest(&address_lock);
+    let mut address_lock_bytes = [0_u8; 8];
+    address_lock_bytes.copy_from_slice(&address_digest[..8]);
+    let address_lock = i64::from_le_bytes(address_lock_bytes);
     let mut author_lock = Vec::with_capacity(16 + author.len());
     author_lock.extend_from_slice(community.as_uuid().as_bytes());
     author_lock.extend_from_slice(author);
-    let author_lock = i64::from_le_bytes(Sha256::digest(&author_lock)[..8].try_into().unwrap());
+    let author_digest = Sha256::digest(&author_lock);
+    let mut author_lock_bytes = [0_u8; 8];
+    author_lock_bytes.copy_from_slice(&author_digest[..8]);
+    let author_lock = i64::from_le_bytes(author_lock_bytes);
     crate::observability::observe_advisory_lock(
         crate::observability::LockType::PushGate,
         sqlx::query("SELECT pg_advisory_xact_lock($1)")
@@ -614,10 +622,10 @@ pub async fn enqueue_wake(
         }],
     )
     .await?;
-    Ok(outcomes
+    outcomes
         .into_iter()
         .next()
-        .expect("one outcome per request"))
+        .ok_or_else(|| crate::DbError::InvalidData("missing wake enqueue outcome".into()))
 }
 
 /// Set-wise counterpart of [`enqueue_wake`]: one transaction and a constant
@@ -1083,7 +1091,8 @@ pub async fn claim_due_wakes(
           AND l.endpoint_hash = o.endpoint_hash
         RETURNING o.community_id, o.id, o.claim_id, o.event_id, c.channel_id,
                   o.author, o.installation_id, o.lease_generation,
-                  l.endpoint_grant, o.class, o.expires_at, o.attempts
+                  l.endpoint_grant, o.class, o.expires_at, o.created_at AS queued_at,
+                  o.attempts
         "#,
     )
     .bind(community.as_uuid())
@@ -1111,7 +1120,8 @@ pub async fn revalidate_wake_for_send(
         r#"
         SELECT o.community_id, o.id, o.claim_id, o.event_id, e.channel_id,
                o.author, o.installation_id, o.lease_generation,
-               l.endpoint_grant, o.class, o.expires_at, o.attempts
+               l.endpoint_grant, o.class, o.expires_at, o.created_at AS queued_at,
+               o.attempts
         FROM push_wake_outbox o
         JOIN push_leases l
           ON l.community_id = o.community_id
@@ -1274,6 +1284,7 @@ fn row_to_claimed_wake(row: sqlx::postgres::PgRow) -> Result<ClaimedWake> {
         endpoint_grant: row.try_get("endpoint_grant")?,
         class: row.try_get("class")?,
         expires_at: row.try_get("expires_at")?,
+        queued_at: row.try_get("queued_at")?,
         attempt: row.try_get("attempts")?,
     })
 }

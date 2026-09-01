@@ -1885,17 +1885,26 @@ test("an older agent message opens the same persona instance as the Agents libra
   await expect(currentCard).toBeVisible();
   await expect(page.getByText("Parity Agent", { exact: true })).toHaveCount(2);
 
-  // The running instance's card opens the running instance.
+  // Post-#5706 contract: a card's main click opens the PERSONA target, never
+  // an explicit pubkey. The archive-aware selector then resolves the persona
+  // to its running instance, so both cards land on the same persona panel —
+  // the exact-instance pick is delegated to the panel's Instances section.
   await currentCard.click();
-  await expectHashSearchParam(page, "profile", currentPubkey);
+  await expectHashSearchParam(page, "profile", null);
+  await expectHashSearchParam(page, "profilePersona", personaId);
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
   ).toHaveAttribute("aria-label", "Stop");
   await page.getByTestId("auxiliary-panel-close").click();
 
-  // The renamed, stopped instance's card opens *that* instance rather than
-  // silently redirecting to its running sibling.
+  // The renamed, stopped instance is still reachable — deliberately — through
+  // the persona panel's Instances list rather than the card body, so a pick
+  // made outside the archive-snapshot fail-open window can't strand the panel.
   await earlierCard.click();
+  await expectHashSearchParam(page, "profilePersona", personaId);
+  await page.getByRole("tab", { name: "Runtime" }).click();
+  await page.getByTestId("user-profile-instances").click();
+  await page.getByTestId(`user-profile-instance-${historicalPubkey}`).click();
   await expectHashSearchParam(page, "profile", historicalPubkey);
   await expect(
     page.getByTestId("user-profile-agent-primary-action"),
