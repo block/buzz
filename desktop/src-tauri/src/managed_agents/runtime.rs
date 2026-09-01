@@ -23,8 +23,8 @@ pub(crate) use super::access_policy::{build_respond_to_env_with_policy, RespondT
 
 mod metadata;
 pub(crate) use metadata::{
-    apply_agent_display_env, child_rust_log_filter, resolve_session_title,
-    runtime_metadata_env_vars, DISPLAY_NAME_ENV_VAR, SESSION_TITLE_ENV_VAR,
+    apply_agent_display_env, apply_replay_floor_env, child_rust_log_filter, resolve_session_title,
+    runtime_metadata_env_vars, DISPLAY_NAME_ENV_VAR, REPLAY_FLOOR_ENV_VAR, SESSION_TITLE_ENV_VAR,
 };
 
 mod stop;
@@ -572,18 +572,12 @@ pub fn spawn_agent_child(
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
     command.env("BUZZ_ACP_LAZY_POOL", if lazy { "true" } else { "false" });
     command.env("BUZZ_ACP_IDLE_POOL_SLEEP", idle_pool_sleep_env(lazy));
-    // Publish-first mention sends: the triggering message is already on the
-    // relay when this spawn runs, so hand the harness the send timestamp as a
-    // startup replay floor. Clear any ambient value on the None path so a
-    // floor from the parent environment can't leak into an unrelated spawn.
-    match replay_floor_unix {
-        Some(floor) => {
-            command.env("BUZZ_ACP_REPLAY_FLOOR", floor.to_string());
-        }
-        None => {
-            command.env_remove("BUZZ_ACP_REPLAY_FLOOR");
-        }
-    }
+    // Publish-first mention sends hand the harness the send timestamp as a
+    // startup replay floor. Strip any ambient value here — before the
+    // `descriptor.env` loop — so a floor from the parent environment can never
+    // leak into an unrelated spawn; the caller's floor is asserted AFTER that
+    // loop by `apply_replay_floor_env` so saved user env cannot shadow it.
+    command.env_remove(REPLAY_FLOOR_ENV_VAR);
     command.env("BUZZ_ACP_AGENT_COMMAND", &resolved_agent_command);
     command.env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
     match &resolved_mcp_command {
@@ -867,6 +861,13 @@ pub fn spawn_agent_child(
     let acp_session_policy = super::apply_app_acp_session_policy_env(app, &mut command);
 
     crate::build_identity::apply_demo_config_home(&mut command)?;
+    // Publish-first replay floor: written AFTER the `descriptor.env` loop, the
+    // same post-loop authority ordering the A1 model write uses. This send's
+    // floor is invocation state and must win over a saved
+    // BUZZ_ACP_REPLAY_FLOOR — the shadow `apply_replay_floor` strips from the
+    // provider payload's `launch.env` tier for the same reason.
+    apply_replay_floor_env(&mut command, replay_floor_unix);
+
     // A1: for local claude agents, ANTHROPIC_MODEL is the single startup model authority.
     // BUZZ_ACP_MODEL is removed (live ACP switches only; two authorities in the same env
     // would be ambiguous).

@@ -6,7 +6,7 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         discover_provider_candidates, load_managed_agents, provider_deploy,
-        resolve_provider_binary, save_managed_agents, BackendKind,
+        resolve_provider_binary, save_managed_agents, BackendKind, REPLAY_FLOOR_ENV_VAR,
     },
     util::now_iso,
 };
@@ -172,12 +172,14 @@ fn assert_payload_scope(
 
 /// Inject a caller-supplied replay floor into the deploy payload so the
 /// remote harness consumes it exactly like a local spawn: as the
-/// `BUZZ_ACP_REPLAY_FLOOR` environment variable. The floor rides
+/// [`REPLAY_FLOOR_ENV_VAR`] environment variable. The floor rides
 /// `launch.policy_env` (tier 1); any same-named key in `launch.env` (tier 2)
 /// is stripped because that tier later-wins and a persisted user value must
-/// not shadow this send's floor. With no caller floor the payload is left
-/// untouched — a user-supplied `launch.env` value passes through, and plain
-/// redeploys never carry a stale floor.
+/// not shadow this send's floor — the remote mirror of
+/// `apply_replay_floor_env`'s post-`descriptor.env` write on the local spawn.
+/// With no caller floor the payload is left untouched — a user-supplied
+/// `launch.env` value passes through, and plain redeploys never carry a stale
+/// floor.
 fn apply_replay_floor(agent_json: &mut serde_json::Value, replay_floor_unix: Option<u64>) {
     let Some(floor) = replay_floor_unix else {
         return;
@@ -194,7 +196,7 @@ fn apply_replay_floor(agent_json: &mut serde_json::Value, replay_floor_unix: Opt
     {
         let shadowed: Vec<String> = env
             .keys()
-            .filter(|key| key.eq_ignore_ascii_case("BUZZ_ACP_REPLAY_FLOOR"))
+            .filter(|key| key.eq_ignore_ascii_case(REPLAY_FLOOR_ENV_VAR))
             .cloned()
             .collect();
         for key in shadowed {
@@ -207,14 +209,14 @@ fn apply_replay_floor(agent_json: &mut serde_json::Value, replay_floor_unix: Opt
     {
         Some(policy_env) => {
             policy_env.insert(
-                "BUZZ_ACP_REPLAY_FLOOR".to_string(),
+                REPLAY_FLOOR_ENV_VAR.to_string(),
                 serde_json::Value::String(floor.to_string()),
             );
         }
         None => {
             launch.insert(
                 "policy_env".to_string(),
-                serde_json::json!({ "BUZZ_ACP_REPLAY_FLOOR": floor.to_string() }),
+                serde_json::json!({ (REPLAY_FLOOR_ENV_VAR): floor.to_string() }),
             );
         }
     }
