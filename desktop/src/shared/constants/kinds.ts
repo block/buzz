@@ -41,6 +41,10 @@ export const KIND_HUDDLE_STARTED = 48100;
 export const KIND_HUDDLE_PARTICIPANT_JOINED = 48101;
 export const KIND_HUDDLE_PARTICIPANT_LEFT = 48102;
 export const KIND_HUDDLE_ENDED = 48103;
+// Agent media sessions: realtime audio/video carried by an external
+// provider and announced into the channel. The relay never carries the media.
+export const KIND_AGENT_MEDIA_SESSION_STARTED = 48200;
+export const KIND_AGENT_MEDIA_SESSION_ENDED = 48201;
 // NIP-78 application-specific data. All use kind 30078; the relay
 // differentiates them by d-tag ("read-state:<slotId>", "channel-sections",
 // "channel-mutes", "channel-stars", "channel-sort", "project-sidebar-membership").
@@ -110,6 +114,10 @@ export const CHANNEL_EVENT_KINDS = [
   KIND_HUDDLE_PARTICIPANT_JOINED, // 48101 — huddle lifecycle overlay
   KIND_HUDDLE_PARTICIPANT_LEFT, // 48102 — huddle lifecycle overlay
   KIND_HUDDLE_ENDED, // 48103 — huddle lifecycle overlay
+  // Control events: subscribed so a panel learns of a live session on
+  // reconnect, but they render no timeline row of their own.
+  KIND_AGENT_MEDIA_SESSION_STARTED, // 48200
+  KIND_AGENT_MEDIA_SESSION_ENDED, // 48201
 ] as const;
 
 // Auxiliary (non-row) timeline kinds: events that overlay onto or hide an
@@ -165,6 +173,10 @@ const NON_CONVERSATIONAL_UNREAD_KINDS: ReadonlySet<number> = new Set([
   KIND_HUDDLE_PARTICIPANT_JOINED, // 48101
   KIND_HUDDLE_PARTICIPANT_LEFT, // 48102
   KIND_HUDDLE_ENDED, // 48103
+  // Not rows today; listed so that if a surface ever renders them they stay
+  // out of the unread pill.
+  KIND_AGENT_MEDIA_SESSION_STARTED, // 48200
+  KIND_AGENT_MEDIA_SESSION_ENDED, // 48201
 ]);
 
 // Whether a timeline message kind should count toward unread tallies. An

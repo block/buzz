@@ -48,6 +48,12 @@ abstract final class EventKind {
   static const huddleParticipantLeft = 48102;
   static const huddleEnded = 48103;
 
+  /// Agent media sessions: realtime audio/video carried by an external
+  /// provider and announced into the channel. The relay never carries the
+  /// media itself.
+  static const agentMediaSessionStarted = 48200;
+  static const agentMediaSessionEnded = 48201;
+
   /// Event kinds that represent user-visible channel messages.
   static const channelMessageEventKinds = [
     streamMessage, // 9

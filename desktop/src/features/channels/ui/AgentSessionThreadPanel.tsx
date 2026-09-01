@@ -17,6 +17,8 @@ import {
 } from "@/features/agents/ui/agentSessionPanelLayout";
 import { deriveTranscriptBlockIds } from "@/features/agents/ui/agentSessionTranscriptGrouping";
 import type { ObserverEvent } from "@/features/agents/ui/agentSessionTypes";
+import { AgentMediaSurface } from "@/features/agents/ui/AgentMediaSurface";
+import { useAgentMediaSession } from "@/features/agents/lib/useAgentMediaSessions";
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
 import {
   useArchivedChannelEvents,
@@ -101,6 +103,13 @@ export function AgentSessionThreadPanel({
   const isLive = isManagedAgentActive(agent);
   const isOverlay = useIsThreadPanelOverlay();
   const sessionChannelId = channelId ?? channel?.id ?? null;
+
+  // A live media session for *this* agent in *this* channel, if one is running.
+  // Null the rest of the time, which is the common case. The hook still holds a
+  // narrow 48200/48201 subscription while the panel is open — that is how a
+  // session that starts later shows up — but it joins no room until there is
+  // one, so nothing is negotiated and nothing is metered.
+  const mediaSession = useAgentMediaSession(sessionChannelId, agent.pubkey);
   // Unified working signal, scoped to this panel's channel (or all channels
   // when the panel is unscoped) — observer turns primary, typing fallback.
   const { working: isWorking } = useAgentWorking(
@@ -514,6 +523,13 @@ export function AgentSessionThreadPanel({
         className="overflow-y-auto px-3 pb-4"
         panelPadding
       >
+        {mediaSession ? (
+          <AgentMediaSurface
+            agentLabel={agentLabel}
+            className="pb-3 pt-2"
+            session={mediaSession}
+          />
+        ) : null}
         <div ref={topSentinelRef} aria-hidden className="h-px" />
         <div ref={contentRef}>
           <ManagedAgentSessionPanel
@@ -521,9 +537,16 @@ export function AgentSessionThreadPanel({
             channelId={sessionChannelId}
             className="border-0 bg-transparent px-0 py-2 shadow-none"
             emptyDescription={
-              sessionChannelId
-                ? `Mention ${agent.name} in the channel to see its work here.`
-                : `Mention ${agent.name} in any channel to see its work here.`
+              // A live media session already answers "mention it to see
+              // something" — the member is watching the agent right now, and
+              // repeating the instruction reads as though nothing happened.
+              // The block still renders, because a media agent may also do ACP
+              // work, and that work belongs here rather than in the video.
+              mediaSession
+                ? `${agent.name} is live above. Tool calls and edits appear here.`
+                : sessionChannelId
+                  ? `Mention ${agent.name} in the channel to see its work here.`
+                  : `Mention ${agent.name} in any channel to see its work here.`
             }
             profiles={profiles}
             rawLayout="exclusive"

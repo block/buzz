@@ -355,6 +355,7 @@ export function ChannelScreen({
     agentSessionCandidates,
     botTypingEntries,
     humanTypingPubkeys,
+    mediaSessions,
     threadTypingPubkeys,
   } = useChannelActivityTyping({
     activeChannel,
@@ -580,6 +581,8 @@ export function ChannelScreen({
   } = useChannelAgentSessions({
     activeChannel,
     activeChannelId,
+    currentPubkey,
+    mediaSessions,
     agentsLoaded:
       !channelMembersQuery.isLoading &&
       !managedAgentsQuery.isLoading &&

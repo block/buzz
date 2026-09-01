@@ -882,6 +882,13 @@ jobs:
           cargo test -p buzz-test-client --test e2e_persona --test e2e_team_catalog --test e2e_nostr_interop --test e2e_project -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay invite -- --ignored --nocapture
           cargo test -p buzz-test-client --test e2e_relay nip43_membership_snapshots_are_rejected -- --ignored --nocapture
+          # Agent media sessions: the stored-state half of 48200/48201
+          # authorization -- who may announce, and which start an end may
+          # close. Those predicates need a real community, channel and NIP-OA
+          # registration, so the in-crate shape tests cannot reach them; this
+          # binary is the only thing that fails if the gate is removed. Every
+          # test in it is #[ignore]d, so it runs nowhere unless selected here.
+          cargo test -p buzz-test-client --test e2e_agent_media_session -- --ignored --nocapture
         env:
           RELAY_URL: ws://localhost:3000
           GIT_CREDENTIAL_NOSTR_BIN: ${{ github.workspace }}/target/ci/git-credential-nostr

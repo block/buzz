@@ -597,6 +597,117 @@ pub const KIND_HUDDLE_ENDED: u32 = 48103;
 /// Huddle channel guidelines/rules document.
 pub const KIND_HUDDLE_GUIDELINES: u32 = 48106;
 
+/// An agent media session hosted by an external provider was started.
+///
+/// Announces that an agent has opened a realtime audio/video session for a
+/// channel — the counterpart to [`KIND_HUDDLE_STARTED`] for sessions the relay
+/// does not itself carry. The relay stores and fans out the announcement; the
+/// media itself never transits the relay.
+///
+/// Channel-scoped via `h`. Ownership is the signature rather than a tag — an
+/// agent does not `p`-tag itself. An `e` tag references the message that
+/// triggered the session, so clients can anchor the session to it.
+///
+/// **Only a registered agent may announce one**, and that is a stricter test
+/// than channel membership: the relay resolves an owner for the signing pubkey
+/// and refuses the announcement when there is none. A plain member cannot
+/// announce a session, and neither can an agent whose channel role merely says
+/// `bot` — the role and the registration are different facts. An external agent
+/// becomes registered by presenting a NIP-OA `auth` tag — an owner-signed
+/// attestation over the agent's own pubkey — inside its NIP-42 `AUTH` event,
+/// which the relay verifies and records. Mint one with
+/// `cargo run -p buzz-sdk --example compute_auth_tag -- <owner_secret>
+/// <agent_pubkey> [conditions]`, which prints the tag JSON; see
+/// `buzz_sdk::nip_oa::compute_auth_tag` for the construction. The owner key
+/// must differ from the agent key — self-attestation is refused. Leave
+/// `conditions` empty unless you mean them: ingest does not consult them on
+/// this path, so a narrow one only risks breaking the agent's other events.
+///
+/// # Content
+///
+/// A JSON object. **This kind is announced by software outside this
+/// repository**, so the field-level contract is stated here rather than left
+/// to the two implementations that enforce it.
+///
+/// | Field | Type | Relay | Client |
+/// |---|---|---|---|
+/// | `provider` | string | required; must be a known provider | required; unknown ⇒ event ignored |
+/// | `connect.url` | string | required; a `ws(s)`/`http(s)` URL with a host | required; same rule |
+/// | `connect.room` | string | required, non-blank | required, non-blank |
+/// | `expires_at` | integer | required; `> created_at`, at most one hour after it | required; `> created_at` |
+/// | `token_endpoint` | string | optional; an `http(s)` URL with a host | optional; dropped unless it is one |
+/// | `participants` | array | not validated | see below — decides what renders |
+/// | `viewer.subscribe`, `viewer.publish` | arrays | not validated | unknown names dropped |
+/// | `v` | integer | not validated | not read |
+///
+/// Both URLs are parsed, not prefix-matched, on both sides. `"wss://"` and
+/// `"https://["` name an allowed scheme and no host, and an announcement
+/// carrying one is refused rather than stored: it would fan out to the whole
+/// channel for every client to fail on separately, which is the outcome
+/// validating the field exists to prevent. `connect.room` is checked after
+/// trimming, because a room of spaces fails at the provider exactly as an
+/// empty one does.
+///
+/// Track kinds are `avatar_video`, `camera`, `screen` and `audio`; anything
+/// else is discarded. `avatar_video` is an agent's rendered face.
+///
+/// `participants` is a list of `{"pubkey": <hex>, "tracks": [<kind>, …]}`. The
+/// relay does not check it, and a client cannot ignore it: **an announcement
+/// that omits it usually renders nothing.** A client accepts a remote track as
+/// the agent's when the publisher's provider identity contains the agent's
+/// pubkey, and otherwise falls back to this declaration — exactly one declared
+/// publisher of that track kind, and that publisher being the agent. No
+/// provider is obliged to put a pubkey in its participant identity, and the
+/// avatar vendors this was built against do not, so the declaration is what
+/// makes the agent's video and voice attributable. Declaring somebody else as the sole publisher
+/// of a track kind is read as a statement that the track is not the agent's,
+/// not as an ambiguity to resolve in the agent's favour.
+///
+/// Omitting `token_endpoint` is legitimate — a provider may deliver its
+/// credential another way — but with no endpoint a viewer is simply told it
+/// cannot join. It is optional because that failure is visible; the `connect`
+/// fields are required because theirs is silent.
+///
+/// An announcer serving `token_endpoint` owes three things the relay cannot
+/// check: verify the caller's NIP-98 signature over the exact request URL,
+/// confirm the caller is a member of the channel in the `h` tag before minting
+/// anything, and answer CORS preflight (below). The relay validates only that
+/// the endpoint is a fetchable URL, so an endpoint that skips the first two is
+/// an open credential mint reachable from a world-readable event.
+///
+/// The CORS obligation is worth expanding, because it is the one whose failure
+/// misleads. A viewer authenticates its token request with a NIP-98
+/// `Authorization` header, which is never a "simple" header, so the browser
+/// sends `OPTIONS` first and blocks the real request when that goes
+/// unanswered. The request never reaches the endpoint's handler, so the client
+/// reports an opaque network error and the announcer's own logs show only a
+/// rejected `OPTIONS` — which reads as unreachable rather than as
+/// misconfigured.
+///
+/// `expires_at` is a unix timestamp after which clients stop rendering the
+/// session. It is a **presentation expiry, not a lease**: it reaps nothing on
+/// the provider. It is required because the closing
+/// [`KIND_AGENT_MEDIA_SESSION_ENDED`] may never arrive — an agent that crashes
+/// publishes no end event — and a card with no stated end would advertise a
+/// dead room indefinitely. The relay bounds it by a maximum session duration,
+/// and additionally by the channel's own deadline when the channel is
+/// ephemeral.
+///
+/// Deliberately not ephemeral: a member who opens the channel after the
+/// announcement must still be able to discover and join a live session.
+pub const KIND_AGENT_MEDIA_SESSION_STARTED: u32 = 48200;
+/// An agent media session ended.
+///
+/// Mirrors [`KIND_HUDDLE_ENDED`]. Channel-scoped via `h`, and carries exactly
+/// one `e` tag referencing the [`KIND_AGENT_MEDIA_SESSION_STARTED`] it closes —
+/// exactly one, because the relay checks the ender's standing against that
+/// start's signer, a question two starts have no single answer to.
+///
+/// Two signers may end a session: the agent that owns it, or the relay closing
+/// one on the owner's behalf. A relay-signed end carries exactly one `p` tag
+/// naming that owner, since signer and subject differ there.
+pub const KIND_AGENT_MEDIA_SESSION_ENDED: u32 = 48201;
+
 // Media (49000–49999)
 /// Internal kind for media upload audit entries. Not a relay event kind.
 pub const KIND_MEDIA_UPLOAD: u32 = 49001;
@@ -751,6 +862,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_HUDDLE_PARTICIPANT_LEFT,
     KIND_HUDDLE_ENDED,
     KIND_HUDDLE_GUIDELINES,
+    KIND_AGENT_MEDIA_SESSION_STARTED,
+    KIND_AGENT_MEDIA_SESSION_ENDED,
     KIND_MEDIA_UPLOAD,
     KIND_GIT_REPO_ANNOUNCEMENT,
     KIND_GIT_REPO_STATE,
@@ -879,6 +992,16 @@ const _: () = assert!(
 const _: () = assert!(KIND_AUTH <= u16::MAX as u32);
 const _: () = assert!(KIND_CANVAS <= u16::MAX as u32);
 const _: () = assert!(KIND_HUDDLE_GUIDELINES <= u16::MAX as u32);
+const _: () = assert!(KIND_AGENT_MEDIA_SESSION_ENDED <= u16::MAX as u32);
+// Compile-time: agent media session events are regular stored kinds — a late
+// joiner must be able to query a live session, so they must not be ephemeral,
+// and there is one event per session start/end, so they must not be replaceable.
+const _: () = assert!(!is_ephemeral(KIND_AGENT_MEDIA_SESSION_STARTED));
+const _: () = assert!(!is_replaceable(KIND_AGENT_MEDIA_SESSION_STARTED));
+const _: () = assert!(!is_parameterized_replaceable(
+    KIND_AGENT_MEDIA_SESSION_STARTED
+));
+const _: () = assert!(!is_ephemeral(KIND_AGENT_MEDIA_SESSION_ENDED));
 const _: () = assert!(EPHEMERAL_KIND_MIN < EPHEMERAL_KIND_MAX);
 // Compile-time: KIND_AGENT_TURN_METRIC is a regular stored kind (not ephemeral, not replaceable).
 const _: () = assert!(!is_ephemeral(KIND_AGENT_TURN_METRIC));

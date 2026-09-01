@@ -8,6 +8,8 @@ import type {
   RelayAgent,
 } from "@/shared/api/types";
 import { usePanelReturnTarget } from "@/shared/hooks/usePanelReturnTarget";
+import type { AgentMediaSession } from "@/features/agents/lib/agentMediaSession";
+import { useAutoOpenRequestedAgentMedia } from "@/features/agents/lib/useAutoOpenRequestedMedia";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import {
   channelBotMemberPubkeySet,
@@ -23,7 +25,7 @@ export type ChannelAgentSessionAgent = Pick<
   ManagedAgent,
   "pubkey" | "name" | "status"
 > & {
-  agentSource: "managed" | "member-bot" | "relay";
+  agentSource: "managed" | "media" | "member-bot" | "relay";
   canInterruptTurn: boolean;
   channelIds?: string[];
   channels?: string[];
@@ -34,8 +36,11 @@ type UseChannelAgentSessionsOptions = {
   activeChannelId: string | null;
   agentsLoaded: boolean;
   channelMembers?: ChannelMember[];
+  currentPubkey?: string | null;
   handleOpenThread: (message: TimelineMessage) => void;
   managedAgents: ChannelAgentSessionAgent[];
+  /** Live media sessions for this channel, for the requester auto-open below. */
+  mediaSessions: readonly AgentMediaSession[];
   openAgentSessionPubkey: string | null;
   openThreadHeadId: string | null;
   profilePanelPubkey?: string | null;
@@ -59,10 +64,18 @@ function relayStatusToManagedStatus(
 export function buildChannelAgentSessionCandidates({
   channelMembers,
   managedAgents,
+  mediaSessions,
   relayAgents,
 }: {
   channelMembers?: ChannelMember[];
   managedAgents: ManagedAgent[];
+  /**
+   * Live media sessions announced in this channel (kind:48200).
+   *
+   * Structural rather than the parsed `AgentMediaSession` type so this stays a
+   * pure function over plain data, testable without the subscription hook.
+   */
+  mediaSessions?: readonly { agentPubkey: string; channelId: string }[];
   relayAgents: RelayAgent[];
 }): ChannelAgentSessionAgent[] {
   const byPubkey = new Map<string, ChannelAgentSessionAgent>();
@@ -108,6 +121,40 @@ export function buildChannelAgentSessionCandidates({
     });
   }
 
+  // A live media session qualifies its agent by itself. An agent that only
+  // publishes video is none of the three sources above: not desktop-managed,
+  // no kind:10100 registration, and its `channel_members.role` may well say
+  // `member` — nothing marks an external agent as a bot at add-time. Without
+  // this it has no session panel, so `AgentMediaSurface` can never mount, no
+  // viewer token is ever requested, and the room it announced sits empty.
+  //
+  // Last, so an agent that already has a record keeps that record's name and
+  // interrupt affordance; the session only vouches for the channel.
+  for (const session of mediaSessions ?? []) {
+    const key = normalizePubkey(session.agentPubkey);
+    const existing = byPubkey.get(key);
+    if (existing) {
+      if (!(existing.channelIds ?? []).includes(session.channelId)) {
+        byPubkey.set(key, {
+          ...existing,
+          channelIds: [...(existing.channelIds ?? []), session.channelId],
+        });
+      }
+      continue;
+    }
+
+    byPubkey.set(key, {
+      pubkey: session.agentPubkey,
+      // No agent record to name it. `resolveUserLabel` prefers the kind:0
+      // profile at render, so this shows only for an agent with no profile.
+      name: truncatePubkey(session.agentPubkey),
+      status: "deployed",
+      agentSource: "media",
+      canInterruptTurn: false,
+      channelIds: [session.channelId],
+    });
+  }
+
   return [...byPubkey.values()];
 }
 
@@ -116,11 +163,14 @@ export function getChannelAgentSessionAgents({
   activeChannelId,
   agents,
   channelMembers,
+  mediaSessionPubkeys,
 }: {
   activeChannel: Channel | null;
   activeChannelId: string | null;
   agents: ChannelAgentSessionAgent[];
   channelMembers?: ChannelMember[];
+  /** Normalized pubkeys with a live media session in this channel. */
+  mediaSessionPubkeys?: ReadonlySet<string>;
 }): ChannelAgentSessionAgent[] {
   if (!activeChannelId || !activeChannel) {
     return [];
@@ -138,6 +188,12 @@ export function getChannelAgentSessionAgents({
 
   return agents.filter((agent) => {
     const normalizedPubkey = normalizePubkey(agent.pubkey);
+    // A session announced in this channel is its own scope, whatever the
+    // roster says. Checked before the source rules so a managed or registered
+    // agent that is on camera here without being a member still qualifies.
+    if (mediaSessionPubkeys?.has(normalizedPubkey)) {
+      return true;
+    }
     const channelIds = agent.channelIds ?? [];
     const channels = agent.channels ?? [];
     const hasDeclaredChannelScope =
@@ -169,8 +225,10 @@ export function useChannelAgentSessions({
   activeChannelId,
   agentsLoaded,
   channelMembers,
+  currentPubkey,
   handleOpenThread,
   managedAgents,
+  mediaSessions,
   openAgentSessionPubkey,
   openThreadHeadId,
   profilePanelPubkey = null,
@@ -248,6 +306,16 @@ export function useChannelAgentSessions({
       setThreadScrollTargetId,
     ],
   );
+
+  // A session this member's own mention started opens its panel here rather
+  // than leaving them hunting for the indicator. This hook already owns every
+  // other way a panel opens, so the automatic one belongs with them.
+  useAutoOpenRequestedAgentMedia({
+    currentPubkey,
+    openAgentSession,
+    panelOpen: openAgentSessionPubkey !== null,
+    sessions: mediaSessions,
+  });
 
   // Back restores the pane the Activity panel replaced; with no recorded
   // target (opened from the composer with no pane, or a direct/restored

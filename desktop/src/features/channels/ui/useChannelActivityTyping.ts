@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { reportChannelBotTyping } from "@/features/agents/agentWorkingSignal";
+import { useAgentMediaSessions } from "@/features/agents/lib/useAgentMediaSessions";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type {
@@ -49,14 +50,27 @@ export function useChannelActivityTyping({
   relayAgents: RelayAgent[];
   typingEntries: TypingIndicatorEntry[];
 }) {
+  // A live media session is channel presence, so it qualifies its agent for a
+  // session panel the same way a roster bot role does. Without this an agent
+  // that only publishes video has no panel, and the surface that renders it
+  // cannot mount — see buildChannelAgentSessionCandidates.
+  const mediaSessions = useAgentMediaSessions(activeChannelId);
   const agentCandidates = React.useMemo(
     () =>
       buildChannelAgentSessionCandidates({
         channelMembers,
         managedAgents,
+        mediaSessions,
         relayAgents,
       }),
-    [channelMembers, managedAgents, relayAgents],
+    [channelMembers, managedAgents, mediaSessions, relayAgents],
+  );
+  const mediaSessionPubkeys = React.useMemo(
+    () =>
+      new Set(
+        mediaSessions.map((session) => normalizePubkey(session.agentPubkey)),
+      ),
+    [mediaSessions],
   );
   const channelAgentSessionAgents = React.useMemo(
     () =>
@@ -65,8 +79,15 @@ export function useChannelActivityTyping({
         activeChannelId,
         agents: agentCandidates,
         channelMembers,
+        mediaSessionPubkeys,
       }),
-    [activeChannel, activeChannelId, agentCandidates, channelMembers],
+    [
+      activeChannel,
+      activeChannelId,
+      agentCandidates,
+      channelMembers,
+      mediaSessionPubkeys,
+    ],
   );
   const channelAgentPubkeys = React.useMemo(
     () =>
@@ -126,6 +147,10 @@ export function useChannelActivityTyping({
     botTypingEntries,
     channelAgentSessionAgents,
     humanTypingPubkeys,
+    // Handed back rather than subscribed to again by the caller: this hook
+    // already holds the channel's sessions, and every extra
+    // `useAgentMediaSessions` call is another relay REQ for the same filter.
+    mediaSessions,
     threadTypingPubkeys,
   };
 }

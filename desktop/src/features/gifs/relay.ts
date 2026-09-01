@@ -7,10 +7,9 @@ import {
   type RelayGifSearchInfo,
 } from "@/features/gifs/api";
 import { relayHttpFromWs } from "@/shared/api/inviteHelpers";
-import { signRelayEvent } from "@/shared/api/tauri";
+import { nip98PostHeader } from "@/shared/api/nip98";
 
 const KLIPY_CUSTOMER_ID_STORAGE_KEY_PREFIX = "buzz:klipy-customer-id:v1:";
-const NIP98_KIND = 27235;
 
 function customerId(relayUrl: string): string {
   if (typeof window === "undefined") return globalThis.crypto.randomUUID();
@@ -28,30 +27,6 @@ function customerId(relayUrl: string): string {
     // over a process-wide fallback that would correlate unrelated relays.
     return globalThis.crypto.randomUUID();
   }
-}
-
-async function sha256Hex(text: string): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(text),
-  );
-  return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-async function nip98PostHeader(url: string, body: string): Promise<string> {
-  const authEvent = await signRelayEvent({
-    kind: NIP98_KIND,
-    content: "",
-    tags: [
-      ["u", url],
-      ["method", "POST"],
-      ["payload", await sha256Hex(body)],
-      ["nonce", crypto.randomUUID()],
-    ],
-  });
-  return `Nostr ${btoa(JSON.stringify(authEvent))}`;
 }
 
 const FRIENDLY_GIF_ERRORS: Record<string, string> = {
