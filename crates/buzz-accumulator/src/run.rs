@@ -136,9 +136,14 @@ pub fn plan_run(
         transcript.push_str("\n\n--- SOURCE EVENT IDS ---\n");
         transcript.push_str(&ids.join("\n"));
     }
+    // Instructions are the task; the schema contract is non-negotiable and
+    // travels with every run — otherwise custom instructions silently drop
+    // the structural rules that complete_run() will refuse on.
     let model_input = format!(
-        "{}\n\n--- CONTEXT (time-ordered events) ---\n{}\n",
-        spec.instructions, transcript
+        "--- TASK ---\n{}\n\n{}\n\n--- CONTEXT (time-ordered events) ---\n{}\n",
+        spec.instructions,
+        schema::CHANNEL_DIGEST_V1.contract_prompt(),
+        transcript
     );
     let est = estimate::estimate(&spec.model, model_input.chars().count());
     Ok(Plan::Ready(RunPlan {
@@ -393,6 +398,31 @@ mod tests {
             estimate::estimate("haiku", run.model_input.chars().count())
         );
         assert_eq!(run.estimate.window_fit.fits, Some(true));
+    }
+
+    #[test]
+    fn custom_instructions_cannot_drop_the_output_contract() {
+        // A task-only prompt ("what is this project about?") must still carry
+        // the schema's structural rules, or validation is a guaranteed refusal.
+        let mut spec = spec();
+        spec.instructions = "what is this project trying to accomplish".to_string();
+        let plan = plan_run(
+            &spec,
+            None,
+            &BTreeSet::new(),
+            vec![sig(&hex_id('b'), 200, "hello")],
+            &BTreeMap::new(),
+        )
+        .expect("plan");
+        let Plan::Ready(run) = plan else {
+            panic!("expected Ready");
+        };
+        assert!(run
+            .model_input
+            .contains("what is this project trying to accomplish"));
+        assert!(run.model_input.contains("OUTPUT CONTRACT"));
+        assert!(run.model_input.contains("Working Context, Log"));
+        assert!(run.model_input.contains("Log is append-only"));
     }
 
     #[test]

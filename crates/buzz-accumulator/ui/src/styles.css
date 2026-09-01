@@ -397,6 +397,40 @@ input[type="checkbox"],
   margin: 6px 0;
 }
 
+.artifact-body hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 14px 0;
+}
+
+.artifact-body blockquote {
+  margin: 8px 0;
+  padding: 2px 12px;
+  border-left: 3px solid var(--border);
+  color: var(--ink-3);
+}
+
+.artifact-body pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+
+.artifact-body table {
+  border-collapse: collapse;
+  margin: 8px 0;
+}
+
+.artifact-body th,
+.artifact-body td {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+  text-align: left;
+}
+
 .version-strip {
   display: flex;
   gap: 4px;

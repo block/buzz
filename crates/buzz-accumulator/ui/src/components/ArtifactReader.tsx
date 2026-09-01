@@ -1,5 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { api, fmtTime, shortId } from "../api";
 
 type Props = {
@@ -119,64 +121,40 @@ function EvidenceCard({ id, onClose }: { id: string; onClose: () => void }) {
 }
 
 const CITATION = /\[event:([0-9a-f]{64})\]/g;
+const CITE_HREF = "#cite:";
 
-/** Minimal renderer for the artifact's markdown-shaped output: headings,
- * list items, paragraphs — with `[event:<id>]` turned into citation chips. */
+/** Real markdown rendering (GFM) for the artifact's output. `[event:<id>]`
+ * citations are pre-rewritten into `#cite:` links, which the `a` component
+ * turns into evidence chips; H1/H2 downshift to fit the pane's hierarchy. */
 function renderOutput(output: string, pin: (id: string) => void): ReactNode {
-  const blocks: ReactNode[] = [];
-  let list: ReactNode[] = [];
-  let key = 0;
-
-  const flushList = () => {
-    if (list.length > 0) {
-      blocks.push(<ul key={key++}>{list}</ul>);
-      list = [];
-    }
-  };
-
-  for (const line of output.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
-      list.push(<li key={key++}>{inline(trimmed.slice(2), pin)}</li>);
-      continue;
-    }
-    flushList();
-    if (trimmed.startsWith("## ")) {
-      blocks.push(<h4 key={key++}>{inline(trimmed.slice(3), pin)}</h4>);
-    } else if (trimmed.startsWith("# ")) {
-      blocks.push(<h3 key={key++}>{inline(trimmed.slice(2), pin)}</h3>);
-    } else if (trimmed.length > 0) {
-      blocks.push(<p key={key++}>{inline(trimmed, pin)}</p>);
-    }
-  }
-  flushList();
-  return blocks;
-}
-
-function inline(text: string, pin: (id: string) => void): ReactNode[] {
-  const out: ReactNode[] = [];
-  let last = 0;
-  let key = 0;
-  CITATION.lastIndex = 0;
-  let m = CITATION.exec(text);
-  while (m !== null) {
-    if (m.index > last) out.push(text.slice(last, m.index));
-    const id = m[1];
-    if (id) {
-      out.push(
-        <button
-          key={key++}
-          className="chip"
-          title={id}
-          onClick={() => pin(id)}
-        >
-          {shortId(id)}
-        </button>,
-      );
-    }
-    last = m.index + m[0].length;
-    m = CITATION.exec(text);
-  }
-  if (last < text.length) out.push(text.slice(last));
-  return out;
+  const withChips = output.replace(
+    CITATION,
+    (_, id: string) => `[${shortId(id)}](${CITE_HREF}${id})`,
+  );
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        h1: ({ children }) => <h3>{children}</h3>,
+        h2: ({ children }) => <h4>{children}</h4>,
+        a: ({ href, children }) => {
+          if (href?.startsWith(CITE_HREF)) {
+            const id = href.slice(CITE_HREF.length);
+            return (
+              <button className="chip" title={id} onClick={() => pin(id)}>
+                {children}
+              </button>
+            );
+          }
+          return (
+            <a href={href} target="_blank" rel="noreferrer">
+              {children}
+            </a>
+          );
+        },
+      }}
+    >
+      {withChips}
+    </ReactMarkdown>
+  );
 }

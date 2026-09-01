@@ -84,7 +84,7 @@ function CreateFold({ selection }: { selection: Selection }) {
         <label>Instructions</label>
         <textarea
           rows={2}
-          placeholder="empty = built-in channel-digest prompt"
+          placeholder="task focus, e.g. 'track decisions and blockers' — the Working Context / Log output contract always applies"
           value={instructions}
           onChange={(e) => setInstructions(e.target.value)}
         />

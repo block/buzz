@@ -25,17 +25,39 @@ pub const CHANNEL_DIGEST_V1: ArtifactSchema = ArtifactSchema {
     append_sections: &["Log"],
 };
 
-/// Default fold instructions for [`CHANNEL_DIGEST_V1`].
-///
-/// The contract lines are load-bearing: exact H1 headings, only-new log
-/// entries (the engine splices history back), and full-id citations copied
-/// from the run's SOURCE EVENT IDS list — ids embedded in message text are
-/// never citations.
-pub const CHANNEL_DIGEST_PROMPT: &str = "Maintain a bounded digest of the anchored selection.\n\
-Return markdown with exactly these H1 sections, in this order: Working Context, Log.\n\
-Working Context is a concise standing summary rewritten in light of all evidence.\n\
-Log: output ONLY new dated entries for this run's evidence — the engine keeps the\n\
-standing Log and appends your new entries to it; never repeat prior entries.\n\
-For new evidence, cite the source events you actually use as [event:<id>], one id\n\
-per bracket, copied in full from the SOURCE EVENT IDS list. Ids that appear inside\n\
-message text are never citations. Do not invent facts. Output only the document markdown.";
+impl ArtifactSchema {
+    /// The output contract, rendered as prompt text. [`crate::plan_run`]
+    /// composes this into every model input *alongside* the spec's
+    /// instructions, so custom instructions focus the task but can never drop
+    /// the structural rules that [`crate::validate::validate_output`] will
+    /// enforce — otherwise a task-only prompt is a guaranteed refusal.
+    pub fn contract_prompt(&self) -> String {
+        let mut s = format!(
+            "OUTPUT CONTRACT (mechanically enforced; nonconforming output is refused and \
+             nothing persists):\nWhatever the task above asks for, deliver it as markdown \
+             with exactly these H1 sections, in this order: {}.\n",
+            self.sections.join(", ")
+        );
+        for a in self.append_sections {
+            s.push_str(&format!(
+                "{a} is append-only: output ONLY new dated entries for this run's evidence \
+                 — the engine keeps the standing {a} and appends your new entries to it; \
+                 never repeat prior entries.\n"
+            ));
+        }
+        s.push_str(
+            "For new evidence, cite the source events you actually use as [event:<id>], one \
+             id per bracket, copied in full from the SOURCE EVENT IDS list. Ids that appear \
+             inside message text are never citations. Do not invent facts. Output only the \
+             document markdown.",
+        );
+        s
+    }
+}
+
+/// Default fold *task* instructions for [`CHANNEL_DIGEST_V1`]. The structural
+/// rules live in [`ArtifactSchema::contract_prompt`], which every run gets
+/// regardless of what the instructions say.
+pub const CHANNEL_DIGEST_PROMPT: &str = "Maintain a bounded digest of the anchored selection. \
+Working Context is a concise standing summary rewritten in light of all evidence; the Log \
+records dated evidence entries.";
