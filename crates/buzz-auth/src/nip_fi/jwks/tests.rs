@@ -589,7 +589,8 @@ async fn resolve_ssrf_accepts_public_ipv6_fast_path() {
 /// The public fetcher rejects an IPv6 loopback JWKS URI before any network
 /// connection is attempted. `fetch_jwks_inner` calls `validate_jwks_uri` as
 /// its first step; `validate_jwks_uri` parses the URI, extracts the host via
-/// `Url::host()`, and rejects any non-globally-unicast address as
+/// `Url::host()`, and rejects any address matched by the shared enumerated
+/// deny policy as
 /// `InvalidUri`. `::1` (loopback) never reaches the extraction or
 /// resolved-target enforcement stages. Bracket-free extraction and
 /// resolved-target value-flow evidence is covered by the dedicated
@@ -1425,15 +1426,27 @@ async fn resolved_target_and_pin_key_seam_public_ipv6_and_fec0_rejection() {
 ///
 /// ## Mutation oracles
 /// 1. **Sharing:** Replace `Arc::clone(&source)` passed to the verifier with a
-///    fresh `Arc::new(second_source)` built from the same configs but independent.
-///    Pre-advancement A1 still verifies (both arcs warm from the same initial
-///    fetch). Post-advancement the verifier's arc is stale; A1-reject and
-///    A2-accept assertions both flip red.
+///    fresh `Arc::new(second_source)` built from the same configs but independent,
+///    sharing the same controlled clock. Warm the independent source with a
+///    separate A1 fetch before advancing the clock. After advancement,
+///    `key_set()` on the verifier's independent source filters the expired A1
+///    snapshot (`filter(|c| now < c.hard_deadline)`) and returns no keys —
+///    the verifier never re-fetches and never observes A2. The A2-accept
+///    assertion flips red reliably, because the verifier never observes A2.
+///    The A1-reject assertion stays green: the independent cache is also
+///    expired (same advanced clock), so that source also returns no A1 keys —
+///    A1 tokens are still rejected, but through expiry of the independent
+///    cache rather than through shared-arc rotation. **A2 acceptance is the
+///    reliable shared-source oracle here.**
 ///
-/// Note: the expiry-purge (`state.snapshot = None` in `get_snapshot`) is a
-/// write-path optimization; A1 rejection after the deadline is enforced
-/// independently by the `key_set` read path (`filter(|c| now < c.hard_deadline)`),
-/// so no separate purge mutation oracle is claimed here.
+/// Note: the expiry-purge (`state.snapshot = None` in `get_snapshot`) is
+/// correctness-critical for concurrent callers: it clears the expired snapshot
+/// before permit acquisition, so a caller that loses the permit race and falls
+/// back to `state.snapshot` receives `None` rather than an expired snapshot.
+/// A1 rejection after the deadline is also enforced independently by the `key_set`
+/// read path (`filter(|c| now < c.hard_deadline)`), but the purge is what
+/// prevents the fallback path from serving a stale snapshot to concurrent
+/// refresh losers, so no separate purge mutation oracle is claimed here.
 #[tokio::test]
 async fn shared_arc_source_verifier_rejects_expired_a1_accepts_a2() {
     use crate::nip_fi::{
@@ -1531,9 +1544,10 @@ async fn shared_arc_source_verifier_rejects_expired_a1_accepts_a2() {
         issuer: issuer.to_owned(),
         contract: jwks_contract.clone(),
     };
-    // Mutation oracle 1 (sharing): pass a second independent Arc to the verifier.
-    // Both arcs see the A1 warm cache, but post-advancement the verifier's arc
-    // is stale — A1-reject and A2-accept assertions flip red.
+    // Mutation oracle 1 (sharing): pass a second independent Arc to the verifier,
+    // separately warmed with A1 before advancing the clock. After advancement,
+    // A2-accept flips red (verifier never observes A2 keys); A1-reject stays
+    // green (independent cache also expired, so A1 keys are absent there too).
     let source = Arc::new(
         ProductionJwksSource::new_with_clock(
             vec![config],
@@ -1595,11 +1609,11 @@ async fn shared_arc_source_verifier_rejects_expired_a1_accepts_a2() {
     // Step 5: the SAME unchanged verifier reflects A2 keys.
     verifier
         .verify(&sign_token(PKCS8_A2, KID_A2, issuer, audience))
-        .expect("A2 token must verify through the unchanged verifier after A1 deadline expired");
+        .expect(
+            "A2 token must verify through the unchanged verifier after A1 deadline expired; \
+             mutation oracle: use independent Arc -> A2-accept flips red (reliable oracle)",
+        );
     verifier
         .verify(&sign_token(PKCS8_A1, KID_A1, issuer, audience))
-        .expect_err(
-            "A1 must be rejected after expiry + rotation; \
-             mutation oracle: use independent Arc -> A1 still passes (red)",
-        );
+        .expect_err("A1 must be rejected after expiry + rotation");
 }

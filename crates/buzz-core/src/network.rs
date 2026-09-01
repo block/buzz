@@ -19,25 +19,25 @@ fn embedded_ipv4(v6: &std::net::Ipv6Addr, prefix: &[u8; 12]) -> Option<std::net:
         .then(|| std::net::Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]))
 }
 
-/// Returns `true` when the address is **not** a globally reachable public unicast
-/// address — i.e., it falls within any range whose `Globally Reachable` column in
-/// the IANA IPv4 or IPv6 Special-Purpose Address Space registry (registries last
-/// updated 2025-10-09) is `False`, `None`, or absent, or within multicast space.
+/// Enumerated-deny SSRF predicate: returns `true` when the address falls within
+/// a blocked class, and `false` (accepted) for everything else, including
+/// addresses not covered by any explicit deny rule (e.g. `fe00::1`).
 ///
-/// Implementation starts from the IANA deny/exception table: the outer predicate
-/// denies ranges whose registry entry is non-global or blank, then carves out
-/// explicit exceptions for entries marked global inside an otherwise-denied
-/// envelope (e.g., PCP/TURN/DNS-SD anycast inside 2001::/23). IPv4 embedded in
-/// IPv4-mapped, IPv4-compatible, and NAT64 well-known (64:ff9b::/96) space is
-/// evaluated recursively against the IPv4 table — registry global=True for the
-/// IPv6 wrapper does not bypass the embedded-address check. SIIT IPv4-translated
-/// (::ffff:0:0:0/96) follows the same recursive path. The local-use NAT64
-/// prefix (64:ff9b:1::/48) is blocked wholesale as a non-global range; its
-/// embedded IPv4 payload is not decoded.
+/// Blocked classes are drawn from the IANA IPv4 and IPv6 Special-Purpose
+/// Address Space registries (last updated 2025-10-09): ranges whose
+/// `Globally Reachable` column is `False`, `None`, or absent, plus multicast
+/// space. Within otherwise-denied envelopes, explicitly global entries are
+/// carved out as exceptions (e.g., PCP/TURN/DNS-SD anycast inside 2001::/23).
+/// IPv4 embedded in IPv4-mapped, IPv4-compatible, and NAT64 well-known
+/// (64:ff9b::/96) space is evaluated recursively against the IPv4 table —
+/// registry global=True for the IPv6 wrapper does not bypass the
+/// embedded-address check. SIIT IPv4-translated (::ffff:0:0:0/96) follows the
+/// same recursive path. The local-use NAT64 prefix (64:ff9b:1::/48) is blocked
+/// wholesale as a non-global range; its embedded IPv4 payload is not decoded.
 ///
-/// Used for SSRF protection: outbound targets must resolve only to publicly
-/// routable space. Conservative posture: `None`/blank registry entries are
-/// treated as non-global.
+/// Used for SSRF protection: rejects outbound targets in known non-public
+/// address classes; addresses not covered by an explicit deny rule pass through.
+/// Conservative posture: `None`/blank registry entries are treated as non-global.
 ///
 /// Registries retrieved 2026-08-31; registries last updated 2025-10-09:
 ///   https://www.iana.org/assignments/iana-ipv4-special-registry/
