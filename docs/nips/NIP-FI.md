@@ -279,7 +279,7 @@ operation: it closes existing connections but does not prevent the key from
 reconnecting.  After disconnection, a client holding a still-valid JWT can
 reconnect immediately.
 
-> **Non-normative note — open product question for Will/Tyler:**
+> **Non-normative note — open product question (session-only vs deny-until-TTL):**
 >
 > The session-only model means a revoked user retains access until their
 > assertion's effective authority expires.  After a successful disconnect call
@@ -517,10 +517,13 @@ assertion TTL consistent with the organization's acceptable revocation latency.
 For upstream revocation without an explicit disconnect call (issuer stops
 issuing assertions; no active session termination), access persists until the
 live session's effective authority deadlines expire.  After the session closes
-naturally, a reconnect requires an assertion that remains valid when reverified;
-if the issuer has stopped issuing, no valid assertion can be obtained and no
-reconnect can succeed.  If the issuer continues issuing assertions, access
-continues.
+naturally, a reconnect requires an assertion that remains valid when reverified.
+Previously issued assertions that have not yet expired remain valid for
+reconnection until `min(exp, iat + maximum_assertion_age)` (subject to possible
+earlier termination from a snapshot refresh failure, hard-deadline expiry without
+key replacement, or signing-key removal).  Stopping issuance prevents minting
+assertions that extend this window; it does not invalidate already-issued
+assertions.  If the issuer continues issuing assertions, access continues.
 
 For the session-only disconnect model (issuer issues a successful disconnect
 call that closes all matching sessions synchronously), there is no surviving
