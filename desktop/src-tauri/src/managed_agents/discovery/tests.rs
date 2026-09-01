@@ -678,7 +678,7 @@ fn probe_codex_acp_version_parses_full_semver_output() {
         "adapter output must parse to its full semantic version"
     );
 }
-
+mod claude_model_env;
 mod codex_version;
 
 #[cfg(unix)]

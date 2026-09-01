@@ -137,7 +137,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_hint: "Buzz talks to the Claude Code CLI through an ACP adapter. Install it with: npm install -g @agentclientprotocol/claude-agent-acp.",
         skill_dir: Some(".claude/skills"),
         supports_acp_model_switching: false,
-        model_env_var: None,
+        model_env_var: Some(crate::managed_agents::ANTHROPIC_MODEL_ENV_KEY), // #2692
         provider_env_var: None,
         provider_locked: true,
         default_env: &[],

@@ -266,8 +266,15 @@ function AgentPersonaCard({
     });
   const isActive = agent ? isManagedAgentActive(agent) : false;
   const profileQuery = useUserProfileQuery(agent?.pubkey);
+  // Prefer the managed agent record — it survives restart even when the
+  // profile query cache is still empty (#2576).
+  // Prefer the managed agent record — it survives restart even when the
+  // profile query cache is still empty (#2576).
   const avatarUrl = agent
-    ? resolveAgentCardAvatarUrl(profileQuery.data?.avatarUrl, persona.avatarUrl)
+    ? resolveAgentCardAvatarUrl(
+        agent.avatarUrl ?? profileQuery.data?.avatarUrl,
+        persona.avatarUrl,
+      )
     : persona.avatarUrl;
   const friendlyError = agent
     ? friendlyAgentLastError(agent.lastError, agent.lastErrorCode)?.copy
@@ -364,6 +371,12 @@ function StandaloneAgentCard({
 }) {
   const title = agent.name;
   const profileQuery = useUserProfileQuery(agent.pubkey);
+  // Prefer the managed agent record — it survives restart even when the
+  // profile query cache is still empty (#2576).
+  const avatarUrl = resolveAgentCardAvatarUrl(
+    agent.avatarUrl,
+    profileQuery.data?.avatarUrl,
+  );
   const friendlyError = friendlyAgentLastError(
     agent.lastError,
     agent.lastErrorCode,
@@ -377,7 +390,7 @@ function StandaloneAgentCard({
       avatar={
         <AgentRuntimeAvatarControl
           activeTestId={`agent-runtime-active-${agent.pubkey}`}
-          avatarUrl={profileQuery.data?.avatarUrl}
+          avatarUrl={avatarUrl}
           errorLabel={friendlyError}
           errorTestId={`agent-runtime-error-${agent.pubkey}`}
           isActive={isActive}
@@ -396,7 +409,7 @@ function StandaloneAgentCard({
           }
         />
       }
-      avatarUrl={profileQuery.data?.avatarUrl}
+      avatarUrl={avatarUrl}
       dataTestId={`managed-agent-${agent.pubkey}`}
       label={title}
       subtitle={
