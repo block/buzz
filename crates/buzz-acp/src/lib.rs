@@ -2727,7 +2727,6 @@ async fn tokio_main() -> Result<()> {
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
         relay_url: config.relay_url.clone(),
-        final_text_fallback_enabled: config.final_text_fallback_enabled,
     });
 
     if !config.memory_enabled {
@@ -2965,10 +2964,20 @@ async fn tokio_main() -> Result<()> {
                 let args = config.agent_args.clone();
                 let env = config.persona_env_vars.clone();
                 let has_codex = config.has_generated_codex_config;
+                let final_text_fallback_candidate = config.final_text_fallback_enabled;
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
+                    let result = spawn_and_init(
+                        &cmd,
+                        &args,
+                        &env,
+                        has_codex,
+                        final_text_fallback_candidate,
+                        idx,
+                        observer,
+                    )
+                    .await;
                     guard.send(result);
                 });
             }
@@ -4953,12 +4962,22 @@ fn recover_panicked_agent(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let final_text_fallback_candidate = config.final_text_fallback_enabled;
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            has_codex,
+            final_text_fallback_candidate,
+            i,
+            observer,
+        )
+        .await;
         guard.send(result);
     });
 }
@@ -5181,6 +5200,7 @@ fn spawn_respawn_task(
     let args = config.agent_args.clone();
     let env = config.persona_env_vars.clone();
     let has_codex = config.has_generated_codex_config;
+    let final_text_fallback_candidate = config.final_text_fallback_enabled;
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
@@ -5192,7 +5212,16 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            has_codex,
+            final_text_fallback_candidate,
+            index,
+            observer,
+        )
+        .await;
         guard.send(result);
     });
 
@@ -5236,6 +5265,7 @@ struct PoolStartup {
     args: Vec<String>,
     extra_env: Vec<(String, String)>,
     has_generated_codex_config: bool,
+    final_text_fallback_candidate: bool,
     model: Option<String>,
     effort_level: Option<String>,
     observer: Option<observer::ObserverHandle>,
@@ -5249,6 +5279,7 @@ impl PoolStartup {
             args: config.agent_args.clone(),
             extra_env: config.persona_env_vars.clone(),
             has_generated_codex_config: config.has_generated_codex_config,
+            final_text_fallback_candidate: config.final_text_fallback_enabled,
             model: config.model.clone(),
             effort_level: config.effort_level.clone(),
             observer,
@@ -5289,6 +5320,15 @@ async fn initialize_agent_pool(
                 };
                 match initialize_result {
                     Ok(Ok(init_result)) => {
+                        acp.set_final_text_fallback_enabled(
+                            startup.final_text_fallback_candidate
+                                && config::needs_final_text_fallback(
+                                    &startup.command,
+                                    &init_result,
+                                    std::env::var_os("BUZZ_MANAGED_AGENT")
+                                        .is_some_and(|value| !value.is_empty()),
+                                ),
+                        );
                         tracing::info!(agent = i, "agent initialized: {init_result}");
                         let protocol_version =
                             init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
@@ -5301,6 +5341,7 @@ async fn initialize_agent_pool(
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("unknown"),
                             steering_supported = acp.steering_supported(),
+                            final_text_fallback_enabled = acp.final_text_fallback_enabled(),
                             "agent initialized"
                         );
                         acp.observe(
@@ -5372,6 +5413,7 @@ async fn spawn_and_init(
     args: &[String],
     extra_env: &[(String, String)],
     has_generated_codex_config: bool,
+    final_text_fallback_candidate: bool,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, String)> {
@@ -5382,6 +5424,15 @@ async fn spawn_and_init(
 
     match acp.initialize().await {
         Ok(init_result) => {
+            acp.set_final_text_fallback_enabled(
+                final_text_fallback_candidate
+                    && config::needs_final_text_fallback(
+                        command,
+                        &init_result,
+                        std::env::var_os("BUZZ_MANAGED_AGENT")
+                            .is_some_and(|value| !value.is_empty()),
+                    ),
+            );
             tracing::info!("agent initialized: {init_result}");
             let protocol_version = init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
             acp.observe(

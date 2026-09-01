@@ -808,9 +808,6 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
-    /// Whether the configured ACP adapter is allowlisted to rely on harness
-    /// publication of its final text instead of posting through `buzz` itself.
-    pub final_text_fallback_enabled: bool,
 }
 
 impl AgentPool {
@@ -2745,9 +2742,10 @@ pub async fn run_prompt_task(
             .collect(),
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
+    let final_text_fallback_enabled = agent.acp.final_text_fallback_enabled();
     agent
         .acp
-        .set_final_text_capture(ctx.final_text_fallback_enabled && batch.is_some());
+        .set_final_text_capture(final_text_fallback_enabled && batch.is_some());
     let prompt_bytes: usize = prompt_blocks.iter().map(|block| block.len()).sum();
     let has_standing_context = match &source {
         PromptSource::Channel(_) => !standing.sections().is_empty(),
@@ -2951,7 +2949,7 @@ pub async fn run_prompt_task(
                             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
                         )
                         .await;
-                        if ctx.final_text_fallback_enabled {
+                        if final_text_fallback_enabled {
                             publish_final_text_reply(
                                 &ctx.rest_client,
                                 batch.as_ref(),
@@ -3034,7 +3032,7 @@ pub async fn run_prompt_task(
             )
             .await;
 
-            if ctx.final_text_fallback_enabled
+            if final_text_fallback_enabled
                 && matches!(&stop_reason, StopReason::EndTurn | StopReason::Refusal)
             {
                 publish_final_text_reply(
@@ -5255,6 +5253,7 @@ mod tests {
     fn final_text_batch(channel_id: Uuid, event: nostr::Event) -> FlushBatch {
         FlushBatch {
             channel_id,
+            scope: conv(channel_id),
             events: vec![crate::queue::BatchEvent {
                 event,
                 prompt_tag: "test".into(),
@@ -5305,7 +5304,20 @@ mod tests {
             auth_tag_json: None,
         };
         let channel_id = Uuid::new_v4();
+        let root_event = EventBuilder::new(Kind::Custom(9), "thread root")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign root");
+        let root_id = root_event.id.to_hex();
+        let parent_event = EventBuilder::new(Kind::Custom(9), "thread parent")
+            .tags([Tag::parse(["e", &root_id, "", "root"]).expect("root tag")])
+            .sign_with_keys(&Keys::generate())
+            .expect("sign parent");
+        let parent_id = parent_event.id.to_hex();
         let triggering_event = EventBuilder::new(Kind::Custom(9), "please reply")
+            .tags([
+                Tag::parse(["e", &root_id, "", "root"]).expect("root tag"),
+                Tag::parse(["e", &parent_id, "", "reply"]).expect("reply tag"),
+            ])
             .sign_with_keys(&Keys::generate())
             .expect("sign trigger");
         let trigger_id = triggering_event.id.to_hex();
@@ -5329,6 +5341,11 @@ mod tests {
                 && tag
                     .get(1)
                     .is_some_and(|value| value == &channel_id.to_string())
+        }));
+        assert!(tags.iter().any(|tag| {
+            tag.first().is_some_and(|value| value == "e")
+                && tag.get(1).is_some_and(|value| value == &root_id)
+                && tag.get(3).is_some_and(|value| value == "root")
         }));
         assert!(tags.iter().any(|tag| {
             tag.first().is_some_and(|value| value == "e")
@@ -8910,7 +8927,6 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":0,"result":{{"stopReason":"end_turn"}}}}'"
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
-            final_text_fallback_enabled: false,
         }
     }
 

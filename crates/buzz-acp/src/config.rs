@@ -533,8 +533,8 @@ pub struct Config {
     pub relay_url: String,
     pub agent_command: String,
     pub agent_args: Vec<String>,
-    /// Whether this adapter cannot publish through the Buzz CLI and therefore
-    /// relies on the harness to publish its ACP final text.
+    /// Whether the configured command may use harness final-text delivery.
+    /// The initialized adapter version narrows this per process.
     pub final_text_fallback_enabled: bool,
     pub mcp_command: String,
     pub idle_timeout_secs: u64,
@@ -803,19 +803,71 @@ pub(crate) fn default_agent_env(command: &str) -> &'static [(&'static str, &'sta
     }
 }
 
-/// Whether Buzz must publish the agent's final ACP text itself.
+/// Whether the configured command is a Hermes adapter that may need final-text
+/// fallback delivery.
 ///
-/// This is deliberately an explicit adapter allowlist, not a best-effort
-/// duplicate check. Adapters that can run `buzz` publish their own replies and
-/// may emit progress chunks before their final answer; enabling the fallback
-/// for them can double-post or publish that progress as a reply. Hermes blocks
-/// Buzz credentials from its tool-shell environment, so its ACP text is the
-/// supported delivery path until the adapter changes that security model.
+/// The command identity is only a candidate gate. Hermes 0.21+ reports its
+/// version during ACP initialization and can use the Buzz-managed terminal to
+/// publish directly; that per-process capability is evaluated by
+/// [`needs_final_text_fallback`]. Keeping the candidate narrow prevents other
+/// adapters' progress chunks from becoming duplicate replies.
 pub(crate) fn supports_final_text_fallback(command: &str) -> bool {
     matches!(
         normalize_agent_command_identity(command).as_str(),
         "hermes" | "hermes-agent" | "hermes-acp"
     )
+}
+
+/// Whether this initialized adapter still needs harness final-text delivery.
+///
+/// Hermes 0.21.0 introduced direct `buzz messages send` delivery from its
+/// Buzz-managed terminal. Only a Buzz-managed process whose ACP handshake
+/// identifies itself as Hermes 0.21 or newer opts out of the fallback. A
+/// missing Buzz-managed marker, missing or malformed handshake, or older
+/// adapter remains on the fallback path so legacy and credential-isolated
+/// Hermes installations retain delivery.
+pub(crate) fn needs_final_text_fallback(
+    command: &str,
+    init_result: &serde_json::Value,
+    buzz_managed: bool,
+) -> bool {
+    if !supports_final_text_fallback(command) {
+        return false;
+    }
+    if !buzz_managed {
+        return true;
+    }
+
+    let Some(info) = init_result.get("agentInfo") else {
+        return true;
+    };
+    if info.get("name").and_then(|value| value.as_str()) != Some("hermes-agent") {
+        return true;
+    }
+    let Some(version) = info.get("version").and_then(|value| value.as_str()) else {
+        return true;
+    };
+
+    let mut components = version.split('.');
+    let parse_component =
+        |component: Option<&str>| component.and_then(|value| value.parse::<u64>().ok());
+    let (Some(major), Some(minor), Some(patch)) = (
+        parse_component(components.next()),
+        parse_component(components.next()),
+        parse_component(components.next()),
+    ) else {
+        return true;
+    };
+    // Do not trust versions with trailing data (for example, a pre-release)
+    // to have the stable 0.21 delivery behavior. The conservative fallback
+    // preserves a reply when the capability cannot be established.
+    if components.next().is_some()
+        || patch.to_string() != version.rsplit('.').next().unwrap_or_default()
+    {
+        return true;
+    }
+
+    (major, minor, patch) < (0, 21, 0)
 }
 
 /// Build the `CODEX_CONFIG` environment variable that enables full outbound
@@ -1785,6 +1837,37 @@ mod tests {
             assert!(
                 !supports_final_text_fallback(command),
                 "{command} must retain agent-authored reply delivery"
+            );
+        }
+    }
+
+    #[test]
+    fn direct_capable_hermes_uses_its_own_buzz_delivery() {
+        let init = serde_json::json!({
+            "agentInfo": {"name": "hermes-agent", "version": "0.21.0"}
+        });
+
+        assert!(
+            !needs_final_text_fallback("hermes-acp", &init, true),
+            "Hermes 0.21 must not create a duplicate harness reply"
+        );
+        assert!(
+            needs_final_text_fallback("hermes-acp", &init, false),
+            "a credential-isolated Hermes 0.21 must retain harness delivery"
+        );
+    }
+
+    #[test]
+    fn legacy_or_unrecognized_hermes_retains_final_text_fallback() {
+        for init in [
+            serde_json::json!({"agentInfo": {"name": "hermes-agent", "version": "0.20.9"}}),
+            serde_json::json!({"agentInfo": {"name": "hermes-agent", "version": "dev"}}),
+            serde_json::json!({"agentInfo": {"name": "other-agent", "version": "0.21.0"}}),
+            serde_json::json!({}),
+        ] {
+            assert!(
+                needs_final_text_fallback("hermes-acp", &init, true),
+                "unrecognized or legacy Hermes must retain fail-safe delivery: {init}"
             );
         }
     }

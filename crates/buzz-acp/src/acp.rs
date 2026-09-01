@@ -227,6 +227,10 @@ pub struct AcpClient {
     /// ACP final text. Disabled adapters keep using their own Buzz CLI reply
     /// path and must not retain progress chunks as fallback content.
     final_text_capture_enabled: bool,
+    /// Whether this initialized ACP process needs the harness to submit its
+    /// final text. This is negotiated from the adapter handshake, rather than
+    /// inferred from the configured command alone.
+    final_text_fallback_enabled: bool,
     /// A prompt emitted more final text than Buzz can publish in one message.
     /// Never truncate a response silently; the pool skips the fallback instead.
     final_text_overflowed: bool,
@@ -581,6 +585,7 @@ impl AcpClient {
             standard_adapter,
             final_text: String::new(),
             final_text_capture_enabled: false,
+            final_text_fallback_enabled: false,
             final_text_overflowed: false,
         })
     }
@@ -628,6 +633,19 @@ impl AcpClient {
         self.final_text_capture_enabled = enabled;
         self.final_text.clear();
         self.final_text_overflowed = false;
+    }
+
+    /// Record whether this initialized process requires harness final-text
+    /// delivery. The caller derives this from the ACP handshake after every
+    /// spawn, including respawns.
+    pub(crate) fn set_final_text_fallback_enabled(&mut self, enabled: bool) {
+        self.final_text_fallback_enabled = enabled;
+    }
+
+    /// Whether the current initialized process requires harness final-text
+    /// delivery.
+    pub(crate) fn final_text_fallback_enabled(&self) -> bool {
+        self.final_text_fallback_enabled
     }
 
     /// Emit a semantic event to the local observer feed, if enabled.
