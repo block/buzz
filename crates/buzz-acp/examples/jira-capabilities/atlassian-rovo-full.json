@@ -1,0 +1,34 @@
+{
+  "version": 2,
+  "servers": [
+    {
+      "name": "atlassian-rovo",
+      "transport": "stdio",
+      "command": "mcp-remote",
+      "args": ["https://mcp.atlassian.com/v1/mcp/authv2"],
+      "env": {},
+      "tool_filter": {
+        "allow": [
+          "atlassianUserInfo",
+          "getAccessibleAtlassianResources",
+          "getJiraIssue",
+          "getTransitionsForJiraIssue",
+          "getJiraIssueRemoteIssueLinks",
+          "getVisibleJiraProjects",
+          "getJiraProjectIssueTypesMetadata",
+          "getJiraIssueTypeMetaWithFields",
+          "searchJiraIssuesUsingJql",
+          "lookupJiraAccountId",
+          "getIssueLinkTypes",
+          "addCommentToJiraIssue",
+          "editJiraIssue",
+          "addWorklogToJiraIssue",
+          "createIssueLink",
+          "createJiraIssue",
+          "transitionJiraIssue"
+        ],
+        "strict_allow": true
+      }
+    }
+  ]
+}
