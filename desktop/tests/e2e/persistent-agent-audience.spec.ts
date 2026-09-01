@@ -5,7 +5,6 @@ import { installMockBridge } from "../helpers/bridge";
 
 const SHOTS = "test-results/persistent-agent-audience";
 const CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
-const RANDOM_CHANNEL_ID = "9dae0116-799b-5071-a0a8-fdd30a91a35d";
 const AGENT_A = "a".repeat(64);
 const AGENT_B = "b".repeat(64);
 const THREAD_ROOT_ID = "mock-general-welcome";
@@ -47,6 +46,24 @@ async function automaticallyMention(
     `@${displayName}`,
   );
   await composer.locator("[data-mention-picker-trigger]").click();
+}
+
+async function waitForMockLiveSubscription(page: Page, channelName: string) {
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (currentChannelName) =>
+          window.__BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?.({
+            channelName: currentChannelName,
+          }) ?? false,
+        channelName,
+      ),
+    )
+    .toBe(true);
+}
+
+async function waitForTimelineSettled(page: Page) {
+  await expect(page.locator("[data-render-pending]")).toHaveCount(0);
 }
 
 async function openGeneral(page: Page) {
@@ -1139,20 +1156,30 @@ test("a removed root-inherited agent stays excluded after the thread reopens", a
   await keepMentionedAgentsPinned(page);
   await installAudienceFixtures(page);
   await openGeneral(page);
+  await waitForMockLiveSubscription(page, "general");
 
   const rootId = "c".repeat(64);
+  const rootContent = "@Morgarita root request";
   await page.evaluate(
-    ({ agentPubkey, eventId }) => {
+    ({ agentPubkey, content, eventId }) => {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
-        content: "@Morgarita root request",
+        content,
         id: eventId,
         mentionPubkeys: [agentPubkey],
       });
     },
-    { agentPubkey: AGENT_A, eventId: rootId },
+    { agentPubkey: AGENT_A, content: rootContent, eventId: rootId },
   );
-  await openThread(page, rootId);
+  await waitForTimelineSettled(page);
+
+  const rootRow = page
+    .getByTestId("message-timeline")
+    .locator(`[data-testid="message-row"][data-message-id="${rootId}"]`);
+  await expect(rootRow).toBeVisible();
+  await rootRow.hover();
+  await rootRow.getByRole("button", { name: "Reply" }).click();
+  await expect(page.getByTestId("message-thread-panel")).toBeVisible();
 
   let composer = threadComposer(page);
   await expect(
@@ -1162,11 +1189,23 @@ test("a removed root-inherited agent stays excluded after the thread reopens", a
   await composer.getByTestId(`composer-address-lock-remove-${AGENT_A}`).click();
   await expect(composer.getByTestId("message-input")).toHaveText("");
 
-  await page.goto(`/#/channels/${RANDOM_CHANNEL_ID}`, {
-    waitUntil: "domcontentloaded",
-  });
-  await expect(page.getByTestId("chat-title")).toHaveText("random");
-  await openThread(page, rootId);
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await threadPanel.getByTestId("auxiliary-panel-close").click();
+  await expect(threadPanel).toBeHidden();
+
+  const loadedRootTags = await page.evaluate(async (eventId) => {
+    const raw = await window.__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_event", {
+      eventId,
+    });
+    return typeof raw === "string"
+      ? (JSON.parse(raw) as { tags?: string[][] }).tags
+      : null;
+  }, rootId);
+  expect(loadedRootTags).toContainEqual(["p", AGENT_A]);
+
+  await rootRow.hover();
+  await rootRow.getByRole("button", { name: "Reply" }).click();
+  await expect(threadPanel).toBeVisible();
 
   composer = threadComposer(page);
   const input = composer.getByTestId("message-input");
