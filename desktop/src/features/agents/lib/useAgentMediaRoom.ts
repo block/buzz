@@ -19,6 +19,64 @@ import { createMicRequestQueue, type MicRequestQueue } from "./micRequestQueue";
 /** Bound the token request so an unreachable gateway surfaces in seconds. */
 const TOKEN_REQUEST_TIMEOUT_MS = 15_000;
 
+/**
+ * Bound the token response.
+ *
+ * The endpoint is named by the announcement, so the address this client signs
+ * a NIP-98 request to and reads a reply from is chosen by the announcing
+ * agent. The request timeout already caps how long a reply may take, but a
+ * fast link delivers a great deal in fifteen seconds, and the reply is a small
+ * JSON object — kilobytes, not megabytes. Reading it in bounded chunks costs
+ * nothing and removes the question.
+ */
+const MAX_TOKEN_RESPONSE_BYTES = 64 * 1024;
+
+/**
+ * Read a response body as JSON, refusing one that runs past the cap.
+ *
+ * Streams rather than checking `Content-Length`, because a body sent with
+ * chunked encoding declares no length and the header is the sender's claim in
+ * any case. Returns `{}` for a body that is absent or not JSON: the caller
+ * distinguishes an HTTP failure from a malformed success on its own, and both
+ * of those want the status, not a parse error.
+ */
+async function readCappedJson(
+  response: Response,
+): Promise<Record<string, unknown>> {
+  if (!response.body) return {};
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_TOKEN_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new Error("The gateway's response was too large.");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(body));
+    return typeof parsed === "object" && parsed !== null
+      ? (parsed as Record<string, unknown>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
 export type AgentMediaRoomStatus =
   | "idle"
   | "authorizing"
@@ -86,10 +144,7 @@ async function fetchViewerToken(session: AgentMediaSession): Promise<string> {
     body,
     signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
   });
-  const json = (await response.json().catch(() => ({}))) as Record<
-    string,
-    unknown
-  >;
+  const json = await readCappedJson(response);
   if (!response.ok) {
     const message =
       typeof json.error === "string" ? json.error : `HTTP ${response.status}`;
