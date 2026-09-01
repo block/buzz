@@ -13,7 +13,7 @@ use crate::{
         load_teams, managed_agent_avatar_url, normalize_agent_args, prepare_codex_task_binding,
         prepare_remote_codex_task_binding, provider_deploy, record_agent_command,
         resolve_effective_agent_env, resolve_provider_binary, save_agents_with_codex_task_binding,
-        save_agents_with_replaced_codex_task_binding, save_managed_agents,
+        save_agents_with_replaced_codex_task_binding, save_managed_agents, save_personas,
         start_managed_agent_process, stop_managed_agent_process, stop_managed_agent_workspace_pair,
         sync_managed_agent_processes, try_regenerate_nest, validate_provider_config,
         AgentKeyAvailability, AgentReadiness, BackendKind, CreateManagedAgentRequest,
@@ -1467,6 +1467,21 @@ pub async fn delete_managed_agent(
                 state.clear_agent_session_caches(pubkey);
             }
 
+            // Older Codex-task records may carry a persona link created by the
+            // migration that kept task agents in Custom agents. Capture that
+            // link before removing the instance so its last task-only
+            // definition can be retired after the agent-store write succeeds.
+            let task_persona_id = records
+                .iter()
+                .find(|record| record.pubkey == pubkey)
+                .and_then(|record| {
+                    let persona_id = record.persona_id.clone()?;
+                    crate::managed_agents::load_codex_task_binding(&app, &record.pubkey)
+                        .ok()
+                        .flatten()
+                        .map(|_| persona_id)
+                });
+
             // Guard: reject deletion of deployed remote agents unless explicitly forced.
             // This turns "don't orphan remote infra" from a UI convention into a backend
             // invariant — a buggy or compromised IPC caller cannot silently orphan a live
@@ -1494,6 +1509,41 @@ pub async fn delete_managed_agent(
                 return Err(format!("agent {pubkey} not found"));
             }
             save_managed_agents(&app, &records)?;
+
+            if let Some(persona_id) = task_persona_id {
+                let still_referenced = records
+                    .iter()
+                    .any(|record| record.persona_id.as_deref() == Some(persona_id.as_str()));
+                if !still_referenced {
+                    match load_personas(&app) {
+                        Ok(mut personas) => {
+                            if let Some(persona) = personas.iter_mut().find(|p| p.id == persona_id)
+                            {
+                                // Never retire built-in, team-owned, or
+                                // shared-catalog definitions as a side effect
+                                // of deleting one task instance.
+                                if !persona.is_builtin
+                                    && persona.source_team.is_none()
+                                    && persona.catalog_source.is_none()
+                                    && !persona.shared
+                                    && persona.is_active
+                                {
+                                    persona.is_active = false;
+                                    persona.updated_at = now_iso();
+                                    if let Err(error) = save_personas(&app, &personas) {
+                                        eprintln!(
+                                            "buzz-desktop: failed to retire deleted Codex task persona {persona_id}: {error}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(error) => eprintln!(
+                            "buzz-desktop: failed to load Codex task persona {persona_id} for cleanup: {error}"
+                        ),
+                    }
+                }
+            }
             if let Err(error) =
                 crate::managed_agents::delete_codex_task_identity_state(&app, &pubkey)
             {

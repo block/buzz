@@ -165,3 +165,11 @@
 - 用户已用管理员权限成功执行 NetworkManager 配置并重新应用到 `ens1f3`。
 - `10.24.11.82/26` 与 `121.192.177.100/26` 同时存在；`ip rule` 显示 `from 121.192.177.100 lookup 177`；公网流量解析为经 `121.192.177.65` 出口。
 - 公网网关 `121.192.177.65` ping 3/3 成功，延迟约 0.84–4.01 ms；内网默认路由未被替换。
+
+## 2026-09-01：删除 Custom Agent 后人格卡片重新出现在 Agents 区域
+
+- 现象：删除下方 Custom agents 中的 Agent 后，同名卡片重新出现在上方 Agents 区域。
+- 定位：旧版 Codex task Agent 记录可能带有迁移生成的 `personaId`。删除实例只移除了 managed-agent 记录，但仍保持该人格定义为 active；统一列表刷新后，失去任务实例过滤条件的定义被重新渲染为普通 Agents 卡片。
+- 处理：删除绑定 Codex task 的最后一个实例时，仅对非内置、非团队、未共享且非共享目录副本的人格自动设为 inactive；普通自定义人格、内置人格和仍被其他实例使用的人格不受影响。删除完成后同时刷新 managed agents、relay agents 和 personas 查询。
+- 验证：待运行 Tauri Rust 测试、桌面 TypeScript/格式检查，并验证删除任务 Agent 后不会出现重复卡片。
+- 版本/提交：待提交。

@@ -656,6 +656,7 @@ export function useDeleteManagedAgentMutation() {
     onSettled: async () => {
       await queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
       await queryClient.invalidateQueries({ queryKey: relayAgentsQueryKey });
+      await queryClient.invalidateQueries({ queryKey: personasQueryKey });
     },
   });
 }
