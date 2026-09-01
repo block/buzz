@@ -85,6 +85,8 @@ export type CreateChannelManagedAgentInput = {
   respondToAllowlist?: string[];
   /** Skip reuse logic and always create a fresh agent instance. */
   forceNewInstance?: boolean;
+  /** Attach this exact singleton instance instead of minting or heuristic reuse. */
+  existingAgentPubkey?: string;
 };
 
 export type CreateChannelManagedAgentResult =
@@ -298,6 +300,36 @@ export async function provisionChannelManagedAgent(
 
   if (trimmedName.length === 0) {
     throw new Error("Agent name is required.");
+  }
+
+  if (input.existingAgentPubkey) {
+    if (!context?.managedAgents) {
+      throw new Error(
+        "Exact existing-agent attachment requires a current managed-agent snapshot.",
+      );
+    }
+    const expected = normalizePubkey(input.existingAgentPubkey);
+    const existing = context.managedAgents.find(
+      (agent) => normalizePubkey(agent.pubkey) === expected,
+    );
+    if (!existing) {
+      throw new Error("The selected existing agent is no longer available.");
+    }
+    if (input.personaId && existing.personaId !== input.personaId) {
+      throw new Error(
+        "The selected existing agent does not match this Team member.",
+      );
+    }
+    const updatedAgent = await applyReusableAgentAccessPolicy(
+      existing,
+      input,
+      context.personas.find((persona) => persona.id === input.personaId),
+    );
+    return {
+      agent: updatedAgent,
+      created: false,
+      runtimeId: input.runtime.id,
+    };
   }
 
   // Smart reuse: if a managed agent with the same personaId already exists

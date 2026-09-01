@@ -21,6 +21,7 @@ mod env_vars;
 pub(crate) mod git_bash;
 pub(crate) mod global_config;
 mod harness_catalog_types;
+mod hermes_profiles;
 mod managed_node_paths;
 mod nest;
 pub(crate) mod parallelism;
@@ -70,6 +71,7 @@ pub(crate) use global_config::{
     validate_global_config, GlobalAgentConfig,
 };
 pub use harness_catalog_types::*;
+pub use hermes_profiles::*;
 pub(crate) use managed_node_paths::*;
 pub use nest::*;
 pub use parallelism::{acp_agents_value, effective_parallelism, harness_max_parallelism};

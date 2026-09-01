@@ -77,7 +77,7 @@ use huddle::{
 };
 use initial_window::*;
 use managed_agents::{
-    backfill_persona_snapshots, ensure_nest, list_managed_agent_runtimes,
+    backfill_persona_snapshots, discover_hermes_profiles, ensure_nest, list_managed_agent_runtimes,
     put_managed_agent_runtime_lifecycle, reconcile_managed_agent_runtimes,
     restart_managed_agent_runtime, start_managed_agent_runtime, stop_managed_agent_runtime,
     try_regenerate_nest,
@@ -595,6 +595,7 @@ pub fn run() {
             fetch_link_preview_metadata,
             discover_acp_auth_methods,
             discover_acp_providers,
+            discover_hermes_profiles,
             discover_git_bash_prerequisite,
             install_acp_runtime,
             save_custom_harness,

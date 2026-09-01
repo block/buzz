@@ -83,6 +83,40 @@ pub async fn update_managed_agent(
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
         let previous_record = record.clone();
 
+        if let Some(team_update) = input.team_id {
+            let next_team_id = match team_update {
+                None => None,
+                Some(team_id) => {
+                    let team_id = team_id.trim().to_string();
+                    if team_id.is_empty() {
+                        return Err("Team id cannot be empty".to_string());
+                    }
+                    if let Some(current) = record.team_id.as_deref() {
+                        if current != team_id {
+                            return Err(format!(
+                                "This agent is already bound to Team {current}; clear that binding before assigning another Team"
+                            ));
+                        }
+                    }
+                    let persona_id = record.persona_id.as_deref().ok_or_else(|| {
+                        "A Team binding requires a linked agent definition".to_string()
+                    })?;
+                    let teams = load_teams(&app)?;
+                    let team = teams
+                        .iter()
+                        .find(|team| team.id == team_id)
+                        .ok_or_else(|| format!("Team {team_id} not found"))?;
+                    if !team.persona_ids.iter().any(|id| id == persona_id) {
+                        return Err(
+                            "The linked agent definition is not a member of that Team".to_string()
+                        );
+                    }
+                    Some(team_id)
+                }
+            };
+            record.team_id = next_team_id;
+        }
+
         let mut name_changed = false;
         if let Some(name_update) = input.name {
             let trimmed = name_update.trim().to_string();

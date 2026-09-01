@@ -8,6 +8,7 @@ import {
 import { resolveAgentCardModelLabel } from "@/features/agents/lib/agentCardModelLabel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
+import { hermesProfileNameFromAgent } from "@/features/agents/lib/hermesProfileBinding";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserProfileQuery } from "@/features/profile/hooks";
 import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
@@ -282,6 +283,13 @@ function AgentPersonaCard({
   const friendlyError = agent
     ? friendlyAgentLastError(agent.lastError, agent.lastErrorCode)?.copy
     : null;
+  const hermesProfile = agent ? hermesProfileNameFromAgent(agent) : null;
+  const runtimeSubtitle = [
+    subtitle,
+    hermesProfile ? `Hermes · ${hermesProfile}` : null,
+  ]
+    .filter((part): part is string => Boolean(part))
+    .join(" · ");
 
   return (
     <AgentIdentityCard
@@ -348,7 +356,7 @@ function AgentPersonaCard({
           </Badge>
         ) : null
       }
-      subtitle={subtitle}
+      subtitle={runtimeSubtitle || null}
     />
   );
 }

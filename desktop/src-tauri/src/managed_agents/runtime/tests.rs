@@ -563,15 +563,15 @@ fn name_matches_known_binary_rejects_node() {
 }
 
 #[test]
-fn name_matches_interpreter_accepts_node() {
-    // `node` IS a known script interpreter and must be recognized.
+fn name_matches_interpreter_accepts_known_hosts() {
     assert!(super::name_matches_interpreter("node"));
+    assert!(super::name_matches_interpreter("python3"));
 }
 
 #[test]
 fn name_matches_interpreter_rejects_unknown() {
     // Interpreters not in KNOWN_SCRIPT_INTERPRETERS must not match.
-    assert!(!super::name_matches_interpreter("python3"));
+    assert!(!super::name_matches_interpreter("ruby"));
     assert!(!super::name_matches_interpreter("deno"));
     assert!(!super::name_matches_interpreter("bun"));
 }
