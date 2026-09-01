@@ -8,7 +8,6 @@ import {
   useManagedAgentsQuery,
   usePersonasQuery,
   useProvisionChannelManagedAgentMutation,
-  useStartManagedAgentMutation,
 } from "@/features/agents/hooks";
 import { applyReusableAgentAccessPolicy } from "@/features/agents/channelAgents";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
@@ -25,6 +24,7 @@ import {
   type ImetaMedia,
 } from "@/features/messages/lib/imetaMediaMarkdown";
 import { useActivePreparedLinkPreviews } from "./useActivePreparedLinkPreviews";
+import { useDetachedAgentStart } from "./useDetachedAgentStart";
 import { createSendPerfTimer } from "./sendPerfLog";
 import { invokeTauri } from "@/shared/api/tauri";
 import type { AcpRuntime, ManagedAgent } from "@/shared/api/types";
@@ -100,7 +100,10 @@ export function useMentionSendFlow({
   const availableRuntimesQuery = useAvailableAcpRuntimes();
   const managedAgentsQuery = useManagedAgentsQuery();
   const personasQuery = usePersonasQuery();
-  const startAgentMutation = useStartManagedAgentMutation();
+  // Detached (publish-first) agent wake, bound to the community and identity
+  // active at this render so a start that outlives a community switch fails
+  // closed instead of spawning against the new tenant.
+  const startAgentDetached = useDetachedAgentStart();
   const getManagedAgentsByPubkey = React.useCallback(async () => {
     const agents =
       managedAgentsQuery.data ??
@@ -132,31 +135,6 @@ export function useMentionSendFlow({
     availableRuntimesQuery.isLoading,
     availableRuntimesQuery.refetch,
   ]);
-  // Depend on the stable mutateAsync method, not the mutation result object —
-  // React Query returns a fresh object each render, which would re-create this
-  // callback and every useCallback chained off it (repo gotcha #6).
-  const startAgentMutateAsync = startAgentMutation.mutateAsync;
-  const startAgentDetached = React.useCallback(
-    (agent: ManagedAgent) => {
-      // Publish-first: the send no longer waits for the agent start. The
-      // replay floor tells the spawned harness to replay at least back to
-      // this moment, so the about-to-publish message is inside its first
-      // subscription window however long the spawn takes.
-      const replayFloorUnix = Math.floor(Date.now() / 1000);
-      void startAgentMutateAsync({
-        pubkey: agent.pubkey,
-        replayFloorUnix,
-      }).catch((error: unknown) => {
-        toast.error(
-          `Could not start ${agent.name} — your message was sent, but the agent may not respond. ${getErrorMessage(
-            error,
-            "Could not start agent.",
-          )}`,
-        );
-      });
-    },
-    [startAgentMutateAsync],
-  );
   const ensureManagedAgentMentionsReady = React.useCallback(
     async (
       mentionPubkeys: string[],
@@ -1073,9 +1051,9 @@ export function useMentionSendFlow({
     setNonMemberPromptError(null);
   }, []);
   return {
-    // Agent starts are detached (publish-first), so startAgentMutation.isPending
-    // deliberately does not gate the composer — a background start must not
-    // block the next send.
+    // Agent starts are detached (publish-first), so useDetachedAgentStart's
+    // in-flight state deliberately does not gate the composer — a background
+    // start must not block the next send.
     isPreparingMentionSend:
       isMentionSendPending ||
       isCompleteSendPending ||

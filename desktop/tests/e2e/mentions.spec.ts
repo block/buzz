@@ -2728,6 +2728,24 @@ test("mentioning an in-channel stopped managed agent publishes first and starts 
     (startCall?.payload as { replayFloorUnix?: number } | undefined)
       ?.replayFloorUnix,
   ).toBeGreaterThan(0);
+  // It also carries the tenant scope active at the send. The start now
+  // outlives the send, and a community switch only remounts the React
+  // subtree, so an unscoped wake would spawn against whichever relay/identity
+  // is current when it lands; the backend fails closed on these instead.
+  const activeRelayUrl = await page.evaluate(() => {
+    const communities = JSON.parse(
+      window.localStorage.getItem("buzz-communities") ?? "[]",
+    ) as { id: string; relayUrl: string }[];
+    const activeId = window.localStorage.getItem("buzz-active-community-id");
+    return (
+      communities.find((community) => community.id === activeId)?.relayUrl ?? ""
+    );
+  });
+  expect(activeRelayUrl).not.toBe("");
+  expect(startCall?.payload).toMatchObject({
+    expectedRelayUrl: activeRelayUrl,
+    expectedSignerPubkey: MOCK_VIEWER_PUBKEY,
+  });
 
   const mentionChip = page
     .getByTestId("message-row")
@@ -2779,6 +2797,82 @@ test("a detached agent start failure surfaces as a toast after the message sends
   // failed-send restore.)
   await expect(page.getByText(startError, { exact: false })).toBeVisible();
   await expect(input).not.toContainText("can you help");
+});
+
+test("a detached start fired before a community switch fails closed instead of waking the agent in the new tenant", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: IN_CHANNEL_MANAGED_AGENT_PUBKEY,
+        name: "fizz",
+        status: "stopped",
+        channelNames: ["general"],
+      },
+    ],
+    // Holds the start open long enough for the community to move under it —
+    // the window the detached (publish-first) wake opened.
+    startManagedAgentDelayMs: 2_000,
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const input = page.getByTestId("message-input");
+  await input.fill("Hey @fizz");
+  await expect(autocomplete(page).getByText("fizz")).toBeVisible();
+  await input.press("Enter");
+  await page.keyboard.type(" can you help?");
+
+  const baselineStartCount = commandCount(
+    await readCommandLog(page),
+    "start_managed_agent",
+  );
+  await page.getByTestId("send-message").click();
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "start_managed_agent"),
+    )
+    .toBeGreaterThan(baselineStartCount);
+
+  // Move the active community while the start is still held. The stored
+  // community is what the mock start reads for its scope check (as the
+  // backend reads the live workspace relay), so writing it directly models
+  // the switch without tearing down the mounted app the toast renders in.
+  await page.evaluate(() => {
+    const communities = JSON.parse(
+      window.localStorage.getItem("buzz-communities") ?? "[]",
+    ) as { id: string; relayUrl: string }[];
+    communities.push({
+      id: "other-community",
+      name: "Other",
+      relayUrl: "wss://other-tenant.example",
+      pubkey: "deadbeef".repeat(8),
+      addedAt: new Date().toISOString(),
+    } as (typeof communities)[number]);
+    window.localStorage.setItem(
+      "buzz-communities",
+      JSON.stringify(communities),
+    );
+    window.localStorage.setItem("buzz-active-community-id", "other-community");
+  });
+
+  // The message published regardless — only the wake is refused, and the
+  // toast says so rather than repeating the backend's "not sent".
+  const mentionChip = page
+    .getByTestId("message-row")
+    .last()
+    .locator("[data-mention].agent-mention-highlight", { hasText: "fizz" });
+  await expect(mentionChip).toBeVisible();
+  await expect(
+    page.getByText(
+      "You switched community or identity before it could start.",
+      {
+        exact: false,
+      },
+    ),
+  ).toBeVisible({ timeout: 10_000 });
 });
 
 test("mentioning an in-channel provider managed agent publishes first and deploys it detached", async ({
