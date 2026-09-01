@@ -279,24 +279,25 @@ reconnect immediately.
 
 > **Non-normative note — open product question for Will/Tyler:**
 >
-> The session-only model means a revoked employee retains access until the
-> adapter stops issuing new assertions.  After a successful disconnect call
-> (all matching sessions closed), there is no surviving old-session window.
-> The only remaining access window is a **reconnect** using a still-valid
-> assertion: that new session is bounded by
+> The session-only model means a revoked employee retains access until their
+> assertion's effective authority expires.  After a successful disconnect call
+> (all matching sessions closed synchronously), there is no surviving
+> old-session window.  If the adapter also stops issuing new assertions at
+> that point, cumulative residual access is bounded by:
 >
 > ```
-> min(
->     remaining assertion authority,   // min(remaining exp, remaining iat + maximum_assertion_age)
->     max_connection_lifetime_seconds,
->     remaining key-snapshot hard deadline
-> )
+> max(0, min(exp, iat + maximum_assertion_age, key_snapshot_hard_deadline) - now)
 > ```
 >
-> This window closes when the adapter stops issuing new assertions for the
-> identity.  If the disconnect call is asynchronous or best-effort, the spec
-> would need to define a completion-bound contract; the current normative text
-> assumes synchronous close.
+> `max_connection_lifetime_seconds` only partitions that interval into
+> individual sessions; it does not shorten the total window.  If the adapter
+> continues issuing new assertions after the disconnect call, cumulative
+> access extends indefinitely — the session-only protocol places no
+> protocol-level bound on that case.
+>
+> If the disconnect call is asynchronous or best-effort, the spec would need
+> to define a completion-bound contract; the current normative text assumes
+> synchronous close.
 >
 > The alternative is a **deny-until-TTL** model: the relay holds a
 > memory-resident deny-list entry for the pubkey keyed to the adapter's stated
@@ -343,14 +344,15 @@ The command JWT MUST carry the following claims:
 | `target_pubkey` | Lowercase hexadecimal encoding of the target 32-byte Nostr public key — the same encoding required for the assertion `nostr_pubkey` claim. |
 
 The `maximum_command_age` policy knob is a required positive finite
-configuration per authorized adapter issuer.  The relay enforces
-`now < iat + maximum_command_age` in addition to `now < exp`.  A missing or
-non-positive configuration denies.
+configuration per authorized adapter issuer, with a normative upper bound of
+60 seconds.  The relay enforces `0 < maximum_command_age <= 60` and
+`now < iat + maximum_command_age` in addition to `now < exp`.  A missing,
+non-positive, or out-of-range configuration denies.
 
 The `VerifyCommandJwt` procedure:
 
 ```text
-VerifyCommandJwt(token, request_method, request_path):
+VerifyCommandJwt(token, request_method, request_path, request_body_pubkey):
   // 1. Bounded decode and type check
   (header, claims) := BoundedJwsDecode(token) or DENY(evidence_rejected)
   assert header.typ == "nip-fi-command+jwt" or DENY(evidence_rejected)
@@ -362,7 +364,7 @@ VerifyCommandJwt(token, request_method, request_path):
   key := snapshot.find(header.kid) or DENY(evidence_rejected)
   VerifySignature(token, key) or DENY(evidence_rejected)
 
-  // 3. Validate claims
+  // 3. Validate claims (pure verification — no side effects)
   AssertExactIss(claims.iss, policy.iss) or DENY(evidence_rejected)
   AssertAudienceMatch(claims.aud, policy.aud) or DENY(evidence_rejected)
   AssertCommandTimeBounds(claims, policy) or DENY(evidence_rejected)
@@ -372,25 +374,26 @@ VerifyCommandJwt(token, request_method, request_path):
   assert claims.cmd    == "disconnect"   or DENY(evidence_rejected)
   target_k := ParseHexKey(claims.target_pubkey) or DENY(evidence_rejected)
 
-  // 4. Atomically reserve jti to prevent replay
-  // The reservation is keyed by (iss, jti) and held until the command's
-  // effective expiry: min(exp, iat + maximum_command_age).  The check and
-  // insert MUST be atomic; a non-atomic "seen then insert" permits concurrent
-  // replay.
-  AtomicReserveJti(claims.iss, claims.jti, effective_expiry) or DENY(authorization_denied)
-
-  // 5. Authorize caller
+  // 4. Principal authorization (pure check — no side effects)
   AssertAuthorizedAdapterPrincipal(claims.iss, claims.sub) or DENY(authorization_denied)
+
+  // 5. Signed-target / request-body agreement (pure check — no side effects)
+  assert target_k == request_body_pubkey or DENY(authorization_denied)
+
+  // 6. Atomically reserve jti — final admission step, immediately before side effects.
+  // The reservation is keyed by (iss, jti) and held until the command's
+  // effective expiry: min(exp, iat + maximum_command_age).  This step MUST
+  // be the last mutation before disconnect side effects; performing it before
+  // steps 4 or 5 would burn the signed command identity on failed-authorization
+  // or mismatched-body requests, violating the fail-closed contract.
+  effective_expiry := min(claims.exp, claims.iat + policy.maximum_command_age)
+  AtomicReserveJti(claims.iss, claims.jti, effective_expiry) or DENY(authorization_denied)
 
   return CommandResult(target_pubkey=target_k, caller=(claims.iss, claims.sub))
 ```
 
-The relay then asserts that `CommandResult.target_pubkey` matches the `pubkey`
-field in the request body; mismatch denies `403`.  Any failure at any step is
-fail-closed: no action is taken.
-
-The command TTL MUST be short; deployment policy governs.  A maximum of 60
-seconds is a reasonable upper bound for `maximum_command_age`.
+Any failure at any step is fail-closed: no side effects occur and the relay
+returns the appropriate error.
 
 This verifier and the disconnect API endpoint are follow-on code changes
 outside this PR, in the same way that the `require_attested_key` enforcement
@@ -406,10 +409,11 @@ Content-Type: application/json
 {"pubkey": "<lowercase-hex-32-byte-pubkey>"}
 ```
 
-The relay verifies the command JWT, confirms `target_pubkey` in the JWT matches
-the body `pubkey` field, confirms the caller is an authorized adapter principal,
-then closes all matching live connections.  An unknown or unprovable pubkey is
-not an error; the relay responds `200` with `{"disconnected": 0}`.
+The relay calls `VerifyCommandJwt` passing the request method, path, and
+body `pubkey` field; any failure denies per the rejection table.  On success,
+the relay closes all live connections whose proven `k` equals
+`CommandResult.target_pubkey`.  An unknown or unprovable pubkey is not an
+error; the relay responds `200` with `{"disconnected": 0}`.
 
 ### Response
 
@@ -513,21 +517,20 @@ is bounded by the remaining assertion authority and `max_connection_lifetime_sec
 for the identity, no reconnect can succeed.
 
 For the session-only disconnect model (adapter issues a successful disconnect
-call that closes all matching sessions), there is no surviving old-session
-window.  The only remaining access is a reconnect using a still-valid assertion,
-bounded by:
+call that closes all matching sessions synchronously), there is no surviving
+old-session window.  If the adapter also stops issuing new assertions at that
+point, cumulative residual access is bounded by:
 
 ```
-min(
-    remaining assertion authority,   // min(remaining exp, remaining iat + maximum_assertion_age)
-    max_connection_lifetime_seconds,
-    remaining key-snapshot hard deadline
-)
+max(0, min(exp, iat + maximum_assertion_age, key_snapshot_hard_deadline) - now)
 ```
 
-This window closes when the adapter stops issuing new assertions.  See the
-non-normative note in the Admin disconnect section for the open product question
-on the deny-until-TTL alternative.
+`max_connection_lifetime_seconds` only partitions that interval into individual
+sessions; it does not shorten the total window.  If the adapter continues
+issuing new assertions after the disconnect call, cumulative access extends
+indefinitely — the session-only protocol places no protocol-level bound on that
+case.  See the non-normative note in the Admin disconnect section for the open
+product question on the deny-until-TTL alternative.
 
 **SSRF.** The JWKS fetcher implements SSRF protection: HTTPS-only URI
 validation, DNS resolution with IP deny-list enforcement, address pinning to
