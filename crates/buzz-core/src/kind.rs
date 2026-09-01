@@ -126,14 +126,13 @@ pub const KIND_PRIVATE_MANAGED_AGENT: u32 = 30179;
 /// author-only (see [`AUTHOR_ONLY_KINDS`]).
 pub const KIND_FOLD_SPEC: u32 = 30640;
 
-/// Accumulator artifact version (regular/immutable, author-only).
+/// Generic immutable processor artifact (regular, author-only profile today).
 ///
-/// One versioned output of a fold run. Content is the `buzz-accumulator`
-/// `ArtifactPayload` JSON (output, shown signal ids, coverage window,
-/// provenance), NIP-44 encrypted from the author's key to itself; reads are
-/// author-only (see [`AUTHOR_ONLY_KINDS`]). Versions are ordinary immutable
-/// events, so a fold's artifact history is append-only by construction.
-pub const KIND_FOLD_ARTIFACT: u32 = 4640;
+/// Content is a versioned generic artifact envelope, currently NIP-44 v2
+/// encrypted from the author's key to itself. Fold output is the first typed
+/// payload profile; the kind is deliberately not fold-specific. Reads are
+/// author-only until additional audience profiles receive complete relay gates.
+pub const KIND_ARTIFACT: u32 = 4640;
 
 /// Kinds whose stored events are readable only by their author.
 ///
@@ -149,7 +148,7 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[
     KIND_PUSH_LEASE,
     KIND_PRIVATE_MANAGED_AGENT,
     KIND_FOLD_SPEC,
-    KIND_FOLD_ARTIFACT,
+    KIND_ARTIFACT,
 ];
 
 /// Kinds that require a result-level read gate beyond the filter-layer
@@ -784,7 +783,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_GIT_STATUS_DRAFT,
     KIND_PROJECT,
     KIND_FOLD_SPEC,
-    KIND_FOLD_ARTIFACT,
+    KIND_ARTIFACT,
 ];
 
 /// Returns `true` if `kind` is in the ephemeral range (20000–29999).
@@ -887,11 +886,11 @@ const _: () = assert!(is_parameterized_replaceable(KIND_PROJECT)); // 30621 ∈ 
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WINDOW_BOUNDS)); // 39006 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_FOLD_SPEC)); // 30640 ∈ 30000–39999
-                                                                     // Artifact versions are immutable history: regular-range, never replaceable.
+                                                                     // Artifacts are immutable history: regular-range, never replaceable.
 const _: () = assert!(
-    !is_parameterized_replaceable(KIND_FOLD_ARTIFACT)
-        && !is_replaceable(KIND_FOLD_ARTIFACT)
-        && !is_ephemeral(KIND_FOLD_ARTIFACT)
+    !is_parameterized_replaceable(KIND_ARTIFACT)
+        && !is_replaceable(KIND_ARTIFACT)
+        && !is_ephemeral(KIND_ARTIFACT)
 ); // 4640 regular
 
 // Compile-time: NIP-34 parameterized replaceable kinds are in the correct range.

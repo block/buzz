@@ -46,6 +46,7 @@ pub mod signal;
 pub mod spec;
 pub mod transcript;
 pub mod validate;
+pub mod wire;
 
 pub use artifact::ArtifactPayload;
 pub use error::Error;
@@ -54,3 +55,6 @@ pub use runner::{FoldRunner, SubprocessRunner};
 pub use selection::Selection;
 pub use signal::Signal;
 pub use spec::FoldSpec;
+pub use wire::{
+    build_artifact_event, ArtifactAudience, ArtifactEncoding, ArtifactEnvelopeV1, ArtifactEvent,
+};

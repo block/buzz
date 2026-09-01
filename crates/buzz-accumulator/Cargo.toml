@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Fold engine: incrementally maintained, provenance-carrying artifacts over the event stream"
 
 [dependencies]
+buzz-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

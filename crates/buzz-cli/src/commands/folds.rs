@@ -3,7 +3,7 @@
 //! A fold maintains a small, always-current artifact (digest) over a saved
 //! selection of relay events. All state is signed relay events owned by the
 //! caller's key: specs are kind-30640 addressable events (`d` = fold name,
-//! last-write-wins) and artifact versions are immutable kind-4640 events —
+//! last-write-wins) and artifacts are immutable kind-4640 events —
 //! both NIP-44 encrypted to self and author-only at the relay.
 //!
 //! Subcommands:
@@ -25,10 +25,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
 use buzz_accumulator::{
-    complete_run, plan_run, ArtifactPayload, FoldRunner, FoldSpec, Plan, Selection, Signal,
+    build_artifact_event, complete_run, plan_run, ArtifactAudience, ArtifactEncoding,
+    ArtifactEnvelopeV1, ArtifactPayload, FoldRunner, FoldSpec, Plan, Selection, Signal,
     SubprocessRunner,
 };
-use buzz_core::kind::{KIND_FOLD_ARTIFACT, KIND_FOLD_SPEC, KIND_PROFILE};
+use buzz_core::kind::{KIND_ARTIFACT, KIND_FOLD_SPEC, KIND_PROFILE};
 use nostr::nips::nip44;
 use nostr::{EventBuilder, Kind, Tag, Timestamp};
 
@@ -196,7 +197,7 @@ async fn load_all_specs(client: &BuzzClient) -> Result<Vec<FoldSpec>, CliError> 
 async fn load_artifacts(client: &BuzzClient, fold: &str) -> Result<Vec<ArtifactPayload>, CliError> {
     let me = client.keys().public_key().to_hex();
     let filter = serde_json::json!({
-        "kinds": [KIND_FOLD_ARTIFACT],
+        "kinds": [KIND_ARTIFACT],
         "authors": [me],
         "limit": 500,
     });
@@ -212,9 +213,23 @@ async fn load_artifacts(client: &BuzzClient, fold: &str) -> Result<Vec<ArtifactP
             skipped += 1;
             continue;
         };
-        let Ok(payload) = serde_json::from_str::<ArtifactPayload>(&plain) else {
-            skipped += 1;
-            continue;
+        // Accept legacy fold-only payloads already written by this branch,
+        // while every new write uses the generic envelope.
+        let payload = match serde_json::from_str::<ArtifactEnvelopeV1>(&plain) {
+            Ok(envelope) => match envelope.into_fold() {
+                Ok(payload) => payload,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            },
+            Err(_) => match serde_json::from_str::<ArtifactPayload>(&plain) {
+                Ok(payload) => payload,
+                Err(_) => {
+                    skipped += 1;
+                    continue;
+                }
+            },
         };
         if payload.fold == fold {
             artifacts.push(payload);
@@ -611,7 +626,15 @@ async fn cmd_run(
             return Err(CliError::Other(e.to_string()));
         }
     };
-    let plaintext = match serde_json::to_string(&artifact) {
+    let envelope = match ArtifactEnvelopeV1::fold(&artifact) {
+        Ok(envelope) => envelope,
+        Err(e) => {
+            let reason = format!("artifact envelope failed: {e}");
+            salvage("unpublished", &reason);
+            return Err(CliError::Other(reason));
+        }
+    };
+    let plaintext = match serde_json::to_string(&envelope) {
         Ok(p) => p,
         Err(e) => {
             let reason = format!("artifact serialization failed: {e}");
@@ -652,7 +675,19 @@ async fn cmd_run(
     // No plaintext tags: the fold name lives only inside the encrypted payload.
     let publish = async {
         let ciphertext = encrypt_to_self(state_client, &plaintext)?;
-        let builder = EventBuilder::new(Kind::Custom(KIND_FOLD_ARTIFACT as u16), ciphertext);
+        let wire = build_artifact_event(
+            ciphertext,
+            ArtifactAudience::OwnerPrivate,
+            ArtifactEncoding::Nip44V2,
+        )
+        .map_err(|e| CliError::Other(e.to_string()))?;
+        let tags = wire
+            .tags
+            .iter()
+            .map(|parts| Tag::parse(parts.iter().map(String::as_str)))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| CliError::Other(format!("artifact tag error: {e}")))?;
+        let builder = EventBuilder::new(Kind::Custom(wire.kind as u16), wire.content).tags(tags);
         let event = state_client.sign_event(builder)?;
         submit_checked(state_client, event, "artifact write was reported duplicate").await
     };

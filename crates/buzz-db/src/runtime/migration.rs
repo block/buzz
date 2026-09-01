@@ -699,7 +699,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 43);
+        assert_eq!(migrations.len(), 44);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -908,15 +908,15 @@ mod postgres_tests {
         assert!(migrations[32].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30179"));
 
-        // Accumulator kinds 30640 (fold spec) + 4640 (artifact version) FTS
-        // exclusion (0043): author-only NIP-44 ciphertext, same
+        // Accumulator kinds 30640 (fold spec) + 4640 (artifact) FTS
+        // exclusion (0044): author-only NIP-44 ciphertext, same
         // wrap-the-existing-expression shape as 0014/0033.
-        assert_eq!(migrations[42].version, 43);
-        assert!(migrations[42]
+        assert_eq!(migrations[43].version, 44);
+        assert!(migrations[43]
             .sql
             .as_str()
             .contains("kind IN (4640, 30640)"));
-        assert!(migrations[42].sql.as_str().contains("search_tsv"));
+        assert!(migrations[43].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30640"));
         assert!(include_str!("../../../../schema/schema.sql").contains(
             "kind IN (1059, 4640, 30179, 30300, 30350, 30622, 30640, 44100, 44101, 44200)"
