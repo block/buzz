@@ -1,10 +1,10 @@
 use super::rate_limit::MAX_IMAGE_RETRY_AFTER;
 use super::{
     apply_image_result, declares_animation, extract_favicon_url, extract_image_url,
-    extract_link_preview_metadata, fetch_sanitized_image_using, is_html_response,
-    read_bytes_prefix, retry_after_duration, retryable_image_cooldown, sanitize_image,
-    ImageFetchError, LinkPreviewImageFetchState, LinkPreviewMetadata, MAX_INLINE_IMAGE_COOLDOWN,
-    MAX_METADATA_DESCRIPTION_CHARS,
+    extract_link_preview_metadata, fetch_link_preview_metadata, fetch_sanitized_image_using,
+    is_html_response, read_bytes_prefix, retry_after_duration, retryable_image_cooldown,
+    sanitize_image, ImageFetchError, LinkPreviewImageFetchState, LinkPreviewMetadata,
+    MAX_INLINE_IMAGE_COOLDOWN, MAX_METADATA_DESCRIPTION_CHARS,
 };
 use axum::{body::Body, http::Response, routing::get, Router};
 use base64::Engine as _;
@@ -33,6 +33,49 @@ async fn test_response(router: Router, path: &str) -> reqwest::Response {
     reqwest::get(format!("http://{address}{path}"))
         .await
         .unwrap()
+}
+
+#[tokio::test(start_paused = true)]
+async fn metadata_pipeline_remains_pending_beyond_former_aggregate_deadline() {
+    let (request_started_tx, request_started_rx) = oneshot::channel::<()>();
+    let request_started_tx = Arc::new(Mutex::new(Some(request_started_tx)));
+    let (release_response_tx, release_response_rx) = oneshot::channel::<()>();
+    let release_response_rx = Arc::new(Mutex::new(Some(release_response_rx)));
+    let address = start_test_server(Router::new().route(
+        "/preview",
+        get(move || {
+            let request_started_tx = Arc::clone(&request_started_tx);
+            let release_response_rx = Arc::clone(&release_response_rx);
+            async move {
+                request_started_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(())
+                    .unwrap();
+                let release_response_rx = release_response_rx.lock().unwrap().take().unwrap();
+                release_response_rx.await.unwrap();
+                Response::builder()
+                    .header("content-type", "text/html")
+                    .body(Body::from("<title>User-paced metadata</title>"))
+                    .unwrap()
+            }
+        }),
+    ))
+    .await;
+    let fetch = tokio::spawn(super::METADATA_TEST_SERVER.scope(
+        address,
+        fetch_link_preview_metadata("https://user-paced.example/preview".to_string()),
+    ));
+
+    request_started_rx.await.unwrap();
+    tokio::time::advance(std::time::Duration::from_secs(11)).await;
+    assert!(!fetch.is_finished());
+
+    release_response_tx.send(()).unwrap();
+    let metadata = fetch.await.unwrap().unwrap().unwrap();
+    assert_eq!(metadata.title, "User-paced metadata");
 }
 
 #[tokio::test(start_paused = true)]

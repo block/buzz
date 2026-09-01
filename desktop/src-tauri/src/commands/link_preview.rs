@@ -67,14 +67,14 @@ async fn fetch_link_preview_metadata_for_url(
     href: String,
 ) -> Result<Option<LinkPreviewMetadata>, String> {
     let mut url = Url::parse(href.trim()).map_err(|error| format!("invalid URL: {error}"))?;
-    validate_public_https_url(&url).await?;
+    validate_metadata_url(&url).await?;
 
     if youtube::is_video_url(&url) {
         return youtube::fetch_oembed_metadata(&url).await;
     }
 
     for redirect_count in 0..=MAX_REDIRECTS {
-        let response = send_pinned_request(&url, "text/html,application/xhtml+xml;q=0.9").await?;
+        let response = send_metadata_request(&url, "text/html,application/xhtml+xml;q=0.9").await?;
 
         if response.status().is_redirection() {
             if redirect_count == MAX_REDIRECTS {
@@ -89,7 +89,7 @@ async fn fetch_link_preview_metadata_for_url(
             url = url
                 .join(location)
                 .map_err(|error| format!("invalid link preview redirect: {error}"))?;
-            validate_public_https_url(&url).await?;
+            validate_metadata_url(&url).await?;
             continue;
         }
 
@@ -152,6 +152,15 @@ fn apply_image_result(
     }
 }
 
+async fn validate_metadata_url(url: &Url) -> Result<(), String> {
+    #[cfg(test)]
+    if METADATA_TEST_SERVER.try_with(|_| ()).is_ok() {
+        return Ok(());
+    }
+
+    validate_public_https_url(url).await
+}
+
 async fn validate_public_https_url(url: &Url) -> Result<(), String> {
     if url.scheme() != "https" || url.username() != "" || url.password().is_some() {
         return Err("link previews require an HTTPS URL without credentials".to_string());
@@ -186,6 +195,25 @@ async fn resolve_public_addresses(host: &str) -> Result<Vec<IpAddr>, String> {
     }
 
     Ok(addresses)
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static METADATA_TEST_SERVER: std::net::SocketAddr;
+}
+
+async fn send_metadata_request(url: &Url, accept: &str) -> Result<reqwest::Response, String> {
+    #[cfg(test)]
+    if let Ok(address) = METADATA_TEST_SERVER.try_with(|address| *address) {
+        return reqwest::Client::new()
+            .get(format!("http://{address}{}", url.path()))
+            .header(ACCEPT, accept)
+            .send()
+            .await
+            .map_err(|error| format!("link preview test request failed: {error}"));
+    }
+
+    send_pinned_request(url, accept).await
 }
 
 async fn send_pinned_request(url: &Url, accept: &str) -> Result<reqwest::Response, String> {
