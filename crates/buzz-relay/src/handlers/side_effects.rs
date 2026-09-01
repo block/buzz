@@ -243,9 +243,12 @@ pub async fn validate_standard_deletion_event(
             .and_then(|t| t.content().map(|s| s.to_string()))
             .ok_or_else(|| anyhow::anyhow!("missing e or a tag for target"))?;
         let parts: Vec<&str> = a_tag.splitn(3, ':').collect();
-        if parts.len() < 2 {
+        if parts.len() < 3 {
             return Err(anyhow::anyhow!("invalid a-tag format"));
         }
+        let target_kind: u32 = parts[0]
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid kind in a-tag"))?;
         let target_pubkey_bytes =
             hex::decode(parts[1]).map_err(|_| anyhow::anyhow!("invalid pubkey in a-tag"))?;
         if target_pubkey_bytes != actor_bytes
@@ -255,6 +258,39 @@ pub async fn validate_standard_deletion_event(
                 .await?
         {
             return Err(anyhow::anyhow!("must be event author"));
+        }
+
+        // Workflow UUIDs are global identifiers inside a community, while the
+        // NIP-09 coordinate's pubkey is supplied by the caller. Binding
+        // authorization only to that caller-supplied pubkey lets an actor send
+        // `30620:<self>:<someone-elses-workflow-id>`: the event is accepted,
+        // then the post-commit delete side effect fails. Validate against the
+        // canonical workflow owner before storing/acknowledging the deletion.
+        if target_kind == buzz_core::kind::KIND_WORKFLOW_DEF {
+            if let Ok(workflow_id) = uuid::Uuid::parse_str(parts[2]) {
+                match state.db.get_workflow(tenant.community(), workflow_id).await {
+                    Ok(workflow) => {
+                        if workflow.owner_pubkey != actor_bytes
+                            && !state
+                                .db
+                                .is_agent_owner(
+                                    tenant.community(),
+                                    &workflow.owner_pubkey,
+                                    &actor_bytes,
+                                )
+                                .await?
+                        {
+                            return Err(anyhow::anyhow!("must be workflow owner"));
+                        }
+                    }
+                    // An already-deleted workflow may still have a live
+                    // definition event from the legacy split delete path.
+                    // Allow its author to repeat the deletion so the side
+                    // effect can retire that orphaned event.
+                    Err(buzz_db::DbError::NotFound(_)) => {}
+                    Err(e) => return Err(e.into()),
+                }
+            }
         }
         return Ok(());
     }
@@ -2192,11 +2228,48 @@ async fn handle_a_tag_deletion(
         buzz_core::kind::KIND_WORKFLOW_DEF => {
             // Try UUID first (workflow_id); fall back to name-based lookup.
             if let Ok(wf_id) = uuid::Uuid::parse_str(d_tag) {
-                let channel_id = state
+                // The workflow row drives scheduling, while its kind:30620
+                // event drives Desktop/CLI discovery. Both representations
+                // must be retired together. Resolve the canonical owner from
+                // the row instead of trusting the caller-supplied coordinate;
+                // validation above has already established that the actor is
+                // the workflow owner (or the owning human of an agent).
+                let workflow = match state.db.get_workflow(tenant.community(), wf_id).await {
+                    Ok(workflow) => Some(workflow),
+                    Err(buzz_db::DbError::NotFound(_)) => None,
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("failed to load workflow {wf_id}: {e}"));
+                    }
+                };
+                let definition_pubkey = workflow
+                    .as_ref()
+                    .map(|workflow| workflow.owner_pubkey.as_slice())
+                    .unwrap_or(&actor_bytes);
+                let channel_id = if let Some(workflow) = &workflow {
+                    state
+                        .db
+                        .delete_workflow_for_owner(
+                            tenant.community(),
+                            wf_id,
+                            &workflow.owner_pubkey,
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("failed to delete workflow {wf_id}: {e}"))?
+                } else {
+                    None
+                };
+                state
                     .db
-                    .delete_workflow_for_owner(tenant.community(), wf_id, &actor_bytes)
+                    .soft_delete_by_coordinate(
+                        tenant.community(),
+                        buzz_core::kind::KIND_WORKFLOW_DEF as i32,
+                        definition_pubkey,
+                        d_tag,
+                    )
                     .await
-                    .map_err(|e| anyhow::anyhow!("failed to delete workflow {wf_id}: {e}"))?;
+                    .map_err(|e| {
+                        anyhow::anyhow!("failed to retire workflow definition {wf_id}: {e}")
+                    })?;
                 if let Some(channel_id) = channel_id {
                     state
                         .workflow_engine
@@ -2218,6 +2291,21 @@ async fn handle_a_tag_deletion(
                             .map_err(|e| {
                                 anyhow::anyhow!("failed to delete workflow {}: {e}", wf.id)
                             })?;
+                        state
+                            .db
+                            .soft_delete_by_coordinate(
+                                tenant.community(),
+                                buzz_core::kind::KIND_WORKFLOW_DEF as i32,
+                                &actor_bytes,
+                                d_tag,
+                            )
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "failed to retire workflow definition {}: {e}",
+                                    wf.id
+                                )
+                            })?;
                         if let Some(channel_id) = channel_id {
                             state
                                 .workflow_engine
@@ -2238,11 +2326,10 @@ async fn handle_a_tag_deletion(
         }
         // Generic NIP-33 (parameterized-replaceable) soft-delete by coordinate.
         //
-        // Listed after the workflow branch so workflow's bespoke deletion
-        // (which doesn't soft-delete the `events` row by design — that's a
-        // separate concern) takes precedence. For every other addressable
-        // kind, including kind:30023 (NIP-23 long-form), we soft-delete the
-        // live row matching `(kind, pubkey, d_tag)` so REQs stop returning it.
+        // Listed after the workflow branch because workflow deletion also
+        // removes its scheduler row. For every other addressable kind,
+        // including kind:30023 (NIP-23 long-form), we soft-delete the live row
+        // matching `(kind, pubkey, d_tag)` so REQs stop returning it.
         // See https://github.com/block/sprout/issues/714.
         k if is_parameterized_replaceable(k) => {
             let pubkey_bytes = match hex::decode(pubkey_hex) {
