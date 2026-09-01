@@ -558,6 +558,16 @@ impl BuzzClient {
         })
     }
 
+    /// Create a client for another relay with the same identity and authentication.
+    pub fn for_relay(&self, relay_url: String) -> Result<Self, CliError> {
+        Self::new(
+            relay_url,
+            self.keys.clone(),
+            self.auth_tag.clone(),
+            self.auth_tag_json.clone(),
+        )
+    }
+
     /// Get the keypair.
     pub fn keys(&self) -> &Keys {
         &self.keys

@@ -366,23 +366,31 @@ struct Preflight {
 /// Load spec + artifact chain, fetch pending signals, and plan the run.
 /// This is the zero-spend half shared by `estimate` and `run`.
 async fn preflight(
-    client: &BuzzClient,
+    state_client: &BuzzClient,
+    source_client: &BuzzClient,
     name: &str,
     since: Option<i64>,
     until: Option<i64>,
     limit: u32,
 ) -> Result<Preflight, CliError> {
-    let spec = load_spec(client, name).await?.ok_or_else(|| {
+    let spec = load_spec(state_client, name).await?.ok_or_else(|| {
         CliError::NotFound(format!("no fold named {name:?} (see `buzz folds list`)"))
     })?;
-    let artifacts = load_artifacts(client, name).await?;
+    let artifacts = load_artifacts(state_client, name).await?;
     let (prior, covered) = chain_state(&artifacts);
     let prior = prior.cloned();
     let since = since.unwrap_or(0);
     let until_exclusive = until.unwrap_or_else(|| now_secs() + 1);
-    let fetched = fetch_signals(client, &spec.selection, since, until_exclusive, limit).await?;
+    let fetched = fetch_signals(
+        source_client,
+        &spec.selection,
+        since,
+        until_exclusive,
+        limit,
+    )
+    .await?;
     let authors: BTreeSet<String> = fetched.iter().map(|s| s.pubkey.clone()).collect();
-    let names = fetch_names(client, &authors).await;
+    let names = fetch_names(source_client, &authors).await;
     let plan = plan_run(&spec, prior.as_ref(), &covered, fetched, &names)
         .map_err(|e| CliError::Other(e.to_string()))?;
     Ok(Preflight {
@@ -541,25 +549,27 @@ async fn cmd_delete(client: &BuzzClient, name: String) -> Result<(), CliError> {
 }
 
 async fn cmd_estimate(
-    client: &BuzzClient,
+    state_client: &BuzzClient,
+    source_client: &BuzzClient,
     name: String,
     since: Option<i64>,
     until: Option<i64>,
     limit: u32,
 ) -> Result<(), CliError> {
-    let pre = preflight(client, &name, since, until, limit).await?;
+    let pre = preflight(state_client, source_client, &name, since, until, limit).await?;
     println!("{}", plan_json(&name, &pre));
     Ok(())
 }
 
 async fn cmd_run(
-    client: &BuzzClient,
+    state_client: &BuzzClient,
+    source_client: &BuzzClient,
     name: String,
     since: Option<i64>,
     until: Option<i64>,
     limit: u32,
 ) -> Result<(), CliError> {
-    let pre = preflight(client, &name, since, until, limit).await?;
+    let pre = preflight(state_client, source_client, &name, since, until, limit).await?;
     let Plan::Ready(run) = &pre.plan else {
         // Cached/stalled runs spend nothing and change nothing — report as data.
         println!("{}", plan_json(&name, &pre));
@@ -620,7 +630,7 @@ async fn cmd_run(
     }
     // Version fence: if a concurrent run published while the model was
     // thinking, abort instead of forking the chain at the same version.
-    let head = match load_artifacts(client, &name).await {
+    let head = match load_artifacts(state_client, &name).await {
         Ok(chain) => chain.last().map(|a| a.version),
         Err(e) => {
             salvage(
@@ -641,10 +651,10 @@ async fn cmd_run(
     }
     // No plaintext tags: the fold name lives only inside the encrypted payload.
     let publish = async {
-        let ciphertext = encrypt_to_self(client, &plaintext)?;
+        let ciphertext = encrypt_to_self(state_client, &plaintext)?;
         let builder = EventBuilder::new(Kind::Custom(KIND_FOLD_ARTIFACT as u16), ciphertext);
-        let event = client.sign_event(builder)?;
-        submit_checked(client, event, "artifact write was reported duplicate").await
+        let event = state_client.sign_event(builder)?;
+        submit_checked(state_client, event, "artifact write was reported duplicate").await
     };
     let event_id = match publish.await {
         Ok(id) => id,
@@ -780,7 +790,7 @@ async fn cmd_share(client: &BuzzClient, name: String, channel: String) -> Result
     Ok(())
 }
 
-pub async fn dispatch(cmd: crate::FoldsCmd, client: &BuzzClient) -> Result<(), CliError> {
+pub async fn dispatch(cmd: crate::FoldsCmd, state_client: &BuzzClient) -> Result<(), CliError> {
     use crate::FoldsCmd;
     match cmd {
         FoldsCmd::Set {
@@ -790,29 +800,68 @@ pub async fn dispatch(cmd: crate::FoldsCmd, client: &BuzzClient) -> Result<(), C
             kind,
             model,
             instructions,
-        } => cmd_set(client, name, channel, author, kind, model, instructions).await,
-        FoldsCmd::List => cmd_list(client).await,
-        FoldsCmd::Get { name } => cmd_get(client, name).await,
-        FoldsCmd::Delete { name } => cmd_delete(client, name).await,
+        } => {
+            cmd_set(
+                state_client,
+                name,
+                channel,
+                author,
+                kind,
+                model,
+                instructions,
+            )
+            .await
+        }
+        FoldsCmd::List => cmd_list(state_client).await,
+        FoldsCmd::Get { name } => cmd_get(state_client, name).await,
+        FoldsCmd::Delete { name } => cmd_delete(state_client, name).await,
         FoldsCmd::Estimate {
             name,
+            source_relay,
             since,
             until,
             limit,
-        } => cmd_estimate(client, name, since, until, limit).await,
+        } => {
+            let source_client = source_relay
+                .map(|url| state_client.for_relay(crate::client::normalize_relay_url(&url)))
+                .transpose()?;
+            cmd_estimate(
+                state_client,
+                source_client.as_ref().unwrap_or(state_client),
+                name,
+                since,
+                until,
+                limit,
+            )
+            .await
+        }
         FoldsCmd::Run {
             name,
+            source_relay,
             since,
             until,
             limit,
-        } => cmd_run(client, name, since, until, limit).await,
+        } => {
+            let source_client = source_relay
+                .map(|url| state_client.for_relay(crate::client::normalize_relay_url(&url)))
+                .transpose()?;
+            cmd_run(
+                state_client,
+                source_client.as_ref().unwrap_or(state_client),
+                name,
+                since,
+                until,
+                limit,
+            )
+            .await
+        }
         FoldsCmd::Artifact {
             name,
             version,
             history,
             raw,
-        } => cmd_artifact(client, name, version, history, raw).await,
-        FoldsCmd::Share { name, channel } => cmd_share(client, name, channel).await,
+        } => cmd_artifact(state_client, name, version, history, raw).await,
+        FoldsCmd::Share { name, channel } => cmd_share(state_client, name, channel).await,
     }
 }
 

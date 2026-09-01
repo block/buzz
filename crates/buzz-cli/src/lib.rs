@@ -1832,6 +1832,10 @@ pub enum FoldsCmd {
     /// Preflight a run without spending: pending signals, est. tokens, cost
     Estimate {
         name: String,
+        /// Relay to read selected source events and author profiles from.
+        /// Fold specs and artifacts remain on the primary --relay.
+        #[arg(long)]
+        source_relay: Option<String>,
         /// Only consider signals created at or after this unix timestamp
         #[arg(long)]
         since: Option<i64>,
@@ -1846,6 +1850,10 @@ pub enum FoldsCmd {
     /// Run the fold: plan, invoke the model, validate, persist a new version
     Run {
         name: String,
+        /// Relay to read selected source events and author profiles from.
+        /// The new artifact remains on the primary --relay.
+        #[arg(long)]
+        source_relay: Option<String>,
         /// Only consider signals created at or after this unix timestamp
         #[arg(long)]
         since: Option<i64>,
@@ -2239,6 +2247,32 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn folds_source_relay_is_limited_to_source_reading_commands() {
+        for verb in ["estimate", "run"] {
+            assert!(Cli::try_parse_from([
+                "buzz",
+                "folds",
+                verb,
+                "daily",
+                "--source-relay",
+                "wss://source.example",
+            ])
+            .is_ok());
+        }
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "folds",
+            "set",
+            "daily",
+            "--channel",
+            "123e4567-e89b-12d3-a456-426614174000",
+            "--source-relay",
+            "wss://source.example",
+        ])
+        .is_err());
     }
 
     #[test]
