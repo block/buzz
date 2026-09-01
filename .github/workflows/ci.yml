@@ -1076,6 +1076,15 @@ jobs:
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
       - name: Dependency policy
         run: cargo-deny check
+      - name: Dependency policy (desktop lockfile)
+        # The root cargo-deny check ignores desktop/src-tauri/Cargo.lock (independent
+        # workspace). Lock it in so a desktop-only vuln can't silently ride along.
+        run: |
+          cargo-deny \
+            --manifest-path desktop/src-tauri/Cargo.toml \
+            --target aarch64-apple-darwin \
+            --exclude-dev \
+            check --config deny.toml advisories
 
   dead-token-guard:
     name: Dead Token Reference Guard
