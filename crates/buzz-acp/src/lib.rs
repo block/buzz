@@ -1675,6 +1675,20 @@ fn idle_pool_sleep_due(
         && inactivity_expired(last_activity, now, bound, turn_in_flight)
 }
 
+/// Whether a completed prompt result counts as activity for the idle clocks
+/// (`idle_pool_sleep_secs` and `exit_after_inactivity_secs`).
+///
+/// Turn completion must refresh `last_activity`: the clock is otherwise only
+/// refreshed at dispatch, so a turn longer than the idle bound would be torn
+/// down on the first reaper tick after it completes — killing the CLI process
+/// together with any background tasks and autonomous wake-ups it still owns
+/// (the waiter-loss incident of 2026-09-01). Heartbeat results are excluded:
+/// heartbeats fire only into an idle pool, so counting them as activity would
+/// keep a heartbeat-enabled pool awake forever.
+fn result_refreshes_idle_clock(source: &PromptSource) -> bool {
+    matches!(source, PromptSource::Channel(_))
+}
+
 #[cfg(test)]
 mod inactivity_tests {
     use super::*;
@@ -1716,6 +1730,28 @@ mod inactivity_tests {
             Duration::from_secs(60),
             false
         ));
+    }
+}
+
+#[cfg(test)]
+mod idle_clock_refresh_tests {
+    use super::*;
+
+    #[test]
+    fn channel_turn_completion_refreshes_idle_clock() {
+        // A completed channel turn is activity: without this, any turn longer
+        // than the idle bound is torn down on the first reaper tick after it
+        // completes, orphaning its background tasks (waiter-loss incident).
+        assert!(result_refreshes_idle_clock(&PromptSource::Channel(
+            Uuid::new_v4()
+        )));
+    }
+
+    #[test]
+    fn heartbeat_completion_does_not_refresh_idle_clock() {
+        // Heartbeats fire only into an idle pool — counting them as activity
+        // would keep a heartbeat-enabled pool awake forever.
+        assert!(!result_refreshes_idle_clock(&PromptSource::Heartbeat));
     }
 }
 
@@ -3148,6 +3184,9 @@ async fn tokio_main() -> Result<()> {
                 if let PromptSource::Channel(ch) = &result.source {
                     typing_channels.remove(ch);
                 }
+                if result_refreshes_idle_clock(&result.source) {
+                    last_activity = tokio::time::Instant::now();
+                }
                 if handle_prompt_result(
                     &mut pool,
                     &mut queue,
@@ -3290,6 +3329,10 @@ async fn tokio_main() -> Result<()> {
                 //     pending_steer on every return path. If it does,
                 //     treat as PromptCompletedNeutral to avoid leaking
                 //     the withheld event in `withheld_native_steer`.
+                // A steer ack is channel activity by definition (steers only
+                // exist for channel turns) — refresh the idle clocks so a
+                // mid-turn steer keeps the pool's idle window honest.
+                last_activity = tokio::time::Instant::now();
                 let (release_withheld, drop_withheld, signal_fallback) = match &ack {
                     Ok(pool::SteerAck::Success { .. }) => (false, true, false),
                     // -32601 = method_not_found: agent does not implement the
