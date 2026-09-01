@@ -1219,8 +1219,8 @@ mod tests {
 
         let task_migration = migrations
             .iter()
-            .find(|migration| migration.version == 43)
-            .expect("task-system migration 0043");
+            .find(|migration| migration.version == 46)
+            .expect("task-system migration 0046");
         let sql = task_migration.sql.as_str();
         assert!(sql.contains("CREATE TABLE tasks"));
         assert!(sql.contains("CREATE TABLE task_events"));
