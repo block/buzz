@@ -7,6 +7,7 @@ mod filter;
 mod observer;
 mod pool;
 mod pool_lifecycle;
+mod proxy;
 mod queue;
 mod relay;
 mod setup_mode;
@@ -1933,6 +1934,14 @@ async fn tokio_main() -> Result<()> {
             .collect();
         let args = AuthenticateArgs::parse_from(&filtered);
         return run_authenticate(args).await;
+    }
+
+    if is_subcommand("--mcp-filter-proxy") {
+        // No clap parsing here — argv layout is fixed:
+        //   <exe> --mcp-filter-proxy <sidecar> <server> -- <cmd> <args...>
+        // The proxy takes over stdio entirely and never returns except on
+        // fatal startup error. Tracing is initialized inside the proxy.
+        return proxy::run_mcp_filter_proxy().await;
     }
 
     tracing_subscriber::fmt()
@@ -5091,18 +5100,59 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
             command,
             args,
             env,
+            tool_filter,
         } = configured;
+        let env_vars: Vec<EnvVar> = env
+            .iter()
+            .map(|(name, value)| EnvVar {
+                name: name.clone(),
+                value: value.clone(),
+            })
+            .collect();
+
+        // If a tool_filter is attached and we know where the source JSON lives,
+        // rewrite this server to spawn the same binary in `--mcp-filter-proxy`
+        // mode. The agent is therefore shielded from `tools/list` and
+        // `tools/call` traffic that doesn't match the policy. The original
+        // command, args, and env are preserved verbatim and passed to the proxy,
+        // which spawns them as a child and proxies stdio.
+        if tool_filter.is_some() {
+            let proxy_command = match config.mcp_config_path.as_deref() {
+                Some(path) => path.to_string_lossy().into_owned(),
+                None => {
+                    // Fail-closed: a tool_filter without a backing JSON path
+                    // means the policy can't be re-loaded at proxy startup, so
+                    // the agent must not be told about the server at all.
+                    return McpServer {
+                        name: name.clone(),
+                        command: String::new(),
+                        args: Vec::new(),
+                        env: env_vars,
+                    };
+                }
+            };
+            let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from(""));
+            let mut proxy_args: Vec<String> = vec![
+                "--mcp-filter-proxy".to_string(),
+                proxy_command,
+                name.clone(),
+                "--".to_string(),
+                command.clone(),
+            ];
+            proxy_args.extend(args.iter().cloned());
+            return McpServer {
+                name: name.clone(),
+                command: exe.to_string_lossy().into_owned(),
+                args: proxy_args,
+                env: env_vars,
+            };
+        }
+
         McpServer {
             name: name.clone(),
             command: command.clone(),
             args: args.clone(),
-            env: env
-                .iter()
-                .map(|(name, value)| EnvVar {
-                    name: name.clone(),
-                    value: value.clone(),
-                })
-                .collect(),
+            env: env_vars,
         }
     }));
 
@@ -6784,6 +6834,7 @@ mod build_mcp_servers_tests {
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
             configured_mcp_servers: Vec::new(),
+            mcp_config_path: None,
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -6839,6 +6890,7 @@ mod build_mcp_servers_tests {
                 .iter()
                 .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
                 .collect::<BTreeMap<_, _>>(),
+            tool_filter: None,
         }
     }
 
@@ -7046,6 +7098,119 @@ mod build_mcp_servers_tests {
             "Path::new(\".\").file_stem() is None — should fall back to \"mcp\""
         );
     }
+
+    // ── v2 tool_filter proxy rewrite ─────────────────────────────────────────
+
+    fn configured_filtered_server(
+        name: &str,
+        command: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        allow: &[&str],
+        strict: bool,
+    ) -> config::ConfiguredMcpServer {
+        config::ConfiguredMcpServer::Stdio {
+            name: name.to_string(),
+            command: command.to_string(),
+            args: args.iter().map(|value| (*value).to_string()).collect(),
+            env: env
+                .iter()
+                .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+                .collect::<BTreeMap<_, _>>(),
+            tool_filter: Some(config::ToolFilter {
+                allow: Some(allow.iter().map(|s| (*s).to_string()).collect()),
+                deny: None,
+                strict_allow: strict,
+            }),
+        }
+    }
+
+    #[test]
+    fn tool_filter_rewrites_server_to_proxy_when_sidecar_path_known() {
+        let mut config = test_config();
+        config.mcp_command.clear();
+        config.mcp_config_path = Some(std::path::PathBuf::from(
+            "/private/etc/buzz/mcp/jira-v2.json",
+        ));
+        config.configured_mcp_servers = vec![configured_filtered_server(
+            "jira",
+            "mcp-remote",
+            &["https://mcp.atlassian.com/v1/mcp/authv2"],
+            &[("JIRA_SITE", "https://example.test")],
+            &["getJiraIssue"],
+            false,
+        )];
+
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 1);
+        let server = &servers[0];
+
+        assert_eq!(server.name, "jira");
+        // Command must point at the current binary so the proxy mode is reachable.
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(server.command, exe.to_string_lossy());
+        // Args layout: --mcp-filter-proxy <sidecar> <server> -- <cmd> <orig args...>
+        assert_eq!(
+            server.args,
+            vec![
+                "--mcp-filter-proxy".to_string(),
+                "/private/etc/buzz/mcp/jira-v2.json".to_string(),
+                "jira".to_string(),
+                "--".to_string(),
+                "mcp-remote".to_string(),
+                "https://mcp.atlassian.com/v1/mcp/authv2".to_string(),
+            ]
+        );
+        // Original env survives the rewrite verbatim.
+        assert_eq!(server.env.len(), 1);
+        assert_eq!(server.env[0].name, "JIRA_SITE");
+        assert_eq!(server.env[0].value, "https://example.test");
+    }
+
+    #[test]
+    fn tool_filter_without_sidecar_path_rewrites_to_empty_command_fail_closed() {
+        // Fail-closed: the proxy cannot re-load the policy at startup without
+        // the JSON path, so the agent must not see this server.
+        let mut config = test_config();
+        config.mcp_command.clear();
+        config.mcp_config_path = None;
+        config.configured_mcp_servers = vec![configured_filtered_server(
+            "jira",
+            "mcp-remote",
+            &["https://mcp.atlassian.com/v1/mcp/authv2"],
+            &[],
+            &["getJiraIssue"],
+            false,
+        )];
+
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 1);
+        let server = &servers[0];
+        assert_eq!(server.name, "jira");
+        assert!(
+            server.command.is_empty(),
+            "fail-closed rewrite must use empty command; got {:?}",
+            server.command
+        );
+        assert!(server.args.is_empty());
+    }
+
+    #[test]
+    fn unfiltered_server_passes_through_unchanged() {
+        let mut config = test_config();
+        config.mcp_command.clear();
+        config.mcp_config_path = Some(std::path::PathBuf::from(
+            "/private/etc/buzz/mcp/jira-v2.json",
+        ));
+        config.configured_mcp_servers =
+            vec![configured_server("search", "search-mcp", &["--stdio"], &[])];
+
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 1);
+        let server = &servers[0];
+        assert_eq!(server.command, "search-mcp");
+        assert_eq!(server.args, vec!["--stdio".to_string()]);
+    }
 }
 
 #[cfg(test)]
@@ -7084,6 +7249,7 @@ mod error_outcome_emission_tests {
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
             configured_mcp_servers: Vec::new(),
+            mcp_config_path: None,
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,

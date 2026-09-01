@@ -48,12 +48,17 @@ pub enum ConfigError {
     ConfigFile(String),
 }
 
-const MCP_CONFIG_VERSION: u32 = 1;
+const MCP_CONFIG_VERSION: u32 = 2;
 const MCP_CONFIG_MAX_BYTES: u64 = 64 * 1024;
 const MCP_SERVER_MAX_COUNT: usize = 16;
 const MCP_SERVER_MAX_ARGS: usize = 128;
 const MCP_SERVER_MAX_ENV: usize = 128;
 const MCP_SERVER_NAME_MAX_BYTES: usize = 128;
+/// Maximum number of tool names in a single `tool_filter.allow`/`tool_filter.deny` list.
+/// Bounded so a malformed config can't drag the LLM-visible catalogue arbitrarily.
+const MCP_TOOL_FILTER_MAX_LIST: usize = 256;
+/// Per-tool-name byte limit. Matches the MCP wire format convention (ASCII, no spaces).
+const MCP_TOOL_NAME_MAX_BYTES: usize = 128;
 const PROTECTED_MCP_ENV_NAMES: [&str; 6] = [
     "BUZZ_PRIVATE_KEY",
     "NOSTR_PRIVATE_KEY",
@@ -72,7 +77,43 @@ pub(crate) enum ConfiguredMcpServer {
         command: String,
         args: Vec<String>,
         env: BTreeMap<String, String>,
+        /// Optional v2 tool filter. When `Some`, the agent's tools/list and
+        /// tools/call responses/requests are filtered through this policy
+        /// before reaching the LLM. Fail-closed at load: invalid filters
+        /// cause the whole document to be rejected.
+        #[serde(default)]
+        tool_filter: Option<ToolFilter>,
     },
+}
+
+/// v2 tool filter attached to a `ConfiguredMcpServer::Stdio`.
+///
+/// Semantics:
+/// - `allow` and `deny` are mutually exclusive. Specifying both is rejected at load.
+/// - An empty `allow` or `deny` list is rejected at load — empty filters are
+///   a footgun (silently allow nothing / deny nothing).
+/// - Names are matched case-sensitively against the bare tool name returned
+///   by `tools/list`. No glob, no regex in this revision.
+/// - `strict_allow`: when `true`, the proxy fails at startup if any name in
+///   `allow` does not appear in the upstream `tools/list` response. Used by
+///   HIVE capability profiles so a renamed Atlassian tool surfaces as a
+///   hard failure rather than a silent deny-all.
+#[derive(Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ToolFilter {
+    #[serde(default)]
+    pub allow: Option<Vec<String>>,
+    #[serde(default)]
+    pub deny: Option<Vec<String>>,
+    #[serde(default)]
+    pub strict_allow: bool,
+}
+
+impl ToolFilter {
+    /// True iff this filter has exactly one of `allow`/`deny` populated.
+    pub fn is_well_formed(&self) -> bool {
+        self.allow.is_some() ^ self.deny.is_some()
+    }
 }
 
 impl ConfiguredMcpServer {
@@ -91,12 +132,21 @@ impl std::fmt::Debug for ConfiguredMcpServer {
                 command,
                 args,
                 env,
+                tool_filter,
             } => formatter
                 .debug_struct("Stdio")
                 .field("name", name)
                 .field("command", command)
                 .field("arg_count", &args.len())
                 .field("env_keys", &env.keys().collect::<Vec<_>>())
+                .field(
+                    "tool_filter",
+                    &tool_filter.as_ref().map(|f| {
+                        let n = f.allow.as_ref().map(|a| a.len()).unwrap_or(0)
+                            + f.deny.as_ref().map(|d| d.len()).unwrap_or(0);
+                        format!("{} entries (strict={})", n, f.strict_allow)
+                    }),
+                )
                 .finish(),
         }
     }
@@ -194,7 +244,7 @@ fn read_mcp_config(path: &std::path::Path) -> Result<Vec<u8>, ConfigError> {
     Ok(content)
 }
 
-fn load_mcp_config(
+pub(crate) fn load_mcp_config(
     path: &std::path::Path,
     legacy_mcp_command: &str,
 ) -> Result<Vec<ConfiguredMcpServer>, ConfigError> {
@@ -203,10 +253,15 @@ fn load_mcp_config(
         ConfigError::ConfigFile(format!("invalid MCP config {}: {error}", path.display()))
     })?;
     if document.version != MCP_CONFIG_VERSION {
-        return Err(ConfigError::ConfigFile(format!(
-            "unsupported MCP config version {} (expected {MCP_CONFIG_VERSION})",
-            document.version
-        )));
+        // Back-compat: accept v1 documents at load time. v1 has no
+        // `tool_filter`, so all servers effectively behave as unfiltered.
+        // Reject anything else.
+        if document.version != 1 {
+            return Err(ConfigError::ConfigFile(format!(
+                "unsupported MCP config version {} (expected {MCP_CONFIG_VERSION} or 1)",
+                document.version
+            )));
+        }
     }
 
     let total = document.servers.len() + usize::from(!legacy_mcp_command.is_empty());
@@ -235,7 +290,11 @@ fn load_mcp_config(
         }
 
         let ConfiguredMcpServer::Stdio {
-            command, args, env, ..
+            command,
+            args,
+            env,
+            tool_filter,
+            ..
         } = server;
         if command.trim().is_empty() || command.contains('\0') {
             return Err(ConfigError::ConfigFile(format!(
@@ -285,9 +344,68 @@ fn load_mcp_config(
                 )));
             }
         }
+        if let Some(filter) = tool_filter {
+            validate_tool_filter(name, filter)?;
+        }
     }
 
     Ok(document.servers)
+}
+
+/// Validate a v2 `tool_filter` block. Fail-closed: any rule violation rejects
+/// the whole MCP config document — the agent must not start.
+pub(crate) fn validate_tool_filter(
+    server_name: &str,
+    filter: &ToolFilter,
+) -> Result<(), ConfigError> {
+    if !filter.is_well_formed() {
+        return Err(ConfigError::ConfigFile(format!(
+            "MCP server '{server_name}' tool_filter must set exactly one of 'allow' or 'deny'"
+        )));
+    }
+    let list: &Vec<String> = match (&filter.allow, &filter.deny) {
+        (Some(list), None) | (None, Some(list)) => list,
+        _ => unreachable!("is_well_formed guarantees exactly one branch"),
+    };
+    if list.is_empty() {
+        return Err(ConfigError::ConfigFile(format!(
+            "MCP server '{server_name}' tool_filter list must not be empty"
+        )));
+    }
+    if list.len() > MCP_TOOL_FILTER_MAX_LIST {
+        return Err(ConfigError::ConfigFile(format!(
+            "MCP server '{server_name}' tool_filter has too many entries ({}, max {MCP_TOOL_FILTER_MAX_LIST})",
+            list.len()
+        )));
+    }
+    let mut seen = HashSet::with_capacity(list.len());
+    for tool in list {
+        if tool.is_empty() {
+            return Err(ConfigError::ConfigFile(format!(
+                "MCP server '{server_name}' tool_filter contains an empty tool name"
+            )));
+        }
+        if tool.len() > MCP_TOOL_NAME_MAX_BYTES {
+            return Err(ConfigError::ConfigFile(format!(
+                "MCP server '{server_name}' tool_filter name too long ({}, max {MCP_TOOL_NAME_MAX_BYTES})",
+                tool.len()
+            )));
+        }
+        if !tool
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(ConfigError::ConfigFile(format!(
+                "MCP server '{server_name}' tool_filter name '{tool}' must use only ASCII letters, digits, '_' or '-'"
+            )));
+        }
+        if !seen.insert(tool.as_str()) {
+            return Err(ConfigError::ConfigFile(format!(
+                "MCP server '{server_name}' tool_filter contains duplicate entry '{tool}'"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, clap::ValueEnum)]
@@ -769,6 +887,11 @@ pub struct Config {
     pub agent_args: Vec<String>,
     pub mcp_command: String,
     pub configured_mcp_servers: Vec<ConfiguredMcpServer>,
+    /// Absolute path to the JSON document loaded into `configured_mcp_servers`.
+    /// `None` when no structured MCP config was supplied. Used by
+    /// `build_mcp_servers` to rewrite tool-filtered servers into the proxy
+    /// binary so the proxy can re-read the policy at startup.
+    pub mcp_config_path: Option<PathBuf>,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
     pub agents: u32,
@@ -1350,6 +1473,7 @@ impl Config {
             agent_args,
             mcp_command: args.mcp_command,
             configured_mcp_servers,
+            mcp_config_path: args.mcp_config.clone(),
             idle_timeout_secs,
             max_turn_duration_secs,
             agents: args.agents,
@@ -1733,6 +1857,7 @@ mod tests {
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
             configured_mcp_servers: Vec::new(),
+            mcp_config_path: None,
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -3204,11 +3329,16 @@ channels = "ALL"
 
     #[test]
     fn structured_mcp_config_rejects_wrong_version_and_unknown_fields() {
+        // v3 is unsupported; v1 is accepted for back-compat, v2 is current.
         for document in [
-            serde_json::json!({"version": 2, "servers": []}),
+            serde_json::json!({"version": 3, "servers": []}),
             serde_json::json!({"version": 1, "servers": [], "unexpected": true}),
+            serde_json::json!({"version": 2, "servers": [], "unexpected": true}),
         ] {
-            assert!(config_from_mcp_document(document, None).is_err());
+            assert!(
+                config_from_mcp_document(document.clone(), None).is_err(),
+                "document {document} must be rejected"
+            );
         }
     }
 
@@ -3422,5 +3552,187 @@ channels = "ALL"
             "Found secret-bearing env args without hide_env_values=true. \
              Add `hide_env_values = true` to each: {violations:?}"
         );
+    }
+
+    // ── MCP v2 tool_filter tests ─────────────────────────────────────────────
+
+    fn v2_filter_doc(filter: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "version": 2,
+            "servers": [{
+                "name": "jira",
+                "transport": "stdio",
+                "command": "mcp-remote",
+                "args": ["https://mcp.atlassian.com/v1/mcp/authv2"],
+                "env": {},
+                "tool_filter": filter,
+            }]
+        })
+    }
+
+    fn v2_filter_doc_no_filter() -> serde_json::Value {
+        serde_json::json!({
+            "version": 2,
+            "servers": [{
+                "name": "jira",
+                "transport": "stdio",
+                "command": "mcp-remote",
+                "args": ["https://mcp.atlassian.com/v1/mcp/authv2"],
+                "env": {},
+            }]
+        })
+    }
+
+    fn v2_filter_doc_legacy() -> serde_json::Value {
+        serde_json::json!({
+            "version": 1,
+            "servers": [{
+                "name": "jira",
+                "transport": "stdio",
+                "command": "mcp-remote",
+                "args": ["https://mcp.atlassian.com/v1/mcp/authv2"],
+                "env": {},
+            }]
+        })
+    }
+
+    fn assert_filter_error_contains(document: serde_json::Value, needle: &str) {
+        let err = config_from_mcp_document(document, None)
+            .expect_err("document must be rejected")
+            .to_string();
+        assert!(
+            err.contains(needle),
+            "expected error to contain {needle:?}, got: {err}"
+        );
+    }
+
+    #[test]
+    fn v2_tool_filter_accepts_allow() {
+        let config = config_from_mcp_document(
+            v2_filter_doc(serde_json::json!({"allow": ["getJiraIssue"]})),
+            None,
+        )
+        .expect("allow filter must be accepted");
+        let ConfiguredMcpServer::Stdio { tool_filter, .. } = &config.configured_mcp_servers[0];
+        let filter = tool_filter.as_ref().expect("filter must be present");
+        assert_eq!(
+            filter.allow.as_ref().unwrap(),
+            &vec!["getJiraIssue".to_string()]
+        );
+        assert!(filter.deny.is_none());
+        assert!(!filter.strict_allow);
+    }
+
+    #[test]
+    fn v2_tool_filter_accepts_deny() {
+        let config = config_from_mcp_document(
+            v2_filter_doc(serde_json::json!({"deny": ["deleteEverything"]})),
+            None,
+        )
+        .expect("deny filter must be accepted");
+        let ConfiguredMcpServer::Stdio { tool_filter, .. } = &config.configured_mcp_servers[0];
+        let filter = tool_filter.as_ref().expect("filter must be present");
+        assert_eq!(
+            filter.deny.as_ref().unwrap(),
+            &vec!["deleteEverything".to_string()]
+        );
+    }
+
+    #[test]
+    fn v2_tool_filter_accepts_strict_allow() {
+        let config = config_from_mcp_document(
+            v2_filter_doc(serde_json::json!({
+                "allow": ["getJiraIssue"],
+                "strict_allow": true,
+            })),
+            None,
+        )
+        .expect("strict_allow must be accepted");
+        let ConfiguredMcpServer::Stdio { tool_filter, .. } = &config.configured_mcp_servers[0];
+        assert!(tool_filter.as_ref().unwrap().strict_allow);
+    }
+
+    #[test]
+    fn v2_tool_filter_rejects_both_allow_and_deny() {
+        assert_filter_error_contains(
+            v2_filter_doc(serde_json::json!({
+                "allow": ["getJiraIssue"],
+                "deny": ["deleteEverything"],
+            })),
+            "must set exactly one of 'allow' or 'deny'",
+        );
+    }
+
+    #[test]
+    fn v2_tool_filter_rejects_empty_allow() {
+        assert_filter_error_contains(
+            v2_filter_doc(serde_json::json!({"allow": []})),
+            "list must not be empty",
+        );
+    }
+
+    #[test]
+    fn v2_tool_filter_rejects_empty_deny() {
+        assert_filter_error_contains(
+            v2_filter_doc(serde_json::json!({"deny": []})),
+            "list must not be empty",
+        );
+    }
+
+    #[test]
+    fn v2_tool_filter_rejects_non_ascii_name() {
+        assert_filter_error_contains(
+            v2_filter_doc(serde_json::json!({"allow": ["café"]})),
+            "ASCII letters, digits, '_' or '-'",
+        );
+    }
+
+    #[test]
+    fn v2_tool_filter_rejects_oversized_name() {
+        let long_name = "a".repeat(200);
+        let mut doc = v2_filter_doc(serde_json::json!({"allow": ["getJiraIssue"]}));
+        doc["servers"][0]["tool_filter"]["allow"] = serde_json::json!([long_name]);
+        assert_filter_error_contains(doc, "name too long");
+    }
+
+    #[test]
+    fn v2_tool_filter_rejects_duplicate_name() {
+        assert_filter_error_contains(
+            v2_filter_doc(serde_json::json!({
+                "allow": ["getJiraIssue", "getJiraIssue"]
+            })),
+            "duplicate entry",
+        );
+    }
+
+    #[test]
+    fn v2_tool_filter_rejects_unknown_field() {
+        // `deny_unknown_fields` on ToolFilter means typos fail loudly.
+        let mut doc = v2_filter_doc(serde_json::json!({"allow": ["getJiraIssue"]}));
+        doc["servers"][0]["tool_filter"]["allowAll"] = serde_json::json!(true);
+        let err = config_from_mcp_document(doc, None)
+            .expect_err("unknown field must fail")
+            .to_string();
+        assert!(
+            err.contains("unknown field") || err.contains("allowAll"),
+            "expected unknown-field error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn v2_document_without_tool_filter_is_accepted() {
+        // v2 documents can omit tool_filter entirely — same as v1 behaviour.
+        let config = config_from_mcp_document(v2_filter_doc_no_filter(), None)
+            .expect("no filter must be accepted");
+        let ConfiguredMcpServer::Stdio { tool_filter, .. } = &config.configured_mcp_servers[0];
+        assert!(tool_filter.is_none());
+    }
+
+    #[test]
+    fn v1_document_still_parses() {
+        // v1 documents must continue to load so existing deployments aren't
+        // broken by the schema bump.
+        let _config = config_from_mcp_document(v2_filter_doc_legacy(), None)
+            .expect("v1 document must still parse");
     }
 }
