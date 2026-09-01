@@ -1264,7 +1264,10 @@ test("first-community owner can create and connect a hosted community", async ({
   await expect(
     page.getByRole("heading", { name: "Finish connecting Buzz" }),
   ).toBeVisible();
-  await page.getByRole("button", { name: "Connect and continue" }).click();
+  await expect(page.getByTestId("hosted-connect-identity-hint")).toContainText(
+    "different Buzz private key",
+  );
+  await page.getByTestId("hosted-connect-identity").click();
   const createSurface = page.getByTestId("hosted-community-create-surface");
   const surfaceBoxBeforeFeedback = await createSurface.boundingBox();
   const communityNameInput = page.getByTestId("hosted-community-address-input");
