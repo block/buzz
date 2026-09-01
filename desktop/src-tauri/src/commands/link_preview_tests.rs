@@ -1,10 +1,10 @@
-
 use super::rate_limit::MAX_IMAGE_RETRY_AFTER;
+use super::retryable_image_cooldown;
 use super::{
     apply_image_result, declares_animation, extract_favicon_url, extract_image_url,
-    extract_link_preview_metadata, fetch_link_preview_metadata_with, is_html_response,
-    read_bytes_prefix, retry_after_duration, sanitize_image, ImageFetchError,
-    LinkPreviewImageFetchState, LinkPreviewMetadata, MAX_METADATA_DESCRIPTION_CHARS,
+    extract_link_preview_metadata, is_html_response, read_bytes_prefix, retry_after_duration,
+    sanitize_image, wait_for_image_host_cooldown, ImageFetchError, LinkPreviewImageFetchState,
+    LinkPreviewMetadata, MAX_METADATA_DESCRIPTION_CHARS,
 };
 use axum::{body::Body, http::Response, routing::get, Router};
 use base64::Engine as _;
@@ -26,17 +26,34 @@ async fn test_response(router: Router, path: &str) -> reqwest::Response {
 }
 
 #[tokio::test(start_paused = true)]
-async fn metadata_fetch_has_no_native_deadline() {
-    let fetch = fetch_link_preview_metadata_with("https://example.com".to_string(), |_| async {
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-        Ok(None)
-    });
-    tokio::pin!(fetch);
+async fn first_rate_limit_and_queued_host_request_share_one_cooldown_boundary() {
+    let cooldown = std::time::Duration::from_secs(60);
+    let url = Url::parse("https://rate-limit-regression.example/image.png").unwrap();
+    let first = async {
+        let mut waited = false;
+        let retry_after = retryable_image_cooldown(&url, Some(cooldown), &mut waited).unwrap();
+        tokio::time::sleep(retry_after).await;
+        assert_eq!(
+            retryable_image_cooldown(&url, Some(cooldown), &mut waited),
+            None
+        );
+    };
+    let queued = async {
+        let mut waited = false;
+        assert!(wait_for_image_host_cooldown(&mut waited, cooldown).await);
+    };
+    tokio::pin!(first);
 
-    tokio::time::advance(std::time::Duration::from_secs(59)).await;
-    assert!(futures_util::poll!(&mut fetch).is_pending());
-    tokio::time::advance(std::time::Duration::from_secs(1)).await;
-    assert_eq!(fetch.await, Ok(None));
+    assert!(futures_util::poll!(&mut first).is_pending());
+    assert_eq!(super::image_host_cooldown_remaining(&url), Some(cooldown));
+    tokio::pin!(queued);
+    assert!(futures_util::poll!(&mut queued).is_pending());
+    tokio::time::advance(cooldown - std::time::Duration::from_millis(1)).await;
+    assert!(futures_util::poll!(&mut first).is_pending());
+    assert!(futures_util::poll!(&mut queued).is_pending());
+    tokio::time::advance(std::time::Duration::from_millis(1)).await;
+    first.await;
+    queued.await;
 }
 
 #[test]

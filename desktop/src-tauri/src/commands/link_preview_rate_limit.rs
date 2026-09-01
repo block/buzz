@@ -2,11 +2,11 @@ use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
     sync::{LazyLock, Mutex, OnceLock},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use reqwest::header::RETRY_AFTER;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::{sync::Mutex as AsyncMutex, time::Instant};
 use url::Url;
 
 pub(super) const MAX_IMAGE_RETRY_AFTER: Duration = Duration::from_secs(60 * 60);

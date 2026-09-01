@@ -1,4 +1,4 @@
-use std::{future::Future, io::Cursor, net::IpAddr, time::Duration};
+use std::{io::Cursor, net::IpAddr, time::Duration};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use futures_util::StreamExt;
@@ -56,20 +56,7 @@ pub struct LinkPreviewMetadata {
 pub async fn fetch_link_preview_metadata(
     href: String,
 ) -> Result<Option<LinkPreviewMetadata>, String> {
-    fetch_link_preview_metadata_with(href, fetch_link_preview_metadata_for_url).await
-}
-
-/// Run metadata fetching without a native deadline. The renderer owns the
-/// finite budget after a composer generation is promoted into a send.
-async fn fetch_link_preview_metadata_with<F, Fut>(
-    href: String,
-    fetch: F,
-) -> Result<Option<LinkPreviewMetadata>, String>
-where
-    F: FnOnce(String) -> Fut,
-    Fut: Future<Output = Result<Option<LinkPreviewMetadata>, String>>,
-{
-    fetch(href).await
+    fetch_link_preview_metadata_for_url(href).await
 }
 
 async fn fetch_link_preview_metadata_for_url(
@@ -335,6 +322,32 @@ async fn fetch_sanitized_image_with_retry(
     .await
 }
 
+async fn wait_for_image_host_cooldown(
+    waited_for_cooldown: &mut bool,
+    retry_after: Duration,
+) -> bool {
+    if *waited_for_cooldown {
+        return false;
+    }
+    *waited_for_cooldown = true;
+    tokio::time::sleep(retry_after).await;
+    true
+}
+
+fn retryable_image_cooldown(
+    url: &Url,
+    retry_after: Option<Duration>,
+    waited_for_cooldown: &mut bool,
+) -> Option<Duration> {
+    let retry_after = retry_after?;
+    set_image_host_cooldown(url, retry_after);
+    if *waited_for_cooldown {
+        return None;
+    }
+    *waited_for_cooldown = true;
+    Some(retry_after)
+}
+
 async fn fetch_sanitized_image(
     mut url: Url,
     preserve_transparency: bool,
@@ -346,14 +359,12 @@ async fn fetch_sanitized_image(
     let mut waited_for_cooldown = false;
     while redirect_count <= MAX_REDIRECTS {
         if let Some(retry_after) = image_host_cooldown_remaining(&url) {
-            if waited_for_cooldown {
+            if !wait_for_image_host_cooldown(&mut waited_for_cooldown, retry_after).await {
                 return Err(ImageFetchError::Transient {
                     retry_after: Some(retry_after),
                     retry_inline: false,
                 });
             }
-            waited_for_cooldown = true;
-            tokio::time::sleep(retry_after).await;
             continue;
         }
 
@@ -393,8 +404,12 @@ async fn fetch_sanitized_image(
                 || status.is_server_error()
             {
                 let retry_after = retry_after_duration(&response);
-                if let Some(retry_after) = retry_after {
-                    set_image_host_cooldown(&url, retry_after);
+                if let Some(retry_after) =
+                    retryable_image_cooldown(&url, retry_after, &mut waited_for_cooldown)
+                {
+                    drop(_host_guard);
+                    tokio::time::sleep(retry_after).await;
+                    continue;
                 }
                 return Err(ImageFetchError::Transient {
                     retry_after,
