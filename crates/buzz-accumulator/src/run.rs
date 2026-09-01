@@ -212,6 +212,7 @@ mod tests {
             schema: "channel-digest@v1".to_string(),
             model: "haiku".to_string(),
             instructions: "Maintain the digest.".to_string(),
+            meta: None,
         }
     }
 

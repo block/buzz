@@ -207,47 +207,50 @@ impl Store {
         since: i64,
         until_exclusive: i64,
     ) -> Result<Vec<Signal>, sqlx::Error> {
-        let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
-            "SELECT id, channel, pubkey, kind, created_at, content FROM events WHERE created_at >= ",
-        );
-        qb.push_bind(since);
-        qb.push(" AND created_at < ");
-        qb.push_bind(until_exclusive);
-        if !selection.channels.is_empty() {
-            qb.push(" AND channel IN (");
-            let mut sep = qb.separated(", ");
-            for c in &selection.channels {
-                sep.push_bind(c);
-            }
-            qb.push(")");
-        }
-        if !selection.authors.is_empty() {
-            qb.push(" AND pubkey IN (");
-            let mut sep = qb.separated(", ");
-            for a in &selection.authors {
-                sep.push_bind(a);
-            }
-            qb.push(")");
-        }
-        let kinds = selection.effective_kinds();
-        qb.push(" AND kind IN (");
-        let mut sep = qb.separated(", ");
-        for k in kinds {
-            sep.push_bind(k as i64);
-        }
-        qb.push(") ORDER BY created_at ASC, id ASC");
+        let mut qb = signal_query(selection, since, until_exclusive);
+        qb.push(" ORDER BY created_at ASC, id ASC");
         let rows = qb.build().fetch_all(&self.pool).await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| Signal {
-                id: r.get("id"),
-                pubkey: r.get("pubkey"),
-                kind: r.get::<i64, _>("kind") as u32,
-                created_at: r.get("created_at"),
-                content: r.get("content"),
-                channel: r.get("channel"),
-            })
-            .collect())
+        Ok(rows.into_iter().map(row_to_signal).collect())
+    }
+
+    /// One page of signals for a selection, in `created_at ASC, id ASC` order.
+    ///
+    /// `after` is a keyset cursor — the `(created_at, id)` of the last row of
+    /// the previous page; rows strictly after it are returned. Content-addressed
+    /// ids make the cursor stable across live-tail inserts.
+    pub async fn page_signals(
+        &self,
+        selection: &Selection,
+        since: i64,
+        until_exclusive: i64,
+        after: Option<(i64, &str)>,
+        limit: i64,
+    ) -> Result<Vec<Signal>, sqlx::Error> {
+        let mut qb = signal_query(selection, since, until_exclusive);
+        if let Some((ts, id)) = after {
+            qb.push(" AND (created_at > ");
+            qb.push_bind(ts);
+            qb.push(" OR (created_at = ");
+            qb.push_bind(ts);
+            qb.push(" AND id > ");
+            qb.push_bind(id.to_string());
+            qb.push("))");
+        }
+        qb.push(" ORDER BY created_at ASC, id ASC LIMIT ");
+        qb.push_bind(limit);
+        let rows = qb.build().fetch_all(&self.pool).await?;
+        Ok(rows.into_iter().map(row_to_signal).collect())
+    }
+
+    /// Resolves one stored event by 64-hex id.
+    pub async fn event_by_id(&self, id: &str) -> Result<Option<Signal>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT id, channel, pubkey, kind, created_at, content FROM events WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(row_to_signal))
     }
 
     // ---- channels ----
@@ -515,6 +518,54 @@ impl Store {
     }
 }
 
+/// Base signal query: columns + window + selection predicates, no ordering.
+fn signal_query(
+    selection: &Selection,
+    since: i64,
+    until_exclusive: i64,
+) -> QueryBuilder<sqlx::Sqlite> {
+    let mut qb: QueryBuilder<sqlx::Sqlite> = QueryBuilder::new(
+        "SELECT id, channel, pubkey, kind, created_at, content FROM events WHERE created_at >= ",
+    );
+    qb.push_bind(since);
+    qb.push(" AND created_at < ");
+    qb.push_bind(until_exclusive);
+    if !selection.channels.is_empty() {
+        qb.push(" AND channel IN (");
+        let mut sep = qb.separated(", ");
+        for c in &selection.channels {
+            sep.push_bind(c);
+        }
+        qb.push(")");
+    }
+    if !selection.authors.is_empty() {
+        qb.push(" AND pubkey IN (");
+        let mut sep = qb.separated(", ");
+        for a in &selection.authors {
+            sep.push_bind(a);
+        }
+        qb.push(")");
+    }
+    qb.push(" AND kind IN (");
+    let mut sep = qb.separated(", ");
+    for k in selection.effective_kinds() {
+        sep.push_bind(k as i64);
+    }
+    qb.push(")");
+    qb
+}
+
+fn row_to_signal(r: sqlx::sqlite::SqliteRow) -> Signal {
+    Signal {
+        id: r.get("id"),
+        pubkey: r.get("pubkey"),
+        kind: r.get::<i64, _>("kind") as u32,
+        created_at: r.get("created_at"),
+        content: r.get("content"),
+        channel: r.get("channel"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,6 +678,7 @@ mod tests {
             schema: "channel-digest@v1".into(),
             model: "haiku".into(),
             instructions: "digest".into(),
+            meta: None,
         };
         spec.validate().expect("valid spec");
         store.put_fold(&spec, 1).await.expect("put");

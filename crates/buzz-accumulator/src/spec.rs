@@ -16,7 +16,7 @@ use crate::selection::Selection;
 pub const MAX_NAME_LEN: usize = 64;
 
 /// One fold definition.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FoldSpec {
     /// Fold name: 1–64 chars of `[a-z0-9-]`, no leading/trailing dash.
     pub name: String,
@@ -28,6 +28,14 @@ pub struct FoldSpec {
     pub model: String,
     /// Fold instructions (the prompt).
     pub instructions: String,
+    /// Free-form client-owned JSON, persisted verbatim with the spec.
+    ///
+    /// The engine never reads it and it is deliberately absent from the
+    /// cached-run comparison ([`crate::plan_run`] compares model, schema,
+    /// prompt hash, and selection field-by-field) — so a client can stash its
+    /// strategy metadata here without invalidating chains.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
 }
 
 impl FoldSpec {
@@ -89,6 +97,7 @@ mod tests {
             schema: "channel-digest@v1".to_string(),
             model: "haiku".to_string(),
             instructions: "Maintain the digest.".to_string(),
+            meta: None,
         }
     }
 
@@ -117,6 +126,15 @@ mod tests {
         let mut s = valid();
         s.instructions = "".to_string();
         assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn spec_json_without_meta_still_loads() {
+        // Specs persisted before the meta field existed must keep loading.
+        let legacy = serde_json::to_string(&valid()).expect("serialize");
+        assert!(!legacy.contains("meta"), "None meta must not serialize");
+        let loaded: FoldSpec = serde_json::from_str(&legacy).expect("deserialize");
+        assert_eq!(loaded.meta, None);
     }
 
     #[test]

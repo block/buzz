@@ -293,31 +293,48 @@ fn oldest_ts(page: &[StoredEvent]) -> Option<i64> {
 
 /// Mirrors kind-0 profiles so transcripts can show names. Cosmetic: failures
 /// are logged and skipped, never fatal.
+///
+/// Pages to the beginning (bounded): a single newest-first page lets recent
+/// ephemeral agent profiles crowd out the long-standing human ones, which is
+/// exactly backwards for display names.
 async fn backfill_profiles(conn: &mut NostrWsConnection, store: &Store) -> anyhow::Result<()> {
-    tokio::time::sleep(REQ_PACING).await;
-    let profiles = match request_until_eose(
-        conn,
-        "profiles-backfill",
-        json!({ "kinds": [0], "limit": PAGE_LIMIT }),
-        PAGE_TIMEOUT,
-    )
-    .await
-    {
-        Ok(ReqOutcome::Settled(events)) => events,
-        Ok(ReqOutcome::Denied(_)) | Err(_) => Vec::new(),
-    };
-    let count = profiles.len();
-    for ev in profiles {
-        let name = profile_name(&ev.content);
-        store
-            .upsert_profile(
-                &ev.pubkey.to_hex(),
-                name.as_deref(),
-                ev.created_at.as_secs() as i64,
-            )
-            .await?;
+    const MAX_PROFILE_PAGES: usize = 40;
+    let mut cursor = chrono::Utc::now().timestamp() + 1;
+    let mut total = 0usize;
+    for page_no in 0..MAX_PROFILE_PAGES {
+        tokio::time::sleep(REQ_PACING).await;
+        // Sub ids must be connection-unique (the relay acks CLOSE late).
+        let page = match request_until_eose(
+            conn,
+            &format!("profiles-backfill-{page_no}"),
+            json!({ "kinds": [0], "until": cursor, "limit": PAGE_LIMIT }),
+            PAGE_TIMEOUT,
+        )
+        .await
+        {
+            Ok(ReqOutcome::Settled(events)) => events,
+            Ok(ReqOutcome::Denied(_)) | Err(_) => Vec::new(),
+        };
+        let count = page.len();
+        total += count;
+        let mut oldest: Option<i64> = None;
+        for ev in &page {
+            let ts = ev.created_at.as_secs() as i64;
+            oldest = Some(oldest.map_or(ts, |o| o.min(ts)));
+            let name = profile_name(&ev.content);
+            store
+                .upsert_profile(&ev.pubkey.to_hex(), name.as_deref(), ts)
+                .await?;
+        }
+        if count < PAGE_LIMIT {
+            break;
+        }
+        // Inclusive `until` re-fetches the boundary second (upsert absorbs
+        // it); never let the cursor stall on a same-second stratum.
+        let next = oldest.unwrap_or(cursor - 1);
+        cursor = if next >= cursor { cursor - 1 } else { next };
     }
-    info!(profiles = count, "profile mirror refreshed");
+    info!(profiles = total, "profile mirror refreshed");
     Ok(())
 }
 

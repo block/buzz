@@ -4,6 +4,7 @@
 //! The daemon is headless; this is its only external surface. It binds
 //! loopback only — the mirror contains everything the key can read.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -38,7 +39,9 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/status", get(get_status))
         .route("/channels", get(get_channels))
+        .route("/events/{id}", get(get_event))
         .route("/select/preview", post(select_preview))
+        .route("/select/events", post(select_events))
         .route("/folds", get(list_folds))
         .route(
             "/folds/{name}",
@@ -138,7 +141,8 @@ struct SelectPreviewBody {
     window: WindowBody,
 }
 
-/// What would this selection materialize? Count + size, zero model calls.
+/// What would this selection materialize? Count + size + daily rhythm,
+/// zero model calls.
 async fn select_preview(
     State(s): State<AppState>,
     Json(body): Json<SelectPreviewBody>,
@@ -148,6 +152,13 @@ async fn select_preview(
     let (since, until) = body.window.resolve();
     let signals = s.store.query_signals(&selection, since, until).await?;
     let total_chars: usize = signals.iter().map(|sig| sig.content.len()).sum();
+    // Daily histogram (UTC day starts). Sparse: days with no matches are absent.
+    let mut buckets: BTreeMap<i64, i64> = BTreeMap::new();
+    for sig in &signals {
+        *buckets
+            .entry(sig.created_at.div_euclid(86_400) * 86_400)
+            .or_default() += 1;
+    }
     Ok(Json(json!({
         "selection": selection,
         "window": { "since": since, "until_exclusive": until },
@@ -155,7 +166,92 @@ async fn select_preview(
         "total_chars": total_chars,
         "oldest_ts": signals.first().map(|sig| sig.created_at),
         "newest_ts": signals.last().map(|sig| sig.created_at),
+        "buckets": buckets
+            .iter()
+            .map(|(day, n)| json!({ "day": day, "count": n }))
+            .collect::<Vec<_>>(),
     })))
+}
+
+/// Keyset cursor for [`select_events`]: the `(created_at, id)` of the last
+/// row of the previous page.
+#[derive(Debug, serde::Deserialize)]
+struct PageCursor {
+    created_at: i64,
+    id: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SelectEventsBody {
+    selection: Selection,
+    #[serde(flatten)]
+    window: WindowBody,
+    /// Page size; clamped to `1..=500`, default 100.
+    limit: Option<i64>,
+    /// Resume after this cursor (from the previous page's `next`).
+    after: Option<PageCursor>,
+}
+
+/// The actual matching events, paged, oldest first — the selection browser.
+async fn select_events(
+    State(s): State<AppState>,
+    Json(body): Json<SelectEventsBody>,
+) -> Result<Json<Value>, ApiError> {
+    let mut selection = body.selection;
+    selection.canonicalize()?;
+    let (since, until) = body.window.resolve();
+    let limit = body.limit.unwrap_or(100).clamp(1, 500);
+    let after = body.after.as_ref().map(|c| (c.created_at, c.id.as_str()));
+    // Fetch one extra row purely to learn whether a next page exists.
+    let mut page = s
+        .store
+        .page_signals(&selection, since, until, after, limit + 1)
+        .await?;
+    let has_more = page.len() as i64 > limit;
+    page.truncate(limit as usize);
+    let authors: BTreeSet<String> = page.iter().map(|sig| sig.pubkey.clone()).collect();
+    let names = s.store.names(&authors).await?;
+    let next = if has_more {
+        page.last()
+            .map(|sig| json!({ "created_at": sig.created_at, "id": sig.id }))
+    } else {
+        None
+    };
+    Ok(Json(json!({
+        "window": { "since": since, "until_exclusive": until },
+        "count": page.len(),
+        "next": next,
+        "events": page
+            .iter()
+            .map(|sig| event_json(sig, names.get(&sig.pubkey)))
+            .collect::<Vec<_>>(),
+    })))
+}
+
+/// Resolves one mirrored event by id — the citation-chip endpoint.
+async fn get_event(
+    State(s): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let sig = s
+        .store
+        .event_by_id(&id)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("event not found: {id}")))?;
+    let names = s.store.names(&BTreeSet::from([sig.pubkey.clone()])).await?;
+    Ok(Json(event_json(&sig, names.get(&sig.pubkey))))
+}
+
+fn event_json(sig: &crate::Signal, author_name: Option<&String>) -> Value {
+    json!({
+        "id": sig.id,
+        "channel": sig.channel,
+        "pubkey": sig.pubkey,
+        "author_name": author_name,
+        "kind": sig.kind,
+        "created_at": sig.created_at,
+        "content": sig.content,
+    })
 }
 
 async fn list_folds(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -187,6 +283,9 @@ struct PutFoldBody {
     instructions: Option<String>,
     /// Defaults to `channel-digest@v1` (the only schema).
     schema: Option<String>,
+    /// Free-form client-owned JSON, stored verbatim and never read by the
+    /// engine (see [`FoldSpec::meta`]).
+    meta: Option<serde_json::Value>,
 }
 
 async fn put_fold(
@@ -205,6 +304,7 @@ async fn put_fold(
             .instructions
             .filter(|i| !i.trim().is_empty())
             .unwrap_or_else(|| schema::CHANNEL_DIGEST_PROMPT.to_string()),
+        meta: body.meta,
     };
     spec.validate()?;
     s.store
@@ -415,6 +515,136 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
         assert_eq!(v["plan"], "stalled");
+    }
+
+    fn seeded(id_char: char, ts: i64) -> super::super::store::StoredEvent {
+        super::super::store::StoredEvent {
+            id: id_char.to_string().repeat(64),
+            channel: Some(CHANNEL.into()),
+            pubkey: "a".repeat(64),
+            kind: 9,
+            created_at: ts,
+            content: format!("msg-{id_char}"),
+            raw: "{}".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn event_lookup_resolves_and_404s() {
+        let state = test_state().await;
+        state
+            .store
+            .upsert_events(&[seeded('e', 100)])
+            .await
+            .expect("seed");
+        let app = router(state);
+        let id = "e".repeat(64);
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/events/{id}"))
+                    .body(Body::empty())
+                    .expect("req"),
+            )
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["id"], id.as_str());
+        assert_eq!(v["content"], "msg-e");
+        let missing = format!("/events/{}", "f".repeat(64));
+        let resp = app
+            .oneshot(Request::get(missing).body(Body::empty()).expect("req"))
+            .await
+            .expect("resp");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn select_events_pages_with_keyset_cursor() {
+        let state = test_state().await;
+        state
+            .store
+            .upsert_events(&[seeded('1', 100), seeded('2', 200), seeded('3', 300)])
+            .await
+            .expect("seed");
+        let app = router(state);
+        let page = |body: Value| {
+            Request::post("/select/events")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("req")
+        };
+        let body = json!({ "selection": { "channels": [CHANNEL] }, "limit": 2 });
+        let resp = app.clone().oneshot(page(body)).await.expect("resp");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["count"], 2);
+        assert_eq!(v["events"][0]["created_at"], 100);
+        let next = v["next"].clone();
+        assert_eq!(next["created_at"], 200);
+
+        let body = json!({ "selection": { "channels": [CHANNEL] }, "limit": 2, "after": next });
+        let v = body_json(app.oneshot(page(body)).await.expect("resp")).await;
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["events"][0]["created_at"], 300);
+        assert!(v["next"].is_null(), "last page must not offer a cursor");
+    }
+
+    #[tokio::test]
+    async fn preview_reports_daily_buckets() {
+        let state = test_state().await;
+        // Two events on day 0, one on day 2 (UTC-day starts).
+        state
+            .store
+            .upsert_events(&[
+                seeded('1', 100),
+                seeded('2', 200),
+                seeded('3', 2 * 86_400 + 5),
+            ])
+            .await
+            .expect("seed");
+        let app = router(state);
+        let req = Request::post("/select/preview")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({ "selection": { "channels": [CHANNEL] } }).to_string(),
+            ))
+            .expect("req");
+        let v = body_json(app.oneshot(req).await.expect("resp")).await;
+        assert_eq!(v["count"], 3);
+        assert_eq!(
+            v["buckets"],
+            json!([
+                { "day": 0, "count": 2 },
+                { "day": 2 * 86_400, "count": 1 },
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn fold_meta_roundtrips_verbatim() {
+        let state = test_state().await;
+        let app = router(state);
+        let meta = json!({ "strategy": { "kind": "partition", "period": "isoweek" } });
+        let put = Request::put("/folds/digest--2026-w35")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "selection": { "channels": [CHANNEL] },
+                    "model": "haiku",
+                    "meta": meta,
+                })
+                .to_string(),
+            ))
+            .expect("req");
+        let v = body_json(app.clone().oneshot(put).await.expect("resp")).await;
+        assert_eq!(v["saved"]["meta"], meta);
+        let get = Request::get("/folds/digest--2026-w35")
+            .body(Body::empty())
+            .expect("req");
+        let v = body_json(app.oneshot(get).await.expect("resp")).await;
+        assert_eq!(v["spec"]["meta"], meta);
     }
 
     #[tokio::test]

@@ -269,6 +269,7 @@ mod tests {
             schema: "channel-digest@v1".into(),
             model: "test-model".into(),
             instructions: "digest the channel".into(),
+            meta: None,
         };
         spec.validate().expect("valid");
         store.put_fold(&spec, 1).await.expect("put fold");
