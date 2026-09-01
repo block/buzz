@@ -489,6 +489,24 @@
     },
     {
       "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-fable-5-1",
+      "registry_label": "Claude Fable 5.1",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:anthropic-adaptive-xhigh-fable-5",
+      "_source": "models.dev anthropic catalog label; Databricks workspace endpoint is absent from its provider catalog"
+    },
+    {
+      "provider": "databricks_v2",
       "raw_model_id": "databricks-claude-opus-4-8",
       "registry_label": "Claude Opus 4.8",
       "thinking_mode": "adaptive",

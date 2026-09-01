@@ -760,6 +760,26 @@
     }
   },
   {
+    "id": "dbv2-claude-fable-5-1-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-claude-fable-5-1",
+    "_note": "Probes the canonical Databricks Fable 5.1 endpoint record.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": "Claude Fable 5.1"
+    }
+  },
+  {
     "id": "dbv2-claude-opus-4-8-exact-record-probe",
     "provider": "databricks_v2",
     "raw_model_id": "databricks-claude-opus-4-8",
@@ -2708,10 +2728,10 @@
     }
   },
   {
-    "id": "dbv2-uc-goose-deepseek-strip-probe",
+    "id": "dbv2-uc-fqn-deepseek-strip-probe",
     "provider": "databricks_v2",
-    "raw_model_id": "data_workflow_tools.goose.goose-deepseek-v4-pro-0813",
-    "_note": "Probes strip parity on a goose- prefixed UC FQN carrying the deepseek- token.",
+    "raw_model_id": "system.ai.deepseek-v4-pro-0813",
+    "_note": "Probes strip parity on a UC FQN carrying the deepseek- token.",
     "expect": {
       "thinking_mode": "none",
       "supported_efforts": [

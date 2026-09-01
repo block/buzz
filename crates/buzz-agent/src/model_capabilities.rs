@@ -634,6 +634,7 @@ mod tests {
     Q::Vector { id: "resolver-exact-raw-id-probe", provider: "databricks_v2", raw_model_id: "databricks-gpt-5-4-mini", note: Some("Probes a raw id that has an exact record.") },
     Q::Vector { id: "dbv2-claude-fable-5-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-claude-fable-5", note: Some("Probes the canonical Databricks Fable 5 endpoint record.") },
     Q::Vector { id: "dbv2-goose-claude-fable-5-alias-probe", provider: "databricks_v2", raw_model_id: "goose-claude-fable-5", note: Some("Probes a prefixed alias of the Databricks Fable 5 endpoint.") },
+    Q::Vector { id: "dbv2-claude-fable-5-1-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-claude-fable-5-1", note: Some("Probes the canonical Databricks Fable 5.1 endpoint record.") },
     Q::Vector { id: "dbv2-claude-opus-4-8-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-claude-opus-4-8", note: Some("Probes the canonical Databricks Opus 4.8 endpoint record.") },
     Q::Vector { id: "dbv2-goose-claude-opus-4-8-alias-probe", provider: "databricks_v2", raw_model_id: "goose-claude-opus-4-8", note: Some("Probes a prefixed alias of the Databricks Opus 4.8 endpoint.") },
     Q::Vector { id: "dbv2-claude-opus-5-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-claude-opus-5", note: Some("Probes the canonical Databricks Opus 5 endpoint record.") },
@@ -743,7 +744,7 @@ mod tests {
     Q::Vector { id: "dbv2-inkling-exact-record-probe", provider: "databricks_v2", raw_model_id: "databricks-inkling", note: Some("Probes the Inkling endpoint record and label.") },
     Q::Vector { id: "dbv2-uc-fqn-gemini-3-5-flash-strip-probe", provider: "databricks_v2", raw_model_id: "system.ai.gemini-3-5-flash", note: Some("Probes strip parity on a system.ai. UC FQN carrying the gemini- token (resolve carries no label; the alias label path is unit-tested).") },
     Q::Vector { id: "dbv2-uc-fqn-meta-llama-strip-probe", provider: "databricks_v2", raw_model_id: "system.ai.meta-llama-3-3-70b-instruct", note: Some("Probes strip parity on a UC FQN where the llama- token strips through meta-.") },
-    Q::Vector { id: "dbv2-uc-goose-deepseek-strip-probe", provider: "databricks_v2", raw_model_id: "data_workflow_tools.goose.goose-deepseek-v4-pro-0813", note: Some("Probes strip parity on a goose- prefixed UC FQN carrying the deepseek- token.") },
+    Q::Vector { id: "dbv2-uc-fqn-deepseek-strip-probe", provider: "databricks_v2", raw_model_id: "system.ai.deepseek-v4-pro-0813", note: Some("Probes strip parity on a UC FQN carrying the deepseek- token.") },
     Q::Vector { id: "dbv2-uc-fqn-inkling-strip-probe", provider: "databricks_v2", raw_model_id: "system.ai.inkling", note: Some("Probes strip parity on a UC FQN carrying the bare inkling token.") },
     Q::Section { group: "Label/capability token isolation probes (#6955 review pass 1)", note: Some("Pins that label_family_tokens (the UC-humanization superset) never leaks into capability resolve(): capability stripping still uses only claude-/gpt-/kimi-, so a label token appearing before a gpt- marker must NOT displace the gpt-5-pro exact profile.") },
     Q::Vector { id: "isolation-openai-gemini-gpt-5-pro-probe", provider: "openai", raw_model_id: "tenant-gemini-gpt-5-pro", note: Some("The gemini- label token must not strip here; capability resolve keeps the gpt-5-pro high-only profile.") },
@@ -843,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn corpus_has_exactly_139_executable_vectors() {
+    fn corpus_has_exactly_140_executable_vectors() {
         // Locks the vector count so a silent INPUTS edit can't quietly drop
         // coverage; must equal the gate in the TS harness
         // (modelCapabilitiesCorpus.test.mjs).
@@ -852,7 +853,7 @@ mod tests {
             .filter(|q| matches!(q, Q::Vector { .. }))
             .count();
         assert_eq!(
-            vectors, 139,
+            vectors, 140,
             "corpus executable-vector count changed; update this gate deliberately"
         );
     }
@@ -873,7 +874,7 @@ mod tests {
 
     #[test]
     fn databricks_v2_fqn_uses_neutral_concrete_unknown_capabilities() {
-        let fqn = resolve("databricks_v2", "data_workflow_tools.goose.goose-kimi-k3");
+        let fqn = resolve("databricks_v2", "system.ai.kimi-k3");
         let fallback = resolve("databricks_v2", "some-unknown-xyz");
         assert_eq!(fqn.thinking_mode, fallback.thinking_mode);
         assert_eq!(fqn.supported_efforts, fallback.supported_efforts);
@@ -1056,16 +1057,10 @@ mod tests {
             ("system.ai.qwen35-122b-a10b", "Qwen3.5 122B A10B"),
             ("system.ai.gemma-3-12b", "Gemma 3 12B"),
             ("system.ai.inkling", "Inkling"),
-            (
-                "data_workflow_tools.goose.goose-deepseek-v4-flash-0731",
-                "DeepSeek V4 Flash",
-            ),
-            ("data_workflow_tools.goose.goose-glm-5-3", "GLM-5.3"),
-            (
-                "data_workflow_tools.goose.goose-glm-5-3-flash",
-                "GLM-5.3 Flash",
-            ),
-            ("data_workflow_tools.goose.goose-grok-4-6", "Grok 4.6"),
+            ("system.ai.deepseek-v4-flash-0731", "DeepSeek V4 Flash"),
+            ("system.ai.glm-5-3", "GLM-5.3"),
+            ("system.ai.glm-5-3-flash", "GLM-5.3 Flash"),
+            ("system.ai.grok-4-6", "Grok 4.6"),
         ] {
             assert_eq!(databricks_registry_label(fqn), Some(label), "fqn={fqn}");
         }
