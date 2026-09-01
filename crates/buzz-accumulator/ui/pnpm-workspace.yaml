@@ -1,0 +1,6 @@
+# Deliberately its own workspace root: the lab is standalone tooling and must
+# not join the repo-level pnpm workspace (or `just ci`'s desktop/web checks).
+packages:
+  - "."
+allowBuilds:
+  esbuild: true
