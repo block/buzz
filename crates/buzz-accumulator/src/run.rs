@@ -157,10 +157,12 @@ pub fn plan_run(
 
 /// Validate model `output` for `plan` and produce the next artifact version.
 ///
-/// On any contract violation this returns [`Error::Nonconforming`] and the
-/// caller must persist nothing. Coverage is computed from exactly the signals
-/// the plan showed; append-section history from `prior` is spliced back
-/// mechanically, so it survives regardless of what the model emitted.
+/// On a structural violation (wrong H1 sections) this returns
+/// [`Error::Nonconforming`] and the caller must persist nothing. Coverage is
+/// computed from exactly the signals the plan showed — provenance is
+/// engine-owned, not read from the output — and append-section history from
+/// `prior` is spliced back mechanically, so it survives regardless of what
+/// the model emitted.
 pub fn complete_run(
     spec: &FoldSpec,
     prior: Option<&ArtifactPayload>,
@@ -170,7 +172,7 @@ pub fn complete_run(
 ) -> Result<ArtifactPayload, Error> {
     let sch = &schema::CHANNEL_DIGEST_V1;
     let shown_ids: Vec<String> = plan.shown.iter().map(|s| s.id.clone()).collect();
-    validate_output(sch, output, prior.map(|p| p.output.as_str()), &shown_ids)?;
+    validate_output(sch, output)?;
     let spliced = splice_append_sections(sch, prior.map(|p| p.output.as_str()), output);
     // Taint travels with the chain: once a channel's events fold in, every
     // later version keeps carrying that channel, even after a selection edit.
@@ -499,7 +501,7 @@ mod tests {
     }
 
     #[test]
-    fn nonconforming_output_is_refused_and_nothing_persists() {
+    fn wrong_sections_are_refused_but_citations_never_are() {
         let spec = spec();
         let b = hex_id('b');
         let plan = plan_run(
@@ -513,16 +515,15 @@ mod tests {
         let Plan::Ready(run) = plan else {
             panic!("expected Ready");
         };
-        // Fabricated citation.
-        let fabricated = digest(&format!("- invented [event:{}]", hex_id('c')));
-        assert!(matches!(
-            complete_run(&spec, None, &run, &fabricated, 0),
-            Err(Error::Nonconforming(_))
-        ));
-        // Wrong sections.
+        // Wrong sections: the structure is the contract, still refused.
         assert!(matches!(
             complete_run(&spec, None, &run, "# Nope\n\nbody\n", 0),
             Err(Error::Nonconforming(_))
         ));
+        // An unshown citation persists: coverage still seals exactly what the
+        // plan showed, independent of what the text cites.
+        let unshown = digest(&format!("- quoted id [event:{}]", hex_id('c')));
+        let v1 = complete_run(&spec, None, &run, &unshown, 0).expect("v1");
+        assert_eq!(v1.shown_ids, vec![b]);
     }
 }

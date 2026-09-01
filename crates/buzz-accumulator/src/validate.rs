@@ -1,10 +1,11 @@
 //! Output-contract validation and the engine splice.
 //!
-//! Nonconforming output is refused and nothing persists. The rules here are
-//! ones a model can genuinely meet — exact H1 sections, citations drawn only
-//! from the ids it was shown — never rules it could only satisfy by lying.
-
-use std::collections::BTreeSet;
+//! Only the section STRUCTURE is validated — it is what the splice and every
+//! reader depend on. Provenance is engine-owned and deterministic (the run's
+//! `shown_ids` and coverage window are computed from the plan, never from
+//! model output), so `[event:…]` citations in the text are best-effort links
+//! for the reader, not a validated contract: a sloppy citation renders as a
+//! dead chip instead of refusing a paid run.
 
 use crate::error::Error;
 use crate::schema::ArtifactSchema;
@@ -78,94 +79,18 @@ pub fn headings(output: &str) -> Vec<String> {
         .collect()
 }
 
-/// Extract cited ids from `[event:…]` brackets under a strict grammar: one
-/// bracket, one id.
-///
-/// The bracket's trimmed content is kept verbatim, and only content that is
-/// exactly 64 lowercase hex characters can ever match a real shown id —
-/// anything else (shortened id, several ids jammed together, prose) fails
-/// validation loudly as a citation of nothing.
-pub fn cited_event_ids(citation_text: &str) -> BTreeSet<String> {
-    let mut cited = BTreeSet::new();
-    let mut rest = citation_text;
-    while let Some(open) = rest.find("[event:") {
-        let inner_start = open + "[event:".len();
-        let Some(close_rel) = rest[inner_start..].find(']') else {
-            break;
-        };
-        let chunk = rest[inner_start..inner_start + close_rel].trim();
-        rest = &rest[inner_start + close_rel + 1..];
-        if !chunk.is_empty() {
-            cited.insert(chunk.to_string());
-        }
-    }
-    cited
-}
-
-/// Validate model output against the artifact contract.
-///
-/// - The output must have exactly the schema's H1 sections, in order.
-/// - Append-section citations are always judged: every cited id must be one of
-///   this run's `source_event_ids` — a run that was shown nothing may cite
-///   nothing. Citations the model merely re-emitted from the prior artifact's
-///   append sections are stripped first, so only this run's citations are
-///   judged against this run's shown ids.
-/// - When signals were shown, the append sections must cite ≥ 1 of them.
-///
-/// Any failure is [`Error::Nonconforming`]: the caller persists nothing.
-pub fn validate_output(
-    schema: &ArtifactSchema,
-    output: &str,
-    previous_output: Option<&str>,
-    source_event_ids: &[String],
-) -> Result<(), Error> {
+/// Validate model output against the artifact contract: the output must have
+/// exactly the schema's H1 sections, in order. That is the whole contract —
+/// the splice and the reader depend on the structure; nothing else about the
+/// text is judged. Failure is [`Error::Nonconforming`]: the caller persists
+/// nothing.
+pub fn validate_output(schema: &ArtifactSchema, output: &str) -> Result<(), Error> {
     let found = headings(output);
     if found != schema.sections {
         return Err(Error::Nonconforming(format!(
             "output does not conform to {}: expected H1 sections {:?}, got {:?}",
             schema.name, schema.sections, found
         )));
-    }
-    if schema.append_sections.is_empty() {
-        if source_event_ids.is_empty() {
-            return Ok(());
-        }
-        return Err(Error::Nonconforming(format!(
-            "schema {:?} has no append section for event citations",
-            schema.name
-        )));
-    }
-    let joined = |doc: &str| {
-        schema
-            .append_sections
-            .iter()
-            .map(|name| section(doc, name))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let citation_text = joined(output);
-    let prior_citation_text = joined(previous_output.unwrap_or(""));
-    let new_citation_text = if !prior_citation_text.is_empty() {
-        citation_text.replacen(&prior_citation_text, "", 1)
-    } else {
-        citation_text
-    };
-    let cited = cited_event_ids(&new_citation_text);
-    let allowed: BTreeSet<&str> = source_event_ids.iter().map(String::as_str).collect();
-    let fabricated: Vec<&str> = cited
-        .iter()
-        .map(String::as_str)
-        .filter(|id| !allowed.contains(id))
-        .collect();
-    if !fabricated.is_empty() {
-        return Err(Error::Nonconforming(format!(
-            "append sections cite event ids that were not shown this run: {fabricated:?}"
-        )));
-    }
-    if !source_event_ids.is_empty() && cited.is_empty() {
-        return Err(Error::Nonconforming(
-            "append sections are missing a source event citation".into(),
-        ));
     }
     Ok(())
 }
@@ -241,91 +166,22 @@ mod tests {
     #[test]
     fn heading_mismatch_is_refused() {
         let out = "# Wrong\n\nx\n\n# Log\n\n- e\n";
-        let err = validate_output(&CHANNEL_DIGEST_V1, out, None, &[id('a')]);
+        let err = validate_output(&CHANNEL_DIGEST_V1, out);
         assert!(matches!(err, Err(Error::Nonconforming(_))));
     }
 
     #[test]
-    fn fabricated_citation_is_refused() {
-        let out = digest(&format!("- made up [event:{}]", id('c')));
-        let err = validate_output(&CHANNEL_DIGEST_V1, &out, None, &[id('a')]);
-        assert!(matches!(err, Err(Error::Nonconforming(_))));
-    }
-
-    #[test]
-    fn run_shown_nothing_may_cite_nothing() {
-        // A config-only rerun shows no signals: an empty Log passes…
-        assert!(validate_output(&CHANNEL_DIGEST_V1, &digest(""), None, &[]).is_ok());
-        // …but any citation is a fabrication and is refused.
-        let out = digest(&format!("- invented [event:{}]", id('c')));
-        let err = validate_output(&CHANNEL_DIGEST_V1, &out, None, &[]);
-        assert!(matches!(err, Err(Error::Nonconforming(_))));
-    }
-
-    #[test]
-    fn missing_citation_is_refused() {
-        let out = digest("- no citation here");
-        let err = validate_output(&CHANNEL_DIGEST_V1, &out, None, &[id('a')]);
-        assert!(matches!(err, Err(Error::Nonconforming(_))));
-    }
-
-    #[test]
-    fn valid_citation_passes() {
-        let out = digest(&format!("- did a thing [event:{}]", id('a')));
-        assert!(validate_output(&CHANNEL_DIGEST_V1, &out, None, &[id('a')]).is_ok());
-    }
-
-    #[test]
-    fn jammed_or_short_brackets_are_refused_not_split() {
-        // Several ids jammed into one bracket: the whole chunk is one
-        // (unmatchable) citation, so the output is refused even though both
-        // ids were legitimately shown.
-        let jam = format!("- both [event:{}, event:{}]", id('a'), id('b'));
-        let err = validate_output(&CHANNEL_DIGEST_V1, &digest(&jam), None, &[id('a'), id('b')]);
-        assert!(matches!(err, Err(Error::Nonconforming(_))));
-        // A shortened id is kept verbatim and can never match a shown id.
-        let short = cited_event_ids("[event:abc123]");
-        assert_eq!(short.into_iter().collect::<Vec<_>>(), vec!["abc123"]);
-    }
-
-    #[test]
-    fn hex_run_with_trailing_garbage_is_not_a_valid_prefix_id() {
-        // 64 valid hex chars + 6 more hex chars: must NOT yield the 64-char
-        // prefix (which could match a real shown id); the chunk is verbatim.
-        let run = format!("{}abcdef", id('a'));
-        let cited = cited_event_ids(&format!("[event:{run}]"));
-        assert!(!cited.contains(&id('a')));
-        assert!(cited.contains(&run));
-        let err = validate_output(
-            &CHANNEL_DIGEST_V1,
-            &digest(&format!("- padded [event:{run}]")),
-            None,
-            &[id('a')],
-        );
-        assert!(matches!(err, Err(Error::Nonconforming(_))));
-    }
-
-    #[test]
-    fn prior_citations_do_not_satisfy_a_new_run() {
-        let prior = digest(&format!("- old entry [event:{}]", id('a')));
-        // Model re-emits the prior Log verbatim and adds nothing new: refused.
-        let repeat_only = digest(&format!("- old entry [event:{}]", id('a')));
-        let err = validate_output(&CHANNEL_DIGEST_V1, &repeat_only, Some(&prior), &[id('b')]);
-        assert!(matches!(err, Err(Error::Nonconforming(_))));
-        // Repeat plus a genuinely new cited entry: the repeat is stripped, the
-        // new citation is judged against this run's shown ids.
-        let repeat_plus_new = digest(&format!(
-            "- old entry [event:{}]\n- new entry [event:{}]",
-            id('a'),
-            id('b')
-        ));
-        assert!(validate_output(
-            &CHANNEL_DIGEST_V1,
-            &repeat_plus_new,
-            Some(&prior),
-            &[id('b')]
-        )
-        .is_ok());
+    fn conforming_sections_pass_regardless_of_citations() {
+        // Provenance is engine-owned (shown_ids + coverage window on the
+        // artifact); citations in the text are best-effort links, never a
+        // refusal. Unshown, missing, and malformed citations all pass —
+        // an unresolvable chip in the reader beats losing a paid run.
+        assert!(validate_output(&CHANNEL_DIGEST_V1, &digest("")).is_ok());
+        assert!(validate_output(&CHANNEL_DIGEST_V1, &digest("- no citation here")).is_ok());
+        let unshown = digest(&format!("- quoted from message text [event:{}]", id('c')));
+        assert!(validate_output(&CHANNEL_DIGEST_V1, &unshown).is_ok());
+        let malformed = digest("- sloppy [event:abc123]");
+        assert!(validate_output(&CHANNEL_DIGEST_V1, &malformed).is_ok());
     }
 
     #[test]
