@@ -274,7 +274,7 @@ test("a second wake for the same agent is suppressed while the first is in fligh
   assert.equal(
     second,
     false,
-    "the suppressed call must report that it fired nothing, so the send-perf summary does not count a wake that never happened",
+    "the suppressed call must report that it fired nothing",
   );
   rendered.unmount();
 });

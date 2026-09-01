@@ -1929,12 +1929,6 @@ test("relay-only allowlisted agents emit a p tag when sent", async ({
   expect(commandCount(commands, "list_relay_agents")).toBe(
     commandCount(baselineCommands, "list_relay_agents"),
   );
-  // The send-perf probe mirrors exactly one summary per send. Zero would mean
-  // the instrumentation went silent; two would mean a step was double-counted
-  // or `completeSend`'s `finally` reported more than once.
-  expect(commandCount(commands, "log_send_perf")).toBe(
-    commandCount(baselineCommands, "log_send_perf") + 1,
-  );
 });
 
 test("managed agents keep their p tag when relay discovery fails before send", async ({

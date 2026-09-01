@@ -11,12 +11,6 @@ import {
 
 /** What the send path learned while making the mentioned agents ready. */
 export type EnsureAgentMentionsReadyResult = {
-  /**
-   * Agent wakes this call actually fired. A wake is detached, so a send that
-   * fired one should still read as fast as one that did not; a wake already in
-   * flight is suppressed and does not count.
-   */
-  detachedStarts: number;
   errors: string[];
   pubkeys: string[];
   /**
@@ -72,7 +66,6 @@ export function useEnsureAgentMentionsReady({
     ) => {
       if (!capturedChannelId || mentionPubkeys.length === 0) {
         return {
-          detachedStarts: 0,
           errors: [] as string[],
           pubkeys: [] as string[],
           wroteRelayState: false,
@@ -93,10 +86,6 @@ export function useEnsureAgentMentionsReady({
       const errors: string[] = [];
       const pubkeys: string[] = [];
       let wroteRelayState = false;
-      let detachedStarts = 0;
-      const countDetachedStart = (agent: ManagedAgent) => {
-        if (startAgentDetached(agent)) detachedStarts += 1;
-      };
       for (const pubkey of uniqueNormalizedPubkeys(mentionPubkeys)) {
         const agent = managedAgentsByPubkey.get(pubkey);
         if (!agent) continue;
@@ -120,14 +109,14 @@ export function useEnsureAgentMentionsReady({
               (!isProviderBackedAgent(readyAgent) &&
                 !isManagedAgentRunning(readyAgent))
             ) {
-              countDetachedStart(readyAgent);
+              startAgentDetached(readyAgent);
             }
           } else {
             await attachAgentToChannel({
               channelId: capturedChannelId,
               agent: readyAgent,
               role: "bot",
-              detachedStart: countDetachedStart,
+              detachedStart: startAgentDetached,
             });
             wroteRelayState = true;
           }
@@ -139,7 +128,6 @@ export function useEnsureAgentMentionsReady({
         }
       }
       return {
-        detachedStarts,
         errors,
         pubkeys: uniqueNormalizedPubkeys(pubkeys),
         wroteRelayState,

@@ -93,26 +93,21 @@ pub(super) fn advance_relay_cursor(filter: &mut serde_json::Value, page: &[nostr
     filter["before_id"] = serde_json::json!(last.id.to_hex());
 }
 
-/// Returns the events plus the number of relay pages it took to read them —
-/// membership paging is sequential, so the page count is the multiplier on this
-/// phase's contribution to send latency.
 async fn query_all_relay_pages(
     state: &AppState,
     mut filter: serde_json::Value,
-) -> Result<(Vec<nostr::Event>, usize), String> {
+) -> Result<Vec<nostr::Event>, String> {
     filter["limit"] = serde_json::json!(RELAY_DIRECTORY_PAGE_SIZE);
     let mut events = Vec::new();
-    let mut pages = 0;
     loop {
         let page = query_relay(state, &[filter.clone()]).await?;
-        pages += 1;
         let done = page.len() < RELAY_DIRECTORY_PAGE_SIZE;
         if !done {
             advance_relay_cursor(&mut filter, &page);
         }
         events.extend(page);
         if done {
-            return Ok((events, pages));
+            return Ok(events);
         }
     }
 }
@@ -134,15 +129,10 @@ async fn list_relay_agents_for_selection(
     requested_pubkeys: Option<&std::collections::HashSet<String>>,
     channel_id: Option<&str>,
 ) -> Result<Vec<RelayAgentInfo>, String> {
-    // Every agent-mention send runs this rebuild at least once, and its phases
-    // are sequential, so each one is directly on the send's critical path.
-    let rebuild = crate::send_perf::Phase::start();
     let viewer_pubkey = current_user_pubkey(state)?;
-    let relay_self = crate::send_perf::Phase::start();
     let relay_pubkey = identity_archive::fetch_relay_self(state)
         .await?
         .ok_or_else(|| "relay agent membership authority is unavailable".to_string())?;
-    let relay_self_ms = relay_self.ms();
 
     // Owned identities are relay state, even when this Desktop has never run
     // them or they have not joined a channel yet. Owner-authored coordinates
@@ -155,7 +145,7 @@ async fn list_relay_agents_for_selection(
     if let Some(requested_pubkeys) = requested_pubkeys {
         owned_filter["#d"] = serde_json::json!(requested_pubkeys);
     }
-    let (owned_events, _owned_pages) = query_all_relay_pages(state, owned_filter)
+    let owned_events = query_all_relay_pages(state, owned_filter)
         .await
         .map_err(|error| format!("relay owned-agent query failed: {error}"))?;
     let owned_candidates = nostr_convert::managed_agent_pubkeys_from_events(&owned_events);
@@ -171,11 +161,9 @@ async fn list_relay_agents_for_selection(
     if let Some(channel_id) = channel_id {
         membership_filter["#d"] = serde_json::json!([channel_id]);
     }
-    let membership = crate::send_perf::Phase::start();
-    let (membership_events, membership_pages) = query_all_relay_pages(state, membership_filter)
+    let membership_events = query_all_relay_pages(state, membership_filter)
         .await
         .map_err(|error| format!("relay agent channel-membership query failed: {error}"))?;
-    let membership_ms = membership.ms();
     let mut member_agent_channel_ids = nostr_convert::member_agent_channel_ids_from_events(
         &membership_events,
         &relay_pubkey,
@@ -184,21 +172,6 @@ async fn list_relay_agents_for_selection(
     if let Some(requested_pubkeys) = requested_pubkeys {
         member_agent_channel_ids.retain(|pubkey, _| requested_pubkeys.contains(pubkey));
     }
-    // `requested=all` is the autocomplete-facing full rebuild; a number is the
-    // send path revalidating exactly the mentions it is about to publish.
-    let requested =
-        requested_pubkeys.map_or_else(|| "all".to_string(), |pubkeys| pubkeys.len().to_string());
-    let log_rebuild = |candidates: usize, batches_ms: f64, policy_ms: f64| {
-        crate::send_perf::log(
-            "relay_directory",
-            &format!(
-                "requested={requested} candidates={candidates} membership_pages={membership_pages} \
-                 relay_self_ms={relay_self_ms:.1} membership_ms={membership_ms:.1} \
-                 batches_ms={batches_ms:.1} policy_ms={policy_ms:.1} total_ms={:.1}",
-                rebuild.ms()
-            ),
-        );
-    };
     let candidate_pubkeys: Vec<String> = member_agent_channel_ids
         .keys()
         .cloned()
@@ -207,7 +180,6 @@ async fn list_relay_agents_for_selection(
         .into_iter()
         .collect();
     if candidate_pubkeys.is_empty() {
-        log_rebuild(0, 0.0, 0.0);
         return Ok(Vec::new());
     }
 
@@ -217,7 +189,6 @@ async fn list_relay_agents_for_selection(
     // phases, so its runtime-directory and owner-profile phases below stay
     // within the ceiling even though `try_join!` runs them concurrently.
     let semaphore = tokio::sync::Semaphore::new(RELAY_DIRECTORY_MAX_CONCURRENCY);
-    let batches = crate::send_perf::Phase::start();
     let (directory_events, profile_events) = tokio::try_join!(
         query_filter_batches(
             state,
@@ -232,7 +203,6 @@ async fn list_relay_agents_for_selection(
             "relay agent owner-profile query failed",
         ),
     )?;
-    let batches_ms = batches.ms();
 
     // Only the agent's signed NIP-OA profile can name the owner coordinate to
     // query. Each exact `(owner, d=agent)` filter returns at most one current
@@ -240,7 +210,6 @@ async fn list_relay_agents_for_selection(
     // the authentic policy out of a bounded result page.
     let verified_owners = nostr_convert::verified_agent_owners_from_profiles(&profile_events);
     let managed_filters = managed_policy_filters(&candidate_pubkeys, &verified_owners);
-    let policy = crate::send_perf::Phase::start();
     let managed_agent_events = query_filter_batches(
         state,
         &semaphore,
@@ -248,7 +217,6 @@ async fn list_relay_agents_for_selection(
         "relay agent managed-policy query failed",
     )
     .await?;
-    log_rebuild(candidate_pubkeys.len(), batches_ms, policy.ms());
 
     let mut agents = nostr_convert::relay_agents_from_directory_events(
         &directory_events,

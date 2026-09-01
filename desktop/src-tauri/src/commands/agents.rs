@@ -827,18 +827,6 @@ pub async fn start_managed_agent(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<ManagedAgentSummary, String> {
-    // Publish-first sends detach this start, so where this line lands relative
-    // to `send_channel_message` in the stream is the proof the wake really is
-    // off the critical path; `replay_floor` is what puts the already-published
-    // mention inside the spawned harness's first subscription window.
-    crate::send_perf::log(
-        "start_managed_agent",
-        &format!(
-            "pubkey={} replay_floor={}",
-            pubkey.chars().take(8).collect::<String>(),
-            replay_floor_unix.map_or_else(|| "none".to_string(), |floor| floor.to_string())
-        ),
-    );
     // Snapshot the workspace owner pubkey for the legacy auth_tag fallback.
     // Read outside the records lock to keep lock ordering simple.
     let owner_hex = workspace_owner_hex(&state)?;

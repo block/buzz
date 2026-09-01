@@ -22,18 +22,12 @@ pub async fn submit_signed_event_at_with_keys(
     if event.pubkey != keys.public_key() {
         return Err("signed event does not match the publishing identity".to_string());
     }
-    // The client-side admission gate can park a publish for seconds after a
-    // relay 429, and nothing else surfaces that wait — split it from the HTTP
-    // round trip so a slow send can be attributed to one or the other.
-    let gate = crate::send_perf::Phase::start();
     crate::relay_admission::wait_for_rate_limit().await;
-    let rate_limit_wait_ms = gate.ms();
     let url = format!("{}/events", api_base_url.trim_end_matches('/'));
     let body_bytes = event.as_json().into_bytes();
     crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "relay event submit")?;
     let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
 
-    let http = crate::send_perf::Phase::start();
     let response = state
         .http_client
         .post(&url)
@@ -43,14 +37,6 @@ pub async fn submit_signed_event_at_with_keys(
         .send()
         .await
         .map_err(|e| classify_request_error(&e))?;
-    crate::send_perf::log(
-        "submit_event",
-        &format!(
-            "kind={} rate_limit_wait_ms={rate_limit_wait_ms:.1} http_ms={:.1}",
-            event.kind.as_u16(),
-            http.ms()
-        ),
-    );
 
     if !response.status().is_success() {
         return Err(relay_error_message(response).await);

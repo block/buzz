@@ -86,14 +86,13 @@ function warnAgentMayNotRespond(agentName: string, detail: string): void {
  * to prevent, and its dedupe key would collapse to a relay-less one shared
  * across communities. Waiting for the query instead of refusing is not an
  * option: reading the scope once it resolves is a post-send read, which is the
- * thing the per-render capture rules out. Refusing is visible (a toast, and no
- * wake counted) and the user's next send re-fires it.
+ * thing the per-render capture rules out. Refusing is visible (a toast, and a
+ * `false` return) and the user's next send re-fires it.
  *
  * Returns whether this call actually fired a wake: a start already in flight
  * for the same agent in the same tenant is suppressed, since the wake is
  * per-agent rather than per-message and the first start's replay floor is
- * earlier than the second message. Callers use the result to report only real
- * fires (the send-perf summary counts them).
+ * earlier than the second message.
  */
 export function useDetachedAgentStart(): (agent: ManagedAgent) => boolean {
   const startAgentMutateAsync = useStartManagedAgentMutation().mutateAsync;
