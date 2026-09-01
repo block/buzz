@@ -9,7 +9,8 @@ import { normalizePubkey } from "@/shared/lib/pubkey";
 import { getErrorMessage } from "./useMentionSendFlow.helpers";
 
 /**
- * Detached starts still in flight, keyed by `(scoped relay URL, pubkey)`.
+ * Detached starts still in flight, keyed by the full tenant scope the wake
+ * asserts: `(scoped relay URL, expected signer, agent pubkey)`.
  *
  * Awaiting the start used to make a duplicate unreachable: `isPending` was a
  * hard early return in the composer's send handler, so no second send could
@@ -20,9 +21,16 @@ import { getErrorMessage } from "./useMentionSendFlow.helpers";
  * collapsing include cross-composer ones (channel composer, thread panel,
  * `NewMessageScreen` each hold their own `useMentionSendFlow`).
  *
- * Keyed by relay as well as pubkey to mirror the backend's own runtime pair
- * key, so a start in one community can never suppress one in another — the
- * same tenant boundary `expectedRelayUrl` enforces below.
+ * The key is the asserted scope, not the backend's `ManagedAgentRuntimeKey`
+ * (which is `(pubkey, relay_url)` — it tracks *runtimes*, while this map tracks
+ * scoped start *operations*). `start_managed_agent` asserts relay **and**
+ * signer before it spawns or deploys, so coalescing on the relay alone would
+ * let a start held under one signing identity suppress another identity's wake
+ * for the same agent on the same relay — a mid-session key import (the
+ * membership-denied overlay writes a new identity straight into the live query
+ * cache) inside a deploy window is enough to reach it. Both halves are in the
+ * key, so a wake is only ever suppressed by one asserting exactly the same
+ * scope.
  *
  * Entries deliberately survive community switches (`resetCommunityState` does
  * NOT clear this map). A held start is not invalidated by leaving its
@@ -102,9 +110,9 @@ function warnAgentMayNotRespond(agentName: string, detail: string): void {
  * `false` return) and the user's next send re-fires it.
  *
  * Returns whether this call actually fired a wake: a start already in flight
- * for the same agent in the same tenant is suppressed, since the wake is
- * per-agent rather than per-message and the first start's replay floor is
- * earlier than the second message.
+ * for the same agent under the same asserted scope — relay *and* signer — is
+ * suppressed, since the wake is per-agent rather than per-message and the
+ * first start's replay floor is earlier than the second message.
  *
  * `replayFloorUnix` lets a caller pass a floor captured earlier than this
  * call — the send path queues its wakes during preparation and flushes them
@@ -150,7 +158,13 @@ export function useDetachedAgentStart(): (
       // No synchronisation is needed or possible: the check, the call and the
       // registration below sit in one synchronous block, so no other send can
       // interleave between "is it in the set?" and "put it in the set".
-      const key = `${expectedRelayUrl}\u0000${normalizePubkey(agent.pubkey)}`;
+      //
+      // Relay verbatim, because its backend comparison is case-sensitive;
+      // signer and agent normalized. `expectedSignerPubkey` is already
+      // canonicalized at capture, matching `assert_expected_signer`'s
+      // case-insensitive compare, so two casings of one identity cannot split
+      // the key.
+      const key = `${expectedRelayUrl}\u0000${expectedSignerPubkey}\u0000${normalizePubkey(agent.pubkey)}`;
       if (inFlightDetachedStarts.has(key)) {
         // One wake serves both messages. A local duplicate is a backend no-op
         // anyway, but a provider redeploy can replace a harness that had just

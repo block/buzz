@@ -29,6 +29,11 @@
  *    guard, and it is tenant-keyed, so retention cannot affect the community
  *    being entered. (`resetCommunityState` no longer clears it; that seam is
  *    pinned E2E.)
+ * 6. That dedupe key is the *whole* scope the wake asserts — relay and signer,
+ *    not the relay alone. The backend distinguishes signers before it spawns
+ *    or deploys, so the renderer must not coalesce across them: a start held
+ *    under the identity in force before a mid-session key import cannot stand
+ *    in for the imported identity's wake.
  *
  * These tests drive the real hook against the real CommunitiesProvider; the
  * scope mirror is driven directly through its module seam, standing in for
@@ -41,6 +46,9 @@ import { after, afterEach, before, beforeEach, test } from "node:test";
 import { JSDOM } from "jsdom";
 
 const SELF = "1".repeat(64);
+// The key a mid-session import puts in force — the signing identity is one
+// global per install, so two signers only ever arrive back to back.
+const IMPORTED_SELF = "2".repeat(64);
 const AGENT = "a".repeat(64);
 const OTHER_AGENT = "b".repeat(64);
 // Mixed case on purpose: the backend's scope comparison is case-sensitive
@@ -68,6 +76,12 @@ let holdStarts = false;
  */
 let heldIdentity = [];
 let holdIdentity = false;
+/**
+ * The identity `get_identity` currently reports. Mutable so a test can move it
+ * the way a mid-session key import does, keeping a refetch consistent with the
+ * cache write that drove the switch.
+ */
+let currentIdentityPubkey = SELF;
 
 before(() => {
   Object.assign(globalThis, {
@@ -80,7 +94,7 @@ before(() => {
   dom.window.__TAURI_INTERNALS__ = {
     invoke: (command, args) => {
       if (command === "get_identity") {
-        const identity = { pubkey: SELF, display_name: "Me" };
+        const identity = { pubkey: currentIdentityPubkey, display_name: "Me" };
         if (!holdIdentity) return Promise.resolve(identity);
         return new Promise((resolve) => {
           heldIdentity.push(() => resolve(identity));
@@ -125,6 +139,7 @@ beforeEach(async () => {
   holdStarts = false;
   heldIdentity = [];
   holdIdentity = false;
+  currentIdentityPubkey = SELF;
   // Toasts queue on a module-level store with no <Toaster> mounted, so one
   // test's warning would otherwise be visible to the next.
   const { toast } = await import("sonner");
@@ -172,7 +187,8 @@ beforeEach(async () => {
  * active community out from under an already-captured callback.
  *
  * `act` is returned too, so a test can drive the render that follows a
- * deliberately-delayed identity resolution.
+ * deliberately-delayed identity resolution, and the `QueryClient` so a test can
+ * move the signing identity the way a mid-session import does.
  */
 async function renderDetachedStart() {
   const { default: React } = await import("react");
@@ -207,22 +223,43 @@ async function renderDetachedStart() {
     { wrapper },
   );
   if (!holdIdentity) await waitForIdentity(act, rendered);
-  return { act, rendered };
+  return { act, client, rendered };
 }
 
 /**
- * Flushes until the identity query has landed, rather than for a fixed number
- * of ticks: a wake fired before the signer scope resolves is now refused, so
- * an under-wait would surface as a phantom suppression bug.
+ * Flushes until the identity query has landed (on `expected`, when given),
+ * rather than for a fixed number of ticks: a wake fired before the signer
+ * scope resolves is now refused, so an under-wait would surface as a phantom
+ * suppression bug.
  */
-async function waitForIdentity(act, rendered) {
+async function waitForIdentity(act, rendered, expected) {
   for (let attempt = 0; attempt < 20; attempt += 1) {
-    if (rendered.result.current.identityPubkey) return;
+    const current = rendered.result.current.identityPubkey;
+    if (expected ? current === expected : Boolean(current)) return;
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
   }
-  assert.fail("the identity query never resolved");
+  assert.fail(
+    expected
+      ? `the identity query never reported ${expected}`
+      : "the identity query never resolved",
+  );
+}
+
+/**
+ * Puts a different signing key in force mid-session, through the exact seam
+ * production uses: the membership-denied onboarding overlay imports an nsec and
+ * writes the new identity straight into the live identity query cache
+ * (`CommunityOnboardingFlow`), while the app underneath — module singletons,
+ * in-flight mutations, this map — keeps running.
+ */
+async function importIdentity(act, rendered, client, pubkey) {
+  currentIdentityPubkey = pubkey;
+  await act(async () => {
+    client.setQueryData(["identity"], { pubkey, display_name: "Me" });
+  });
+  await waitForIdentity(act, rendered, pubkey);
 }
 
 const AGENT_RECORD = { pubkey: AGENT, name: "fizz" };
@@ -714,5 +751,92 @@ test("a wake for the same agent in another community is not suppressed", async (
     [RELAY_A, RELAY_B],
     "the key carries the relay, so one tenant's in-flight wake never suppresses another's",
   );
+  rendered.unmount();
+});
+
+test("a wake under a newly imported identity is not suppressed by one held under the old", async () => {
+  // The signer half of the same boundary. `start_managed_agent` asserts the
+  // expected signer before it spawns or deploys — and a provider deploy
+  // re-asserts it against the payload rebuilt after the deploy lock — so a
+  // start held under the previous identity is not the wake this one is owed.
+  // Suppressing it would drop every send for the length of a cold spawn or
+  // first deploy, and leave the agent deployed under the stale owner.
+  holdStarts = true;
+  const { act, client, rendered } = await renderDetachedStart();
+
+  await act(async () => {
+    rendered.result.current.startDetached(AGENT_RECORD);
+    await settle();
+  });
+  await importIdentity(act, rendered, client, IMPORTED_SELF);
+
+  let refire;
+  await act(async () => {
+    refire = rendered.result.current.startDetached(AGENT_RECORD);
+    await settle();
+  });
+
+  assert.equal(refire, true, "the identity now in force is owed its own wake");
+  assert.deepEqual(
+    startCalls.map((call) => call.expectedSignerPubkey),
+    [SELF, IMPORTED_SELF],
+    "the key carries the signer, so one identity's in-flight wake never suppresses another's",
+  );
+  // Same agent on the same relay: the signer is the only thing separating the
+  // two operations, which is exactly what the pre-fix key could not see.
+  assert.deepEqual(
+    startCalls.map((call) => call.pubkey),
+    [AGENT, AGENT],
+  );
+  assert.deepEqual(
+    startCalls.map((call) => call.expectedRelayUrl),
+    [RELAY_A, RELAY_A],
+  );
+  rendered.unmount();
+});
+
+test("settling one signer's start leaves the other signer's suppression intact", async () => {
+  // Per-signer settlement independence: the `finally` delete closes over the
+  // key it registered, so freeing the imported identity's entry must not lift
+  // the suppression the still-held old-identity start is providing (nor the
+  // reverse).
+  holdStarts = true;
+  const { act, client, rendered } = await renderDetachedStart();
+  // What a send fired before the import holds: the callback from the render
+  // that fired it, still carrying the old signer.
+  const startAsOldIdentity = rendered.result.current.startDetached;
+
+  await act(async () => {
+    startAsOldIdentity(AGENT_RECORD);
+    await settle();
+  });
+  await importIdentity(act, rendered, client, IMPORTED_SELF);
+  await act(async () => {
+    rendered.result.current.startDetached(AGENT_RECORD);
+    await settle();
+  });
+  assert.equal(startCalls.length, 2, "both signers have a start in flight");
+
+  await act(async () => {
+    heldStarts[1].resolve();
+    await settle();
+  });
+
+  let refireImported;
+  let refireOld;
+  await act(async () => {
+    refireImported = rendered.result.current.startDetached(AGENT_RECORD);
+    refireOld = startAsOldIdentity(AGENT_RECORD);
+    await settle();
+  });
+
+  assert.equal(refireImported, true, "the settled signer's key is free again");
+  assert.equal(
+    refireOld,
+    false,
+    "the still-held signer's entry must survive another signer's settlement",
+  );
+  assert.equal(startCalls.length, 3);
+  assert.equal(startCalls[2].expectedSignerPubkey, IMPORTED_SELF);
   rendered.unmount();
 });
