@@ -23,6 +23,12 @@
  *    agent over community B's UI. Delivery compares the captured scope against
  *    the on-screen mirror (`detachedToastScope`) at toast time — not a reset
  *    generation, so an A→B→A round-trip warns again once A is back on screen.
+ * 5. The in-flight map outlives a community switch on purpose: the backend's
+ *    scope assertion is a current-state check, so an A→B→A round-trip
+ *    re-validates a still-held start — the map entry is its only duplicate
+ *    guard, and it is tenant-keyed, so retention cannot affect the community
+ *    being entered. (`resetCommunityState` no longer clears it; that seam is
+ *    pinned E2E.)
  *
  * These tests drive the real hook against the real CommunitiesProvider; the
  * scope mirror is driven directly through its module seam, standing in for
@@ -367,6 +373,76 @@ test("a wake fires again once the previous one has settled", async () => {
   });
 
   assert.equal(startCalls.length, 2, "suppression must not outlive the start");
+  rendered.unmount();
+});
+
+test("an A→B→A community round-trip does not reopen the in-flight window", async () => {
+  // The production seam — `resetCommunityState` deliberately not clearing the
+  // map on switch — is pinned E2E, where the real switch path runs. This pins
+  // the hook contract that makes retention sufficient: the round-trip hands
+  // back a callback carrying A's scope again, its key matches the retained
+  // entry, and the wake stays suppressed while the first start (whose scope
+  // is valid again now that A is re-applied) is still deploying.
+  holdStarts = true;
+  const { act, rendered } = await renderDetachedStart();
+
+  await act(async () => {
+    rendered.result.current.startDetached(AGENT_RECORD);
+    await settle();
+  });
+  await act(async () => {
+    rendered.result.current.switchCommunity("community-b");
+  });
+  await act(async () => {
+    rendered.result.current.switchCommunity("community-a");
+  });
+
+  let refire;
+  await act(async () => {
+    refire = rendered.result.current.startDetached(AGENT_RECORD);
+    await settle();
+  });
+
+  assert.equal(refire, false, "the retained entry must still suppress");
+  assert.equal(
+    startCalls.length,
+    1,
+    "a round-trip must not duplicate a deploy the first start is still performing",
+  );
+  rendered.unmount();
+});
+
+test("a wake re-fires once the start held across a round-trip has rejected", async () => {
+  // Retention ends at settlement, not at some later reset: the `finally`
+  // self-cleans, so a failed start never latches the agent — the user's next
+  // send after the failure toast gets a real wake.
+  holdStarts = true;
+  const { act, rendered } = await renderDetachedStart();
+
+  await act(async () => {
+    rendered.result.current.startDetached(AGENT_RECORD);
+    await settle();
+  });
+  await act(async () => {
+    rendered.result.current.switchCommunity("community-b");
+  });
+  await act(async () => {
+    rendered.result.current.switchCommunity("community-a");
+  });
+  await act(async () => {
+    heldStarts[0].reject();
+    await settle();
+  });
+  await act(async () => {
+    assert.equal(rendered.result.current.startDetached(AGENT_RECORD), true);
+    await settle();
+  });
+
+  assert.equal(
+    startCalls.length,
+    2,
+    "settlement must end the suppression even across a round-trip",
+  );
   rendered.unmount();
 });
 

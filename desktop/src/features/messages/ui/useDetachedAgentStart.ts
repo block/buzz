@@ -23,13 +23,23 @@ import { getErrorMessage } from "./useMentionSendFlow.helpers";
  * Keyed by relay as well as pubkey to mirror the backend's own runtime pair
  * key, so a start in one community can never suppress one in another — the
  * same tenant boundary `expectedRelayUrl` enforces below.
+ *
+ * Entries deliberately survive community switches (`resetCommunityState` does
+ * NOT clear this map). A held start is not invalidated by leaving its
+ * community: the backend's scope assertion is a current-state check, so a
+ * start fired in A is valid again the moment A is re-applied — an A→B→A
+ * round-trip that cleared the map would let a second send duplicate a
+ * provider deploy the first start is still performing (and hand the harness
+ * the second message's replay floor, past the first message). The key is the
+ * tenant scope, so a retained entry cannot affect another community, and the
+ * `finally` below self-cleans on settlement, which the deploy op bounds.
  */
 const inFlightDetachedStarts = new Map<string, Promise<unknown>>();
 
 /**
- * Drops every tracked in-flight start. Registered in `resetCommunityState`:
- * these starts belong to the community being left and are about to fail closed
- * at the backend's scope assertion anyway.
+ * Drops every tracked in-flight start. Test-only isolation seam — one test's
+ * held start must not suppress the next test's. Production deliberately never
+ * calls this: see the map's doc for why entries survive community switches.
  */
 export function resetDetachedAgentStarts(): void {
   inFlightDetachedStarts.clear();
@@ -181,11 +191,12 @@ export function useDetachedAgentStart(): (
           warnAgentMayNotRespond(agent.name, detachedStartFailureDetail(error));
         })
         .finally(() => {
-          // Identity-guarded: `resetDetachedAgentStarts` may have cleared the
-          // map and a later start re-registered this key while this one was in
-          // flight (an A→B→A community switch), and an unguarded delete would
-          // drop that newer entry. Clearing in `finally` rather than on success
-          // is what keeps a failed start from latching the agent permanently.
+          // Identity-guarded: only test isolation clears this map now
+          // (production retains entries across community switches), but if a
+          // reset-and-re-register did interleave while this start was in
+          // flight, an unguarded delete would drop the newer entry. Clearing
+          // in `finally` rather than on success is what keeps a failed start
+          // from latching the agent permanently.
           if (inFlightDetachedStarts.get(key) === started) {
             inFlightDetachedStarts.delete(key);
           }

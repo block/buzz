@@ -3049,6 +3049,164 @@ test("a detached start fired before a real community switch fails closed and kee
   ).toBe(0);
 });
 
+test("a deploy held across an A→B→A community round-trip is not fired twice", async ({
+  page,
+}) => {
+  // The in-flight detached-start map used to be cleared by every community
+  // switch, and the backend's scope assertion is a current-state check — so a
+  // deploy still held from community A became valid again the moment A was
+  // re-applied, and a second mention back in A deployed the agent a second
+  // time (carrying the second message's replay floor, past the first
+  // message). The entries are tenant-keyed and self-cleaning, so they now
+  // survive the switch. This drives the real rail-switch path (provider →
+  // remount → resetCommunityState) that did the clearing; the map contract
+  // itself is pinned at the unit level.
+  const COMMUNITY_A = {
+    id: "ws-a",
+    name: "Alpha",
+    relayUrl: "ws://localhost:3000",
+    addedAt: "2026-01-01T00:00:00.000Z",
+  };
+  const COMMUNITY_B = {
+    id: "ws-b",
+    name: "Bravo",
+    relayUrl: "ws://localhost:3001",
+    addedAt: "2026-01-02T00:00:00.000Z",
+  };
+  await installMockBridge(
+    page,
+    {
+      managedAgents: [
+        {
+          pubkey: OUT_OF_CHANNEL_PROVIDER_AGENT_PUBKEY,
+          name: "portal",
+          status: "not_deployed",
+          channelNames: ["general"],
+          backend: {
+            type: "provider",
+            id: "portal",
+            config: { region: "test" },
+          },
+        },
+      ],
+      // Far longer than the round-trip below ever takes, so the first deploy
+      // is deterministically still in flight when the second send fires;
+      // settled on demand via the release seam for the retry leg.
+      startManagedAgentDelayMs: 45_000,
+      // Arms the first settlement to reject. A successful mock settle writes
+      // `deployed` into the record, and the third send below would then skip
+      // the wake on status alone — the retry leg has to prove the *map entry*
+      // self-cleaned, so the record must still read `not_deployed`.
+      startManagedAgentErrors: ["Mock provider deploy failed."],
+    },
+    { skipCommunitySeed: true },
+  );
+  await page.addInitScript(
+    ({ list, active }) => {
+      window.localStorage.setItem("buzz-communities", JSON.stringify(list));
+      window.localStorage.setItem("buzz-active-community-id", active);
+    },
+    { list: [COMMUNITY_A, COMMUNITY_B], active: COMMUNITY_A.id },
+  );
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const sendMention = async (text: string) => {
+    const input = page.getByTestId("message-input");
+    await input.fill("Hey @portal");
+    await expect(autocomplete(page).getByText("portal")).toBeVisible();
+    await input.press("Enter");
+    await page.keyboard.type(` ${text}`);
+    // Enter rather than the send button: the third send happens while the
+    // first deploy's failure toast is on screen, and the toast overlay
+    // intercepts pointer events aimed at the composer's corner.
+    await input.press("Enter");
+    await expect(
+      page.getByTestId("message-row").filter({ hasText: text }),
+    ).toBeVisible();
+  };
+
+  const baselineCommands = await readCommandLog(page);
+  const baselineStartCount = commandCount(
+    baselineCommands,
+    "start_managed_agent",
+  );
+  const baselineSettledCount = commandCount(
+    baselineCommands,
+    "start_managed_agent:settled",
+  );
+  const baselinePayloadCount = (await readCommandPayloadLog(page)).length;
+
+  await sendMention("do X");
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "start_managed_agent"),
+    )
+    .toBe(baselineStartCount + 1);
+  const startCall = (await readCommandPayloadLog(page))
+    .slice(baselinePayloadCount)
+    .find((entry) => entry.command === "start_managed_agent");
+  expect(startCall?.payload).toMatchObject({
+    expectedRelayUrl: COMMUNITY_A.relayUrl,
+    expectedSignerPubkey: MOCK_VIEWER_PUBKEY,
+  });
+
+  // The round trip, while the deploy is still held.
+  await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+  await expect(
+    page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`),
+  ).toHaveAttribute("aria-current", "true");
+  await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
+  await expect(
+    page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`),
+  ).toHaveAttribute("aria-current", "true");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  // Back in A, the held deploy's scope is valid again and the record still
+  // reads `not_deployed`, so this send queues a wake — the retained map entry
+  // is the only thing standing between it and a duplicate deploy. A
+  // suppressed wake makes no call, so give the post-publish flush a moment
+  // before snapshotting: pre-fix the duplicate invoke landed well inside it.
+  await sendMention("also Y");
+  await page.waitForTimeout(500);
+  expect(commandCount(await readCommandLog(page), "start_managed_agent")).toBe(
+    baselineStartCount + 1,
+  );
+
+  // Settle the held deploy on demand (the armed rejection). Retention must
+  // end at settlement rather than latching the agent for the session.
+  const released = await page.evaluate(
+    () =>
+      (
+        window as {
+          __BUZZ_E2E_RELEASE_MANAGED_AGENT_STARTS__?: () => number;
+        }
+      ).__BUZZ_E2E_RELEASE_MANAGED_AGENT_STARTS__?.() ?? 0,
+  );
+  expect(released).toBe(1);
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "start_managed_agent:settled"),
+    )
+    .toBe(baselineSettledCount + 1);
+  // The failure settled with A on screen, so its warning delivers here — the
+  // round-trip kept it out of B without dropping it.
+  await expect(
+    page.getByText("Could not start portal", { exact: false }),
+  ).toBeVisible();
+
+  // The map entry self-cleaned at settlement, so a third mention of the
+  // still-undeployed agent re-fires the wake.
+  await sendMention("try again");
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "start_managed_agent"),
+    )
+    .toBe(baselineStartCount + 2);
+});
+
 test("mentioning an in-channel provider managed agent publishes first and deploys it detached", async ({
   page,
 }) => {

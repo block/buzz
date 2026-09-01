@@ -374,7 +374,8 @@ type E2eConfig = {
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
     /** Delay (ms) for `start_managed_agent` so e2e tests can switch the
-     *  community mid-startup and observe the fail-closed scope check. */
+     *  community mid-startup and observe the fail-closed scope check.
+     *  Releasable early via `__BUZZ_E2E_RELEASE_MANAGED_AGENT_STARTS__()`. */
     startManagedAgentDelayMs?: number;
     /** Hold the media proxy at port 0 until the E2E release seam is invoked. */
     mediaProxyInitiallyUnavailable?: boolean;
@@ -1513,6 +1514,11 @@ declare global {
     /** Count of `get_event` invocations for the current defer-target ID since
      *  the last time `__BUZZ_E2E_DEFER_GET_EVENT__` was set. */
     __BUZZ_E2E_GET_EVENT_CALL_COUNT__?: number;
+    /** Release every `start_managed_agent` currently held behind
+     *  `startManagedAgentDelayMs`, letting it settle (scope checks, then any
+     *  armed `startManagedAgentErrors` rejection) without waiting out the
+     *  delay. Returns the number of holds flushed. */
+    __BUZZ_E2E_RELEASE_MANAGED_AGENT_STARTS__?: () => number;
     /** Hold the next channel read until released. */
     __BUZZ_E2E_DEFER_NEXT_CHANNELS_READ__?: () => void;
     /** Disarm the latch and release the held channel read, if any. */
@@ -1645,6 +1651,11 @@ let deferredGetEventQueue: DeferredGetEvent[] = [];
 let deferredLinkPreviewMetadataQueue: Array<() => void> = [];
 let deferredLinkPreviewUploadQueue: Array<() => void> = [];
 let deferredThreadRepliesQueue: Array<() => void> = [];
+// Starts currently held behind `startManagedAgentDelayMs`, releasable early
+// via `__BUZZ_E2E_RELEASE_MANAGED_AGENT_STARTS__()`: a spec that holds a
+// start across a community round-trip needs the hold long enough to be
+// deterministic AND a way to settle it on demand afterwards.
+let heldManagedAgentStartReleases: Array<() => void> = [];
 let cancelledMediaUploadIds = new Set<string>();
 let cancelledMediaFetchIds = new Set<string>();
 let mockMediaFetchControllers = new Map<string, AbortController>();
@@ -9603,7 +9614,20 @@ async function handleStartManagedAgent(
 ): Promise<RawManagedAgent> {
   const delayMs = config?.mock?.startManagedAgentDelayMs ?? 0;
   if (delayMs > 0) {
-    await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const release = () => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        heldManagedAgentStartReleases = heldManagedAgentStartReleases.filter(
+          (held) => held !== release,
+        );
+        resolve();
+      };
+      const timer = window.setTimeout(release, delayMs);
+      heldManagedAgentStartReleases.push(release);
+    });
   }
   // After the injected delay, like the real command's checks before any
   // spawn/deploy side effect: a caller-captured tenant scope and signer
@@ -11527,6 +11551,12 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_GET_EVENT_CALL_COUNT__ = 0;
   window.__BUZZ_E2E_DEFER_GET_EVENT__ = null;
   deferredGetEventQueue = [];
+  heldManagedAgentStartReleases = [];
+  window.__BUZZ_E2E_RELEASE_MANAGED_AGENT_STARTS__ = () => {
+    const held = heldManagedAgentStartReleases.splice(0);
+    for (const release of held) release();
+    return held.length;
+  };
   deferNextChannelsRead = false;
   deferredChannelsReadResolve = null;
   window.__BUZZ_E2E_CHANNELS_READ_PENDING__ = 0;
