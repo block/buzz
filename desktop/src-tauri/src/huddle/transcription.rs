@@ -2,7 +2,7 @@ use tauri::State;
 
 use crate::app_state::AppState;
 
-use super::{models, pipeline::maybe_start_stt_pipeline};
+use super::{models, openai_stt, pipeline::maybe_start_stt_pipeline};
 
 /// Start the STT pipeline for the active huddle.
 ///
@@ -61,8 +61,10 @@ pub async fn set_huddle_transcription_enabled(
     drop(old_stt);
 
     if enabled {
-        if let Some(manager) = models::global_model_manager() {
-            manager.start_stt_download(state.http_client.clone());
+        if !openai_stt::is_configured()? {
+            if let Some(manager) = models::global_model_manager() {
+                manager.start_stt_download(state.http_client.clone());
+            }
         }
         if let Err(e) = maybe_start_stt_pipeline(&state, &ephemeral_channel_id).await {
             eprintln!("buzz-desktop: STT transcript start failed: {e}");

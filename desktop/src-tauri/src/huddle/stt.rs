@@ -32,13 +32,22 @@ use std::{
 
 use tokio::sync::mpsc as tokio_mpsc;
 
-use super::{human_floor::HumanFloor, local_barge_in};
+use super::{
+    human_floor::HumanFloor,
+    local_barge_in,
+    openai_stt::{OpenAiSttConfig, OpenAiSttDecoder},
+};
 
 // ── Public pipeline handle ────────────────────────────────────────────────────
 
 /// Bounded audio queue capacity.
 /// 100 ms batches at 48 kHz ≈ 19 KB each → 50 slots ≈ 5 s / ~1 MB max backlog.
 const AUDIO_QUEUE_DEPTH: usize = 50;
+
+/// OpenAI-compatible decoders run independently from microphone capture.
+/// Sixteen 30-second utterances occupy at most about 31 MB of PCM while a
+/// slow local model catches up.
+const OPENAI_UTTERANCE_QUEUE_DEPTH: usize = 16;
 
 /// Maximum speech buffer size: 30 seconds at 16 kHz.
 /// Prevents OOM if VAD stays in speech mode (noisy environment).
@@ -73,6 +82,11 @@ enum SttAudioOrigin {
     RemoteHuman,
 }
 
+enum SttBackend {
+    Parakeet(PathBuf),
+    OpenAi(OpenAiSttConfig),
+}
+
 impl SttPipeline {
     /// Spawn the pipeline thread.
     ///
@@ -102,6 +116,38 @@ impl SttPipeline {
         human_floor: HumanFloor,
         output_device: Option<String>,
     ) -> Result<(Self, tokio_mpsc::Receiver<String>), String> {
+        Self::spawn(
+            SttBackend::Parakeet(model_dir),
+            ptt_active,
+            manual_mic_unmuted,
+            human_floor,
+            output_device,
+        )
+    }
+
+    pub(super) fn new_openai(
+        config: OpenAiSttConfig,
+        ptt_active: Option<Arc<AtomicBool>>,
+        manual_mic_unmuted: Option<Arc<AtomicBool>>,
+        human_floor: HumanFloor,
+        output_device: Option<String>,
+    ) -> Result<(Self, tokio_mpsc::Receiver<String>), String> {
+        Self::spawn(
+            SttBackend::OpenAi(config),
+            ptt_active,
+            manual_mic_unmuted,
+            human_floor,
+            output_device,
+        )
+    }
+
+    fn spawn(
+        backend: SttBackend,
+        ptt_active: Option<Arc<AtomicBool>>,
+        manual_mic_unmuted: Option<Arc<AtomicBool>>,
+        human_floor: HumanFloor,
+        output_device: Option<String>,
+    ) -> Result<(Self, tokio_mpsc::Receiver<String>), String> {
         let (audio_tx, audio_rx) = mpsc::sync_channel::<SttAudioInput>(AUDIO_QUEUE_DEPTH);
         let (text_tx, text_rx) = tokio_mpsc::channel::<String>(64);
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -113,7 +159,7 @@ impl SttPipeline {
             .name("stt-worker".into())
             .spawn(move || {
                 stt_worker(
-                    model_dir,
+                    backend,
                     audio_rx,
                     text_tx,
                     shutdown_worker,
@@ -373,6 +419,103 @@ fn stt_speculative_decode() -> bool {
     std::env::var("BUZZ_STT_SPECULATIVE").is_ok_and(|v| v == "1")
 }
 
+trait SpeechDecoder {
+    fn decode(&self, speech: &[f32]) -> Result<DecodeOutcome, String>;
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DecodeOutcome {
+    Transcript(String),
+    Queued,
+}
+
+struct QueuedDecoder {
+    utterance_tx: SyncSender<Vec<f32>>,
+}
+
+impl SpeechDecoder for QueuedDecoder {
+    fn decode(&self, speech: &[f32]) -> Result<DecodeOutcome, String> {
+        self.utterance_tx
+            .try_send(speech.to_vec())
+            .map_err(|error| format!("STT utterance queue unavailable: {error}"))?;
+        Ok(DecodeOutcome::Queued)
+    }
+}
+
+fn spawn_openai_decoder(
+    config: OpenAiSttConfig,
+    text_tx: tokio_mpsc::Sender<String>,
+    shutdown: Arc<AtomicBool>,
+) -> Result<Box<dyn SpeechDecoder>, String> {
+    let decoder = OpenAiSttDecoder::new(config)?;
+    let (utterance_tx, utterance_rx) = mpsc::sync_channel::<Vec<f32>>(OPENAI_UTTERANCE_QUEUE_DEPTH);
+    thread::Builder::new()
+        .name("stt-openai-decoder".into())
+        .spawn(move || loop {
+            if shutdown.load(Ordering::Acquire) {
+                break;
+            }
+            let speech = match utterance_rx.recv_timeout(RECV_TIMEOUT) {
+                Ok(speech) => speech,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            let Some(text) = decode_speech(&decoder, &speech) else {
+                continue;
+            };
+            if shutdown.load(Ordering::Acquire) {
+                break;
+            }
+            send_transcript(text, &text_tx);
+        })
+        .map_err(|error| format!("failed to spawn OpenAI STT decoder thread: {error}"))?;
+    Ok(Box::new(QueuedDecoder { utterance_tx }))
+}
+
+struct ParakeetDecoder {
+    recognizer: sherpa_onnx::OfflineRecognizer,
+}
+
+impl ParakeetDecoder {
+    fn new(model_dir: PathBuf) -> Result<Self, String> {
+        use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
+
+        let tokens_path = model_dir.join("tokens.txt");
+        let model_path = model_dir.join("model.int8.onnx");
+        if !tokens_path.exists() || !model_path.exists() {
+            return Err(format!("STT model not found at {}", model_dir.display()));
+        }
+        let mut config = OfflineRecognizerConfig::default();
+        config.model_config.nemo_ctc.model = Some(model_path.to_string_lossy().into_owned());
+        config.model_config.tokens = Some(tokens_path.to_string_lossy().into_owned());
+        config.model_config.num_threads = stt_num_threads();
+        config.model_config.debug = false;
+        let recognizer =
+            OfflineRecognizer::create(&config).ok_or("OfflineRecognizer::create returned None")?;
+        Ok(Self { recognizer })
+    }
+}
+
+impl SpeechDecoder for ParakeetDecoder {
+    fn decode(&self, speech: &[f32]) -> Result<DecodeOutcome, String> {
+        let stream = self.recognizer.create_stream();
+        stream.accept_waveform(16_000, speech);
+        self.recognizer.decode(&stream);
+        Ok(DecodeOutcome::Transcript(
+            stream
+                .get_result()
+                .map(|result| result.text.trim().to_string())
+                .unwrap_or_default(),
+        ))
+    }
+}
+
+impl SpeechDecoder for OpenAiSttDecoder {
+    fn decode(&self, speech: &[f32]) -> Result<DecodeOutcome, String> {
+        OpenAiSttDecoder::decode(self, speech).map(DecodeOutcome::Transcript)
+    }
+}
+
 struct SttStreamState {
     resampler: rubato::Fft<f32>,
     chunk_in: usize,
@@ -417,21 +560,18 @@ fn run_stt_receive_loop(
     let mut local_barge_in_state = local_barge_in::WorkerLocalBargeIn::new(human_floor);
 
     loop {
-        // Check shutdown flag before blocking.
         if shutdown.load(Ordering::Acquire) {
             break;
         }
 
         process(SttLoopInput::Tick, &mut local_barge_in_state);
 
-        // Use recv_timeout so we can periodically check the shutdown flag.
         let input = match audio_rx.recv_timeout(RECV_TIMEOUT) {
             Ok(input) => input,
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break, // Sender dropped.
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
 
-        // Drain any additional pending messages to batch-process.
         let mut batch = vec![input];
         while let Ok(input) = audio_rx.try_recv() {
             batch.push(input);
@@ -442,7 +582,7 @@ fn run_stt_receive_loop(
 
 #[allow(clippy::too_many_arguments)]
 fn stt_worker(
-    model_dir: PathBuf,
+    backend: SttBackend,
     audio_rx: Receiver<SttAudioInput>,
     text_tx: tokio_mpsc::Sender<String>,
     shutdown: Arc<AtomicBool>,
@@ -451,40 +591,24 @@ fn stt_worker(
     human_floor: HumanFloor,
     output_device: Option<String>,
 ) {
-    // ── 1. Initialise sherpa-onnx recognizer ─────────────────────────────────
-    //
-    // Parakeet TDT-CTC 110M ships as a single `model.int8.onnx` (CTC head) plus
-    // `tokens.txt`. sherpa-onnx infers the model family from which inner config
-    // has a `model` path set, so we don't need to set `model_type` explicitly.
-    // (See rust-api-examples/parakeet_tdt_ctc_simulate_streaming_microphone.rs
-    // in k2-fsa/sherpa-onnx.)
-    use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
-
-    let tokens_path = model_dir.join("tokens.txt");
-    let model_path = model_dir.join("model.int8.onnx");
-    if !tokens_path.exists() || !model_path.exists() {
-        eprintln!(
-            "buzz-desktop: STT model not found at {} — STT disabled",
-            model_dir.display()
-        );
-        drain_until_shutdown(audio_rx, &shutdown);
-        return;
-    }
-
-    let mut cfg = OfflineRecognizerConfig::default();
-    cfg.model_config.nemo_ctc.model = Some(model_path.to_string_lossy().into_owned());
-    cfg.model_config.tokens = Some(tokens_path.to_string_lossy().into_owned());
-    cfg.model_config.num_threads = stt_num_threads();
-    // Explicit — defaults are not part of the API contract, and noisy debug
-    // logging in release builds would be expensive on every VAD chunk.
-    cfg.model_config.debug = false;
-
-    let recognizer = match OfflineRecognizer::create(&cfg) {
-        Some(r) => r,
-        None => {
-            eprintln!("buzz-desktop: OfflineRecognizer::create returned None — STT disabled");
-            drain_until_shutdown(audio_rx, &shutdown);
-            return;
+    let decoder: Box<dyn SpeechDecoder> = match backend {
+        SttBackend::Parakeet(model_dir) => match ParakeetDecoder::new(model_dir) {
+            Ok(decoder) => Box::new(decoder),
+            Err(error) => {
+                tracing::warn!(error = %error, "STT disabled");
+                drain_until_shutdown(audio_rx, &shutdown);
+                return;
+            }
+        },
+        SttBackend::OpenAi(config) => {
+            match spawn_openai_decoder(config, text_tx.clone(), Arc::clone(&shutdown)) {
+                Ok(decoder) => decoder,
+                Err(error) => {
+                    tracing::warn!(error = %error, "STT disabled");
+                    drain_until_shutdown(audio_rx, &shutdown);
+                    return;
+                }
+            }
         }
     };
 
@@ -535,7 +659,7 @@ fn stt_worker(
                         flush_to_stt(
                             &local_stream.endpoint.speech_buf,
                             local_stream.endpoint.voiced_frames,
-                            &recognizer,
+                            decoder.as_ref(),
                             &text_tx,
                         );
                         local_stream.endpoint.reset_segment();
@@ -560,7 +684,7 @@ fn stt_worker(
                         stream,
                         &input.pcm_bytes,
                         speculative_enabled,
-                        &recognizer,
+                        decoder.as_ref(),
                         &text_tx,
                         ptt_gate,
                         manual_gate,
@@ -584,7 +708,7 @@ fn process_stt_input(
     stream: &mut SttStreamState,
     pcm_bytes: &[u8],
     speculative_enabled: bool,
-    recognizer: &sherpa_onnx::OfflineRecognizer,
+    decoder: &dyn SpeechDecoder,
     text_tx: &tokio_mpsc::Sender<String>,
     ptt_active: Option<&Arc<AtomicBool>>,
     manual_mic_unmuted: Option<&Arc<AtomicBool>>,
@@ -607,7 +731,7 @@ fn process_stt_input(
             &mut stream.endpoint,
             SILENCE_FLUSH_FRAMES,
             (speculative_enabled, &mut stream.speculative),
-            recognizer,
+            decoder,
             text_tx,
             ptt_active,
             manual_mic_unmuted,
@@ -664,7 +788,7 @@ fn process_16k_samples(
     endpoint: &mut VadEndpoint,
     flush_frames: usize,
     speculative: (bool, &mut Option<(String, usize)>),
-    recognizer: &sherpa_onnx::OfflineRecognizer,
+    decoder: &dyn SpeechDecoder,
     text_tx: &tokio_mpsc::Sender<String>,
     ptt_active: Option<&Arc<AtomicBool>>,
     manual_mic_unmuted: Option<&Arc<AtomicBool>>,
@@ -724,10 +848,9 @@ fn process_16k_samples(
                     && flush_allowed
                     && has_enough_voiced_audio(endpoint.voiced_frames)
                 {
-                    speculative.replace((
-                        decode_speech(recognizer, &endpoint.speech_buf),
-                        endpoint.voiced_frames,
-                    ));
+                    if let Some(text) = decode_speech(decoder, &endpoint.speech_buf) {
+                        speculative.replace((text, endpoint.voiced_frames));
+                    }
                 }
             }
             VadFrameAction::Flush => {
@@ -738,7 +861,7 @@ fn process_16k_samples(
                     _ => flush_to_stt(
                         &endpoint.speech_buf,
                         endpoint.voiced_frames,
-                        recognizer,
+                        decoder,
                         text_tx,
                     ),
                 }
@@ -755,7 +878,7 @@ fn process_16k_samples(
             flush_to_stt(
                 &endpoint.speech_buf,
                 endpoint.voiced_frames,
-                recognizer,
+                decoder,
                 text_tx,
             );
             endpoint.reset_segment();
@@ -774,7 +897,7 @@ fn process_16k_samples(
 fn flush_to_stt(
     speech_buf: &[f32],
     voiced_frames: usize,
-    recognizer: &sherpa_onnx::OfflineRecognizer,
+    decoder: &dyn SpeechDecoder,
     text_tx: &tokio_mpsc::Sender<String>,
 ) {
     if speech_buf.is_empty() {
@@ -786,19 +909,20 @@ fn flush_to_stt(
         );
         return;
     }
-    send_transcript(decode_speech(recognizer, speech_buf), text_tx);
+    if let Some(text) = decode_speech(decoder, speech_buf) {
+        send_transcript(text, text_tx);
+    }
 }
 
-/// Run the Parakeet decode on a speech buffer and return the trimmed text.
-fn decode_speech(recognizer: &sherpa_onnx::OfflineRecognizer, speech_buf: &[f32]) -> String {
-    let stream = recognizer.create_stream();
-    stream.accept_waveform(16_000, speech_buf);
-    recognizer.decode(&stream);
-
-    stream
-        .get_result()
-        .map(|r| r.text.trim().to_string())
-        .unwrap_or_default()
+fn decode_speech(decoder: &dyn SpeechDecoder, speech_buf: &[f32]) -> Option<String> {
+    match decoder.decode(speech_buf) {
+        Ok(DecodeOutcome::Transcript(text)) => Some(text.trim().to_string()),
+        Ok(DecodeOutcome::Queued) => None,
+        Err(error) => {
+            tracing::warn!(error = %error, "STT decode failed");
+            None
+        }
+    }
 }
 
 fn send_transcript(text: String, text_tx: &tokio_mpsc::Sender<String>) {
