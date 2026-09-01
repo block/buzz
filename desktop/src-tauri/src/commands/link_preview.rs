@@ -1,4 +1,4 @@
-use std::{io::Cursor, net::IpAddr, time::Duration};
+use std::{future::Future, io::Cursor, net::IpAddr, time::Duration};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use futures_util::StreamExt;
@@ -24,8 +24,6 @@ const MAX_IMAGE_FETCH_BYTES: usize = 2 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION: u32 = 4096;
 const MAX_IMAGE_PIXELS: u64 = 16_000_000;
 const MAX_SANITIZED_DIMENSION: u32 = 1200;
-const PREVIEW_FETCH_TIMEOUT: Duration = Duration::from_secs(4);
-const PREVIEW_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REDIRECTS: usize = 3;
 const MAX_METADATA_CHARS: usize = 180;
 const MAX_METADATA_DESCRIPTION_CHARS: usize = 280;
@@ -56,15 +54,23 @@ pub struct LinkPreviewMetadata {
 pub async fn fetch_link_preview_metadata(
     href: String,
 ) -> Result<Option<LinkPreviewMetadata>, String> {
-    tokio::time::timeout(
-        PREVIEW_TOTAL_TIMEOUT,
-        fetch_link_preview_metadata_inner(href),
-    )
-    .await
-    .map_err(|_| "link preview request timed out".to_string())?
+    fetch_link_preview_metadata_with(href, fetch_link_preview_metadata_for_url).await
 }
 
-async fn fetch_link_preview_metadata_inner(
+/// Run metadata fetching without a native deadline. The renderer owns the
+/// finite budget after a composer generation is promoted into a send.
+async fn fetch_link_preview_metadata_with<F, Fut>(
+    href: String,
+    fetch: F,
+) -> Result<Option<LinkPreviewMetadata>, String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = Result<Option<LinkPreviewMetadata>, String>>,
+{
+    fetch(href).await
+}
+
+async fn fetch_link_preview_metadata_for_url(
     href: String,
 ) -> Result<Option<LinkPreviewMetadata>, String> {
     let mut url = Url::parse(href.trim()).map_err(|error| format!("invalid URL: {error}"))?;
@@ -107,28 +113,15 @@ async fn fetch_link_preview_metadata_inner(
         let (image_result, favicon_result) = tokio::join!(
             async {
                 match image_url {
-                    Some(image_url) => Some(
-                        tokio::time::timeout(
-                            PREVIEW_FETCH_TIMEOUT,
-                            fetch_sanitized_image_with_retry(image_url, false),
-                        )
-                        .await
-                        .unwrap_or(Err(ImageFetchError::Transient {
-                            retry_after: None,
-                            retry_inline: false,
-                        })),
-                    ),
+                    Some(image_url) => {
+                        Some(fetch_sanitized_image_with_retry(image_url, false).await)
+                    }
                     None => None,
                 }
             },
             async {
                 match favicon_url {
-                    Some(favicon_url) => tokio::time::timeout(
-                        PREVIEW_FETCH_TIMEOUT,
-                        fetch_sanitized_image(favicon_url, true),
-                    )
-                    .await
-                    .ok(),
+                    Some(favicon_url) => Some(fetch_sanitized_image(favicon_url, true).await),
                     None => None,
                 }
             }
@@ -219,9 +212,9 @@ async fn send_pinned_request(url: &Url, accept: &str) -> Result<reqwest::Respons
         .header(ACCEPT, accept)
         .header(USER_AGENT, "Buzz Desktop link preview");
 
-    tokio::time::timeout(PREVIEW_FETCH_TIMEOUT, request.send())
+    request
+        .send()
         .await
-        .map_err(|_| "link preview request timed out".to_string())?
         .map_err(|error| format!("link preview request failed: {error}"))
 }
 
@@ -681,9 +674,9 @@ mod tests {
     use super::rate_limit::MAX_IMAGE_RETRY_AFTER;
     use super::{
         apply_image_result, declares_animation, extract_favicon_url, extract_image_url,
-        extract_link_preview_metadata, is_html_response, read_bytes_prefix, retry_after_duration,
-        sanitize_image, ImageFetchError, LinkPreviewImageFetchState, LinkPreviewMetadata,
-        MAX_METADATA_DESCRIPTION_CHARS,
+        extract_link_preview_metadata, fetch_link_preview_metadata_with, is_html_response,
+        read_bytes_prefix, retry_after_duration, sanitize_image, ImageFetchError,
+        LinkPreviewImageFetchState, LinkPreviewMetadata, MAX_METADATA_DESCRIPTION_CHARS,
     };
     use axum::{body::Body, http::Response, routing::get, Router};
     use base64::Engine as _;
@@ -702,6 +695,21 @@ mod tests {
         reqwest::get(format!("http://{address}{path}"))
             .await
             .unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn metadata_fetch_has_no_native_deadline() {
+        let fetch =
+            fetch_link_preview_metadata_with("https://example.com".to_string(), |_| async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok(None)
+            });
+        tokio::pin!(fetch);
+
+        tokio::time::advance(std::time::Duration::from_secs(59)).await;
+        assert!(futures_util::poll!(&mut fetch).is_pending());
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        assert_eq!(fetch.await, Ok(None));
     }
 
     #[test]
