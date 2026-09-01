@@ -222,12 +222,40 @@ function createMetadataLoader({
 function fetchLinkPreviewMetadata(
   href: string,
 ): Promise<LinkPreviewMetadata | null> {
+  const startedAt = performance.now();
+  const logResult = (
+    result: LinkPreviewMetadata | null,
+  ): LinkPreviewMetadata | null => {
+    if (import.meta.env?.DEV) {
+      console.info("[link-preview] metadata fetch completed", {
+        href,
+        elapsedMs: Math.round(performance.now() - startedAt),
+        result: result === null ? "miss" : "hit",
+        imageFetchState: result?.imageFetchState ?? "none",
+        imageRetryAfterMs: result?.imageRetryAfterMs ?? null,
+        hasImage: Boolean(result?.imageDataUrl && result.imageDomain),
+        hasFavicon: Boolean(result?.faviconDataUrl),
+      });
+    }
+    return result;
+  };
+  const logFailure = (error: unknown): never => {
+    if (import.meta.env?.DEV) {
+      console.warn("[link-preview] metadata fetch failed", {
+        href,
+        elapsedMs: Math.round(performance.now() - startedAt),
+        error,
+      });
+    }
+    throw error;
+  };
+
   return invokeTauri<LinkPreviewMetadata | null>(
     "fetch_link_preview_metadata",
     {
       href,
     },
-  );
+  ).then(logResult, logFailure);
 }
 
 const metadataLoader = createMetadataLoader({
