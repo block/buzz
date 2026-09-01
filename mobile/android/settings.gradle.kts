@@ -12,8 +12,7 @@ pluginManagement {
 
     repositories {
         google()
-        mavenCentral()
-        gradlePluginPortal()
+        maven(url = "https://global.block-artifacts.com/artifactory/square-public")
     }
 }
 
