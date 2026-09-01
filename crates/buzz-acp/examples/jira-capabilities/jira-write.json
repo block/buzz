@@ -2,7 +2,7 @@
   "version": 2,
   "servers": [
     {
-      "name": "jira",
+      "name": "atlassian-rovo",
       "transport": "stdio",
       "command": "mcp-remote",
       "args": ["https://mcp.atlassian.com/v1/mcp/authv2"],
