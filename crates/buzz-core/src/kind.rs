@@ -150,16 +150,11 @@ pub const RESULT_GATED_KINDS: &[u32] = &[
 ///
 /// The relay enforces this at the filter layer (`p_gated_filters_authorized`):
 /// a REQ that can match any kind in this set is closed unless the filter's
-/// `#p` values exactly equal the authenticated reader's pubkey. For stored
-/// (non-ephemeral) kinds in this set, the storage layer additionally writes a
-/// NULL `search_tsv` so the event is unsearchable through NIP-50 FTS
-/// (`schema/schema.sql` and the forward FTS migrations — drift
-/// caught by `p_gated_persistent_kinds_have_storage_null_tsvector` in
-/// `crates/buzz-search/tests/fts_integration.rs`).
-///
-/// Ephemeral kinds (20000–29999, e.g. [`KIND_AGENT_OBSERVER_FRAME`]) are
-/// included for filter-layer enforcement but are never stored, so the
-/// storage-layer search defense does not apply to them.
+/// `#p` values exactly equal the authenticated reader's pubkey. Existing
+/// private event families also have storage-level search exclusions. Those
+/// exclusions are not implied by this access-control list: durable workflow
+/// wakes use the result-level recipient and current-membership checks even
+/// when their content has an indexed vector. Ephemeral kinds are never stored.
 pub const P_GATED_KINDS: &[u32] = &[
     KIND_AGENT_OBSERVER_FRAME,
     KIND_WORKFLOW_MENTION_WAKE,

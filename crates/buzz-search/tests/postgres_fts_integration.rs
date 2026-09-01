@@ -30,8 +30,6 @@ const MIGRATION_0008_SQL: &str =
 const MIGRATION_0014_SQL: &str = include_str!("../../../migrations/0014_push_lease_fts.sql");
 const MIGRATION_0033_SQL: &str =
     include_str!("../../../migrations/0033_private_managed_agent_fts.sql");
-const MIGRATION_0042_SQL: &str =
-    include_str!("../../../migrations/0044_workflow_mention_wake_fts.sql");
 
 async fn setup() -> (PgPool, String) {
     setup_with_search_policy(true).await
@@ -60,8 +58,8 @@ async fn setup_with_search_policy(apply_fresh_allowlist: bool) -> (PgPool, Strin
         .connect(&url_with_search_path)
         .await
         .expect("connect with search_path");
-    // Apply the full migration chain in order so the test schema exactly matches
-    // production. Future FTS-affecting migrations must be added here.
+    // Apply the selected FTS-affecting chain, not the full production schema.
+    // Preserve both existing fresh allowlist and brownfield skip-set policies.
     pool.execute(MIGRATION_0001_SQL)
         .await
         .expect("apply 0001 migration");
@@ -94,9 +92,6 @@ async fn setup_with_search_policy(apply_fresh_allowlist: bool) -> (PgPool, Strin
     pool.execute(MIGRATION_0033_SQL)
         .await
         .expect("apply 0033 migration");
-    pool.execute(MIGRATION_0042_SQL)
-        .await
-        .expect("apply 0042 migration");
     (pool, schema)
 }
 
@@ -1416,26 +1411,9 @@ async fn author_only_kinds_are_storage_level_unsearchable() {
     teardown(pool, &schema).await;
 }
 
-/// Tripwire: every Rust-side `P_GATED_KINDS` entry that is *persistent* (not
-/// in the ephemeral 20000–29999 range) MUST be excluded from `search_tsv` at
-/// the storage layer.
-///
-/// L2 (the filter-level `#p` gate in `p_gated_filters_authorized`) prevents
-/// reachable leaks today, but it is Rust logic — a future bug or new exempt
-/// search entry point could surface tokenized content from these kinds. The
-/// L1 NULL tsvector is the unbreakable backstop: `@@` mathematically cannot
-/// match NULL. This test catches the drift where someone adds a persistent
-/// kind to `P_GATED_KINDS` without the matching desired schema and forward
-/// migration exclusion.
-///
-/// Ephemeral kinds (20000–29999) are skipped: they are never stored, so the
-/// storage-layer defense does not apply to them regardless of the schema
-/// CASE. `p_gated_filters_authorized` remains their sole defense by design.
-///
-/// Companion to `author_only_kinds_are_storage_level_unsearchable`: that test
-/// covers `AUTHOR_ONLY_KINDS` drift; this one covers `P_GATED_KINDS`
-/// persistent-subset drift. Together they tripwire both Rust-side privacy
-/// constants against the schema literal.
+/// Preserve the existing storage exclusions for private event families.
+/// Wake authorization is instead enforced at the relay's read/count boundary;
+/// index membership does not grant visibility. See workflow_search_tests.
 #[tokio::test]
 #[ignore = "requires Postgres"]
 async fn p_gated_persistent_kinds_have_storage_null_tsvector() {
@@ -1472,7 +1450,9 @@ async fn assert_p_gated_storage_null(apply_fresh_allowlist: bool) {
     let persistent: Vec<u32> = P_GATED_KINDS
         .iter()
         .copied()
-        .filter(|&k| !buzz_core::kind::is_ephemeral(k))
+        .filter(|&k| {
+            !buzz_core::kind::is_ephemeral(k) && k != buzz_core::kind::KIND_WORKFLOW_MENTION_WAKE
+        })
         .collect();
     assert!(
         !persistent.is_empty(),
@@ -1492,8 +1472,8 @@ async fn assert_p_gated_storage_null(apply_fresh_allowlist: bool) {
             1_700_000_100 + i as i64,
         )
         .await;
-        // Empty content is the canonical wake payload, but an empty vector is
-        // not NULL: it matches a NOT-only query. Exercise both payload shapes.
+        // Preserve NULL rather than empty vectors for these existing exclusions.
+        // An empty vector can match a NOT-only query.
         insert_event(
             &pool,
             c,

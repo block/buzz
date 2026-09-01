@@ -702,7 +702,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 45);
+        assert_eq!(migrations.len(), 44);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -911,7 +911,7 @@ mod postgres_tests {
         assert!(migrations[32].sql.as_str().contains("search_tsv"));
         assert!(!migrations[0].sql.as_str().contains("30179"));
         assert!(include_str!("../../../../schema/schema.sql")
-            .contains("kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200, 44620)"));
+            .contains("kind IN (1059, 30179, 30300, 30350, 30622, 44100, 44101, 44200)"));
 
         // Public push-gateway authority is intentionally deployment-global and
         // durable: immediate revocation and hostile-relay admission cannot be
@@ -1194,12 +1194,15 @@ mod postgres_tests {
             2
         );
 
-        // Durable workflow wakes are recipient-gated and must remain outside
-        // full-text search on both fresh and brownfield databases.
+        // Supersession metadata is additive; there is no wake FTS migration.
         assert_eq!(migrations[43].version, 44);
-        let workflow_wake_fts = migrations[43].sql.as_str();
-        assert!(workflow_wake_fts.contains("kind = 44620"));
-        assert!(desired_schema.contains("44200, 44620"));
+        let workflow_supersession = migrations[43].sql.as_str();
+        assert!(workflow_supersession
+            .contains("workflow_revision_superseded BOOLEAN NOT NULL DEFAULT false"));
+        assert!(!workflow_supersession.contains("UPDATE events"));
+        assert!(
+            desired_schema.contains("workflow_revision_superseded BOOLEAN NOT NULL DEFAULT false")
+        );
 
         // pgschema intentionally reconciles DDL, not seed DML or table storage
         // parameters. Its post-apply reconciliation must restore and verify

@@ -622,3 +622,6 @@ async fn rendered_trigger_mentions_never_create_durable_wakes_or_authority() {
         }
     }
 }
+
+#[path = "workflow_search_tests.rs"]
+mod workflow_search_postgres_tests;

@@ -1330,7 +1330,7 @@ fn extract_channel_id_from_filters(filters: &[Filter]) -> Option<uuid::Uuid> {
 pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: &str) -> bool {
     let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
     filters.iter().all(|filter| {
-        // Kindless full-text searches cannot surface p-gated rows, and a
+        // Kindless full-text searches use per-event authorization, and a
         // kindless channel filter is safe to register: global p-gated events
         // cannot enter its channel index, while channel-scoped workflow wakes
         // are removed by the shared per-event recipient gate. Preserve the
