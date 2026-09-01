@@ -200,14 +200,14 @@ async fn submit_repo_update(client: &BuzzClient, builder: EventBuilder) -> Resul
     Ok(())
 }
 
-/// Build the kind:30617 announcement for `repos create`, including the
-/// `buzz-channel` binding when requested.
+/// Build the kind:30617 announcement for `repos create` with a required
+/// `buzz-channel` binding.
 ///
 /// Pure (no I/O) so the emitted tags are unit-testable. Exactly one
 /// validated `buzz-channel` tag is appended — the tag is the git ACL
-/// (issue #3527: without it the relay 404s every clone/fetch/push), so the
-/// UUID is shape-validated here and its existence/membership is the relay's
-/// authority at git-access time, same posture as `repos bind`.
+/// (issue #3539 / #3527: without it the relay 404s every clone/fetch/push),
+/// so the UUID is shape-validated here and its existence/membership is the
+/// relay's authority at git-access time, same posture as `repos bind`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_create_announcement(
     repo_id: &str,
@@ -216,9 +216,10 @@ pub(crate) fn build_create_announcement(
     clone_urls: &[String],
     web_url: Option<&str>,
     relays: &[String],
-    channel: Option<&str>,
+    channel: &str,
 ) -> Result<EventBuilder, CliError> {
     validate_repo_id(repo_id)?;
+    crate::validate::validate_uuid(channel)?;
 
     let clone_refs: Vec<&str> = clone_urls.iter().map(|s| s.as_str()).collect();
     let relay_refs: Vec<&str> = relays.iter().map(|s| s.as_str()).collect();
@@ -233,10 +234,7 @@ pub(crate) fn build_create_announcement(
     )
     .map_err(|e| CliError::Other(format!("build_repo_announcement failed: {e}")))?;
 
-    if let Some(channel) = channel {
-        crate::validate::validate_uuid(channel)?;
-        builder = builder.tag(Tag::parse(["buzz-channel", channel]).map_err(tag_error)?);
-    }
+    builder = builder.tag(Tag::parse(["buzz-channel", channel]).map_err(tag_error)?);
     Ok(builder)
 }
 
@@ -249,7 +247,7 @@ pub async fn cmd_create_repo(
     clone_urls: &[String],
     web_url: Option<&str>,
     relays: &[String],
-    channel: Option<&str>,
+    channel: &str,
 ) -> Result<(), CliError> {
     let builder = build_create_announcement(
         repo_id,
@@ -435,7 +433,7 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
                 &clone_urls,
                 web.as_deref(),
                 &relays,
-                channel.as_deref(),
+                &channel,
             )
             .await
         }
@@ -768,7 +766,7 @@ mod tests {
         assert!(matches!(error, crate::error::CliError::Usage(_)));
     }
 
-    /// Issue #3527: `repos create --channel` must emit exactly one
+    /// Issue #3539 / #3527: `repos create --channel` must emit exactly one
     /// `buzz-channel` tag so the primary create command stops producing
     /// repos the relay 404s forever.
     #[test]
@@ -781,7 +779,7 @@ mod tests {
             &["https://relay.example/git/owner/demo".to_string()],
             None,
             &[],
-            Some(&channel),
+            &channel,
         )
         .expect("build create announcement")
         .sign_with_keys(&Keys::generate())
@@ -804,24 +802,8 @@ mod tests {
     }
 
     #[test]
-    fn create_without_channel_emits_no_binding_tag() {
-        let event = build_create_announcement("demo", None, None, &[], None, &[], None)
-            .expect("build create announcement")
-            .sign_with_keys(&Keys::generate())
-            .expect("sign create announcement");
-
-        assert!(
-            !event
-                .tags
-                .iter()
-                .any(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz-channel")),
-            "no --channel means no binding tag (vanilla NIP-34 stays possible)"
-        );
-    }
-
-    #[test]
     fn create_rejects_malformed_channel_uuid() {
-        let error = build_create_announcement("demo", None, None, &[], None, &[], Some("nope"))
+        let error = build_create_announcement("demo", None, None, &[], None, &[], "nope")
             .expect_err("malformed channel id must not build an announcement");
         assert!(matches!(error, crate::error::CliError::Usage(_)));
     }
