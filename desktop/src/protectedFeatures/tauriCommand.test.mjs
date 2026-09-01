@@ -25,8 +25,12 @@ const configured = override.build.frontendDist;
 // Tauri resolves frontendDist against the directory holding tauri.conf.json
 // (config_parent.join(path) in tauri-codegen), not against the process cwd.
 const output = path.resolve(process.env.BUZZ_TEST_CONFIG_DIR, configured);
-mkdirSync(output, { recursive: true });
-writeFileSync(path.join(output, "variant.txt"), process.env.VITE_BUZZ_BESTIE);
+// Write through the producer path the wrapper publishes and read back through
+// the config-resolved consumer path. Doing both against one path would make the
+// fake agree with itself no matter where the wrapper pointed frontendDist.
+const producer = process.env.BUZZ_PROTECTED_BUILD_OUTPUT;
+mkdirSync(producer, { recursive: true });
+writeFileSync(path.join(producer, "variant.txt"), process.env.VITE_BUZZ_BESTIE);
 await new Promise((resolve) => setTimeout(resolve, 100));
 const observed = readFileSync(path.join(output, "variant.txt"), "utf8");
 writeFileSync(
