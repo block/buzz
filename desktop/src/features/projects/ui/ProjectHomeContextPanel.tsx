@@ -6,14 +6,22 @@ import {
   GitCommitHorizontal,
   GitPullRequest,
   Hash,
+  Link2Off,
+  MoreHorizontal,
   Users,
 } from "lucide-react";
 import * as React from "react";
+import { toast } from "sonner";
 
+import { useChannelMembersQuery } from "@/features/channels/hooks";
+import { canManageProjectRelatedChannels } from "@/features/projects/lib/projectRelatedChannelAccess";
 import { presentContextCount } from "@/features/projects/lib/projectHomeSummary";
 import type { ProjectHomeWorkspaceSheetTab } from "@/features/projects/lib/projectHomeWorkspaceSheet";
 import { resolveProjectDefaultBranch } from "@/features/projects/lib/projectBranches";
-import { listProjectBoundChannels } from "@/features/projects/lib/projectRelatedChannels";
+import {
+  isExplicitProjectRelatedChannel,
+  listProjectBoundChannels,
+} from "@/features/projects/lib/projectRelatedChannels";
 import {
   useProjectActivitySummariesQuery,
   useProjectRepoSnapshotQuery,
@@ -21,10 +29,17 @@ import {
   type Project,
 } from "@/features/projects/hooks";
 import { ProjectChannelIcon } from "@/features/projects/ui/ProjectChannelIcon";
+import { useChangeProjectRelatedChannelsMutation } from "@/features/projects/useChangeProjectRelatedChannels";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import type { EntityLinkTab } from "@/shared/lib/entityLink";
 import { Button } from "@/shared/ui/button";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from "@/shared/ui/context-menu";
 import { ProjectChannelManagement } from "./ProjectChannelManagement";
 import { ProjectRepositoryManagement } from "./ProjectRepositoryManagement";
 import { SECTION_ACTION_VISIBILITY_CLASS } from "@/features/sidebar/ui/sidebarSectionStyles";
@@ -86,10 +101,12 @@ function ContextSection({
 }
 
 function ContextRowContent({
+  accessory,
   children,
   count,
   icon,
 }: {
+  accessory?: React.ReactNode;
   children: React.ReactNode;
   count?: number;
   icon: React.ReactNode;
@@ -100,15 +117,18 @@ function ContextRowContent({
         {icon}
       </span>
       <span className="min-w-0 flex-1 truncate text-left">{children}</span>
-      <span className="w-8 shrink-0 text-right tabular-nums text-current opacity-60">
-        {count ?? ""}
-      </span>
+      {accessory ?? (
+        <span className="w-8 shrink-0 text-right tabular-nums text-current opacity-60">
+          {count ?? ""}
+        </span>
+      )}
     </>
   );
 }
 
 function ContextNavButton({
   children,
+  contextMenuTrigger = false,
   count,
   disabled,
   icon,
@@ -118,6 +138,7 @@ function ContextNavButton({
   title,
 }: {
   children: React.ReactNode;
+  contextMenuTrigger?: boolean;
   count?: number;
   disabled?: boolean;
   icon: React.ReactNode;
@@ -126,11 +147,13 @@ function ContextNavButton({
   testId?: string;
   title?: string;
 }) {
-  return (
+  const button = (
     <Button
+      aria-haspopup={contextMenuTrigger ? "menu" : undefined}
       aria-pressed={pressed}
       className={cn(
         PROJECT_HOME_SIDEBAR_ROW_CLASS,
+        contextMenuTrigger && "group/project-context-row",
         pressed &&
           "bg-sidebar-active text-sidebar-active-foreground shadow-xs hover:bg-sidebar-active hover:text-sidebar-active-foreground",
       )}
@@ -138,44 +161,74 @@ function ContextNavButton({
       disabled={disabled}
       onClick={onClick}
       size="sm"
-      title={title}
+      title={
+        contextMenuTrigger
+          ? "Right-click or press Shift+F10 for project actions"
+          : title
+      }
       type="button"
       variant="ghost"
     >
-      <ContextRowContent count={count} icon={icon}>
+      <ContextRowContent
+        accessory={
+          contextMenuTrigger ? (
+            <MoreHorizontal
+              aria-hidden="true"
+              className="size-4 shrink-0 opacity-0 transition-opacity group-hover/project-context-row:opacity-60 group-focus-visible/project-context-row:opacity-60"
+            />
+          ) : undefined
+        }
+        count={count}
+        icon={icon}
+      >
         {children}
       </ContextRowContent>
     </Button>
+  );
+  return contextMenuTrigger ? (
+    <ContextMenuTrigger asChild>{button}</ContextMenuTrigger>
+  ) : (
+    button
   );
 }
 
 function ChannelContextRow({
   channel,
+  contextMenuTrigger = false,
   onClick,
   projectHome,
   testId,
 }: {
   channel: Channel;
+  contextMenuTrigger?: boolean;
   onClick?: () => void;
   projectHome?: boolean;
   testId: string;
 }) {
   const Icon = projectHome ? ProjectChannelIcon : Hash;
-  if (onClick) {
-    return (
-      <ContextNavButton icon={<Icon />} onClick={onClick} testId={testId}>
+  let row: React.ReactNode;
+  if (onClick || contextMenuTrigger) {
+    row = (
+      <ContextNavButton
+        contextMenuTrigger={contextMenuTrigger}
+        icon={<Icon />}
+        onClick={onClick}
+        testId={testId}
+      >
         {channel.name}
       </ContextNavButton>
     );
+  } else {
+    row = (
+      <div
+        className={`${PROJECT_HOME_SIDEBAR_ROW_CLASS} pointer-events-none flex items-center`}
+        data-testid={testId}
+      >
+        <ContextRowContent icon={<Icon />}>{channel.name}</ContextRowContent>
+      </div>
+    );
   }
-  return (
-    <div
-      className={`${PROJECT_HOME_SIDEBAR_ROW_CLASS} pointer-events-none flex items-center`}
-      data-testid={testId}
-    >
-      <ContextRowContent icon={<Icon />}>{channel.name}</ContextRowContent>
-    </div>
-  );
+  return row;
 }
 
 export function ProjectHomeContextPanel({
@@ -234,6 +287,19 @@ export function ProjectHomeContextPanel({
     null,
     Boolean(firstRepository),
   );
+  const homeChannelMembersQuery = useChannelMembersQuery(
+    project.projectChannelId,
+  );
+  const homeChannel = channels.find(
+    (candidate) => candidate.id === project.projectChannelId,
+  );
+  const canManageChannels = canManageProjectRelatedChannels({
+    homeChannelActive: homeChannel?.archivedAt === null,
+    homeChannelMembers: homeChannelMembersQuery.data,
+    identityPubkey,
+    project,
+  });
+  const changeChannelsMutation = useChangeProjectRelatedChannelsMutation();
   const channelsById = new Map(
     channels.map((candidate) => [candidate.id, candidate]),
   );
@@ -325,7 +391,8 @@ export function ProjectHomeContextPanel({
         collapsible
         headerAction={
           <ProjectChannelManagement
-            identityPubkey={identityPubkey}
+            canManage={canManageChannels}
+            channels={channels}
             project={project}
           />
         }
@@ -335,9 +402,14 @@ export function ProjectHomeContextPanel({
         {listedChannels.length > 0 ? (
           listedChannels.map((binding) => {
             const isHome = binding.role === "home";
-            return (
+            const canRemove =
+              canManageChannels &&
+              !isHome &&
+              isExplicitProjectRelatedChannel(project, binding.channel.id);
+            const row = (
               <ChannelContextRow
                 channel={binding.channel}
+                contextMenuTrigger={canRemove}
                 key={`${binding.role}:${binding.channel.id}`}
                 onClick={
                   isHome || !onOpenChannel
@@ -351,6 +423,39 @@ export function ProjectHomeContextPanel({
                     : `project-home-context-channel-${binding.channel.name}`
                 }
               />
+            );
+            if (!canRemove) return row;
+            return (
+              <ContextMenu key={`${binding.role}:${binding.channel.id}`}>
+                {row}
+                <ContextMenuContent>
+                  <ContextMenuItem
+                    disabled={changeChannelsMutation.isPending}
+                    onSelect={() => {
+                      void changeChannelsMutation
+                        .mutateAsync({
+                          project,
+                          remove: [binding.channel.id],
+                        })
+                        .then(() => {
+                          toast.success(
+                            `Channel "#${binding.channel.name}" removed from project.`,
+                          );
+                        })
+                        .catch((error: unknown) => {
+                          toast.error(
+                            error instanceof Error
+                              ? error.message
+                              : "Could not remove the channel from this project.",
+                          );
+                        });
+                    }}
+                  >
+                    <Link2Off />
+                    Remove from project
+                  </ContextMenuItem>
+                </ContextMenuContent>
+              </ContextMenu>
             );
           })
         ) : (

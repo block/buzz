@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 
 import {
   enumerateProjectEvents,
@@ -89,6 +90,71 @@ test("buildProjectHomeFromFetcher scopes startup lookup to the active channel", 
     kinds: [5],
     extraFilter: { "#a": [`30621:${owner}:relay`, repositoryAddress] },
   });
+});
+
+test("buildProjectsFromFetcher consumes relay-signed effective Project tags", async () => {
+  const relaySecret = new Uint8Array(32).fill(11);
+  const relayPubkey = getPublicKey(relaySecret);
+  const owner = "a".repeat(64);
+  const identityId = "b".repeat(64);
+  const coordinate = `30621:${owner}:relay`;
+  const related = "22222222-2222-4222-8222-222222222222";
+  const projectEvent = {
+    id: identityId,
+    sig: "owner-signature",
+    kind: 30621,
+    pubkey: owner,
+    created_at: 200,
+    content: "",
+    tags: [
+      ["d", "relay"],
+      ["name", "Owner name"],
+    ],
+  };
+  const stateEvent = finalizeEvent(
+    {
+      kind: 30623,
+      created_at: 201,
+      content: JSON.stringify({
+        v: 1,
+        deleted: false,
+        project_tags: [
+          ["d", "relay"],
+          ["name", "Effective name"],
+          ["buzz-related-channel", related],
+        ],
+      }),
+      tags: [
+        ["d", "c".repeat(64)],
+        ["a", coordinate],
+        ["rev", "2"],
+        ["e", identityId, "", "identity"],
+        ["e", "d".repeat(64), "", "change"],
+      ],
+    },
+    relaySecret,
+  );
+  const calls = [];
+  const projects = await buildProjectsFromFetcher(
+    async (kinds, extraFilter) => {
+      calls.push({ kinds, extraFilter });
+      if (kinds.includes(30621)) return [projectEvent];
+      if (kinds.includes(30623)) return [stateEvent];
+      return [];
+    },
+    { relayPubkey },
+  );
+
+  assert.equal(projects[0].name, "Effective name");
+  assert.deepEqual(projects[0].relatedChannelIds, [related]);
+  assert.ok(
+    calls.some(
+      ({ kinds, extraFilter }) =>
+        kinds.includes(30623) &&
+        extraFilter.authors[0] === relayPubkey &&
+        extraFilter["#a"][0] === coordinate,
+    ),
+  );
 });
 
 test("enumerateProjectEvents drains a tied boundary second before advancing", async () => {

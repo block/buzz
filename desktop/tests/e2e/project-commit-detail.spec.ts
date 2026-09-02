@@ -384,9 +384,9 @@ test("creating a project opens its channel conversation", async ({ page }) => {
   await expect(repositoryAction).toHaveCSS("opacity", "1");
   await page.getByTestId("project-home-context-channel").hover();
   await page.getByTestId("add-project-channel").click();
-  await expect(page.getByTestId("create-project-channel-dialog")).toBeVisible();
+  await expect(page.getByTestId("add-project-channel-dialog")).toBeVisible();
   await page.keyboard.press("Escape");
-  await expect(page.getByTestId("create-project-channel-dialog")).toBeHidden();
+  await expect(page.getByTestId("add-project-channel-dialog")).toBeHidden();
   await expect(
     page.getByTestId("sidebar-project-multi-repo-demo"),
   ).toBeVisible();

@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
 import { CommunitiesProvider } from "@/features/communities/useCommunities";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import { emit, listen } from "@tauri-apps/api/event";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { decode, npubEncode, nsecEncode } from "nostr-tools/nip19";
@@ -68,6 +69,8 @@ import {
   KIND_MEMBER_REMOVED_NOTIFICATION,
   KIND_PERSONA,
   KIND_PROJECT_ANNOUNCEMENT,
+  KIND_PROJECT_CHANGE,
+  KIND_PROJECT_STATE,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
   KIND_STREAM_MESSAGE_EDIT,
@@ -215,6 +218,8 @@ type E2eConfig = {
     projectHeadBranch?: string;
     /** Override the repository access channel for project authorization states. */
     projectAccessChannelId?: string;
+    /** Role held by the mock viewer in the Buzz Project's home channel. */
+    projectHomeRole?: "owner" | "admin" | "member";
     /** Make remote project snapshots fail with this git-facing message. */
     projectRepoSnapshotError?: string;
     /** Delay remote repository snapshots so project loading UI is observable. */
@@ -1592,6 +1597,10 @@ const DEFAULT_REAL_IDENTITY = {
   pubkey: "e5ebc6cdb579be112e336cc319b5989b4bb6af11786ea90dbe52b5f08d741b34",
   username: "tyler",
 } satisfies TestIdentity;
+
+// The mock relay uses a real key for relay-authored projections so production
+// signature verification exercises the same trust boundary as a live relay.
+const MOCK_PROJECT_RELAY_IDENTITY = DEFAULT_REAL_IDENTITY;
 
 const ALICE_PUBKEY =
   "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f";
@@ -6065,6 +6074,7 @@ const MOCK_PROJECT_SUBJECTS = [
 
 const MOCK_PROJECT_KINDS = new Set<number>([
   KIND_PROJECT_ANNOUNCEMENT,
+  KIND_PROJECT_STATE,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
   KIND_GIT_PATCH,
@@ -6231,31 +6241,156 @@ function buildMockProjectEvents(): RelayEvent[] {
   if (!window.__BUZZ_E2E_REPOSITORY_ONLY_PROJECTS__) {
     const projectOwner =
       window.__BUZZ_E2E_PROJECT_OWNER_OVERRIDE__ ?? MOCK_PROJECT_SEEDS[0].owner;
-    events.push(
-      createMockEvent(
-        KIND_PROJECT_ANNOUNCEMENT,
-        "",
+    const identityEvent = createMockEvent(
+      KIND_PROJECT_ANNOUNCEMENT,
+      "",
+      [
+        ["d", "buzz"],
+        ["name", "buzz"],
+        ["description", "The complete Buzz community platform."],
+        ["a", `${KIND_REPO_ANNOUNCEMENT}:${projectOwner}:buzz`],
+        ["a", `${KIND_REPO_ANNOUNCEMENT}:${ALICE_PUBKEY}:relay-tools`],
         [
-          ["d", "buzz"],
-          ["name", "buzz"],
-          ["description", "The complete Buzz community platform."],
-          ["a", `${KIND_REPO_ANNOUNCEMENT}:${projectOwner}:buzz`],
-          ["a", `${KIND_REPO_ANNOUNCEMENT}:${ALICE_PUBKEY}:relay-tools`],
-          [
-            "buzz-channel",
-            getConfig()?.mock?.projectAccessChannelId ??
-              STARTER_PROJECT_HOME_CHANNEL_ID,
-          ],
-          ["buzz-related-channel", "9dae0116-799b-5071-a0a8-fdd30a91a35d"],
+          "buzz-channel",
+          getConfig()?.mock?.projectAccessChannelId ??
+            STARTER_PROJECT_HOME_CHANNEL_ID,
         ],
-        projectOwner,
-        now,
-        "project-buzz".padEnd(64, "0"),
-      ),
+        ["buzz-related-channel", "9dae0116-799b-5071-a0a8-fdd30a91a35d"],
+      ],
+      projectOwner,
+      now,
+      "b".repeat(64),
+    );
+    events.push(
+      identityEvent,
+      buildMockProjectStateEvent(identityEvent, 1, identityEvent.id),
     );
   }
 
   return events;
+}
+
+function projectCoordinateFromIdentity(event: RelayEvent): string {
+  const dtag = event.tags.find((tag) => tag[0] === "d")?.[1];
+  if (!dtag) throw new Error("Mock Project identity is missing its d tag.");
+  return `${KIND_PROJECT_ANNOUNCEMENT}:${event.pubkey}:${dtag}`;
+}
+
+function buildMockProjectStateEvent(
+  identityEvent: RelayEvent,
+  revision: number,
+  changeEventId: string,
+  projectTags = identityEvent.tags,
+): RelayEvent {
+  const coordinate = projectCoordinateFromIdentity(identityEvent);
+  return finalizeEvent(
+    {
+      kind: KIND_PROJECT_STATE,
+      content: JSON.stringify({
+        v: 1,
+        deleted: false,
+        project_tags: projectTags,
+      }),
+      tags: [
+        ["d", bytesToHex(sha256(new TextEncoder().encode(coordinate)))],
+        ["a", coordinate],
+        ["rev", String(revision)],
+        ["e", identityEvent.id, "", "identity"],
+        ["e", changeEventId, "", "change"],
+      ],
+      created_at: Math.floor(Date.now() / 1000) + revision,
+    },
+    hexToBytes(MOCK_PROJECT_RELAY_IDENTITY.privateKey),
+  );
+}
+
+function applyMockProjectRelatedChannelChange(
+  socket: MockSocket,
+  event: RelayEvent,
+): void {
+  const coordinate = event.tags.find((tag) => tag[0] === "a")?.[1];
+  const expectedRevision = event.tags.find(
+    (tag) => tag[0] === "expected-revision",
+  )?.[1];
+  const store = getMockProjectEventStore();
+  const projectionIndex = store.findIndex(
+    (candidate) =>
+      candidate.kind === KIND_PROJECT_STATE &&
+      candidate.tags.some(
+        (tag) => tag.length === 2 && tag[0] === "a" && tag[1] === coordinate,
+      ),
+  );
+  const projection = store[projectionIndex];
+  if (!coordinate || !expectedRevision || !projection) {
+    throw new Error("Mock Project change is missing its current projection.");
+  }
+  const currentRevision = projection.tags.find((tag) => tag[0] === "rev")?.[1];
+  if (expectedRevision !== currentRevision) {
+    sendWsText(socket.handler, [
+      "OK",
+      event.id,
+      false,
+      `conflict: Project revision is ${currentRevision ?? "unknown"}`,
+    ]);
+    return;
+  }
+
+  const body = JSON.parse(event.content) as {
+    patch: { related_channels: { add: string[]; remove: string[] } };
+  };
+  const patch = body.patch.related_channels;
+
+  const projectionBody = JSON.parse(projection.content) as {
+    project_tags: string[][];
+  };
+  const identityId = projection.tags.find(
+    (tag) => tag[0] === "e" && tag[3] === "identity",
+  )?.[1];
+  const identityEvent = store.find(
+    (candidate) =>
+      candidate.kind === KIND_PROJECT_ANNOUNCEMENT &&
+      candidate.id === identityId,
+  );
+  if (!identityEvent) {
+    throw new Error("Mock Project State is missing its identity event.");
+  }
+
+  const related = new Set(
+    projectionBody.project_tags
+      .filter((tag) => tag[0] === "buzz-related-channel")
+      .map((tag) => tag[1]),
+  );
+  for (const channelId of patch.remove) related.delete(channelId);
+  for (const channelId of patch.add) related.add(channelId);
+
+  const effectiveProjectTags = [
+    ...projectionBody.project_tags.filter(
+      (tag) => tag[0] !== "buzz-related-channel",
+    ),
+    ...[...related]
+      .sort()
+      .map((channelId) => ["buzz-related-channel", channelId]),
+  ];
+  const nextRevision = Number(currentRevision) + 1;
+  store.splice(
+    projectionIndex,
+    1,
+    buildMockProjectStateEvent(
+      identityEvent,
+      nextRevision,
+      event.id,
+      effectiveProjectTags,
+    ),
+  );
+  const acceptedProjectEvents =
+    window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__ ?? [];
+  acceptedProjectEvents.push({
+    content: event.content,
+    kind: event.kind,
+    tags: event.tags,
+  });
+  window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__ = acceptedProjectEvents;
+  sendWsText(socket.handler, ["OK", event.id, true, ""]);
 }
 
 function getMockProjectEventStore(): RelayEvent[] {
@@ -7367,8 +7502,18 @@ async function handleGetChannelMembers(
   const identity = getIdentity(config);
   if (!identity) {
     const channel = getMockChannel(args.channelId);
+    const members = cloneMembers(channel.members);
+    if (
+      args.channelId === STARTER_PROJECT_HOME_CHANNEL_ID &&
+      config?.mock?.projectHomeRole
+    ) {
+      const viewer = members.find(
+        (member) => member.pubkey === MOCK_IDENTITY_PUBKEY,
+      );
+      if (viewer) viewer.role = config.mock.projectHomeRole;
+    }
     return {
-      members: cloneMembers(channel.members),
+      members,
       next_cursor: null,
     };
   }
@@ -11077,6 +11222,11 @@ function sendToMockSocket(args: {
       return;
     }
 
+    if (event.kind === KIND_PROJECT_CHANGE) {
+      applyMockProjectRelatedChannelChange(socket, event);
+      return;
+    }
+
     if (isMockProjectScopedEvent(event)) {
       if (event.pubkey !== DEFAULT_MOCK_IDENTITY.pubkey) {
         sendWsText(socket.handler, [
@@ -14504,7 +14654,9 @@ export function maybeInstallE2eTauriMocks() {
             ),
           );
         }
-        return activeConfig?.mock?.relaySelf ?? null;
+        return (
+          activeConfig?.mock?.relaySelf ?? MOCK_PROJECT_RELAY_IDENTITY.pubkey
+        );
       case "archive_identity":
       case "unarchive_identity":
         // The spec only verifies UI state, not the submitted request shape;

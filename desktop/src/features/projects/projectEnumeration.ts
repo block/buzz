@@ -3,6 +3,7 @@ import type { RelayEvent } from "@/shared/api/types";
 import {
   KIND_DELETION,
   KIND_PROJECT_ANNOUNCEMENT,
+  KIND_PROJECT_STATE,
   KIND_REPO_ANNOUNCEMENT,
 } from "@/shared/constants/kinds";
 import { absorbStandaloneProjectRepositories } from "./lib/projectCollection";
@@ -19,6 +20,7 @@ const TOMBSTONE_COORDINATE_CHUNK_SIZE = 100;
 export type ProjectEventExtraFilter = {
   "#a"?: string[];
   "#buzz-channel"?: string[];
+  authors?: string[];
 };
 
 type ProjectEventFilter = ProjectEventExtraFilter & {
@@ -161,6 +163,37 @@ async function fetchScopedDeletionEvents(
   return pages.flat();
 }
 
+async function fetchScopedProjectStateEvents(
+  fetchExhaustively: FetchProjectEventsExhaustively,
+  projectEvents: RelayEvent[],
+  relayPubkey: string,
+): Promise<RelayEvent[]> {
+  const coordinates = [
+    ...new Set(
+      projectEvents.flatMap((event) => {
+        const coordinate = eventCoordinate(event);
+        return coordinate ? [coordinate] : [];
+      }),
+    ),
+  ];
+  if (coordinates.length === 0) return [];
+
+  const pages: Promise<RelayEvent[]>[] = [];
+  for (
+    let index = 0;
+    index < coordinates.length;
+    index += TOMBSTONE_COORDINATE_CHUNK_SIZE
+  ) {
+    pages.push(
+      fetchExhaustively([KIND_PROJECT_STATE], {
+        authors: [relayPubkey],
+        "#a": coordinates.slice(index, index + TOMBSTONE_COORDINATE_CHUNK_SIZE),
+      }),
+    );
+  }
+  return (await Promise.all(pages)).flat();
+}
+
 /**
  * Core fetch-and-build logic for `fetchProjects`, extracted for testability.
  *
@@ -177,12 +210,20 @@ export async function buildProjectsFromFetcher(
     relayOrigin?: string | null;
     hiddenAddresses?: ReadonlySet<string>;
     viewerPubkey?: string | null;
+    relayPubkey?: string | null;
   } = {},
 ): Promise<Project[]> {
   const [projectEvents, repositoryEvents] = await Promise.all([
     fetchExhaustively([KIND_PROJECT_ANNOUNCEMENT]),
     fetchExhaustively([KIND_REPO_ANNOUNCEMENT]),
   ]);
+  const projectStateEvents = options.relayPubkey
+    ? await fetchScopedProjectStateEvents(
+        fetchExhaustively,
+        projectEvents,
+        options.relayPubkey,
+      )
+    : [];
 
   // Tombstones are fetched second (not in parallel) because the `#a` scoping
   // needs the announcement coordinates; both announcement kinds are small,
@@ -207,6 +248,8 @@ export async function buildProjectsFromFetcher(
   return absorbStandaloneProjectRepositories(
     buildProjectReadModels({
       projectEvents,
+      projectStateEvents,
+      relayPubkey: options.relayPubkey,
       repositoryEvents,
       deletionEvents: tombstoneResult.events,
       relayOrigin: options.relayOrigin ?? null,
@@ -227,13 +270,14 @@ export async function buildProjectHomeFromFetcher(
     relayOrigin?: string | null;
     hiddenAddresses?: ReadonlySet<string>;
     viewerPubkey?: string | null;
+    relayPubkey?: string | null;
   } = {},
 ): Promise<Project | null> {
   const projects = await buildProjectsFromFetcher(
     (kinds, extraFilter) =>
       fetchExhaustively(
         kinds,
-        kinds.includes(KIND_DELETION)
+        kinds.includes(KIND_DELETION) || kinds.includes(KIND_PROJECT_STATE)
           ? extraFilter
           : { ...extraFilter, "#buzz-channel": [channelId] },
       ),

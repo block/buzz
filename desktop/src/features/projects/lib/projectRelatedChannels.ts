@@ -194,3 +194,13 @@ export function listProjectChildChannels(
     (channel) => channel.role !== "home",
   );
 }
+
+/** Whether this channel is an explicit Project membership, not a derived repository binding. */
+export function isExplicitProjectRelatedChannel(
+  project: Pick<ProjectRelatedChannelSource, "relatedChannelIds">,
+  channelId: string,
+): boolean {
+  return (project.relatedChannelIds ?? []).some(
+    (candidate) => candidate.trim() === channelId,
+  );
+}

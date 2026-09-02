@@ -70,6 +70,9 @@ export const KIND_REPO_ANNOUNCEMENT = 30617;
 export const KIND_REPO_STATE = 30618;
 // NIP-MP: project grouping above NIP-34 repositories.
 export const KIND_PROJECT_ANNOUNCEMENT = 30621;
+// NIP-PC: relay-signed effective Project state and collaborative change command.
+export const KIND_PROJECT_STATE = 30623;
+export const KIND_PROJECT_CHANGE = 47010;
 export const KIND_GIT_PATCH = 1617;
 export const KIND_GIT_PULL_REQUEST = 1618;
 export const KIND_GIT_PR_UPDATE = 1619;

@@ -6,6 +6,7 @@ import {
   collectProjectRelatedChannelRows,
   listProjectBoundChannels,
   listProjectChildChannels,
+  isExplicitProjectRelatedChannel,
   projectRelatedChannelRowKey,
   uniqueProjectRelatedChannelCount,
 } from "./projectRelatedChannels.ts";
@@ -105,6 +106,12 @@ test("collects one row per repository channel binding", () => {
     ]),
     2,
   );
+});
+
+test("identifies only explicit related-channel membership", () => {
+  const project = makeProject({ relatedChannelIds: [CHANNEL_A] });
+  assert.equal(isExplicitProjectRelatedChannel(project, CHANNEL_A), true);
+  assert.equal(isExplicitProjectRelatedChannel(project, CHANNEL_B), false);
 });
 
 test("collapses repositories sharing one project channel", () => {

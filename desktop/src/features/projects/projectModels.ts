@@ -4,6 +4,7 @@ import {
   KIND_REPO_ANNOUNCEMENT,
 } from "@/shared/constants/kinds";
 import { effectiveCloneUrls } from "./lib/projectCloneUrl";
+import { parseProjectState, type ProjectState } from "./projectState";
 
 export type Repository = {
   id: string;
@@ -56,6 +57,10 @@ export function isExplicitProject(project: Project): boolean {
 
 type BuildProjectReadModelsInput = {
   projectEvents: RelayEvent[];
+  /** Relay-authored NIP-PC projections for the requested Project coordinates. */
+  projectStateEvents?: RelayEvent[];
+  /** Trusted NIP-11 relay signing key. Without it, owner identity is used. */
+  relayPubkey?: string | null;
   repositoryEvents: RelayEvent[];
   /** NIP-09 kind:5 deletion events relevant to projects and repositories. */
   deletionEvents?: RelayEvent[];
@@ -454,6 +459,8 @@ function projectIsListingEligible(
 
 export function buildProjectReadModels({
   projectEvents,
+  projectStateEvents = [],
+  relayPubkey,
   repositoryEvents,
   deletionEvents = [],
   relayOrigin,
@@ -490,20 +497,65 @@ export function buildProjectReadModels({
     ]),
   );
 
-  const explicitProjects = deduplicateAddressableEvents(projectEvents)
-    .filter((event) => !isDeleted(event))
-    .flatMap((event) => {
-      const project = eventToExplicitProject(
-        event,
-        repositoriesByAddress,
-        visibleRepositoriesByAddress,
-      );
-      return project &&
-        projectIsListingEligible(project, viewerPubkey) &&
-        !hiddenAddresses.has(project.projectAddress)
-        ? [project]
-        : [];
-    });
+  const currentProjectEvents = deduplicateAddressableEvents(
+    projectEvents,
+  ).filter((event) => !isDeleted(event));
+  const projectStateByCoordinate = new Map<string, ProjectState>();
+  if (relayPubkey) {
+    const stateEventsByCoordinate = new Map<string, RelayEvent[]>();
+    for (const event of projectStateEvents) {
+      const coordinates = event.tags.filter((tag) => tag[0] === "a");
+      if (coordinates.length !== 1 || coordinates[0].length !== 2) continue;
+      const coordinate = coordinates[0][1];
+      const events = stateEventsByCoordinate.get(coordinate) ?? [];
+      events.push(event);
+      stateEventsByCoordinate.set(coordinate, events);
+    }
+    for (const identityEvent of currentProjectEvents) {
+      const dtag = getTag(identityEvent, "d");
+      if (!dtag) continue;
+      const coordinate = `${KIND_PROJECT_ANNOUNCEMENT}:${identityEvent.pubkey.toLowerCase()}:${dtag}`;
+      const candidates = (
+        stateEventsByCoordinate.get(coordinate) ?? []
+      ).flatMap((event) => {
+        try {
+          const state = parseProjectState(event, relayPubkey, coordinate);
+          return state.identityEventId === identityEvent.id ? [state] : [];
+        } catch {
+          return [];
+        }
+      });
+      // An addressable query should have one winner. Ambiguous valid results
+      // are not safe to guess between, so retain the portable owner identity.
+      if (candidates.length === 1) {
+        projectStateByCoordinate.set(coordinate, candidates[0]);
+      }
+    }
+  }
+
+  const explicitProjects = currentProjectEvents.flatMap((event) => {
+    const dtag = getTag(event, "d");
+    const coordinate = dtag
+      ? `${KIND_PROJECT_ANNOUNCEMENT}:${event.pubkey.toLowerCase()}:${dtag}`
+      : null;
+    const state = coordinate
+      ? projectStateByCoordinate.get(coordinate)
+      : undefined;
+    if (state?.deleted) return [];
+    const effectiveEvent = state
+      ? { ...event, tags: state.projectTags.map((tag) => [...tag]) }
+      : event;
+    const project = eventToExplicitProject(
+      effectiveEvent,
+      repositoriesByAddress,
+      visibleRepositoriesByAddress,
+    );
+    return project &&
+      projectIsListingEligible(project, viewerPubkey) &&
+      !hiddenAddresses.has(project.projectAddress)
+      ? [project]
+      : [];
+  });
   const claimedRepositories = new Set(
     explicitProjects.flatMap((project) =>
       project.repositoryAddresses.filter((address) => {

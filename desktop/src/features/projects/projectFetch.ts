@@ -1,5 +1,6 @@
 import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
 import { getIdentity } from "@/shared/api/tauriIdentity";
+import { getRelaySelf } from "@/features/moderation/lib/relaySelf";
 import {
   buildProjectHomeFromFetcher,
   buildProjectsFromFetcher,
@@ -36,9 +37,12 @@ export async function fetchProjects(
   // Delegates to `buildProjectsFromFetcher` in `projectEnumeration.ts`, which
   // is the pure, Tauri-free core of this operation. Its javadoc explains
   // fail-closed tombstones and NIP-OA owner-deletion suppression.
-  const viewerPubkey = await getIdentity()
-    .then((identity) => identity.pubkey)
-    .catch(() => undefined);
+  const [viewerPubkey, relayPubkey] = await Promise.all([
+    getIdentity()
+      .then((identity) => identity.pubkey)
+      .catch(() => undefined),
+    getRelaySelf().catch(() => null),
+  ]);
   const fetcher: FetchProjectEventsExhaustively =
     fetchExhaustively ??
     ((kinds, extraFilter) =>
@@ -47,6 +51,7 @@ export async function fetchProjects(
     relayOrigin: getCachedRelayOrigin(),
     hiddenAddresses: new Set(readHiddenProjectCards()),
     viewerPubkey,
+    relayPubkey,
   });
   return projects.map((project) =>
     markProjectDataAuthoritative(project, "relay"),
@@ -58,9 +63,12 @@ export async function fetchProjectHomeForChannel(
   channelId: string,
   signal?: AbortSignal,
 ): Promise<Project | null> {
-  const viewerPubkey = await getIdentity()
-    .then((identity) => identity.pubkey)
-    .catch(() => undefined);
+  const [viewerPubkey, relayPubkey] = await Promise.all([
+    getIdentity()
+      .then((identity) => identity.pubkey)
+      .catch(() => undefined),
+    getRelaySelf().catch(() => null),
+  ]);
   const project = await buildProjectHomeFromFetcher(
     (kinds, extraFilter) =>
       fetchProjectEventsExhaustively(kinds, extraFilter, undefined, signal),
@@ -69,6 +77,7 @@ export async function fetchProjectHomeForChannel(
       relayOrigin: getCachedRelayOrigin(),
       hiddenAddresses: new Set(readHiddenProjectCards()),
       viewerPubkey,
+      relayPubkey,
     },
   );
   return project ? markProjectDataAuthoritative(project, "relay") : null;
