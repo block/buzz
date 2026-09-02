@@ -231,39 +231,31 @@ pub fn validate_file_content(
 
 /// Validate a generic file upload with optional untrusted format hints.
 ///
-/// The existing deny-list path remains the default. The only hint pair that
-/// changes classification is `text/calendar` plus `ics`, because iCalendar is
-/// UTF-8 text and has no reliable magic-byte signature. Either calendar signal
-/// without the other fails closed.
+/// The existing deny-list path remains the default. An exact `text/calendar`
+/// MIME or `ics` extension only selects strict calendar validation; neither hint
+/// is trusted to classify the bytes by itself. This keeps standard Blossom
+/// clients interoperable without weakening content validation.
 pub fn validate_file_content_with_hints(
     bytes: &[u8],
     config: &MediaConfig,
     declared_mime: Option<&str>,
     extension: Option<&str>,
 ) -> Result<(String, String), MediaError> {
-    let signals_calendar = declared_mime == Some("text/calendar") || extension == Some("ics");
-    if !signals_calendar {
-        return validate_file_content(bytes, config);
+    if declared_mime == Some("text/calendar") || extension == Some("ics") {
+        return validate_calendar_content(bytes, config);
     }
-    if declared_mime != Some("text/calendar") || extension != Some("ics") {
-        return Err(MediaError::DisallowedContentType(
-            declared_mime
-                .unwrap_or("application/octet-stream")
-                .to_string(),
-        ));
-    }
-
-    validate_calendar_content(bytes, config)
+    validate_file_content(bytes, config)
 }
 
 fn signals_calendar_content(bytes: &[u8]) -> bool {
-    let unfolded = unfold_calendar_bytes(bytes);
-    std::str::from_utf8(&unfolded).is_ok_and(|text| {
-        text.lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .is_some_and(|line| line.eq_ignore_ascii_case("BEGIN:VCALENDAR"))
-    })
+    // The calendar envelope is ASCII and must be the first non-empty content
+    // line. Inspect borrowed line slices so generic attachments do not incur a
+    // second full-payload allocation merely to decide which validator to run.
+    bytes
+        .split(|byte| *byte == b'\n')
+        .map(|line| line.trim_ascii())
+        .find(|line| !line.is_empty())
+        .is_some_and(|line| line.eq_ignore_ascii_case(b"BEGIN:VCALENDAR"))
 }
 
 fn unfold_calendar_bytes(bytes: &[u8]) -> Vec<u8> {
@@ -2795,22 +2787,24 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_calendar_from_matching_untrusted_hints() {
+    fn test_validate_calendar_from_untrusted_signals() {
         let calendar = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nSUMMARY:Planning\r\nEND:VCALENDAR\r\n";
+        let expected = ("text/calendar".to_string(), "ics".to_string());
         assert_eq!(
             validate_file_content(calendar, &test_config()).unwrap(),
-            ("text/calendar".to_string(), "ics".to_string())
+            expected
         );
-        let (mime, ext) = validate_file_content_with_hints(
-            calendar,
-            &test_config(),
-            Some("text/calendar"),
-            Some("ics"),
-        )
-        .unwrap();
-
-        assert_eq!(mime, "text/calendar");
-        assert_eq!(ext, "ics");
+        for (mime, extension) in [
+            (Some("text/calendar"), Some("ics")),
+            (Some("text/calendar"), None),
+            (None, Some("ics")),
+        ] {
+            assert_eq!(
+                validate_file_content_with_hints(calendar, &test_config(), mime, extension,)
+                    .unwrap(),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -2836,7 +2830,7 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_calendar_rejects_bad_content_and_mismatched_hints() {
+    fn test_validate_calendar_rejects_bad_content_for_any_signal() {
         let config = test_config();
         let valid = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n";
         let malformed = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\n";
@@ -2847,30 +2841,30 @@ mod tests {
         let folded_envelope_junk = b"BEGIN:VCALENDAR\r\n EVIL\r\nEND:VCALENDAR\r\n";
         let unbalanced_component = b"BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nEND:VCALENDAR\r\n";
 
-        for bytes in [
-            malformed.as_slice(),
-            nul,
-            invalid_utf8,
-            wrapped_html,
-            folded_envelope_junk,
-            unbalanced_component,
-        ] {
-            assert!(validate_file_content_with_hints(
-                bytes,
-                &config,
-                Some("text/calendar"),
-                Some("ics"),
-            )
-            .is_err());
-        }
-        for (mime, ext) in [
+        for (mime, extension) in [
+            (Some("text/calendar"), Some("ics")),
             (Some("text/calendar"), None),
             (None, Some("ics")),
-            (Some("text/plain"), Some("ics")),
-            (Some("text/calendar"), Some("txt")),
         ] {
-            assert!(validate_file_content_with_hints(valid, &config, mime, ext).is_err());
+            for bytes in [
+                malformed.as_slice(),
+                nul,
+                invalid_utf8,
+                wrapped_html,
+                folded_envelope_junk,
+                unbalanced_component,
+            ] {
+                assert!(validate_file_content_with_hints(bytes, &config, mime, extension).is_err());
+            }
         }
+
+        // Content-based recognition also fails closed after the cheap borrowed
+        // envelope check; invalid UTF-8 cannot fall back to an opaque download.
+        assert!(validate_file_content(invalid_utf8, &config).is_err());
+        assert_eq!(
+            validate_file_content(valid, &config).unwrap(),
+            ("text/calendar".to_string(), "ics".to_string())
+        );
     }
 
     #[test]

@@ -263,7 +263,8 @@ pub async fn process_file_upload(
 }
 
 /// Untrusted client hints for an attachment format with no magic bytes.
-/// Only the `text/calendar` plus `ics` pair affects validation.
+/// An exact `text/calendar` MIME or `ics` extension selects strict calendar
+/// validation; the bytes remain authoritative.
 #[derive(Debug, Clone, Default)]
 pub struct FileUploadHints {
     /// Normalized request MIME type.

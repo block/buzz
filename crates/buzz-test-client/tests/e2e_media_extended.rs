@@ -88,15 +88,19 @@ async fn upload_calendar_to_path(
     keys: &Keys,
     path: &str,
     body: &[u8],
+    extension: Option<&str>,
 ) -> reqwest::Response {
     let sha256 = hex::encode(Sha256::digest(body));
     let auth = sign_blossom_auth(keys, &sha256);
-    client
+    let mut request = client
         .put(format!("{}{path}", relay_http_url()))
         .header("Authorization", blossom_auth_header(&auth))
         .header("X-SHA-256", &sha256)
-        .header("Content-Type", "text/calendar")
-        .header("X-Buzz-File-Extension", "ics")
+        .header("Content-Type", "text/calendar");
+    if let Some(extension) = extension {
+        request = request.header("X-Buzz-File-Extension", extension);
+    }
+    request
         .body(body.to_vec())
         .send()
         .await
@@ -270,7 +274,9 @@ async fn test_upload_calendar_roundtrip_is_forced_download() {
     let client = http_client();
     let keys = Keys::generate();
     let calendar = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Buzz test//EN\r\nBEGIN:VEVENT\r\nUID:test@example.com\r\nDTSTART:20260821T120000Z\r\nSUMMARY:Planning\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
-    let response = upload_calendar_to_path(&client, &keys, "/upload", calendar).await;
+    // Standard Blossom clients know the MIME but not Buzz's optional extension
+    // header. Valid bytes must still receive the canonical calendar descriptor.
+    let response = upload_calendar_to_path(&client, &keys, "/upload", calendar, None).await;
     assert_eq!(response.status(), 200);
     let descriptor: serde_json::Value = response.json().await.unwrap();
     assert_eq!(descriptor["type"], "text/calendar");
@@ -303,7 +309,8 @@ async fn test_legacy_media_route_rejects_calendar() {
     let client = http_client();
     let keys = Keys::generate();
     let calendar = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n";
-    let response = upload_calendar_to_path(&client, &keys, "/media/upload", calendar).await;
+    let response =
+        upload_calendar_to_path(&client, &keys, "/media/upload", calendar, Some("ics")).await;
     assert_eq!(
         response.status(),
         reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
@@ -321,7 +328,7 @@ async fn test_calendar_hints_reject_disguised_image_and_wrapped_html() {
         b"BEGIN:VCALENDAR\r\n<!DOCTYPE html><script>alert(1)</script>\r\nEND:VCALENDAR\r\n"
             .to_vec(),
     ] {
-        let response = upload_calendar_to_path(&client, &keys, "/upload", &body).await;
+        let response = upload_calendar_to_path(&client, &keys, "/upload", &body, Some("ics")).await;
         assert_eq!(
             response.status(),
             reqwest::StatusCode::UNSUPPORTED_MEDIA_TYPE
