@@ -13,7 +13,6 @@ import {
   deleteChannel,
   getCanvas,
   getChannelDetails,
-  getChannelMembers,
   getChannels,
   hideDm,
   joinChannel,
@@ -49,11 +48,9 @@ import {
   type ChannelSnapshot,
   writeChannelSnapshot,
 } from "@/features/channels/channelSnapshot";
-import {
-  CHANNEL_MEMBERS_STALE_TIME_MS,
-  channelMembersQueryKey,
-} from "@/features/channels/rosterFreshness";
+import { channelMembersQueryKey } from "@/features/channels/rosterFreshness";
 import { dmVisibilityQueryKeyFor } from "@/features/channels/useHiddenDmIds";
+import { refreshDirectoryAfterMembershipChange } from "./membershipDirectorySync";
 
 export const channelsQueryKey = ["channels"] as const;
 /** Keeps focused polling at the established one-minute cadence. */
@@ -516,6 +513,7 @@ export function useCreateChannelMutation() {
       queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
         upsertCachedChannel(current, createdChannel),
       );
+      refreshDirectoryAfterMembershipChange(queryClient);
     },
     onSettled: () => {
       // refetchType "none": onSuccess already cached the relay-returned channel;
@@ -642,23 +640,7 @@ export function useChannelDetailsQuery(
   });
 }
 
-export function useChannelMembersQuery(
-  channelId: string | null,
-  enabled = true,
-) {
-  return useQuery({
-    enabled: enabled && channelId !== null,
-    queryKey: ["channels", channelId ?? "none", "members"],
-    queryFn: async () => {
-      if (!channelId) {
-        throw new Error("No channel selected.");
-      }
-
-      return getChannelMembers(channelId);
-    },
-    staleTime: CHANNEL_MEMBERS_STALE_TIME_MS,
-  });
-}
+export { useChannelMembersQuery } from "./useChannelMembersQuery";
 
 export function useUpdateChannelMutation(channelId: string | null) {
   const queryClient = useQueryClient();
@@ -841,6 +823,9 @@ export function useAddChannelMembersMutation(channelId: string | null) {
       return addChannelMembers({ ...rest, channelId: effectiveChannelId });
     },
     onSuccess: (result, variables) => {
+      if (result.added.length > 0) {
+        refreshDirectoryAfterMembershipChange(queryClient);
+      }
       const effectiveChannelId = variables.channelId ?? channelId;
       if (
         effectiveChannelId &&
@@ -896,6 +881,7 @@ export function useJoinChannelMutation(channelId: string | null) {
 
       await joinChannel(channelId);
     },
+    onSuccess: () => refreshDirectoryAfterMembershipChange(queryClient),
     onSettled: async () => {
       await invalidateChannelState(queryClient, channelId);
     },
@@ -913,6 +899,7 @@ export function useLeaveChannelMutation(channelId: string | null) {
 
       await leaveChannel(channelId);
     },
+    onSuccess: () => refreshDirectoryAfterMembershipChange(queryClient),
     onSettled: async () => {
       await invalidateChannelState(queryClient, channelId);
     },
