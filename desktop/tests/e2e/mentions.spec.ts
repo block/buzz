@@ -34,10 +34,28 @@ const PROFILE_ONLY_AGENT_PUBKEY =
 const OWNED_AGENT_PROFILE_PUBKEY =
   "1212121212121212121212121212121212121212121212121212121212121212";
 const HUDDLE_EPHEMERAL_CHANNEL_ID = "3f9f2c4e-8b7a-4b1c-9d2e-5a6f7c8d9e0f";
-const ELROND_PUBKEY = "15".repeat(32);
-const LEGOLAS_PUBKEY = "16".repeat(32);
-const GIMLI_PUBKEY = "17".repeat(32);
-const GANDALF_PUBKEY = "18".repeat(32);
+const ELROND_PUBKEY = "31".repeat(32);
+const LEGOLAS_PUBKEY = "32".repeat(32);
+const GIMLI_PUBKEY = "33".repeat(32);
+const GANDALF_PUBKEY = "34".repeat(32);
+const STANDARD_GROUPED_ARRIVAL_ACTOR = {
+  pubkey: "10".repeat(32),
+  displayName: "Alice Chen",
+};
+const STANDARD_GROUPED_ARRIVAL_TARGETS = [
+  { pubkey: "11".repeat(32), displayName: "Erica Chapman" },
+  { pubkey: "12".repeat(32), displayName: "Peter Griffin" },
+  { pubkey: "13".repeat(32), displayName: "Marcia Thomas" },
+  { pubkey: "14".repeat(32), displayName: "Jordan Lee" },
+  { pubkey: "15".repeat(32), displayName: "Olivia Park" },
+  { pubkey: "16".repeat(32), displayName: "Sam Rivera" },
+];
+const JOIN_COLLAPSE_PROFILES = [
+  { pubkey: ELROND_PUBKEY, displayName: "Elrond" },
+  { pubkey: LEGOLAS_PUBKEY, displayName: "Legolas" },
+  { pubkey: GIMLI_PUBKEY, displayName: "Gimli" },
+  { pubkey: GANDALF_PUBKEY, displayName: "Gandalf" },
+];
 const JOIN_COLLAPSE_CHANNEL_NAME = "random";
 const SYSTEM_MESSAGE_KIND = 40099;
 const DM_THREAD_AGENT_MENTION_ERROR_TEXT =
@@ -253,6 +271,22 @@ async function waitForTimelineSettled(page: import("@playwright/test").Page) {
 
 function normalizeVisibleText(text: string) {
   return text.replace(/\s+,/g, ",").replace(/\s+/g, " ").trim();
+}
+
+function findDuplicateFixturePubkeys(
+  profiles: Array<{ pubkey: string; displayName: string }>,
+) {
+  const namesByPubkey = new Map<string, string[]>();
+
+  for (const profile of profiles) {
+    const names = namesByPubkey.get(profile.pubkey) ?? [];
+    names.push(profile.displayName);
+    namesByPubkey.set(profile.pubkey, names);
+  }
+
+  return [...namesByPubkey.entries()]
+    .filter(([, names]) => names.length > 1)
+    .map(([pubkey, displayNames]) => ({ pubkey, displayNames }));
 }
 
 async function collectJoinCollapseRows(page: import("@playwright/test").Page) {
@@ -3748,18 +3782,8 @@ test("system add rows use plain names while remove rows retain agent mention sty
 test("groups contiguous arrival activity with hidden names in the standard tooltip", async ({
   page,
 }) => {
-  const actor = {
-    pubkey: "10".repeat(32),
-    displayName: "Alice Chen",
-  };
-  const targets = [
-    { pubkey: "11".repeat(32), displayName: "Erica Chapman" },
-    { pubkey: "12".repeat(32), displayName: "Peter Griffin" },
-    { pubkey: "13".repeat(32), displayName: "Marcia Thomas" },
-    { pubkey: "14".repeat(32), displayName: "Jordan Lee" },
-    { pubkey: "15".repeat(32), displayName: "Olivia Park" },
-    { pubkey: "16".repeat(32), displayName: "Sam Rivera" },
-  ];
+  const actor = STANDARD_GROUPED_ARRIVAL_ACTOR;
+  const targets = STANDARD_GROUPED_ARRIVAL_TARGETS;
   await installMockBridge(page, {
     searchProfiles: [actor, ...targets],
   });
@@ -3837,16 +3861,21 @@ test("groups contiguous arrival activity with hidden names in the standard toolt
   await expect(avatarStack.locator("..")).toHaveCSS("align-items", "center");
 });
 
+test("keeps deterministic grouped-arrival fixture pubkeys unique", () => {
+  expect(
+    findDuplicateFixturePubkeys([
+      STANDARD_GROUPED_ARRIVAL_ACTOR,
+      ...STANDARD_GROUPED_ARRIVAL_TARGETS,
+      ...JOIN_COLLAPSE_PROFILES,
+    ]),
+  ).toEqual([]);
+});
+
 test("collapses contiguous mixed join arrivals into one actor-neutral cohort", async ({
   page,
 }) => {
   await installMockBridge(page, {
-    searchProfiles: [
-      { pubkey: ELROND_PUBKEY, displayName: "Elrond" },
-      { pubkey: LEGOLAS_PUBKEY, displayName: "Legolas" },
-      { pubkey: GIMLI_PUBKEY, displayName: "Gimli" },
-      { pubkey: GANDALF_PUBKEY, displayName: "Gandalf" },
-    ],
+    searchProfiles: JOIN_COLLAPSE_PROFILES,
   });
   await page.goto("/");
   await page.getByTestId("channel-random").click();
