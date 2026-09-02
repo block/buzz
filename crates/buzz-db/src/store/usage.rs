@@ -379,6 +379,26 @@ pub async fn community_hosts(pool: &PgPool) -> Result<Vec<CommunityHost>> {
         .collect())
 }
 
+/// Fetch id → host mappings for writable (lifecycle `active`) communities only.
+///
+/// Write paths that sweep every community (e.g. the NIP-43 membership
+/// reconciler) must use this variant: quiescing communities are read-only and
+/// fenced/tombstone communities reject writes at the database fence, so
+/// sweeping them permanently retries into `community write fenced` errors —
+/// one warning per community per sweep, forever, after any community
+/// deletion completes its fence step.
+pub async fn writable_community_hosts(pool: &PgPool) -> Result<Vec<CommunityHost>> {
+    let rows = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT id, host FROM communities WHERE deletion_state = 'active'",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, host)| CommunityHost { id, host })
+        .collect())
+}
+
 impl Db {
     /// Try to acquire the detached session advisory lock for relay usage metrics.
     ///
@@ -472,6 +492,13 @@ impl Db {
     #[datastore_span(name = "usage_community_hosts", system = "postgresql")]
     pub async fn usage_community_hosts(&self) -> Result<Vec<CommunityHost>> {
         community_hosts(&self.pool).await
+    }
+
+    /// Writable (lifecycle `active`) community hosts — see
+    /// [`writable_community_hosts`].
+    #[datastore_span(name = "usage_writable_community_hosts", system = "postgresql")]
+    pub async fn usage_writable_community_hosts(&self) -> Result<Vec<CommunityHost>> {
+        writable_community_hosts(&self.pool).await
     }
 }
 

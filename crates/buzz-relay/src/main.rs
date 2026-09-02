@@ -226,10 +226,35 @@ async fn main() -> anyhow::Result<()> {
         error!("Failed to ensure partitions: {e}");
     }
 
-    db.validate_deletion_serving_catalog().await.map_err(|e| {
-        error!("Community deletion serving-fence validation failed: {e}");
-        anyhow::anyhow!("Community deletion serving fence is unsafe: {e}")
-    })?;
+    // Retry briefly before going fatal: during a rolling deploy, old and new
+    // pods briefly share the database connection budget, and a transient pool
+    // timeout here otherwise flaps a fresh pod into CrashLoopBackOff. The
+    // fail-closed contract is preserved — persistent failure still aborts boot.
+    {
+        let mut attempt = 0u32;
+        loop {
+            match db.validate_deletion_serving_catalog().await {
+                Ok(()) => break,
+                Err(e) if attempt < 3 => {
+                    attempt += 1;
+                    let backoff = std::time::Duration::from_secs(1 << attempt);
+                    warn!(
+                        %e,
+                        attempt,
+                        backoff_secs = backoff.as_secs(),
+                        "Community deletion serving-fence validation failed; retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                }
+                Err(e) => {
+                    error!("Community deletion serving-fence validation failed: {e}");
+                    return Err(anyhow::anyhow!(
+                        "Community deletion serving fence is unsafe: {e}"
+                    ));
+                }
+            }
+        }
+    }
     info!("Community deletion serving fences verified");
 
     // Freshness fence probe: cursor pages route to the replica only for

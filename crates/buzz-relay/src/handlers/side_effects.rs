@@ -3031,7 +3031,10 @@ async fn emit_initial_ref_state(
 /// when nothing changed. A failure in one community is logged and counted but
 /// does not prevent the remaining communities from being repaired.
 pub async fn reconcile_nip43_membership_snapshots(state: &Arc<AppState>) -> anyhow::Result<usize> {
-    let communities = state.db.usage_community_hosts().await?;
+    // Writable communities only: quiescing/fenced/tombstone communities reject
+    // membership writes at the database fence, so sweeping them turns every
+    // completed community deletion into a permanent per-sweep failure loop.
+    let communities = state.db.usage_writable_community_hosts().await?;
     let mut reconciled = 0usize;
 
     for community in communities {
