@@ -27,6 +27,7 @@ import {
   ProjectEntityFacepile,
   ProjectEntityListRow,
 } from "./ProjectEntityListRow";
+import { ProjectPanelState } from "./ProjectPanelState";
 import { useProjectConversationPanel } from "./ProjectConversationPanelContext";
 
 // Relay search caps a page at 500. Use the full page and surface a lower-bound
@@ -62,6 +63,53 @@ export function useDiscussionChannels(query: string): {
     isLoading: search.isLoading,
     isTruncated: hits.length >= DISCUSSION_SEARCH_LIMIT,
   };
+}
+
+/** Hits are sorted newest first, so the first hit per channel is the one a
+ * click should land on (and the one worth quoting). */
+function useLatestHitByChannel(hits: SearchHit[]) {
+  return React.useMemo(() => {
+    const byChannel = new Map<string, SearchHit>();
+    for (const hit of hits) {
+      if (hit.channelId && !byChannel.has(hit.channelId)) {
+        byChannel.set(hit.channelId, hit);
+      }
+    }
+    return byChannel;
+  }, [hits]);
+}
+
+/**
+ * Shared row-click behavior: land on the latest matching message — in the
+ * side conversation panel when one is mounted — instead of jumping straight
+ * to the channel. Forum content opens in place (the panel renders chat
+ * threads only), and channels with no quotable hit fall back to plain
+ * channel navigation.
+ */
+function openDiscussionHit({
+  channelId,
+  goChannel,
+  latestHit,
+  openSearchHit,
+  panel,
+}: {
+  channelId: string;
+  goChannel: (channelId: string) => unknown;
+  latestHit: SearchHit | undefined;
+  openSearchHit: (hit: SearchHit) => unknown;
+  panel: { openConversation: (hit: SearchHit) => void } | null;
+}) {
+  if (!latestHit) {
+    void goChannel(channelId);
+    return;
+  }
+  const opensForum =
+    latestHit.kind === KIND_FORUM_POST || latestHit.kind === KIND_FORUM_COMMENT;
+  if (!panel || opensForum) {
+    void openSearchHit(latestHit);
+    return;
+  }
+  panel.openConversation(latestHit);
 }
 
 /** Channel display name, preferring the hit's name, then bounded metadata,
@@ -141,19 +189,10 @@ export function DiscussedInChannels({
     { enabled: visible.length > 0 },
   );
   const profiles = profilesQuery.data?.profiles;
-  // Hits are sorted newest first, so the first hit per channel is the one a
-  // click should land on (and the one worth quoting). The origin channel has
-  // no such hit: the `h` tag proves only the channel, so its row navigates
-  // to the channel without claiming any particular message.
-  const latestHitByChannel = React.useMemo(() => {
-    const byChannel = new Map<string, SearchHit>();
-    for (const hit of hits) {
-      if (hit.channelId && !byChannel.has(hit.channelId)) {
-        byChannel.set(hit.channelId, hit);
-      }
-    }
-    return byChannel;
-  }, [hits]);
+  // The origin channel has no quotable hit: the `h` tag proves only the
+  // channel, so its row navigates to the channel without claiming any
+  // particular message.
+  const latestHitByChannel = useLatestHitByChannel(hits);
   if (channels.length === 0) return null;
 
   const hiddenCount = channels.length - visible.length;
@@ -173,21 +212,14 @@ export function DiscussedInChannels({
         {visible.map((channel) => {
           const latestHit = latestHitByChannel.get(channel.id);
           const name = channelName(channel.id, channel.name);
-          const opensForum =
-            latestHit != null &&
-            (latestHit.kind === KIND_FORUM_POST ||
-              latestHit.kind === KIND_FORUM_COMMENT);
-          const openConversation = () => {
-            if (!latestHit) {
-              void goChannel(channel.id);
-              return;
-            }
-            if (!projectConversationPanel || opensForum) {
-              void openSearchHit(latestHit);
-              return;
-            }
-            projectConversationPanel.openConversation(latestHit);
-          };
+          const openConversation = () =>
+            openDiscussionHit({
+              channelId: channel.id,
+              goChannel,
+              latestHit,
+              openSearchHit,
+              panel: projectConversationPanel,
+            });
           return (
             <div
               className="group relative flex w-full min-w-0 items-start gap-2.5 px-3 py-2 transition-colors hover:bg-muted/30"
@@ -277,7 +309,7 @@ const NAME_LIST_MAX = 3;
 function DiscussionMessagePreview({ content }: { content: string }) {
   return (
     <Markdown
-      className="inbox-preview-markdown mt-0.5 text-inherit leading-4"
+      className="inbox-preview-markdown mt-0.5 text-inherit leading-6"
       content={discussionSnippet(content)}
       interactive={false}
     />
@@ -336,7 +368,9 @@ function DiscussionNameList({
 /**
  * Full-width channel list for the workspace "Channels" tab: every channel
  * where the repository (or its PRs/issues) is linked in chat, with the
- * people who discussed it there.
+ * people who discussed it there. Clicking a row opens the latest matching
+ * conversation in the side panel (whose header still jumps to the channel)
+ * rather than leaving the project view.
  */
 export function DiscussionChannelsPanel({
   query,
@@ -345,13 +379,17 @@ export function DiscussionChannelsPanel({
   query: string;
   repositoryName: string;
 }) {
-  const { channels, isLoading, isTruncated } = useDiscussionChannels(query);
-  const { goChannel } = useAppNavigation();
+  const { channels, hits, isLoading, isTruncated } =
+    useDiscussionChannels(query);
+  const { goChannel, openSearchHit } = useAppNavigation();
+  const projectConversationPanel = useProjectConversationPanel();
+  const latestHitByChannel = useLatestHitByChannel(hits);
   const channelIds = React.useMemo(
     () => channels.map((channel) => channel.id),
     [channels],
   );
   const channelName = useChannelNameLookup(channelIds);
+
   const profilesQuery = useUsersBatchQuery(
     channels.flatMap((channel) => channel.participants),
     { enabled: channels.length > 0 },
@@ -363,10 +401,12 @@ export function DiscussionChannelsPanel({
   }
   if (channels.length === 0) {
     return (
-      <p className="px-4 py-6 text-sm text-muted-foreground">
-        No channels reference this repository yet. Paste its link (or a review
-        or task link) in a channel and it will show up here.
-      </p>
+      <ProjectPanelState
+        className="px-4"
+        description="Paste this repository, review, or task link in a channel and it will appear here."
+        testId="project-discussion-channels-panel"
+        title="No linked channels yet"
+      />
     );
   }
 
@@ -379,10 +419,11 @@ export function DiscussionChannelsPanel({
   );
 
   return (
-    <div>
+    <div className="px-4" data-testid="project-discussion-channels-panel">
       <ul data-testid="discussion-channels">
         {channels.map((channel) => {
           const name = channelName(channel.id, channel.name);
+          const latestHit = latestHitByChannel.get(channel.id);
           return (
             <li className="relative" key={channel.id}>
               <ProjectEntityListRow
@@ -397,7 +438,15 @@ export function DiscussionChannelsPanel({
                 dateSeconds={channel.lastActivityAt}
                 dateTestId="project-channel-row-date"
                 icon={<Hash className="h-3.5 w-3.5 text-muted-foreground/70" />}
-                onClick={() => void goChannel(channel.id)}
+                onClick={() =>
+                  openDiscussionHit({
+                    channelId: channel.id,
+                    goChannel,
+                    latestHit,
+                    openSearchHit,
+                    panel: projectConversationPanel,
+                  })
+                }
                 people={channel.participants}
                 peopleTestId="project-channel-participants"
                 profiles={profiles}
@@ -411,7 +460,11 @@ export function DiscussionChannelsPanel({
                 }}
                 testId="project-channel-row"
                 title={`#${name}`}
-                titleAttr={`Open #${name}`}
+                titleAttr={
+                  latestHit
+                    ? `Open the latest conversation in #${name}`
+                    : `Open #${name}`
+                }
               />
             </li>
           );

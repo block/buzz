@@ -1285,14 +1285,15 @@ impl ProjectVisibility {
 pub enum ProjectsCmd {
     /// Create a new multi-repo project (NIP-MP kind:30621)
     ///
-    /// Requires at least one --repo. Fails with Conflict if the project already exists.
+    /// With no `--repo`, creates a default repository bound to `--channel`.
+    /// Fails with Conflict if the project already exists.
     Create {
         /// Project identifier (slug), up to 1024 bytes
         slug: String,
         /// Member repository coordinate: bare Buzz repo id (e.g. `buzz`) or full
         /// `30617:<owner-hex>:<repo-d>` for cross-owner or colon-bearing repo ids.
-        /// At least one --repo is required.
-        #[arg(long = "repo", required = true)]
+        /// Omit to create a default repository named after the slug (requires `--channel`).
+        #[arg(long = "repo")]
         repo: Vec<String>,
         /// Display name (≤256 bytes)
         #[arg(long)]
@@ -1332,6 +1333,28 @@ pub enum ProjectsCmd {
         /// Member repository coordinate (bare id or full `30617:<owner-hex>:<repo-d>`)
         #[arg(long = "repo", required = true)]
         repo: Vec<String>,
+    },
+    /// Draft a project-linked channel for owner review in Buzz Desktop
+    #[command(name = "add-channel")]
+    AddChannel {
+        /// Project home channel UUID from the current ACP [Context]
+        #[arg(long)]
+        home_channel: String,
+        /// New channel name
+        #[arg(long)]
+        name: String,
+        /// Optional channel description
+        #[arg(long)]
+        description: Option<String>,
+        /// Channel visibility
+        #[arg(long, value_enum, default_value = "open")]
+        visibility: ChannelVisibility,
+        /// Optional temporary-channel lifetime in seconds
+        #[arg(long)]
+        ttl: Option<u64>,
+        /// Optional Desktop channel-template name
+        #[arg(long)]
+        template: Option<String>,
     },
     /// Remove one or more member repositories from a project
     #[command(name = "remove-repo")]
@@ -1633,12 +1656,18 @@ pub enum PrCmd {
 pub enum IssuesCmd {
     /// Create a git issue (NIP-34 kind:1621)
     Create {
-        /// Repo owner pubkey (64-char hex)
+        /// Repo owner pubkey (64-char hex). Optional when `--channel` (or
+        /// `BUZZ_GIT_ORIGIN_CHANNEL_ID`) names a project home.
         #[arg(long)]
-        repo_owner: String,
-        /// Repo identifier (d-tag)
+        repo_owner: Option<String>,
+        /// Repo identifier (d-tag). Optional when `--channel` (or
+        /// `BUZZ_GIT_ORIGIN_CHANNEL_ID`) names a project home.
         #[arg(long)]
-        repo_id: String,
+        repo_id: Option<String>,
+        /// Project home channel. Infers the repository, creating one bound to
+        /// this project when none exists. Defaults to `BUZZ_GIT_ORIGIN_CHANNEL_ID`.
+        #[arg(long)]
+        channel: Option<String>,
         /// Issue title
         #[arg(long, alias = "subject")]
         title: String,
@@ -2368,6 +2397,7 @@ mod tests {
         assert_eq!(
             names(&cmd, "projects"),
             vec![
+                "add-channel",
                 "add-repo",
                 "create",
                 "delete",
@@ -2414,7 +2444,7 @@ mod tests {
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),
-            ("projects", 7),
+            ("projects", 8),
             ("reactions", 3),
             ("repos", 5),
             ("social", 7),
@@ -2484,6 +2514,25 @@ mod tests {
     }
 
     // ── projects update mutation group ────────────────────────────────────────
+
+    /// Project-channel requests accept the owner-review metadata.
+    #[test]
+    fn projects_add_channel_accepts_owner_review_fields() {
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "projects",
+            "add-channel",
+            "--home-channel",
+            "11111111-1111-4111-8111-111111111111",
+            "--name",
+            "release-planning",
+            "--visibility",
+            "private",
+            "--template",
+            "Release team",
+        ])
+        .is_ok());
+    }
 
     /// Multiple independent fields must be accepted in the same invocation.
     #[test]

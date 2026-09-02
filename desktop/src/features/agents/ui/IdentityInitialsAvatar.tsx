@@ -39,7 +39,7 @@ export function IdentityInitialsAvatar({
   return (
     <span
       className={cn(
-        "flex h-full w-full items-center justify-center rounded-full border-[3px] border-background font-semibold shadow-sm",
+        "flex h-full w-full items-center justify-center rounded-[30%] border-[3px] border-background font-semibold shadow-sm",
         colorClassName,
         textSizeClassName,
         className,

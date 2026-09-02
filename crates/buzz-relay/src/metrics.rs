@@ -32,6 +32,11 @@ const LATENCY_BUCKETS_MS: [f64; 11] = [
 /// Seconds-scale buckets for internal processing histograms (event, search, audit).
 const DURATION_BUCKETS_S: [f64; 10] = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 5.0];
 
+/// Readiness buckets concentrate resolution near the two-second failure budget.
+const READINESS_DURATION_BUCKETS_S: [f64; 15] = [
+    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5,
+];
+
 /// Seconds-scale buckets for Git hydration and pack streams.
 const GIT_DURATION_BUCKETS_S: [f64; 13] = [
     0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
@@ -56,16 +61,8 @@ const GIT_PACK_BUCKETS: [f64; 9] = [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 1
 /// Integer-count buckets for fan-out recipient histograms.
 const FANOUT_BUCKETS: [f64; 9] = [0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 500.0, 1000.0];
 
-/// Install the global metrics recorder and spawn the Prometheus HTTP exporter.
-///
-/// `build()` returns the recorder + exporter future and internally spawns
-/// the upkeep task, so no separate upkeep call is needed.
-///
-/// Must be called from within a Tokio runtime.
-/// Panics if a recorder is already installed or the port is in use.
-pub fn install(port: u16, gauge_idle_timeout_secs: u64) {
-    let (recorder, exporter) = PrometheusBuilder::new()
-        .with_http_listener(([0, 0, 0, 0], port))
+fn configured_prometheus_builder(gauge_idle_timeout_secs: u64) -> PrometheusBuilder {
+    PrometheusBuilder::new()
         // Remove gauge series that the relay intentionally stops emitting.
         .idle_timeout(
             MetricKindMask::GAUGE,
@@ -103,6 +100,11 @@ pub fn install(port: u16, gauge_idle_timeout_secs: u64) {
         )
         .expect("valid git compaction duration bucket boundaries")
         .set_buckets_for_metric(
+            Matcher::Full("buzz_readiness_check_duration_seconds".to_owned()),
+            &READINESS_DURATION_BUCKETS_S,
+        )
+        .expect("valid readiness duration bucket boundaries")
+        .set_buckets_for_metric(
             Matcher::Full("buzz_git_hydrate_bytes".to_owned()),
             &GIT_BYTES_BUCKETS,
         )
@@ -139,11 +141,55 @@ pub fn install(port: u16, gauge_idle_timeout_secs: u64) {
             &FANOUT_BUCKETS,
         )
         .expect("valid fanout bucket boundaries")
+}
+
+/// Install the global metrics recorder and spawn the Prometheus HTTP exporter.
+///
+/// `build()` returns the recorder + exporter future and internally spawns
+/// the upkeep task, so no separate upkeep call is needed.
+///
+/// Must be called from within a Tokio runtime.
+/// Panics if a recorder is already installed or the port is in use.
+pub fn install(port: u16, gauge_idle_timeout_secs: u64) {
+    let (recorder, exporter) = configured_prometheus_builder(gauge_idle_timeout_secs)
+        .with_http_listener(([0, 0, 0, 0], port))
         .build()
         .expect("metrics exporter must build exactly once");
 
     metrics::set_global_recorder(recorder).expect("global recorder must be set exactly once");
+    describe_readiness_metrics();
     tokio::spawn(exporter);
+}
+
+/// Register the frozen readiness metric descriptions with the active recorder.
+pub(crate) fn describe_readiness_metrics() {
+    metrics::describe_counter!(
+        "buzz_readiness_checks_total",
+        "Kubernetes health-listener readiness probes by terminal bounded reason"
+    );
+    metrics::describe_counter!(
+        "buzz_readiness_dependency_checks_total",
+        "Completed readiness dependency attempts by dependency and bounded outcome"
+    );
+    metrics::describe_histogram!(
+        "buzz_readiness_check_duration_seconds",
+        metrics::Unit::Seconds,
+        "Completed readiness check duration without outcome label multiplication"
+    );
+    metrics::describe_gauge!(
+        "buzz_readiness_state",
+        "Latest publishable readiness state by check, where 1 is ready and 0 is not ready"
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn readiness_test_recorder() -> (
+    metrics_exporter_prometheus::PrometheusRecorder,
+    metrics_exporter_prometheus::PrometheusHandle,
+) {
+    let recorder = configured_prometheus_builder(300).build_recorder();
+    let handle = recorder.handle();
+    (recorder, handle)
 }
 
 /// Axum middleware that records CAKE framework HTTP metrics.

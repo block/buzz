@@ -72,6 +72,10 @@ class ChannelDeepLink extends BuzzDeepLink {
 
 /// A parsed `buzz://message` deep link.
 class MessageDeepLink extends BuzzDeepLink {
+  /// Local community identifier for notification-originated links.
+  /// Canonical shared links omit this because community IDs are device-local.
+  final String? communityId;
+
   /// Channel UUID from the `channel` query param.
   final String channelId;
 
@@ -82,6 +86,7 @@ class MessageDeepLink extends BuzzDeepLink {
   final String? threadRootId;
 
   const MessageDeepLink({
+    this.communityId,
     required this.channelId,
     required this.messageId,
     this.threadRootId,
@@ -90,16 +95,18 @@ class MessageDeepLink extends BuzzDeepLink {
   @override
   bool operator ==(Object other) =>
       other is MessageDeepLink &&
+      other.communityId == communityId &&
       other.channelId == channelId &&
       other.messageId == messageId &&
       other.threadRootId == threadRootId;
 
   @override
-  int get hashCode => Object.hash(channelId, messageId, threadRootId);
+  int get hashCode =>
+      Object.hash(communityId, channelId, messageId, threadRootId);
 
   @override
   String toString() =>
-      'MessageDeepLink(channel: $channelId, id: $messageId, '
+      'MessageDeepLink(community: $communityId, channel: $channelId, id: $messageId, '
       'thread: $threadRootId)';
 }
 

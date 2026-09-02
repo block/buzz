@@ -5,7 +5,11 @@ use crate::{
     events,
     models::{ChannelDetailInfo, ChannelInfo, ChannelMembersResponse, GetChannelsPayload},
     nostr_convert,
-    relay::{query_relay, relay_api_base_url_with_override, submit_event, submit_event_with_keys},
+    relay::{
+        assert_expected_relay_scope, assert_expected_signer, query_relay,
+        relay_api_base_url_with_override, submit_event, submit_event_at_with_keys,
+        submit_event_with_keys,
+    },
 };
 
 // ── Reads (pure-nostr via /query) ────────────────────────────────────────────
@@ -121,6 +125,24 @@ pub async fn get_channel_details(
         .ok_or_else(|| "channel not found".to_string())
 }
 
+/// Cap for the kind:0 profile join in `get_channel_members`. Enriching a
+/// huge roster required an `authors` filter carrying every member pubkey — a
+/// query whose size and relay cost grow linearly with membership and which
+/// dominated channel-open latency on large channels. Members past the cap
+/// keep `display_name: None` (the UI falls back to pubkey-derived labels and
+/// resolves visible names through its profile caches); `role == "bot"` agent
+/// flags are roster-derived and unaffected by the cap.
+const MEMBER_PROFILE_JOIN_LIMIT: usize = 500;
+
+/// The pubkeys eligible for the kind:0 profile join: roster order, capped.
+fn profile_join_pubkeys(members: &[crate::models::ChannelMemberInfo], limit: usize) -> Vec<String> {
+    members
+        .iter()
+        .take(limit)
+        .map(|member| member.pubkey.clone())
+        .collect()
+}
+
 #[tauri::command]
 pub async fn get_channel_members(
     channel_id: String,
@@ -142,8 +164,9 @@ pub async fn get_channel_members(
         .transpose()?
         .ok_or_else(|| "channel members not found".to_string())?;
 
-    // Batch-fetch kind:0 profiles to populate display names.
-    let pubkeys: Vec<String> = response.members.iter().map(|m| m.pubkey.clone()).collect();
+    // Batch-fetch kind:0 profiles to populate display names, capped so the
+    // query cost is bounded on large rosters (see MEMBER_PROFILE_JOIN_LIMIT).
+    let pubkeys = profile_join_pubkeys(&response.members, MEMBER_PROFILE_JOIN_LIMIT);
     if !pubkeys.is_empty() {
         let profile_events = query_relay(
             &state,
@@ -515,9 +538,18 @@ pub async fn add_channel_members(
     channel_id: String,
     pubkeys: Vec<String>,
     role: Option<String>,
+    expected_relay_url: Option<String>,
+    expected_signer_pubkey: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let uuid = parse_channel_uuid(&channel_id)?;
+    let relay_base = relay_api_base_url_with_override(&state);
+    assert_expected_relay_scope(expected_relay_url.as_deref(), &relay_base)?;
+    let signing_keys = state.signing_keys()?;
+    assert_expected_signer(
+        expected_signer_pubkey.as_deref(),
+        &signing_keys.public_key().to_hex(),
+    )?;
     let role_str = match role.as_deref() {
         Some("admin") => Some("admin"),
         Some("bot") => Some("bot"),
@@ -537,7 +569,7 @@ pub async fn add_channel_members(
                 continue;
             }
         };
-        match submit_event(builder, &state).await {
+        match submit_event_at_with_keys(builder, &state, &relay_base, &signing_keys).await {
             Ok(_) => added.push(pubkey.clone()),
             Err(e) => errors.push(serde_json::json!({"pubkey": pubkey, "error": e})),
         }

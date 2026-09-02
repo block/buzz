@@ -34,6 +34,8 @@ type MockFeedWindow = Window & {
     content: string;
     createdAt?: number;
     id?: string;
+    kind?: number;
+    mentionPubkeys?: string[];
     parentEventId?: string;
     pubkey?: string;
   }) => {
@@ -450,9 +452,9 @@ async function expectIntroActionCardLayout(
   }
 
   expect(actionBox.height).toBeGreaterThan(actionBox.width);
-  expect(Math.round(actionBox.width)).toBe(220);
-  expect(Math.round(iconBox.width)).toBe(48);
-  expect(Math.round(iconBox.height)).toBe(48);
+  expect(Math.round(actionBox.width)).toBe(192);
+  expect(Math.round(iconBox.width)).toBe(40);
+  expect(Math.round(iconBox.height)).toBe(40);
   const introIconRadius = await page
     .getByTestId("message-channel-intro-icon")
     .evaluate((element) => window.getComputedStyle(element).borderRadius);
@@ -1030,7 +1032,14 @@ test("drops an expanded DM after the first message fails", async ({ page }) => {
   await page.keyboard.type(" for a hand");
   await page.getByTestId("send-message").click();
 
-  await expect(page.getByText(sendError)).toBeVisible();
+  await expect(
+    page.getByTestId("new-message-page").getByText(sendError, { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page
+      .locator("[data-sonner-toast]")
+      .filter({ hasText: `Message failed to send: ${sendError}` }),
+  ).toBeVisible();
   await expect(input).toContainText("Fizz");
 
   const commandsAfterFailure = await readCommandPayloadLog(page);
@@ -1133,6 +1142,15 @@ test("drops an expanded DM after agent startup fails", async ({ page }) => {
 
   await input.fill(retryMessage);
   const retryBaseline = commandsAfterFailure.length;
+  // The first send left the cursor parked over the bottom-right error toast,
+  // which overlaps the send button. Sonner pauses its dismiss timer while the
+  // toaster is hovered, so move the cursor away and let the transient toast
+  // clear before retrying — otherwise the retry click is intercepted for the
+  // full timeout.
+  await page.mouse.move(0, 0);
+  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0, {
+    timeout: 10_000,
+  });
   await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("chat-title")).toHaveText("charlie");
@@ -1461,10 +1479,9 @@ test("create channel template selector matches the lifecycle controls", async ({
   await expect(page.getByTestId("create-channel-description")).toHaveValue(
     "Coordinate a new project from planning through launch.",
   );
-  await expect(page.getByTestId("create-channel-permissions")).toContainText(
-    "Private",
-  );
-  await page.getByTestId("create-channel-permissions").click();
+  await expect(
+    page.getByTestId("create-channel-permissions-option-private"),
+  ).toHaveAttribute("aria-pressed", "true");
   await page.getByTestId("create-channel-permissions-option-open").click();
   await expect(page.getByTestId("create-channel-template-summary")).toHaveText(
     "Open · Canvas included · 1 agent · 1 team",
@@ -1487,6 +1504,12 @@ test("create channel exposes templates when the library is empty", async ({
   const templateContainer = page.getByTestId(
     "create-channel-template-container",
   );
+  await expect(
+    page.getByTestId("create-channel-channel-type").getByRole("button"),
+  ).toHaveText(["Temporary", "Ongoing"]);
+  await expect(
+    page.getByTestId("create-channel-permissions").getByRole("button"),
+  ).toHaveText(["Private", "Public"]);
   await expect(templateContainer).toContainText("TemplateOptional");
   const typeBox = await typeContainer.boundingBox();
   const visibilityBox = await visibilityContainer.boundingBox();
@@ -1528,8 +1551,9 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
   await page
     .getByTestId("create-channel-description")
     .fill("Auto-cleaned test stream");
-  await page.getByTestId("create-channel-channel-type").click();
-  await page.getByLabel("Temporary channel").click();
+  await page
+    .getByTestId("create-channel-channel-type-option-temporary")
+    .click();
   const channelTypeContainer = page.getByTestId(
     "create-channel-channel-type-container",
   );
@@ -1539,22 +1563,20 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
   await expect(
     page.getByTestId("create-channel-permissions-container"),
   ).toBeVisible();
-  await expect(page.getByTestId("create-channel-permissions")).toContainText(
-    "Public",
-  );
-  await page.getByTestId("create-channel-permissions").click();
-  await page.getByTestId("create-channel-permissions-option-private").click();
-  await expect(page.getByTestId("create-channel-permissions")).toContainText(
-    "Private",
-  );
-  await expect(
-    page.getByTestId("create-channel-permissions-option-private"),
-  ).toHaveCount(0);
-  await page.getByTestId("create-channel-permissions").click();
   await expect(
     page.getByTestId("create-channel-permissions-option-open"),
-  ).toBeVisible();
+  ).toHaveAttribute("aria-pressed", "true");
+  await page.getByTestId("create-channel-permissions-option-private").click();
+  await expect(
+    page.getByTestId("create-channel-permissions-option-private"),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    page.getByTestId("create-channel-permissions-option-open"),
+  ).toHaveAttribute("aria-pressed", "false");
   await page.getByTestId("create-channel-permissions-option-open").click();
+  await expect(
+    page.getByTestId("create-channel-permissions-option-open"),
+  ).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByTestId("create-channel-ttl")).toContainText("7 days");
   await page.getByTestId("create-channel-ttl").click();
   await page.getByTestId("create-channel-ttl-option-1209600").click();
@@ -1572,12 +1594,78 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
     /Ephemeral channel\. Cleans up in 14 days\./,
   );
 
+  const channelRow = page.getByTestId(`channel-${channelName}`);
+  const channelId = await channelRow.getAttribute("data-channel-id");
+  if (!channelId) {
+    throw new Error("Created ephemeral channel is missing its channel id.");
+  }
+
+  await waitForMockLiveSubscription(page, channelName);
+  await page.getByTestId("channel-general").click();
+  await page.evaluate(
+    ({ agentPubkey, channelId: activeChannelId }) => {
+      (window as MockFeedWindow).__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey,
+        channelId: activeChannelId,
+        turnId: "ephemeral-sidebar-status",
+      });
+    },
+    { agentPubkey: OWNED_RELAY_AGENT_PUBKEY, channelId },
+  );
+
+  await expect(
+    page.getByTestId(`channel-working-${channelName}`),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId(`channel-ephemeral-${channelName}`),
+  ).toHaveCount(0);
+
+  await page.evaluate(
+    ({ agentPubkey, channelId: activeChannelId }) => {
+      (window as MockFeedWindow).__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey,
+        channelId: activeChannelId,
+        turnId: "ephemeral-sidebar-status",
+        kind: "turn_completed",
+      });
+    },
+    { agentPubkey: OWNED_RELAY_AGENT_PUBKEY, channelId },
+  );
+  await expect(
+    page.getByTestId(`channel-ephemeral-${channelName}`),
+  ).toBeVisible();
+
   await page
     .getByRole("button", { name: "Toggle Sidebar", exact: true })
     .click();
   await expect(
     page.getByTestId(`channel-ephemeral-${channelName}`),
   ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Toggle Sidebar", exact: true })
+    .click();
+
+  await page.evaluate(
+    ({ channelName: targetChannelName, mentionPubkey, senderPubkey }) => {
+      (window as MockFeedWindow).__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: targetChannelName,
+        content: "Unread mention in an ephemeral channel",
+        kind: 40002,
+        mentionPubkeys: [mentionPubkey],
+        pubkey: senderPubkey,
+      });
+    },
+    {
+      channelName,
+      mentionPubkey: MOCK_IDENTITY_PUBKEY,
+      senderPubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  await expect(page.getByTestId(`channel-unread-${channelName}`)).toBeVisible();
+  await expect(
+    page.getByTestId(`channel-ephemeral-${channelName}`),
+  ).toHaveCount(0);
 });
 
 test("ephemeral countdown refreshes when switching channels after a clock jump", async ({
@@ -1597,8 +1685,9 @@ test("ephemeral countdown refreshes when switching channels after a clock jump",
     await page
       .getByTestId("create-channel-description")
       .fill("Auto-cleaned test stream");
-    await page.getByTestId("create-channel-channel-type").click();
-    await page.getByLabel("Temporary channel").click();
+    await page
+      .getByTestId("create-channel-channel-type-option-temporary")
+      .click();
     await page.getByTestId("create-channel-submit").click();
     await expect(page.getByTestId("chat-title")).toContainText(channelName);
   }
@@ -1746,8 +1835,15 @@ test("empty channel shows intro actions", async ({ page }) => {
   await expect(
     page.getByTestId("channel-intro-action-create-channel"),
   ).toHaveCount(0);
+  const addAgentsAction = page.getByTestId("channel-intro-action-create-agent");
+  await expect(addAgentsAction).toBeVisible();
   await expect(
-    page.getByTestId("channel-intro-action-create-agent"),
+    addAgentsAction.getByText("Add agent", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    addAgentsAction.getByText("Add an agent here.", {
+      exact: true,
+    }),
   ).toBeVisible();
   await expect(
     page.getByTestId("channel-intro-action-add-people"),
@@ -1767,7 +1863,7 @@ test("empty channel shows intro actions", async ({ page }) => {
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("members-sidebar")).not.toBeVisible();
 
-  await page.getByTestId("channel-intro-action-create-agent").click();
+  await addAgentsAction.click();
   await expect(page.getByRole("heading", { name: "Add agents" })).toBeVisible();
 
   await page.keyboard.press("Escape");
@@ -2537,6 +2633,85 @@ test("manage channel updates details", async ({ page }) => {
   await expect(
     reopenedEditDialog.getByTestId("channel-management-purpose"),
   ).toHaveCount(0);
+});
+
+test("channel management keeps both description paragraphs visible for editors and readers", async ({
+  page,
+}) => {
+  const description =
+    "Post deploy requests here before 3pm.\n\nFor emergencies, ping the on-call directly.\nInclude the service name and rollback plan.";
+  const visibleFragment = "Include the service name and rollback plan.";
+
+  await page.goto("/");
+  await page.waitForFunction(
+    () =>
+      typeof window.__BUZZ_E2E_MUTATE_CHANNEL__ === "function" &&
+      typeof window.__BUZZ_E2E_INVALIDATE_CHANNELS__ === "function",
+  );
+  await page.evaluate(
+    async ({ generalChannelId, randomChannelId, description }) => {
+      const bridge = window as Window & {
+        __BUZZ_E2E_INVALIDATE_CHANNELS__: () => Promise<void>;
+        __BUZZ_E2E_MUTATE_CHANNEL__: (options: {
+          channelId: string;
+          description?: string;
+        }) => void;
+      };
+      for (const channelId of [generalChannelId, randomChannelId]) {
+        bridge.__BUZZ_E2E_MUTATE_CHANNEL__({ channelId, description });
+      }
+      await bridge.__BUZZ_E2E_INVALIDATE_CHANNELS__();
+    },
+    {
+      generalChannelId: GENERAL_CHANNEL_ID,
+      randomChannelId: RANDOM_CHANNEL_ID,
+      description,
+    },
+  );
+
+  for (const [channelName, editable] of [
+    ["general", true],
+    ["random", false],
+  ] as const) {
+    await openChannelManagement(page, channelName);
+    const summary = page.getByTestId("channel-management-description");
+    await expect(summary).toHaveText(description);
+    await expect(page.getByTestId("channel-management-edit")).toHaveCount(
+      editable ? 1 : 0,
+    );
+
+    const fragmentBounds = await summary.evaluate((element, fragment) => {
+      const textNode = Array.from(element.childNodes).find(
+        (node) => node.nodeType === Node.TEXT_NODE,
+      );
+      if (!textNode?.textContent) {
+        throw new Error("channel summary text node is missing");
+      }
+      const start = textNode.textContent.indexOf(fragment);
+      if (start < 0) {
+        throw new Error(`channel summary is missing fragment: ${fragment}`);
+      }
+      const range = document.createRange();
+      range.setStart(textNode, start);
+      range.setEnd(textNode, start + fragment.length);
+      const textRect = range.getBoundingClientRect();
+      const containerRect = element.getBoundingClientRect();
+      return {
+        containerBottom: containerRect.bottom,
+        containerTop: containerRect.top,
+        textBottom: textRect.bottom,
+        textTop: textRect.top,
+      };
+    }, visibleFragment);
+    expect(fragmentBounds.textTop).toBeGreaterThanOrEqual(
+      fragmentBounds.containerTop - 1,
+    );
+    expect(fragmentBounds.textBottom).toBeLessThanOrEqual(
+      fragmentBounds.containerBottom + 1,
+    );
+
+    await closeChannelManagement(page);
+  }
 });
 
 test("manage channel shows member avatars and owner-only row controls", async ({
@@ -4000,7 +4175,40 @@ test("members sidebar virtualizes large channel rosters", async ({ page }) => {
   await expect(memberRows.first()).toBeVisible();
   expect(await memberRows.count()).toBeLessThan(50);
 
+  const firstGeneratedRow = memberList.getByTestId(
+    `sidebar-member-${pubkeys[0]}`,
+  );
+  await expect
+    .poll(() =>
+      firstGeneratedRow.evaluate(
+        (row) =>
+          getComputedStyle(row.parentElement as HTMLElement).contentVisibility,
+      ),
+    )
+    .toBe("visible");
+
   const virtualizedList = memberList.locator(".overflow-y-auto");
+  await page.evaluate(() => document.fonts.ready);
+
+  const heights: number[] = [];
+  for (const ratio of [0, 0.1, 0.25, 0.5, 0.75, 1]) {
+    heights.push(
+      await virtualizedList.evaluate(async (element, ratio) => {
+        element.scrollTop =
+          (element.scrollHeight - element.clientHeight) * ratio;
+        element.dispatchEvent(new Event("scroll"));
+
+        await new Promise<void>((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+        );
+
+        return element.scrollHeight;
+      }, ratio),
+    );
+  }
+
+  expect(Math.max(...heights) - Math.min(...heights)).toBeLessThan(120);
+
   await virtualizedList.evaluate((element) => {
     element.scrollTop = element.scrollHeight;
     element.dispatchEvent(new Event("scroll"));
@@ -4008,6 +4216,25 @@ test("members sidebar virtualizes large channel rosters", async ({ page }) => {
   await expect(
     memberList.getByTestId(`sidebar-member-${pubkeys.at(-1)}`),
   ).toBeVisible();
+});
+
+test("opening a human-only members sidebar skips managed runtime discovery", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const baselineCommands = await readCommandLog(page);
+  const baselineRuntimeListCount = commandCount(
+    baselineCommands,
+    "list_managed_agent_runtimes",
+  );
+
+  await openMembersSidebar(page, "random");
+  await expect(page.getByTestId("members-sidebar-people")).toBeVisible();
+
+  const commands = await readCommandLog(page);
+  expect(commandCount(commands, "list_managed_agent_runtimes")).toBe(
+    baselineRuntimeListCount,
+  );
 });
 
 test("members sidebar can invite relay-authorized agents", async ({ page }) => {
@@ -4521,8 +4748,17 @@ test("members sidebar can stop and start a managed bot in this community", async
     baselineCommands,
     "stop_managed_agent",
   );
+  const baselineRuntimeListCount = commandCount(
+    baselineCommands,
+    "list_managed_agent_runtimes",
+  );
 
   await openMembersSidebar(page, "general");
+  await expect
+    .poll(async () =>
+      commandCount(await readCommandLog(page), "list_managed_agent_runtimes"),
+    )
+    .toBe(baselineRuntimeListCount + 1);
 
   const agentStatus = page.getByTestId(
     `sidebar-managed-agent-status-${agentPubkey}`,

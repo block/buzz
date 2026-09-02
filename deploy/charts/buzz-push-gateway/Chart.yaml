@@ -3,6 +3,6 @@ apiVersion: v2
 # branches (see docs/push-gateway-deployment.md, "Gateway chart release").
 name: buzz-push-gateway
 description: Public capability-gated APNs last-hop gateway for Buzz
-version: 0.1.0
+version: 0.2.0
 appVersion: "0.1.0"
 type: application

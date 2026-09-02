@@ -149,6 +149,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | |
 | `DATABRICKS_HOST` | — | Required when provider=databricks or provider=databricks_v2. |
 | `DATABRICKS_MODEL` | — | Required when provider=databricks or provider=databricks_v2. |
+| `DATABRICKS_MODEL_FILTER` | — | Optional discovery-only, comma-separated full-string `*`/`?` patterns OR-matched against raw Databricks endpoint and Unity Catalog model-service IDs. Blank/unset shows all; this is visibility filtering, not an authorization boundary. |
 | `DATABRICKS_TOKEN` | — | Optional static bearer escape hatch. If unset, Databricks uses browser OAuth + refresh cache. |
 | `BUZZ_AGENT_SYSTEM_PROMPT` | built-in | Inline system prompt. |
 | `BUZZ_AGENT_SYSTEM_PROMPT_FILE` | — | File path. Mutually exclusive with the above. |
@@ -158,7 +159,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `BUZZ_AGENT_MAX_CONTEXT_TOKENS` | `200000` | Provider context window used by the handoff gate. |
 | `BUZZ_AGENT_MAX_HANDOFFS` | `10` | Max context handoffs per session before falling back to truncation. |
 | `BUZZ_AGENT_LLM_TIMEOUT_SECS` | `240` | Max seconds with no response bytes before abandoning an LLM call (per-read inactivity, not wall-clock). |
-| `BUZZ_AGENT_TOOL_TIMEOUT_SECS` | `660` | Per-tool call timeout in seconds |
+| `BUZZ_AGENT_TOOL_TIMEOUT_SECS` | `1260` | Per-tool call timeout in seconds |
 | `BUZZ_AGENT_MAX_PARALLEL_TOOLS` | `8` | Max concurrent tool calls per turn (1 = sequential) |
 | `BUZZ_AGENT_MAX_SESSIONS` | unlimited | Max concurrent ACP sessions. Sessions are cheap; default has no cap. |
 | `BUZZ_AGENT_MAX_LINE_BYTES` | `4194304` | 4 MiB. Hard cap on inbound JSON-RPC frames. |
@@ -241,7 +242,9 @@ lifecycle hook — see [MCP_DRIVEN_HOOKS.md](../../docs/MCP_DRIVEN_HOOKS.md).
 | Block Gateway | `openai` | `POST {base}/chat/completions` | gpt-5, claude |
 | OpenRouter | `openrouter` | `POST {base}/chat/completions` | anything they route (extended-thinking replay, provider-agnostic tool calling) |
 | Databricks | `databricks` | `POST {host}/serving-endpoints/{model}/invocations` | goose-claude-4-6-sonnet |
-| Databricks AI Gateway v2 | `databricks_v2` | `POST {host}/ai-gateway/{provider}/v1/...` | databricks-gpt-5-5, databricks-claude-opus-4-7 |
+| Databricks AI Gateway v2 | `databricks_v2` | `POST {host}/ai-gateway/{provider}/v1/...` | workspace endpoints and Unity Catalog model-service FQNs; UC FQNs use MLflow Chat Completions |
+
+The optional `DATABRICKS_MODEL_FILTER` applies only to model discovery. Each comma-separated entry is trimmed and matched against the complete raw ID with case-sensitive `*` (zero or more characters) and `?` (one Unicode character) semantics; patterns are OR-ed. Unset or blank preserves the full authenticated catalog. A nonblank value containing no usable patterns is rejected. This controls picker visibility only; Databricks and Unity Catalog permissions remain the authorization boundary. A filtered-empty result is authoritative and does not restore the built-in fallback models.
 
 If `BUZZ_AGENT_PROVIDER=anthropic` is selected without `ANTHROPIC_API_KEY`, `BUZZ_AGENT_PROVIDER=openai` is selected without `OPENAI_COMPAT_API_KEY`, or `BUZZ_AGENT_PROVIDER=openrouter` is selected without `OPENROUTER_API_KEY`, the agent returns an error — there is no implicit fallback to another provider.
 
@@ -323,7 +326,7 @@ The trust boundary is **the operator who launched the agent**. The harness, MCP 
 | Tool calls per turn | 64 | `MAX_TOOL_CALLS_PER_TURN` |
 | Loop rounds | 0 (unlimited) | `BUZZ_AGENT_MAX_ROUNDS` |
 | LLM read inactivity timeout | 240 s | `BUZZ_AGENT_LLM_TIMEOUT_SECS` |
-| Tool call timeout | 660 s | `BUZZ_AGENT_TOOL_TIMEOUT_SECS` |
+| Tool call timeout | 1260 s | `BUZZ_AGENT_TOOL_TIMEOUT_SECS` |
 
 ## What This Is NOT
 

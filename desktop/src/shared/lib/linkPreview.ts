@@ -665,7 +665,17 @@ export function extractSupportedLinkPreviews(
   const relayOrigin = activeRelayOrigin ?? null;
   for (const candidate of candidates) {
     const preview = parseSupportedLinkPreview(candidate.href, relayOrigin);
-    if (!preview || seen.has(preview.href)) continue;
+    // Buzz-native links render as inline entity chips. Their relay-backed
+    // metadata is available from the chip on hover, so a second standalone
+    // preview would duplicate the same entity presentation. This also covers
+    // same-relay clone URLs, which parseSupportedLinkPreview normalizes to a
+    // buzz://repo href. External web links continue through the snapshot path.
+    if (
+      !preview ||
+      preview.href.startsWith("buzz://") ||
+      seen.has(preview.href)
+    )
+      continue;
 
     seen.add(preview.href);
     previews.push(

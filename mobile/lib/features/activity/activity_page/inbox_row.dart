@@ -89,6 +89,9 @@ class _InboxRow extends HookConsumerWidget {
     final knownAgentPubkeys = channel == null
         ? ref.watch(knownAgentPubkeysProvider)
         : ref.watch(agentMentionPubkeysProvider(channel!.id));
+    final isAgent =
+        knownAgentPubkeys.contains(senderPubkey) ||
+        profile?.ownerPubkey != null;
     final agentMentionPubkeys = agentPubkeysWithProfileOwners(
       knownAgentPubkeys: knownAgentPubkeys,
       profileOwnedAgentPubkeys: [
@@ -223,6 +226,7 @@ class _InboxRow extends HookConsumerWidget {
                             _RowAvatar(
                               pubkey: item.item.pubkey,
                               profile: profile,
+                              isAgent: isAgent,
                             ),
                             const SizedBox(width: messageAvatarContentGap),
                             Expanded(
@@ -453,8 +457,13 @@ class _InboxSwipeAction extends StatelessWidget {
 class _RowAvatar extends StatelessWidget {
   final String pubkey;
   final UserProfile? profile;
+  final bool isAgent;
 
-  const _RowAvatar({required this.pubkey, required this.profile});
+  const _RowAvatar({
+    required this.pubkey,
+    required this.profile,
+    required this.isAgent,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -472,6 +481,7 @@ class _RowAvatar extends StatelessWidget {
           color: context.colors.onPrimaryContainer,
         ),
       ),
+      isAgent: isAgent,
     );
   }
 }

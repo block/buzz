@@ -1,4 +1,5 @@
 import { type LucideIcon, Plus } from "lucide-react";
+import type { ReactNode } from "react";
 
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -9,6 +10,7 @@ export function ProjectSectionHeader({
   icon: Icon,
   testId = "project-section-header",
   title,
+  trailing,
 }: {
   action?: {
     disabled?: boolean;
@@ -20,20 +22,24 @@ export function ProjectSectionHeader({
   icon: LucideIcon;
   testId?: string;
   title: string;
+  trailing?: ReactNode;
 }) {
   return (
     <header
-      className={cn("flex min-h-12 items-center gap-3 px-4 py-2", className)}
+      className={cn(
+        "flex min-h-12 flex-wrap items-center gap-2 px-4 py-2",
+        className,
+      )}
       data-testid={testId}
     >
       <div className="flex min-w-0 flex-1 items-center gap-3">
-        <h2 className="min-w-0 truncate text-sm font-semibold text-foreground">
-          {title}
-        </h2>
         <Icon
           className="h-4 w-4 shrink-0 text-muted-foreground"
           data-testid="project-section-header-icon"
         />
+        <h2 className="min-w-0 truncate text-sm font-semibold text-foreground">
+          {title}
+        </h2>
       </div>
       {action ? (
         <Button
@@ -48,6 +54,7 @@ export function ProjectSectionHeader({
           <Plus className="h-4 w-4" />
         </Button>
       ) : null}
+      {trailing}
     </header>
   );
 }

@@ -1,5 +1,5 @@
 //! Unit tests for `config_bridge/reader.rs` (kept in a sibling file so
-//! `reader.rs` stays under the 1000-line budget; `#[path]`-included from
+//! `reader.rs` stays under the 1500-line budget; `#[path]`-included from
 //! there).
 
 use std::{collections::BTreeMap, path::Path, sync::Mutex};
@@ -65,6 +65,7 @@ fn test_runtime() -> &'static KnownAcpRuntime {
 
 fn test_record() -> ManagedAgentRecord {
     ManagedAgentRecord {
+        description: None,
         pubkey: "test".to_string(),
         name: "Test Agent".to_string(),
         persona_id: None,
@@ -112,6 +113,7 @@ fn test_record() -> ManagedAgentRecord {
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
         definition_parallelism: None,

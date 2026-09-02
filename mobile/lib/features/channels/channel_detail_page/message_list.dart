@@ -42,6 +42,9 @@ class _MessageList extends HookConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final appView = View.of(context);
+    final localSendAnimations = ref.watch(
+      localMessageSendAnimationProvider(channelId),
+    );
     final displayEntries = groupMembershipTimelineEntries(entries);
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
@@ -66,9 +69,11 @@ class _MessageList extends HookConsumerWidget {
     );
     final isAutoScrolling = useRef(false);
     final latestNavigationRequest = useState(0);
+    final latestNavigationTargetId = useRef<String?>(null);
     final latestRealignmentQueued = useRef(false);
     final latestEntryId = entries.isEmpty ? null : entries.last.message.id;
     final previousLatestEntryId = useRef<String?>(null);
+    final observedLocalSendIds = useRef(localSendAnimations.keys.toSet());
     final didOpenInitialThread = useRef(false);
     final didJumpToInitialMessage = useRef(false);
     final isUnreadNavigationDismissed = useState(false);
@@ -338,14 +343,16 @@ class _MessageList extends HookConsumerWidget {
         return;
       }
       try {
+        final targetIndex =
+            reversedIndexOf(latestNavigationTargetId.value) ?? 0;
         await itemScrollController.scrollTo(
-          index: 0,
+          index: targetIndex,
           alignment: latestAlignment(),
           duration: jumpToLatestScrollDuration,
           curve: jumpToLatestScrollCurve,
         );
         if (context.mounted && !hasUserScrolled.value) {
-          isAtLatest.value = true;
+          isAtLatest.value = targetIndex == 0;
           isJumpToLatestVisible.value = false;
         }
       } finally {
@@ -353,12 +360,13 @@ class _MessageList extends HookConsumerWidget {
       }
     }
 
-    void scrollToLatest() {
+    void scrollToLatest({String? targetMessageId}) {
       if (!itemScrollController.isAttached || isAutoScrolling.value) return;
       isAutoScrolling.value = true;
       followsLatest.value = true;
       hasUserScrolled.value = false;
       hasUnseenLatestEntry.value = false;
+      latestNavigationTargetId.value = targetMessageId;
       latestNavigationRequest.value += 1;
     }
 
@@ -429,8 +437,13 @@ class _MessageList extends HookConsumerWidget {
             ) -
             composerBottomInset,
       );
+      final hidesJumpToLatest = shouldHideChannelJumpToLatest(
+        isAtLatest: latestIsAtBoundary(),
+        followsLatest: followsLatest.value,
+        userHasDetached: hasUserScrolled.value,
+      );
       final shouldShow =
-          !latestIsAtBoundary() &&
+          !hidesJumpToLatest &&
           (hasUnseenLatestEntry.value ||
               !latestIsVisible ||
               distanceFromLatest.value > visiblePageHeight);
@@ -617,10 +630,28 @@ class _MessageList extends HookConsumerWidget {
     useEffect(() {
       final previous = previousLatestEntryId.value;
       previousLatestEntryId.value = latestEntryId;
-      if (previous == null ||
-          latestEntryId == null ||
-          previous == latestEntryId) {
+      final entryIds = entries.map((entry) => entry.message.id).toSet();
+      final newlyInsertedLocalSendIds = localSendAnimations.keys
+          .where(
+            (eventId) =>
+                !observedLocalSendIds.value.contains(eventId) &&
+                entryIds.contains(eventId),
+          )
+          .toList();
+      observedLocalSendIds.value
+        ..removeWhere((eventId) => !localSendAnimations.containsKey(eventId))
+        ..addAll(newlyInsertedLocalSendIds);
+      final localSendId = newlyInsertedLocalSendIds.firstOrNull;
+      final latestEntryChanged =
+          previous != null &&
+          latestEntryId != null &&
+          previous != latestEntryId;
+      if (!latestEntryChanged && localSendId == null) {
         return null;
+      }
+      if (localSendId != null) {
+        followsLatest.value = true;
+        hasUserScrolled.value = false;
       }
       if (!followsLatest.value || hasUserScrolled.value) {
         hasUnseenLatestEntry.value = true;
@@ -628,7 +659,7 @@ class _MessageList extends HookConsumerWidget {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!context.mounted) return;
         if (followsLatest.value && !hasUserScrolled.value) {
-          scrollToLatest();
+          scrollToLatest(targetMessageId: localSendId);
           return;
         }
         final positions = itemPositionsListener.itemPositions.value;
@@ -640,7 +671,7 @@ class _MessageList extends HookConsumerWidget {
         }
       });
       return null;
-    }, [latestEntryId]);
+    }, [latestEntryId, localSendAnimations]);
 
     if (entries.isEmpty) {
       return Center(
@@ -781,57 +812,67 @@ class _MessageList extends HookConsumerWidget {
                             message.pubkey.toLowerCase() ||
                         (message.createdAt - prevMessage.createdAt) > 300);
 
-                return Padding(
-                  key: ValueKey('channel-message-group-${message.id}'),
-                  padding: EdgeInsets.only(bottom: index == 0 ? Grid.xs : 0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (showDayDivider)
-                        DayDivider(
-                          label: formatDayHeading(message.createdAt),
-                          dayTimestamp: message.createdAt,
-                          stickyDayTimestamp: stickyDayTimestamp,
-                        ),
-                      if (message.isSystem)
-                        _SystemMessageRow(
-                          message: message,
-                          groupedMessages: entryGroup.length > 1
-                              ? entryGroup
-                                    .map((entry) => entry.message)
-                                    .toList()
-                              : null,
-                          channelId: channelId,
-                          currentPubkey: currentPubkey,
-                          allMessages: null,
-                          isMember: isMember,
-                          isArchived: isArchived,
-                        )
-                      else ...[
-                        _MessageBubble(
-                          message: message,
-                          showAuthor: showAuthor,
-                          channelNames: channelNamesMap,
-                          currentChannelId: channelId,
-                          currentPubkey: currentPubkey,
-                          allMessages: allMessages,
-                          isMember: isMember,
-                          isArchived: isArchived,
-                          composerFocusNode: composerFocusNode,
-                          restoreComposerFocus: restoreComposerFocus,
-                        ),
-                        if (entry.summary != null)
-                          _ThreadSummaryRow(
-                            summary: entry.summary!,
+                return LocalMessageSendTransition(
+                  key: ValueKey('channel-message-send-${message.id}'),
+                  animate: isRecentLocalMessageSendAnimation(
+                    localSendAnimations,
+                    message.id,
+                  ),
+                  startOffsetFactor: showAuthor
+                      ? localMessageSendTransitionAvatarStartOffset
+                      : localMessageSendTransitionStartOffset,
+                  child: Padding(
+                    key: ValueKey('channel-message-group-${message.id}'),
+                    padding: EdgeInsets.only(bottom: index == 0 ? Grid.xs : 0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (showDayDivider)
+                          DayDivider(
+                            label: formatDayHeading(message.createdAt),
+                            dayTimestamp: message.createdAt,
+                            stickyDayTimestamp: stickyDayTimestamp,
+                          ),
+                        if (message.isSystem)
+                          _SystemMessageRow(
                             message: message,
-                            allMessages: allMessages,
+                            groupedMessages: entryGroup.length > 1
+                                ? entryGroup
+                                      .map((entry) => entry.message)
+                                      .toList()
+                                : null,
                             channelId: channelId,
                             currentPubkey: currentPubkey,
+                            allMessages: allMessages,
                             isMember: isMember,
                             isArchived: isArchived,
+                          )
+                        else ...[
+                          _MessageBubble(
+                            message: message,
+                            showAuthor: showAuthor,
+                            channelNames: channelNamesMap,
+                            currentChannelId: channelId,
+                            currentPubkey: currentPubkey,
+                            allMessages: allMessages,
+                            isMember: isMember,
+                            isArchived: isArchived,
+                            composerFocusNode: composerFocusNode,
+                            restoreComposerFocus: restoreComposerFocus,
                           ),
+                          if (entry.summary != null)
+                            _ThreadSummaryRow(
+                              summary: entry.summary!,
+                              message: message,
+                              allMessages: allMessages,
+                              channelId: channelId,
+                              currentPubkey: currentPubkey,
+                              isMember: isMember,
+                              isArchived: isArchived,
+                            ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
                 );
               },

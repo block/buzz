@@ -10,6 +10,8 @@ use std::sync::LazyLock;
 
 const MAX_DISPLAY_NAME_CHARS: usize = 128;
 const MAX_SYSTEM_PROMPT_BYTES: usize = 64 * 1024;
+/// Cap for the optional public agent description.
+pub(crate) const MAX_AGENT_DESCRIPTION_CHARS: usize = 280;
 const EMOJI_VARIATION_SELECTOR: char = '\u{FE0F}';
 const ZERO_WIDTH_JOINER: char = '\u{200D}';
 
@@ -41,6 +43,23 @@ pub(crate) fn validate_agent_definition_text(
     validate_visible_text(system_prompt, "Agent instructions", true)
 }
 
+/// Validate an optional public agent description: max 280 characters and the
+/// same visible-text policy as the other definition fields (invisible, bidi,
+/// and control characters are rejected, not stripped). `None` and the empty
+/// string are both valid — the description is optional.
+pub(crate) fn validate_agent_description_text(description: Option<&str>) -> Result<(), String> {
+    let Some(description) = description else {
+        return Ok(());
+    };
+    let description_chars = description.chars().count();
+    if description_chars > MAX_AGENT_DESCRIPTION_CHARS {
+        return Err(format!(
+            "Description is too long ({description_chars} characters, max {MAX_AGENT_DESCRIPTION_CHARS})"
+        ));
+    }
+    validate_visible_text(description, "Description", false)
+}
+
 /// Validate the human-reviewed definition text carried by a managed agent.
 ///
 /// Definition-linked agents resolve their executable prompt through the
@@ -60,7 +79,14 @@ pub(crate) fn validate_managed_agent_definition_text(
     validate_agent_definition_text(name, executable_prompt)
 }
 
-fn validate_visible_text(
+/// Reject control and default-ignorable characters in human-reviewed text.
+///
+/// The shared executable-definition invariant: a recipient reviews a visible
+/// string, then it is delivered verbatim to an ACP harness. Invisible,
+/// default-ignorable, and bidi-override characters make what executes differ
+/// from what was reviewed, so they are refused rather than silently stripped.
+/// `allow_layout_controls` permits `\n`/`\t` for multiline fields.
+pub(crate) fn validate_visible_text(
     value: &str,
     label: &str,
     allow_layout_controls: bool,
@@ -234,6 +260,37 @@ mod tests {
     fn enforces_display_name_and_prompt_bounds() {
         assert!(validate_agent_definition_text(&"a".repeat(129), "prompt").is_err());
         assert!(validate_agent_definition_text("Reviewer", &"a".repeat(64 * 1024 + 1)).is_err());
+    }
+
+    #[test]
+    fn description_accepts_none_empty_and_plain_text() {
+        assert!(validate_agent_description_text(None).is_ok());
+        assert!(validate_agent_description_text(Some("")).is_ok());
+        assert!(validate_agent_description_text(Some("Buttercup, a software engineer 🐝")).is_ok());
+        assert!(
+            validate_agent_description_text(Some(&"a".repeat(MAX_AGENT_DESCRIPTION_CHARS))).is_ok()
+        );
+    }
+
+    #[test]
+    fn description_rejects_over_280_chars() {
+        assert!(validate_agent_description_text(Some(
+            &"a".repeat(MAX_AGENT_DESCRIPTION_CHARS + 1)
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn description_rejects_invisible_bidi_and_control_characters() {
+        for character in ['\u{200B}', '\u{202E}', '\u{2066}', '\0', '\r', '\u{0007}'] {
+            for description in [
+                format!("A helpful{character}agent"),
+                format!("{character}A helpful agent"),
+                format!("A helpful agent{character}"),
+            ] {
+                assert!(validate_agent_description_text(Some(&description)).is_err());
+            }
+        }
     }
 
     #[test]

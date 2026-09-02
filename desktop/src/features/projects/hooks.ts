@@ -3,7 +3,6 @@ import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
 import { getRelaySelf } from "@/features/moderation/lib/relaySelf";
-import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
 import { signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import {
@@ -14,7 +13,6 @@ import {
   listProjectLocalRepositories,
 } from "@/shared/api/projectGit";
 import {
-  KIND_DELETION,
   KIND_GIT_ISSUE,
   KIND_GIT_PATCH,
   KIND_GIT_PR_UPDATE,
@@ -60,16 +58,24 @@ import {
 } from "./projectPullRequests.mjs";
 import { fetchProjectsWorkItems } from "./projectWorkItems";
 import {
+  projectDeletionMutationOptions,
+  projectsQueryKey,
+} from "./projectDeletionMutation";
+import {
   eventToRepository,
   type Project,
   type Repository,
 } from "./projectModels";
+import { fetchProjectHomeForChannel, fetchProjects } from "./projectFetch";
 import {
-  buildProjectsFromFetcher,
-  type FetchProjectEventsExhaustively,
-  fetchProjectEventsExhaustively,
-} from "./projectEnumeration";
+  markProjectCollectionAuthoritative,
+  persistProjectSnapshot,
+  PROJECT_QUERY_STRUCTURAL_SHARING,
+} from "./projectSnapshot";
 import { projectMatchesRouteId } from "./projectRoutes";
+
+export { fetchProjects } from "./projectFetch";
+export { projectsQueryKey };
 
 export type {
   Project,
@@ -78,10 +84,7 @@ export type {
   ProjectPullRequestCommentAnchor,
   Repository,
 };
-
 export type ProjectPullRequestCommentDecision = "request-changes";
-
-const HIDDEN_PROJECT_CARDS_KEY = "buzz.projects.hidden-cards.v1";
 
 export type RepoState = {
   branches: Array<{ name: string; commit: string }>;
@@ -131,23 +134,6 @@ export type ProjectIssueListItem = {
   issue: ProjectIssue;
 };
 
-function readHiddenProjectCards(): string[] {
-  if (typeof window === "undefined") {
-    return [];
-  }
-
-  try {
-    const parsed = JSON.parse(
-      window.localStorage.getItem(HIDDEN_PROJECT_CARDS_KEY) ?? "[]",
-    );
-    return Array.isArray(parsed)
-      ? parsed.filter((item): item is string => typeof item === "string")
-      : [];
-  } catch {
-    return [];
-  }
-}
-
 /**
  * Converts a kind:30617 repo announcement into a `Project`.
  *
@@ -165,19 +151,6 @@ export function eventToProject(
     throw new Error("Invalid repository announcement.");
   }
   return repository;
-}
-
-export async function fetchProjects(
-  fetchExhaustively: FetchProjectEventsExhaustively = fetchProjectEventsExhaustively,
-): Promise<Project[]> {
-  // Delegates to `buildProjectsFromFetcher` in `projectEnumeration.ts`, which
-  // is the pure, Tauri-free core of this operation. That helper's javadoc
-  // explains the fail-closed tombstone contract and the NIP-OA owner-deletion
-  // relay-side-suppression decision.
-  return buildProjectsFromFetcher(fetchExhaustively, {
-    relayOrigin: getCachedRelayOrigin(),
-    hiddenAddresses: new Set(readHiddenProjectCards()),
-  });
 }
 
 function eventToRepoState(event: RelayEvent): RepoState {
@@ -205,8 +178,10 @@ function eventToRepoState(event: RelayEvent): RepoState {
     updatedAt: event.created_at,
   };
 }
-
-async function fetchRepoState(project: Repository): Promise<RepoState | null> {
+/** Load the trusted relay state used to resolve a repository's live refs. */
+export async function fetchRepoState(
+  project: Repository,
+): Promise<RepoState | null> {
   const relaySelf = await getRelaySelf();
   const trustedAuthors = [
     ...new Set(
@@ -616,43 +591,72 @@ async function fetchProjectActivitySummaries(
   );
 }
 
-async function deleteProject(project: Project): Promise<void> {
-  const identity = await getIdentity();
-  if (identity.pubkey.toLowerCase() !== project.owner.toLowerCase()) {
-    throw new Error("Only the project owner can delete this project.");
-  }
+/**
+ * Freshness windows for the Projects surface. Every local write path
+ * invalidates its keys explicitly (issue/PR mutations, project creation,
+ * repo sync), so short windows bought nothing for own-actions and charged a
+ * full relay fan-out — project enumeration is an exhaustive paginated scan,
+ * work items are five 2,000-event queries — on nearly every Projects
+ * re-entry. Remote actors' changes surface within the window. gcTime keeps
+ * the enumeration cached across visits so re-entering Projects paints from
+ * cache instead of blocking on the scan.
+ */
+export const PROJECTS_STALE_TIME_MS = 5 * 60_000;
+// Window-guarded like react-query's own server default (Infinity): an
+// explicit finite gcTime schedules a real, non-unref'd timeout per cache
+// entry, which keeps node test processes alive for the full 30 minutes.
+export const PROJECTS_GC_TIME_MS =
+  typeof window === "undefined" ? Number.POSITIVE_INFINITY : 30 * 60_000;
+export const PROJECT_WORK_ITEMS_STALE_TIME_MS = 2 * 60_000;
+export const PROJECT_ACTIVITY_STALE_TIME_MS = 2 * 60_000;
+export const PROJECT_LOCAL_REPOS_STALE_TIME_MS = 2 * 60_000;
 
-  const event = await signRelayEvent({
-    kind: KIND_DELETION,
-    content: `Delete project ${project.name}`,
-    tags: [["a", project.projectAddress]],
-  });
-
-  await relayClient.publishEvent(
-    event,
-    "Timed out deleting project.",
-    "Failed to delete project.",
-  );
-}
-
-export const projectsQueryKey = ["projects"] as const;
-
-export function useProjectsQuery() {
+export function useProjectsQuery(enabled = true) {
+  const queryClient = useQueryClient();
   return useQuery({
     queryKey: projectsQueryKey,
-    queryFn: () => fetchProjects(),
-    staleTime: 60_000,
+    queryFn: async ({ signal }) => {
+      const projects = await fetchProjects(undefined, signal);
+      markProjectCollectionAuthoritative(queryClient);
+      persistProjectSnapshot(queryClient, projects);
+      return projects;
+    },
+    staleTime: PROJECTS_STALE_TIME_MS,
+    gcTime: PROJECTS_GC_TIME_MS,
+    structuralSharing: PROJECT_QUERY_STRUCTURAL_SHARING,
+    enabled,
+  });
+}
+
+export function useProjectHomeForChannelQuery(
+  channelId: string,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: ["projects", "home-channel", channelId],
+    queryFn: ({ signal }) => fetchProjectHomeForChannel(channelId, signal),
+    staleTime: PROJECTS_STALE_TIME_MS,
+    gcTime: PROJECTS_GC_TIME_MS,
+    enabled: enabled && channelId.length > 0,
   });
 }
 
 export function useProjectQuery(projectId: string) {
+  const queryClient = useQueryClient();
   return useQuery({
     queryKey: projectsQueryKey,
-    queryFn: () => fetchProjects(),
+    queryFn: async ({ signal }) => {
+      const projects = await fetchProjects(undefined, signal);
+      markProjectCollectionAuthoritative(queryClient);
+      persistProjectSnapshot(queryClient, projects);
+      return projects;
+    },
     select: (projects) =>
       projects.find((project) => projectMatchesRouteId(project, projectId)) ??
       null,
-    staleTime: 60_000,
+    staleTime: PROJECTS_STALE_TIME_MS,
+    gcTime: PROJECTS_GC_TIME_MS,
+    structuralSharing: PROJECT_QUERY_STRUCTURAL_SHARING,
   });
 }
 
@@ -793,7 +797,8 @@ export function useProjectLocalRepositoriesQuery(reposDir?: string | null) {
   return useQuery({
     queryKey: ["projects", "local-repositories", reposDir ?? "default"],
     queryFn: () => listProjectLocalRepositories({ reposDir }),
-    staleTime: 10_000,
+    // Filesystem scan; repo sync/clone flows invalidate this key on change.
+    staleTime: PROJECT_LOCAL_REPOS_STALE_TIME_MS,
     retry: 1,
   });
 }
@@ -828,9 +833,22 @@ export function useProjectPullRequestsQuery(
 export function useProjectsWorkItemsQuery(projects: Project[]) {
   return useQuery({
     enabled: projects.length > 0,
-    queryKey: ["projects", "work-items", projects.map((project) => project.id)],
-    queryFn: () => fetchProjectsWorkItems(projects),
-    staleTime: 30_000,
+    queryKey: [
+      "projects",
+      "work-items",
+      projects.map((project) => project.id),
+      // Repo attach/detach changes the fan-out inputs without changing
+      // project ids; keying on addresses too prevents a pre-attach result
+      // from serving as fresh for the whole staleTime window.
+      projects
+        .flatMap((project) =>
+          project.repositories.map((repository) => repository.repoAddress),
+        )
+        .sort(),
+    ],
+    queryFn: ({ signal }) =>
+      fetchProjectsWorkItems(projects, undefined, signal),
+    staleTime: PROJECT_WORK_ITEMS_STALE_TIME_MS,
   });
 }
 
@@ -935,20 +953,12 @@ export function useProjectActivitySummariesQuery(projects: Project[]) {
     enabled: repoAddresses.length > 0,
     queryKey: ["projects", "activity-summaries", repoAddresses],
     queryFn: () => fetchProjectActivitySummaries(projects),
-    staleTime: 30_000,
+    staleTime: PROJECT_ACTIVITY_STALE_TIME_MS,
   });
 }
 
 export function useDeleteProjectMutation() {
   const queryClient = useQueryClient();
 
-  return useMutation({
-    mutationFn: deleteProject,
-    onSuccess: (_data, project) => {
-      queryClient.setQueryData<Project[]>(projectsQueryKey, (current = []) =>
-        current.filter((item) => item.id !== project.id),
-      );
-      void queryClient.invalidateQueries({ queryKey: projectsQueryKey });
-    },
-  });
+  return useMutation(projectDeletionMutationOptions(queryClient));
 }

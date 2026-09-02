@@ -164,6 +164,7 @@ mod tests {
 
     fn sample_agent() -> ManagedAgentRecord {
         ManagedAgentRecord {
+            description: None,
             pubkey: "agentpubkeyhex".to_string(),
             name: "Test Agent".to_string(),
             persona_id: Some("persona-1".to_string()),
@@ -219,6 +220,7 @@ mod tests {
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
+            team_catalog_source: None,
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
             definition_parallelism: None,

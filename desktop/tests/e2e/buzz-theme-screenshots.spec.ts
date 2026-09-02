@@ -676,33 +676,43 @@ test("app font size and conversation density apply independently", async ({
   const fontSizeDescription = page
     .getByTestId("font-size-row")
     .locator("[data-settings-subcopy]");
+  // The conversation tokens are rem-relative `calc(...)` expressions (the
+  // type tokens ride on `--buzz-type-rem`, which itself derives from the
+  // root rem so Cmd +/- zooms everything together). Reading the raw custom
+  // property strings off <html> would just return unresolved calc text, so
+  // resolve each token to px through a probe element instead: assign the
+  // token to the probe's font-size and read the computed value back.
+  // font-size is used (rather than width) because its computed value keeps
+  // fractional precision instead of snapping to layout units.
   const readScale = () =>
     root.evaluate((element) => {
-      const style = window.getComputedStyle(element);
-      return {
-        authorLineHeight: Number.parseFloat(
-          style.getPropertyValue("--conversation-author-line-height"),
-        ),
-        bodyGap: Number.parseFloat(
-          style.getPropertyValue("--conversation-body-gap"),
-        ),
-        fontSize: style.getPropertyValue("--conversation-message-font-size"),
-        lineHeight: style.getPropertyValue(
-          "--conversation-message-line-height",
-        ),
-        paragraphGap: Number.parseFloat(
-          style.getPropertyValue("--conversation-paragraph-gap"),
-        ),
-        rowPadding: Number.parseFloat(
-          style.getPropertyValue("--conversation-row-padding-block"),
-        ),
-        timestampFontSize: style.getPropertyValue(
-          "--conversation-timestamp-font-size",
-        ),
-        timestampLineHeight: Number.parseFloat(
-          style.getPropertyValue("--conversation-timestamp-line-height"),
-        ),
+      const PROBE_ID = "buzz-e2e-conversation-scale-probe";
+      const tokens = {
+        authorLineHeight: "--conversation-author-line-height",
+        bodyGap: "--conversation-body-gap",
+        fontSize: "--conversation-message-font-size",
+        lineHeight: "--conversation-message-line-height",
+        paragraphGap: "--conversation-paragraph-gap",
+        rowPadding: "--conversation-row-padding-block",
+        timestampFontSize: "--conversation-timestamp-font-size",
+        timestampLineHeight: "--conversation-timestamp-line-height",
+      } as const;
+      let probe = element.ownerDocument.getElementById(PROBE_ID);
+      if (!probe) {
+        probe = element.ownerDocument.createElement("span");
+        probe.id = PROBE_ID;
+        probe.style.cssText =
+          "position:absolute;left:-9999px;top:0;visibility:hidden;pointer-events:none";
+        element.appendChild(probe);
+      }
+      const resolvePx = (token: string) => {
+        probe.style.fontSize = `var(${token})`;
+        const px = Number.parseFloat(window.getComputedStyle(probe).fontSize);
+        return Math.round(px * 100) / 100;
       };
+      return Object.fromEntries(
+        Object.entries(tokens).map(([key, token]) => [key, resolvePx(token)]),
+      ) as Record<keyof typeof tokens, number>;
     });
   const readSettingsScale = () =>
     page.getByTestId("conversation-density-row").evaluate((element) => {
@@ -753,14 +763,15 @@ test("app font size and conversation density apply independently", async ({
   await expect(fontSizeDescription).toHaveText(
     "Applies across conversations and interface text",
   );
+  // Comfy + Default: 14px conversation text on a 16px root rem.
   await expect.poll(readScale).toEqual({
     authorLineHeight: 16,
-    bodyGap: 0.125,
-    fontSize: "calc(16px * .875)",
-    lineHeight: "calc(16px * 1.25)",
-    paragraphGap: 0.5,
-    rowPadding: 0.25,
-    timestampFontSize: "calc(16px * .75)",
+    bodyGap: 2,
+    fontSize: 14,
+    lineHeight: 20,
+    paragraphGap: 8,
+    rowPadding: 4,
+    timestampFontSize: 12,
     timestampLineHeight: 16,
   });
   await expect
@@ -876,14 +887,15 @@ test("app font size and conversation density apply independently", async ({
       ),
     )
     .toBe("compact");
+  // Compact only tightens spacing; type is untouched.
   await expect.poll(readScale).toEqual({
     authorLineHeight: 16,
     bodyGap: 0,
-    fontSize: "calc(16px * .875)",
-    lineHeight: "calc(16px * 1.25)",
-    paragraphGap: 0.375,
-    rowPadding: 0.25,
-    timestampFontSize: "calc(16px * .75)",
+    fontSize: 14,
+    lineHeight: 20,
+    paragraphGap: 6,
+    rowPadding: 4,
+    timestampFontSize: 12,
     timestampLineHeight: 16,
   });
   await expect.poll(readSettingsScale).toEqual({
@@ -907,15 +919,16 @@ test("app font size and conversation density apply independently", async ({
       ),
     )
     .toBe("larger");
+  // Larger scales only the type tokens (15/14); compact spacing is unchanged.
   await expect.poll(readScale).toEqual({
-    authorLineHeight: 17.142857,
+    authorLineHeight: 17.14,
     bodyGap: 0,
-    fontSize: "calc(17.142857px * .875)",
-    lineHeight: "calc(17.142857px * 1.25)",
-    paragraphGap: 0.375,
-    rowPadding: 0.25,
-    timestampFontSize: "calc(17.142857px * .75)",
-    timestampLineHeight: 17.142857,
+    fontSize: 15,
+    lineHeight: 21.43,
+    paragraphGap: 6,
+    rowPadding: 4,
+    timestampFontSize: 12.86,
+    timestampLineHeight: 17.14,
   });
   await expect
     .poll(() =>
@@ -946,15 +959,16 @@ test("app font size and conversation density apply independently", async ({
   await expect(root).toHaveAttribute("data-conversation-density", "spacious");
   await expect(root).toHaveAttribute("data-font-size", "larger");
   await expect(spacious).toHaveAttribute("aria-pressed", "true");
+  // Spacious loosens spacing only; Larger type carries over.
   await expect.poll(readScale).toEqual({
-    authorLineHeight: 17.142857,
-    bodyGap: 0.25,
-    fontSize: "calc(17.142857px * .875)",
-    lineHeight: "calc(17.142857px * 1.25)",
-    paragraphGap: 0.625,
-    rowPadding: 0.5,
-    timestampFontSize: "calc(17.142857px * .75)",
-    timestampLineHeight: 17.142857,
+    authorLineHeight: 17.14,
+    bodyGap: 4,
+    fontSize: 15,
+    lineHeight: 21.43,
+    paragraphGap: 10,
+    rowPadding: 8,
+    timestampFontSize: 12.86,
+    timestampLineHeight: 17.14,
   });
   await expect.poll(readSettingsScale).toEqual({
     fontSize: "15px",
@@ -973,15 +987,16 @@ test("app font size and conversation density apply independently", async ({
   await expect(root).toHaveAttribute("data-conversation-density", "spacious");
   await expect(root).toHaveAttribute("data-font-size", "smaller");
   await expect(smaller).toHaveAttribute("aria-pressed", "true");
+  // Smaller scales only the type tokens (13/14); spacious spacing is unchanged.
   await expect.poll(readScale).toEqual({
-    authorLineHeight: 14.857143,
-    bodyGap: 0.25,
-    fontSize: "calc(14.857143px * .875)",
-    lineHeight: "calc(14.857143px * 1.25)",
-    paragraphGap: 0.625,
-    rowPadding: 0.5,
-    timestampFontSize: "calc(14.857143px * .75)",
-    timestampLineHeight: 14.857143,
+    authorLineHeight: 14.86,
+    bodyGap: 4,
+    fontSize: 13,
+    lineHeight: 18.57,
+    paragraphGap: 10,
+    rowPadding: 8,
+    timestampFontSize: 11.14,
+    timestampLineHeight: 14.86,
   });
   await expect
     .poll(() =>
@@ -1044,14 +1059,15 @@ test("app font size and conversation density apply independently", async ({
       ),
     )
     .toBe("comfortable");
+  // Back to Default type while the drag previews spacious spacing.
   await expect.poll(readScale).toEqual({
     authorLineHeight: 16,
-    bodyGap: 0.25,
-    fontSize: "calc(16px * .875)",
-    lineHeight: "calc(16px * 1.25)",
-    paragraphGap: 0.625,
-    rowPadding: 0.5,
-    timestampFontSize: "calc(16px * .75)",
+    bodyGap: 4,
+    fontSize: 14,
+    lineHeight: 20,
+    paragraphGap: 10,
+    rowPadding: 8,
+    timestampFontSize: 12,
     timestampLineHeight: 16,
   });
   await expect.poll(readSettingsScale).toEqual({

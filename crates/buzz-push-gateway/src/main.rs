@@ -35,12 +35,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let c = Config::from_env()?;
     let metrics_handle = buzz_push_gateway::metrics::install()?;
-    let transport = Arc::new(ApnsTransport::token(
-        &fs::read(&c.apns_key_path)?,
-        &c.apns_key_id,
-        &c.apns_team_id,
-        c.apns_topic,
-    )?);
+    let app_attest_root = fs::read(&c.app_attest_root_cert_path)?;
+    let configured = &c.profile;
+    let profile = {
+        let transport = Arc::new(ApnsTransport::certificate(
+            &fs::read(&configured.apns_cert_path)?,
+            configured.apns_topic.clone(),
+            configured.apns_environment,
+        )?);
+        let apple = AppAttestVerifier::new(
+            configured.app_attest_app_id.clone(),
+            app_attest_root.clone(),
+        )?;
+        buzz_push_gateway::http::ProfileRuntime {
+            app_attest: Arc::new(apple),
+            transport,
+        }
+    };
     let grant_keyring = GrantKeyring::new(
         c.grant_keys
             .iter()
@@ -77,24 +88,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
-    let app_attest = Arc::new(AppAttestVerifier::new(
-        c.app_attest_app_id,
-        fs::read(&c.app_attest_root_cert_path)?,
-    )?);
     let accepting = Arc::new(AtomicBool::new(true));
     let (public, health) = router_with_metrics(
         AppState {
             grant_keyring: Arc::new(grant_keyring),
-            app_attest,
             authority,
             token_keyring: Arc::new(token_keyring),
-            transport,
+            profile: Arc::new(profile),
             delivery_url: c.public_delivery_url,
             max_grant_lifetime_seconds: c.max_grant_lifetime_seconds,
             max_installation_lifetime_seconds: c.max_installation_lifetime_seconds,
             endpoint_quota_window_seconds: c.endpoint_quota_window_seconds,
             endpoint_quota_max_deliveries: c.endpoint_quota_max_deliveries,
-            enabled_profiles: c.enabled_profiles,
             now: || chrono::Utc::now().timestamp(),
             accepting: accepting.clone(),
         },

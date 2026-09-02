@@ -1,16 +1,17 @@
 import { expect, test } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
-import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+import {
+  installBridge,
+  installMockBridge,
+  TEST_IDENTITIES,
+} from "../helpers/bridge";
 
 const SHOTS = "test-results/entity-link-recipient-cards";
 
-// Regression coverage for buzz:// entity links posted WITHOUT sender
-// snapshot tags (CLI / agent senders): #3818 moved external-link previews to
-// sender-authored snapshots, which silently killed the recipient-side
-// buzz://pr|issue|repo cards from #4695. These cards resolve their titles
-// from the active relay itself, so they must render for recipients even when
-// the message carries no link-preview tags.
+// Regression coverage for Buzz-native entity links after standalone cards were
+// removed. Raw and authored entity links keep their inline navigation and
+// relay-backed metadata tooltips, while external sender snapshots still render.
 
 const ALICE_PUBKEY = TEST_IDENTITIES.alice.pubkey;
 const DEFAULT_MOCK_PUBKEY = "deadbeef".repeat(8);
@@ -20,8 +21,11 @@ const PR_SUBJECT = "Restore recipient-side entity cards";
 const ISSUE_ID = `f0${"1a2b".repeat(15)}ee`; // 64-hex event id
 const ISSUE_SUBJECT =
   "Smoke test: issue tracking on relay-tools with a deliberately long title";
+const EXTERNAL_HREF = "https://example.com/entity-chip-control";
+const RELAY_ORIGIN = "http://localhost:3000";
+const CLONE_HREF = `${RELAY_ORIGIN}/git/${ALICE_PUBKEY}/relay-tools.git`;
 
-test("agent-style message with angle-bracket buzz:// links renders entity cards without snapshot tags", async ({
+test("agent-style Buzz links stay chip-only with metadata tooltips", async ({
   page,
 }) => {
   await page.addInitScript(
@@ -75,7 +79,7 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   // Simulate an agent/CLI sender: plain kind-9 message with angle-bracket
   // buzz:// URLs in a Markdown list and NO link-preview snapshot tags.
   await page.evaluate(
-    ({ prId, issueId, alicePubkey }) => {
+    ({ prId, issueId, alicePubkey, externalHref, cloneHref }) => {
       window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
         channelName: "general",
         pubkey: alicePubkey,
@@ -85,11 +89,35 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
           `- Pull request with enough leading context to wrap: <buzz://pr?id=${prId}&owner=${alicePubkey}&d=relay-tools>`,
           `- Issue: <buzz://issue?id=${issueId}&owner=${alicePubkey}&d=relay-tools>`,
           `- Repository: <buzz://repo?owner=${alicePubkey}&d=relay-tools>`,
+          `- Labeled issue: [triage this issue](buzz://issue?id=${issueId}&owner=${alicePubkey}&d=relay-tools)`,
+          `- Labeled clone: [clone relay-tools](${cloneHref})`,
           `- Missing repo: <buzz://repo?owner=${alicePubkey}&d=missing-repo>`,
+          `- External control: <${externalHref}>`,
         ].join("\n"),
+        extraTags: [
+          [
+            "link-preview",
+            "snapshot",
+            "1",
+            externalHref,
+            "External preview survives",
+            "Example",
+            "Sender-authored external metadata",
+            "",
+            "",
+            "",
+            "",
+          ],
+        ],
       });
     },
-    { prId: PR_ID, issueId: ISSUE_ID, alicePubkey: ALICE_PUBKEY },
+    {
+      prId: PR_ID,
+      issueId: ISSUE_ID,
+      alicePubkey: ALICE_PUBKEY,
+      externalHref: EXTERNAL_HREF,
+      cloneHref: CLONE_HREF,
+    },
   );
 
   const row = page
@@ -98,22 +126,10 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
     .last();
   await expect(row).toBeVisible();
 
-  // The PR card resolves builder metadata from the signed root and repository.
-  const prCard = row.locator('[data-link-preview="buzz-pull-request"]');
-  await expect(prCard).toBeVisible();
-  await expect(prCard).toContainText("relay-tools");
-  await expect(prCard).toContainText(PR_SUBJECT);
-  await expect(prCard).not.toContainText(
-    "Open · fix/entity-cards → main · abc1230",
-  );
-  await expect(prCard).toHaveAttribute("data-image-state", "none");
-  await expect(prCard.locator("[data-link-preview-thumbnail]")).toHaveCount(0);
-  await expect(
-    prCard.locator("[data-link-preview-hostname-buzz-mark]"),
-  ).toBeVisible();
-  await expect(
-    prCard.locator("[data-link-preview-hostname-favicon]"),
-  ).toHaveCount(0);
+  await expect(row.locator('[data-link-preview^="buzz-"]')).toHaveCount(0);
+  const externalCard = row.locator('[data-link-preview="generic-link"]');
+  await expect(externalCard).toBeVisible();
+  await expect(externalCard).toContainText("External preview survives");
   const prChip = row.getByRole("button", {
     name: /Open pull request .* in repository relay-tools/,
   });
@@ -144,8 +160,8 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   const tooltipSemanticColors = await prTooltip.evaluate((element) => {
     const styles = getComputedStyle(element);
     const probe = document.createElement("span");
-    probe.style.backgroundColor = "hsl(var(--secondary))";
-    probe.style.color = "hsl(var(--secondary-foreground))";
+    probe.style.backgroundColor = "hsl(var(--popover))";
+    probe.style.color = "hsl(var(--popover-foreground))";
     document.body.append(probe);
     const semanticStyles = getComputedStyle(probe);
     const result = {
@@ -158,9 +174,7 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   expect(tooltipSemanticColors.actual).toEqual(tooltipSemanticColors.expected);
   await expect(prChip).toHaveText("relay-tools");
 
-  const issueChip = row.getByRole("button", {
-    name: /Open issue .* in repository relay-tools/,
-  });
+  const issueChip = row.locator('[data-buzz-link-kind="issue"]');
   // The issue chip is the repository name alone — resolved metadata never
   // reaches the inline label, so it neither absorbs the title nor falls back
   // to the event hash.
@@ -193,29 +207,21 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
     issueTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
   ).toHaveText("Issue · relay-tools");
 
-  // The repository card uses its signed announcement metadata and remains
-  // image-less.
-  const repoCard = row
-    .locator('[data-link-preview="buzz-repository"]')
-    .filter({ hasText: "relay-tools" });
-  await expect(repoCard).toBeVisible();
-  await expect(repoCard).toContainText("relay-tools");
-  await expect(repoCard).toContainText(
-    "Operator tooling and admin CLI for relay deployments.",
-  );
-  await expect(repoCard).toContainText("active · default: main");
-  await expect(repoCard).toHaveAttribute("data-image-state", "none");
-  await expect(repoCard.locator("[data-link-preview-thumbnail]")).toHaveCount(
-    0,
-  );
+  const labeledIssue = row
+    .getByRole("button", { name: /Open issue .* in repository relay-tools:/ })
+    .filter({ hasText: "triage this issue" });
+  await expect(labeledIssue).toBeVisible();
+  await labeledIssue.hover();
   await expect(
-    repoCard.locator("[data-link-preview-hostname-buzz-mark]"),
-  ).toBeVisible();
-  await expect(
-    repoCard.locator("[data-link-preview-hostname-favicon]"),
-  ).toHaveCount(0);
+    page
+      .getByRole("tooltip")
+      .locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toHaveText(ISSUE_SUBJECT);
+
+  // Repository metadata remains available from its inline chip.
   const repoChip = row.getByRole("button", {
     name: "Open repository relay-tools",
+    exact: true,
   });
   await repoChip.hover();
   const repoTooltip = page.getByRole("tooltip");
@@ -225,6 +231,23 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   await expect(
     repoTooltip.locator('[data-buzz-tooltip-metadata-type=""]'),
   ).toHaveText("Repository");
+
+  const labeledClone = row
+    .getByRole("button", { name: "Open repository relay-tools" })
+    .filter({ hasText: "clone relay-tools" });
+  await expect(labeledClone).toBeVisible();
+  await expect(labeledClone).toHaveClass(/underline/);
+  await expect(labeledClone).not.toHaveClass(/wrapping-inline-chip/);
+  await expect(labeledClone).toHaveAttribute("title", CLONE_HREF);
+  await labeledClone.hover();
+  const cloneTooltip = page.getByRole("tooltip");
+  await expect(
+    cloneTooltip.locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toContainText("Operator tooling and admin CLI for relay deployments.");
+  await labeledClone.click();
+  await expect(page.locator("[data-project-detail-screen]")).toBeVisible();
+  await page.getByTestId("channel-general").click();
+
   const missingRepoChip = row.getByRole("button", {
     name: "Open repository missing-repo",
   });
@@ -257,16 +280,11 @@ test("agent-style message with angle-bracket buzz:// links renders entity cards 
   await expect(missingRepoFooter).toHaveText("Repository");
   await expect(missingRepoFooter).toHaveClass(/text-secondary-foreground\/80/);
   await expect(missingRepoFooter).not.toHaveClass(/text-primary-foreground/);
-  // Default typography is 14px; keep the image-less card compact while
-  // allowing fractional line-height rounding across rendering platforms.
-  expect(
-    await repoCard.evaluate((card) => card.getBoundingClientRect().height),
-  ).toBeLessThan(90);
 
   await waitForAnimations(page);
   await page.screenshot({
     animations: "disabled",
-    path: `${SHOTS}/01-recipient-entity-cards.png`,
+    path: `${SHOTS}/01-recipient-entity-chips.png`,
   });
 });
 
@@ -384,7 +402,7 @@ test("entity tooltip uses project context while relay metadata is delayed", asyn
   ).toHaveText("buzz · The complete Buzz community platform.");
 });
 
-test("desktop composer shows entity card and send is not blocked by missing snapshot", async ({
+test("desktop composer and sent message keep Buzz entities chip-only", async ({
   page,
 }) => {
   await installMockBridge(page);
@@ -395,35 +413,96 @@ test("desktop composer shows entity card and send is not blocked by missing snap
   const repoLink = `buzz://repo?owner=${ALICE_PUBKEY}&d=relay-tools`;
   await page.getByTestId("message-input").fill(`Check out ${repoLink}`);
 
-  // buzz:// links never produce snapshot tags, so the composer card must
-  // show as done (not stuck "processing") with zero ready snapshots.
-  const composerCard = page
-    .locator("[data-composer-link-previews]")
-    .locator('[data-link-preview="buzz-repository"]');
-  await expect(composerCard).toBeVisible();
-  await expect(page.locator("[data-composer-link-previews]")).toHaveAttribute(
-    "data-ready-snapshot-count",
-    "0",
-  );
+  // Buzz-native links do not enter the standalone composer-preview surface.
+  await expect(page.locator("[data-composer-link-previews]")).toHaveCount(0);
 
   await waitForAnimations(page);
   await page.screenshot({
     animations: "disabled",
-    path: `${SHOTS}/02-composer-entity-card.png`,
+    path: `${SHOTS}/02-composer-entity-chip-only.png`,
   });
 
   await page.getByTestId("send-message").click();
 
   const row = page.getByTestId("message-row").last();
-  const repoCard = row.locator('[data-link-preview="buzz-repository"]');
-  await expect(repoCard).toBeVisible();
-  await expect(repoCard).toContainText("relay-tools");
+  await expect(row.locator('[data-link-preview^="buzz-"]')).toHaveCount(0);
+  const repoChip = row.getByRole("button", {
+    name: "Open repository relay-tools",
+  });
+  await expect(repoChip).toBeVisible();
+  await repoChip.hover();
+  await expect(
+    page
+      .getByRole("tooltip")
+      .locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toContainText("Operator tooling and admin CLI for relay deployments.");
 
   await waitForAnimations(page);
   await page.screenshot({
     animations: "disabled",
-    path: `${SHOTS}/03-sent-entity-card.png`,
+    path: `${SHOTS}/03-sent-entity-chip-tooltip.png`,
   });
+});
+
+// The composer and the renderer must classify a same-relay clone URL
+// identically. Both read the active relay origin: without it the composer
+// treats the URL as an external link, shows a loading standalone card, and
+// enters sender-snapshot fetching — a preview the sent message then
+// contradicts by rendering the same URL as a repository chip.
+test("composer classifies a same-relay clone URL as a repository chip, not a card", async ({
+  page,
+}) => {
+  // The default mock relay is http://localhost:3000, and generic external
+  // previews are HTTPS-only — an http clone URL is unclassifiable either way,
+  // so the mismatch cannot appear. Point the bridge at an https relay so the
+  // composer's classification is the only variable.
+  const relayHttpUrl = "https://relay.e2e.example";
+  const cloneHref = `${relayHttpUrl}/git/${DEFAULT_MOCK_PUBKEY}/buzz.git`;
+  await installBridge(page, {
+    mode: "mock",
+    relayHttpUrl,
+    relayWsUrl: relayHttpUrl.replace(/^https/, "wss"),
+    // Serve external metadata so a misclassified clone URL produces a
+    // persistent standalone card rather than a card that loads and then
+    // disappears on a null result — the assertions below would otherwise pass
+    // by racing the loading window instead of by correct classification.
+    mock: {
+      linkPreviewMetadata: {
+        title: "Misclassified as external",
+        siteName: "relay.e2e.example",
+        description: "Sender-snapshot metadata for an external link",
+        imageDataUrl: null,
+        imageDomain: null,
+      },
+    },
+  });
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("channel-general").click();
+
+  await page.getByTestId("message-input").fill(`Clone it: ${cloneHref}`);
+  // Past the composer's 350ms resolution debounce: a same-relay clone URL must
+  // never reach the standalone preview surface, loading card included.
+  await expect(page.locator("[data-composer-link-previews]")).toHaveCount(0);
+  await page.waitForTimeout(600);
+  await expect(page.locator("[data-composer-link-previews]")).toHaveCount(0);
+
+  await page.getByTestId("send-message").click();
+
+  const row = page.getByTestId("message-row").last();
+  await expect(row.locator("[data-link-preview]")).toHaveCount(0);
+  const repoChip = row.getByRole("button", { name: "Open repository buzz" });
+  await expect(repoChip).toBeVisible();
+  await repoChip.hover();
+  await expect(
+    page
+      .getByRole("tooltip")
+      .locator('[data-buzz-tooltip-metadata-content=""]'),
+  ).toContainText("Relay, desktop, and mobile clients");
+
+  // The chip navigates in-app, proving the clone URL resolved onto the
+  // canonical buzz://repo target rather than being handed to the OS.
+  await repoChip.click();
+  await expect(page.locator("[data-project-detail-screen]")).toBeVisible();
 });
 
 test("reopening the same entity link reapplies its workspace state", async ({
@@ -500,10 +579,7 @@ test("reopening the same entity link reapplies its workspace state", async ({
     name: "Project breadcrumb",
   });
   await breadcrumb.getByRole("button").nth(1).click();
-  await expect(page.getByRole("tab", { name: "Overview" })).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
+  await expect(page.getByTestId("project-channel-home")).toBeVisible();
 
   await emitEntityLink(repoLink);
   await expect(pullRequestsTab).toHaveAttribute("aria-selected", "true");
@@ -583,6 +659,10 @@ test("deleted reply links identify deletion and fall back to their thread root",
 test("deleted top-level message links identify deletion and fall back to channel navigation", async ({
   page,
 }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "buzz-dark");
+    window.localStorage.setItem("buzz-accent-color", "#c0a2f1");
+  });
   const missingMessageId = "d".repeat(64);
   const channelId = "9dae0116-799b-5071-a0a8-fdd30a91a35d";
   const link = `buzz://message?channel=${channelId}&id=${missingMessageId}`;
@@ -606,6 +686,33 @@ test("deleted top-level message links identify deletion and fall back to channel
   );
   await expect(deletedLink).toHaveClass(/buzz-link-deleted/);
   await expect(deletedLink).not.toHaveClass(/buzz-link-unavailable/);
+  const unavailableColors = await linkMessage.evaluate((message) => {
+    const probe = document.createElement("span");
+    probe.className = "mention-chip buzz-link-unavailable";
+    message.querySelector(".message-markdown")?.append(probe);
+    const styles = getComputedStyle(probe);
+    const colors = {
+      backgroundColor: styles.backgroundColor,
+      color: styles.color,
+    };
+    probe.remove();
+    return colors;
+  });
+  await expect
+    .poll(() =>
+      deletedLink.evaluate((element) => {
+        const styles = getComputedStyle(element);
+        return {
+          backgroundColor: styles.backgroundColor,
+          color: styles.color,
+        };
+      }),
+    )
+    .toEqual(unavailableColors);
+  await waitForAnimations(page);
+  await linkMessage.screenshot({
+    path: `${SHOTS}/deleted-message-link-after.png`,
+  });
   await deletedLink.hover();
   await expect(page.getByRole("tooltip")).toHaveText("Message deleted");
 

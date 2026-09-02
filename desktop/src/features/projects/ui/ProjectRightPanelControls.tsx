@@ -1,4 +1,4 @@
-import { Info, MessageCircle } from "lucide-react";
+import { MessageCircle } from "lucide-react";
 
 import {
   toggleTerminalPanel,
@@ -6,6 +6,7 @@ import {
 } from "@/features/terminal/terminalPanelStore";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { DrawerPanelIcon } from "@/shared/ui/DrawerPanelIcon";
 import { TerminalPanelIcon } from "@/shared/ui/TerminalPanelIcon";
 
 export type ProjectRightPanelMode = "chat" | "repository";
@@ -28,7 +29,7 @@ export function ProjectChatPanelControl({
     <Button
       aria-label={chatOpen ? "Hide project chat" : "Show project chat"}
       aria-pressed={chatOpen}
-      className="h-7 w-7 text-muted-foreground hover:bg-muted/70 hover:text-foreground"
+      className="h-7 w-7 text-sidebar-foreground hover:bg-sidebar-accent"
       data-testid="project-right-panel-chat-tab"
       onClick={() => {
         if (chatOpen) {
@@ -95,6 +96,13 @@ export function ProjectRightPanelControls({
           open={terminalOpen}
         />
       </Button>
+      <ProjectChatPanelControl
+        collapsed={collapsed}
+        mode={mode}
+        onCollapse={onCollapse}
+        onExpand={onExpand}
+        onModeChange={onModeChange}
+      />
       <Button
         aria-label={
           repositoryOpen ? "Hide project context" : "Show project context"
@@ -115,12 +123,10 @@ export function ProjectRightPanelControls({
         type="button"
         variant="ghost"
       >
-        <Info
-          className={cn(
-            "h-4 w-4 transition-opacity duration-200 ease-linear",
-            repositoryOpen ? "opacity-100" : "opacity-60",
-          )}
-          data-testid="project-right-panel-repository-icon"
+        <DrawerPanelIcon
+          className="-scale-x-100"
+          side={repositoryOpen ? "left" : "right"}
+          testId="project-right-panel-repository-icon"
         />
       </Button>
     </div>

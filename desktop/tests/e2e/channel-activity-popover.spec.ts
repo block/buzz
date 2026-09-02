@@ -244,7 +244,11 @@ async function seedChannelActivity(
     );
   }
 
-  await expect(page.getByTestId("channel-unread-dot-general")).toBeVisible();
+  // The seeded activity includes an in-thread @mention, so the row shows the
+  // numeric mention badge rather than the plain thread-activity dot. The
+  // hover preview popover must still work either way.
+  await expect(page.getByTestId("channel-unread-general")).toBeVisible();
+  await expect(page.getByTestId("channel-unread-dot-general")).toHaveCount(0);
   if (includeAgent) {
     await expect(page.getByTestId("channel-working-general")).toBeVisible();
   }
@@ -773,10 +777,11 @@ test.describe("channel activity hover preview", () => {
     await rootRow.hover();
     const actionBar = page.getByTestId(`message-action-bar-${root.id}`);
     await expect(actionBar).toBeVisible();
-    await actionBar
-      .getByRole("button", { name: /^React with / })
-      .first()
-      .click();
+    await actionBar.getByRole("button", { name: "Open reactions" }).click();
+    const picker = page.locator("em-emoji-picker");
+    await expect(picker).toBeVisible();
+    await picker.locator("input[type='search']").fill("thumbs up");
+    await picker.getByRole("button", { name: "👍" }).first().click();
     await expect(
       rootRow.getByRole("button", { name: /^Toggle .* reaction$/ }),
     ).toBeVisible();

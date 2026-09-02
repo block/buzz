@@ -642,6 +642,7 @@ function ProfileHero({
         }
         badgeBox={PROFILE_HERO_PRESENCE_BADGE.shell}
         className="h-20 w-20"
+        cornerRadius={isBot ? 24 : undefined}
         curve={STATUS_DOT_MASK_CURVE}
         cutout={PROFILE_HERO_PRESENCE_BADGE.cutout}
         size={80}
@@ -652,6 +653,7 @@ function ProfileHero({
           iconClassName="h-8 w-8"
           label={displayName}
           plain
+          shape={isBot ? "squircle" : "circle"}
           testId="user-profile-avatar"
         />
       </MaskedAvatarBadgeFrame>

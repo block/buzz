@@ -82,7 +82,10 @@ pub async fn update_persona_and_publish(
             // Strict path: this command's contract is to report the publication
             // outcome, so an enqueue failure must reach the UI rather than being
             // logged and swallowed.
-            prepare_persona_publication(app, state, persona, None)
+            let result = prepare_persona_publication(app, state, persona, None)?;
+            // F2: refresh any shared 30178 heads that include this persona.
+            crate::commands::refresh_team_catalog_heads_for_persona(app, state, &persona.id);
+            Ok(result)
         })
         .await?;
 
@@ -143,6 +146,7 @@ mod tests {
 
     fn persona() -> AgentDefinition {
         AgentDefinition {
+            description: None,
             id: "catalog-reviewer".to_string(),
             display_name: "Catalog Reviewer".to_string(),
             avatar_url: None,
@@ -157,6 +161,7 @@ mod tests {
             source_team: None,
             source_team_persona_slug: None,
             catalog_source: None,
+            team_catalog_source: None,
             env_vars: BTreeMap::new(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),

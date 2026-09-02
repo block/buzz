@@ -487,6 +487,7 @@ fn sample_agent_record() -> ManagedAgentRecord {
 
 fn sample_persona() -> AgentDefinition {
     AgentDefinition {
+        description: None,
         id: "custom:helper".to_string(),
         display_name: "Helper".to_string(),
         avatar_url: Some("https://example.com/a.png".to_string()),
@@ -501,6 +502,7 @@ fn sample_persona() -> AgentDefinition {
         source_team: Some("team-1".to_string()),
         source_team_persona_slug: Some("helper".to_string()),
         catalog_source: None,
+        team_catalog_source: None,
         env_vars: [("K".to_string(), "v".to_string())].into_iter().collect(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),

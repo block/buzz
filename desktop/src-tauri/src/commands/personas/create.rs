@@ -13,7 +13,7 @@ use crate::{
     util::now_iso,
 };
 
-use super::{pending, retain_persona_pending, trim_optional, trim_required};
+use super::{normalize_description, pending, retain_persona_pending, trim_optional, trim_required};
 
 #[tauri::command]
 pub async fn create_persona(
@@ -29,6 +29,7 @@ pub async fn create_persona(
         // exact string before the ACP harness executes it.
         let system_prompt = input.system_prompt.clone();
         validate_agent_definition_text(&display_name, &system_prompt)?;
+        let description = normalize_description(input.description)?;
         let avatar_url = trim_optional(input.avatar_url);
         let runtime = trim_optional(input.runtime);
         let model = trim_optional(input.model);
@@ -58,6 +59,7 @@ pub async fn create_persona(
             id: Uuid::new_v4().to_string(),
             display_name,
             avatar_url,
+            description,
             system_prompt,
             runtime,
             model,
@@ -69,6 +71,9 @@ pub async fn create_persona(
             source_team: None,
             source_team_persona_slug: None,
             catalog_source,
+            // Team-publication provenance is set only by
+            // `add_team_from_catalog`, never by an ordinary create.
+            team_catalog_source: None,
             env_vars: input.env_vars,
             respond_to: None,
             respond_to_allowlist: Vec::new(),

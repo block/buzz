@@ -41,8 +41,6 @@ export type CreateChannelFormState = {
   setEphemeral: (value: boolean) => void;
   ttlSeconds: number;
   setTtlSeconds: (value: number) => void;
-  typePopoverOpen: boolean;
-  setTypePopoverOpen: (open: boolean) => void;
   errorMessage: string | null;
   selectedTemplateId: string | null;
   handleTemplateChange: (templateId: string) => void;
@@ -79,7 +77,6 @@ export function useCreateChannelForm({
   const [selectedTemplateId, setSelectedTemplateId] = React.useState<
     string | null
   >(null);
-  const [typePopoverOpen, setTypePopoverOpen] = React.useState(false);
   const nameInputRef = React.useRef<HTMLInputElement>(null);
   const visibilityTouchedRef = React.useRef(false);
 
@@ -97,7 +94,6 @@ export function useCreateChannelForm({
     setTtlSeconds(DEFAULT_EPHEMERAL_TTL_SECONDS);
     setErrorMessage(null);
     setSelectedTemplateId(null);
-    setTypePopoverOpen(false);
     visibilityTouchedRef.current = false;
 
     if (!autoFocusName) return;
@@ -211,8 +207,6 @@ export function useCreateChannelForm({
     setEphemeral,
     ttlSeconds,
     setTtlSeconds,
-    typePopoverOpen,
-    setTypePopoverOpen,
     errorMessage,
     selectedTemplateId,
     handleTemplateChange,

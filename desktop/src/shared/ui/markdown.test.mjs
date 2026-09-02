@@ -1121,7 +1121,7 @@ test("bare Buzz permalinks render cohesive icon-prefixed chips", () => {
   assert.equal((html.match(/data-channel-deep-link=""/g) ?? []).length, 1);
   assert.match(html, /inline-chip-icon-channel/);
   assert.match(html, /wrapping-inline-chip/);
-  assert.match(html, /inline-chip-leading-fragment[^>]*>e</);
+  assert.match(html, /inline-chip-leading-fragment[^>]*>engin</);
   assert.match(html, /inline-chip-icon-pr/);
   assert.match(html, /inline-chip-icon-issue/);
   assert.match(html, /inline-chip-icon-repo/);
@@ -1243,17 +1243,21 @@ test("authored Buzz permalink labels remain ordinary links", () => {
   });
   const html = renderToStaticMarkup(
     React.createElement(
-      MarkdownRuntimeContext.Provider,
-      {
-        value: {
-          channels: [{ id: channelId, name: "engineering" }],
-          onOpenChannel: () => {},
-          onOpenEntityLink: () => {},
-          onOpenMessageLink: () => {},
-          relayOrigin: null,
+      QueryClientProvider,
+      { client: new QueryClient() },
+      React.createElement(
+        MarkdownRuntimeContext.Provider,
+        {
+          value: {
+            channels: [{ id: channelId, name: "engineering" }],
+            onOpenChannel: () => {},
+            onOpenEntityLink: () => {},
+            onOpenMessageLink: () => {},
+            relayOrigin: null,
+          },
         },
-      },
-      markdown,
+        markdown,
+      ),
     ),
   );
 
@@ -1266,6 +1270,44 @@ test("authored Buzz permalink labels remain ordinary links", () => {
   assert.doesNotMatch(html, /\[object Object\]/);
   assert.match(html, />the issue</);
   assert.equal((html.match(/underline-offset-4/g) ?? []).length, 4);
+});
+
+test("generic audio attachments render outside paragraph markup", () => {
+  const href = "https://relay.example/media/meeting.mp3";
+  const markdown = renderCachedMarkdown({
+    components: createMarkdownComponents(true, false),
+    content: `[meeting.mp3](${href})`,
+    variant: "generic-audio-block-integration-test",
+  });
+  const html = renderToStaticMarkup(
+    React.createElement(
+      MarkdownRuntimeContext.Provider,
+      {
+        value: {
+          channels: [],
+          imetaByUrl: new Map([
+            [
+              href,
+              {
+                duration: 42,
+                filename: "meeting.mp3",
+                m: "audio/mpeg",
+              },
+            ],
+          ]),
+          onOpenChannel: () => {},
+          onOpenEntityLink: () => {},
+          onOpenMessageLink: () => {},
+          relayOrigin: "https://relay.example",
+        },
+      },
+      markdown,
+    ),
+  );
+
+  assert.match(html, /data-testid="audio-message-attachment"/);
+  assert.match(html, /aria-label="Download meeting.mp3"/);
+  assert.doesNotMatch(html, /<p[^>]*>\s*<div/);
 });
 
 test("bare Buzz permalinks shorten unavailable channel identifiers", () => {
@@ -1295,7 +1337,7 @@ test("bare Buzz permalinks shorten unavailable channel identifiers", () => {
   );
 
   assert.equal(
-    (html.match(/inline-chip-leading-fragment[^>]*>5<\/span>80ca78b/g) ?? [])
+    (html.match(/inline-chip-leading-fragment[^>]*>580ca<\/span>78b/g) ?? [])
       .length,
     2,
   );
@@ -1328,7 +1370,7 @@ test("channel references replace the authored hash with the channel icon", () =>
 
   assert.match(html, /inline-chip-icon-channel/);
   assert.match(html, /wrapping-inline-chip/);
-  assert.match(html, /inline-chip-leading-fragment[^>]*>e</);
+  assert.match(html, /inline-chip-leading-fragment[^>]*>engin</);
   assert.match(html.replace(/<[^>]+>/g, ""), /engineering/);
   assert.doesNotMatch(html, />#engineering</);
 });

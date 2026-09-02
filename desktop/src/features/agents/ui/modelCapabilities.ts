@@ -174,6 +174,7 @@ const ProviderFallbacksSchema = z
 export const ManifestSchema = z
   .object({
     family_tokens: z.array(z.string()).min(1),
+    label_family_tokens: z.array(z.string()).min(1),
     family_rules: z.array(FamilyRuleSchema),
     databricks_v2_known_models: z.array(z.string()),
     exact_records: z.array(ExactRecordSchema),
@@ -181,6 +182,7 @@ export const ManifestSchema = z
     // Root documentation keys; modeled for strict parsing, not read at runtime.
     // Mirrors the Rust `Manifest` doc fields under `deny_unknown_fields`.
     _comment: z.string().optional(),
+    _comment_label_family_tokens: z.string().optional(),
     _comment_databricks_v2_known_models: z.string().optional(),
     _sources: z.record(z.string(), z.string()).optional(),
   })
@@ -287,6 +289,19 @@ function toResult(
   };
 }
 
+function isDatabricksModelServiceFqn(model: string): boolean {
+  const components = model.split(".");
+  return (
+    components.length === 3 &&
+    components.every(
+      (component) =>
+        component.length > 0 &&
+        !/\s/.test(component) &&
+        !component.includes("/"),
+    )
+  );
+}
+
 /**
  * Resolve the capability profile for a `(provider, rawModelId)` pair.
  *
@@ -300,9 +315,13 @@ export function resolveModelCapabilities(
 ): CapabilityResult {
   const canon = canonicalizeProvider(provider);
   const blank = rawModelId.trim().length === 0;
+  // Unity Catalog FQNs are neutral model-service identities. Resolve them
+  // through the concrete-unknown fallback before suffix family matching.
+  const modelServiceFqn =
+    canon === "databricks_v2" && isDatabricksModelServiceFqn(rawModelId);
 
   // 1. Provider-qualified exact-record lookup (case-insensitive on the id).
-  if (!blank) {
+  if (!blank && !modelServiceFqn) {
     const idLower = rawModelId.toLowerCase();
     for (const rec of MANIFEST.exact_records) {
       if (
@@ -315,7 +334,7 @@ export function resolveModelCapabilities(
   }
 
   // 2. Boundary-aware family match: longest token wins, lexicographic tie-break.
-  if (!blank) {
+  if (!blank && !modelServiceFqn) {
     const modelLower = rawModelId.toLowerCase();
     const stripped = stripCatalogPrefix(modelLower, MANIFEST.family_tokens);
     let best: { len: number; rule: FamilyRule } | null = null;
@@ -400,6 +419,6 @@ export function databricksRegistryLabel(rawModelId: string): string | null {
   return databricksRegistryLabelForRecords(
     rawModelId,
     MANIFEST.exact_records,
-    MANIFEST.family_tokens,
+    MANIFEST.label_family_tokens,
   );
 }

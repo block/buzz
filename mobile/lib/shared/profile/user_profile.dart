@@ -12,6 +12,8 @@ class UserProfile {
   /// means this identity is an agent (mirrors desktop's `ownerPubkey`).
   final String? ownerPubkey;
 
+  bool get isAgent => ownerPubkey != null;
+
   const UserProfile({
     required this.pubkey,
     this.displayName,

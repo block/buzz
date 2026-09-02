@@ -8,7 +8,6 @@ import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
-import { ProjectsContributionGraph } from "./ProjectsContributionGraph";
 
 /** Matches Tailwind `-space-x-1.5` so stacked rows stay zoom-safe. */
 const STACK_OVERLAP_REM = 0.375;
@@ -59,7 +58,10 @@ function OverviewPerson({
     <Tooltip>
       <TooltipTrigger asChild>
         <span
-          className="relative inline-flex rounded-full ring-2 ring-background"
+          className={cn(
+            "relative inline-flex ring-2 ring-background",
+            profile?.isAgent ? "rounded-[30%]" : "rounded-full",
+          )}
           data-overview-person=""
           style={{ zIndex: stackSize - index }}
         >
@@ -67,6 +69,7 @@ function OverviewPerson({
             accent={profile?.isAgent === true}
             avatarUrl={profile?.avatarUrl ?? null}
             displayName={label}
+            shape={profile?.isAgent ? "squircle" : "circle"}
             size="sm"
           />
         </span>
@@ -179,12 +182,4 @@ export function ProjectsOverviewPeople({
       })}
     </div>
   );
-}
-
-export function ProjectsOverviewActivityGraph({
-  activityByDay,
-}: {
-  activityByDay: Record<string, number>;
-}) {
-  return <ProjectsContributionGraph activityByDay={activityByDay} compact />;
 }

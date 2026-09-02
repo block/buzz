@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/theme/theme.dart';
@@ -214,7 +213,7 @@ class SearchPage extends HookConsumerWidget {
         automaticallyImplyLeading: false,
         horizontalInset: Grid.twelve,
         showBottomDivider: true,
-        bottomDividerOpacity: 0.06,
+        bottomDividerOpacity: 0.07,
         titleStyle: headerTitleStyle,
         // Keep this mounted through the search-field morph so it can fade in
         // beneath the returning field rather than popping in afterward.
@@ -644,12 +643,10 @@ class _RecentSearches extends StatelessWidget {
 class _ChannelsSection extends StatelessWidget {
   final List<Channel> channels;
   final VoidCallback onResultSelected;
-
   const _ChannelsSection({
     required this.channels,
     required this.onResultSelected,
   });
-
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -670,12 +667,14 @@ class _ChannelsSection extends StatelessWidget {
               key: ValueKey('search-channel-title-${channel.id}'),
               style: contentListTitleTextStyle,
             ),
-            subtitle: Text(
-              '${channel.memberCount} member${channel.memberCount == 1 ? '' : 's'}',
-              style: contentListBodyTextStyle.copyWith(
-                color: context.colors.onSurfaceVariant,
-              ),
-            ),
+            subtitle: channel.isMember
+                ? Text(
+                    '${channel.memberCount} member${channel.memberCount == 1 ? '' : 's'}',
+                    style: contentListBodyTextStyle.copyWith(
+                      color: context.colors.onSurfaceVariant,
+                    ),
+                  )
+                : null,
             trailing: !channel.isMember && !channel.isDm
                 ? Container(
                     padding: const EdgeInsets.symmetric(
@@ -730,6 +729,7 @@ class _PeopleSection extends ConsumerWidget {
               imageUrl: user.avatarUrl,
               radius: 20,
               fallback: Text(user.label.substring(0, 1).toUpperCase()),
+              isAgent: user.isAgent,
             ),
             title: Text(
               user.label,

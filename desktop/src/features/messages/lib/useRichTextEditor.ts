@@ -6,7 +6,7 @@ import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import Link from "@tiptap/extension-link";
 import { Extension, type KeyboardShortcutCommand } from "@tiptap/core";
-import { Plugin, Selection, TextSelection } from "@tiptap/pm/state";
+import { Selection, TextSelection } from "@tiptap/pm/state";
 import type { ResolvedPos } from "@tiptap/pm/model";
 
 import { readTextFromSystemClipboard } from "@/shared/api/tauriMedia";
@@ -24,7 +24,9 @@ import { MESSAGE_MARKDOWN_CLASS } from "@/shared/ui/mentionChip";
 
 import {
   MentionHighlightExtension,
-  mentionHighlightKey,
+  reassertMentionCaretAfterFocus,
+  settleAutocompleteMentionInsert,
+  syncMentionHighlightFromProps,
 } from "./mentionHighlightExtension";
 import { CUSTOM_EMOJI_NODE_NAME } from "./customEmojiNode";
 import { useComposerCustomEmoji } from "./useComposerCustomEmoji";
@@ -32,6 +34,7 @@ import { buildPlainTextProjection } from "./plainTextProjection";
 import { parseSnapshotClipboardHtml } from "./agentSnapshotClipboard";
 import { buildPreviewUpdate } from "./linkPreviewContent";
 import { createLinkInteractionExtension } from "./linkInteractionExtension";
+import { LinkPasteTrailingSpace } from "./linkPasteTrailingSpace";
 import {
   CodeBlockAfterHardBreak,
   handleCodeFenceEnter,
@@ -69,6 +72,10 @@ export type AutocompleteEdit = {
   replaceFromOffset: number;
   replaceToOffset: number;
   insertText: string;
+  /** Keep the current selection mapped through this edit instead of moving it to the insertion. */
+  preserveSelection?: boolean;
+  /** Skip asynchronous DOM caret reassertion when focus may move elsewhere. */
+  reassertMentionCaret?: boolean;
   /**
    * When set, the replaced range becomes a CustomEmojiNode for this
    * shortcode (followed by `insertText`, which carries the trailing space)
@@ -132,63 +139,6 @@ export type RichTextEditorOptions = {
   onLinkShortcut?: () => boolean;
 };
 
-const PASTED_LINK_AT_END_RE =
-  /(?:^|\s)((?:https?:\/\/|www\.)[^\s]+|(?:github\.com|linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s]+)$/i;
-
-function shouldAppendSpaceAfterPaste(text: string): boolean {
-  const trimmedEnd = text.trimEnd();
-  if (!trimmedEnd || trimmedEnd.length !== text.length) return false;
-  return PASTED_LINK_AT_END_RE.test(trimmedEnd);
-}
-
-const LinkPasteTrailingSpace = Extension.create({
-  name: "linkPasteTrailingSpace",
-
-  addProseMirrorPlugins() {
-    return [
-      new Plugin({
-        props: {
-          handlePaste(view, event) {
-            const pastedText = event.clipboardData?.getData("text/plain") ?? "";
-            if (!shouldAppendSpaceAfterPaste(pastedText)) return false;
-
-            window.setTimeout(() => {
-              if (!view.dom.isConnected) return;
-              const { state } = view;
-              if (!state.selection.empty) return;
-
-              const from = state.selection.from;
-              if (from < state.doc.content.size) {
-                const nextText = state.doc.textBetween(
-                  from,
-                  Math.min(state.doc.content.size, from + 1),
-                  "\n",
-                  "\n",
-                );
-                if (/^\s$/.test(nextText)) return;
-              }
-
-              let transaction = state.tr.insertText(" ", from, from);
-              const linkMark = state.schema.marks.link;
-              if (linkMark) {
-                transaction = transaction.removeMark(from, from + 1, linkMark);
-              }
-              transaction = transaction.setSelection(
-                TextSelection.create(transaction.doc, from + 1),
-              );
-              transaction.setStoredMarks([]);
-              view.dispatch(transaction.scrollIntoView());
-              view.focus();
-            }, 0);
-
-            return false;
-          },
-        },
-      }),
-    ];
-  },
-});
-
 /**
  * Creates and manages a Tiptap editor configured for Markdown output.
  *
@@ -214,18 +164,15 @@ export function useRichTextEditor({
   onLinkSelectionChange,
   onLinkShortcut,
 }: RichTextEditorOptions) {
+  const addressedAgentMentionNamesRef = React.useRef<readonly string[]>([]);
   const onUpdateRef = React.useRef(onUpdate);
   onUpdateRef.current = onUpdate;
-
   const onSubmitRef = React.useRef(onSubmit);
   onSubmitRef.current = onSubmit;
-
   const onEditLastOwnMessageRef = React.useRef(onEditLastOwnMessage);
   onEditLastOwnMessageRef.current = onEditLastOwnMessage;
-
   const onEditLinkRef = React.useRef(onEditLink);
   onEditLinkRef.current = onEditLink;
-
   const onLinkSelectionChangeRef = React.useRef(onLinkSelectionChange);
   onLinkSelectionChangeRef.current = onLinkSelectionChange;
 
@@ -474,7 +421,13 @@ export function useRichTextEditor({
         }).configure({
           openOnClick: false,
           autolink: true,
-          linkOnPaste: true,
+          // The composer's own paste handler owns every selected-text link
+          // paste (`createComposerLinkPasteHandler`). TipTap's `linkOnPaste`
+          // recognises the same URLs one layer down, and when our handler
+          // declines a selection it can't link cleanly, `linkOnPaste` still
+          // fires and partially links it. No ordering trick removes a second
+          // handler — the only fix is not to register it.
+          linkOnPaste: false,
           // Allow Buzz message links through TipTap's URL sanitiser.
           // http(s) and mailto are accepted by default; non-listed protocols are
           // stripped on paste/typed input.
@@ -661,13 +614,19 @@ export function useRichTextEditor({
   const hadFocusBeforeDisableRef = React.useRef(false);
   React.useEffect(() => {
     if (!editor || editor.isEditable === editable) return;
+    // `emitUpdate: false` on both toggles — the doc hasn't changed, so the
+    // default synthetic `update` event would replay `onUpdate` with stale
+    // text/cursor and resurrect consumer state derived from it (e.g. reopen
+    // a mention menu the user dismissed with Escape, or re-fire a typing
+    // notification for an untouched draft). Real content changes (typing,
+    // clearContent) dispatch real transactions that emit their own updates.
     if (!editable) {
       // About to disable: remember whether we currently hold focus so we know
       // whether to restore it when re-enabled.
       hadFocusBeforeDisableRef.current = editor.isFocused;
-      editor.setEditable(false);
+      editor.setEditable(false, false);
     } else {
-      editor.setEditable(true);
+      editor.setEditable(true, false);
       // Re-enabled: if we owned focus before the disable blurred us, take it
       // back (preserving the current selection — `focus()` with no arg keeps
       // the existing selection rather than jumping to the end).
@@ -688,25 +647,35 @@ export function useRichTextEditor({
   }, [editor, placeholder]);
 
   // Keep mention/channel-highlight decorations in sync with known names.
-  // NOTE: We use `editor.storage.mentionHighlight` (the mutable storage object
-  // shared with the ProseMirror plugin closure) rather than finding the
-  // extension instance via extensionManager — the instance's `.storage` getter
-  // returns a fresh spread-copy on every access, so mutations are silently lost.
+  // Mutate `editor.storage.mentionHighlight`; the extension getter copies storage.
   React.useEffect(() => {
     if (!editor) return;
-    // biome-ignore lint/suspicious/noExplicitAny: TipTap's Storage type doesn't include dynamic extension keys
-    const storage = (editor.storage as any).mentionHighlight as
-      | { names: string[]; agentNames: string[]; channelNames: string[] }
-      | undefined;
-    if (storage) {
-      storage.names = mentionNames ?? [];
-      storage.agentNames = agentMentionNames ?? [];
-      storage.channelNames = channelNames ?? [];
-      // Force the plugin to re-decorate by dispatching a metadata transaction.
-      const { tr } = editor.state;
-      editor.view.dispatch(tr.setMeta(mentionHighlightKey, true));
-    }
+    syncMentionHighlightFromProps(
+      editor,
+      mentionNames,
+      [
+        ...new Set([
+          ...(agentMentionNames ?? []),
+          ...addressedAgentMentionNamesRef.current,
+        ]),
+      ],
+      channelNames,
+    );
   }, [editor, mentionNames, agentMentionNames, channelNames]);
+
+  const syncAddressedAgentMentionNames = React.useCallback(
+    (names: readonly string[]) => {
+      addressedAgentMentionNamesRef.current = names;
+      if (!editor) return;
+      syncMentionHighlightFromProps(
+        editor,
+        mentionNames,
+        [...new Set([...(agentMentionNames ?? []), ...names])],
+        channelNames,
+      );
+    },
+    [agentMentionNames, channelNames, editor, mentionNames],
+  );
 
   // Custom-emoji set changes: re-resolve the `src` attr on any existing
   // node in the doc (e.g. an emoji's image was just published).
@@ -831,6 +800,8 @@ export function useRichTextEditor({
       toOffset: number,
       text: string,
       customEmojiShortcode?: string,
+      preserveSelection = false,
+      reassertMentionCaret = !preserveSelection,
     ) => {
       if (!editor) return;
       const projection = buildPlainTextProjection(editor.state.doc);
@@ -863,17 +834,23 @@ export function useRichTextEditor({
       }
 
       const tr = editor.state.tr.insertText(text, fromPM, toPM);
-      // Place cursor at the end of the inserted text. We map `toPM` (the
-      // right end of the replaced range) through the transaction's
-      // mapping — that's the post-transaction position right after the
-      // inserted text, valid even if mark normalisation shifted things.
-      // (Mapping `fromPM + text.length` directly would be a pre-image
-      // position that may not exist in the original doc, which throws
-      // "Position N out of range".)
-      const cursorPM = tr.mapping.map(toPM);
-      tr.setSelection(TextSelection.create(tr.doc, cursorPM));
+      if (preserveSelection) {
+        tr.setSelection(editor.state.selection.map(tr.doc, tr.mapping));
+      } else {
+        // Place cursor at the end of the inserted text. We map `toPM` (the
+        // right end of the replaced range) through the transaction's
+        // mapping — that's the post-transaction position right after the
+        // inserted text, valid even if mark normalisation shifted things.
+        // (Mapping `fromPM + text.length` directly would be a pre-image
+        // position that may not exist in the original doc, which throws
+        // "Position N out of range".)
+        const cursorPM = tr.mapping.map(toPM);
+        tr.setSelection(TextSelection.create(tr.doc, cursorPM));
+      }
+      settleAutocompleteMentionInsert(editor, tr, text, !preserveSelection);
       editor.view.dispatch(tr);
       editor.view.focus();
+      if (reassertMentionCaret) reassertMentionCaretAfterFocus(editor.view);
     },
     [editor, customEmojiWiring.resolveUrl],
   );
@@ -965,6 +942,7 @@ export function useRichTextEditor({
     focusPreserve,
     getPlainTextAndCursor,
     replacePlainTextRange,
+    syncAddressedAgentMentionNames,
     getLinkSelectionInfo,
     applyLink,
     removeLink,

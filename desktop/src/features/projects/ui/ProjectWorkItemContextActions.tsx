@@ -33,13 +33,7 @@ export function ProjectWorkItemContextActions({
     const canAssignOthers =
       viewer !== null && (isAuthor || isOwner || isManagedAgentOwner);
     return (
-      <section
-        className="space-y-1 pt-2"
-        data-testid="project-context-task-assignment"
-      >
-        <h3 className="text-xs font-normal text-muted-foreground/70">
-          Assignment
-        </h3>
+      <div data-testid="project-context-task-assignment">
         <IssueAssigneesRow
           canAssignOthers={canAssignOthers}
           contextActions
@@ -52,7 +46,7 @@ export function ProjectWorkItemContextActions({
           testIdPrefix="project-context-issue"
           viewerPubkey={viewer}
         />
-      </section>
+      </div>
     );
   }
 
@@ -64,7 +58,7 @@ export function ProjectWorkItemContextActions({
       (isAuthor || isOwner || isManagedAgentOwner);
     if (!canRequestReview) return null;
     return (
-      <section className="pt-2" data-testid="project-context-reviewers">
+      <div data-testid="project-context-reviewers">
         <PullRequestReviewersRow
           actionLabel="Add Reviewer"
           canRequest={canRequestReview}
@@ -77,7 +71,7 @@ export function ProjectWorkItemContextActions({
           showSummary={false}
           summaryTestId="project-context-review-summary"
         />
-      </section>
+      </div>
     );
   }
 

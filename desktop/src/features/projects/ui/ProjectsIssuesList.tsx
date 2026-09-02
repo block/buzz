@@ -1,4 +1,5 @@
 import { Eye, FolderKanban } from "lucide-react";
+import * as React from "react";
 
 import type {
   Project,
@@ -13,8 +14,14 @@ import {
   resolveUserLabel,
   type UserProfileLookup,
 } from "@/features/profile/lib/identity";
+import {
+  countGroupedRows,
+  sliceGroupedRows,
+  useIncrementalMount,
+} from "@/shared/hooks/useIncrementalMount";
 import { cn } from "@/shared/lib/cn";
 import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
+import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { DropdownMenuItem } from "@/shared/ui/dropdown-menu";
 import { CopyShareLinkMenuItem } from "./CopyShareLinkMenuItem";
@@ -24,6 +31,7 @@ import { ProjectEventTypeIcon } from "./ProjectEventTypeIcon";
 import { PROJECT_GRID_CARD_BODY_CLASS } from "./projectGridCardStyles";
 import { ProjectListRowMenu } from "./ProjectListRowMenu";
 import { ProjectSelectableGroup } from "./ProjectSelectableGroup";
+import { ProjectPanelState } from "./ProjectPanelState";
 import { ProjectsWorkItemsLoadNotice } from "./ProjectsWorkItemsLoadNotice";
 import { groupProjectWorkItemsByProject } from "./projectWorkItemGroups";
 
@@ -53,14 +61,20 @@ function nextStepLabel(status: ProjectIssue["status"]) {
   return "Open task";
 }
 
-function IssueGridCard({
+const IssueGridCard = React.memo(function IssueGridCard({
   issue,
   onOpen,
   project,
+  repository,
 }: {
   issue: ProjectIssue;
-  onOpen: (project: Project, issue: ProjectIssue) => void;
+  onOpen: (
+    project: Project,
+    repository: Repository,
+    issue: ProjectIssue,
+  ) => void;
   project: Project;
+  repository: Repository;
 }) {
   return (
     <Card
@@ -69,7 +83,7 @@ function IssueGridCard({
     >
       <button
         className="absolute inset-0"
-        onClick={() => onOpen(project, issue)}
+        onClick={() => onOpen(project, repository, issue)}
         type="button"
       >
         <span className="sr-only">View task {issue.title}</span>
@@ -97,7 +111,7 @@ function IssueGridCard({
       </div>
     </Card>
   );
-}
+});
 
 function issueSelectionItem(
   project: Project,
@@ -113,7 +127,10 @@ function issueSelectionItem(
   });
 }
 
-function IssueListRow({
+// Memoized: these rows render in unbounded lists, and any Projects-view
+// state change used to re-render every row. Props are kept identity-stable
+// by the list (memoized groups/selection arrays, stable onOpen).
+const IssueListRow = React.memo(function IssueListRow({
   issue,
   onOpen,
   profiles,
@@ -122,7 +139,11 @@ function IssueListRow({
   repository,
 }: {
   issue: ProjectIssue;
-  onOpen: (project: Project, issue: ProjectIssue) => void;
+  onOpen: (
+    project: Project,
+    repository: Repository,
+    issue: ProjectIssue,
+  ) => void;
   profiles?: UserProfileLookup;
   project: Project;
   rangeItems: ReturnType<typeof issueSelectionItem>[];
@@ -137,7 +158,7 @@ function IssueListRow({
       dateSeconds={issue.updatedAt}
       dateTestId="projects-row-date"
       icon={null}
-      onClick={() => onOpen(project, issue)}
+      onClick={() => onOpen(project, repository, issue)}
       peopleSlot={
         <ProjectAuthorIdentity
           label={authorLabel}
@@ -157,7 +178,7 @@ function IssueListRow({
       titleIcon={<ProjectEventTypeIcon className="h-3.5 w-3.5" kind="issue" />}
       trailing={
         <ProjectListRowMenu label={`More options for ${issue.title}`}>
-          <DropdownMenuItem onSelect={() => onOpen(project, issue)}>
+          <DropdownMenuItem onSelect={() => onOpen(project, repository, issue)}>
             <Eye className="h-4 w-4" />
             {nextStepLabel(issue.status)}
           </DropdownMenuItem>
@@ -170,7 +191,7 @@ function IssueListRow({
       }
     />
   );
-}
+});
 
 export function ProjectsIssuesList({
   embedded,
@@ -185,6 +206,40 @@ export function ProjectsIssuesList({
   profiles,
   viewMode,
 }: ProjectsIssuesListProps) {
+  // Grouping and per-group selection arrays are identity-stable across
+  // re-renders so the memoized rows only re-render when their data changes.
+  const allGroups = React.useMemo(
+    () =>
+      groupProjectWorkItemsByProject(issues).map((group) => ({
+        ...group,
+        selectionItems: group.rows.map((row) =>
+          issueSelectionItem(row.project, row.repository, row.issue),
+        ),
+      })),
+    [issues],
+  );
+  // Mount rows progressively: a one-shot mount of hundreds of rows blocked
+  // the main thread for over a second on tab entry.
+  // Each layout's counter grows only while that layout is active: otherwise
+  // a layout switch would find the other counter already grown and mount the
+  // whole collection in one commit.
+  const mountedRowCount = useIncrementalMount(
+    countGroupedRows(allGroups),
+    30,
+    60,
+    viewMode !== "grid",
+  );
+  const mountedGridCount = useIncrementalMount(
+    issues.length,
+    30,
+    60,
+    viewMode === "grid",
+  );
+  const groups = React.useMemo(
+    () => sliceGroupedRows(allGroups, mountedRowCount),
+    [allGroups, mountedRowCount],
+  );
+
   if (isLoading) {
     return <BuzzLoadingState label="Loading tasks" />;
   }
@@ -200,21 +255,37 @@ export function ProjectsIssuesList({
   );
 
   if (error && issues.length === 0) {
-    return loadNotice;
+    return (
+      <ProjectPanelState
+        action={
+          <Button
+            disabled={isRetrying}
+            onClick={onRetry}
+            size="sm"
+            variant="outline"
+          >
+            {isRetrying ? "Retrying..." : "Retry"}
+          </Button>
+        }
+        description={
+          error instanceof Error ? error.message : "The relay request failed."
+        }
+        error
+        panel={false}
+        title="Could not load tasks"
+      />
+    );
   }
 
   if (issues.length === 0) {
     return (
       <div className="space-y-3">
         {loadNotice}
-        <div
-          className={cn(
-            "px-4 py-12 text-center text-sm text-muted-foreground",
-            !embedded && "border border-dashed border-border/60",
-          )}
-        >
-          {emptyMessage}
-        </div>
+        <ProjectPanelState
+          className={cn(!embedded && "border border-dashed border-border/60")}
+          panel={false}
+          title={emptyMessage}
+        />
       </div>
     );
   }
@@ -224,35 +295,33 @@ export function ProjectsIssuesList({
       <div className="space-y-3">
         {loadNotice}
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {issues.map(({ project, issue, repository }) => (
-            <IssueGridCard
-              issue={issue}
-              key={`${repository.id}:${issue.id}`}
-              onOpen={(selectedProject, selectedIssue) =>
-                onOpen(selectedProject, repository, selectedIssue)
-              }
-              project={project}
-            />
-          ))}
+          {issues
+            .slice(0, mountedGridCount)
+            .map(({ project, issue, repository }) => (
+              <IssueGridCard
+                issue={issue}
+                key={`${repository.id}:${issue.id}`}
+                onOpen={onOpen}
+                project={project}
+                repository={repository}
+              />
+            ))}
         </div>
       </div>
     );
   }
-
-  const groups = groupProjectWorkItemsByProject(issues);
 
   return (
     <div className="space-y-3">
       {loadNotice}
       <div data-testid="projects-list-container">
         {groups.map((group) => {
-          const groupSelectionItems = group.rows.map((row) =>
-            issueSelectionItem(row.project, row.repository, row.issue),
-          );
+          const groupSelectionItems = group.selectionItems;
           return (
             <ProjectSelectableGroup
               count={group.rows.length}
               groupKey={group.project.id}
+              headerClassName="mx-0 gap-3 px-4"
               headerTestId="projects-issue-project-group-header"
               icon={<FolderKanban className="h-4 w-4" />}
               items={groupSelectionItems}
@@ -263,12 +332,13 @@ export function ProjectsIssuesList({
             >
               <ul>
                 {group.rows.map(({ project, issue, repository }) => (
-                  <li key={`${repository.id}:${issue.id}`}>
+                  <li
+                    className="[contain-intrinsic-size:auto_3.5rem] [content-visibility:auto]"
+                    key={`${repository.id}:${issue.id}`}
+                  >
                     <IssueListRow
                       issue={issue}
-                      onOpen={(selectedProject, selectedIssue) =>
-                        onOpen(selectedProject, repository, selectedIssue)
-                      }
+                      onOpen={onOpen}
                       profiles={profiles}
                       project={project}
                       rangeItems={groupSelectionItems}

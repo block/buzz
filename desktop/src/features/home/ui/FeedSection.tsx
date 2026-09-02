@@ -206,6 +206,11 @@ export function FeedSection({
                         profiles,
                         preferResolvedSelfLabel: true,
                       })}
+                      shape={
+                        profiles?.[item.pubkey.toLowerCase()]?.isAgent === true
+                          ? "squircle"
+                          : "circle"
+                      }
                       size="xs"
                     />
                     {resolveUserLabel({

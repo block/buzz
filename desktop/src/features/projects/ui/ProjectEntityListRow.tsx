@@ -43,8 +43,9 @@ export function ProjectEntityFacepile({
             >
               <UserAvatar
                 avatarUrl={profiles?.[pubkey]?.avatarUrl ?? null}
-                className="rounded-full ring-2 ring-background"
+                className="ring-2 ring-background"
                 displayName={label}
+                shape={profiles?.[pubkey]?.isAgent ? "squircle" : "circle"}
                 size="xs"
               />
             </span>
@@ -57,14 +58,18 @@ export function ProjectEntityFacepile({
             triggerElement="span"
           >
             <button
-              className={cn("rounded-full", index > 0 && "-ml-1.5")}
+              className={cn(
+                profiles?.[pubkey]?.isAgent ? "rounded-[30%]" : "rounded-full",
+                index > 0 && "-ml-1.5",
+              )}
               title={label}
               type="button"
             >
               <UserAvatar
                 avatarUrl={profiles?.[pubkey]?.avatarUrl ?? null}
-                className="rounded-full ring-2 ring-background"
+                className="ring-2 ring-background"
                 displayName={label}
+                shape={profiles?.[pubkey]?.isAgent ? "squircle" : "circle"}
                 size="xs"
               />
             </button>
@@ -131,6 +136,7 @@ export function ProjectEntitySelectControl({
 
 export function ProjectEntityListRow({
   affiliation,
+  affiliationClassName,
   affiliationTestId,
   affiliationTitle,
   beforeDate,
@@ -158,6 +164,7 @@ export function ProjectEntityListRow({
   trailing,
 }: {
   affiliation?: React.ReactNode;
+  affiliationClassName?: string;
   affiliationTestId?: string;
   affiliationTitle?: string;
   beforeDate?: React.ReactNode;
@@ -292,7 +299,10 @@ export function ProjectEntityListRow({
       ) : null}
       {affiliation ? (
         <span
-          className="hidden w-36 shrink-0 truncate text-right text-xs text-muted-foreground/65 md:block"
+          className={cn(
+            "hidden w-36 shrink-0 truncate text-left text-xs text-muted-foreground/65 md:block",
+            affiliationClassName,
+          )}
           data-projects-text-priority="secondary"
           data-testid={affiliationTestId}
           title={
@@ -309,18 +319,22 @@ export function ProjectEntityListRow({
       >
         {peopleContent}
       </span>
-      {count != null ? (
+      {count != null || countTestId ? (
         <span
-          className="grid w-12 shrink-0 grid-cols-[0.875rem_1fr] items-center gap-1 text-xs text-muted-foreground/65"
+          className="flex w-12 shrink-0 items-center gap-1 text-xs text-muted-foreground/65"
           data-projects-text-priority="secondary"
           data-testid={countTestId}
           title={countTitle}
         >
-          <MessageSquare className="h-3.5 w-3.5" />
-          <span className="text-right tabular-nums">
-            {count}
-            {countSuffix}
-          </span>
+          {count != null ? (
+            <>
+              <MessageSquare className="h-3.5 w-3.5" />
+              <span className="tabular-nums">
+                {count}
+                {countSuffix}
+              </span>
+            </>
+          ) : null}
         </span>
       ) : null}
       {beforeDate ? (

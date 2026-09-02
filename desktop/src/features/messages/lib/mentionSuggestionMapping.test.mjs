@@ -16,8 +16,9 @@ function candidate(overrides = {}) {
   };
 }
 
-function suggestion(overrides = {}) {
+function suggestion(overrides = {}, agentProvenanceReady = true) {
   return mapMentionCandidateToSuggestion({
+    agentProvenanceReady,
     candidate: candidate(overrides),
     currentPubkey: OWNER,
     label: "Carl",
@@ -33,6 +34,14 @@ test("labels Desktop-managed agent identities as managed here", () => {
 
 test("labels same-owner relay agent identities as managed elsewhere", () => {
   assert.equal(suggestion().agentProvenance, "managed-elsewhere");
+});
+
+test("fails closed while the managed-agent directory is unresolved", () => {
+  assert.equal(
+    suggestion({ isManagedAgent: true }, false).agentProvenance,
+    undefined,
+  );
+  assert.equal(suggestion({}, false).agentProvenance, undefined);
 });
 
 test("does not attribute another owner's agent to a device", () => {

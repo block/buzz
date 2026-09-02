@@ -535,6 +535,45 @@
     }
   },
   {
+    "id": "dbv2-goose-claude-4-6-sonnet-alias-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "goose-claude-4-6-sonnet",
+    "_note": "Probes the discovered Goose Sonnet 4.6 endpoint spelling and label.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": "Claude Sonnet 4.6"
+    }
+  },
+  {
+    "id": "dbv2-goose-claude-4-7-opus-alias-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "goose-claude-4-7-opus",
+    "_note": "Probes the discovered Goose Opus 4.7 endpoint spelling and label.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": "Claude Opus 4.7"
+    }
+  },
+  {
     "id": "dbv2-team-prefix-probe",
     "provider": "databricks_v2",
     "raw_model_id": "team-x-claude-opus-4-7",
@@ -721,6 +760,26 @@
     }
   },
   {
+    "id": "dbv2-claude-fable-5-1-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-claude-fable-5-1",
+    "_note": "Probes the canonical Databricks Fable 5.1 endpoint record.",
+    "expect": {
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "registry_label": "Claude Fable 5.1"
+    }
+  },
+  {
     "id": "dbv2-claude-opus-4-8-exact-record-probe",
     "provider": "databricks_v2",
     "raw_model_id": "databricks-claude-opus-4-8",
@@ -838,6 +897,27 @@
       "databricks_v2_wire_route": "anthropic-messages",
       "normalization_policy": "none",
       "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-kimi-2-7-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-kimi-2-7",
+    "_note": "Probes the canonical Databricks Kimi 2.7 endpoint record.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": "Kimi 2.7"
     }
   },
   {
@@ -2262,6 +2342,464 @@
         "high"
       ],
       "default_effort": "medium",
+      "databricks_v2_wire_route": "not-applicable",
+      "normalization_policy": "openai-standard",
+      "registry_label": null
+    }
+  },
+  {
+    "_group": "Databricks UC model-family humanization probes (#6918 follow-up)",
+    "_note": "Exact-record and UC-FQN strip probes for the Gemini/DeepSeek/GLM/Grok/Llama/Qwen/Gemma/Inkling families surfaced by UC discovery."
+  },
+  {
+    "id": "dbv2-gemini-3-1-flash-image-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-gemini-3-1-flash-image",
+    "_note": "Probes the Gemini 3.1 Flash Image endpoint record and label.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": "Gemini 3.1 Flash Image"
+    }
+  },
+  {
+    "id": "dbv2-gemini-3-5-flash-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-gemini-3-5-flash",
+    "_note": "Probes the Gemini 3.5 Flash endpoint record and label.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "registry_label": "Gemini 3.5 Flash"
+    }
+  },
+  {
+    "id": "dbv2-gemini-3-5-flash-lite-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-gemini-3-5-flash-lite",
+    "_note": "Probes the Gemini 3.5 Flash Lite endpoint record and label.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "registry_label": "Gemini 3.5 Flash Lite"
+    }
+  },
+  {
+    "id": "dbv2-gemini-3-6-flash-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-gemini-3-6-flash",
+    "_note": "Probes the Gemini 3.6 Flash endpoint record and label.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "registry_label": "Gemini 3.6 Flash"
+    }
+  },
+  {
+    "id": "dbv2-gemini-3-pro-image-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-gemini-3-pro-image",
+    "_note": "Probes the Gemini 3 Pro Image endpoint record and label.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "high"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "registry_label": "Gemini 3 Pro Image"
+    }
+  },
+  {
+    "id": "dbv2-deepseek-v4-flash-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-deepseek-v4-flash-0731",
+    "_note": "Probes the DeepSeek V4 Flash endpoint record and label.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "registry_label": "DeepSeek V4 Flash"
+    }
+  },
+  {
+    "id": "dbv2-deepseek-v4-pro-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-deepseek-v4-pro-0813",
+    "_note": "Probes the DeepSeek V4 Pro endpoint record and label.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "high",
+        "max"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "registry_label": "DeepSeek V4 Pro"
+    }
+  },
+  {
+    "id": "dbv2-glm-5-3-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-glm-5-3",
+    "_note": "Probes the GLM-5.3 endpoint record and label.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": "GLM-5.3"
+    }
+  },
+  {
+    "id": "dbv2-glm-5-3-flash-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-glm-5-3-flash",
+    "_note": "Probes the GLM-5.3 Flash endpoint record and label.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "registry_label": "GLM-5.3 Flash"
+    }
+  },
+  {
+    "id": "dbv2-grok-4-6-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-grok-4-6",
+    "_note": "Probes the Grok 4.6 endpoint record and label.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "registry_label": "Grok 4.6"
+    }
+  },
+  {
+    "id": "dbv2-llama-4-maverick-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-llama-4-maverick",
+    "_note": "Probes the Llama 4 Maverick endpoint record and label.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": "Llama 4 Maverick"
+    }
+  },
+  {
+    "id": "dbv2-meta-llama-3-1-8b-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-meta-llama-3-1-8b-instruct",
+    "_note": "Probes the meta-llama record; the llama- token strips the meta- prefix identically for record and query.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": "Llama 3.1 8B Instruct"
+    }
+  },
+  {
+    "id": "dbv2-meta-llama-3-3-70b-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-meta-llama-3-3-70b-instruct",
+    "_note": "Probes the meta-llama 3.3 70B record and label.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": "Llama 3.3 70B Instruct"
+    }
+  },
+  {
+    "id": "dbv2-qwen3-next-80b-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-qwen3-next-80b-a3b-instruct",
+    "_note": "Probes the Qwen3 Next 80B record; the bare qwen token strips on a hyphen boundary.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": "Qwen3 Next 80B A3B Instruct"
+    }
+  },
+  {
+    "id": "dbv2-qwen35-122b-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-qwen35-122b-a10b",
+    "_note": "Probes the Qwen3.5 122B record; the bare qwen token strips a qwen35 stem with no separator.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": "Qwen3.5 122B A10B"
+    }
+  },
+  {
+    "id": "dbv2-gemma-3-12b-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-gemma-3-12b",
+    "_note": "Probes the Gemma 3 12B endpoint record and label.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": "Gemma 3 12B"
+    }
+  },
+  {
+    "id": "dbv2-inkling-exact-record-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "databricks-inkling",
+    "_note": "Probes the Inkling endpoint record and label.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "registry_label": "Inkling"
+    }
+  },
+  {
+    "id": "dbv2-uc-fqn-gemini-3-5-flash-strip-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "system.ai.gemini-3-5-flash",
+    "_note": "Probes strip parity on a system.ai. UC FQN carrying the gemini- token (resolve carries no label; the alias label path is unit-tested).",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-uc-fqn-meta-llama-strip-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "system.ai.meta-llama-3-3-70b-instruct",
+    "_note": "Probes strip parity on a UC FQN where the llama- token strips through meta-.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-uc-fqn-deepseek-strip-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "system.ai.deepseek-v4-pro-0813",
+    "_note": "Probes strip parity on a UC FQN carrying the deepseek- token.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "dbv2-uc-fqn-inkling-strip-probe",
+    "provider": "databricks_v2",
+    "raw_model_id": "system.ai.inkling",
+    "_note": "Probes strip parity on a UC FQN carrying the bare inkling token.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "registry_label": null
+    }
+  },
+  {
+    "_group": "Label/capability token isolation probes (#6955 review pass 1)",
+    "_note": "Pins that label_family_tokens (the UC-humanization superset) never leaks into capability resolve(): capability stripping still uses only claude-/gpt-/kimi-, so a label token appearing before a gpt- marker must NOT displace the gpt-5-pro exact profile."
+  },
+  {
+    "id": "isolation-openai-gemini-gpt-5-pro-probe",
+    "provider": "openai",
+    "raw_model_id": "tenant-gemini-gpt-5-pro",
+    "_note": "The gemini- label token must not strip here; capability resolve keeps the gpt-5-pro high-only profile.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "high"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "not-applicable",
+      "normalization_policy": "openai-standard",
+      "registry_label": null
+    }
+  },
+  {
+    "id": "isolation-openai-qwenchanted-gpt-5-pro-probe",
+    "provider": "openai",
+    "raw_model_id": "tenant-qwenchanted-gpt-5-pro",
+    "_note": "The bare qwen label token must not fire mid-segment; capability resolve keeps the gpt-5-pro high-only profile.",
+    "expect": {
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "high"
+      ],
+      "default_effort": "high",
       "databricks_v2_wire_route": "not-applicable",
       "normalization_policy": "openai-standard",
       "registry_label": null

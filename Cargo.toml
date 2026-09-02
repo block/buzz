@@ -77,7 +77,7 @@ postcard    = { version = "1", default-features = false, features = ["use-std"] 
 
 # Inter-relay mesh transport (buzz-relay-mesh)
 iroh = { version = "1.0.0-rc.0", default-features = false, features = ["tls-ring"] }
-serde_json  = "1"
+serde_json  = { version = "1", features = ["raw_value"] }
 serde_yaml  = "0.9"
 evalexpr    = "11"
 cron        = "0.16"
@@ -100,8 +100,11 @@ anyhow    = "1"
 uuid    = { version = "1", features = ["v4", "serde"] }
 chrono  = { version = "0.4", features = ["serde"] }
 
+# JWT / JWS verification (NIP-FI federated identity assertions)
+jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
+
 # HTTP client (webhook delivery)
-reqwest = { version = "0.13", features = ["json", "rustls"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "rustls", "stream"], default-features = false }
 
 # Cryptography
 sha2      = "0.11"

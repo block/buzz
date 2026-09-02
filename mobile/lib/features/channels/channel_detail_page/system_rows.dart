@@ -164,6 +164,15 @@ class _SystemMessageRow extends HookConsumerWidget {
                         ],
                       ),
               ),
+              if (systemEvent.type == SystemEventType.huddleStarted &&
+                  systemEvent.ephemeralChannelId != null)
+                _HuddleJoinSurface(
+                  message: message,
+                  allMessages: allMessages ?? const [],
+                  parentChannelId: channelId,
+                  isMember: isMember,
+                  isArchived: isArchived,
+                ),
               if (reactions.isNotEmpty)
                 Padding(
                   padding: EdgeInsets.only(
@@ -373,6 +382,8 @@ class _MessageStyleSystemMessageContent extends StatelessWidget {
           child: _UserAvatar(
             profile: userCache[displayPubkey.toLowerCase()],
             pubkey: displayPubkey,
+            isAgent:
+                userCache[displayPubkey.toLowerCase()]?.ownerPubkey != null,
             size: messageAvatarSize,
           ),
         ),

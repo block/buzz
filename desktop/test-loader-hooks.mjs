@@ -89,6 +89,12 @@ export function resolve(specifier, context, nextResolve) {
     const resolved = path.join(repoRoot, "preview-features.json");
     return nextResolve(toFileSpecifier(resolved), context);
   }
+  if (specifier === "@protected-features") {
+    const variant =
+      process.env.VITE_BUZZ_BESTIE === "1" ? "internal.ts" : "public.ts";
+    const resolved = path.join(srcRoot, "protectedFeatures", variant);
+    return nextResolve(toFileSpecifier(resolved), context);
+  }
   if (specifier === "@model-capabilities-manifest") {
     const resolved = path.join(repoRoot, "scripts", "model-capabilities.json");
     return nextResolve(toFileSpecifier(resolved), context);

@@ -15,6 +15,7 @@ export type TimelineThreadSummaryParticipant = {
   id: string;
   author: string;
   avatarUrl: string | null;
+  isAgent?: boolean;
 };
 
 export type TimelineThreadSummary = {
@@ -152,6 +153,9 @@ export function buildDescendantStatsByMessageId(
       id: participantKey,
       author: message.author,
       avatarUrl: message.avatarUrl ?? null,
+      ...(message.isAgent === true || message.role === "bot"
+        ? { isAgent: true }
+        : {}),
     };
 
     let ancestorId = message.parentId ?? null;
@@ -233,6 +237,9 @@ function participantFromMessage(
     id: message.pubkey ?? message.id,
     author: message.author,
     avatarUrl: message.avatarUrl ?? null,
+    ...(message.isAgent === true || message.role === "bot"
+      ? { isAgent: true }
+      : {}),
   };
 }
 
@@ -403,6 +410,9 @@ function buildRelayThreadSummary(
         id: pubkey,
         author: profiles?.[pubkey.toLowerCase()]?.displayName ?? pubkey,
         avatarUrl: profiles?.[pubkey.toLowerCase()]?.avatarUrl ?? null,
+        ...(profiles?.[pubkey.toLowerCase()]?.isAgent === true
+          ? { isAgent: true }
+          : {}),
       })),
   };
 }
@@ -541,4 +551,60 @@ export function buildThreadPanelData(
     threadReplyTargetId,
     expandedReplyIds,
   );
+}
+
+function hasLaterVisibleSibling(
+  entries: readonly MainTimelineEntry[],
+  entryIndex: number,
+): boolean {
+  const depth = entries[entryIndex]?.message.depth;
+  if (depth == null) {
+    return false;
+  }
+
+  for (let index = entryIndex + 1; index < entries.length; index += 1) {
+    const nextDepth = entries[index].message.depth;
+    if (nextDepth <= depth) {
+      return nextDepth === depth;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Depths at which a vertical thread-branch guide should continue past `message`
+ * because an ancestor on its path still has a later visible sibling. Pure so
+ * the branch-guide geometry is unit-tested without the panel.
+ */
+export function getActiveContinuationDepths({
+  ancestors,
+  entries,
+  index,
+  message,
+}: {
+  ancestors: readonly { index: number; message: TimelineMessage }[];
+  entries: readonly MainTimelineEntry[];
+  index: number;
+  message: TimelineMessage;
+}): number[] {
+  const depths: number[] = [];
+
+  for (const ancestor of ancestors) {
+    if (ancestor.message.depth === 0) {
+      continue;
+    }
+
+    const childDepth = ancestor.message.depth + 1;
+    const pathChild =
+      message.depth === childDepth
+        ? { index, message }
+        : ancestors.find((candidate) => candidate.message.depth === childDepth);
+
+    if (pathChild && hasLaterVisibleSibling(entries, pathChild.index)) {
+      depths.push(ancestor.message.depth);
+    }
+  }
+
+  return depths;
 }

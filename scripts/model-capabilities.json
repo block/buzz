@@ -11,6 +11,20 @@
     "gpt-",
     "kimi-"
   ],
+  "_comment_label_family_tokens": "Prefix tokens used ONLY by databricks_registry_label (and its TS mirror) to strip catalog/endpoint prefixes off Unity Catalog FQN and goose- alias ids before matching a curated display label. Deliberately SEPARATE from family_tokens: label stripping is a discovery-only display concern, while family_tokens drives capability resolution in resolve() for every provider. Adding a family marker here humanizes its UC ids without altering any model's resolved capability profile.",
+  "label_family_tokens": [
+    "claude-",
+    "gpt-",
+    "kimi-",
+    "gemini-",
+    "deepseek-",
+    "glm-",
+    "grok-",
+    "llama-",
+    "qwen",
+    "gemma-",
+    "inkling"
+  ],
   "family_rules": [
     {
       "id": "anthropic-manual-budget-claude3",
@@ -475,6 +489,24 @@
     },
     {
       "provider": "databricks_v2",
+      "raw_model_id": "databricks-claude-fable-5-1",
+      "registry_label": "Claude Fable 5.1",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes materialized from family:anthropic-adaptive-xhigh-fable-5",
+      "_source": "models.dev anthropic catalog label; Databricks workspace endpoint is absent from its provider catalog"
+    },
+    {
+      "provider": "databricks_v2",
       "raw_model_id": "databricks-claude-opus-4-8",
       "registry_label": "Claude Opus 4.8",
       "thinking_mode": "adaptive",
@@ -586,6 +618,24 @@
       "_reconciliation": "no-effort-divergence",
       "_reconciliation_note": "models.dev advertises reasoning_options=[{\"type\":\"budget_tokens\",\"min\":1024}]. This is a different capability axis (extended thinking token budget), not an effort-level selector. No effort divergence to reconcile — efforts for this model come from the anthropic family rule (anthropic-adaptive-xhigh-opus-4-7).",
       "_reconciliation_doc": "https://models.dev/api.json (retrieved 2026-07-31, SHA-256 d5a4974cd69f19b0f67713acaa6bb3b16e920defdc07ecbdf6b0a936181bb0e0): providers.databricks.models[\"databricks-claude-opus-4-7\"].reasoning_options=[{\"type\":\"budget_tokens\",\"min\":1024}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "goose-claude-4-7-opus",
+      "registry_label": "Claude Opus 4.7",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes copied from equivalent registry endpoint databricks-claude-opus-4-7 for the discovered Goose endpoint id",
+      "_source": "registry_labels"
     },
     {
       "provider": "databricks_v2",
@@ -749,6 +799,23 @@
     },
     {
       "provider": "databricks_v2",
+      "raw_model_id": "goose-claude-4-6-sonnet",
+      "registry_label": "Claude Sonnet 4.6",
+      "thinking_mode": "adaptive",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default_effort": "high",
+      "databricks_v2_wire_route": "anthropic-messages",
+      "normalization_policy": "none",
+      "_provenance": "all axes copied from equivalent registry endpoint databricks-claude-sonnet-4-6 for the discovered Goose endpoint id",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
       "raw_model_id": "databricks-gemini-2-5-flash",
       "registry_label": "Gemini 2.5 Flash",
       "thinking_mode": "none",
@@ -879,6 +946,354 @@
       "normalization_policy": "openai-clamp-max-to-xhigh",
       "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
       "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gemini-3-1-flash-image",
+      "registry_label": "Gemini 3.1 Flash Image",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels",
+      "_reconciliation": "keep-fallback",
+      "_reconciliation_note": "No model-level entry for gemini-3-1-flash-image exists under any provider in the pinned models.dev payload; there is genuinely no upstream reasoning evidence to reconcile. Retain the databricks_v2 concrete_unknown fallback profile.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): no providers.*.models[*] key matches gemini-3-1-flash-image."
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gemini-3-5-flash",
+      "registry_label": "Gemini 3.5 Flash",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "_provenance": "supported_efforts+thinking_mode+default_effort+normalization_policy: adopted from models.dev first-party google model-level evidence (Kimi-K3 precedent); databricks_v2_wire_route+label: registry_labels",
+      "source": "models.dev google reasoning_options effort: minimal|low|medium|high",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "The Unity Catalog endpoint uses the hyphenated stem gemini-3-5-flash, while the pinned models.dev first-party google entry uses the dotted model id gemini-3.5-flash and advertises effort [minimal, low, medium, high]. Per the Kimi-K3 precedent, adopt this model-level effort evidence despite the spelling difference and the exact endpoint being absent from the models.dev databricks catalog. Databricks serves via MLflow Chat (reasoning_effort only), so thinking_mode stays none and default_effort is null.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.google.models[\"gemini-3.5-flash\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"minimal\",\"low\",\"medium\",\"high\"]}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gemini-3-5-flash-lite",
+      "registry_label": "Gemini 3.5 Flash Lite",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "_provenance": "supported_efforts+thinking_mode+default_effort+normalization_policy: adopted from models.dev first-party google model-level evidence (Kimi-K3 precedent); databricks_v2_wire_route+label: registry_labels",
+      "source": "models.dev google reasoning_options effort: minimal|low|medium|high",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "The Unity Catalog endpoint uses the hyphenated stem gemini-3-5-flash-lite, while the pinned models.dev first-party google entry uses the dotted model id gemini-3.5-flash-lite and advertises effort [minimal, low, medium, high]. Per the Kimi-K3 precedent, adopt this model-level effort evidence despite the spelling difference and the exact endpoint being absent from the models.dev databricks catalog. Databricks serves via MLflow Chat (reasoning_effort only), so thinking_mode stays none and default_effort is null.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.google.models[\"gemini-3.5-flash-lite\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"minimal\",\"low\",\"medium\",\"high\"]}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gemini-3-6-flash",
+      "registry_label": "Gemini 3.6 Flash",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "_provenance": "supported_efforts+thinking_mode+default_effort+normalization_policy: adopted from models.dev first-party google model-level evidence (Kimi-K3 precedent); databricks_v2_wire_route+label: registry_labels",
+      "source": "models.dev google reasoning_options effort: minimal|low|medium|high",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "The Unity Catalog endpoint uses the hyphenated stem gemini-3-6-flash, while the pinned models.dev first-party google entry uses the dotted model id gemini-3.6-flash and advertises effort [minimal, low, medium, high]. Per the Kimi-K3 precedent, adopt this model-level effort evidence despite the spelling difference and the exact endpoint being absent from the models.dev databricks catalog. Databricks serves via MLflow Chat (reasoning_effort only), so thinking_mode stays none and default_effort is null.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.google.models[\"gemini-3.6-flash\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"minimal\",\"low\",\"medium\",\"high\"]}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gemini-3-pro-image",
+      "registry_label": "Gemini 3 Pro Image",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "high"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "_provenance": "supported_efforts+thinking_mode+default_effort+normalization_policy: adopted from models.dev first-party google model-level evidence (Kimi-K3 precedent); databricks_v2_wire_route+label: registry_labels",
+      "source": "models.dev google reasoning_options effort: low|high",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "The exact databricks endpoint is absent from the models.dev databricks catalog, but the first-party google entry advertises effort [low, high]. Per the Kimi-K3 precedent, adopt model-level effort evidence despite endpoint absence. Databricks serves via MLflow Chat (reasoning_effort only), so thinking_mode stays none and default_effort is null.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.google.models[\"gemini-3-pro-image\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"low\",\"high\"]}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-deepseek-v4-flash-0731",
+      "registry_label": "DeepSeek V4 Flash",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "_provenance": "supported_efforts+thinking_mode+default_effort+normalization_policy: adopted from models.dev first-party deepseek model-level evidence (Kimi-K3 precedent); databricks_v2_wire_route+label: registry_labels",
+      "source": "models.dev deepseek reasoning_options effort: low|high|max",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "The exact databricks endpoint is absent from the models.dev databricks catalog, but the first-party deepseek entry advertises a reasoning toggle plus effort [low, high, max]. Per the Kimi-K3 precedent, adopt the model-level effort list despite endpoint absence. The toggle is not representable on the MLflow Chat request schema (reasoning_effort only), so thinking_mode stays none and default_effort is null — mirroring the kimi-k3 record.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.deepseek.models[\"deepseek-v4-flash\"].reasoning_options=[{\"type\":\"toggle\"},{\"type\":\"effort\",\"values\":[\"low\",\"high\",\"max\"]}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-deepseek-v4-pro-0813",
+      "registry_label": "DeepSeek V4 Pro",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "high",
+        "max"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "_provenance": "supported_efforts+thinking_mode+default_effort+normalization_policy: adopted from models.dev first-party deepseek model-level evidence (Kimi-K3 precedent); databricks_v2_wire_route+label: registry_labels",
+      "source": "models.dev deepseek reasoning_options effort: high|max",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "The exact databricks endpoint is absent from the models.dev databricks catalog, but the first-party deepseek entry advertises a reasoning toggle plus effort [high, max]. Per the Kimi-K3 precedent, adopt the model-level effort list despite endpoint absence. The toggle is not representable on the MLflow Chat request schema (reasoning_effort only), so thinking_mode stays none and default_effort is null — mirroring the kimi-k3 record.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.deepseek.models[\"deepseek-v4-pro\"].reasoning_options=[{\"type\":\"toggle\"},{\"type\":\"effort\",\"values\":[\"high\",\"max\"]}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-glm-5-3",
+      "registry_label": "GLM-5.3",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-glm-5-3-flash",
+      "registry_label": "GLM-5.3 Flash",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "high",
+        "max"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "_provenance": "supported_efforts+thinking_mode+default_effort+normalization_policy: adopted from models.dev first-party Z.AI model-level evidence (Kimi-K3 precedent); databricks_v2_wire_route+label: registry_labels",
+      "source": "models.dev zai reasoning_options effort: low|high|max",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "The exact databricks endpoint is absent from the models.dev databricks catalog, but the first-party Z.AI entry glm-5.3-flash advertises effort [low, high, max]. Per the Kimi-K3 precedent, adopt the model-level effort list despite endpoint absence. Databricks serves via MLflow Chat (reasoning_effort only), so thinking_mode stays none and default_effort is null.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.zai.models[\"glm-5.3-flash\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"low\",\"high\",\"max\"]}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-grok-4-6",
+      "registry_label": "Grok 4.6",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "_provenance": "supported_efforts+thinking_mode+default_effort+normalization_policy: adopted from models.dev first-party xAI model-level evidence (Kimi-K3 precedent); databricks_v2_wire_route+label: registry_labels",
+      "source": "models.dev xai reasoning_options effort: low|medium|high|xhigh",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "The exact databricks endpoint is absent from the models.dev databricks catalog, but the first-party xAI entry grok-4.6 advertises effort [low, medium, high, xhigh]. Per the Kimi-K3 precedent, adopt the model-level effort list despite endpoint absence. Databricks serves via MLflow Chat (reasoning_effort only), so thinking_mode stays none and default_effort is null.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.xai.models[\"grok-4.6\"].reasoning_options=[{\"type\":\"effort\",\"values\":[\"low\",\"medium\",\"high\",\"xhigh\"]}]"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-llama-4-maverick",
+      "registry_label": "Llama 4 Maverick",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels",
+      "_reconciliation": "keep-fallback",
+      "_reconciliation_note": "Llama 4 Maverick is a non-reasoning model: all 26 model-level records across providers in the pinned payload report reasoning=false with no reasoning_options. There is no effort evidence to adopt. Retain the databricks_v2 concrete_unknown fallback profile.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): every providers.*.models[*] whose id contains \"llama-4-maverick\" (e.g. meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8) has reasoning=false, reasoning_options=null."
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-meta-llama-3-1-8b-instruct",
+      "registry_label": "Llama 3.1 8B Instruct",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels",
+      "_reconciliation": "keep-fallback",
+      "_reconciliation_note": "Llama 3.1 8B Instruct is a non-reasoning model: the consensus across model-level records in the pinned payload is reasoning=false with no reasoning_options (a single reseller, pioneer, is an outlier advertising effort [low, medium, high]). There is no first-party or consensus effort evidence to adopt. Retain the databricks_v2 concrete_unknown fallback profile.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.*.models[*] ids containing \"llama-3.1-8b\" report reasoning=false with reasoning_options=null across essentially all providers (huggingface, nvidia, groq, openrouter, kilo, ...); only pioneer/meta-llama/Llama-3.1-8B-Instruct is reasoning=true."
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-meta-llama-3-3-70b-instruct",
+      "registry_label": "Llama 3.3 70B Instruct",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels",
+      "_reconciliation": "keep-fallback",
+      "_reconciliation_note": "Llama 3.3 70B Instruct is a non-reasoning model: every model-level record across ~50 providers in the pinned payload reports reasoning=false with no effort values (one reseller, berget, sets reasoning=true but with an empty reasoning_options set, i.e. no effort list). There is no effort evidence to adopt. Retain the databricks_v2 concrete_unknown fallback profile.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.*.models[*] ids containing \"llama-3.3-70b\" report reasoning=false, reasoning_options=null across all providers; providers.berget.models[\"meta-llama/Llama-3.3-70B-Instruct\"] is reasoning=true with reasoning_options=[]."
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-qwen3-next-80b-a3b-instruct",
+      "registry_label": "Qwen3 Next 80B A3B Instruct",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels",
+      "_reconciliation": "keep-fallback",
+      "_reconciliation_note": "The first-party alibaba entry qwen3-next-80b-a3b-instruct reports reasoning=false with no reasoning_options — the -instruct variant is the non-reasoning sibling of qwen3-next-80b-a3b-thinking. There is no effort evidence to adopt for the instruct model. Retain the databricks_v2 concrete_unknown fallback profile.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.alibaba.models[\"qwen3-next-80b-a3b-instruct\"].reasoning=false, reasoning_options=null (contrast qwen3-next-80b-a3b-thinking which is reasoning=true with budget_tokens)."
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-qwen35-122b-a10b",
+      "registry_label": "Qwen3.5 122B A10B",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels",
+      "_reconciliation": "keep-fallback",
+      "_reconciliation_note": "The first-party alibaba entry qwen3.5-122b-a10b expresses reasoning only as a toggle plus budget_tokens — NOT an effort-level selector. Neither axis is representable on the Databricks MLflow Chat transport (reasoning_effort only), mirroring the claude-opus-4-7 budget_tokens precedent where no effort divergence is reconciled. Resellers that do advertise effort sets conflict sharply (kilo [none, high]; tensorx [none..max]; neon [none, low, medium, high]), so there is no consistent effort list to adopt. Retain the databricks_v2 concrete_unknown fallback profile.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.alibaba.models[\"qwen3.5-122b-a10b\"].reasoning_options=[{\"type\":\"toggle\"},{\"type\":\"budget_tokens\"}]; reseller effort sets diverge (kilo=[none,high], tensorx=[none,minimal,low,medium,high,xhigh,max], neon=[none,low,medium,high])."
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-gemma-3-12b",
+      "registry_label": "Gemma 3 12B",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels",
+      "_reconciliation": "keep-fallback",
+      "_reconciliation_note": "Gemma 3 12B is a non-reasoning model: every model-level record across providers in the pinned payload reports reasoning=false with no reasoning_options. There is no effort evidence to adopt. Retain the databricks_v2 concrete_unknown fallback profile.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.*.models[*] ids containing \"gemma-3-12b\" (e.g. google/gemma-3-12b-it) all report reasoning=false, reasoning_options=null."
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-inkling",
+      "registry_label": "Inkling",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default_effort": null,
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-standard",
+      "_provenance": "supported_efforts+thinking_mode+default_effort+normalization_policy: adopted from models.dev first-party Thinking Machines model-level evidence (Kimi-K3 precedent); databricks_v2_wire_route+label: registry_labels",
+      "source": "models.dev thinkingmachines reasoning_options effort: low|medium|high|xhigh|max",
+      "_reconciliation": "adopt",
+      "_reconciliation_note": "The exact databricks endpoint is absent from the models.dev databricks catalog, but the first-party Thinking Machines entry Inkling advertises a reasoning toggle plus effort [low, medium, high, xhigh, max]. Per the Kimi-K3 precedent, adopt the model-level effort list despite endpoint absence. The toggle is not representable on the MLflow Chat request schema (reasoning_effort only), so thinking_mode stays none and default_effort is null — mirroring the kimi-k3 record.",
+      "_reconciliation_doc": "https://models.dev/api.json (pinned SHA-256 9266003029c4ea265e923637826211f597db08e8f0f40123aad8547411029238): providers.thinkingmachines.models[\"thinkingmachines/Inkling\"].reasoning_options=[{\"type\":\"toggle\"},{\"type\":\"effort\",\"values\":[\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]}]"
     },
     {
       "provider": "databricks_v2",
@@ -1041,6 +1456,25 @@
       "_reconciliation": "adopt",
       "_reconciliation_note": "models.dev advertises toggleable reasoning with [low, high, max], but no default. The Databricks endpoint is absent from its provider catalog, so retain the established MLflow Chat route, adopt the upstream capability set, and leave the effort unset rather than invent a Databricks default. The MLflow Chat request schema cannot express a reasoning toggle (only reasoning_effort is representable), so thinking_mode maps to none rather than the upstream toggle, matching the kimi-k2-7-code precedent.",
       "_reconciliation_doc": "https://models.dev/api.json (retrieved 2026-08-20, SHA-256 7ccb5635f682e4248ad8d39f515fbe3f2bb10e67bbc7fa1b94e66dddb00779e5): providers.moonshotai.models[\"kimi-k3\"].reasoning_options=[{\"type\":\"toggle\"},{\"type\":\"effort\",\"values\":[\"low\",\"high\",\"max\"]}]; Databricks endpoint absent from providers.databricks.models"
+    },
+    {
+      "provider": "databricks_v2",
+      "raw_model_id": "databricks-kimi-2-7",
+      "registry_label": "Kimi 2.7",
+      "thinking_mode": "none",
+      "supported_efforts": [
+        "none",
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default_effort": "medium",
+      "databricks_v2_wire_route": "mlflow-chat",
+      "normalization_policy": "openai-clamp-max-to-xhigh",
+      "_provenance": "all axes materialized from provider fallback (databricks_v2/concrete_unknown)",
+      "_source": "registry_labels"
     },
     {
       "provider": "databricks_v2",

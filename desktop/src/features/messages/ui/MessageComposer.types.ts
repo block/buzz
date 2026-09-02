@@ -10,6 +10,7 @@ export type MessageComposerEditTarget = {
   author: string;
   body: string;
   id: string;
+  isThreadReply: boolean;
   /**
    * NIP-92 imeta attachments on the original event, in tag order. Loaded
    * into the composer's pending-imeta state on edit-open so the user sees
@@ -24,9 +25,8 @@ export type MessageComposerEditTarget = {
 
 export type MessageComposerProps = {
   audienceContext?: {
+    rootTags?: readonly string[][];
     type: "thread";
-    threadRootId: string;
-    initialAgentPubkeys?: readonly string[];
   } | null;
   channelId?: string | null;
   channelName: string;
@@ -56,6 +56,8 @@ export type MessageComposerProps = {
   editTarget?: MessageComposerEditTarget | null;
   isSending?: boolean;
   mediaController?: MediaUploadController;
+  /** Reports whether a surrounding drop zone may add an attachment. */
+  onAttachmentAcceptanceChange?: (acceptsAttachment: boolean) => void;
   onDeferredEditPendingChange?: (isPending: boolean) => void;
   onCancelEdit?: () => void;
   onCancelReply?: () => void;
@@ -96,6 +98,8 @@ export type MessageComposerProps = {
   ) => Promise<void>;
   placeholder?: string;
   profiles?: UserProfileLookup;
+  /** Explicit mention pubkeys from the loaded channel window, newest first. */
+  recentMentionPubkeys?: readonly string[];
   replyTarget?: {
     author: string;
     body: string;

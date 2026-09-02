@@ -9,10 +9,7 @@ import {
   parseEntityLink,
   type ParsedEntityLink,
 } from "@/shared/lib/entityLink";
-import {
-  parseSupportedLinkPreview,
-  type SupportedLinkPreview,
-} from "@/shared/lib/linkPreview";
+import { parseSupportedLinkPreview } from "@/shared/lib/linkPreview";
 
 import {
   loadBuzzEntityMetadata,
@@ -194,27 +191,6 @@ export function useOpenEntityLink(): (link: ParsedEntityLink) => void {
 }
 
 /**
- * In-app open handlers for `buzz://` entity preview cards, keyed by href.
- * External cards get no handler and keep their OS-opened anchor.
- */
-export function useEntityCardOpenHandlers(
-  previews: SupportedLinkPreview[],
-  onOpenEntityLink: (link: ParsedEntityLink) => void,
-): Map<string, () => void> {
-  return React.useMemo(() => {
-    const handlers = new Map<string, () => void>();
-    for (const preview of previews) {
-      if (!isEntityLink(preview.href)) continue;
-      const parsed = parseEntityLink(preview.href);
-      if (parsed.ok) {
-        handlers.set(preview.href, () => onOpenEntityLink(parsed.value));
-      }
-    }
-    return handlers;
-  }, [onOpenEntityLink, previews]);
-}
-
-/**
  * Resolve an anchor href to a canonical `buzz://` entity link, accepting
  * both the deep-link scheme directly and HTTPS relay clone URLs (which the
  * preview parser normalizes onto `buzz://repo` only when the URL origin
@@ -253,7 +229,7 @@ export function EntityLinkAnchor({
   interactive?: boolean;
   asChip?: boolean;
 }): React.ReactElement | null {
-  const { data: projects } = useProjectsQuery();
+  const { data: projects } = useProjectsQuery(interactive);
   return renderEntityLinkAnchor({
     children,
     href,
@@ -296,17 +272,37 @@ export function renderEntityLinkAnchor({
   if (!parsed.ok) return null;
   const presentation = entityLinkPresentation(parsed.value);
 
-  if (!asChip) {
+  const inlineLink = (metadata?: LinkPreviewMetadata | null) => {
+    const resolvedContext = metadata?.title.trim();
+    const ariaLabel = resolvedContext
+      ? `${presentation.ariaLabel}: ${resolvedContext}`
+      : presentation.ariaLabel;
     return (
       <BuzzInlineLink
         href={href}
         title={href}
-        aria-label={presentation.ariaLabel}
+        aria-label={ariaLabel}
         interactive={interactive}
         onOpenLink={() => onOpenEntityLink(parsed.value)}
       >
         {children}
       </BuzzInlineLink>
+    );
+  };
+
+  if (!asChip) {
+    return interactive ? (
+      <EntityMetadataTooltip
+        fallback={presentation.label}
+        footer={presentation.tooltipFooter}
+        href={canonicalHref}
+        link={parsed.value}
+        projects={projects}
+      >
+        {inlineLink}
+      </EntityMetadataTooltip>
+    ) : (
+      inlineLink()
     );
   }
 

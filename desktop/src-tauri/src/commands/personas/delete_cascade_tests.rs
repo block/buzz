@@ -17,6 +17,7 @@ fn make_agent(
     runtime_pid: Option<u32>,
 ) -> ManagedAgentRecord {
     ManagedAgentRecord {
+        description: None,
         pubkey: pubkey.to_string(),
         name: "Test Agent".to_string(),
         persona_id: persona_id.map(str::to_string),
@@ -66,6 +67,7 @@ fn make_agent(
         source_team: None,
         source_team_persona_slug: None,
         catalog_source: None,
+        team_catalog_source: None,
         relay_mesh: None,
         effort_level: None,
         auto_restart_on_config_change: false,

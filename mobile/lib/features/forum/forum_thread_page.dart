@@ -359,9 +359,11 @@ class _OriginalPost extends ConsumerWidget {
               GestureDetector(
                 onTap: () => showUserProfileSheet(context, post.pubkey),
                 child: _Avatar(
+                  key: ValueKey('forum-original-avatar-${post.eventId}'),
                   profile: profile,
                   pubkey: post.pubkey,
                   radius: 16,
+                  isAgent: agentMentionPubkeys.contains(pk),
                 ),
               ),
               const SizedBox(width: Grid.xxs),
@@ -462,9 +464,11 @@ class _ReplyRow extends ConsumerWidget {
               GestureDetector(
                 onTap: () => showUserProfileSheet(context, reply.pubkey),
                 child: _Avatar(
+                  key: ValueKey('forum-reply-avatar-${reply.eventId}'),
                   profile: profile,
                   pubkey: reply.pubkey,
                   radius: 12,
+                  isAgent: agentMentionPubkeys.contains(pk),
                 ),
               ),
               const SizedBox(width: Grid.xxs),
@@ -620,11 +624,14 @@ class _Avatar extends StatelessWidget {
   final UserProfile? profile;
   final String pubkey;
   final double radius;
+  final bool isAgent;
 
   const _Avatar({
+    super.key,
     required this.profile,
     required this.pubkey,
     required this.radius,
+    required this.isAgent,
   });
 
   @override
@@ -645,6 +652,7 @@ class _Avatar extends StatelessWidget {
           color: context.colors.onPrimaryContainer,
         ),
       ),
+      isAgent: isAgent,
     );
   }
 }

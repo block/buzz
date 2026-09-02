@@ -2,7 +2,9 @@
 mod app_menu;
 mod app_state;
 mod archive;
+mod build_identity;
 mod builderlab;
+mod channel_head_cache;
 mod commands;
 mod deep_link;
 mod egress_guard;
@@ -40,6 +42,7 @@ mod relay_admission;
 mod reset;
 mod secret_store;
 mod shutdown;
+mod team_catalog;
 mod templates;
 mod terminal_runtime;
 #[cfg_attr(not(test), allow(dead_code))]
@@ -94,11 +97,7 @@ use tauri_plugin_window_state::StateFlags;
 use tray_menu::show_main_window;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // mesh-llm's async chains (model download, node start/join) overflow
-    // tokio's default 2 MiB worker stacks — a stack-guard SIGABRT, not a
-    // panic. Upstream mesh-llm and mesh-console both run on 8 MiB worker
-    // stacks for this reason; give Tauri's command runtime the same headroom
-    // before anything else touches tauri::async_runtime.
+    // mesh-llm async chains overflow tokio's default 2 MiB stacks; run on 8 MiB like upstream.
     #[cfg(feature = "mesh-llm")]
     match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -129,7 +128,7 @@ pub fn run() {
             }
             // Forward any deep link URLs from the duplicate launch.
             for arg in &argv {
-                if arg.starts_with("buzz://") {
+                if crate::build_identity::is_deep_link_for_build(arg) {
                     handle_deep_link_url(app, arg);
                 }
             }
@@ -234,6 +233,7 @@ pub fn run() {
         .manage(archive::sync::ArchiveSyncState::default())
         .manage(native_relay_client::NativeRelayClient::default())
         .manage(observed_unread::ObservedUnreadStore::default())
+        .manage(channel_head_cache::ChannelHeadCacheStore::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
             #[cfg(target_os = "macos")]
@@ -314,16 +314,14 @@ pub fn run() {
             // agent spawns can resolve custom/preset runtime ids without
             // waiting for the frontend's discover_acp_providers call.  This is
             // a pure directory scan — no PATH probing, no async work.
-            {
-                let custom_dir = app_handle
-                    .path()
-                    .app_data_dir()
-                    .ok()
-                    .map(|d| d.join("custom_harnesses"));
-                managed_agents::custom_harnesses::warm_harness_registry_from_dir(
-                    custom_dir.as_deref(),
-                );
-            }
+            let custom_harness_dir = app_handle
+                .path()
+                .app_data_dir()
+                .ok()
+                .map(|d| d.join("custom_harnesses"));
+            managed_agents::custom_harnesses::warm_harness_registry_from_dir(
+                custom_harness_dir.as_deref(),
+            );
 
             // Store the AppHandle so huddle commands can emit `huddle-state-changed`
             // events via `huddle::emit_huddle_state` without threading the handle
@@ -353,10 +351,7 @@ pub fn run() {
                 // Route mesh-llm's download progress (model weights, runtime)
                 // onto Tauri events so the UI can render real progress.
                 crate::mesh_llm::install_progress_sink(&app_handle);
-                let mesh_app = app_handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    crate::mesh_llm::start_coordinator(mesh_app).await;
-                });
+                tauri::async_runtime::spawn(crate::mesh_llm::start_coordinator(app_handle.clone()));
             }
 
             // Start the localhost media streaming proxy. Uses the shared HTTP
@@ -379,6 +374,7 @@ pub fn run() {
             if let Err(error) = ensure_nest() {
                 eprintln!("buzz-desktop: failed to create nest: {error}");
             }
+            archive::spawn_warm_init(app_handle.clone());
 
             // Resolve the REPOS symlink from the persisted repos_dir BEFORE
             // agents are restored below, and decide whether restore is safe.
@@ -402,7 +398,10 @@ pub fn run() {
             // the now-inert ~/.sprout; the frontend dedupes the toast.
             // Suppressed when a reset completed this boot: the nest was wiped and
             // a fresh ~/.sprout-less state is exactly what we want.
-            if !reset_outcome.completed && migration::migrate_legacy_nest() {
+            if !crate::build_identity::is_demo_build()
+                && !reset_outcome.completed
+                && migration::migrate_legacy_nest()
+            {
                 let _ = app_handle.emit("legacy-nest-migrated", ());
             }
 
@@ -654,6 +653,7 @@ pub fn run() {
             add_reaction,
             remove_reaction,
             get_event,
+            get_events,
             show_native_notification,
             #[cfg(target_os = "macos")]
             macos_notifications::take_pending_activations,
@@ -672,6 +672,8 @@ pub fn run() {
             save_png_data_url,
             download_file,
             fetch_media_bytes,
+            cancel_media_fetch,
+            release_media_fetch,
             copy_image_to_clipboard,
             copy_text_to_clipboard,
             read_clipboard_text,
@@ -700,6 +702,7 @@ pub fn run() {
             start_managed_agent,
             stop_managed_agent,
             set_agent_managed_profiles,
+            set_thread_scoped_acp_sessions,
             set_managed_agent_start_on_app_launch,
             set_managed_agent_auto_restart,
             delete_managed_agent,
@@ -725,9 +728,13 @@ pub fn run() {
             discover_backend_providers,
             probe_backend_provider,
             persona_catalog::fetch_persona_catalog,
+            team_catalog::fetch_team_catalog,
             unread_catch_up::unread_catch_up,
             observed_unread::observed_unread_open_scope,
             observed_unread::observed_unread_ingest,
+            channel_head_cache::channel_head_cache_load,
+            channel_head_cache::channel_head_cache_store,
+            channel_head_cache::channel_head_cache_clear,
             list_personas,
             create_persona,
             update_persona,
@@ -744,6 +751,8 @@ pub fn run() {
             list_teams,
             create_team,
             update_team,
+            set_team_shared,
+            add_team_from_catalog,
             delete_team,
             export_agent_snapshot,
             card_mint_key_status,
@@ -842,6 +851,9 @@ pub fn run() {
             archive::index_observer_channel_id,
             archive::read_unindexed_observer_rows,
             archive::get_agent_usage_series,
+            archive::get_observer_retention_days,
+            archive::set_observer_retention_days,
+            archive::archive_size_stats,
             archive::sync::announce_archive_sync_epoch,
             archive::sync::start_archive_sync,
             archive::sync::stop_archive_sync,
@@ -914,7 +926,6 @@ pub fn run() {
         RunEvent::Exit => {
             shut_down_app(app_handle, &run_shutdown_done);
             app_handle.state::<ClipboardState>().release();
-
             #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
             if restart_requested.load(Ordering::SeqCst) {
                 relaunch_after_mesh_shutdown(app_handle);

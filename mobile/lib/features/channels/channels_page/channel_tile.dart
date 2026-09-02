@@ -214,6 +214,7 @@ class _DmAvatar extends ConsumerWidget {
                 fontWeight: FontWeight.w600,
               ),
             ),
+            isAgent: profile?.isAgent == true,
           ),
           Positioned(
             right: -1,

@@ -29,6 +29,7 @@ fn base() -> SpawnConfigSnapshot {
         max_turn_duration_seconds: Some(7200),
         parallelism: 1,
         effort_level: Some("high".into()),
+        session_policy: "channel".into(),
     }
 }
 
@@ -72,6 +73,7 @@ fn mutations() -> Vec<Mutation> {
         }),
         ("parallelism", |s| s.parallelism = 8),
         ("effort_level", |s| s.effort_level = None),
+        ("session_policy", |s| s.session_policy = "thread".into()),
     ]
 }
 
@@ -233,6 +235,27 @@ fn allowlisted_env_key_is_case_insensitive() {
             after: Value::String("openai".into()),
         },
         "allowlist match must be case-insensitive"
+    );
+}
+
+#[test]
+fn allowlisted_databricks_filter_shows_plain_value() {
+    let mut before = base();
+    before
+        .env
+        .insert("DATABRICKS_MODEL_FILTER".into(), "old-*".into());
+    let mut after = before.clone();
+    after
+        .env
+        .insert("DATABRICKS_MODEL_FILTER".into(), "new-*".into());
+
+    assert_eq!(
+        change_at(&diff(&before, &after), "env.DATABRICKS_MODEL_FILTER"),
+        &RestartChange::Value {
+            before: Value::String("old-*".into()),
+            after: Value::String("new-*".into()),
+        },
+        "the discovery filter is non-secret and should be reviewable"
     );
 }
 

@@ -194,11 +194,18 @@ export function InboxMessageRow({
               role={profileRole}
               triggerElement="span"
             >
-              <span className="inline-flex shrink-0 rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring">
+              <span
+                className={cn(
+                  "inline-flex shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+                  isAuthorAgent ? "rounded-[30%]" : "rounded-full",
+                )}
+              >
                 <UserAvatar
+                  accent={isAuthorAgent}
                   avatarUrl={message.avatarUrl}
                   className="h-9 w-9 shrink-0"
                   displayName={message.authorLabel}
+                  shape={isAuthorAgent ? "squircle" : "circle"}
                   size="md"
                 />
               </span>

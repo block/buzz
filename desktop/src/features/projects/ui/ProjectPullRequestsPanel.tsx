@@ -34,7 +34,6 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ChannelMember } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
-import { BuzzLoadingState } from "@/shared/ui/BuzzLoadingState";
 import {
   ProjectFeedRow,
   ProjectFeedRowCluster,
@@ -58,6 +57,7 @@ import {
 } from "./ProjectStatusProgressIcon";
 import { ProjectWorkItemGroup } from "./ProjectWorkItemGroup";
 import { ProjectWorkItemRow } from "./ProjectWorkItemRow";
+import { PullRequestsPanelSurface } from "./PullRequestsPanelSurface";
 
 export { PullRequestMetaHeader } from "./PullRequestMetaRail";
 
@@ -537,13 +537,14 @@ export function ProjectPullRequestDetail({
           ) : null}
           {pullRequest.updates.length > 0 ? (
             <div
-              className={pullRequest.content ? "mt-4 space-y-3" : "space-y-3"}
+              className={pullRequest.content ? "mt-4 space-y-4" : "space-y-4"}
             >
               <h4 className="text-sm font-semibold text-foreground">Updates</h4>
               {pullRequest.updates.map((update) => (
                 <article className="space-y-1" key={update.id}>
                   <div className="flex min-w-0 items-center justify-between gap-3">
                     <AuthorIdentity
+                      avatarSize="sm"
                       profiles={profiles}
                       pubkey={update.author}
                       role={
@@ -855,7 +856,7 @@ export function PullRequestsPanel({
   profiles,
   project,
   pullRequests,
-  selectedPullRequestId,
+  selectedPullRequest,
 }: {
   diffStats?: { additions: number; deletions: number } | null;
   error: unknown;
@@ -870,51 +871,8 @@ export function PullRequestsPanel({
   profiles?: UserProfileLookup;
   project: Project;
   pullRequests: ProjectPullRequest[];
-  selectedPullRequestId: string | null;
+  selectedPullRequest: ProjectPullRequest | null;
 }) {
-  const selectedPullRequest =
-    pullRequests.find((item) => item.id === selectedPullRequestId) ?? null;
-
-  React.useEffect(() => {
-    if (
-      selectedPullRequestId &&
-      !pullRequests.some((item) => item.id === selectedPullRequestId)
-    ) {
-      onSelectedPullRequestIdChange(null);
-    }
-  }, [onSelectedPullRequestIdChange, pullRequests, selectedPullRequestId]);
-
-  if (isLoading) {
-    return <BuzzLoadingState label="Loading reviews" />;
-  }
-
-  if (pullRequests.length === 0) {
-    return (
-      <p className="p-4 text-sm text-muted-foreground">
-        {error
-          ? "Could not load reviews for this repository."
-          : "No reviews yet."}
-      </p>
-    );
-  }
-
-  if (selectedPullRequest) {
-    return (
-      <ProjectPullRequestDetail
-        diffStats={diffStats}
-        filesChanged={filesChanged}
-        filesCount={filesCount}
-        forceOpenFiles={forceOpenFiles}
-        onOpenInlineComment={onOpenInlineComment}
-        onOpenCommit={onOpenCommit}
-        onOpenTerminal={onOpenTerminal}
-        profiles={profiles}
-        project={project}
-        pullRequest={selectedPullRequest}
-      />
-    );
-  }
-
   const groups = PULL_REQUEST_STATUS_ORDER.map((status) => ({
     items: pullRequests.filter((pullRequest) => pullRequest.status === status),
     status,
@@ -924,36 +882,60 @@ export function PullRequestsPanel({
   );
 
   return (
-    <div>
-      {groups.map(({ items, status }) => {
-        return (
-          <ProjectWorkItemGroup
-            count={items.length}
-            icon={
-              <ProjectStatusProgressIcon
-                className={`h-4 w-4 ${pullRequestStatusClassName(status)}`}
-                state={pullRequestProgressState(status)}
-              />
-            }
-            items={items.map((pullRequest) =>
-              reviewSelectionItem(project, pullRequest),
-            )}
-            key={status}
-            label={status}
-          >
-            {items.map((pullRequest) => (
-              <PullRequestRow
-                key={pullRequest.id}
-                onOpen={() => onSelectedPullRequestIdChange(pullRequest.id)}
-                profiles={profiles}
-                project={project}
-                pullRequest={pullRequest}
-                rangeItems={rangeItems}
-              />
-            ))}
-          </ProjectWorkItemGroup>
-        );
-      })}
-    </div>
+    <PullRequestsPanelSurface
+      detail={
+        selectedPullRequest ? (
+          <ProjectPullRequestDetail
+            diffStats={diffStats}
+            filesChanged={filesChanged}
+            filesCount={filesCount}
+            forceOpenFiles={forceOpenFiles}
+            onOpenInlineComment={onOpenInlineComment}
+            onOpenCommit={onOpenCommit}
+            onOpenTerminal={onOpenTerminal}
+            profiles={profiles}
+            project={project}
+            pullRequest={selectedPullRequest}
+          />
+        ) : null
+      }
+      error={error}
+      isLoading={isLoading}
+      list={
+        <div>
+          {groups.map(({ items, status }) => {
+            return (
+              <ProjectWorkItemGroup
+                count={items.length}
+                icon={
+                  <ProjectStatusProgressIcon
+                    className={`h-4 w-4 ${pullRequestStatusClassName(status)}`}
+                    state={pullRequestProgressState(status)}
+                  />
+                }
+                items={items.map((pullRequest) =>
+                  reviewSelectionItem(project, pullRequest),
+                )}
+                key={status}
+                label={status}
+              >
+                {items.map((pullRequest) => (
+                  <PullRequestRow
+                    key={pullRequest.id}
+                    onOpen={() => onSelectedPullRequestIdChange(pullRequest.id)}
+                    profiles={profiles}
+                    project={project}
+                    pullRequest={pullRequest}
+                    rangeItems={rangeItems}
+                  />
+                ))}
+              </ProjectWorkItemGroup>
+            );
+          })}
+        </div>
+      }
+      pullRequests={pullRequests}
+      selectedPullRequest={selectedPullRequest}
+    />
   );
 }
