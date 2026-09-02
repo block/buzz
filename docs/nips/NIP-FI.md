@@ -126,7 +126,8 @@ field, parsing, attachment, and no-fallback semantics.
 
 ## Client-attached transport
 
-The client sends exactly one field on the WebSocket upgrade request:
+The client sends exactly one `Nostr-Federated-Identity` field on the
+WebSocket upgrade request or protected HTTP request (see HTTP ingress):
 
 ```text
 Nostr-Federated-Identity: Bearer <compact-JWS>
@@ -456,6 +457,80 @@ immediately.
 | Malformed request body or `until` exceeds ceiling | `400` | `bad request\n` |
 | Deny set at capacity | `503` | `deny set full\n` |
 
+## HTTP ingress
+
+In enforce mode, every protected HTTP request MUST carry both a NIP-98
+authorization event and a NIP-FI assertion bound to the same key, and the
+deployment verifies both.  NIP-98 proves key possession; NIP-FI proves
+identity.  Without the assertion check, an offboarded principal's key
+continues to authorize HTTP requests for the full remaining assertion TTL —
+bypassing the identity system on every HTTP surface.
+
+### Protected surfaces
+
+A **protected HTTP surface** is a deployment-configured set of routes for
+which the deployment enforces NIP-FI admission.  In enforce mode, the
+deployment MUST apply NIP-FI verification to all routes in the protected
+set; unprotected routes outside the set are not governed by this spec.  The
+protected set MUST be configured fail-closed: a route that cannot be
+classified as exempt MUST be treated as protected.  Deployment operators
+define the set; this spec assigns no normative route names.
+
+> **Non-normative examples of surfaces that may appear in a protected set:**
+> HTTP API bridge, invite redemption, media storage, git smart-HTTP.
+
+### Request format
+
+Each protected HTTP request MUST present both of the following:
+
+```text
+Authorization: Nostr <base64url-NIP-98-event>
+Nostr-Federated-Identity: Bearer <compact-JWS>
+```
+
+`Authorization` carries the NIP-98 authorization event as specified in NIP-98.
+`Nostr-Federated-Identity` carries the compact-JWS assertion, identical in
+format to the WebSocket transport field.  The field names are distinct; they
+serve different roles and MUST NOT be combined or substituted for each other.
+A request presenting only one of the two is denied.  The rules for
+`Nostr-Federated-Identity` from Client-attached transport apply unchanged:
+missing, repeated, comma-combined, empty, malformed, non-Bearer, or
+mixed-profile fields deny.  [FI-TRACE-TRANSPORT-CLOSED]
+
+### Admission procedure
+
+On each protected HTTP request:
+
+1. Extract `Nostr-Federated-Identity`; missing or malformed → deny
+   `missing_evidence` or `evidence_rejected`.
+2. Call `VerifyAssertion`; any error → deny per the rejection table.
+3. Validate the NIP-98 `Authorization` event per NIP-98; extract the proven
+   pubkey `k` from the event.  An absent, malformed, or invalid NIP-98 event
+   → deny `missing_evidence` or `evidence_rejected` as appropriate.
+4. Assert `verified.asserted_key == k`; mismatch → deny `authorization_denied`.
+   [FI-TRACE-ASSERTION-KEY-MISMATCH]
+5. Check deny set for `(iss, k)`; active entry (`now < until`) → deny
+   `authorization_denied`.  [FI-TRACE-DENY-SET]
+6. Admit the request.
+
+### Per-request verification
+
+HTTP is sessionless.  **Every** protected request re-executes the full
+admission procedure above; there is no session lifetime, no cached admission
+decision, and no carry-over from a prior request.  The cumulative residual
+bound `max(0, min(exp, iat + maximum_assertion_age) - now)` applies per
+request — there is no per-connection lifetime partition to shorten it
+further.  Issuers SHOULD configure short assertion TTLs consistent with the
+deployment's acceptable revocation latency.
+
+### Denial responses
+
+Denial on a protected HTTP request produces an HTTP response (not a Nostr
+text frame).  The same public denial classes, status codes, and fixed body
+bytes from the Rejection and privacy table apply.  The response contains no
+free text, reason code, issuer, subject, key, claim, or timing hint.
+[FI-TRACE-DENIAL-ORACLE]
+
 ## Rejection and privacy
 
 Public class is a function only of evidence the requester supplied, never of
@@ -470,7 +545,8 @@ exception and reveals only that a required dependency is unreadable.
 | required JWKS snapshot unreadable | `authorization_unavailable` | `restricted: authorization unavailable` | `503`; `Content-Type: text/plain; charset=utf-8`; body `authorization unavailable\n` |
 
 A denial decided on a WebSocket upgrade is the HTTP response in place of `101`.
-A denial decided after the connection is established is the Nostr text.
+A denial decided on a protected HTTP request is the HTTP response.
+A denial decided after a WebSocket connection is established is the Nostr text.
 Responses contain no free text, reason code, issuer, subject, key, claim, or
 timing hint.  [FI-TRACE-DENIAL-ORACLE]
 
@@ -533,6 +609,7 @@ deployment-local identifiers.  [FI-TRACE-DISCOVERY-PRIVATE]
 | `FI-TRACE-DEPENDENCY-FAIL-CLOSED` | An unreadable JWKS snapshot denies `authorization_unavailable`; no degraded Nostr-only access. |
 | `FI-TRACE-LEASE-BOUND` | A session closes at its earliest deadline; equality at any deadline is expired. |
 | `FI-TRACE-DENY-SET` | A pubkey in the deny set is denied `authorization_denied` on admission until `now >= until`; an expired or absent entry does not deny; a past-`until` command closes sessions and does not deny future admissions; a deny-set-full command is rejected `503` without closing sessions. |
+| `FI-TRACE-HTTP-INGRESS` | A protected HTTP request with both valid headers and matching pubkeys is admitted; absent, mismatched, or invalid assertion or NIP-98 event denies; a request presenting only one of the two denies; an active deny-set entry denies; a route that cannot be classified as exempt is treated as protected. |
 | `FI-TRACE-DENIAL-ORACLE` | Each public-class row produces its exact fixed bytes; all private-state rows compare byte-identical. |
 | `FI-TRACE-DISCOVERY-PRIVATE` | Complete discovery bytes do not expose issuer, audience, or deployment-private state. |
 | `FI-TRACE-CROSS-DOMAIN-COLLISION` | Equal `sub` values under different `iss` values remain distinct identities. |
@@ -578,6 +655,14 @@ race is bounded by `max(0, min(exp, iat + maximum_assertion_age) - now)` — the
 same bound as issuer-stops-issuance without a deny call, and finite by the
 assertion contract.
 
+**HTTP ingress bypass.** Without the pairing rule, a principal whose key is
+still valid for HTTP but whose assertion has been revoked (issuer stops
+issuance or a deny-until-TTL entry is active) would retain HTTP access for
+the full remaining assertion TTL.  The pairing rule closes this gap by
+requiring assertion verification on every protected HTTP request.  The per-request
+re-verification model means there is no cached admission window; a deny-set
+entry takes effect on the very next request.
+
 **SSRF.** The JWKS fetcher implements SSRF protection: HTTPS-only URI
 validation, DNS resolution with IP deny-list enforcement, address pinning to
 prevent DNS rebinding TOCTOU, and redirect denial.  The complete IANA
@@ -594,6 +679,7 @@ is bounded before any attacker-controlled lookup.
 ## Sources
 
 - NIP-42 authentication: <https://github.com/nostr-protocol/nips/blob/6d2979b3f503a8539c983efbcdcf901bbcf9ed23/42.md>
+- NIP-98 HTTP authorization: <https://github.com/nostr-protocol/nips/blob/master/98.md>
 - JWT BCP: <https://www.rfc-editor.org/rfc/rfc8725>
 - JWT access-token profile: <https://www.rfc-editor.org/rfc/rfc9068>
 - DPoP: <https://www.rfc-editor.org/rfc/rfc9449>
