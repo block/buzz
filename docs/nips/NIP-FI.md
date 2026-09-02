@@ -290,7 +290,7 @@ the assertion contract.  [FI-TRACE-DENY-SET]
 
 The relay MUST bound the deny set size.  When the deny set is at capacity, the
 relay MUST NOT silently drop the incoming deny entry; it MUST reject the command
-with `503` so the adapter knows the entry was not recorded.  Implementations
+with `503` so the issuer knows the entry was not recorded.  Implementations
 SHOULD use an LRU or TTL-expiry policy to age out entries before reaching the
 hard cap.
 
@@ -325,7 +325,7 @@ is immediately expired); this is not an error.
 > the entry expires.
 >
 > The deny set is RAM-cache, not a database — the same operational posture as
-> the JWKS snapshot.  A relay restart clears the set; the adapter, as the
+> the JWKS snapshot.  A relay restart clears the set; the issuer, as the
 > durable system of record for revocations, SHOULD re-push still-active denies
 > when it observes a relay restart (same publish/cache pattern as JWKS).  A
 > fresh relay MAY consult the issuer before first admissions to close the
@@ -571,7 +571,7 @@ minted.  The issuer SHOULD set `until` to outlast
 the longest still-live assertion it has issued to ensure no unexpired assertion
 slides through the expiry boundary.
 
-A relay restart clears the in-memory deny set.  The adapter, as the durable
+A relay restart clears the in-memory deny set.  The issuer, as the durable
 system of record for revocations, SHOULD re-push still-active entries on
 observed restart.  The residual exposure window during the seconds-wide restart
 race is bounded by `max(0, min(exp, iat + maximum_assertion_age) - now)` — the
