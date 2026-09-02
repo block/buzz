@@ -20,9 +20,11 @@ import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
 import { TeamsSection } from "./TeamsSection";
 import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
+import { providerDeployedAgentForPersonaDelete } from "@/features/agents/lib/managedAgentControlActions";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
+import { pickProfileAgent } from "./unifiedAgentGroups";
 import { useProfilePanel } from "@/shared/context/ProfilePanelContext";
 import { useBakedBuildEnvQuery } from "@/features/agents/hooks";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
@@ -135,6 +137,25 @@ export function AgentsView() {
       }
     });
   }, []);
+
+  const handleDeletePersonaFromLibrary = React.useCallback(
+    (persona: Parameters<typeof personas.openDelete>[0]) => {
+      const linkedAgents = (agents.managedAgents ?? []).filter(
+        (candidate) => candidate.personaId === persona.id,
+      );
+      const providerAgent = providerDeployedAgentForPersonaDelete(
+        persona.id,
+        agents.managedAgents ?? [],
+        pickProfileAgent(linkedAgents),
+      );
+      if (providerAgent) {
+        void agents.handleDelete(providerAgent.pubkey);
+        return;
+      }
+      personas.openDelete(persona);
+    },
+    [agents, personas],
+  );
 
   return (
     <>
@@ -274,7 +295,7 @@ export function AgentsView() {
               onDeactivatePersona={(persona) => {
                 void personas.handleSetActive(persona, false, "library");
               }}
-              onDeletePersona={personas.openDelete}
+              onDeletePersona={handleDeletePersonaFromLibrary}
             />
 
             <TeamsSection
