@@ -16,19 +16,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::artifact::ArtifactPayload;
 use crate::error::Error;
-use crate::estimate::{self, Estimate};
+use crate::estimate::{self, ContextBudget, Estimate};
 use crate::selection::materialize;
 use crate::signal::Signal;
-use crate::spec::FoldSpec;
+use crate::spec::{FoldSpec, Order};
 use crate::transcript::{render_transcript, ShownSignal};
 
-/// Hard character budget for one run's model input (prior digest + transcript).
-pub const MAX_CONTEXT_CHARS: usize = 120_000;
+/// Emergency guard: most signals one run may show (and therefore seal).
+/// Bounds `shown_ids` so one version's provenance stays storable; the normal
+/// limit is the model-aware token budget, not this.
+pub const MAX_SHOWN_PER_RUN: usize = 1_000;
 
-/// Most signals one run may show (and therefore seal). Bounds `shown_ids` so
-/// one version's coverage list stays small; the rest of an oversized backlog
-/// stays pending for the next run.
-pub const MAX_SHOWN_PER_RUN: usize = 250;
+/// Chars one SOURCE EVENT IDS line costs (64-hex id + newline), reserved out
+/// of the budget before the transcript is rendered.
+const ID_LINE_CHARS: usize = 65;
 
 /// Largest prior artifact document a run will build on: a model-input budget.
 /// The prior digest is re-fed to the model every run, so an unbounded one
@@ -60,6 +61,19 @@ pub enum Plan {
     Ready(RunPlan),
 }
 
+/// Which constraint actually bounded a run plan — preflight reports this so
+/// every boundary is explainable, never mysterious.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunLimit {
+    /// Everything pending fits: nothing was left behind.
+    None,
+    /// The model-aware token budget bound the run; the rest stays pending.
+    TokenBudget,
+    /// The [`MAX_SHOWN_PER_RUN`] emergency guard bound the run.
+    EventCap,
+}
+
 /// A priced, ready-to-execute run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunPlan {
@@ -74,20 +88,26 @@ pub struct RunPlan {
     pub estimate: Estimate,
     /// Total uncovered signals this plan drew from (`shown.len() <=` this).
     pub pending: usize,
+    /// The model-aware budget the plan was sized against, term by term.
+    pub budget: ContextBudget,
+    /// The constraint that actually bounded this plan.
+    pub limit: RunLimit,
 }
 
 /// Plan the next run of `spec`.
 ///
 /// `prior` is the latest artifact version (if any), `covered` the union of
 /// `shown_ids` across all prior versions, `fetched` the raw signals the
-/// caller fetched for the selection's window, and `names` an optional
-/// pubkey→display-name map for transcript lines.
+/// caller fetched for the selection's window, `names` an optional
+/// pubkey→display-name map for transcript lines, and `order` an optional
+/// one-run override of the spec's traversal policy.
 pub fn plan_run(
     spec: &FoldSpec,
     prior: Option<&ArtifactPayload>,
     covered: &BTreeSet<String>,
     fetched: Vec<Signal>,
     names: &BTreeMap<String, String>,
+    order: Option<Order>,
 ) -> Result<Plan, Error> {
     let signals = materialize(fetched);
     let new: Vec<Signal> = signals
@@ -124,16 +144,31 @@ pub fn plan_run(
         ),
         None => String::new(),
     };
-    // A prior under the prior-digest budget always leaves ample transcript
-    // budget (40k bytes of parent against a 120k-char context).
-    let raw_budget = MAX_CONTEXT_CHARS.saturating_sub(parent.chars().count() + 2);
-    let render = render_transcript(&new, names, raw_budget, MAX_SHOWN_PER_RUN);
+    // Model-aware budget: window − reserved output − safety margin, then
+    // every fixed part of the input (task, guidance, prior, id list) is
+    // charged before the transcript gets the remainder.
+    let budget = estimate::context_budget(&spec.model);
+    let order = order.unwrap_or(spec.order);
+    let fixed_overhead = spec.instructions.chars().count()
+        + ENGINE_GUIDANCE.chars().count()
+        + parent.chars().count()
+        + new.len().min(MAX_SHOWN_PER_RUN) * ID_LINE_CHARS
+        + 128; // section headers + separators
+    let raw_budget = budget.input_budget_chars.saturating_sub(fixed_overhead);
+    let render = render_transcript(&new, names, raw_budget, MAX_SHOWN_PER_RUN, order);
     if !new.is_empty() && render.shown.is_empty() {
         return Ok(Plan::Stalled {
             reason: "no pending event fits the remaining context budget".to_string(),
             pending: new.len(),
         });
     }
+    let limit = if !render.truncated {
+        RunLimit::None
+    } else if render.shown.len() >= MAX_SHOWN_PER_RUN {
+        RunLimit::EventCap
+    } else {
+        RunLimit::TokenBudget
+    };
     let mut transcript = [parent.as_str(), render.body.as_str()]
         .iter()
         .filter(|part| !part.is_empty())
@@ -158,6 +193,8 @@ pub fn plan_run(
         truncated: render.truncated,
         estimate: est,
         pending: new.len(),
+        budget,
+        limit,
     }))
 }
 
@@ -216,6 +253,7 @@ mod tests {
             },
             model: "haiku".to_string(),
             instructions: "Maintain the digest.".to_string(),
+            order: Order::default(),
             meta: None,
         }
     }
@@ -264,6 +302,7 @@ mod tests {
             &covered,
             vec![sig(&a, 100, "seen")],
             &BTreeMap::new(),
+            None,
         )
         .expect("plan");
         assert_eq!(plan, Plan::Cached);
@@ -282,6 +321,7 @@ mod tests {
             &covered,
             vec![sig(&a, 100, "seen")],
             &BTreeMap::new(),
+            None,
         )
         .expect("plan");
         let Plan::Ready(run) = plan else {
@@ -319,6 +359,7 @@ mod tests {
             &BTreeSet::new(),
             vec![sig(&hex_id('b'), 200, "pending")],
             &BTreeMap::new(),
+            None,
         )
         .expect("plan");
         let Plan::Stalled { reason, pending } = plan else {
@@ -335,14 +376,30 @@ mod tests {
         let prior = artifact_v1(&spec, &[(&a, 100)]);
         spec.selection.channels.push("ch2".to_string());
         let covered = BTreeSet::from([a]);
-        let plan = plan_run(&spec, Some(&prior), &covered, vec![], &BTreeMap::new()).expect("plan");
+        let plan = plan_run(
+            &spec,
+            Some(&prior),
+            &covered,
+            vec![],
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("plan");
         assert!(matches!(plan, Plan::Ready(_)), "got {plan:?}");
     }
 
     #[test]
     fn no_prior_and_no_signals_stalls_instead_of_folding_nothing() {
         let spec = spec();
-        let plan = plan_run(&spec, None, &BTreeSet::new(), vec![], &BTreeMap::new()).expect("plan");
+        let plan = plan_run(
+            &spec,
+            None,
+            &BTreeSet::new(),
+            vec![],
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("plan");
         let Plan::Stalled { reason, pending } = plan else {
             panic!("expected Stalled, got {plan:?}");
         };
@@ -367,6 +424,7 @@ mod tests {
             &covered,
             vec![new_sig],
             &BTreeMap::new(),
+            None,
         )
         .expect("plan");
         let Plan::Ready(run) = plan else {
@@ -388,6 +446,7 @@ mod tests {
             &BTreeSet::new(),
             vec![sig(&b, 200, "hello")],
             &BTreeMap::new(),
+            None,
         )
         .expect("plan");
         let Plan::Ready(run) = plan else {
@@ -416,6 +475,7 @@ mod tests {
             &BTreeSet::new(),
             vec![sig(&hex_id('b'), 200, "hello")],
             &BTreeMap::new(),
+            None,
         )
         .expect("plan");
         let Plan::Ready(run) = plan else {
@@ -431,24 +491,120 @@ mod tests {
     #[test]
     fn oversized_backlog_chunks_honestly_and_never_seals_unread() {
         let spec = spec();
-        // Enough large signals that they cannot all fit one run's budget.
-        let fetched: Vec<Signal> = (0..40)
+        // Enough large signals to overflow even the model-aware haiku budget
+        // (300 × 5k chars ≈ 1.5M chars against a ~700k-char budget).
+        let fetched: Vec<Signal> = (0..300)
             .map(|i| sig(&format!("{i:064}"), 1_000 + i as i64, &"m".repeat(5_000)))
             .collect();
-        let plan =
-            plan_run(&spec, None, &BTreeSet::new(), fetched, &BTreeMap::new()).expect("plan");
+        let plan = plan_run(
+            &spec,
+            None,
+            &BTreeSet::new(),
+            fetched,
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("plan");
         let Plan::Ready(run) = plan else {
             panic!("expected Ready");
         };
         assert!(run.truncated);
-        assert!(run.shown.len() < 40, "must not claim the whole backlog");
-        assert_eq!(run.pending, 40);
+        assert!(run.shown.len() < 300, "must not claim the whole backlog");
+        assert_eq!(run.pending, 300);
+        assert_eq!(run.limit, RunLimit::TokenBudget);
+        // Default order walks the backlog forward: the OLDEST chunk first.
+        assert_eq!(run.shown[0].id, format!("{:064}", 0));
+        let n = run.shown.len();
+        assert_eq!(run.shown[n - 1].id, format!("{:064}", n - 1));
         // Coverage seals only what was shown; the rest stays pending.
         let cited = run.shown[0].id.clone();
         let out = digest(&format!("- chunk one [event:{cited}]"));
         let v1 = complete_run(&spec, None, &run, &out, 1_700_000_300);
         assert_eq!(v1.shown_ids.len(), run.shown.len());
         assert!(v1.truncated);
+    }
+
+    #[test]
+    fn newest_first_override_keeps_the_freshest_chunk() {
+        let spec = spec();
+        let fetched: Vec<Signal> = (0..300)
+            .map(|i| sig(&format!("{i:064}"), 1_000 + i as i64, &"m".repeat(5_000)))
+            .collect();
+        let plan = plan_run(
+            &spec,
+            None,
+            &BTreeSet::new(),
+            fetched,
+            &BTreeMap::new(),
+            Some(Order::NewestFirst),
+        )
+        .expect("plan");
+        let Plan::Ready(run) = plan else {
+            panic!("expected Ready");
+        };
+        assert!(run.truncated);
+        // The freshest event makes the cut; older ones stay pending.
+        assert_eq!(run.shown.last().expect("shown").id, format!("{:064}", 299));
+        assert_ne!(run.shown[0].id, format!("{:064}", 0));
+    }
+
+    #[test]
+    fn known_model_budget_folds_far_past_the_old_flat_ceiling() {
+        // 40 × 5k chars ≈ 200k chars ≈ 50k tokens: over the old 120k-char
+        // ceiling, comfortably inside haiku's model-aware budget — one run,
+        // nothing left behind, and the plan says so.
+        let spec = spec();
+        let fetched: Vec<Signal> = (0..40)
+            .map(|i| sig(&format!("{i:064}"), 1_000 + i as i64, &"m".repeat(5_000)))
+            .collect();
+        let plan = plan_run(
+            &spec,
+            None,
+            &BTreeSet::new(),
+            fetched,
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("plan");
+        let Plan::Ready(run) = plan else {
+            panic!("expected Ready");
+        };
+        assert!(!run.truncated);
+        assert_eq!(run.shown.len(), 40);
+        assert_eq!(run.limit, RunLimit::None);
+        assert!(
+            run.estimate.est_input_tokens > 30_000,
+            "the old ceiling stopped near 30k tokens; got {}",
+            run.estimate.est_input_tokens
+        );
+        assert_eq!(run.estimate.window_fit.fits, Some(true));
+        assert_eq!(run.budget.model_window, Some(200_000));
+    }
+
+    #[test]
+    fn event_cap_is_the_emergency_guard_and_is_reported() {
+        let spec = spec();
+        // Tiny signals: the token budget would hold thousands, so the
+        // MAX_SHOWN_PER_RUN guard binds — and the plan must say that.
+        let fetched: Vec<Signal> = (0..MAX_SHOWN_PER_RUN + 500)
+            .map(|i| sig(&format!("{i:064}"), 1_000 + i as i64, "m"))
+            .collect();
+        let plan = plan_run(
+            &spec,
+            None,
+            &BTreeSet::new(),
+            fetched,
+            &BTreeMap::new(),
+            None,
+        )
+        .expect("plan");
+        let Plan::Ready(run) = plan else {
+            panic!("expected Ready");
+        };
+        assert!(run.truncated);
+        assert_eq!(run.shown.len(), MAX_SHOWN_PER_RUN);
+        assert_eq!(run.limit, RunLimit::EventCap);
+        assert_eq!(run.pending, MAX_SHOWN_PER_RUN + 500);
     }
 
     #[test]
@@ -461,6 +617,7 @@ mod tests {
             &BTreeSet::new(),
             vec![sig(&b, 200, "hello")],
             &BTreeMap::new(),
+            None,
         )
         .expect("plan");
         let Plan::Ready(run) = plan else {
@@ -488,6 +645,7 @@ mod tests {
             &covered,
             vec![sig(&b, 200, "next")],
             &BTreeMap::new(),
+            None,
         )
         .expect("plan");
         let Plan::Ready(run) = plan else {

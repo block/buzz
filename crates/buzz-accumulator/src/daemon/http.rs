@@ -15,7 +15,7 @@ use axum::{Json, Router};
 use serde_json::{json, Value};
 
 use crate::runner::FoldRunner;
-use crate::{FoldSpec, Selection};
+use crate::{FoldSpec, Order, Selection};
 
 use super::folds::{self, FoldError, RunGuard, WindowClamp};
 use super::publish::Publisher;
@@ -276,10 +276,12 @@ async fn get_fold(
         .await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, format!("fold not found: {name}")))?;
     let chain = s.store.artifacts(&name).await?;
+    let coverage = folds::coverage(&s.store, &name).await?;
     Ok(Json(json!({
         "spec": spec,
         "versions": chain.len(),
         "latest": chain.last().map(artifact_summary),
+        "coverage": coverage,
     })))
 }
 
@@ -289,6 +291,8 @@ struct PutFoldBody {
     model: String,
     /// Defaults to the built-in running-digest task.
     instructions: Option<String>,
+    /// Backlog traversal policy; defaults to oldest-first.
+    order: Option<Order>,
     /// Free-form client-owned JSON, stored verbatim and never read by the
     /// engine (see [`FoldSpec::meta`]).
     meta: Option<serde_json::Value>,
@@ -307,6 +311,7 @@ async fn put_fold(
             .instructions
             .filter(|i| !i.trim().is_empty())
             .unwrap_or_else(|| crate::spec::DEFAULT_INSTRUCTIONS.to_string()),
+        order: body.order.unwrap_or_default(),
         meta: body.meta,
     };
     spec.validate()?;
@@ -334,6 +339,8 @@ async fn delete_fold(
 struct PreflightBody {
     #[serde(flatten)]
     window: WindowBody,
+    /// One-run override of the fold's traversal policy.
+    order: Option<Order>,
     /// When true, the Ready plan carries the exact string the model would
     /// receive — the "show me what's behind the curtain" seam.
     #[serde(default)]
@@ -346,19 +353,42 @@ async fn preflight_fold(
     body: Option<Json<PreflightBody>>,
 ) -> Result<Json<Value>, ApiError> {
     let Json(body) = body.unwrap_or_default();
-    let out = folds::preflight(&s.store, &name, body.window.clamp(), body.include_input).await?;
+    let out = folds::preflight(
+        &s.store,
+        &name,
+        body.window.clamp(),
+        body.include_input,
+        body.order,
+    )
+    .await?;
     Ok(Json(
         serde_json::to_value(out).unwrap_or_else(|_| json!({})),
     ))
 }
 
+#[derive(Debug, Default, serde::Deserialize)]
+struct RunBody {
+    #[serde(flatten)]
+    window: WindowBody,
+    /// One-run override of the fold's traversal policy.
+    order: Option<Order>,
+}
+
 async fn run_fold(
     State(s): State<AppState>,
     Path(name): Path<String>,
-    body: Option<Json<WindowBody>>,
+    body: Option<Json<RunBody>>,
 ) -> Result<Json<Value>, ApiError> {
-    let clamp = body.map(|Json(w)| w.clamp()).unwrap_or((None, None));
-    let out = folds::run_fold(&s.store, s.runner.clone(), &s.runs, &name, clamp).await?;
+    let Json(body) = body.unwrap_or_default();
+    let out = folds::run_fold(
+        &s.store,
+        s.runner.clone(),
+        &s.runs,
+        &name,
+        body.window.clamp(),
+        body.order,
+    )
+    .await?;
     Ok(Json(
         serde_json::to_value(out).unwrap_or_else(|_| json!({})),
     ))
@@ -366,6 +396,7 @@ async fn run_fold(
 
 fn artifact_summary(a: &crate::ArtifactPayload) -> Value {
     json!({
+        "fold": a.fold,
         "version": a.version,
         "created_at": a.created_at,
         "shown": a.shown_ids.len(),
@@ -557,6 +588,11 @@ mod tests {
             .expect("req");
         let resp = app.clone().oneshot(get).await.expect("resp");
         assert_eq!(resp.status(), StatusCode::OK);
+        let v = body_json(resp).await;
+        assert_eq!(v["coverage"]["processed"], 0);
+        assert_eq!(v["coverage"]["pending"], 0);
+        assert_eq!(v["coverage"]["complete"], false);
+        assert_eq!(v["spec"]["order"], "oldest-first");
 
         let del = Request::delete("/folds/weekly")
             .body(Body::empty())
@@ -607,6 +643,8 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let v = body_json(resp).await;
         assert_eq!(v["plan"], "stalled");
+        assert_eq!(v["coverage"]["pending"], 0);
+        assert_eq!(v["coverage"]["complete"], false);
     }
 
     fn seeded(id_char: char, ts: i64) -> super::super::store::StoredEvent {

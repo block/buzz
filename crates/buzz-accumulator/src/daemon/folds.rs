@@ -11,9 +11,23 @@ use std::sync::{Arc, Mutex};
 
 use crate::run::Plan;
 use crate::runner::FoldRunner;
-use crate::{complete_run, plan_run, ArtifactPayload, FoldSpec};
+use crate::{complete_run, plan_run, ArtifactPayload, FoldSpec, Order};
 
 use super::store::Store;
+
+/// Where a fold's coverage stands over its (clamped) window — the explicit
+/// completion state for a multi-pass baseline.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct Coverage {
+    /// Matching signals already covered by the chain.
+    pub processed: usize,
+    /// Matching signals not yet covered.
+    pub pending: usize,
+    /// True when a frozen selection is fully covered: the fold is done
+    /// forever. A live fold is never complete — at best it is caught up
+    /// (`pending == 0`).
+    pub complete: bool,
+}
 
 /// A fold-run outcome, HTTP-shaped.
 #[derive(Debug, serde::Serialize)]
@@ -50,29 +64,38 @@ pub enum RunOutcome {
     },
 }
 
-/// Preflight summary, HTTP-shaped.
+/// Preflight summary, HTTP-shaped. Every variant carries the fold's coverage
+/// state so a multi-pass baseline always knows where it stands.
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "plan", rename_all = "snake_case")]
 pub enum PreflightOutcome {
     /// Nothing to do.
-    Cached,
+    Cached {
+        /// Where coverage stands.
+        coverage: Coverage,
+    },
     /// Would not run.
     Stalled {
         /// Why.
         reason: String,
-        /// New (uncovered) signals waiting in the window.
-        pending: usize,
+        /// Where coverage stands (`pending` counts the waiting signals).
+        coverage: Coverage,
     },
     /// Would run: what the model would see and what it would cost.
     Ready {
-        /// Signals that would be shown.
+        /// Signals that would be shown ("selected").
         shown: usize,
-        /// New signals in the window (includes the shown ones).
-        pending: usize,
+        /// Where coverage stands (`pending` includes the shown ones).
+        coverage: Coverage,
         /// Whether the window would be chunked.
         truncated: bool,
-        /// Zero-spend input-size estimate (tokens + window fit).
+        /// Zero-spend input-size estimate (tokens + window fit + headroom).
         estimate: crate::estimate::Estimate,
+        /// The model-aware budget the plan was sized against, term by term.
+        budget: crate::estimate::ContextBudget,
+        /// The constraint that actually bounded this plan — the chunk
+        /// rationale, stated instead of implied.
+        limit: crate::RunLimit,
         /// Window actually queried, `[since, until_exclusive)`.
         window: (i64, i64),
         /// The exact string the model would receive — the transparency seam
@@ -142,12 +165,14 @@ impl Drop for RunToken {
 pub type WindowClamp = (Option<i64>, Option<i64>);
 
 /// Loads spec + chain and plans a run over the selection's window (narrowed
-/// by `clamp`). Returns the resolved window alongside the plan.
+/// by `clamp`), with an optional one-run `order` override. Returns the
+/// resolved window and coverage state alongside the plan.
 async fn plan(
     store: &Store,
     name: &str,
     clamp: WindowClamp,
-) -> Result<(FoldSpec, Vec<ArtifactPayload>, Plan, (i64, i64)), FoldError> {
+    order: Option<Order>,
+) -> Result<(FoldSpec, Vec<ArtifactPayload>, Plan, (i64, i64), Coverage), FoldError> {
     let spec = store
         .get_fold(name)
         .await?
@@ -162,10 +187,44 @@ async fn plan(
     let fetched = store
         .query_signals(&spec.selection, since, until_exclusive)
         .await?;
+    let processed = fetched.iter().filter(|s| covered.contains(&s.id)).count();
+    let pending = fetched.len() - processed;
+    let coverage = Coverage {
+        processed,
+        pending,
+        complete: spec.selection.is_frozen() && pending == 0,
+    };
     let authors: BTreeSet<String> = fetched.iter().map(|s| s.pubkey.clone()).collect();
     let names = store.names(&authors).await?;
-    let plan = plan_run(&spec, chain.last(), &covered, fetched, &names)?;
-    Ok((spec, chain, plan, (since, until_exclusive)))
+    let plan = plan_run(&spec, chain.last(), &covered, fetched, &names, order)?;
+    Ok((spec, chain, plan, (since, until_exclusive), coverage))
+}
+
+/// Where a fold's coverage stands over its own window — the cheap state
+/// lookup behind `GET /folds/{name}`.
+pub async fn coverage(store: &Store, name: &str) -> Result<Coverage, FoldError> {
+    let spec = store
+        .get_fold(name)
+        .await?
+        .ok_or_else(|| FoldError::NotFound(name.to_string()))?;
+    let now = chrono::Utc::now().timestamp();
+    let (since, until_exclusive) = spec.selection.resolve_window(None, None, now);
+    let covered: BTreeSet<String> = store
+        .artifacts(name)
+        .await?
+        .iter()
+        .flat_map(|a| a.shown_ids.iter().cloned())
+        .collect();
+    let fetched = store
+        .query_signals(&spec.selection, since, until_exclusive)
+        .await?;
+    let processed = fetched.iter().filter(|s| covered.contains(&s.id)).count();
+    let pending = fetched.len() - processed;
+    Ok(Coverage {
+        processed,
+        pending,
+        complete: spec.selection.is_frozen() && pending == 0,
+    })
 }
 
 /// Zero-spend preflight: what would a run do, and at what estimated cost?
@@ -176,32 +235,37 @@ pub async fn preflight(
     name: &str,
     clamp: WindowClamp,
     include_input: bool,
+    order: Option<Order>,
 ) -> Result<PreflightOutcome, FoldError> {
-    let (_, _, plan, window) = plan(store, name, clamp).await?;
+    let (_, _, plan, window, coverage) = plan(store, name, clamp, order).await?;
     Ok(match plan {
-        Plan::Cached => PreflightOutcome::Cached,
-        Plan::Stalled { reason, pending } => PreflightOutcome::Stalled { reason, pending },
+        Plan::Cached => PreflightOutcome::Cached { coverage },
+        Plan::Stalled { reason, .. } => PreflightOutcome::Stalled { reason, coverage },
         Plan::Ready(rp) => PreflightOutcome::Ready {
             shown: rp.shown.len(),
-            pending: rp.pending,
+            coverage,
             truncated: rp.truncated,
             estimate: rp.estimate,
+            budget: rp.budget,
+            limit: rp.limit,
             window,
             model_input: include_input.then_some(rp.model_input),
         },
     })
 }
 
-/// Runs one fold turn over the selection's window (narrowed by `clamp`).
+/// Runs one fold turn over the selection's window (narrowed by `clamp`),
+/// with an optional one-run `order` override.
 pub async fn run_fold(
     store: &Store,
     runner: Arc<dyn FoldRunner + Send + Sync>,
     guard: &RunGuard,
     name: &str,
     clamp: WindowClamp,
+    order: Option<Order>,
 ) -> Result<RunOutcome, FoldError> {
     let _token = guard.acquire(name)?;
-    let (spec, chain, plan, _) = plan(store, name, clamp).await?;
+    let (spec, chain, plan, _, _) = plan(store, name, clamp, order).await?;
     let run_plan = match plan {
         Plan::Cached => return Ok(RunOutcome::Cached),
         Plan::Stalled { reason, pending } => return Ok(RunOutcome::Stalled { reason, pending }),
@@ -259,6 +323,7 @@ mod tests {
             },
             model: "test-model".into(),
             instructions: "digest the channel".into(),
+            order: Order::default(),
             meta: None,
         };
         spec.validate().expect("valid");
@@ -281,20 +346,22 @@ mod tests {
     #[tokio::test]
     async fn preflight_prices_before_any_spend() {
         let store = store_with_fold_and_signal().await;
-        let out = preflight(&store, "weekly", (None, None), false)
+        let out = preflight(&store, "weekly", (None, None), false, None)
             .await
             .expect("preflight");
         match out {
             PreflightOutcome::Ready {
                 shown,
-                pending,
+                coverage,
                 model_input,
                 ..
             } => {
                 assert_eq!(shown, 1);
                 // Engine semantics: pending counts every new signal in the
                 // window, including the ones that would be shown.
-                assert_eq!(pending, 1);
+                assert_eq!(coverage.pending, 1);
+                assert_eq!(coverage.processed, 0);
+                assert!(!coverage.complete, "live fold is never complete");
                 assert!(model_input.is_none(), "input only rides when asked for");
             }
             other => panic!("expected ready, got {other:?}"),
@@ -304,7 +371,7 @@ mod tests {
     #[tokio::test]
     async fn preflight_can_expose_the_exact_model_input() {
         let store = store_with_fold_and_signal().await;
-        let out = preflight(&store, "weekly", (None, None), true)
+        let out = preflight(&store, "weekly", (None, None), true, None)
             .await
             .expect("preflight");
         match out {
@@ -325,7 +392,7 @@ mod tests {
         let output = format!("Just a paragraph citing [event:{id}], no headings.");
         let runner = Arc::new(FakeRunner(output.clone()));
         let guard = RunGuard::default();
-        let out = run_fold(&store, runner.clone(), &guard, "weekly", (None, None))
+        let out = run_fold(&store, runner.clone(), &guard, "weekly", (None, None), None)
             .await
             .expect("run");
         match out {
@@ -340,7 +407,7 @@ mod tests {
             other => panic!("expected folded, got {other:?}"),
         }
         // Same window again: engine reports cached, no new version.
-        let again = run_fold(&store, runner, &guard, "weekly", (None, None))
+        let again = run_fold(&store, runner, &guard, "weekly", (None, None), None)
             .await
             .expect("rerun");
         assert!(matches!(again, RunOutcome::Cached), "got {again:?}");
@@ -363,7 +430,7 @@ mod tests {
 
         let runner = Arc::new(FakeRunner("the day, summarized".into()));
         let guard = RunGuard::default();
-        let out = run_fold(&store, runner.clone(), &guard, "weekly", (None, None))
+        let out = run_fold(&store, runner.clone(), &guard, "weekly", (None, None), None)
             .await
             .expect("run");
         assert!(matches!(out, RunOutcome::Folded { .. }), "got {out:?}");
@@ -382,23 +449,139 @@ mod tests {
             }])
             .await
             .expect("late event");
-        let pf = preflight(&store, "weekly", (None, None), false)
+        let pf = preflight(&store, "weekly", (None, None), false, None)
             .await
             .expect("preflight");
-        assert!(matches!(pf, PreflightOutcome::Cached), "got {pf:?}");
+        assert!(matches!(pf, PreflightOutcome::Cached { .. }), "got {pf:?}");
         // A clamp can only narrow, never widen past the freeze.
-        let pf = preflight(&store, "weekly", (Some(0), Some(10_000)), false)
+        let pf = preflight(&store, "weekly", (Some(0), Some(10_000)), false, None)
             .await
             .expect("preflight");
-        assert!(matches!(pf, PreflightOutcome::Cached), "got {pf:?}");
+        assert!(matches!(pf, PreflightOutcome::Cached { .. }), "got {pf:?}");
     }
 
     #[tokio::test]
     async fn unknown_fold_is_not_found() {
         let store = Store::open(":memory:").await.expect("open");
-        let err = preflight(&store, "nope", (None, None), false)
+        let err = preflight(&store, "nope", (None, None), false, None)
             .await
             .expect_err("missing fold");
         assert!(matches!(err, FoldError::NotFound(_)));
+    }
+
+    /// Riley's acceptance test: a backlog larger than one call bootstraps
+    /// oldest → newest across repeated runs with no skipped or duplicate
+    /// `shown_ids`, each run sized by the model-aware budget with the
+    /// limiting constraint reported; the finished baseline then absorbs one
+    /// newly arrived event without replaying covered history.
+    #[tokio::test]
+    async fn bootstrap_walks_the_backlog_then_increments_without_replay() {
+        let store = store_with_fold_and_signal().await;
+        // Replace the seed with a 60-event backlog too big for one run under
+        // the unknown-model fallback budget (~120k chars vs 60 × 5k-char events).
+        let backlog: Vec<super::super::store::StoredEvent> = (0..60)
+            .map(|i| super::super::store::StoredEvent {
+                id: format!("{i:064}"),
+                channel: Some(CHANNEL.into()),
+                pubkey: "a".repeat(64),
+                kind: 9,
+                created_at: 1_000 + i as i64,
+                content: "m".repeat(5_000),
+                raw: "{}".into(),
+            })
+            .collect();
+        store.upsert_events(&backlog).await.expect("seed backlog");
+        let all_ids: Vec<String> = std::iter::once("e".repeat(64))
+            .chain((0..60).map(|i| format!("{i:064}")))
+            .collect();
+
+        let runner = Arc::new(FakeRunner("baseline chunk".into()));
+        let guard = RunGuard::default();
+        let mut covered_in_order: Vec<String> = Vec::new();
+        let mut runs = 0;
+        loop {
+            let pf = preflight(&store, "weekly", (None, None), false, None)
+                .await
+                .expect("preflight");
+            match pf {
+                PreflightOutcome::Ready {
+                    shown,
+                    coverage,
+                    truncated,
+                    limit,
+                    ..
+                } => {
+                    // Preflight explains the boundary truthfully: a chunked
+                    // run names its constraint, a final run reports none.
+                    assert_eq!(
+                        coverage.pending,
+                        all_ids.len() - covered_in_order.len(),
+                        "pending must track the uncovered remainder"
+                    );
+                    assert_eq!(coverage.processed, covered_in_order.len());
+                    if truncated {
+                        assert!(shown < coverage.pending);
+                        assert_eq!(limit, crate::RunLimit::TokenBudget);
+                    } else {
+                        assert_eq!(shown, coverage.pending);
+                        assert_eq!(limit, crate::RunLimit::None);
+                    }
+                }
+                other => panic!("expected ready mid-bootstrap, got {other:?}"),
+            }
+            let out = run_fold(&store, runner.clone(), &guard, "weekly", (None, None), None)
+                .await
+                .expect("run");
+            let RunOutcome::Folded { artifact, .. } = out else {
+                panic!("expected folded, got {out:?}");
+            };
+            covered_in_order.extend(artifact.shown_ids.iter().cloned());
+            runs += 1;
+            assert!(runs < 20, "bootstrap must converge");
+            if covered_in_order.len() == all_ids.len() {
+                break;
+            }
+        }
+        assert!(runs > 1, "the backlog must not fit one call");
+        // Earliest → latest, no skips, no duplicates: the runs' shown_ids
+        // concatenate to exactly the chronological id list.
+        assert_eq!(covered_in_order, all_ids);
+
+        // Baseline done: the live fold is caught up (never "complete").
+        let pf = preflight(&store, "weekly", (None, None), false, None)
+            .await
+            .expect("preflight");
+        let PreflightOutcome::Cached { coverage } = pf else {
+            panic!("expected cached after bootstrap, got {pf:?}");
+        };
+        assert_eq!(coverage.processed, all_ids.len());
+        assert_eq!(coverage.pending, 0);
+        assert!(!coverage.complete, "live selection is never complete");
+
+        // One newly arrived event folds without replaying covered history.
+        let late = "f".repeat(64);
+        store
+            .upsert_events(&[super::super::store::StoredEvent {
+                id: late.clone(),
+                channel: Some(CHANNEL.into()),
+                pubkey: "a".repeat(64),
+                kind: 9,
+                created_at: 9_000,
+                content: "the new arrival".into(),
+                raw: "{}".into(),
+            }])
+            .await
+            .expect("late event");
+        let out = run_fold(&store, runner, &guard, "weekly", (None, None), None)
+            .await
+            .expect("incremental run");
+        let RunOutcome::Folded { artifact, .. } = out else {
+            panic!("expected folded, got {out:?}");
+        };
+        assert_eq!(
+            artifact.shown_ids,
+            vec![late],
+            "incremental run folds exactly the frontier, no replay"
+        );
     }
 }

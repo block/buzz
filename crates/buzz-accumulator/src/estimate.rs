@@ -50,6 +50,68 @@ pub fn estimate_tokens(chars: usize) -> u64 {
     chars.div_ceil(4) as u64
 }
 
+/// Output tokens reserved out of the model window before sizing the input.
+pub const RESERVED_OUTPUT_TOKENS: u64 = 16_384;
+
+/// Safety margin reserved for tokenizer drift (chars/4 is a heuristic) and
+/// the runner's own system prompt.
+pub const SAFETY_MARGIN_TOKENS: u64 = 8_192;
+
+/// Conservative input budget when the model's window is not curated — the
+/// pre-model-aware planning ceiling, kept as the honest fallback.
+pub const FALLBACK_INPUT_BUDGET_CHARS: usize = 120_000;
+
+/// Emergency hard cap on one run's input, whatever the window says. A guard,
+/// not a target: it only binds if a future curated window would push a single
+/// input past a megabyte of text.
+pub const EMERGENCY_MAX_INPUT_CHARS: usize = 1_000_000;
+
+/// How much input one run may plan for a model, and where that number came
+/// from. Derived from the curated window minus explicit reservations —
+/// preflight surfaces every term so a boundary is always explainable.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ContextBudget {
+    /// Curated window size, if known.
+    pub model_window: Option<u64>,
+    /// Tokens reserved for the model's output.
+    pub reserved_output_tokens: u64,
+    /// Tokens reserved for estimate drift + runner system prompt.
+    pub safety_margin_tokens: u64,
+    /// Tokens the planned input may use (window − reservations, or the
+    /// fallback for an unknown model).
+    pub input_budget_tokens: u64,
+    /// The same budget in chars (tokens × 4), the unit planning works in.
+    pub input_budget_chars: usize,
+}
+
+/// Compute the planning budget for `model`.
+///
+/// Known window: `window − reserved output − safety margin`, in chars, capped
+/// by [`EMERGENCY_MAX_INPUT_CHARS`]. Unknown window: the honest conservative
+/// fallback rather than a guess.
+pub fn context_budget(model: &str) -> ContextBudget {
+    match MODEL_WINDOWS.iter().find(|(m, _)| *m == model) {
+        Some((_, window)) => {
+            let tokens = window.saturating_sub(RESERVED_OUTPUT_TOKENS + SAFETY_MARGIN_TOKENS);
+            let chars = ((tokens as usize) * 4).min(EMERGENCY_MAX_INPUT_CHARS);
+            ContextBudget {
+                model_window: Some(*window),
+                reserved_output_tokens: RESERVED_OUTPUT_TOKENS,
+                safety_margin_tokens: SAFETY_MARGIN_TOKENS,
+                input_budget_tokens: (chars / 4) as u64,
+                input_budget_chars: chars,
+            }
+        }
+        None => ContextBudget {
+            model_window: None,
+            reserved_output_tokens: RESERVED_OUTPUT_TOKENS,
+            safety_margin_tokens: SAFETY_MARGIN_TOKENS,
+            input_budget_tokens: (FALLBACK_INPUT_BUDGET_CHARS / 4) as u64,
+            input_budget_chars: FALLBACK_INPUT_BUDGET_CHARS,
+        },
+    }
+}
+
 /// Report whether an input-token estimate fits `model`'s curated window.
 pub fn window_fit(model: &str, est_input_tokens: u64) -> WindowFit {
     match MODEL_WINDOWS.iter().find(|(m, _)| *m == model) {
@@ -114,5 +176,29 @@ mod tests {
         let f = window_fit("sonnet", 10);
         assert_eq!(f.fits, Some(true));
         assert_eq!(f.headroom_tokens, Some(199_990));
+    }
+
+    #[test]
+    fn known_model_budget_reserves_output_and_safety() {
+        let b = context_budget("haiku");
+        assert_eq!(b.model_window, Some(200_000));
+        assert_eq!(
+            b.input_budget_tokens,
+            200_000 - RESERVED_OUTPUT_TOKENS - SAFETY_MARGIN_TOKENS
+        );
+        assert_eq!(b.input_budget_chars, b.input_budget_tokens as usize * 4);
+        assert!(
+            b.input_budget_chars > 4 * FALLBACK_INPUT_BUDGET_CHARS,
+            "a 200k window must not be capped near the 30k-token fallback"
+        );
+        assert!(b.input_budget_chars <= EMERGENCY_MAX_INPUT_CHARS);
+    }
+
+    #[test]
+    fn unknown_model_budget_falls_back_conservatively() {
+        let b = context_budget("mystery-model");
+        assert_eq!(b.model_window, None);
+        assert_eq!(b.input_budget_chars, FALLBACK_INPUT_BUDGET_CHARS);
+        assert_eq!(b.input_budget_tokens, 30_000);
     }
 }

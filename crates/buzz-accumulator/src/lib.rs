@@ -61,8 +61,8 @@ pub mod transcript;
 
 pub use artifact::ArtifactPayload;
 pub use error::Error;
-pub use run::{complete_run, plan_run, Plan, RunPlan};
+pub use run::{complete_run, plan_run, Plan, RunLimit, RunPlan};
 pub use runner::{FoldRunner, SubprocessRunner};
 pub use selection::Selection;
 pub use signal::Signal;
-pub use spec::FoldSpec;
+pub use spec::{FoldSpec, Order};

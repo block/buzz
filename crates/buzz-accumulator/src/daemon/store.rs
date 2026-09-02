@@ -671,6 +671,7 @@ mod tests {
             selection: selection(&["6ba7b810-9dad-11d1-80b4-00c04fd430c8"]),
             model: "haiku".into(),
             instructions: "digest".into(),
+            order: crate::Order::default(),
             meta: None,
         };
         spec.validate().expect("valid spec");

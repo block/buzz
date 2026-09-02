@@ -207,17 +207,25 @@ function PlanBox({ plan }: { plan: Preflight }) {
   if (plan.plan === "stalled") {
     return (
       <div className="plan-box warn">
-        Stalled: {plan.reason} ({plan.pending} pending)
+        Stalled: {plan.reason} ({plan.coverage.pending} pending)
       </div>
     );
   }
   const est = plan.estimate;
   const fits = est.window_fit.fits;
+  const limitNote =
+    plan.limit === "token-budget"
+      ? " (chunked by the model's token budget — the rest stays pending)"
+      : plan.limit === "event-cap"
+        ? " (chunked by the per-run event cap — the rest stays pending)"
+        : "";
   return (
     <div className="plan-box ok">
-      Ready: {plan.shown} new event(s) to fold / {plan.pending} not yet covered
-      {plan.truncated ? " (chunked — the rest stays pending)" : ""} · ~
-      {fmtTokens(est.est_input_tokens)} input tokens
+      Ready: {plan.shown} new event(s) to fold / {plan.coverage.pending} not yet covered
+      {limitNote} · ~{fmtTokens(est.est_input_tokens)} input tokens
+      {est.window_fit.headroom_tokens != null
+        ? ` · ${fmtTokens(Math.max(0, est.window_fit.headroom_tokens))} headroom`
+        : ""}
       {fits === false ? " · OVER the model window" : ""}
       <br />
       <span className="faint">

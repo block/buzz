@@ -73,11 +73,15 @@ export type EventsPage = {
   events: EventItem[];
 };
 
+/** Backlog traversal policy when one run cannot hold every pending event. */
+export type Order = "oldest-first" | "newest-first";
+
 export type FoldSpec = {
   name: string;
   selection: Selection;
   model: string;
   instructions: string;
+  order: Order;
   meta?: unknown;
 };
 
@@ -99,15 +103,33 @@ export type WindowFit = {
 
 export type Estimate = { est_input_tokens: number; window_fit: WindowFit };
 
+/** Explicit completion state: processed / pending over the fold's window;
+ * complete only ever true for a fully covered frozen selection. */
+export type Coverage = { processed: number; pending: number; complete: boolean };
+
+/** The model-aware budget a plan was sized against, term by term. */
+export type ContextBudget = {
+  model_window: number | null;
+  reserved_output_tokens: number;
+  safety_margin_tokens: number;
+  input_budget_tokens: number;
+  input_budget_chars: number;
+};
+
+/** Which constraint actually bounded a ready plan. */
+export type RunLimit = "none" | "token-budget" | "event-cap";
+
 export type Preflight =
-  | { plan: "cached" }
-  | { plan: "stalled"; reason: string; pending: number }
+  | { plan: "cached"; coverage: Coverage }
+  | { plan: "stalled"; reason: string; coverage: Coverage }
   | {
       plan: "ready";
       shown: number;
-      pending: number;
+      coverage: Coverage;
       truncated: boolean;
       estimate: Estimate;
+      budget: ContextBudget;
+      limit: RunLimit;
       window: [number, number];
       /** The exact string the model would receive; present only when the
        * preflight asked for it (`include_input`). */
@@ -227,18 +249,19 @@ export const api = {
       selection: Selection;
       model: string;
       instructions?: string;
+      order?: Order;
       meta?: unknown;
     },
   ) => request<{ saved: FoldSpec }>(`/folds/${name}`, { method: "PUT", ...json(body) }),
   deleteFold: (name: string) =>
     request<{ deleted: string }>(`/folds/${name}`, { method: "DELETE" }),
-  preflight: (name: string, window: TimeWindow, includeInput = false) =>
+  preflight: (name: string, window: TimeWindow, includeInput = false, order?: Order) =>
     request<Preflight>(
       `/folds/${name}/preflight`,
-      post({ ...window, include_input: includeInput }),
+      post({ ...window, include_input: includeInput, order }),
     ),
-  run: (name: string, window: TimeWindow) =>
-    request<RunOutcome>(`/folds/${name}/run`, post(window)),
+  run: (name: string, window: TimeWindow, order?: Order) =>
+    request<RunOutcome>(`/folds/${name}/run`, post({ ...window, order })),
   artifacts: (name: string) =>
     request<{ fold: string; artifacts: ArtifactSummary[] }>(
       `/folds/${name}/artifacts`,

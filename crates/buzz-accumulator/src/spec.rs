@@ -18,6 +18,25 @@ pub const MAX_NAME_LEN: usize = 64;
 pub const DEFAULT_INSTRUCTIONS: &str = "Maintain a running digest of the selection: rewrite the \
 prior version in light of the new events. Keep it concise, concrete, and factual.";
 
+/// Which end of the uncovered backlog survives when one run's budget cannot
+/// hold everything. An explicit policy, not a hidden global: the fold carries
+/// a default and a single run may override it. Either way the transcript the
+/// model sees is chronological.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Order {
+    /// Walk the backlog forward: fold the oldest uncovered signals first.
+    /// Never leaves temporal holes — repeated runs cover earliest → latest —
+    /// so it is the default (and the right bootstrap-baseline policy). Once
+    /// caught up it is indistinguishable from newest-first: everything after
+    /// the covered frontier fits and folds.
+    #[default]
+    OldestFirst,
+    /// Fold the freshest uncovered signals first; older ones stay pending for
+    /// later runs. Catch-up policy: current view now, history backfills.
+    NewestFirst,
+}
+
 /// One fold definition: a factory for artifacts.
 ///
 /// A fold is exactly name + selection + model + instructions — nothing else.
@@ -34,6 +53,13 @@ pub struct FoldSpec {
     pub model: String,
     /// Fold instructions (the prompt).
     pub instructions: String,
+    /// Backlog traversal policy when a run cannot hold every pending signal.
+    ///
+    /// Deliberately absent from the cached-run comparison: order decides
+    /// *which* uncovered signals a budget-limited run folds first, not what a
+    /// finished artifact contains — coverage truth stays `shown_ids`.
+    #[serde(default)]
+    pub order: Order,
     /// Free-form client-owned JSON, persisted verbatim with the spec.
     ///
     /// The engine never reads it and it is deliberately absent from the
@@ -94,6 +120,7 @@ mod tests {
             },
             model: "haiku".to_string(),
             instructions: "Maintain the digest.".to_string(),
+            order: Order::default(),
             meta: None,
         }
     }
@@ -139,6 +166,20 @@ mod tests {
         }"#;
         let loaded: FoldSpec = serde_json::from_str(with_schema).expect("legacy schema field");
         assert_eq!(loaded.name, "old");
+        // Specs persisted before `order` existed default to oldest-first.
+        assert_eq!(loaded.order, Order::OldestFirst);
+    }
+
+    #[test]
+    fn order_serializes_kebab_case() {
+        assert_eq!(
+            serde_json::to_string(&Order::OldestFirst).expect("ser"),
+            "\"oldest-first\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Order>("\"newest-first\"").expect("de"),
+            Order::NewestFirst
+        );
     }
 
     #[test]
