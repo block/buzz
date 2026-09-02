@@ -80,9 +80,18 @@ pub struct ContextBudget {
     /// Tokens the planned input may use (window − reservations, or the
     /// fallback for an unknown model).
     pub input_budget_tokens: u64,
-    /// The same budget in chars (tokens × 4), the unit planning works in.
+    /// The planning budget in characters, conservatively derived from tokens.
+    /// This is intentionally smaller than the chars/4 display estimate.
     pub input_budget_chars: usize,
 }
+
+/// Conservative characters-per-token planning ratio. Fold inputs contain
+/// hashes, URLs, source code, JSON, and markdown—not just English prose—so the
+/// common chars/4 display heuristic can materially undercount the tokens the
+/// Claude CLI actually receives. Planning at 3 chars/token keeps that heuristic
+/// for estimates while preventing a preflight-approved prompt from crossing
+/// the runner's real context boundary.
+pub const PLANNING_CHARS_PER_TOKEN: usize = 3;
 
 /// Compute the planning budget for `model`.
 ///
@@ -93,12 +102,13 @@ pub fn context_budget(model: &str) -> ContextBudget {
     match MODEL_WINDOWS.iter().find(|(m, _)| *m == model) {
         Some((_, window)) => {
             let tokens = window.saturating_sub(RESERVED_OUTPUT_TOKENS + SAFETY_MARGIN_TOKENS);
-            let chars = ((tokens as usize) * 4).min(EMERGENCY_MAX_INPUT_CHARS);
+            let chars =
+                ((tokens as usize) * PLANNING_CHARS_PER_TOKEN).min(EMERGENCY_MAX_INPUT_CHARS);
             ContextBudget {
                 model_window: Some(*window),
                 reserved_output_tokens: RESERVED_OUTPUT_TOKENS,
                 safety_margin_tokens: SAFETY_MARGIN_TOKENS,
-                input_budget_tokens: (chars / 4) as u64,
+                input_budget_tokens: tokens,
                 input_budget_chars: chars,
             }
         }
@@ -186,10 +196,13 @@ mod tests {
             b.input_budget_tokens,
             200_000 - RESERVED_OUTPUT_TOKENS - SAFETY_MARGIN_TOKENS
         );
-        assert_eq!(b.input_budget_chars, b.input_budget_tokens as usize * 4);
+        assert_eq!(
+            b.input_budget_chars,
+            b.input_budget_tokens as usize * PLANNING_CHARS_PER_TOKEN
+        );
         assert!(
-            b.input_budget_chars > 4 * FALLBACK_INPUT_BUDGET_CHARS,
-            "a 200k window must not be capped near the 30k-token fallback"
+            b.input_budget_chars > 3 * FALLBACK_INPUT_BUDGET_CHARS,
+            "a 200k window must remain materially larger than the fallback"
         );
         assert!(b.input_budget_chars <= EMERGENCY_MAX_INPUT_CHARS);
     }
