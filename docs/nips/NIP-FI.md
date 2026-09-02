@@ -155,11 +155,8 @@ single-issuer deployment is a registry of length one.  [FI-TRACE-CROSS-DOMAIN-CO
 
 The existing `FederatedAssertionVerifier<S>` and `ProductionJwksSource<F>`
 (merged in PR 3 / `70895b355`) implement the verification procedure described
-here.  The `require_attested_key` flag in `IssuerPolicy` is the per-issuer
-enforcement primitive for the unconditional `nostr_pubkey` requirement in this
-section; conformance to NIP-FI v2 requires startup validation that forces this
-flag true for every configured issuer.  That integration is a follow-on code
-change outside this PR.
+here.  The `nostr_pubkey` claim is unconditionally required — absence rejects
+regardless of issuer policy (NIP-FI v2, PR #7221).
 
 ### JWKS snapshot
 
@@ -402,8 +399,7 @@ Any failure at any step is fail-closed: no side effects occur and the relay
 returns the appropriate error.
 
 This verifier and the disconnect API endpoint are follow-on code changes
-outside this PR, in the same way that the `require_attested_key` enforcement
-integration is.
+outside this PR.
 
 ### Request
 

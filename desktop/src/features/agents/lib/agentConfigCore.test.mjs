@@ -79,19 +79,92 @@ test("Goose exposes provider, model, and its real effort application key", () =>
     scope: "global",
   });
 
-  assert.equal(
-    field(model, "effort").optionSource,
-    "legacyProviderModelCatalog",
-  );
+  assert.equal(field(model, "effort").optionSource, "harnessNative");
   assert.deepEqual(field(model, "effort").currentPersistence, {
     kind: "envVar",
-    key: "BUZZ_AGENT_THINKING_EFFORT",
+    key: "GOOSE_THINKING_EFFORT",
   });
   assert.deepEqual(field(model, "effort").targetApplication, {
     kind: "envVar",
     key: "GOOSE_THINKING_EFFORT",
   });
+  // Goose reads/writes its native key at global scope — the launch projection's
+  // global tier is native-only, so the legacy BUZZ_AGENT_THINKING_EFFORT in the
+  // config is not surfaced as the effort value (it would be silently ignored).
+  assert.equal(field(model, "effort").value, null);
 });
+
+// Carl (review 5036131024): global/onboarding effort persistence must use the
+// runtime's native key so a selection reaches the spawn. The launch projection's
+// global tier reads native-only (legacy alias is record/persona-scope), so
+// persisting the legacy key for Goose round-trips in the UI but is ignored at
+// spawn. Both scopes derive the same persistence/application key.
+for (const scope of ["global", "onboarding"]) {
+  test(`effort persists to the runtime native key at ${scope} scope`, () => {
+    const goose = deriveAgentConfigFieldModel({
+      config: { ...config, env_vars: { GOOSE_THINKING_EFFORT: "high" } },
+      runtime: runtime("goose", { thinkingEnvVar: "GOOSE_THINKING_EFFORT" }),
+      scope,
+    });
+    const gooseEffort = field(goose, "effort");
+    assert.deepEqual(gooseEffort.currentPersistence, {
+      kind: "envVar",
+      key: "GOOSE_THINKING_EFFORT",
+    });
+    assert.deepEqual(gooseEffort.targetApplication, {
+      kind: "envVar",
+      key: "GOOSE_THINKING_EFFORT",
+    });
+    assert.equal(gooseEffort.value, "high");
+    assert.deepEqual(structuredEnvKeys([gooseEffort]), [
+      "GOOSE_THINKING_EFFORT",
+    ]);
+
+    const buzz = deriveAgentConfigFieldModel({
+      config,
+      runtime: runtime("buzz-agent", {
+        thinkingEnvVar: "BUZZ_AGENT_THINKING_EFFORT",
+      }),
+      scope,
+    });
+    const buzzEffort = field(buzz, "effort");
+    assert.deepEqual(buzzEffort.currentPersistence, {
+      kind: "envVar",
+      key: "BUZZ_AGENT_THINKING_EFFORT",
+    });
+    assert.equal(buzzEffort.value, "high");
+  });
+}
+
+// Per-agent scopes (definition/instance) intentionally keep effort on the
+// generic legacy BUZZ_AGENT_THINKING_EFFORT row until PR 2.7 migrates Goose —
+// currentPersistence/value stay legacy while targetApplication is native
+// (agents/AGENTS.md rule 2). The scope gate must not broaden to these scopes.
+for (const scope of ["definition", "instance"]) {
+  test(`Goose effort stays on the legacy persistence key at ${scope} scope`, () => {
+    const model = deriveAgentConfigFieldModel({
+      config: {
+        ...config,
+        env_vars: {
+          BUZZ_AGENT_THINKING_EFFORT: "high",
+          GOOSE_THINKING_EFFORT: "low",
+        },
+      },
+      runtime: runtime("goose", { thinkingEnvVar: "GOOSE_THINKING_EFFORT" }),
+      scope,
+    });
+    const effort = field(model, "effort");
+    assert.deepEqual(effort.currentPersistence, {
+      kind: "envVar",
+      key: "BUZZ_AGENT_THINKING_EFFORT",
+    });
+    assert.deepEqual(effort.targetApplication, {
+      kind: "envVar",
+      key: "GOOSE_THINKING_EFFORT",
+    });
+    assert.equal(effort.value, "high");
+  });
+}
 
 test("Claude models effort as a deferred native ACP option", () => {
   const model = deriveAgentConfigFieldModel({
@@ -560,4 +633,91 @@ test("NUMERIC_KIND_MIN_contextLimit_is_1", () => {
 
 test("NUMERIC_KIND_MIN_maxRounds_is_0", () => {
   assert.equal(NUMERIC_KIND_MIN.maxRounds, 0);
+});
+
+// ── P2 regression: Goose optionSource + isHarnessNativeEffort guard ───────────
+//
+// Source-level reproduction of the P2 blocker: save global Goose defaults with
+// GOOSE_THINKING_EFFORT=off, then open AI defaults. Previously, optionSource
+// was "legacyProviderModelCatalog" → AgentConfigFields passed the persisted key
+// to useEffortAutoClear with buzz-agent provider/model vocab → "off" not in
+// that list → hook deleted the valid native value on mount. Fix: emit
+// "harnessNative" so AgentConfigFields can detect isHarnessNativeEffort and
+// make the hook a no-op.
+
+test("Goose_optionSource_is_harnessNative_not_legacyProviderModelCatalog", () => {
+  // The sole optionSource change (P2 fix): Goose must NOT be
+  // "legacyProviderModelCatalog" because that routes effort into the
+  // buzz-agent provider/model catalog, deleting valid Goose values on mount.
+  const model = deriveAgentConfigFieldModel({
+    config,
+    runtime: runtime("goose", { thinkingEnvVar: "GOOSE_THINKING_EFFORT" }),
+    scope: "global",
+  });
+  const effortField = field(model, "effort");
+  assert.equal(
+    effortField.optionSource,
+    "harnessNative",
+    'Goose global optionSource must be "harnessNative" — "legacyProviderModelCatalog" routes to buzz-agent vocab and deletes valid `off` on mount',
+  );
+});
+
+test("Goose_global_off_value_is_preserved_by_harnessNative_optionSource", () => {
+  // A saved GOOSE_THINKING_EFFORT=off must round-trip through the field model
+  // without deletion. The field value reflects the config value, and
+  // optionSource="harnessNative" signals to AgentConfigFields that the
+  // auto-clear hook should be a no-op (no buzz-agent vocab gate).
+  const savedConfig = {
+    ...config,
+    env_vars: { GOOSE_THINKING_EFFORT: "off" },
+  };
+  const model = deriveAgentConfigFieldModel({
+    config: savedConfig,
+    runtime: runtime("goose", { thinkingEnvVar: "GOOSE_THINKING_EFFORT" }),
+    scope: "global",
+  });
+  const effortField = field(model, "effort");
+  assert.equal(
+    effortField.optionSource,
+    "harnessNative",
+    "Goose effort field must use harnessNative optionSource",
+  );
+  assert.equal(
+    effortField.value,
+    "off",
+    "saved GOOSE_THINKING_EFFORT=off must survive round-trip through field model (not deleted by buzz-agent vocab check)",
+  );
+});
+
+test("Goose_onboarding_optionSource_is_harnessNative", () => {
+  // Same contract at onboarding scope — the persistence key is the native key
+  // at both global and onboarding, so both must guard against buzz-agent vocab.
+  const model = deriveAgentConfigFieldModel({
+    config,
+    runtime: runtime("goose", { thinkingEnvVar: "GOOSE_THINKING_EFFORT" }),
+    scope: "onboarding",
+  });
+  assert.equal(
+    field(model, "effort").optionSource,
+    "harnessNative",
+    "Goose onboarding optionSource must also be harnessNative",
+  );
+});
+
+test("buzz_agent_optionSource_unchanged_still_buzzAgentCatalog", () => {
+  // Ensure the fix did not accidentally change buzz-agent's optionSource.
+  // buzz-agent's effort MUST go through the provider/model catalog for the
+  // per-provider effort validation to work (e.g. "none" vs "off").
+  const model = deriveAgentConfigFieldModel({
+    config,
+    runtime: runtime("buzz-agent", {
+      thinkingEnvVar: "BUZZ_AGENT_THINKING_EFFORT",
+    }),
+    scope: "global",
+  });
+  assert.equal(
+    field(model, "effort").optionSource,
+    "buzzAgentCatalog",
+    "buzz-agent optionSource must remain buzzAgentCatalog",
+  );
 });

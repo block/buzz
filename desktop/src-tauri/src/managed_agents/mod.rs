@@ -49,13 +49,27 @@ pub(crate) use team_repair::team_persona_key;
 mod teams;
 mod types;
 
-// Shared guard for tests that mutate or read process-global PATH.
+// Shared lock for tests that call `lock_path_mutex` or `lock_env_mutex`.
+// Both helpers delegate here so any two tests using either helper are mutually
+// exclusive with each other. Tests in other modules that maintain their own
+// independent locks (app_state_tests, agent_config_tests, reader_tests) are
+// NOT in this domain and are not covered by this mutex.
 #[cfg(test)]
-static PATH_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static PROCESS_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+// Acquires the shared process-env lock. Call from any test in this module that
+// reads, writes, or removes a process-global environment variable (including PATH).
 #[cfg(test)]
 pub(crate) fn lock_path_mutex() -> std::sync::MutexGuard<'static, ()> {
-    PATH_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+    PROCESS_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+// Delegates to the same lock as `lock_path_mutex`. Tests using either helper
+// are mutually exclusive with each other; PATH and env-key mutations that go
+// through these helpers cannot race.
+#[cfg(test)]
+pub(crate) fn lock_env_mutex() -> std::sync::MutexGuard<'static, ()> {
+    PROCESS_ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 pub use backend::*;

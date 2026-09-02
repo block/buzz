@@ -466,8 +466,14 @@ pub struct ManagedAgentRecord {
     /// deserialize as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_mesh: Option<RelayMeshConfig>,
-    /// Canonical Claude Code effort level. Injected as `BUZZ_ACP_EFFORT_LEVEL` at spawn
-    /// so the harness applies it via `session/set_config_option` at session creation.
+    /// Canonical, harness-agnostic startup effort level. This is the single
+    /// persisted effort authority: at spawn the launch projection
+    /// (`config_bridge::effort`) resolves the effective value over this column
+    /// and all env tiers, then emits it under the destination runtime's native
+    /// key — `GOOSE_THINKING_EFFORT` for Goose, `BUZZ_AGENT_THINKING_EFFORT` for
+    /// buzz-agent, or the `BUZZ_ACP_EFFORT_LEVEL` startup sentinel for
+    /// Claude/Codex and keyless/unknown adapters. Preserved across runtime
+    /// switches (invalid values skip-as-absent at projection time).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort_level: Option<String>,
 }
@@ -656,6 +662,18 @@ pub struct AcpRuntimeCatalogEntry {
     pub provider_env_var: Option<String>,
     /// Environment variable used to apply thinking effort, when supported.
     pub thinking_env_var: Option<String>,
+    /// Canonical accepted effort values for this runtime, in display order.
+    /// Serialized from `KnownAcpRuntime::effort_normalization.canonical` for
+    /// runtimes with a static finite vocabulary (e.g. Goose). `None` for
+    /// runtimes with no canonicalization contract (buzz-agent uses a
+    /// provider/model catalog; Claude/Codex/unknown runtimes accept any string).
+    ///
+    /// The renderer uses this to drive choices and validation, replacing the
+    /// TS-side `GOOSE_EFFORT_CANONICAL_VALUES` duplicate. When non-null, the
+    /// `harnessNative` effort field uses this list exclusively — `off` and all
+    /// other valid Goose values are always present when this is Goose, so
+    /// `useEffortAutoClear` never incorrectly deletes a valid saved value.
+    pub effort_canonical_values: Option<Vec<String>>,
     pub max_tokens_env_var: Option<String>,
     pub context_limit_env_var: Option<String>,
     pub max_rounds_env_var: Option<String>,

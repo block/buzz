@@ -69,7 +69,11 @@ pub(crate) const MAX_JWKS_KEYS: usize = 64;
 /// semantics** so prepared evidence built against an older contract is
 /// invalidated. Per-policy fields (issuer, class, bounds, …) are hashed
 /// separately and need no bump.
-pub(crate) const VERIFIER_CONTRACT_VERSION: u32 = 1;
+///
+/// v2 (PR #7221): `nostr_pubkey` absence now unconditionally rejects — the
+/// per-issuer `require_attested_key` knob is removed and the NIP-FI v2 spec
+/// requirement is always enforced.
+pub(crate) const VERIFIER_CONTRACT_VERSION: u32 = 2;
 
 /// The transport-contract fingerprint folded into [`TransportContractId`].
 /// **Bump on any change** to the client-attached parsing, attachment,
@@ -347,7 +351,6 @@ pub struct IssuerPolicy {
     token_class: TokenClass,
     freshness: FreshnessClass,
     algorithms: Vec<Algorithm>,
-    require_attested_key: bool,
     skew_seconds: u64,
     maximum_assertion_age_seconds: u64,
     maximum_status_age_seconds: Option<u64>,
@@ -404,7 +407,6 @@ impl IssuerPolicy {
         token_class: TokenClass,
         freshness: FreshnessClass,
         algorithms: Vec<Algorithm>,
-        require_attested_key: bool,
         skew_seconds: u64,
         maximum_assertion_age_seconds: u64,
         maximum_status_age_seconds: Option<u64>,
@@ -467,7 +469,6 @@ impl IssuerPolicy {
             &token_class,
             freshness,
             &algorithms,
-            require_attested_key,
             skew_seconds,
             maximum_assertion_age_seconds,
             maximum_status_age_seconds,
@@ -480,7 +481,6 @@ impl IssuerPolicy {
             token_class,
             freshness,
             algorithms,
-            require_attested_key,
             skew_seconds,
             maximum_assertion_age_seconds,
             maximum_status_age_seconds,
@@ -512,11 +512,6 @@ impl IssuerPolicy {
     /// The accepted asymmetric algorithms.
     pub fn algorithms(&self) -> &[Algorithm] {
         &self.algorithms
-    }
-
-    /// Whether enrollment requires a `nostr_pubkey` claim equal to the actor.
-    pub const fn require_attested_key(&self) -> bool {
-        self.require_attested_key
     }
 
     /// The accepted clock skew, in seconds.
@@ -646,7 +641,6 @@ fn derive_assertion_policy_id(
     token_class: &TokenClass,
     freshness: FreshnessClass,
     algorithms: &[Algorithm],
-    require_attested_key: bool,
     skew_seconds: u64,
     maximum_assertion_age_seconds: u64,
     maximum_status_age_seconds: Option<u64>,
@@ -702,7 +696,6 @@ fn derive_assertion_policy_id(
         &mut hasher,
         algorithms.iter().map(|a| algorithm_tag(*a).as_bytes()),
     );
-    hasher.update([u8::from(require_attested_key)]);
     hasher.update(skew_seconds.to_be_bytes());
     hasher.update(maximum_assertion_age_seconds.to_be_bytes());
     hasher.update(maximum_status_age_seconds.unwrap_or(0).to_be_bytes());
