@@ -112,8 +112,8 @@ async fn run(cmd: Cmd) -> Result<(), CliError> {
 }
 
 async fn cmd_source(relay_url: String, nsec: Option<String>) -> Result<(), CliError> {
-    // Resolve the payload to transfer.
-    let (payload_str, payload_type) = resolve_payload(nsec)?;
+    // Resolve the payload to transfer (JSON identity bundle for mobile targets).
+    let (payload_str, payload_type) = resolve_identity_payload(&relay_url, nsec)?;
 
     // Create pairing session.
     let (mut session, qr) = PairingSession::new_source(relay_url.clone());
@@ -595,6 +595,33 @@ fn resolve_payload(nsec: Option<String>) -> Result<(Zeroizing<String>, PayloadTy
             Ok((Zeroizing::new(nsec_str), PayloadType::Nsec))
         }
     }
+}
+
+/// Wrap the secret in the JSON bundle the mobile target expects:
+/// `{"relayUrl": ..., "pubkey": ..., "nsec": ...}`.
+fn resolve_identity_payload(
+    relay_url: &str,
+    nsec: Option<String>,
+) -> Result<(Zeroizing<String>, PayloadType), CliError> {
+    let (nsec_zeroized, payload_type) = resolve_payload(nsec)?;
+    // Derive the pubkey from the secret key so the JSON bundle is self-consistent.
+    let sk = SecretKey::parse(&nsec_zeroized)
+        .map_err(|e| CliError::InvalidNsec(e.to_string()))?;
+    let keys = Keys::new(sk);
+    let pubkey = keys.public_key().to_hex();
+    // Mobile expects an http(s) (or debug ws) URL; keep the same host:port but
+    // present the API base form matching the Tauri desktop pairing command.
+    let http_url = relay_url
+        .trim_start_matches("ws://")
+        .trim_start_matches("wss://")
+        .to_string();
+    let http_url = format!("http://{http_url}");
+    let payload_json = serde_json::json!({
+        "relayUrl": http_url,
+        "pubkey": pubkey,
+        "nsec": &*nsec_zeroized,
+    });
+    Ok((Zeroizing::new(payload_json.to_string()), payload_type))
 }
 
 /// Read a single line from stdin (trims trailing newline).

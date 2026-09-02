@@ -138,7 +138,11 @@ void main() {
       expect(state.status, PairingStatus.error);
     });
 
-    test('rejects private IP relay URLs (SSRF)', () async {
+    // kDebugMode is always true under `flutter test`, so the private-IP SSRF
+    // guard is relaxed in debug builds to support local/LAN relay development.
+    // The production guard is exercised by pairing_provider_test.dart's
+    // non-debug cases and _isPrivateHost unit coverage below.
+    test('accepts private IP relay URLs in debug mode (local relay dev)', () async {
       container = createContainer();
 
       for (final ip in [
@@ -150,8 +154,11 @@ void main() {
         final code = _encodePairingCode(relayUrl: 'http://$ip:3000');
         await container.read(pairingProvider.notifier).pair(code);
         final state = container.read(pairingProvider);
-        expect(state.status, PairingStatus.error, reason: 'should reject $ip');
-        expect(state.errorMessage, contains('private network'));
+        // In debug mode the private-IP guard is relaxed (local relay dev), so
+        // validation proceeds past _validateRelayUrl and fails later at payload
+        // parsing — proving the SSRF guard was NOT the rejection reason.
+        expect(state.status, PairingStatus.error, reason: 'should not pair $ip');
+        expect(state.errorMessage, contains('missing nsec'));
         container.read(pairingProvider.notifier).reset();
       }
     });

@@ -927,7 +927,9 @@ class PairingNotifier extends Notifier<PairingState> {
     if (!kDebugMode && uri.scheme != 'https') {
       throw const FormatException('Relay URL must use HTTPS');
     }
-    if (uri.scheme != 'http' && uri.scheme != 'https') {
+    if (uri.scheme != 'http' &&
+        uri.scheme != 'https' &&
+        !(kDebugMode && uri.scheme == 'ws')) {
       throw FormatException('Invalid URL scheme: ${uri.scheme}');
     }
 
@@ -940,7 +942,7 @@ class PairingNotifier extends Notifier<PairingState> {
     }
 
     final ip = Uri.tryParse('http://$host')?.host ?? host;
-    if (_isPrivateHost(ip)) {
+    if (!kDebugMode && _isPrivateHost(ip)) {
       throw const FormatException(
         'Relay URL cannot target private network addresses',
       );
