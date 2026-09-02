@@ -683,18 +683,22 @@ call with an `until` timestamp), the relay inserts a deny entry for the target
 pubkey with expiry `until` and closes all matching sessions synchronously.  Any
 subsequent admission attempt for that pubkey is denied `authorization_denied`
 until `now >= until`.  The `until` ceiling enforced by the relay is
-`now + maximum_assertion_age`, bounding the maximum residual exposure to the
-maximum remaining validity of any assertion the issuer could have already
-minted.  The issuer SHOULD set `until` to outlast
-the longest still-live assertion it has issued to ensure no unexpired assertion
-slides through the expiry boundary.
+`now + maximum_assertion_age`; this limits how long a deny entry may last —
+it does not ensure denial outlasts all live assertions.  A short or past
+`until` is valid, and if the issuer continues issuing after the entry
+expires, access resumes.  The issuer SHOULD set `until` to outlast the
+longest still-live assertion it has issued to ensure no unexpired assertion
+slides through the expiry boundary; this is an operational recommendation,
+not a protocol invariant.
 
-A relay restart clears the in-memory deny set.  The issuer, as the durable
-system of record for revocations, SHOULD re-push still-active entries on
-observed restart.  The residual exposure window during the seconds-wide restart
-race is bounded by `max(0, min(exp, iat + maximum_assertion_age) - now)` — the
-same bound as issuer-stops-issuance without a deny call, and finite by the
-assertion contract.
+A relay restart clears the in-memory deny set.  The issuer SHOULD re-push
+still-active entries on observed restart, but re-push is not required and
+carries no specified completion bound.  If the issuer stops issuing
+assertions and re-push completes before any expired-entry reconnection
+attempt, the residual exposure after restart is bounded by
+`max(0, min(exp, iat + maximum_assertion_age) - now)`.  If the issuer
+continues issuing or re-push does not complete in time, that formula does
+not apply and access may continue beyond it.
 
 **HTTP ingress bypass.** Without the pairing rule, a principal holding an
 active key can mint fresh NIP-98 events indefinitely and retain HTTP access
