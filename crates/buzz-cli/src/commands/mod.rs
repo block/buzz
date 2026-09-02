@@ -13,6 +13,7 @@ pub mod pack;
 pub mod patches;
 pub mod pr;
 pub mod project_channel;
+pub mod project_related_channels;
 pub mod projects;
 pub mod reactions;
 pub mod repos;

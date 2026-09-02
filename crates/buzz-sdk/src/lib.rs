@@ -16,8 +16,10 @@ pub mod broker;
 pub mod builders;
 pub mod mentions;
 pub mod nip_oa;
+pub mod project_related_channel;
 
 pub use builders::*;
+pub use project_related_channel::*;
 
 /// Re-export kind constants so consumers don't need buzz-core directly.
 pub use buzz_core::kind;

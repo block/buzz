@@ -1356,6 +1356,33 @@ pub enum ProjectsCmd {
         #[arg(long)]
         template: Option<String>,
     },
+    /// Link an existing channel to a Project
+    #[command(name = "link-channel")]
+    LinkChannel {
+        /// Full Project coordinate: `30621:<owner-hex>:<project-d>`
+        #[arg(long)]
+        project: String,
+        /// Existing channel UUID
+        #[arg(long)]
+        channel: String,
+    },
+    /// Unlink an existing channel from a Project
+    #[command(name = "unlink-channel")]
+    UnlinkChannel {
+        /// Full Project coordinate: `30621:<owner-hex>:<project-d>`
+        #[arg(long)]
+        project: String,
+        /// Related channel UUID
+        #[arg(long)]
+        channel: String,
+    },
+    /// Read the relay's authoritative related channels for a Project
+    #[command(name = "related-channels")]
+    RelatedChannels {
+        /// Full Project coordinate: `30621:<owner-hex>:<project-d>`
+        #[arg(long)]
+        project: String,
+    },
     /// Remove one or more member repositories from a project
     #[command(name = "remove-repo")]
     RemoveRepo {
@@ -2402,8 +2429,11 @@ mod tests {
                 "create",
                 "delete",
                 "get",
+                "link-channel",
                 "list",
+                "related-channels",
                 "remove-repo",
+                "unlink-channel",
                 "update"
             ]
         );
@@ -2444,7 +2474,7 @@ mod tests {
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),
-            ("projects", 8),
+            ("projects", 11),
             ("reactions", 3),
             ("repos", 5),
             ("social", 7),
@@ -2637,5 +2667,29 @@ mod tests {
             .is_err(),
             "--visibility chartreuse on update must be rejected at parse time"
         );
+    }
+
+    #[test]
+    fn projects_link_and_unlink_channel_require_singular_targets() {
+        let project = format!("30621:{}:buzz", "a".repeat(64));
+        let channel = "11111111-1111-4111-8111-111111111111";
+        for command in ["link-channel", "unlink-channel"] {
+            assert!(Cli::try_parse_from([
+                "buzz",
+                "projects",
+                command,
+                "--project",
+                &project,
+                "--channel",
+                channel,
+            ])
+            .is_ok());
+            assert!(
+                Cli::try_parse_from(["buzz", "projects", command, "--project", &project,]).is_err()
+            );
+            assert!(
+                Cli::try_parse_from(["buzz", "projects", command, "--channel", channel,]).is_err()
+            );
+        }
     }
 }

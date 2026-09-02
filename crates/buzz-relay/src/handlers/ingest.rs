@@ -28,7 +28,8 @@ use buzz_core::kind::{
     KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
     KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
     KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT, KIND_REACTION,
+    KIND_PRIVATE_MANAGED_AGENT, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_PROJECT,
+    KIND_PROJECT_RELATED_CHANNEL, KIND_PROJECT_RELATED_CHANNELS_SNAPSHOT, KIND_REACTION,
     KIND_READ_STATE, KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED,
     KIND_STREAM_MESSAGE_DIFF, KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED,
     KIND_STREAM_MESSAGE_SCHEDULED, KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM,
@@ -530,6 +531,10 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // NIP-MP: a project is repository metadata — grouping repositories needs
         // the same scope as announcing them.
         KIND_PROJECT => Ok(Scope::ReposWrite),
+        // Related-channel commands are global Project metadata, but the intended
+        // actors are home-channel admins. Standard CLI auth includes
+        // `channels:write`, not `repos:write`.
+        KIND_PROJECT_RELATED_CHANNEL => Ok(Scope::ChannelsWrite),
         KIND_GIT_PATCH
         | KIND_GIT_PULL_REQUEST
         | KIND_GIT_PR_UPDATE
@@ -544,6 +549,29 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_APPROVAL_GRANT | KIND_APPROVAL_DENY => Ok(Scope::MessagesWrite),
         _ => Err("restricted: unknown event kind"),
     }
+}
+
+fn sign_project_related_channels_snapshot(
+    state: &AppState,
+    plan: &buzz_db::project_related_channels::ProjectRelatedChannelsSnapshotPlan,
+) -> Result<Event, IngestError> {
+    if plan.truncated {
+        warn!(
+            project = %plan.project_coordinate,
+            cap = buzz_core::project_related_channels::PROJECT_RELATED_CHANNELS_SNAPSHOT_CAP,
+            "Project related-channel snapshot omitted effective relationships above the cap"
+        );
+    }
+    let builder = buzz_sdk::build_project_related_channels_snapshot(
+        &plan.project_coordinate,
+        &plan.project_event_id,
+        plan.entries.iter().copied(),
+        plan.created_at,
+    )
+    .map_err(|error| IngestError::Internal(format!("error: build Project snapshot: {error}")))?;
+    builder
+        .sign_with_keys(&state.relay_keypair)
+        .map_err(|error| IngestError::Internal(format!("error: sign Project snapshot: {error}")))
 }
 
 /// Extract a channel UUID from the `"h"` NIP-29 group tag.
@@ -671,6 +699,7 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // `buzz-channel` tag is a metadata reference, not a routing directive,
             // so a project's state is never channel-scoped.
             | KIND_PROJECT
+            | KIND_PROJECT_RELATED_CHANNEL
             // Community moderation commands (9040–9044): community-global
             // direct commands, same model as the NIP-43 9030-series. A stray
             // `h` tag must never channel-scope them (pinned contract —
@@ -1528,6 +1557,9 @@ fn validate_team_catalog_envelope(event: &Event) -> Result<(), String> {
 /// the relay frame limit (`config.rs`), so the cap must be checked before any
 /// set proportional to the tag list is built.
 const PROJECT_MEMBER_CAP: usize = 64;
+/// Bound legacy embedded related-channel tags to the derived snapshot's limit.
+const PROJECT_LEGACY_RELATED_CHANNEL_CAP: usize =
+    buzz_core::project_related_channels::PROJECT_RELATED_CHANNELS_SNAPSHOT_CAP;
 
 /// Maximum byte length of a project `name` tag value.
 const PROJECT_NAME_MAX_LEN: usize = 256;
@@ -1609,6 +1641,7 @@ impl ProjectRejection {
 fn validate_project_envelope(event: &Event) -> Result<(), ProjectRejection> {
     let mut d_tags: Vec<&str> = Vec::new();
     let mut members: Vec<&str> = Vec::new();
+    let mut legacy_related_channel_count = 0usize;
     let mut name: Option<&str> = None;
     let mut description: Option<&str> = None;
     let mut buzz_channel: Option<&str> = None;
@@ -1624,6 +1657,7 @@ fn validate_project_envelope(event: &Event) -> Result<(), ProjectRejection> {
         match tag_name {
             "d" => d_tags.push(value),
             "a" => members.push(value),
+            "buzz-related-channel" => legacy_related_channel_count += 1,
             _ => {
                 if let Some(i) = PROJECT_SINGLETON_METADATA_TAGS
                     .iter()
@@ -1645,8 +1679,9 @@ fn validate_project_envelope(event: &Event) -> Result<(), ProjectRejection> {
     // `d-cardinality` / `d-empty`: under NIP-33 a missing `d` is treated as
     // empty, which collapses every such project into the `(pubkey, 30621, "")`
     // slot where unrelated projects silently overwrite each other. Several `d`
-    // tags make the address reader-dependent. Length is bounded by the generic
-    // `D_TAG_MAX_LEN` check the ingest pipeline already applies.
+    // tags make the address reader-dependent. Project writes take a specialized
+    // storage path before the generic NIP-33 check, so enforce the same bound
+    // here as part of the Project envelope.
     if d_tags.len() != 1 {
         return Err(ProjectRejection::new(
             "d-cardinality",
@@ -1660,6 +1695,25 @@ fn validate_project_envelope(event: &Event) -> Result<(), ProjectRejection> {
         return Err(ProjectRejection::new(
             "d-empty",
             "project event `d` tag must not be empty",
+        ));
+    }
+    if d_tags[0].len() > buzz_db::event::D_TAG_MAX_LEN {
+        return Err(ProjectRejection::new(
+            "d-too-long",
+            format!(
+                "project event `d` tag too long ({} bytes, max {})",
+                d_tags[0].len(),
+                buzz_db::event::D_TAG_MAX_LEN,
+            ),
+        ));
+    }
+
+    if legacy_related_channel_count > PROJECT_LEGACY_RELATED_CHANNEL_CAP {
+        return Err(ProjectRejection::new(
+            "related-channel-cap",
+            format!(
+                "project event must have at most {PROJECT_LEGACY_RELATED_CHANNEL_CAP} legacy `buzz-related-channel` tags (got {legacy_related_channel_count})",
+            ),
         ));
     }
 
@@ -2787,6 +2841,15 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    let project_related_channel_command = if kind_u32 == KIND_PROJECT_RELATED_CHANNEL {
+        Some(
+            buzz_sdk::parse_project_related_channel_command(&event)
+                .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?,
+        )
+    } else {
+        None
+    };
+
     // Track pre-created channel UUID for compensation on insert failure.
     let mut pre_created_channel: Option<Uuid> = None;
 
@@ -3008,6 +3071,198 @@ async fn ingest_event_inner(
 
     if kind_u32 == KIND_EMOJI_SET || kind_u32 == KIND_EMOJI_LIST {
         validate_custom_emoji_tags(&event)?;
+    }
+
+    if kind_u32 == KIND_PROJECT {
+        let project_d = buzz_db::event::extract_d_tag(&event)
+            .ok_or_else(|| IngestError::Internal("error: validated Project has no d tag".into()))?;
+        let relay_pubkey = state.relay_keypair.public_key().to_bytes();
+        let outcome = buzz_db::project_related_channels::prepare_project_replacement(
+            &state.db,
+            tenant.community(),
+            &event,
+            &project_d,
+            relay_pubkey.as_slice(),
+        )
+        .await
+        .map_err(|error| IngestError::Internal(format!("error: {error}")))?;
+        match outcome {
+            buzz_db::project_related_channels::PrepareProjectReplacementOutcome::Applied(
+                prepared,
+            ) => {
+                let snapshot_event =
+                    sign_project_related_channels_snapshot(state, prepared.snapshot())?;
+                let (stored_project, stored_snapshot) = prepared
+                    .commit_with_snapshot(&snapshot_event)
+                    .await
+                    .map_err(|error| IngestError::Internal(format!("error: {error}")))?;
+                emit(
+                    tracer,
+                    TraceAction::WriteInsertGlobal {
+                        msg_id: msg_id_label(event.id.as_bytes()),
+                        claimed_community: claimed_community_from_event(&event),
+                    },
+                    state_for_request(tenant, auth.pubkey()),
+                );
+                let project_pubkey_hex = auth.pubkey().to_hex();
+                dispatch_persistent_event(
+                    tenant,
+                    state,
+                    &stored_project,
+                    KIND_PROJECT,
+                    &project_pubkey_hex,
+                    None,
+                )
+                .await;
+                let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
+                dispatch_persistent_event(
+                    tenant,
+                    state,
+                    &stored_snapshot,
+                    KIND_PROJECT_RELATED_CHANNELS_SNAPSHOT,
+                    &relay_pubkey_hex,
+                    None,
+                )
+                .await;
+                return Ok(IngestResult {
+                    event_id: event_id_hex,
+                    accepted: true,
+                    message: String::new(),
+                });
+            }
+            buzz_db::project_related_channels::PrepareProjectReplacementOutcome::Unchanged => {
+                emit(
+                    tracer,
+                    TraceAction::WriteInsertGlobal {
+                        msg_id: msg_id_label(event.id.as_bytes()),
+                        claimed_community: claimed_community_from_event(&event),
+                    },
+                    state_for_request(tenant, auth.pubkey()),
+                );
+                return Ok(IngestResult {
+                    event_id: event_id_hex,
+                    accepted: true,
+                    message: "duplicate:".into(),
+                });
+            }
+        }
+    }
+
+    if let Some(command) = project_related_channel_command {
+        let change = match command.operation {
+            buzz_sdk::ProjectRelatedChannelOperation::Add => {
+                buzz_db::project_related_channels::ProjectRelatedChannelChange::Add
+            }
+            buzz_sdk::ProjectRelatedChannelOperation::Remove => {
+                buzz_db::project_related_channels::ProjectRelatedChannelChange::Remove
+            }
+        };
+        let project_owner = command.project_owner.to_bytes();
+        let relay_pubkey = state.relay_keypair.public_key().to_bytes();
+        let outcome = buzz_db::project_related_channels::apply_project_related_channel_command(
+            &state.db,
+            tenant.community(),
+            buzz_db::project_related_channels::ApplyProjectRelatedChannelCommand {
+                event: &event,
+                relay_pubkey: relay_pubkey.as_slice(),
+                project_owner: project_owner.as_slice(),
+                project_d: &command.project_d,
+                channel_id: command.channel_id,
+                change,
+            },
+        )
+        .await
+        .map_err(|error| IngestError::Internal(format!("error: {error}")))?;
+
+        match outcome {
+            buzz_db::project_related_channels::ApplyProjectRelatedChannelOutcome::Applied(
+                prepared,
+            ) => {
+                let snapshot_event = sign_project_related_channels_snapshot(state, prepared.snapshot())?;
+                let (stored_event, stored_snapshot) = prepared
+                    .commit_with_snapshot(&snapshot_event)
+                    .await
+                    .map_err(|error| IngestError::Internal(format!("error: {error}")))?;
+                emit(
+                    tracer,
+                    TraceAction::WriteInsertGlobal {
+                        msg_id: msg_id_label(event.id.as_bytes()),
+                        claimed_community: claimed_community_from_event(&event),
+                    },
+                    state_for_request(tenant, auth.pubkey()),
+                );
+                let pubkey_hex = auth.pubkey().to_hex();
+                dispatch_persistent_event(
+                    tenant,
+                    state,
+                    &stored_event,
+                    kind_u32,
+                    &pubkey_hex,
+                    None,
+                )
+                .await;
+                let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
+                dispatch_persistent_event(
+                    tenant,
+                    state,
+                    &stored_snapshot,
+                    KIND_PROJECT_RELATED_CHANNELS_SNAPSHOT,
+                    &relay_pubkey_hex,
+                    None,
+                )
+                .await;
+                return Ok(IngestResult {
+                    event_id: event_id_hex,
+                    accepted: true,
+                    message: String::new(),
+                });
+            }
+            buzz_db::project_related_channels::ApplyProjectRelatedChannelOutcome::Replay => {
+                emit(
+                    tracer,
+                    TraceAction::WriteInsertGlobal {
+                        msg_id: msg_id_label(event.id.as_bytes()),
+                        claimed_community: claimed_community_from_event(&event),
+                    },
+                    state_for_request(tenant, auth.pubkey()),
+                );
+                return Ok(IngestResult {
+                    event_id: event_id_hex,
+                    accepted: true,
+                    message: "duplicate:".into(),
+                });
+            }
+            buzz_db::project_related_channels::ApplyProjectRelatedChannelOutcome::Noop => {
+                emit(
+                    tracer,
+                    TraceAction::WriteNoopGlobal {
+                        msg_id: msg_id_label(event.id.as_bytes()),
+                        claimed_community: claimed_community_from_event(&event),
+                    },
+                    state_for_request(tenant, auth.pubkey()),
+                );
+                return Ok(IngestResult {
+                    event_id: event_id_hex,
+                    accepted: true,
+                    message: "no-op: related channel already has requested state".into(),
+                });
+            }
+            buzz_db::project_related_channels::ApplyProjectRelatedChannelOutcome::ProjectNotFound => {
+                return Err(IngestError::Rejected(
+                    "invalid: Project coordinate has no live Project".into(),
+                ));
+            }
+            buzz_db::project_related_channels::ApplyProjectRelatedChannelOutcome::Unauthorized => {
+                return Err(IngestError::AuthFailed(
+                    "restricted: Project related-channel changes require Project-owner or home-channel-admin authority".into(),
+                ));
+            }
+            buzz_db::project_related_channels::ApplyProjectRelatedChannelOutcome::InvalidTarget(
+                reason,
+            ) => {
+                return Err(IngestError::Rejected(format!("invalid: {reason}")));
+            }
+        }
     }
 
     // Resolve the target reference, then use one DB transaction to upsert the
@@ -5089,6 +5344,36 @@ mod postgres_tests {
     }
 
     #[test]
+    fn project_envelope_rejects_d_tag_over_generic_parameterized_limit() {
+        let project_d = "x".repeat(buzz_db::event::D_TAG_MAX_LEN + 1);
+        let ev = make_project(&[&["d", &project_d]]);
+        let err = validate_project_envelope(&ev).unwrap_err();
+        assert!(err.to_string().contains("`d` tag too long"), "got: {err}");
+    }
+
+    #[test]
+    fn project_envelope_bounds_legacy_related_channel_tags() {
+        let channel_ids: Vec<String> = (0..=PROJECT_LEGACY_RELATED_CHANNEL_CAP)
+            .map(|i| format!("00000000-0000-4000-8000-{i:012}"))
+            .collect();
+        let mut tags: Vec<Vec<&str>> = vec![vec!["d", "wide"]];
+        tags.extend(
+            channel_ids
+                .iter()
+                .map(|channel_id| vec!["buzz-related-channel", channel_id.as_str()]),
+        );
+        let tag_refs: Vec<&[&str]> = tags.iter().map(Vec::as_slice).collect();
+        let ev = make_project(&tag_refs);
+        let err = validate_project_envelope(&ev).unwrap_err();
+        assert!(
+            err.to_string().contains(&format!(
+                "at most {PROJECT_LEGACY_RELATED_CHANNEL_CAP} legacy `buzz-related-channel` tags"
+            )),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn project_envelope_rejects_valueless_d_tag() {
         // `["d"]` with no value is treated as empty, not as absent.
         let ev = make_project(&[&["d"]]);
@@ -5296,6 +5581,20 @@ mod postgres_tests {
         // `buzz-channel` is a metadata reference, not a routing directive.
         assert!(is_global_only_kind(KIND_PROJECT));
         assert!(!requires_h_channel_scope(KIND_PROJECT));
+    }
+
+    #[test]
+    fn project_related_channel_commands_use_channel_write_scope_and_global_routing() {
+        let dummy = make_dummy_event();
+        assert_eq!(
+            required_scope_for_kind(KIND_PROJECT_RELATED_CHANNEL, &dummy).unwrap(),
+            Scope::ChannelsWrite
+        );
+        assert!(is_global_only_kind(KIND_PROJECT_RELATED_CHANNEL));
+        assert!(!requires_h_channel_scope(KIND_PROJECT_RELATED_CHANNEL));
+        assert!(buzz_core::kind::is_relay_only_kind(
+            KIND_PROJECT_RELATED_CHANNELS_SNAPSHOT
+        ));
     }
 
     #[test]

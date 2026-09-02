@@ -170,10 +170,12 @@ pub async fn verify_channel_roster_fence_behavior(pool: &sqlx::PgPool) -> Result
     Ok(())
 }
 
-/// Take the per-channel membership lock. MUST be the first statement in the
-/// transaction that then reads roles/owner counts and writes membership, so the
-/// whole check-then-write sequence is atomic against a concurrent one.
-async fn acquire_channel_membership_lock(
+/// Take the per-channel membership lock before reading roles/owner counts or
+/// writing membership, so the whole check-then-write sequence is atomic against
+/// a concurrent one. A transaction may first take a deterministic prerequisite
+/// lock: Project mutations take the Project coordinate lock before membership
+/// locks, and acquire multiple membership locks in ascending channel UUID order.
+pub(crate) async fn acquire_channel_membership_lock(
     tx: &mut Transaction<'_, Postgres>,
     community_id: CommunityId,
     channel_id: Uuid,
@@ -1192,6 +1194,53 @@ pub async fn get_member_role(
     Ok(row.map(|r| r.try_get("role")).transpose()?)
 }
 
+/// Check the shared channel-management authority rule inside a caller transaction.
+///
+/// Authority is held by a direct owner/admin membership, or by the registered
+/// human owner of an owner-role agent membership. Memberships must be active;
+/// channel archival/deletion state is deliberately left to the caller so this
+/// predicate remains usable for unarchive flows. Owning an admin-role agent
+/// does not inherit that agent's authority.
+pub(crate) async fn has_channel_management_authority_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    actor_pubkey: &[u8],
+) -> Result<bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS( \
+             SELECT 1 FROM channel_members cm \
+             LEFT JOIN users u ON u.community_id = cm.community_id AND u.pubkey = cm.pubkey \
+             WHERE cm.community_id = $1 AND cm.channel_id = $2 AND cm.removed_at IS NULL \
+               AND ( \
+                   (cm.pubkey = $3 AND cm.role IN ('owner', 'admin')) \
+                   OR (cm.role = 'owner' AND u.agent_owner_pubkey = $3) \
+               ) \
+         )",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_id)
+    .bind(actor_pubkey)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(Into::into)
+}
+
+/// Check whether an actor may manage privileged channel metadata.
+async fn has_channel_management_authority(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_id: Uuid,
+    actor_pubkey: &[u8],
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let authorized =
+        has_channel_management_authority_tx(&mut tx, community_id, channel_id, actor_pubkey)
+            .await?;
+    tx.commit().await?;
+    Ok(authorized)
+}
+
 impl Db {
     /// Verify the mixed-version channel-roster database fence end to end.
     #[datastore_span(name = "verify_channel_roster_fence", system = "postgresql")]
@@ -1376,6 +1425,17 @@ impl Db {
     ) -> Result<Option<String>> {
         get_member_role(&self.pool, community_id, channel_id, pubkey).await
     }
+
+    /// Check the shared owner/admin channel-management authority rule.
+    #[datastore_span(name = "has_channel_management_authority", system = "postgresql")]
+    pub async fn has_channel_management_authority(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        actor_pubkey: &[u8],
+    ) -> Result<bool> {
+        has_channel_management_authority(&self.pool, community_id, channel_id, actor_pubkey).await
+    }
 }
 
 #[cfg(test)]
@@ -1407,6 +1467,83 @@ mod postgres_tests {
             .await
             .expect("insert test community");
         id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn shared_management_authority_only_inherits_owner_agent_role() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel_owner = random_pubkey();
+        let direct_admin = random_pubkey();
+        let owner_agent = random_pubkey();
+        let owner_agent_human = random_pubkey();
+        let admin_agent = random_pubkey();
+        let admin_agent_human = random_pubkey();
+        for pubkey in [
+            &channel_owner,
+            &direct_admin,
+            &owner_agent,
+            &owner_agent_human,
+            &admin_agent,
+            &admin_agent_human,
+        ] {
+            ensure_user(&pool, community, pubkey)
+                .await
+                .expect("ensure authority-test user");
+        }
+        set_agent_owner(&pool, community, &owner_agent, &owner_agent_human)
+            .await
+            .expect("register owner agent");
+        set_agent_owner(&pool, community, &admin_agent, &admin_agent_human)
+            .await
+            .expect("register admin agent");
+        let channel = create_test_channel(
+            &pool,
+            community_uuid,
+            "shared-management-authority",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &channel_owner,
+            None,
+        )
+        .await
+        .expect("create authority-test channel");
+        for (pubkey, role) in [
+            (&direct_admin, MemberRole::Admin),
+            (&owner_agent, MemberRole::Owner),
+            (&admin_agent, MemberRole::Admin),
+        ] {
+            add_member(
+                &pool,
+                community,
+                channel.id,
+                pubkey,
+                role,
+                Some(&channel_owner),
+            )
+            .await
+            .expect("add authority-test member");
+        }
+
+        assert!(
+            has_channel_management_authority(&pool, community, channel.id, &direct_admin)
+                .await
+                .expect("check direct admin")
+        );
+        assert!(
+            has_channel_management_authority(&pool, community, channel.id, &owner_agent_human)
+                .await
+                .expect("check owner-agent human")
+        );
+        assert!(
+            !has_channel_management_authority(&pool, community, channel.id, &admin_agent_human)
+                .await
+                .expect("check admin-agent human"),
+            "authority must not flow through an admin-role agent"
+        );
     }
 
     #[allow(clippy::too_many_arguments)]

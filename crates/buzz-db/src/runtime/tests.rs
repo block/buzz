@@ -180,6 +180,30 @@ async fn make_community(pool: &PgPool) -> Uuid {
 
 #[tokio::test]
 #[ignore = "requires Postgres"]
+async fn migration_schema_catalog_includes_project_related_channel_write_fence() {
+    let db = setup_db().await;
+    db.validate_deletion_serving_catalog()
+        .await
+        .expect("migration schema must fence every scoped serving table");
+
+    let attached: bool = sqlx::query_scalar(
+        "SELECT EXISTS ( \
+           SELECT 1 FROM pg_trigger trigger \
+           JOIN pg_class relation ON relation.oid = trigger.tgrelid \
+           JOIN pg_proc procedure ON procedure.oid = trigger.tgfoid \
+           WHERE relation.relname = 'project_related_channel_overrides' \
+             AND procedure.proname = 'enforce_community_write_fence' \
+             AND NOT trigger.tgisinternal \
+         )",
+    )
+    .fetch_one(&db.pool)
+    .await
+    .expect("inspect Project override write fence");
+    assert!(attached);
+}
+
+#[tokio::test]
+#[ignore = "requires Postgres"]
 async fn migration_schema_database_guard_covers_legacy_writer_and_nip09_deletion() {
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 

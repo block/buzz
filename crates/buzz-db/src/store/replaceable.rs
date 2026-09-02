@@ -96,6 +96,25 @@ pub(crate) fn event_replacement_lock_key(
     hash as i64
 }
 
+/// Acquire the transaction-scoped lock for one parameterized-event coordinate.
+pub(crate) async fn acquire_parameterized_event_lock(
+    tx: &mut Transaction<'_, Postgres>,
+    community_id: CommunityId,
+    kind: i32,
+    pubkey: &[u8],
+    d_tag: &str,
+) -> Result<()> {
+    let lock_key = event_replacement_lock_key(community_id, kind, pubkey, Some(d_tag.as_bytes()));
+    observability::observe_advisory_lock(
+        LockType::Replacement,
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut **tx),
+    )
+    .await?;
+    Ok(())
+}
+
 /// Replace a parameterized event in a caller-owned transaction.
 ///
 /// This function acquires a transaction-scoped advisory lock but never commits
@@ -117,19 +136,8 @@ async fn replace_parameterized_event_in_transaction_impl(
         .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
     let received_at = Utc::now();
 
-    let lock_key = event_replacement_lock_key(
-        community_id,
-        kind_i32,
-        pubkey_bytes.as_slice(),
-        Some(d_tag.as_bytes()),
-    );
-    observability::observe_advisory_lock(
-        LockType::Replacement,
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(lock_key)
-            .execute(&mut **tx),
-    )
-    .await?;
+    acquire_parameterized_event_lock(tx, community_id, kind_i32, pubkey_bytes.as_slice(), d_tag)
+        .await?;
 
     let d_tag_count = event
         .tags

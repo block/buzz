@@ -699,8 +699,17 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 44);
+        assert_eq!(migrations.len(), 45);
         assert_eq!(migrations[0].version, 1);
+        assert_eq!(migrations[44].version, 45);
+        assert!(migrations[44]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE project_related_channel_overrides"));
+        assert!(migrations[44]
+            .sql
+            .as_str()
+            .contains("attach_community_write_fence('project_related_channel_overrides')"));
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
             .sql
@@ -1817,6 +1826,13 @@ mod postgres_tests {
             );
         }
         let mut expected_fences = migration.fence_attachments.clone();
+        let migration_0045: &str = MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 45)
+            .expect("embedded migration 0045")
+            .sql
+            .as_ref();
+        expected_fences.extend(surface(migration_0045).fence_attachments);
         expected_fences.remove("product_feedback");
         expected_fences.remove("rate_limit_violations");
         assert_eq!(
@@ -2748,6 +2764,14 @@ mod postgres_tests {
             present.is_empty(),
             "all NIP-FI tables must be absent after migration 0044: {present:?}"
         );
+
+        // Advance to the current schema before checking the current deletion
+        // catalog. The assertions above keep the migration-0044 boundary under
+        // test while allowing later migrations to add catalogued relations.
+        MIGRATOR
+            .run(&pool)
+            .await
+            .expect("apply migrations after 0044");
 
         // The deletion catalog must validate with ledger relations gone.
         crate::deletion::DeletionStore::new(pool.clone())

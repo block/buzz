@@ -278,6 +278,21 @@ CREATE INDEX idx_events_not_before ON events (community_id, not_before)
 -- EXPLAIN before its work lands (Quinn option A; Max's index-spelling caveat).
 CREATE INDEX idx_events_search_tsv ON events USING GIN (search_tsv);
 
+-- ── Project related-channel overrides ───────────────────────────────────────
+-- Accepted kind:47010 events are the durable command history. This table holds
+-- the authoritative current per-channel desired-state override.
+
+CREATE TABLE project_related_channel_overrides (
+    community_id UUID NOT NULL REFERENCES communities(id),
+    project_owner BYTEA NOT NULL,
+    project_d TEXT NOT NULL,
+    channel_id UUID NOT NULL,
+    present BOOLEAN NOT NULL,
+    PRIMARY KEY (community_id, project_owner, project_d, channel_id),
+    CONSTRAINT chk_project_related_channel_owner_len CHECK (LENGTH(project_owner) = 32),
+    CONSTRAINT chk_project_related_channel_d_len CHECK (LENGTH(project_d) BETWEEN 1 AND 1024)
+);
+
 -- ── Event mentions ────────────────────────────────────────────────────────────
 -- Conformance: "Channel-less global events and DMs" (#p fan-out). The join to
 -- events MUST carry the community tuple (e.community_id = m.community_id AND
@@ -1739,6 +1754,7 @@ SELECT attach_community_write_fence('join_policy_acceptances');
 SELECT attach_community_write_fence('moderation_actions');
 SELECT attach_community_write_fence('moderation_reports');
 SELECT attach_community_write_fence('parameterized_event_watermarks');
+SELECT attach_community_write_fence('project_related_channel_overrides');
 SELECT attach_community_write_fence('pubkey_allowlist');
 SELECT attach_community_write_fence('push_leases');
 SELECT attach_community_write_fence('push_match_queue');
@@ -1892,4 +1908,3 @@ CREATE INDEX idx_relay_operator_audit_target
 
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('relay_operator_audit', 'deployment-global append-only roster mutation audit trail; no community_id intentionally');
-

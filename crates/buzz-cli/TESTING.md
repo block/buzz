@@ -486,6 +486,79 @@ buzz notes get --name dco-check   # exits non-zero: not found
 buzz notes rm --name does-not-exist   # exits non-zero
 ```
 
+### 6.13 Project related channels
+
+`projects link-channel` and `projects unlink-channel` change the membership of
+an existing channel. This is distinct from `projects add-channel`, which drafts
+a new channel for owner review in Buzz Desktop.
+
+The following flow creates its own Project and channel fixtures. Run it from the
+repository root after building `buzz-cli` and exporting the credentials from
+section 4:
+
+```bash
+BUZZ_BIN="${BUZZ_BIN:-$PWD/target/debug/buzz}"
+FIXTURE_SUFFIX="$(date +%s)-$$"
+PROJECT_SLUG="cli-related-channels-$FIXTURE_SUFFIX"
+
+HOME_CHANNEL_RESULT=$("$BUZZ_BIN" channels create \
+  --name "cli-project-home-$FIXTURE_SUFFIX" \
+  --type stream --visibility open)
+HOME_CHANNEL_ID=$(jq -er '.channel_id' <<<"$HOME_CHANNEL_RESULT")
+
+RELATED_CHANNEL_RESULT=$("$BUZZ_BIN" channels create \
+  --name "cli-project-related-$FIXTURE_SUFFIX" \
+  --type stream --visibility open)
+RELATED_CHANNEL_ID=$(jq -er '.channel_id' <<<"$RELATED_CHANNEL_RESULT")
+
+"$BUZZ_BIN" projects create "$PROJECT_SLUG" \
+  --name "CLI related-channel test" \
+  --channel "$HOME_CHANNEL_ID" | jq -e '.accepted == true'
+PROJECT_OWNER=$("$BUZZ_BIN" projects get "$PROJECT_SLUG" | jq -er '.pubkey')
+PROJECT_COORD="30621:${PROJECT_OWNER}:${PROJECT_SLUG}"
+
+# Link succeeds and the trusted relay snapshot contains the channel.
+"$BUZZ_BIN" projects link-channel \
+  --project "$PROJECT_COORD" \
+  --channel "$RELATED_CHANNEL_ID" | jq -e '.accepted == true'
+"$BUZZ_BIN" projects related-channels --project "$PROJECT_COORD" \
+  | jq -e --arg channel "$RELATED_CHANNEL_ID" \
+      '.snapshot_found == true and .source == "relay_snapshot" and (.related_channels | index($channel) != null)'
+
+# Repeating the desired state succeeds without changing readback.
+"$BUZZ_BIN" projects link-channel \
+  --project "$PROJECT_COORD" \
+  --channel "$RELATED_CHANNEL_ID" | jq -e '.accepted == true'
+"$BUZZ_BIN" projects related-channels --project "$PROJECT_COORD" \
+  | jq -e --arg channel "$RELATED_CHANNEL_ID" \
+      '.snapshot_found == true and (.related_channels | index($channel) != null)'
+
+# Unlink succeeds and removes the channel from the trusted snapshot.
+"$BUZZ_BIN" projects unlink-channel \
+  --project "$PROJECT_COORD" \
+  --channel "$RELATED_CHANNEL_ID" | jq -e '.accepted == true'
+"$BUZZ_BIN" projects related-channels --project "$PROJECT_COORD" \
+  | jq -e --arg channel "$RELATED_CHANNEL_ID" \
+      '.snapshot_found == true and .source == "relay_snapshot" and (.related_channels | index($channel) == null)'
+
+# Repeating unlink is also an accepted no-op.
+"$BUZZ_BIN" projects unlink-channel \
+  --project "$PROJECT_COORD" \
+  --channel "$RELATED_CHANNEL_ID" | jq -e '.accepted == true'
+"$BUZZ_BIN" projects related-channels --project "$PROJECT_COORD" \
+  | jq -e --arg channel "$RELATED_CHANNEL_ID" \
+      '.snapshot_found == true and (.related_channels | index($channel) == null)'
+```
+
+Every command above exits zero when its assertion succeeds. A missing snapshot
+uses the live owner-signed Project metadata and reports
+`snapshot_found=false` with `source="project_metadata"`. A present snapshot
+must carry an `e` tag equal to that live Project event's lowercase ID. If the
+Project is not live, the command reports it as not found without consulting a
+snapshot. A stale or malformed `e`, invalid relay author, signature, or payload
+is a trust error: the command exits non-zero instead of returning an empty list
+or using the metadata fallback.
+
 ---
 
 ## 7. Error Path Testing
@@ -553,6 +626,15 @@ env -u BUZZ_PRIVATE_KEY \
 
 ```bash
 # Delete test channels
+if [[ -n "${PROJECT_SLUG:-}" ]]; then
+  "${BUZZ_BIN:-$PWD/target/debug/buzz}" projects delete "$PROJECT_SLUG" | jq .
+fi
+if [[ -n "${HOME_CHANNEL_ID:-}" ]]; then
+  "${BUZZ_BIN:-$PWD/target/debug/buzz}" channels delete --channel "$HOME_CHANNEL_ID" | jq .
+fi
+if [[ -n "${RELATED_CHANNEL_ID:-}" ]]; then
+  "${BUZZ_BIN:-$PWD/target/debug/buzz}" channels delete --channel "$RELATED_CHANNEL_ID" | jq .
+fi
 buzz channels delete --channel "$CHANNEL_ID" | jq .
 buzz channels delete --channel "$FORUM_ID" | jq .
 ```

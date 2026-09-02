@@ -596,28 +596,16 @@ pub async fn validate_admin_event(
                 k == "name" || k == "about" || k == "archived" || k == "visibility" || k == "ttl"
             });
             if has_privileged_tag {
-                let members = state.db.get_members(tenant.community(), channel_id).await?;
-                let actor_member = members.iter().find(|m| m.pubkey == actor_bytes);
-                match actor_member {
-                    Some(m) if m.role == "owner" || m.role == "admin" => Ok(()),
-                    _ => {
-                        // Allow the owning human of any active owner-role agent in the
-                        // channel, even when the human is not a channel member —
-                        // diverges from kind:9001 intentionally.
-                        if actor_owns_any_owner_agent(
-                            state,
-                            tenant.community(),
-                            &members,
-                            &actor_bytes,
-                        )
-                        .await?
-                        {
-                            return Ok(());
-                        }
-                        Err(anyhow::anyhow!(
-                            "actor not authorized for name/about/archived/visibility/ttl changes"
-                        ))
-                    }
+                if state
+                    .db
+                    .has_channel_management_authority(tenant.community(), channel_id, &actor_bytes)
+                    .await?
+                {
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!(
+                        "actor not authorized for name/about/archived/visibility/ttl changes"
+                    ))
                 }
             } else {
                 // topic/purpose: any member
@@ -2326,6 +2314,22 @@ async fn handle_standard_deletion_event(
                 target_id = %hex::encode(&target_id),
                 "NIP-09 deletion ignored for push lease"
             );
+            continue;
+        }
+        if u32::from(target_event.event.kind.as_u16())
+            == buzz_core::kind::KIND_PROJECT_RELATED_CHANNEL
+        {
+            tracing::debug!(
+                target_id = %hex::encode(&target_id),
+                "NIP-09 deletion ignored for Project related-channel command"
+            );
+            continue;
+        }
+        if u32::from(target_event.event.kind.as_u16()) == buzz_core::kind::KIND_PROJECT {
+            state
+                .db
+                .soft_delete_parameterized_event_by_id(tenant.community(), &target_id)
+                .await?;
             continue;
         }
 

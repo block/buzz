@@ -30,6 +30,8 @@ pub mod moderation;
 pub mod partition;
 /// Buzz product-feedback sidecar persistence.
 pub mod product_feedback;
+/// Collaborative Project related-channel override heads.
+pub mod project_related_channels;
 /// Community-scoped push lease and durable wake-outbox persistence.
 pub mod push;
 /// Reaction persistence.

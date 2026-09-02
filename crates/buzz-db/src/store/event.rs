@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use buzz_core::kind::{
     event_kind_i32, is_ephemeral, is_parameterized_replaceable, KIND_AUTH, KIND_EVENT_REMINDER,
-    KIND_HUDDLE_STARTED, SHARED_GATED_KINDS,
+    KIND_HUDDLE_STARTED, KIND_PROJECT, SHARED_GATED_KINDS,
 };
 use buzz_core::{CommunityId, StoredEvent};
 use buzz_datastore_tracing::datastore_span;
@@ -834,6 +834,70 @@ pub async fn soft_delete_event(
     Ok(result.rows_affected() > 0)
 }
 
+/// Soft-delete a parameterized-replaceable event by id while serializing with
+/// writers for its `(kind, pubkey, d_tag)` coordinate.
+///
+/// NIP-09 `e`-tag deletion discovers the coordinate from the target row. The
+/// coordinate lock prevents a Project command from authorizing against a head
+/// concurrently being deleted by id. Deleting a live Project also removes its
+/// relay-derived related-channel snapshot in this transaction.
+pub async fn soft_delete_parameterized_event_by_id(
+    pool: &PgPool,
+    community_id: CommunityId,
+    event_id: &[u8],
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let row =
+        sqlx::query("SELECT kind, pubkey, d_tag FROM events WHERE community_id = $1 AND id = $2")
+            .bind(community_id.as_uuid())
+            .bind(event_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(row) = row else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    let kind: i32 = row.try_get("kind")?;
+    let pubkey: Vec<u8> = row.try_get("pubkey")?;
+    let d_tag: Option<String> = row.try_get("d_tag")?;
+    let Some(d_tag) = d_tag else {
+        tx.rollback().await?;
+        return Ok(false);
+    };
+    if !buzz_core::kind::is_parameterized_replaceable(kind as u32) {
+        tx.rollback().await?;
+        return Ok(false);
+    }
+    crate::replaceable::acquire_parameterized_event_lock(
+        &mut tx,
+        community_id,
+        kind,
+        &pubkey,
+        &d_tag,
+    )
+    .await?;
+    let result = sqlx::query(
+        "UPDATE events SET deleted_at = NOW() \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(event_id)
+    .execute(&mut *tx)
+    .await?;
+    let deleted = result.rows_affected() > 0;
+    if deleted && kind == KIND_PROJECT as i32 {
+        crate::project_related_channels::delete_snapshot_in_transaction(
+            &mut tx,
+            community_id,
+            &pubkey,
+            &d_tag,
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(deleted)
+}
+
 /// Soft-delete the live row for an addressable coordinate
 /// `(kind, pubkey, d_tag)` — the NIP-33 replacement key — provided it is not
 /// newer than the deletion request.
@@ -863,6 +927,8 @@ pub async fn soft_delete_event(
 ///
 /// Returns `Ok(true)` if a row was deleted, `Ok(false)` if no live row matched
 /// (already deleted, never existed, or strictly newer than the deletion).
+/// Deleting a live Project also removes its relay-derived related-channel
+/// snapshot under the same coordinate lock and transaction.
 pub async fn soft_delete_by_coordinate(
     pool: &PgPool,
     community_id: CommunityId,
@@ -873,6 +939,17 @@ pub async fn soft_delete_by_coordinate(
 ) -> Result<bool> {
     let deletion_created_at = DateTime::from_timestamp(deletion_created_at_secs, 0)
         .ok_or(DbError::InvalidTimestamp(deletion_created_at_secs))?;
+    let mut tx = pool.begin().await?;
+    if buzz_core::kind::is_parameterized_replaceable(kind as u32) {
+        crate::replaceable::acquire_parameterized_event_lock(
+            &mut tx,
+            community_id,
+            kind,
+            pubkey,
+            d_tag,
+        )
+        .await?;
+    }
     let result = sqlx::query(
         "UPDATE events SET deleted_at = NOW() \
          WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
@@ -883,10 +960,20 @@ pub async fn soft_delete_by_coordinate(
     .bind(pubkey)
     .bind(d_tag)
     .bind(deletion_created_at)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
-
-    Ok(result.rows_affected() > 0)
+    let deleted = result.rows_affected() > 0;
+    if deleted && kind == KIND_PROJECT as i32 {
+        crate::project_related_channels::delete_snapshot_in_transaction(
+            &mut tx,
+            community_id,
+            pubkey,
+            d_tag,
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(deleted)
 }
 
 /// Atomically soft-delete an event and decrement thread reply counters.
@@ -1561,6 +1648,17 @@ impl Db {
         event_id: &[u8],
     ) -> Result<bool> {
         crate::event::soft_delete_event(&self.pool, community_id, event_id).await
+    }
+
+    /// Soft-delete a parameterized-replaceable event by id under its coordinate lock.
+    #[datastore_span(name = "soft_delete_parameterized_event_by_id", system = "postgresql")]
+    pub async fn soft_delete_parameterized_event_by_id(
+        &self,
+        community_id: CommunityId,
+        event_id: &[u8],
+    ) -> Result<bool> {
+        crate::event::soft_delete_parameterized_event_by_id(&self.pool, community_id, event_id)
+            .await
     }
 
     /// Soft-delete the live row for an addressable coordinate `(kind, pubkey, d_tag)`

@@ -24,11 +24,11 @@ Buzz renders one card per `kind:30617`, so "the platform" — a relay, a desktop
 - **Project-level metadata has no owner.** A project name, description, and linked channel describe the *group*, not any one repository. Scattered across per-repository tags they have no single writer, no replacement semantics, and no deletion story: removing a repository from the group means editing an event you may not control.
 - **Existing list kinds do not fit.** NIP-51 sets (`kind:30004` curation sets and friends) are private-or-public user bookmarks over arbitrary content, not a shared, named, addressable container for a forge collection with its own channel binding and visibility. Overloading a curation set would make every project indistinguishable from a user's reading list.
 
-One custom kind, held by one signer, with all group state in one replaceable event, resolves all three. The cost is bounded and stated plainly: `kind:30621` is Buzz-specific, so a third-party NIP-34 client sees the member repositories individually and ignores the grouping. Nothing degrades — the repositories remain standard, portable `kind:30617` events, discoverable and renderable exactly as before.
+One custom Project identity kind, held by one signer, with the portable repository grouping in one replaceable event, resolves all three. The cost is bounded and stated plainly: `kind:30621` is Buzz-specific, so a third-party NIP-34 client sees the member repositories individually and ignores the grouping. Nothing degrades — the repositories remain standard, portable `kind:30617` events, discoverable and renderable exactly as before.
 
 ## Non-Goals
 
-This NIP does not define shared or delegated project editing — a project is replaceable only by its own signer (see [Authority](#authority)).
+This NIP does not define shared or delegated replacement of the project identity event — a project is replaceable only by its own signer (see [Authority](#authority)). An authoritative relay may define separate actor-signed commands for narrow collaborative relations without allowing those actors to replace `kind:30621`; Buzz's related-channel extension is specified in [`project-membership-commands.md`](../spec/project-membership-commands.md). Its relay-signed current-state snapshot is a bounded derived projection, not part of the portable Project identity or an independent permission grant.
 This NIP does not define any authorization over member repositories. Membership is not a permission grant, and a project is never consulted by git push policy.
 This NIP does not define project-level branch protection, CI, or workflow configuration.
 This NIP does not define nested projects. A project's members are repositories, never other projects.
@@ -140,9 +140,9 @@ Clients MUST preserve each member repository's own owner provenance in the UI. A
 
 ### Editing model
 
-Editing is **owner-only**: publish a replacement `kind:30621` with the same `d` and a newer `created_at`. Adding, removing, or reordering members and changing metadata are all one operation — replacing the container. This falls out of the addressable-event model with no relay-side permission machinery; NIP-01 replacement already refuses to let one pubkey overwrite another's coordinate.
+Editing the `kind:30621` identity event is **owner-only**: publish a replacement with the same `d` and a newer `created_at`. Adding, removing, or reordering repository members and changing identity metadata are all one operation — replacing the container. This falls out of the addressable-event model with no relay-side permission machinery; NIP-01 replacement already refuses to let one pubkey overwrite another's coordinate.
 
-Delegated or maintainer editing is deliberately out of scope for this version. Adding it later needs no change to this event shape — only a new rule about who may replace a coordinate.
+Delegated replacement is deliberately out of scope. Relay-local collaborative relations do not change who may replace the coordinate.
 
 ### Zero-member projects
 

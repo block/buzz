@@ -69,6 +69,10 @@ exact spec line it grounds in.
   spec: `WriteDuplicate` (line 612). The DB returned "already present";
   no row was added. No `row_community` because no row was produced.
 
+- **`write_noop_global { msg_id, claimed_community }`**
+  implementation-only observation for a channel-less command whose requested
+  state already held. No row was added.
+
 ### Read seam
 
 - **`auth_check { channel, claimed_community, verdict }`**
@@ -133,7 +137,9 @@ normalized away the violation. The checker assumes you *did not*.
 |------|---------------|
 | `crates/buzz-relay/src/conformance/mod.rs` | helpers + `EmitGuard` + `sanitized_reason_for` |
 | `crates/buzz-relay/src/conformance/tracers.rs` | `NoopTracer` (prod default), `JsonlTracer` |
-| `crates/buzz-relay/src/handlers/ingest.rs` | `AuthCheck`, `WriteInsert`, `WriteInsertGlobal`, `WriteDuplicate`, outer-wrapper `SanitizedError` |
+| `crates/buzz-relay/src/handlers/ingest.rs` | `AuthCheck`, `WriteInsert`, `WriteInsertGlobal`, `WriteDuplicate`, `WriteNoopGlobal`, outer-wrapper `SanitizedError` |
+
+`WriteNoopGlobal` records an authorized desired-state command whose requested state already holds; it is intentionally distinct from a stored insert and from a duplicate signed event.
 | `crates/buzz-relay/src/handlers/req.rs` | **held back** — additive patch for integration onto Max's req.rs work |
 
 ## Where the checker lives

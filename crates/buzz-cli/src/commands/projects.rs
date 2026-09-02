@@ -842,6 +842,19 @@ pub async fn dispatch(cmd: crate::ProjectsCmd, client: &BuzzClient) -> Result<()
             )
             .await
         }
+        ProjectsCmd::LinkChannel { project, channel } => {
+            crate::commands::project_related_channels::cmd_link_channel(client, &project, &channel)
+                .await
+        }
+        ProjectsCmd::UnlinkChannel { project, channel } => {
+            crate::commands::project_related_channels::cmd_unlink_channel(
+                client, &project, &channel,
+            )
+            .await
+        }
+        ProjectsCmd::RelatedChannels { project } => {
+            crate::commands::project_related_channels::cmd_related_channels(client, &project).await
+        }
         ProjectsCmd::RemoveRepo { slug, repo } => cmd_remove_repo(client, &slug, &repo).await,
         ProjectsCmd::Update {
             slug,

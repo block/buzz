@@ -48,11 +48,11 @@ NIP-34 is the metadata and discovery layer. Git remains the transport. The trans
 
 Real work spans repositories. The platform is a relay, a desktop app, and a mobile app — three repos, one project. Render one card per repo and they look like three unrelated things.
 
-Grouping is the one forge semantic that per-repo tags cannot express, and it's worth being precise about why, because everything else here deliberately avoids a custom kind.
+Grouping is the one forge semantic that per-repo tags cannot express, and it's worth being precise about why, because everything else here deliberately avoids a custom Project identity kind.
 
 Put membership in each `kind:30617` and a project spanning Alice's and Bob's repos needs *both* of them to publish a tag naming the group. Alice can't enroll Bob's repo — she can't sign for his key. Cross-owner grouping becomes impossible, and the project's own name, description, and channel end up scattered across events with no single writer and no deletion story: dropping a repo from the group would mean editing an event you don't control.
 
-So there is exactly one custom kind — [NIP-MP](docs/nips/NIP-MP.md), `kind:30621`. One signer, one replaceable event, all group state in one place:
+So there is exactly one custom Project identity kind — [NIP-MP](docs/nips/NIP-MP.md), `kind:30621`. One signer owns the replaceable identity and metadata event:
 
 ```json
 {
@@ -68,7 +68,9 @@ So there is exactly one custom kind — [NIP-MP](docs/nips/NIP-MP.md), `kind:306
 }
 ```
 
-A project points at repos. That's all it does. The signer gets no authority over any member — no edit, no delete, no push, no admin. Adding Bob's repo to your project is your signed assertion that the two belong together, and it changes nothing about Bob's repo or who can push to it. Push policy reads the repo's own event, never the project's.
+The portable Project identity points at repos; it does not confer authority over them. The signer gets no edit, delete, push, or admin rights over any member. Adding Bob's repo to your project is your signed assertion that the two belong together, and it changes nothing about Bob's repo or who can push to it. Push policy reads the repo's own event, never the project's.
+
+Project collaboration does not require sharing the identity key. An authoritative Buzz relay may accept separately signed, relay-authorized commands for narrow collaborative relations such as related channels. Those commands are attributable to their actors, do not replace `kind:30621`, and grant no authority over the referenced channel. The Project's live home-channel roles determine who may collaborate. A relay may publish a bounded signed projection for efficient current-state reads, but that projection is derived from owner metadata and accepted commands; it is not Project identity or an independent source of authority.
 
 The cost is stated plainly: a third-party NIP-34 client sees the member repos individually and ignores the grouping. Nothing degrades — the repos are still standard, portable `kind:30617` events. And a repo in no project still renders on its own, exactly as before.
 

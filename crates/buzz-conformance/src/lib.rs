@@ -166,6 +166,7 @@ pub struct AbstractState {
 /// - [`TraceAction::WriteInsert`] (spec `WriteInsert`, lines 514–550)
 /// - [`TraceAction::WriteInsertGlobal`] (spec `WriteInsertGlobal`, lines 559–595)
 /// - [`TraceAction::WriteDuplicate`] (spec `WriteDuplicate`, lines 606–637)
+/// - [`TraceAction::WriteNoopGlobal`] (implementation no-store success)
 /// - [`TraceAction::SanitizedError`] (spec `SanitizedError`, line 778)
 /// - [`TraceAction::AuthCheck`] (spec `AuthCheck`, line 794) — M2/M8 target
 /// - [`TraceAction::ReadMessageRows`] (spec `ReadMessageRows`, line 643)
@@ -207,6 +208,13 @@ pub enum TraceAction {
         /// The channel the duplicate hit.
         channel: ChannelLabel,
         /// The community the client *claimed*, if any.
+        claimed_community: Option<CommunityLabel>,
+    },
+    /// Channel-less command whose requested state already held, so no event was stored.
+    WriteNoopGlobal {
+        /// Opaque hash of the submitted event id.
+        msg_id: OpaqueId,
+        /// The community the client claimed, if any.
         claimed_community: Option<CommunityLabel>,
     },
     /// Sanitized error (spec `SanitizedError`). Closed-alphabet reason
@@ -268,6 +276,7 @@ impl TraceAction {
             TraceAction::WriteInsert { .. } => "write_insert",
             TraceAction::WriteInsertGlobal { .. } => "write_insert_global",
             TraceAction::WriteDuplicate { .. } => "write_duplicate",
+            TraceAction::WriteNoopGlobal { .. } => "write_noop_global",
             TraceAction::SanitizedError { .. } => "sanitized_error",
             TraceAction::AuthCheck { .. } => "auth_check",
             TraceAction::ReadMessageRows { .. } => "read_message_rows",

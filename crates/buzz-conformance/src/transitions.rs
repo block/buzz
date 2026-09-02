@@ -197,6 +197,9 @@ pub fn check_step(
         // real ChannelCommunity(ch), enforced by the universal check.
         TraceAction::WriteDuplicate { .. } => Ok(()),
 
+        // Successful channel-less command that intentionally made no durable write.
+        TraceAction::WriteNoopGlobal { .. } => Ok(()),
+
         // --- Spec SanitizedError (line 778) ---
         // Closed-alphabet reason; labels = {}; carries no row data. The
         // emitter must collapse every reject path into one of the three
@@ -323,6 +326,7 @@ pub fn action_channel(action: &TraceAction) -> Option<&ChannelLabel> {
         TraceAction::ReadMessageRows { channel, .. } => channel.as_ref(),
         TraceAction::ReadByIdRows { channel, .. } => channel.as_ref(),
         TraceAction::WriteInsertGlobal { .. }
+        | TraceAction::WriteNoopGlobal { .. }
         | TraceAction::ReadHostFeedRows { .. }
         | TraceAction::SanitizedError { .. }
         | TraceAction::ImplBug { .. } => None,

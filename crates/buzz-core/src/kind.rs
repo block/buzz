@@ -631,6 +631,12 @@ pub const KIND_GIT_STATUS_DRAFT: u32 = 1633;
 /// announcement, never a project. See `docs/nips/NIP-MP.md`.
 pub const KIND_PROJECT: u32 = 30621;
 
+/// Relay-derived effective related-channel snapshot for one Project.
+pub const KIND_PROJECT_RELATED_CHANNELS_SNAPSHOT: u32 = 30623;
+
+/// Actor-signed command that links or unlinks one related channel from a Project.
+pub const KIND_PROJECT_RELATED_CHANNEL: u32 = 47010;
+
 /// All registered kind constants — used for duplicate detection and iteration.
 pub const ALL_KINDS: &[u32] = &[
     KIND_PROFILE,
@@ -763,6 +769,8 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_GIT_STATUS_CLOSED,
     KIND_GIT_STATUS_DRAFT,
     KIND_PROJECT,
+    KIND_PROJECT_RELATED_CHANNELS_SNAPSHOT,
+    KIND_PROJECT_RELATED_CHANNEL,
 ];
 
 /// Returns `true` if `kind` is in the ephemeral range (20000–29999).
@@ -834,6 +842,7 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
             | KIND_CHANNEL_SUMMARY
             | KIND_PRESENCE_SNAPSHOT
             | KIND_DM_VISIBILITY
+            | KIND_PROJECT_RELATED_CHANNELS_SNAPSHOT
             | KIND_THREAD_SUMMARY
             | KIND_WINDOW_BOUNDS
     )
@@ -862,6 +871,9 @@ const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_PROJECT)); // 30621 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(
+    KIND_PROJECT_RELATED_CHANNELS_SNAPSHOT
+));
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WINDOW_BOUNDS)); // 39006 ∈ 30000–39999
 
@@ -883,6 +895,10 @@ const _: () = assert!(EPHEMERAL_KIND_MIN < EPHEMERAL_KIND_MAX);
 // Compile-time: KIND_AGENT_TURN_METRIC is a regular stored kind (not ephemeral, not replaceable).
 const _: () = assert!(!is_ephemeral(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(!is_replaceable(KIND_AGENT_TURN_METRIC));
+// Project related-channel commands are durable regular events.
+const _: () = assert!(!is_ephemeral(KIND_PROJECT_RELATED_CHANNEL));
+const _: () = assert!(!is_replaceable(KIND_PROJECT_RELATED_CHANNEL));
+const _: () = assert!(!is_parameterized_replaceable(KIND_PROJECT_RELATED_CHANNEL));
 const _: () = assert!(!is_parameterized_replaceable(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(KIND_AGENT_TURN_METRIC <= u16::MAX as u32);
 // Moderation kinds fit u16 and are neither replaceable nor ephemeral:
@@ -910,6 +926,7 @@ mod tests {
     #[test]
     fn nip43_membership_snapshot_is_relay_only() {
         assert!(is_relay_only_kind(KIND_NIP43_MEMBERSHIP_LIST));
+        assert!(is_relay_only_kind(KIND_PROJECT_RELATED_CHANNELS_SNAPSHOT));
         assert!(!is_relay_only_kind(KIND_NIP43_LEAVE_REQUEST));
     }
 

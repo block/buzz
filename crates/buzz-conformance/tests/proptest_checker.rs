@@ -128,6 +128,12 @@ fn arb_clean_action(resolved: CommunityLabel) -> impl Strategy<Value = TraceActi
                 claimed_community,
             }
         }),
+        (arb_opaque(), prop::option::of(Just(res))).prop_map(|(msg_id, claimed_community)| {
+            TraceAction::WriteNoopGlobal {
+                msg_id,
+                claimed_community,
+            }
+        }),
         (arb_opaque(), arb_channel(), prop::option::of(Just(res))).prop_map(
             |(msg_id, channel, claimed_community)| TraceAction::WriteDuplicate {
                 msg_id,
