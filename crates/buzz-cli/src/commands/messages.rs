@@ -608,6 +608,34 @@ pub struct SendMessageParams {
     pub mentions: Vec<String>,
 }
 
+fn attachment_filename(file_path: &str) -> Option<&str> {
+    let filename = std::path::Path::new(file_path).file_name()?.to_str()?;
+    if filename.is_empty() || filename.len() > 255 || filename.chars().any(char::is_control) {
+        return None;
+    }
+    Some(filename)
+}
+
+fn attachment_imeta_tag(desc: &crate::client::BlobDescriptor, file_path: &str) -> Vec<String> {
+    let mut tag = crate::client::build_imeta_tag(desc);
+    if let Some(filename) = attachment_filename(file_path) {
+        tag.push(format!("filename {filename}"));
+    }
+    tag
+}
+
+fn append_attachment_markdown(content: &mut String, desc: &crate::client::BlobDescriptor) {
+    if desc.mime_type.starts_with("video/") {
+        content.push_str("\n![video](");
+    } else if desc.mime_type.starts_with("image/") {
+        content.push_str("\n![image](");
+    } else {
+        content.push_str("\n[file](");
+    }
+    content.push_str(&desc.url);
+    content.push(')');
+}
+
 pub async fn cmd_send_message(
     client: &BuzzClient,
     mut p: SendMessageParams,
@@ -655,14 +683,8 @@ pub async fn cmd_send_message(
             .upload_file(file_path)
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
-        media_tags.push(crate::client::build_imeta_tag(&desc));
-        if desc.mime_type.starts_with("video/") {
-            media_content.push_str("\n![video](");
-        } else {
-            media_content.push_str("\n![image](");
-        }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
+        media_tags.push(attachment_imeta_tag(&desc, file_path));
+        append_attachment_markdown(&mut media_content, &desc);
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
@@ -1056,17 +1078,53 @@ pub async fn dispatch(
 #[cfg(test)]
 mod tests {
     use super::{
-        channel_id_from_event, cmd_get_thread, event_mention_pubkeys, find_root_from_tags,
-        format_events, match_profiles_by_name, merge_message_mentions, missing_members,
-        normalize_explicit_mentions, parse_member_pubkeys, resolve_names_to_pubkeys,
-        resolve_thread_target, thread_ref_from_event, thread_ref_from_parent_tags, BuzzClient,
-        CliError, Uuid,
+        append_attachment_markdown, attachment_imeta_tag, channel_id_from_event, cmd_get_thread,
+        event_mention_pubkeys, find_root_from_tags, format_events, match_profiles_by_name,
+        merge_message_mentions, missing_members, normalize_explicit_mentions, parse_member_pubkeys,
+        resolve_names_to_pubkeys, resolve_thread_target, thread_ref_from_event,
+        thread_ref_from_parent_tags, BuzzClient, CliError, Uuid,
     };
+    use crate::client::BlobDescriptor;
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
     use nostr::Keys;
     use serde_json::json;
+
+    fn attachment_descriptor(mime_type: &str) -> BlobDescriptor {
+        BlobDescriptor {
+            url: "https://buzz.example/media/abc.xlsx".into(),
+            sha256: "a".repeat(64),
+            size: 42,
+            mime_type: mime_type.into(),
+            uploaded: 1,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+        }
+    }
+
+    #[test]
+    fn generic_attachment_uses_file_link_and_preserves_filename() {
+        let desc = attachment_descriptor(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        );
+        let mut content = String::new();
+        append_attachment_markdown(&mut content, &desc);
+        let tag = attachment_imeta_tag(&desc, "/tmp/EBEN1 Test Sequence Chart.xlsx");
+
+        assert_eq!(content, "\n[file](https://buzz.example/media/abc.xlsx)");
+        assert!(tag.contains(&"filename EBEN1 Test Sequence Chart.xlsx".to_string()));
+    }
+
+    #[test]
+    fn image_attachment_keeps_inline_image_markdown() {
+        let desc = attachment_descriptor("image/png");
+        let mut content = String::new();
+        append_attachment_markdown(&mut content, &desc);
+        assert_eq!(content, "\n![image](https://buzz.example/media/abc.xlsx)");
+    }
 
     const ID_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const ID_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

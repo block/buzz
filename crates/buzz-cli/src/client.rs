@@ -60,20 +60,14 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
     tag
 }
 
-/// MIME types accepted for upload.
-const ALLOWED_MIMES: &[&str] = &[
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/webp",
-    "video/mp4",
-];
-
 /// Maximum file size for image uploads (50 MB).
 const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Maximum file size for video uploads (500 MB).
 const MAX_VIDEO_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Maximum file size for generic document/archive uploads (100 MB).
+const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Sign a NIP-98 HTTP auth event (kind:27235) and return the Authorization header value.
 ///
@@ -1134,15 +1128,17 @@ impl BuzzClient {
             .map(|t| t.mime_type().to_string())
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        if !ALLOWED_MIMES.contains(&mime.as_str()) {
-            return Err(CliError::Usage(format!("unsupported file type: {mime}")));
-        }
-
-        // 3. Size check
+        // 3. Size check. Content policy remains authoritative at the relay:
+        // `/upload` sniffs the bytes, rejects active/executable content and
+        // routes non-media documents through the generic-file path. Keeping a
+        // second MIME allowlist here made the CLI reject PDFs, Office files,
+        // archives and text that the relay intentionally supports.
         let max = if mime.starts_with("video/") {
             MAX_VIDEO_BYTES
-        } else {
+        } else if mime.starts_with("image/") {
             MAX_IMAGE_BYTES
+        } else {
+            MAX_FILE_BYTES
         };
         if bytes.len() as u64 > max {
             return Err(CliError::Usage(format!(
