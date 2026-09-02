@@ -21,11 +21,16 @@ export function useDraftMentionRouting(params: {
   getDraftMentionRefs: (
     content: string,
     fallbackRefs?: readonly DraftMentionRef[],
+    competingDisplayNames?: readonly string[],
   ) => DraftMentionRef[];
   restoreDraftMentionRefs: (refs: readonly DraftMentionRef[]) => void;
 } {
   const getDraftMentionRefs = React.useCallback(
-    (content: string, fallbackRefs: readonly DraftMentionRef[] = []) =>
+    (
+      content: string,
+      fallbackRefs: readonly DraftMentionRef[] = [],
+      competingDisplayNames: readonly string[] = [],
+    ) =>
       snapshotDraftMentionRefs(
         content,
         params.mentionMapRef.current,
@@ -33,6 +38,7 @@ export function useDraftMentionRouting(params: {
         params.memberCandidates,
         params.personaMentionMapRef.current.keys(),
         fallbackRefs,
+        competingDisplayNames,
       ),
     [
       params.mentionMapRef,

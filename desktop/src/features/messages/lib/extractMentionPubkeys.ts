@@ -69,9 +69,11 @@ export function mentionMatchCandidates({
   selectedMentions,
   selectedDisplayNames,
   memberCandidates,
+  competingDisplayNames,
 }: {
   selectedMentions: ReadonlyMap<string, string>;
   selectedDisplayNames?: Iterable<string>;
+  competingDisplayNames?: Iterable<string>;
   memberCandidates: readonly MentionPubkeyCandidate[];
 }): MentionMatch[] {
   const selectedLabels = [...(selectedDisplayNames ?? [])];
@@ -104,6 +106,11 @@ export function mentionMatchCandidates({
     }
   }
 
+  // Historical unresolved labels own ranges without binding or suppressing
+  // current same-name members. They must also block shorter selected labels.
+  for (const displayName of competingDisplayNames ?? []) {
+    addMatches(displayName);
+  }
   return candidates;
 }
 
@@ -112,6 +119,7 @@ export function extractMentionPubkeys(options: {
   text: string;
   selectedMentions: ReadonlyMap<string, string>;
   selectedDisplayNames?: Iterable<string>;
+  competingDisplayNames?: Iterable<string>;
   memberCandidates: readonly MentionPubkeyCandidate[];
 }): string[] {
   const { text, selectedMentions, memberCandidates } = options;

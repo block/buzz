@@ -21,6 +21,8 @@ export type MessageComposerEditTarget = {
   imetaMedia?: ImetaMedia[];
   mentionRefs?: DraftMentionRef[];
   unresolvedMentionPubkeys?: string[];
+  /** Historical alias candidates, for retention only; never notifying bindings. */
+  unresolvedMentionRefs?: DraftMentionRef[];
 };
 
 export type MessageComposerProps = {

@@ -746,9 +746,10 @@ export function useMentions(
     [mentionSelection.prepareSelectionPreference, setSelected],
   );
   const extractMentionPubkeysForCurrentMentions = React.useCallback(
-    (text: string): string[] => {
+    (text: string, competingDisplayNames: readonly string[] = []): string[] => {
       const extracted = extractMentionPubkeys({
         text,
+        competingDisplayNames,
         selectedMentions: mentionMapRef.current,
         selectedDisplayNames: personaMentionMapRef.current.keys(),
         memberCandidates: mentionCandidates,

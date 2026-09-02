@@ -11,6 +11,18 @@ export function getMentionTagPubkey(tag: string[]): string | null {
   return tag[1].toLowerCase();
 }
 
+/** An edit snapshot supersedes historical notification p-tags for body identity. */
+export function mentionIdentityTags(tags: string[][] | undefined): string[][] {
+  const source = tags ?? [];
+  return source.some((tag) => tag[0] === "buzz:mention-snapshot")
+    ? // Annotated references (e.g. immutable agent-address metadata) are not
+      // authored body bindings and must not leak into a fresh edit snapshot.
+      source.filter(
+        (tag) => tag[0] === MENTION_REFERENCE_TAG && tag.length === 2,
+      )
+    : source;
+}
+
 /**
  * All names a profile can be @mentioned by. Message text is matched against
  * the sender's view of the profile at send time (agents and the CLI resolve
@@ -76,7 +88,7 @@ export function resolveMentionProps(
   content = "",
 ): ResolvedMentionProps {
   const taggedKeys = new Set(
-    (tags ?? [])
+    mentionIdentityTags(tags)
       .map(getMentionTagPubkey)
       .filter((key): key is string => Boolean(key)),
   );

@@ -90,3 +90,34 @@ refs, typed members and personas before presence selection; they are never match
 in a separate, narrower pass. Current selections (including unbound personas)
 take precedence over same-label fallback refs. Historical unresolved identities
 still preserve non-notifying metadata, without claiming a literal binding.
+
+## Replacement edit snapshots
+
+An edit snapshot supersedes original notification `p` tags for authored-body
+identity, including on the next edit-open. Unresolved historical aliases are
+retained only if their original literal still wins current draft occurrence
+ownership; a newly selected same-label key or a longer typed label cannot inherit
+those old references. With no known historical alias, retain metadata only for
+an unchanged body with unchanged bindings (conservatively drop it on replacement).
+Current picker bindings must never reinterpret the original recipient audience.
+All historical aliases compete together, including unresolved aliases absent from
+the current roster and labels containing nested `@` signs. Tied historical keys
+remain reference candidates, never a name-to-key binding. The same non-binding
+historical labels also compete during resolved-ref snapshots and edit recipient
+extraction, so a restored shorter binding cannot reclaim a deleted occurrence.
+Current same-label members remain eligible; only an explicit current selection
+supersedes same-label historical references.
+New typed recipients join the reference snapshot after eligibility revalidation.
+
+Send-to-channel uses the latest authored snapshot rather than intersecting it
+with the original event's `p` tags: a recipient added on an earlier edit may have
+no `p` on the original event. This is a new forward, not an edit notification.
+Immutable annotated automatic-address metadata remains separate, and only
+previously delivered automatic addresses are forwarded. Snapshot bodies and
+full-key qualifiers alone never authorize an untagged recipient.
+
+Full-key literal labels remain intact in the composer and on the wire. Composer
+and rendered mention chips break between characters within narrow line boxes;
+rendered chips expose the complete label through their accessible name/title.
+The browser regression covers 800px windows at 100% and 150% root text size,
+send/reopen, and historical replacement followed by forwarding.

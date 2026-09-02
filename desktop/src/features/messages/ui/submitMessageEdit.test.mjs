@@ -264,3 +264,161 @@ test("send/reopen/edit preserves distinct same-name refs independently of tag or
     );
   }
 });
+
+for (const replacement of [
+  "hello @Alice",
+  "plain text",
+  "@Scout Jones",
+  "@Scout",
+]) {
+  test(`ambiguous history replacement ${replacement} snapshots and forwards only current identities`, async () => {
+    const { buildEditMentionState } = await import(
+      "../lib/draftMentionRefs.ts"
+    );
+    const { extractMentionPubkeys } = await import(
+      "../lib/extractMentionPubkeys.ts"
+    );
+    const { applyEditTagOverlay } = await import(
+      "../lib/applyEditTagOverlay.mjs"
+    );
+    const { getSendToChannelSemantics } = await import(
+      "../lib/sendToChannelSemantics.ts"
+    );
+    const a = "1".repeat(64),
+      b = "2".repeat(64),
+      c = "3".repeat(64);
+    const profiles = {
+      [a]: { displayName: "Scout" },
+      [b]: { displayName: "Scout" },
+      [c]: { displayName: "Alice" },
+    };
+    const tags = [
+      ["p", a],
+      ["p", b],
+    ];
+    const originalContent = "hello @Scout";
+    const editTarget = buildEditMentionState(
+      originalContent,
+      tags,
+      profiles,
+      () => false,
+    );
+    const selected =
+      replacement === "@Scout" ? new Map([["Scout", c]]) : new Map();
+    const members = [
+      { displayName: "Scout", pubkey: a, isMember: true },
+      { displayName: "Scout", pubkey: b, isMember: true },
+      { displayName: "Alice", pubkey: c, isMember: true },
+      { displayName: "Scout Jones", pubkey: c, isMember: true },
+    ];
+    let saved;
+    await submitMessageEdit({
+      ...baseOptions(async (content, refs, notifying) => {
+        saved = { content, refs, notifying };
+      }),
+      content: replacement,
+      originalContent,
+      editTarget,
+      extractMentionPubkeys: (text) =>
+        extractMentionPubkeys({
+          text,
+          selectedMentions: selected,
+          memberCandidates: members,
+        }),
+      getMentionRefs: (text, fallback) =>
+        snapshotDraftMentionRefs(text, selected, [], members, [], fallback),
+    });
+    const expected = replacement === "plain text" ? [] : [c];
+    assert.deepEqual(
+      saved.refs ?? [],
+      expected.map((key) => ["mention", key]),
+    );
+    assert.deepEqual(saved.notifying, expected);
+    const overlaid = applyEditTagOverlay(tags, [
+      ...(saved.refs ?? []),
+      ...saved.notifying.map((key) => ["p", key]),
+      ["buzz:mention-snapshot"],
+    ]);
+    assert.deepEqual(
+      getSendToChannelSemantics(
+        {
+          body: saved.content,
+          tags: overlaid,
+          edited: true,
+          pubkey: "f".repeat(64),
+        },
+        profiles,
+      ).mentionPubkeys,
+      expected,
+    );
+    const reopened = buildEditMentionState(
+      saved.content,
+      overlaid,
+      profiles,
+      () => false,
+    );
+    assert.ok(!reopened.unresolvedMentionPubkeys.includes(a));
+    assert.ok(!reopened.unresolvedMentionPubkeys.includes(b));
+  });
+}
+
+test("missing-profile history cannot cling to replacement mentions or newly selected same-text identity", async () => {
+  const { buildEditMentionState } = await import("../lib/draftMentionRefs.ts");
+  const old = "1".repeat(64),
+    current = "2".repeat(64);
+  const originalContent = "@Unknown hello";
+  const editTarget = buildEditMentionState(
+    originalContent,
+    [["p", old]],
+    undefined,
+    () => false,
+  );
+  for (const content of ["@Alice hello", originalContent]) {
+    const selected = new Map([
+      [content === originalContent ? "Unknown" : "Alice", current],
+    ]);
+    let saved;
+    await submitMessageEdit({
+      ...baseOptions(async (_body, tags) => {
+        saved = tags;
+      }),
+      content,
+      originalContent,
+      editTarget,
+      getMentionRefs: (text, fallback) =>
+        snapshotDraftMentionRefs(text, selected, [], [], [], fallback),
+    });
+    assert.deepEqual(saved, [["mention", current]]);
+  }
+});
+
+test("still-owned ambiguous history remains reference-only after unrelated text editing", async () => {
+  const { buildEditMentionState } = await import("../lib/draftMentionRefs.ts");
+  const a = "1".repeat(64),
+    b = "2".repeat(64);
+  const editTarget = buildEditMentionState(
+    "@Scout hello",
+    [
+      ["p", a],
+      ["p", b],
+    ],
+    { [a]: { displayName: "Scout" }, [b]: { displayName: "Scout" } },
+    () => false,
+  );
+  let saved;
+  await submitMessageEdit({
+    ...baseOptions(async (_body, tags, notifying) => {
+      saved = { tags, notifying };
+    }),
+    originalContent: "@Scout hello",
+    content: "@Scout hello edited",
+    editTarget,
+  });
+  assert.deepEqual(saved, {
+    tags: [
+      ["mention", a],
+      ["mention", b],
+    ],
+    notifying: [],
+  });
+});

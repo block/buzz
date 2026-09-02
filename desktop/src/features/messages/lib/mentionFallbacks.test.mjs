@@ -87,7 +87,9 @@ for (const replacement of ["member", "persona", "selected", "ambiguous"]) {
     }
     assert.deepEqual(
       saved.tags ?? [],
-      replacement === "selected" ? [["mention", B]] : [],
+      replacement === "selected" || replacement === "member"
+        ? [["mention", B]]
+        : [],
     );
     assert.deepEqual(saved.notifying, replacement === "persona" ? [] : [B]);
     await submitMessageEdit({

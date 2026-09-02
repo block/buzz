@@ -12,6 +12,7 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import {
   getMentionTagPubkey,
+  mentionIdentityTags,
   resolveMentionProps,
 } from "@/shared/lib/resolveMentionNames";
 
@@ -63,7 +64,7 @@ function unresolvedEditMentionPubkeys(
   const resolved = new Set(refs.map((ref) => normalizePubkey(ref.pubkey)));
   return [
     ...new Set(
-      (tags ?? [])
+      mentionIdentityTags(tags)
         .map(getMentionTagPubkey)
         .filter((pubkey): pubkey is string => Boolean(pubkey))
         .map(normalizePubkey)
@@ -77,21 +78,97 @@ export function buildEditMentionState(
   tags: string[][] | undefined,
   profiles: UserProfileLookup | undefined,
   isAgentPubkey: (pubkey: string) => boolean,
-): Pick<MessageComposerEditTarget, "mentionRefs" | "unresolvedMentionPubkeys"> {
+): Pick<
+  MessageComposerEditTarget,
+  "mentionRefs" | "unresolvedMentionPubkeys" | "unresolvedMentionRefs"
+> {
   const mentionRefs = resolveEditMentionRefs(
     content,
     tags,
     profiles,
     isAgentPubkey,
   );
+  const unresolvedMentionPubkeys = unresolvedEditMentionPubkeys(
+    content,
+    tags,
+    mentionRefs,
+  );
+  // Retain ambiguous aliases as candidates, not bindings. Matching each key in
+  // isolation supplies its aliases; matching all candidates together prevents a
+  // shorter alias from claiming another identity's longer literal occurrence.
+  const candidates = [
+    ...new Set(
+      mentionIdentityTags(tags)
+        .map(getMentionTagPubkey)
+        .filter((key): key is string => Boolean(key)),
+    ),
+  ].flatMap((pubkey) =>
+    (
+      resolveMentionProps([["mention", pubkey]], profiles, content)
+        .mentionNames ?? []
+    ).map((displayName) => ({
+      displayName,
+      pubkey,
+      isAgent: isAgentPubkey(pubkey),
+    })),
+  );
+  const unresolved = new Set(unresolvedMentionPubkeys);
+  const unresolvedMentionRefs = mentionOccurrences(content, candidates).flatMap(
+    (match) =>
+      match.candidates.filter((candidate) => unresolved.has(candidate.pubkey)),
+  );
   return {
     mentionRefs,
-    unresolvedMentionPubkeys: unresolvedEditMentionPubkeys(
-      content,
-      tags,
-      mentionRefs,
-    ),
+    unresolvedMentionPubkeys,
+    ...(unresolvedMentionRefs.length ? { unresolvedMentionRefs } : {}),
   };
+}
+
+/** Keep historical references only while their original occurrence still owns them. */
+export function snapshotUnresolvedEditMentionPubkeys(
+  content: string,
+  originalContent: string,
+  editTarget: Pick<
+    MessageComposerEditTarget,
+    "mentionRefs" | "unresolvedMentionPubkeys" | "unresolvedMentionRefs"
+  >,
+  getMentionRefs: (
+    content: string,
+    fallback: readonly DraftMentionRef[],
+  ) => DraftMentionRef[],
+): string[] {
+  const candidates = editTarget.unresolvedMentionRefs ?? [];
+  // Resolve all historical competitors together, retaining ties as references,
+  // never choosing a binding for an ambiguous label.
+  const present = getMentionRefs(content, [
+    ...(editTarget.mentionRefs ?? []),
+    ...candidates,
+  ]);
+  return (editTarget.unresolvedMentionPubkeys ?? []).filter((pubkey) => {
+    const aliases = candidates.filter((ref) => ref.pubkey === pubkey);
+    // Without a historical alias (e.g. unloaded profile), there is no evidence
+    // tying this key to any edited text. Preserve only an unchanged body rather
+    // than attaching old identities to a replacement's unrelated @mention.
+    if (!aliases.length) {
+      const originalRefs = editTarget.mentionRefs ?? [];
+      return (
+        content === originalContent &&
+        getMentionRefs(content, originalRefs).every((ref) =>
+          originalRefs.some(
+            (original) =>
+              original.pubkey === ref.pubkey &&
+              original.displayName === ref.displayName,
+          ),
+        )
+      );
+    }
+    return aliases.some((ref) =>
+      present.some(
+        (winner) =>
+          winner.pubkey === pubkey && winner.displayName === ref.displayName,
+      ),
+    );
+  });
 }
 
 export function buildMessageComposerEditTarget(
@@ -122,9 +199,11 @@ export function snapshotDraftMentionRefs(
   memberCandidates: readonly MentionPubkeyCandidate[] = [],
   selectedDisplayNames: Iterable<string> = [],
   fallbackRefs: readonly DraftMentionRef[] = [],
+  competingDisplayNames: readonly string[] = [],
 ): DraftMentionRef[] {
-  // Edit-open refs are fallback bindings, not a second occurrence pass. Compose
-  // them before matching against current selections, typed members and personas.
+  // Fallback references may contain ambiguous historical ties. Keep them as
+  // candidates, not a name-to-key Map: collapsing ties would invent a binding.
+  // Non-binding competitors also take part when snapshotting resolved refs.
   const personaLabels = [...selectedDisplayNames];
   const currentNames = new Set(
     [...mentions.keys(), ...personaLabels].map((name) =>
@@ -134,35 +213,36 @@ export function snapshotDraftMentionRefs(
   const fallback = fallbackRefs.filter(
     (ref) => !currentNames.has(ref.displayName.trim().toLowerCase()),
   );
-  const bindings = new Map([
-    ...fallback.map((ref) => [ref.displayName, ref.pubkey] as const),
-    ...mentions,
-  ]);
   const agentNames = new Set(
-    [
-      ...selectedAgentNames,
-      ...fallback.filter((ref) => ref.isAgent).map((ref) => ref.displayName),
-    ].map((name) => name.trim().toLowerCase()),
+    selectedAgentNames.map((name) => name.trim().toLowerCase()),
   );
+  const refs = [
+    ...fallback,
+    ...[...mentions].map(([displayName, pubkey]) => ({
+      displayName,
+      pubkey,
+      isAgent: agentNames.has(displayName.trim().toLowerCase()),
+    })),
+  ];
   const presentNames = new Set(
-    mentionOccurrences(
-      content,
-      mentionMatchCandidates({
-        selectedMentions: bindings,
+    mentionOccurrences(content, [
+      ...fallback,
+      ...mentionMatchCandidates({
+        selectedMentions: mentions,
         memberCandidates,
-        selectedDisplayNames: personaLabels,
+        selectedDisplayNames: [
+          ...personaLabels,
+          ...fallback.map((ref) => ref.displayName),
+        ],
+        competingDisplayNames,
       }),
-    ).flatMap((match) =>
+    ]).flatMap((match) =>
       match.candidates.map((candidate) => candidate.displayName),
     ),
   );
-  return [...bindings.entries()]
-    .filter(([displayName]) => presentNames.has(displayName))
-    .map(([displayName, pubkey]) => ({
-      displayName,
-      pubkey: normalizePubkey(pubkey),
-      isAgent: agentNames.has(displayName.trim().toLowerCase()),
-    }));
+  return refs
+    .filter(({ displayName }) => presentNames.has(displayName))
+    .map((ref) => ({ ...ref, pubkey: normalizePubkey(ref.pubkey) }));
 }
 
 function normalizeDraftMentionRefs(

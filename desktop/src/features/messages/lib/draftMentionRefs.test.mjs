@@ -265,3 +265,21 @@ test("qualified history consumes the entire multi-digit collision suffix", () =>
     ]);
   }
 });
+
+test("authoritative edit snapshots exclude old p-tags and annotated tray metadata on reopen", () => {
+  const target = buildEditMentionState(
+    "@Bob edited",
+    [
+      ["p", ALICE],
+      ["mention", ALICE, "agent-address"],
+      ["mention", BOB],
+      ["buzz:mention-snapshot"],
+    ],
+    { [ALICE]: { displayName: "Alice" }, [BOB]: { displayName: "Bob" } },
+    () => false,
+  );
+  assert.deepEqual(target.mentionRefs, [
+    { displayName: "Bob", pubkey: BOB, isAgent: false },
+  ]);
+  assert.deepEqual(target.unresolvedMentionPubkeys, []);
+});
