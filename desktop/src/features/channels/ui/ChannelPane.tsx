@@ -196,6 +196,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   );
   const [isMainDeferredEditPending, setMainDeferredEditPending] =
     React.useState(false);
+  const [acceptsMainAttachments, setAcceptsMainAttachments] =
+    React.useState(true);
   const isNonMemberView =
     activeChannel !== null &&
     !activeChannel.isMember &&
@@ -333,6 +335,7 @@ export const ChannelPane = React.memo(function ChannelPane({
     hasMainComposerOverlay &&
     !isComposerDisabled &&
     !isMainDeferredEditPending &&
+    acceptsMainAttachments &&
     !isSinglePanelView;
   const hasTypingActivity = typingPubkeys.length > 0;
   const composerWorkingBotPubkeys = useChannelWorkingAgentPubkeys(
@@ -761,6 +764,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 isSending={isSending}
                 mainComposerMedia={mainComposerMedia}
                 mainEditTarget={mainEditTarget}
+                onAttachmentAcceptanceChange={setAcceptsMainAttachments}
                 onCancelEdit={onCancelEdit}
                 onEditSave={onEditSave}
                 onOpenAgentSession={onOpenAgentSession}

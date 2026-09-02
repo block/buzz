@@ -17,6 +17,11 @@ pub struct AgentDefinition {
     pub id: String,
     pub display_name: String,
     pub avatar_url: Option<String>,
+    /// Optional short, PUBLIC description (max 280 chars), shown on the
+    /// agent's card/profile and carried on the public kind:30175 persona
+    /// event. EXCLUDED from `persona_content_hash` (no restart badge).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub system_prompt: String,
     /// Preferred ACP runtime ID (e.g., 'goose', 'claude', 'codex'). Determines which agent binary
     /// Buzz spawns. When deploying from this persona, this runtime is pre-selected in the UI.
@@ -146,6 +151,7 @@ impl AgentDefinition {
             respond_to: RespondTo::default(),
             respond_to_allowlist: Vec::new(),
             display_name: Some(self.display_name),
+            description: self.description,
             slug: Some(self.id),
             runtime: self.runtime,
             name_pool: self.name_pool,
@@ -180,6 +186,7 @@ impl ManagedAgentRecord {
                 .clone()
                 .unwrap_or_else(|| self.name.clone()),
             avatar_url: self.avatar_url.clone(),
+            description: self.description.clone(),
             system_prompt: self.system_prompt.clone().unwrap_or_default(),
             runtime: self.runtime.clone(),
             model: self.model.clone(),
@@ -366,6 +373,13 @@ pub struct ManagedAgentRecord {
     /// from `AgentDefinition.display_name` (unified agent model, Phase 1A).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Optional short, PUBLIC agent description. Keyless definition records
+    /// carry the authored value; persona-linked instances leave it absent and
+    /// resolve through their definition so a second copy cannot drift.
+    /// Display metadata only (never spawn-relevant, never part of the persona
+    /// content hash).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Stable definition slug — the former `AgentDefinition.id`. Key-less
     /// records (definitions not yet instantiated) publish kind:30175 at
     /// `d_tag = slug`, preserving the pre-merge event coordinates. `None` for

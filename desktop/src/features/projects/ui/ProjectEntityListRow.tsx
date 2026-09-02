@@ -43,8 +43,9 @@ export function ProjectEntityFacepile({
             >
               <UserAvatar
                 avatarUrl={profiles?.[pubkey]?.avatarUrl ?? null}
-                className="rounded-full ring-2 ring-background"
+                className="ring-2 ring-background"
                 displayName={label}
+                shape={profiles?.[pubkey]?.isAgent ? "squircle" : "circle"}
                 size="xs"
               />
             </span>
@@ -57,14 +58,18 @@ export function ProjectEntityFacepile({
             triggerElement="span"
           >
             <button
-              className={cn("rounded-full", index > 0 && "-ml-1.5")}
+              className={cn(
+                profiles?.[pubkey]?.isAgent ? "rounded-[30%]" : "rounded-full",
+                index > 0 && "-ml-1.5",
+              )}
               title={label}
               type="button"
             >
               <UserAvatar
                 avatarUrl={profiles?.[pubkey]?.avatarUrl ?? null}
-                className="rounded-full ring-2 ring-background"
+                className="ring-2 ring-background"
                 displayName={label}
+                shape={profiles?.[pubkey]?.isAgent ? "squircle" : "circle"}
                 size="xs"
               />
             </button>

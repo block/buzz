@@ -476,17 +476,15 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use buzz_core::CommunityId;
     use nostr::Keys;
     use sqlx::postgres::PgPoolOptions;
     use sqlx::PgPool;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
-
     async fn get_pool() -> PgPool {
-        PgPool::connect(TEST_DB_URL)
+        PgPool::connect(&crate::test_support::database_url())
             .await
             .expect("connect to test DB")
     }
@@ -497,7 +495,7 @@ mod tests {
             .execute(admin)
             .await
             .expect("create scratch db");
-        let base = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
+        let base = crate::test_support::database_url();
         let idx = base.rfind('/').expect("db url has a path segment");
         let scratch_url = format!("{}/{}", &base[..idx], name);
         let pool = PgPool::connect(&scratch_url)
@@ -525,7 +523,7 @@ mod tests {
         // Postgres advisory locks are per-database; hardcoding the production
         // USAGE_METRICS_LOCK_KEY (0x4255_5A5A_4D45_5452) on the shared test DB
         // races any live buzz-relay on the same database (see #3619).
-        let admin_url = std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
+        let admin_url = crate::test_support::database_url();
         let admin = PgPoolOptions::new()
             .max_connections(1)
             .connect(&admin_url)

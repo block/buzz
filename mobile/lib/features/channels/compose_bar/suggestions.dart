@@ -53,6 +53,7 @@ class _MentionSuggestions extends StatelessWidget {
                     fontWeight: FontWeight.w600,
                   ),
                 ),
+                isAgent: candidate.isAgent,
               ),
               title: Text(name, style: context.textTheme.titleSmall),
               subtitle: _MentionSuggestionInfo.build(

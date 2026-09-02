@@ -452,7 +452,9 @@ fn validate_inbound_persona_definition(persona: &AgentDefinition) -> Result<(), 
         &persona.display_name,
         &persona.system_prompt,
     )
-    .map_err(|error| format!("Inbound persona definition is unsafe: {error}"))
+    .map_err(|error| format!("Inbound persona definition is unsafe: {error}"))?;
+    crate::managed_agents::validate_agent_description_text(persona.description.as_deref())
+        .map_err(|error| format!("Inbound persona definition is unsafe: {error}"))
 }
 
 fn validate_inbound_managed_agent_definition(
@@ -685,6 +687,7 @@ fn apply_inbound_persona(personas: &mut Vec<AgentDefinition>, inbound: AgentDefi
         Some(local) => {
             local.display_name = inbound.display_name;
             local.avatar_url = inbound.avatar_url;
+            local.description = inbound.description;
             local.system_prompt = inbound.system_prompt;
             local.runtime = inbound.runtime;
             local.model = inbound.model;

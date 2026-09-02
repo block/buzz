@@ -140,7 +140,7 @@ test("always addressing a new agent delegates the first add for immediate confir
   assert.deepEqual(pulsedPubkeys, []);
 });
 
-test("toggling an addressed agent keeps autocomplete open and removes the lock", async () => {
+test("unpinning an addressed agent keeps its current mention and autocomplete open", async () => {
   const { act, renderHook } = await import("@testing-library/react");
   const { useAgentAddressLockPicker } = await import(
     "./useAgentAddressLockPicker.ts"
@@ -187,20 +187,17 @@ test("toggling an addressed agent keeps autocomplete open and removes the lock",
   );
 
   act(() => {
-    result.current.toggleAlwaysAddressAgent({
-      pubkey: "agent-pubkey",
-      displayName: "Agent Ada",
-      isAgent: true,
-    });
+    result.current.toggleAlwaysAddressAgent(
+      {
+        pubkey: "agent-pubkey",
+        displayName: "Agent Ada",
+        isAgent: true,
+      },
+      { preserveMention: true },
+    );
   });
 
-  assert.deepEqual(appliedEdits, [
-    {
-      replaceFromOffset: 4,
-      replaceToOffset: 15,
-      insertText: "",
-    },
-  ]);
+  assert.deepEqual(appliedEdits, []);
   assert.equal(cancelCount, 0);
   assert.deepEqual(removedPubkeys, ["agent-pubkey"]);
   assert.deepEqual(pulsedPubkeys, []);

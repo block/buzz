@@ -11,6 +11,7 @@ import 'package:buzz/features/channels/channel.dart';
 import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/message_content.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
+import 'package:buzz/shared/mentions/agent_identity_provider.dart';
 import 'package:buzz/shared/read_state/read_state_provider.dart';
 import 'package:buzz/shared/profile/user_cache_provider.dart';
 import 'package:buzz/shared/profile/user_profile.dart';
@@ -120,6 +121,7 @@ void main() {
     ValueListenable<int>? tabReselection,
     List<ComposeDraft> drafts = const [],
     List<Reminder> reminders = const [],
+    Set<String> knownAgentPubkeys = const {},
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -135,6 +137,7 @@ void main() {
         userCacheProvider.overrideWith(
           () => _FakeUserCacheNotifier(users ?? testUsers),
         ),
+        knownAgentPubkeysProvider.overrideWithValue(knownAgentPubkeys),
         readStateProvider.overrideWith(
           () => _FakeReadStateNotifier(readContexts),
         ),
@@ -531,6 +534,26 @@ void main() {
       ),
       isTrue,
     );
+  });
+
+  testWidgets('directory-known Activity authors use agent avatars', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      await buildTestable(knownAgentPubkeys: const {'agent_pk'}),
+    );
+    await tester.pumpAndSettle();
+
+    final agentRow = find.byKey(const ValueKey('inbox-row-ag1'));
+    final agentAvatar = tester.widget<AvatarImage>(
+      find.descendant(of: agentRow, matching: find.byType(AvatarImage)),
+    );
+    final humanRow = find.byKey(const ValueKey('inbox-row-m1'));
+    final humanAvatar = tester.widget<AvatarImage>(
+      find.descendant(of: humanRow, matching: find.byType(AvatarImage)),
+    );
+    expect(agentAvatar.isAgent, isTrue);
+    expect(humanAvatar.isAgent, isFalse);
   });
 
   testWidgets('multiple top-level messages in one DM render one row', (

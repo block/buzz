@@ -153,8 +153,8 @@ with a TypeScript lookup table or an id comparison in a component.
    place that resolves it for dialog surfaces and publishes it through
    `ui/AgentRunLocationContext.tsx`; the field reads that context and lets an
    explicit `runLocation` prop win. Do **not** thread the value as a prop
-   through `AgentDefinitionDialog` / `AgentInstanceEditDialog` — both are
-   already over the 1000-line ceiling, and neither uses the value itself.
+   through `AgentDefinitionDialog` / `AgentInstanceEditDialog` — neither uses
+   the value itself, and the shared context keeps the dialog boundary stable.
    Surfaces rendered outside `AgentDialog` (e.g. `EditRespondToDialog`) pass the
    prop directly. Local names "your
    computer, including files, accounts, and connected tools"; remote names "the
@@ -216,9 +216,9 @@ with a TypeScript lookup table or an id comparison in a component.
    cosmetic — the Rust command rejects non-local backends because remote effort
    is set at deploy time via `policy_env`. Because it reads its inputs from the
    config surface the dialog already fetches (`useAgentConfigSurface`) and owns
-   its own mutation, it does **not** thread new props through the over-1000-line
-   dialog (see rule 11): keep effort state inside the section component, never
-   as dialog-level props. The read-only display is the `thinkingEffort`
+   its own mutation, it does **not** thread new props through the dialog (see
+   rule 11): keep effort state inside the section component, never as
+   dialog-level props. The read-only display is the `thinkingEffort`
    normalized field rendered by `AgentConfigPanel` via `NormalizedRow`, which
    already shows both facts — `field.value` (canonical, the effort the next
    spawn will launch with) and, when a running ACP session differs,
@@ -236,7 +236,38 @@ with a TypeScript lookup table or an id comparison in a component.
    mid-conversation effort control without a plan ruling. The archived live-effort
    machinery lives on `archive/claude-config-gaps-live-effort` for reference only.
 
-12. **Owner-only builds constrain managed runtimes, not relay-agent mentions.**
+15. **The persona `description` is public display metadata.** It is optional,
+   capped at 280 characters, and validated through the shared visible-text
+   policy (`validate_agent_description_text` in `definition_validation.rs`)
+   on the raw authored bytes at create/update, snapshot import, publication,
+   inbound sync, and the untrusted catalog parser — rejected, never stripped.
+   It is deliberately EXCLUDED from `persona_content_hash`
+   (`description_change_does_not_change_content_hash`), so a description-only
+   edit never flips the restart badge on linked instances. Only the AUTHORED
+   description exists — there is deliberately no derived/generated fallback;
+   a blank description publishes an empty kind:0 `about`, exactly as before
+   the field existed. Agent and team snapshots carry the authored description
+   in the member profile's `about` and validate it before import. The trim/empty
+   resolution exists twice and must stay in
+   sync (port changes in the same PR): `lib/agentDescription.ts`
+   (`effectiveAgentDescription`) feeds display surfaces, and its Rust twin
+   (`managed_agents/agent_description.rs`, `effective_agent_description` /
+   `record_effective_description`) feeds the publish path, where
+   `profile_needs_sync` compares `about` (None == empty) so description edits
+   reconcile instead of being clobbered. Persona-linked instances do not own a
+   second description copy; snapshot export materializes the definition value
+   only into the portable snapshot, and a dangling link resolves no description
+   rather than reviving stale instance metadata. The agents-page card face shows the
+   authored description as its second line, falling back to the model label
+   when none exists (`UnifiedAgentsSection.tsx` composes it;
+   `AgentIdentityCard` takes a presentational `subtitle`). The community catalog
+   shows the same authored description before consent: a clamped two-line list
+   subtitle for scanning and the full safely wrapped value in persona detail.
+   The dialog field
+   lives in `ui/AgentDescriptionField.tsx` (`AgentIdentityFields`), not
+   inline in the over-1000-line dialogs.
+
+16. **Owner-only builds constrain managed runtimes, not relay-agent mentions.**
     The compiled owner-only capability applies when Desktop starts or deploys a
     managed agent. Independently operated relay agents with NIP-OA ownership
     remain eligible in every build when their verified owner's signed
@@ -250,7 +281,32 @@ with a TypeScript lookup table or an id comparison in a component.
     refresh only local persona/team/managed-agent caches; they must never
     invalidate the remote relay directory.
 
-15. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. UC FQNs are catalog data and always use the MLflow Chat Completions route, regardless of family-looking text in their components.
+17. **Databricks model discovery has one shared catalog authority.** Desktop and ACP call the shared `buzz-agent` discovery library; Desktop passes the effective merged `DATABRICKS_MODEL_FILTER` explicitly, and the library applies it to raw workspace endpoint IDs and Unity Catalog model-service FQNs after the additive union. A successful filtered-empty catalog is authoritative: it stays empty, disables switching, and never falls through to configured or known-model fallback. UC FQNs are catalog data and always use the MLflow Chat Completions route, regardless of family-looking text in their components. Global Defaults preserves the discovered model ID as the selected value while its closed trigger renders the provider-scoped display label; do not force the raw persisted ID over that label.
+
+## Channel-only runtime controls
+
+Desktop observer controls identify a channel, not a thread session. The harness
+rejects `cancel_turn` and `switch_model` with `ambiguous_target` when that channel
+has multiple known session scopes, including retained idle scopes. Do not treat
+that result as success or a deferred model switch. Stop feedback waits for the
+harness result matching the control type, channel, and request ID; relay delivery
+alone does not prove that a turn was signalled. A missing result is unconfirmed,
+not success. The activity pane must use its resolved `sessionChannelId` for
+both the outgoing control and result correlation, even without a loaded
+`Channel` object. Stop is unavailable in an unscoped all-channel pane.
+
+Per-thread observer controls remain a separate protocol/UI change. Do not tell
+users to type `!cancel` beside an inline mention: the owner command requires
+kind 9, body exactly `!cancel` after trimming, and the agent's separate `p` tag.
+The automatic-mention picker also inserts literal `@Name` into the body, so it
+does not provide an exact-command workaround. The UI must state this limitation
+rather than offer an ineffective command. An authorized owner can instead use
+the CLI with the channel and target thread root:
+
+```sh
+buzz messages send --channel <channel-id> --reply-to <thread-root-id> \
+  --mention <agent-pubkey> --content '!cancel'
+```
 
 ## The tests that enforce this
 
@@ -289,6 +345,11 @@ with a TypeScript lookup table or an id comparison in a component.
   acceptance coverage for readiness, failure states, defaults, session-draft
   restoration, zero-write Skip, Next save failure/retry, navigation, and
   successful-empty vs failed optional-model discovery.
+- `desktop/tests/e2e/agents.spec.ts` — community catalog descriptions remain
+  visible in the list and full detail before Add agent, including long
+  unbroken Unicode text without horizontal overflow.
+- `lib/agentDescription.test.mjs` — authored-description resolution: trim,
+  blank/missing → null.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 - Rust: persona sharing/retention tests pin relay+owner scoping, durable
   enqueue errors, relay rejection/unavailability, and accepted publication.

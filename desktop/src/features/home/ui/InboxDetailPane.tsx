@@ -495,6 +495,10 @@ function InboxMessageDetailPane({
       : null;
   const isThreadContext =
     !isDirectMessage && hasInboxThreadContext(item, messages);
+  const threadRootTags = isThreadContext
+    ? (displayMessages.find((message) => message.id === item.conversationId)
+        ?.tags ?? [])
+    : [];
   const contextLabel = isThreadContext
     ? isDirectMessage
       ? `Thread with ${item.senderLabel}`
@@ -804,7 +808,14 @@ function InboxMessageDetailPane({
           />
           <div className="pointer-events-auto">
             <MessageComposer
-              audienceContext={isDirectMessage ? null : { type: "thread" }}
+              audienceContext={
+                isDirectMessage
+                  ? null
+                  : {
+                      type: "thread",
+                      rootTags: threadRootTags,
+                    }
+              }
               channelId={item.item.channelId}
               channelName={item.channelLabel ?? "channel"}
               channelType={composerChannelType}

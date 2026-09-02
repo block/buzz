@@ -1,6 +1,6 @@
 //! Migration tests for `archive/store.rs` — M1: harness column.
 //!
-//! Kept in a sibling file so `store_tests.rs` stays under the 1000-line gate;
+//! Kept in a sibling file so `store_tests.rs` stays under the 1500-line gate;
 //! `#[path]`-included from `store.rs`.
 
 use super::*;

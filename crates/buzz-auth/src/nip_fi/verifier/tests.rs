@@ -28,6 +28,17 @@ const TEST_KID: &str = "test-key-1";
 const ISSUER: &str = "https://issuer.example";
 const AUDIENCE: &str = "https://relay.example";
 
+/// A canonical JWKS contract for the default test issuer. Used wherever a
+/// `JwksSourceContract` is required but JWKS behavior is not under test.
+fn test_jwks_contract() -> crate::nip_fi::jwks::JwksSourceContract {
+    crate::nip_fi::jwks::JwksSourceContract::new(
+        format!("{}/.well-known/jwks.json", ISSUER),
+        300,
+        3600,
+    )
+    .expect("valid test contract")
+}
+
 // A second, independent P-256 key: issuer B's real signing key, used to prove
 // that a token signed by B and claiming `iss=A` cannot mint an A identity.
 const TEST_EC_PKCS8_PEM_B: &str = "-----BEGIN PRIVATE KEY-----\n\
@@ -102,11 +113,18 @@ fn access_token_policy_with(subject_class: SubjectClassContract) -> IssuerPolicy
         60,
         3600,
         None,
+        test_jwks_contract(),
     )
     .expect("valid policy")
 }
 
 fn dedicated_policy(issuer: &str) -> IssuerPolicy {
+    let contract = crate::nip_fi::jwks::JwksSourceContract::new(
+        format!("{}/.well-known/jwks.json", issuer.trim_end_matches('/')),
+        300,
+        3600,
+    )
+    .expect("valid test contract");
     IssuerPolicy::new(
         issuer.to_owned(),
         vec![AUDIENCE.to_owned()],
@@ -117,6 +135,7 @@ fn dedicated_policy(issuer: &str) -> IssuerPolicy {
         60,
         3600,
         None,
+        contract,
     )
     .expect("valid policy")
 }
@@ -132,6 +151,7 @@ fn dedicated_policy_with_audiences(audiences: Vec<String>) -> IssuerPolicy {
         60,
         3600,
         None,
+        test_jwks_contract(),
     )
     .expect("valid policy")
 }
@@ -147,6 +167,7 @@ fn dedicated_policy_with_algorithms(algorithms: Vec<Algorithm>) -> IssuerPolicy 
         60,
         3600,
         None,
+        test_jwks_contract(),
     )
     .expect("valid policy")
 }
@@ -688,6 +709,7 @@ fn missing_nostr_pubkey_denies_under_attested_key_policy() {
         60,
         3600,
         None,
+        test_jwks_contract(),
     )
     .unwrap();
     let verifier = verifier_with(policy);
@@ -1087,6 +1109,7 @@ fn current_status_policy() -> IssuerPolicy {
         60,
         3600,
         Some(120), // maximum_status_age required for current-status
+        test_jwks_contract(),
     )
     .expect("valid current-status policy")
 }
@@ -1366,6 +1389,7 @@ fn assertion_policy_id_is_deterministic_and_semantic() {
         120, // different skew => different semantics
         3600,
         None,
+        test_jwks_contract(),
     )
     .unwrap();
     assert_ne!(p1.id(), changed.id());
@@ -1391,6 +1415,7 @@ fn offline_policy_rejects_inapplicable_maximum_status_age() {
         60,
         3600,
         Some(120),
+        test_jwks_contract(),
     )
     .unwrap_err();
     assert_eq!(err, IssuerPolicyError::InapplicableMaximumStatusAge);
@@ -1409,6 +1434,7 @@ fn offline_policy_accepts_absent_maximum_status_age() {
         60,
         3600,
         None,
+        test_jwks_contract(),
     )
     .is_ok());
 }
@@ -1427,6 +1453,7 @@ fn current_status_policy_still_requires_positive_maximum_status_age() {
         60,
         3600,
         None,
+        test_jwks_contract(),
     )
     .unwrap_err();
     assert_eq!(missing, IssuerPolicyError::MissingMaximumStatusAge);
@@ -1440,6 +1467,7 @@ fn current_status_policy_still_requires_positive_maximum_status_age() {
         60,
         3600,
         Some(0),
+        test_jwks_contract(),
     )
     .unwrap_err();
     assert_eq!(zero, IssuerPolicyError::InvalidTimeBounds);
@@ -1533,7 +1561,185 @@ fn assertion_policy_id_is_invariant_under_subject_class_value_permutation_and_du
     assert_eq!(base.id(), permuted.id());
 }
 
-// ---- Canonical scope capture ---------------------------------------------
+// ---- JwksSourceContract in AssertionPolicyId ------------------------------
+//
+// Per the NIP-FI spec ("Policy identity and snapshots"): `assertion_policy_id`
+// covers "authenticated key/status-source contracts" and "time rules". The
+// three contract fields are immutable contract identity, not mutable state —
+// changing any one of them changes which keys the runtime trusts or how long
+// it trusts them, invalidating all prepared evidence against the old contract.
+// Key rotation (JWKS content change) leaves all three unchanged and must NOT
+// move the ID.
+
+/// Helper: build a policy with the given `JwksSourceContract`.
+fn policy_with_contract(contract: crate::nip_fi::jwks::JwksSourceContract) -> IssuerPolicy {
+    IssuerPolicy::new(
+        ISSUER.to_owned(),
+        vec![AUDIENCE.to_owned()],
+        TokenClass::DedicatedNipFi,
+        FreshnessClass::OfflineJwt,
+        vec![Algorithm::ES256],
+        false,
+        60,
+        3600,
+        None,
+        contract,
+    )
+    .expect("valid policy")
+}
+
+#[test]
+fn assertion_policy_id_moves_when_jwks_uri_changes() {
+    // The JWKS URI selects the authenticated key source. A different URI may
+    // serve different keys — the policy ID must change.
+    //
+    // Mutation (omit URI from hash): both policies hash identically despite
+    // different endpoints; this test turns red.
+    let base = policy_with_contract(
+        crate::nip_fi::jwks::JwksSourceContract::new(
+            format!("{}/.well-known/jwks.json", ISSUER),
+            300,
+            3600,
+        )
+        .unwrap(),
+    );
+    let different_uri = policy_with_contract(
+        crate::nip_fi::jwks::JwksSourceContract::new(
+            format!("{}/.well-known/jwks-alt.json", ISSUER),
+            300,
+            3600,
+        )
+        .unwrap(),
+    );
+    assert_ne!(
+        base.id(),
+        different_uri.id(),
+        "JWKS URI change must move assertion_policy_id"
+    );
+}
+
+#[test]
+fn assertion_policy_id_moves_when_refresh_interval_changes() {
+    // The refresh interval defines bounded refresh behavior. A longer interval
+    // allows stale keys to persist longer — the policy ID must change.
+    //
+    // Mutation (omit refresh_interval from hash): both policies hash
+    // identically; this test turns red.
+    let base = policy_with_contract(
+        crate::nip_fi::jwks::JwksSourceContract::new(
+            format!("{}/.well-known/jwks.json", ISSUER),
+            300,
+            3600,
+        )
+        .unwrap(),
+    );
+    let different_interval = policy_with_contract(
+        crate::nip_fi::jwks::JwksSourceContract::new(
+            format!("{}/.well-known/jwks.json", ISSUER),
+            600, // doubled
+            3600,
+        )
+        .unwrap(),
+    );
+    assert_ne!(
+        base.id(),
+        different_interval.id(),
+        "refresh_interval_seconds change must move assertion_policy_id"
+    );
+}
+
+#[test]
+fn assertion_policy_id_moves_when_hard_deadline_changes() {
+    // The hard deadline defines the source's accepted time rule; every
+    // per-snapshot deadline the verifier seals into `VerifiedAssertion`
+    // derives from this. A looser deadline extends the valid window beyond
+    // what the new policy intends — the policy ID must change.
+    //
+    // Mutation (omit key_snapshot_hard_deadline from hash): both policies
+    // hash identically; this test turns red.
+    let base = policy_with_contract(
+        crate::nip_fi::jwks::JwksSourceContract::new(
+            format!("{}/.well-known/jwks.json", ISSUER),
+            300,
+            3600,
+        )
+        .unwrap(),
+    );
+    let different_deadline = policy_with_contract(
+        crate::nip_fi::jwks::JwksSourceContract::new(
+            format!("{}/.well-known/jwks.json", ISSUER),
+            300,
+            7200, // doubled
+        )
+        .unwrap(),
+    );
+    assert_ne!(
+        base.id(),
+        different_deadline.id(),
+        "key_snapshot_hard_deadline_seconds change must move assertion_policy_id"
+    );
+}
+
+#[test]
+fn assertion_policy_id_is_stable_for_same_jwks_contract() {
+    // URI canonicalization is deterministic: the same validated URI, interval,
+    // and deadline always hash to the same policy ID regardless of call order.
+    let c1 = crate::nip_fi::jwks::JwksSourceContract::new(
+        format!("{}/.well-known/jwks.json", ISSUER),
+        300,
+        3600,
+    )
+    .unwrap();
+    let c2 = crate::nip_fi::jwks::JwksSourceContract::new(
+        format!("{}/.well-known/jwks.json", ISSUER),
+        300,
+        3600,
+    )
+    .unwrap();
+    let p1 = policy_with_contract(c1);
+    let p2 = policy_with_contract(c2);
+    assert_eq!(
+        p1.id(),
+        p2.id(),
+        "same JWKS contract must produce identical assertion_policy_id"
+    );
+}
+
+#[test]
+fn identical_contract_produces_stable_assertion_policy_id() {
+    // `AssertionPolicyId` is derived from the contract fields only — not from
+    // JWKS key material. This means JWKS key additions/removals (runtime
+    // rotation) cannot change the policy ID; only changes to the contract
+    // itself (JWKS URI, refresh interval, hard deadline) would do so.
+    //
+    // This test verifies the structural invariant: two `IssuerPolicy` values
+    // built from identical contracts produce the same `AssertionPolicyId`,
+    // regardless of when or how many times the ID is derived. Because key
+    // material never flows into `derive_assertion_policy_id`, the ID is
+    // stable for the lifetime of a given contract.
+    let p1 = policy_with_contract(
+        crate::nip_fi::jwks::JwksSourceContract::new(
+            format!("{}/.well-known/jwks.json", ISSUER),
+            300,
+            3600,
+        )
+        .unwrap(),
+    );
+    let p2 = policy_with_contract(
+        crate::nip_fi::jwks::JwksSourceContract::new(
+            format!("{}/.well-known/jwks.json", ISSUER),
+            300,
+            3600,
+        )
+        .unwrap(),
+    );
+    // Identical contract → identical ID: key material is not part of the hash.
+    assert_eq!(
+        p1.id(),
+        p2.id(),
+        "identical contract must produce the same assertion_policy_id (key material is not hashed)"
+    );
+}
 
 #[test]
 fn scope_capture_is_canonical_under_order_and_duplicates() {

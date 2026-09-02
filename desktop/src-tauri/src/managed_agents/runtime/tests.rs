@@ -265,7 +265,6 @@ fn build_env_rejects_empty_allowlist_in_allowlist_mode() {
 }
 
 // ── persona fixture helpers ─────────────────────────────────────────
-
 fn persona_with_provider(
     id: &str,
     prompt: &str,
@@ -273,6 +272,7 @@ fn persona_with_provider(
     provider: Option<&str>,
 ) -> crate::managed_agents::AgentDefinition {
     crate::managed_agents::AgentDefinition {
+        description: None,
         id: id.to_string(),
         display_name: id.to_string(),
         avatar_url: None,
@@ -1209,12 +1209,11 @@ fn minimal_record(pubkey: &str) -> crate::managed_agents::ManagedAgentRecord {
 
 fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRuntime {
     use std::process::{Command, Stdio};
-    // Spawn a real child so ManagedAgentProcess's Child field is satisfied.
-    // `true` exits immediately with 0 — just a handle we need for type purposes.
-    // Absolute `/usr/bin/true` on unix (present on both macOS and Linux):
-    // parallel tests holding `lock_path_mutex` swap PATH to a tempdir, and a
-    // bare `true` lookup during that window fails with NotFound (observed
-    // flake). Windows keeps the PATH lookup — no test there swaps PATH.
+    // Spawn a real child so ManagedAgentProcess's Child field is satisfied;
+    // `true` exits immediately with 0. Absolute `/usr/bin/true` on unix (both
+    // macOS and Linux): parallel tests holding `lock_path_mutex` swap PATH to a
+    // tempdir, and a bare `true` lookup during that window fails NotFound
+    // (observed flake). Windows keeps the PATH lookup — no test there swaps it.
     #[cfg(unix)]
     let program = "/usr/bin/true";
     #[cfg(windows)]
@@ -1235,6 +1234,7 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
             "wss://relay.example",
             &Default::default(),
             false,
+            crate::managed_agents::AcpSessionPolicy::Channel,
         ),
         setup_mode: false,
         adapter_availability: None,

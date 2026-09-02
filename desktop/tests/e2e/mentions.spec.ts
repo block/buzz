@@ -416,12 +416,10 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
   expect(fullNpubs).toHaveLength(2);
   expect(new Set(fullNpubs).size).toBe(2);
 
-  await managedRow
-    .getByRole("button", { name: "Automatically mention carl", exact: true })
-    .click();
+  await managedRow.getByRole("button", { name: "Mention carl" }).click();
   await expect(
     page.getByTestId(`composer-address-lock-${managedPubkey}`),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(
     page.getByTestId(`composer-address-lock-${relayPubkey}`),
   ).toHaveCount(0);
@@ -430,21 +428,18 @@ test("duplicate owned agents preserve provenance and exact pubkey selection", as
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "@carl local"))
     .toEqual([managedPubkey]);
-  await expect(input).toHaveText("@carl ");
+  await expect(input).toHaveText("");
 
-  await page.getByTestId(`composer-address-lock-${managedPubkey}`).click();
   await input.fill("@carl");
   const reopenedDropdown = autocomplete(page);
   await expect(reopenedDropdown).toBeVisible();
   const reopenedRelayRow = reopenedDropdown.getByTestId(
     `mention-suggestion-${relayPubkey}`,
   );
-  await reopenedRelayRow
-    .getByRole("button", { name: "Automatically mention carl", exact: true })
-    .click();
+  await reopenedRelayRow.getByRole("button", { name: "Mention carl" }).click();
   await expect(
     page.getByTestId(`composer-address-lock-${relayPubkey}`),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(
     page.getByTestId(`composer-address-lock-${managedPubkey}`),
   ).toHaveCount(0);
@@ -1441,7 +1436,7 @@ test("managed relay-profile agents with member roles can be addressed explicitly
   await expect(charlieRow.getByText("agent")).toBeVisible();
   await charlieRow
     .getByRole("button", {
-      name: "Automatically mention charlie",
+      name: "Mention charlie",
       exact: true,
     })
     .click();
@@ -1450,12 +1445,7 @@ test("managed relay-profile agents with member roles can be addressed explicitly
   await expect(input.locator(".agent-mention-highlight")).toHaveText("charlie");
   await expect(
     page.getByTestId(`composer-address-lock-${TEST_IDENTITIES.charlie.pubkey}`),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("status").filter({
-      hasText: "Automatically mentioning charlie",
-    }),
-  ).toBeVisible();
+  ).toHaveCount(0);
 });
 
 test("other-owned agents without a shared channel are hidden from mentions", async ({
@@ -2957,7 +2947,7 @@ test("a managed non-member agent from a DM can be addressed explicitly", async (
   await expect(input.locator(".mention-chip")).toHaveCount(0);
   await charlieRow
     .getByRole("button", {
-      name: "Automatically mention charlie",
+      name: "Mention charlie",
       exact: true,
     })
     .click();
@@ -2966,7 +2956,7 @@ test("a managed non-member agent from a DM can be addressed explicitly", async (
   await expect(input.locator(".agent-mention-highlight")).toHaveText("charlie");
   await expect(
     page.getByTestId(`composer-address-lock-${TEST_IDENTITIES.charlie.pubkey}`),
-  ).toBeVisible();
+  ).toHaveCount(0);
 });
 
 test("global non-member people can be selected from channel mentions", async ({

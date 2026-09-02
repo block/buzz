@@ -7,6 +7,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import '../../shared/auth/auth.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../../shared/crypto/nip_oa.dart';
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/relay/relay.dart';
 import '../profile/profile_provider.dart';
@@ -155,12 +156,14 @@ class DirectoryUser {
   final String? displayName;
   final String? avatarUrl;
   final String? nip05Handle;
+  final bool isAgent;
 
   const DirectoryUser({
     required this.pubkey,
     this.displayName,
     this.avatarUrl,
     this.nip05Handle,
+    this.isAgent = false,
   });
 
   String get label {
@@ -313,6 +316,7 @@ List<DirectoryUser> directoryUsersFromProfileEvents(List<NostrEvent> events) {
           displayName: profile.displayName,
           avatarUrl: profile.avatarUrl,
           nip05Handle: profile.nip05,
+          isAgent: verifiedOaOwnerPubkey(event.tags, event.pubkey) != null,
         ),
   ]..sort((a, b) {
     final labelComparison = a.label.toLowerCase().compareTo(
@@ -381,6 +385,16 @@ final relayDirectoryUsersProvider =
                   displayName: profile.displayName,
                   avatarUrl: profile.avatarUrl,
                   nip05Handle: profile.nip05,
+                  isAgent:
+                      verifiedOaOwnerPubkey(
+                        profileEvents
+                            .firstWhere(
+                              (event) => event.pubkey.toLowerCase() == pubkey,
+                            )
+                            .tags,
+                        pubkey,
+                      ) !=
+                      null,
                 )
               else
                 DirectoryUser(pubkey: pubkey),

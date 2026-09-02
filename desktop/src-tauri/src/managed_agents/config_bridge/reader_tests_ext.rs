@@ -1,5 +1,5 @@
 //! Additional tests for `config_bridge/reader.rs` — split out to keep
-//! `reader_tests.rs` under the 1000-line file-size ratchet.
+//! `reader_tests.rs` under the 1500-line file-size ratchet.
 //!
 //! Included as `mod ext` inside `reader_tests.rs`, so `use super::*` gives
 //! access to all helpers and types from that module.

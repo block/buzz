@@ -20,11 +20,11 @@ use crate::filter::SubscriptionRule;
 ///
 /// Sized for slow turns where the agent may go silent on its outer ACP channel
 /// while running long sub-tools (e.g. a buzz-agent running another agent, or
-/// codex/claude doing multi-minute single tool calls). 900s gives 300s of
-/// breathing room above the 600s max shell timeout, so legitimate long-running
+/// codex/claude doing multi-minute single tool calls). 1500s gives 300s of
+/// breathing room above the 1200s max shell timeout, so legitimate long-running
 /// tool calls don't race the idle deadline.
 /// Override via `--idle-timeout` / `BUZZ_ACP_IDLE_TIMEOUT`.
-pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
+pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 1_500;
 
 /// Default absolute wall-clock cap per agent turn (2 hours).
 /// Override via `--max-turn-duration` / `BUZZ_ACP_MAX_TURN_DURATION`.
@@ -350,6 +350,19 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_DEDUP", default_value = "queue", value_enum)]
     pub dedup: DedupMode,
 
+    /// How ACP provider sessions are scoped in channels.
+    /// channel (default): one provider session per channel (legacy behavior).
+    /// thread: each canonical channel thread gets an isolated provider session;
+    /// direct messages stay conversation-scoped either way. Ships as `channel`
+    /// so thread scoping can be canaried and rolled back without code changes.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_SESSION_POLICY",
+        default_value = "channel",
+        value_enum
+    )]
+    pub session_policy: crate::scope::SessionPolicy,
+
     /// How to handle new @mentions while a turn is already in-flight.
     /// steer (default): cancel+re-prompt, framing the new mention as a message
     /// that arrived mid-task — the agent keeps working and weaves it in.
@@ -536,6 +549,8 @@ pub struct Config {
     pub initial_message: Option<String>,
     pub subscribe_mode: SubscribeMode,
     pub dedup_mode: DedupMode,
+    /// How ACP provider sessions are scoped in channels (channel vs thread).
+    pub session_policy: crate::scope::SessionPolicy,
     pub multiple_event_handling: MultipleEventHandling,
     pub ignore_self: bool,
     pub kinds_override: Option<Vec<u32>>,
@@ -646,6 +661,35 @@ const SESSION_TITLE_SEPARATOR: &str = " · ";
 /// survives. Returns the bare agent name when there is no channel, the channel
 /// name is blank, or no room is left for it.
 pub(crate) fn compose_session_title(agent: &str, channel_name: Option<&str>) -> String {
+    compose_session_title_with_limit(agent, channel_name, SESSION_TITLE_MAX_CHARS)
+}
+
+/// Append the canonical thread root's first eight characters to a session title.
+/// Reserve suffix space before truncating names so thread identity always survives.
+/// Conversation and heartbeat sessions preserve their existing title behavior.
+pub(crate) fn compose_scoped_session_title(
+    agent: &str,
+    channel_name: Option<&str>,
+    thread_root: Option<&str>,
+) -> String {
+    let Some(root) = thread_root.filter(|root| !root.is_empty()) else {
+        return compose_session_title(agent, channel_name);
+    };
+    let short_root: String = root.chars().take(8).collect();
+    let suffix = format!("{SESSION_TITLE_SEPARATOR}{short_root}");
+    let budget = SESSION_TITLE_MAX_CHARS.saturating_sub(suffix.chars().count());
+    let agent: String = agent.chars().take(budget).collect();
+    format!(
+        "{}{suffix}",
+        compose_session_title_with_limit(agent.trim_end(), channel_name, budget)
+    )
+}
+
+fn compose_session_title_with_limit(
+    agent: &str,
+    channel_name: Option<&str>,
+    max_chars: usize,
+) -> String {
     let Some(channel) = channel_name.and_then(sanitize_session_title) else {
         return agent.to_string();
     };
@@ -653,7 +697,7 @@ pub(crate) fn compose_session_title(agent: &str, channel_name: Option<&str>) -> 
     let reserved = agent.chars().count() + SESSION_TITLE_SEPARATOR.chars().count() + 1;
     let channel: String = channel
         .chars()
-        .take(SESSION_TITLE_MAX_CHARS.saturating_sub(reserved))
+        .take(max_chars.saturating_sub(reserved))
         .collect::<String>()
         .trim_end()
         .to_string();
@@ -1113,6 +1157,7 @@ impl Config {
             initial_message: args.initial_message,
             subscribe_mode: args.subscribe,
             dedup_mode: args.dedup,
+            session_policy: args.session_policy,
             multiple_event_handling: args.multiple_event_handling,
             ignore_self: !args.no_ignore_self,
             kinds_override: args.kinds,
@@ -1164,7 +1209,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} session_policy={} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1176,6 +1221,7 @@ impl Config {
             self.heartbeat_interval_secs,
             self.subscribe_mode,
             self.dedup_mode,
+            self.session_policy,
             self.multiple_event_handling,
             self.ignore_self,
             self.context_message_limit,
@@ -1489,6 +1535,7 @@ mod tests {
             initial_message: None,
             subscribe_mode: mode,
             dedup_mode: DedupMode::Queue,
+            session_policy: crate::scope::SessionPolicy::Channel,
             multiple_event_handling: MultipleEventHandling::Queue,
             ignore_self: true,
             kinds_override: None,
@@ -2618,6 +2665,42 @@ channels = "ALL"
         assert!(result.is_empty());
     }
 
+    // ── Session policy parsing + default ──────────────────────────────────────
+
+    #[test]
+    fn test_session_policy_default_is_channel() {
+        // Ships dark: the default must be `channel` so thread scoping is opt-in
+        // and can be rolled back without code changes.
+        let args = CliArgs::parse_from(["buzz-acp", "--private-key", &"0".repeat(64)]);
+        assert_eq!(args.session_policy, crate::scope::SessionPolicy::Channel);
+    }
+
+    #[test]
+    fn test_session_policy_thread_flag_parses() {
+        let args = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &"0".repeat(64),
+            "--session-policy",
+            "thread",
+        ]);
+        assert_eq!(args.session_policy, crate::scope::SessionPolicy::Thread);
+    }
+
+    #[test]
+    fn test_session_policy_env_var_parses() {
+        // The env fallback (`BUZZ_ACP_SESSION_POLICY`) must resolve to the same
+        // value as the flag; this is what the managed-agent runtime sets.
+        let args = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &"0".repeat(64),
+            "--session-policy=thread",
+        ]);
+        assert_eq!(args.session_policy, crate::scope::SessionPolicy::Thread);
+        assert_eq!(args.session_policy.to_string(), "thread");
+    }
+
     // ── Multiple-event-handling validation + default ──────────────────────────
 
     #[test]
@@ -2674,9 +2757,9 @@ channels = "ALL"
     // ── Idle timeout constant + guard (PR #935) ───────────────────────────────
 
     #[test]
-    fn default_idle_timeout_is_900_seconds() {
+    fn default_idle_timeout_is_1500_seconds() {
         // Lock the constant value so accidental changes are caught.
-        assert_eq!(DEFAULT_IDLE_TIMEOUT_SECS, 900);
+        assert_eq!(DEFAULT_IDLE_TIMEOUT_SECS, 1_500);
     }
 
     #[test]
@@ -2693,6 +2776,45 @@ channels = "ALL"
         // And the valid case (const assertion so clippy doesn't flag it):
         const {
             assert!(DEFAULT_IDLE_TIMEOUT_SECS < DEFAULT_MAX_TURN_DURATION_SECS);
+        }
+    }
+
+    #[test]
+    fn budget_ordering_invariant_shell_cap_plus_headroom_fits_within_idle_timeout() {
+        // Asserts the three-layer budget relationship introduced in PR #7185:
+        //   buzz-dev-mcp MAX_TIMEOUT_MS (1 200 000 ms = 1 200s)
+        //   ≤ buzz-agent BUZZ_AGENT_TOOL_TIMEOUT_SECS default (1 260s)
+        //   < buzz-acp DEFAULT_IDLE_TIMEOUT_SECS (1 500s)
+        //
+        // The idle deadline must strictly outlast the agent tool timeout so a
+        // legitimately long-running tool call is killed by buzz-agent first (at
+        // 1 260s) rather than the ACP idle watchdog. The 240s gap gives the agent
+        // time to handle the timeout, emit a response, and reset the idle clock
+        // before the ACP connection dies.
+        //
+        // If any of these constants change the compiler catches the inversion here.
+        // Cross-crate constants are mirrored as literals; grep for PR #7185 to
+        // find the authoritative source if you need to update them.
+        const SHELL_CAP_MS: u64 = 1_200_000; // buzz-dev-mcp MAX_TIMEOUT_MS
+        const SHELL_CAP_SECS: u64 = SHELL_CAP_MS / 1_000;
+        const AGENT_TOOL_TIMEOUT_SECS: u64 = 1_260; // buzz-agent BUZZ_AGENT_TOOL_TIMEOUT_SECS default
+
+        const {
+            // Shell cap must not exceed the agent's per-tool-call timeout.
+            assert!(
+                SHELL_CAP_SECS <= AGENT_TOOL_TIMEOUT_SECS,
+                "shell cap must be <= agent tool timeout"
+            );
+            // Agent tool timeout must be strictly less than the ACP idle deadline.
+            assert!(
+                AGENT_TOOL_TIMEOUT_SECS < DEFAULT_IDLE_TIMEOUT_SECS,
+                "agent tool timeout must be < ACP idle timeout"
+            );
+            // ACP idle timeout must remain below the max turn duration.
+            assert!(
+                DEFAULT_IDLE_TIMEOUT_SECS < DEFAULT_MAX_TURN_DURATION_SECS,
+                "ACP idle timeout must be < max turn duration"
+            );
         }
     }
 
@@ -2989,6 +3111,36 @@ channels = "ALL"
     fn compose_session_title_drops_the_channel_when_the_agent_name_fills_the_cap() {
         let agent = "a".repeat(SESSION_TITLE_MAX_CHARS);
         assert_eq!(compose_session_title(&agent, Some("buzz-dev")), agent);
+    }
+
+    #[test]
+    fn scoped_session_title_keeps_short_root_even_when_names_fill_the_cap() {
+        let root = "abcdef01".repeat(8);
+        assert_eq!(
+            compose_scoped_session_title("Fizz", Some("buzz-dev"), Some(&root)),
+            "Fizz · #buzz-dev · abcdef01"
+        );
+        assert_eq!(
+            compose_scoped_session_title("Fizz", None, Some(&root)),
+            "Fizz · abcdef01"
+        );
+        assert_eq!(
+            compose_scoped_session_title("Fizz", Some("buzz-dev"), Some("abc")),
+            "Fizz · #buzz-dev · abc"
+        );
+        for (agent, channel) in [
+            ("🐝".repeat(80), "work".into()),
+            ("Fizz".into(), "🐝".repeat(100)),
+        ] {
+            let title = compose_scoped_session_title(&agent, Some(&channel), Some(&root));
+            assert_eq!(title.chars().count(), SESSION_TITLE_MAX_CHARS);
+            assert!(title.ends_with(" · abcdef01"));
+        }
+        assert_eq!(
+            compose_scoped_session_title("Fizz", Some("buzz-dev"), None),
+            "Fizz · #buzz-dev"
+        );
+        assert_eq!(compose_scoped_session_title("Fizz", None, None), "Fizz");
     }
 
     /// Every arg whose env var name contains KEY/SECRET/TOKEN/PASSWORD/CRED/AUTH

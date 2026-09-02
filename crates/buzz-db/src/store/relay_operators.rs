@@ -326,7 +326,7 @@ impl crate::Db {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
     use sqlx::PgPool;
 

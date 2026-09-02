@@ -830,7 +830,10 @@ export function MessageThreadPanel({
           >
             <ComposerDockBackdrop gutterClassName="inset-x-5" />
             <MessageComposer
-              audienceContext={{ type: "thread" }}
+              audienceContext={{
+                type: "thread",
+                rootTags: threadHead.tags,
+              }}
               channelId={channelId}
               channelName={channelName}
               channelType={channel?.channelType ?? null}

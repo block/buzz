@@ -11,6 +11,9 @@ spec:
   template:
     metadata:
       labels: {{- include "push.runtimeLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations: {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 60

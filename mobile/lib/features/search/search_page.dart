@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-
 import '../../shared/mentions/agent_identity_provider.dart';
 import '../../shared/mentions/mention_tags.dart';
 import '../../shared/theme/theme.dart';
@@ -730,6 +729,7 @@ class _PeopleSection extends ConsumerWidget {
               imageUrl: user.avatarUrl,
               radius: 20,
               fallback: Text(user.label.substring(0, 1).toUpperCase()),
+              isAgent: user.isAgent,
             ),
             title: Text(
               user.label,

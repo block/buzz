@@ -153,6 +153,7 @@ export function ChannelScreenHeader({
           ) : activeDmParticipant ? (
             <UserProfilePopover
               pubkey={activeDmParticipant.pubkey}
+              role={activeDmParticipant.isAgent ? "bot" : undefined}
               triggerAriaLabel={`Open profile for ${activeChannelTitle}`}
               triggerElement="span"
             >
@@ -163,6 +164,7 @@ export function ChannelScreenHeader({
                 geometry={DM_HEADER_AVATAR_STATUS_GEOMETRY}
                 iconClassName="h-4 w-4"
                 label={activeChannelTitle}
+                shape={activeDmParticipant.isAgent ? "squircle" : "circle"}
                 size={DM_HEADER_AVATAR_SIZE}
                 status={activeDmPresenceStatus ?? "offline"}
                 statusTestId="chat-presence-badge"
@@ -177,6 +179,7 @@ export function ChannelScreenHeader({
               geometry={DM_HEADER_AVATAR_STATUS_GEOMETRY}
               iconClassName="h-4 w-4"
               label={activeChannelTitle}
+              shape="circle"
               size={DM_HEADER_AVATAR_SIZE}
               status={activeDmPresenceStatus ?? "offline"}
               statusTestId="chat-presence-badge"
@@ -222,23 +225,23 @@ function DmHeaderParticipantStack({
           pubkey={participant.pubkey}
           triggerAriaLabel={`Open profile for ${participant.displayName}`}
           triggerElement="span"
+          role={participant.isAgent ? "bot" : undefined}
         >
           <span
             className={index > 0 ? "-ml-2" : ""}
             data-testid="chat-header-dm-avatar-stack-participant"
-            style={{
-              zIndex: index + 1,
-              ...(index < stackItemCount - 1 && {
-                mask: "radial-gradient(circle 18px at calc(100% + 4px) 50%, transparent 99%, #fff 100%)",
-                WebkitMask:
-                  "radial-gradient(circle 18px at calc(100% + 4px) 50%, transparent 99%, #fff 100%)",
-              }),
-            }}
+            style={{ zIndex: index + 1 }}
           >
             <UserAvatar
+              accent={participant.isAgent === true}
               avatarUrl={participant.avatarUrl}
-              className="h-8 w-8 text-xs"
+              className={
+                index < stackItemCount - 1
+                  ? "h-8 w-8 text-xs ring-2 ring-background"
+                  : "h-8 w-8 text-xs"
+              }
               displayName={participant.displayName}
+              shape={participant.isAgent ? "squircle" : "circle"}
               size="sm"
             />
           </span>

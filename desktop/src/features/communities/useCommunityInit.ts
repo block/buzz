@@ -5,10 +5,10 @@ import { isMacPlatform } from "@/shared/lib/platform";
 import { relayClient } from "@/shared/api/relayClient";
 import { resetRateLimitGate } from "@/shared/api/relayRateLimitGate";
 import {
-  applyCommunity,
   autoConnectDefaultRelayEnabled,
   getDefaultRelayUrl,
 } from "@/shared/api/tauri";
+import { applyCommunity } from "@/shared/api/tauriWorkspace";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { clearTrayAgentActivity } from "@/shared/api/trayMenu";
 import { getOverrides } from "@/shared/features";
@@ -21,6 +21,7 @@ import {
   initDraftStore,
 } from "@/features/messages/lib/useDrafts";
 import { resetRenderScopedReactionHydration } from "@/features/messages/lib/renderScopedReactions";
+import { resetAudioMediaLoadScheduler } from "@/features/messages/lib/audioMediaLoadScheduler";
 import { resetBackgroundMediaUploads } from "@/features/messages/lib/backgroundMediaUploadStore";
 import { resetLinkPreviewPreparations } from "@/features/messages/lib/linkPreviewPreparationStore";
 import { resetPersistentAgentAudienceStore } from "@/features/messages/lib/persistentAgentAudience";
@@ -74,6 +75,7 @@ async function resetCommunityState({
   resetMediaCaches();
   resetLinkPreviewMetadataCache();
   resetVideoPlayerState();
+  resetAudioMediaLoadScheduler();
   resetRenderScopedReactionHydration();
   resetBackgroundMediaUploads();
   resetLinkPreviewPreparations();
@@ -300,6 +302,7 @@ export function useCommunityInit(
           activeCommunity.token,
           activeCommunity.reposDir,
           getOverrides().agentManagedProfiles === true,
+          getOverrides().threadScopedAcpSessions === true,
         );
       } catch (error) {
         // A bad `repos_dir` no longer reaches here — `apply_workspace` treats

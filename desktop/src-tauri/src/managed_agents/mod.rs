@@ -8,6 +8,8 @@ pub(crate) use access_policy::{owner_only, owner_only_access_build, projected_ac
 pub(crate) use agent_env::{
     baked_build_env, build_buzz_agent_provider_defaults, discovery_env_with_baked_floor,
 };
+mod agent_description;
+pub(crate) use agent_description::{effective_agent_description, record_effective_description};
 mod backend;
 pub(crate) mod claude_config;
 pub(crate) mod config_bridge;
@@ -35,6 +37,7 @@ pub mod retention;
 mod runtime;
 mod runtime_commands;
 mod runtime_types;
+mod session_policy;
 pub(crate) mod snapshot_avatar;
 pub(crate) mod spawn_snapshot;
 pub(crate) mod storage;
@@ -56,7 +59,8 @@ pub(crate) fn lock_path_mutex() -> std::sync::MutexGuard<'static, ()> {
 
 pub use backend::*;
 pub(crate) use definition_validation::{
-    validate_agent_definition_text, validate_managed_agent_definition_text, validate_visible_text,
+    validate_agent_definition_text, validate_agent_description_text,
+    validate_managed_agent_definition_text, validate_visible_text,
 };
 pub use discovery::*;
 pub use env_vars::*;
@@ -86,6 +90,10 @@ pub use restore::*;
 pub use runtime::*;
 pub use runtime_commands::*;
 pub use runtime_types::*;
+pub(crate) use session_policy::{
+    acp_session_policy, apply_app_acp_session_policy_env, insert_acp_session_policy_env,
+    AcpSessionPolicy, ManagedAgentExperimentState, ACP_SESSION_POLICY_ENV_VAR,
+};
 pub use storage::*;
 pub use teams::*;
 pub use types::*;

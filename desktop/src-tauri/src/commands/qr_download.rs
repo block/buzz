@@ -1,7 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 use crate::commands::export_util::save_bytes_with_dialog;
-use crate::commands::media::sanitize_filename;
+use crate::commands::media_filename::sanitize_filename;
 use crate::commands::personas::PNG_MAGIC;
 
 fn decode_png_data_url(data_url: &str) -> Result<Vec<u8>, String> {

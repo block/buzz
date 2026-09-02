@@ -38,6 +38,7 @@ type ChannelMainComposerDockProps = {
   isSending: boolean;
   mainComposerMedia: MediaUploadController;
   mainEditTarget: MessageComposerEditTarget | null;
+  onAttachmentAcceptanceChange: MessageComposerProps["onAttachmentAcceptanceChange"];
   onCancelEdit: ChannelPaneProps["onCancelEdit"];
   onEditSave: ChannelPaneProps["onEditSave"];
   onOpenAgentSession: ChannelPaneProps["onOpenAgentSession"];
@@ -100,6 +101,7 @@ export function ChannelMainComposerDock({
   isSending,
   mainComposerMedia,
   mainEditTarget,
+  onAttachmentAcceptanceChange,
   onCancelEdit,
   onEditSave,
   onOpenAgentSession,
@@ -142,7 +144,6 @@ export function ChannelMainComposerDock({
         ) : null}
         <ComposerDockBackdrop gutterClassName="inset-x-5" />
         <MessageComposer
-          audienceContext={{ type: "channel" }}
           autoSubmitDraftKey={autoSendDraftKey}
           channelId={activeChannel?.id ?? null}
           channelName={activeChannel?.name ?? "channel"}
@@ -153,6 +154,7 @@ export function ChannelMainComposerDock({
           isSending={isSending}
           layoutMode="dock"
           mediaController={mainComposerMedia}
+          onAttachmentAcceptanceChange={onAttachmentAcceptanceChange}
           onAutoSubmitComplete={handleAutoSubmitComplete}
           onCancelEdit={onCancelEdit}
           onCancelReply={

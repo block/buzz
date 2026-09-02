@@ -150,7 +150,7 @@ class _ChannelRefreshFence {
 /// nothing awaits it, so a throw would only surface as an unhandled error.
 ///
 /// An extension in this part file rather than a method on the notifier because
-/// `channels_provider.dart` sits against the repository-wide 1000-line file
+/// `channels_provider.dart` sits against the repository-wide 1200-line file
 /// ceiling enforced by `just file-size-check`.
 extension _CatchUpFencing on ChannelsNotifier {
   bool _isCatchUpRetired(
@@ -188,7 +188,7 @@ Future<T> _fenced<T>(_ChannelRefreshFence fence, Future<T> future) async {
 /// profiles in one round-trip. Returns lowercase pubkey to label.
 ///
 /// Lives in this part file because `channels_provider.dart` sits against the
-/// repository-wide 1000-line file ceiling enforced by `just file-size-check`.
+/// repository-wide 1200-line file ceiling enforced by `just file-size-check`.
 Future<Map<String, String>> _resolveDmDisplayNames(
   RelaySessionNotifier session,
   _ChannelRefreshFence fence,
@@ -271,7 +271,7 @@ Future<List<NostrEvent>> _fetchHuddleStarts(
 /// Counts distinct `p`-tagged members per channel from kind:39002 events.
 ///
 /// Lives in this part file to keep `channels_provider.dart` under the
-/// repository-wide 1000-line ceiling enforced by `just file-size-check`.
+/// repository-wide 1200-line ceiling enforced by `just file-size-check`.
 Map<String, int> _memberCountsByChannelId(Iterable<NostrEvent> memberEvents) {
   final memberCounts = <String, int>{};
   for (final event in memberEvents) {
@@ -297,7 +297,7 @@ Map<String, int> _memberCountsByChannelId(Iterable<NostrEvent> memberEvents) {
 /// filter, so a retired response is discarded rather than merged.
 ///
 /// Lives in this part file because `channels_provider.dart` sits against the
-/// repository-wide 1000-line file ceiling enforced by `just file-size-check`.
+/// repository-wide 1200-line file ceiling enforced by `just file-size-check`.
 class _ChannelRefreshCoordinator {
   /// Resolves the relay-and-identity scope that is active right now.
   final String Function() currentScope;
@@ -429,7 +429,7 @@ Future<List<NostrEvent>> _fetchPaginatedChannelEvents(
 /// Thread-interest and unread helpers shared by [ChannelsNotifier].
 ///
 /// Lives in this part file because `channels_provider.dart` sits against the
-/// repository-wide 1000-line file ceiling enforced by `just file-size-check`.
+/// repository-wide 1200-line file ceiling enforced by `just file-size-check`.
 String? _observedUnreadRootId(NostrEvent event) =>
     _isBroadcastReply(event) ? null : event.threadReference.rootId;
 
@@ -456,7 +456,7 @@ String _encodeRootIdSet(Set<String> values) => jsonEncode(values.toList());
 /// Records one observed unread event for a channel's badge state.
 ///
 /// An extension in this part file rather than a method on the notifier because
-/// `channels_provider.dart` sits against the repository-wide 1000-line file
+/// `channels_provider.dart` sits against the repository-wide 1200-line file
 /// ceiling enforced by `just file-size-check`. Private members stay reachable:
 /// a part shares its parent's library.
 extension _ObservedUnreadRecording on ChannelsNotifier {

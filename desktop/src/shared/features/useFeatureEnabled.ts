@@ -105,6 +105,8 @@ export function useFeatureEnabled(featureId: string): boolean {
   return resolveEnabled(featureId, overrides, feature.defaultEnabled);
 }
 
+export { resolveEnabled } from "./resolveEnabled";
+
 /**
  * Hook to toggle a feature override. Returns [enabled, toggle].
  */
@@ -157,5 +159,3 @@ export function usePreviewFeatureWarning(featureId: string): void {
     };
   }, [feature, enabled]);
 }
-
-export { resolveEnabled } from "./resolveEnabled";

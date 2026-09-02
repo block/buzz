@@ -27,8 +27,12 @@ mod store;
 /// Database error types.
 pub mod error;
 
+#[cfg(test)]
+mod test_support;
+
 pub use runtime::{
-    insert_mentions, migration, replica_fence, Db, DbConfig, DbPoolStats, ReadSession,
+    insert_mentions, migration, replica_fence, Db, DbConfig, DbPoolStats, DbReadinessOutcome,
+    ReadSession,
 };
 pub(crate) use runtime::{
     insert_mentions_in_transaction, observability, route_proof, ReadSessionInner, RouteDecision,

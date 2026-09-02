@@ -2,7 +2,7 @@
 //! and their supporting helpers.
 //!
 //! Import-side commands and helpers live in `snapshot::import` to keep this
-//! file under the 1000-line gate.
+//! file under the 1500-line gate.
 //!
 //! Split from `personas/mod.rs` to keep that file under the line-count gate.
 
@@ -54,6 +54,25 @@ pub(crate) fn resolve_from_lists<'a>(
         return Ok((record, true));
     }
     Err(format!("agent {id:?} not found"))
+}
+
+/// Materialize persona-owned display metadata onto a cloned instance for
+/// portable snapshot construction. Keyless definition records already carry
+/// their own description.
+pub(crate) fn materialize_snapshot_description(
+    record: &mut ManagedAgentRecord,
+    is_definition: bool,
+    definitions: &[ManagedAgentRecord],
+) {
+    if is_definition {
+        return;
+    }
+    if let Some(persona_id) = record.persona_id.as_deref() {
+        record.description = definitions
+            .iter()
+            .find(|definition| definition.slug.as_deref() == Some(persona_id))
+            .and_then(|definition| definition.description.clone());
+    }
 }
 
 /// Validate that `memory_source_pubkey` is an appropriate source for a
@@ -250,6 +269,7 @@ pub(crate) async fn materialize_snapshot_bytes(
         let (def_record, is_definition) = resolve_from_lists(&id, &instances, &definitions)
             .map(|(r, is_def)| (r.clone(), is_def))?;
         let mut def_record = def_record;
+        materialize_snapshot_description(&mut def_record, is_definition, &definitions);
         // A snapshot is a verbatim portable copy of the effective runtime,
         // provider, and model configuration, not a pointer to the sender's
         // machine-wide defaults. This does not translate or substitute values

@@ -14,45 +14,6 @@ import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import type { ComposerAddressAgent } from "./ComposerAddressControls";
 import type { MentionSuggestion } from "./MentionAutocomplete";
 
-function buildMentionRemovalEdits(
-  text: string,
-  displayNames: readonly string[],
-  queryRange?: { start: number; end: number },
-): AutocompleteEdit[] {
-  const ranges = displayNames.flatMap((displayName) =>
-    getMentionOffsets(text, displayName).map((start) => {
-      let end = start + `@${displayName}`.length;
-      if (text[end] === " ") end += 1;
-      return { start, end };
-    }),
-  );
-  if (queryRange) {
-    ranges.push({
-      start: Math.max(0, Math.min(queryRange.start, text.length)),
-      end: Math.max(0, Math.min(queryRange.end, text.length)),
-    });
-  }
-
-  const merged = ranges
-    .filter(({ start, end }) => start < end)
-    .sort((left, right) => left.start - right.start)
-    .reduce<Array<{ start: number; end: number }>>((result, range) => {
-      const previous = result.at(-1);
-      if (previous && range.start <= previous.end) {
-        previous.end = Math.max(previous.end, range.end);
-      } else {
-        result.push({ ...range });
-      }
-      return result;
-    }, []);
-
-  return merged.reverse().map(({ start, end }) => ({
-    replaceFromOffset: start,
-    replaceToOffset: end,
-    insertText: "",
-  }));
-}
-
 export function useAgentAddressLockPicker({
   applyAutocompleteEdit,
   audience,
@@ -177,13 +138,21 @@ export function useAgentAddressLockPicker({
     ],
   );
 
-  const removeAddressedAgent = React.useCallback(
+  const unpinAddressedAgent = React.useCallback(
     (pubkey: string) => {
       const normalized = normalizePubkey(pubkey);
       if (!audienceScope || !normalized) return;
       unpinnedAgentPubkeysRef.current.add(normalized);
       const excludePubkey = audience.excludePubkey ?? audience.removePubkey;
       excludePubkey(normalized);
+    },
+    [audience.excludePubkey, audience.removePubkey, audienceScope],
+  );
+  const removeAddressedAgent = React.useCallback(
+    (pubkey: string) => {
+      const normalized = normalizePubkey(pubkey);
+      if (!audienceScope || !normalized) return;
+      unpinAddressedAgent(normalized);
       const displayName = lockedAgents.find(
         (agent) => agent.pubkey === normalized,
       )?.displayName;
@@ -206,43 +175,27 @@ export function useAgentAddressLockPicker({
     },
     [
       applyAutocompleteEdit,
-      audience.excludePubkey,
-      audience.removePubkey,
       audienceScope,
       lockedAgents,
       onImplicitPrefixRemoved,
       richText.getPlainTextAndCursor,
-    ],
-  );
-  const removeAddressedAgentMentions = React.useCallback(
-    (pubkey: string) => {
-      const normalized = normalizePubkey(pubkey);
-      if (!audienceScope || !normalized) return;
-      const { text } = richText.getPlainTextAndCursor();
-      const matchingDisplayNames = mentions
-        .getDraftMentionRefs(text)
-        .filter((ref) => normalizePubkey(ref.pubkey) === normalized)
-        .map((ref) => ref.displayName);
-      for (const edit of buildMentionRemovalEdits(text, matchingDisplayNames)) {
-        applyAutocompleteEdit(edit);
-      }
-      removeAddressedAgent(normalized);
-    },
-    [
-      applyAutocompleteEdit,
-      audienceScope,
-      mentions.getDraftMentionRefs,
-      removeAddressedAgent,
-      richText.getPlainTextAndCursor,
+      unpinAddressedAgent,
     ],
   );
   const toggleAlwaysAddressAgent = React.useCallback(
-    (suggestion: MentionSuggestion) => {
+    (
+      suggestion: MentionSuggestion,
+      options: { preserveMention?: boolean } = {},
+    ) => {
       const pubkey = normalizePubkey(suggestion.pubkey ?? "");
       if (!audienceScope || !pubkey || !suggestion.isAgent) return;
 
       if (lockedAgentPubkeys.has(pubkey)) {
-        removeAddressedAgentMentions(pubkey);
+        if (options.preserveMention) {
+          unpinAddressedAgent(pubkey);
+        } else {
+          removeAddressedAgent(pubkey);
+        }
         setAnnouncement(
           `Stopped automatically mentioning ${suggestion.displayName}`,
         );
@@ -313,9 +266,10 @@ export function useAgentAddressLockPicker({
       onAddressAgentMention,
       onImplicitPrefixInserted,
       onPulseAddressLock,
-      removeAddressedAgentMentions,
+      removeAddressedAgent,
       richText.getPlainTextAndCursor,
       trackMentionAddressedAgent,
+      unpinAddressedAgent,
     ],
   );
 

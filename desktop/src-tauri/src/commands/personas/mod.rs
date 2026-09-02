@@ -26,6 +26,38 @@ fn trim_optional(value: Option<String>) -> Option<String> {
     })
 }
 
+/// Validate the raw authored bytes before applying storage normalization.
+/// This ordering is security-relevant: prohibited edge characters must be
+/// rejected, never made invisible by trimming.
+fn normalize_description(value: Option<String>) -> Result<Option<String>, String> {
+    crate::managed_agents::validate_agent_description_text(value.as_deref())?;
+    Ok(trim_optional(value))
+}
+
+#[cfg(test)]
+mod description_normalization_tests {
+    use super::normalize_description;
+
+    #[test]
+    fn trims_visible_whitespace_and_collapses_blank_to_none() {
+        assert_eq!(
+            normalize_description(Some("  A careful agent.  ".to_string())).unwrap(),
+            Some("A careful agent.".to_string())
+        );
+        assert_eq!(
+            normalize_description(Some("   ".to_string())).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_prohibited_characters_at_the_edges_before_trimming() {
+        for value in ["\nA careful agent.", "A careful agent.\n", "\u{feff}Agent"] {
+            assert!(normalize_description(Some(value.to_string())).is_err());
+        }
+    }
+}
+
 mod pending;
 pub(in crate::commands) use pending::retain_persona_pending;
 pub(in crate::commands) use pending::retain_persona_pending_at;

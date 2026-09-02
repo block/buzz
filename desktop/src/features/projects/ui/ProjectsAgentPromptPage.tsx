@@ -671,6 +671,7 @@ export function ProjectsAgentPromptPage({
                         avatarUrl={avatarUrlFor(selectedAgent.pubkey)}
                         className="shrink-0"
                         displayName={selectedAgent.name}
+                        shape="squircle"
                         size="xs"
                       />
                     ) : null}
@@ -697,6 +698,7 @@ export function ProjectsAgentPromptPage({
                           avatarUrl={avatarUrlFor(candidate.pubkey)}
                           className="mr-2 shrink-0"
                           displayName={candidate.name}
+                          shape="squircle"
                           size="xs"
                         />
                         <span className="min-w-0 truncate">

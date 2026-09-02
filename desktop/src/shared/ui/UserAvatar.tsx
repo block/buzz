@@ -37,6 +37,7 @@ type UserAvatarProps = {
   displayName: string;
   size?: UserAvatarSize;
   accent?: boolean;
+  shape?: "circle" | "squircle";
   className?: string;
   fallbackDelayMs?: number;
   testId?: string;
@@ -47,6 +48,7 @@ export function UserAvatar({
   displayName,
   size = "md",
   accent = false,
+  shape,
   className,
   fallbackDelayMs = 200,
   testId,
@@ -61,12 +63,20 @@ export function UserAvatar({
     : avatarUrl
       ? rewriteRelayUrl(avatarUrl)
       : null;
+  const resolvedShape = shape ?? "circle";
+  const radiusClass =
+    resolvedShape === "squircle" ? "rounded-[30%]" : "rounded-full";
 
   return (
     <Avatar
       // Animated avatars carry their own backdrop disc and transparent
       // surroundings — any container fill would flatten the pop-out.
-      className={cn(sizeClasses[size], !animated && "shadow-xs", className)}
+      className={cn(
+        sizeClasses[size],
+        radiusClass,
+        !animated && "shadow-xs",
+        className,
+      )}
       data-testid={testId}
       onMouseEnter={animated ? () => setIsHovered(true) : undefined}
       onMouseLeave={animated ? () => setIsHovered(false) : undefined}

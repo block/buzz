@@ -35,6 +35,8 @@ import { Progress } from "@/shared/ui/progress";
 import { Toggle } from "@/shared/ui/toggle";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ComposerImageEditor } from "./ComposerImageEditor";
+import { isVoiceNoteAttachment } from "@/features/messages/lib/audioAttachment";
+import { AudioMessageAttachment } from "./AudioMessageAttachment";
 
 /**
  * Reveal-on-interaction for the composer's media action buttons.
@@ -611,18 +613,32 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
       : Array.from({ length: uploadingCount || 1 }, (_, index) => ({
           id: -index - 1,
         }));
+  const hasAudioAttachment =
+    attachments.some((attachment) =>
+      isVoiceNoteAttachment({
+        filename: attachment.filename,
+        m: attachment.type,
+      }),
+    ) || queuedPreviews.some((preview) => preview.type?.startsWith("audio/"));
 
   return (
     <LayoutGroup>
       <motion.div
         layout
-        className="flex items-center gap-2"
+        className={cn(
+          "flex items-center gap-2",
+          hasAudioAttachment && "w-full",
+        )}
         transition={{ type: "spring", stiffness: 500, damping: 30 }}
       >
         <AnimatePresence mode="popLayout">
           {attachments.map((attachment) => {
             const hash = shortHash(attachment.sha256);
-            const isVideo = attachment.type.startsWith("video/");
+            const isAudio = isVoiceNoteAttachment({
+              filename: attachment.filename,
+              m: attachment.type,
+            });
+            const isVideo = attachment.type.startsWith("video/") && !isAudio;
             const isImage = attachment.type.startsWith("image/");
             const isFile = !isVideo && !isImage;
 
@@ -635,6 +651,42 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
                   onRemove={onRemove}
                   snapshotKind={snapshotKind}
                 />
+              );
+            }
+
+            if (isAudio) {
+              const label = attachment.filename || "Voice note";
+              return (
+                <motion.div
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="group relative w-full min-w-0 max-w-[21rem]"
+                  exit={{ opacity: 0, scale: 0.8 }}
+                  initial={false}
+                  key={attachment.url}
+                  layout
+                  transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                >
+                  <AudioMessageAttachment
+                    composer
+                    duration={attachment.duration}
+                    filename={label}
+                    href={rewriteRelayUrl(attachment.url)}
+                  />
+                  <Tooltip disableHoverableContent>
+                    <TooltipTrigger asChild>
+                      <button
+                        aria-label="Remove voice note"
+                        className={COMPOSER_MEDIA_REMOVE_CLASS}
+                        data-testid="remove-composer-voice-note"
+                        onClick={() => onRemove(attachment.url)}
+                        type="button"
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>Remove attachment</TooltipContent>
+                  </Tooltip>
+                </motion.div>
               );
             }
 
@@ -697,7 +749,44 @@ export const ComposerAttachments = React.memo(function ComposerAttachments({
           })}
           {queuedPreviews.map((preview) => {
             const isVideo = preview.type?.startsWith("video/") ?? false;
+            const isAudio = preview.type?.startsWith("audio/") ?? false;
             const isMedia = preview.type?.startsWith("image/") || isVideo;
+            if (isAudio && preview.posterUrl) {
+              return (
+                <motion.div
+                  animate={{ opacity: 1, scale: 1 }}
+                  className="group relative w-full min-w-0 max-w-[21rem]"
+                  data-testid="composer-queued-media-attachment"
+                  exit={{ opacity: 0, scale: 0.8 }}
+                  initial={{ opacity: 0, scale: 0.8 }}
+                  key={`queued-attachment-${preview.id}`}
+                  layout
+                  transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                >
+                  <AudioMessageAttachment
+                    composer
+                    filename={preview.filename ?? "Voice note"}
+                    href={preview.posterUrl}
+                  />
+                  {onRemoveQueued ? (
+                    <Tooltip disableHoverableContent>
+                      <TooltipTrigger asChild>
+                        <button
+                          aria-label="Remove voice note"
+                          className={COMPOSER_MEDIA_REMOVE_CLASS}
+                          data-testid="remove-composer-voice-note"
+                          onClick={() => onRemoveQueued(preview.id)}
+                          type="button"
+                        >
+                          <X className="h-2.5 w-2.5" />
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent>Remove attachment</TooltipContent>
+                    </Tooltip>
+                  ) : null}
+                </motion.div>
+              );
+            }
             return (
               <motion.div
                 animate={{ opacity: 1, scale: 1 }}

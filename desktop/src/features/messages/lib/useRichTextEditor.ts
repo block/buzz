@@ -167,16 +167,12 @@ export function useRichTextEditor({
   const addressedAgentMentionNamesRef = React.useRef<readonly string[]>([]);
   const onUpdateRef = React.useRef(onUpdate);
   onUpdateRef.current = onUpdate;
-
   const onSubmitRef = React.useRef(onSubmit);
   onSubmitRef.current = onSubmit;
-
   const onEditLastOwnMessageRef = React.useRef(onEditLastOwnMessage);
   onEditLastOwnMessageRef.current = onEditLastOwnMessage;
-
   const onEditLinkRef = React.useRef(onEditLink);
   onEditLinkRef.current = onEditLink;
-
   const onLinkSelectionChangeRef = React.useRef(onLinkSelectionChange);
   onLinkSelectionChangeRef.current = onLinkSelectionChange;
 
@@ -618,13 +614,19 @@ export function useRichTextEditor({
   const hadFocusBeforeDisableRef = React.useRef(false);
   React.useEffect(() => {
     if (!editor || editor.isEditable === editable) return;
+    // `emitUpdate: false` on both toggles — the doc hasn't changed, so the
+    // default synthetic `update` event would replay `onUpdate` with stale
+    // text/cursor and resurrect consumer state derived from it (e.g. reopen
+    // a mention menu the user dismissed with Escape, or re-fire a typing
+    // notification for an untouched draft). Real content changes (typing,
+    // clearContent) dispatch real transactions that emit their own updates.
     if (!editable) {
       // About to disable: remember whether we currently hold focus so we know
       // whether to restore it when re-enabled.
       hadFocusBeforeDisableRef.current = editor.isFocused;
-      editor.setEditable(false);
+      editor.setEditable(false, false);
     } else {
-      editor.setEditable(true);
+      editor.setEditable(true, false);
       // Re-enabled: if we owned focus before the disable blurred us, take it
       // back (preserving the current selection — `focus()` with no arg keeps
       // the existing selection rather than jumping to the end).

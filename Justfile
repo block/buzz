@@ -99,6 +99,7 @@ check: fmt-check clippy desktop-check desktop-tauri-fmt-check desktop-tauri-clip
 security-review-check:
     node --check .github/scripts/codex-security-review.js
     node --test .github/scripts/codex-security-review.test.js
+    actionlint .github/workflows/codex-security-review.yml
 
 # Run the repository-wide differential file-size ratchet and its policy tests.
 # The ratchet inspects only files changed from the merge base, so this stays
@@ -255,7 +256,18 @@ desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
     BUZZ_BUILD_AGENT_ACCESS_OWNER_ONLY=1 \
       BUZZ_TEST_EXPECTED_AGENT_ACCESS_OWNER_ONLY=true \
       cargo test compiled_policy_matches_expected -- --ignored --nocapture
-    echo "Both compiled states verified."
+    echo "=== Maximum accepted demo name reaches Rust build validation ==="
+    DEMO_CONFIG="$(node ../scripts/demo-build-config.mjs "$(printf 'x%.0s' {1..31})" /dev/null 1234567812345678)"
+    DEMO_SLUG="$(node -e 'console.log(JSON.parse(process.argv[1]).slug)' "$DEMO_CONFIG")"
+    BUZZ_BUILD_DEMO_SLUG="$DEMO_SLUG" \
+      BUZZ_TEST_EXPECTED_DEMO_SLUG="$DEMO_SLUG" \
+      cargo test compiled_demo_slug_matches_expected -- --ignored --nocapture
+    BUZZ_BUILD_DEMO_SLUG="$DEMO_SLUG" cargo test --workspace
+    if node ../scripts/demo-build-config.mjs "$(printf 'x%.0s' {1..32})" /dev/null 1234567812345678; then
+      echo "A 32-character demo name unexpectedly passed JavaScript validation" >&2
+      exit 1
+    fi
+    echo "Both compiled states and the accepted/rejected demo-name boundary verified."
 
 # Build the full desktop Tauri app locally (unsigned, for testing)
 # Sidecar binary list must stay in sync with _ensure-sidecar-stubs above.
@@ -275,6 +287,38 @@ desktop-release-build target="aarch64-apple-darwin":
     touch "desktop/src-tauri/binaries/buzz-$TARGET"
     pnpm install
     cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
+
+# Build an unsigned named macOS demo DMG with isolated app and runtime identities.
+desktop-demo-build demo_name target="aarch64-apple-darwin":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    TARGET={{target}}
+    [[ "$(uname -s)" == "Darwin" && "$TARGET" == *-apple-darwin ]] || { echo "Demo DMGs require a macOS Apple target" >&2; exit 2; }
+    CONFIG_PATH="$(mktemp "${TMPDIR:-/tmp}/buzz-demo-config.XXXXXX")"
+    trap 'rm -f "$CONFIG_PATH"' EXIT
+    DEMO_BUILD_ID="$(node -e 'console.log(require("node:crypto").randomBytes(8).toString("hex"))')"
+    DEMO_CONFIG="$(node desktop/scripts/demo-build-config.mjs {{quote(demo_name)}} "$CONFIG_PATH" "$DEMO_BUILD_ID")"
+    read_config() { node -e 'console.log(JSON.parse(process.argv[1])[process.argv[2]])' "$DEMO_CONFIG" "$1"; }
+    PRODUCT_NAME="$(read_config productName)"
+    DMG_VOLUME_NAME="$(read_config dmgVolumeName)"
+    DMG_FILE_STEM="$(read_config dmgFileStem)"
+    DEMO_SLUG="$(read_config slug)"
+    cargo build --release --target "$TARGET" \
+      -p buzz-acp -p buzz-agent -p buzz-backend-kubernetes -p buzz-dev-mcp \
+      -p git-credential-nostr -p buzz-cli
+    ./scripts/bundle-sidecars.sh "$TARGET"
+    pnpm install
+    cd {{desktop_dir}}
+    BUZZ_BUILD_DEMO_SLUG="$DEMO_SLUG" pnpm tauri build --features mesh-llm --target "$TARGET" --bundles app --config "$CONFIG_PATH"
+    cd ..
+    VERSION="$(node -p "require('./desktop/package.json').version")"
+    DMG_ARCH="${TARGET%%-*}"; [[ "$DMG_ARCH" == "x86_64" ]] && DMG_ARCH=x64
+    APP_PATH="desktop/src-tauri/target/$TARGET/release/bundle/macos/$PRODUCT_NAME.app"
+    PLIST="$APP_PATH/Contents/Info.plist"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $PRODUCT_NAME" "$PLIST"
+    /usr/libexec/PlistBuddy -c "Set :CFBundleName $PRODUCT_NAME" "$PLIST"
+    codesign --force --deep --sign - "$APP_PATH"
+    VOL_NAME="$DMG_VOLUME_NAME" ./desktop/scripts/package-macos-dmg.sh "$APP_PATH" "desktop/src-tauri/target/$TARGET/release/bundle/dmg/${DMG_FILE_STEM}_${VERSION}_${DMG_ARCH}.dmg"
 
 # Run desktop checks suitable for CI / pre-push
 desktop-ci: desktop-check desktop-test desktop-tauri-fmt-check desktop-build desktop-tauri-check desktop-tauri-test
@@ -347,14 +391,21 @@ test-unit:
         # because nothing in CI runs `cargo test --workspace` — workspace
         # membership alone buys clippy/check, not a single executed test.
         cargo nextest run -p buzz-backend-kubernetes
-        # buzz-agent model-capabilities corpus: the Rust half of the
-        # cross-language drift guard. `model_capabilities.rs` embeds
-        # scripts/model-capabilities.json + scripts/normative-corpus.json via
-        # include_str! and replays the full locked corpus as pure in-process tests (no
-        # infra). Enumerated explicitly because nothing in CI runs
-        # `cargo test --workspace`; without this step a manifest edit that
-        # diverges Rust from the corpus ships green.
-        cargo nextest run -p buzz-agent --lib
+        # buzz-agent: two infra-free concerns run together by executing the
+        # whole crate (lib + integration tests), because nothing in CI runs
+        # `cargo test --workspace`, so without this stanza neither the crate's
+        # library tests nor its integration tests execute remotely.
+        #   * model-capabilities corpus (lib): the Rust half of the
+        #     cross-language drift guard. `model_capabilities.rs` embeds
+        #     scripts/model-capabilities.json + scripts/normative-corpus.json via
+        #     include_str! and replays the full locked corpus as pure in-process
+        #     tests; without it a manifest edit that diverges Rust from the
+        #     corpus ships green.
+        #   * OAuth auth coordinator (lib concurrency matrix + databricks
+        #     integration tests): lock single-flight, cooldown, cross-process
+        #     crash recovery — infra-free via a stub OIDC provider and an
+        #     injected browser opener, no network or Postgres.
+        cargo nextest run -p buzz-agent
         # Admin API auth-boundary tests (api::admin in buzz-relay): the NIP-98
         # duplicate-tag rejections, the Host/Origin replay-ordering causal pair,
         # the admin.localhost origin/advertisement/canonical-URL pins, and the
@@ -380,6 +431,10 @@ test-unit:
         # disabled_mode_still_requires_the_correct_host / _a_matching_origin.
         cargo nextest run -p buzz-relay --lib \
             -E 'test(/^api::admin::/) - test(=api::admin::tests::disabled_mode_allows_unauthenticated_requests_on_the_admin_host) - test(=api::admin::tests::nip98_mode_unrostered_signer_does_not_consume_a_replay_slot)'
+        # ACP author-gate and queue tests protect the trust boundary between
+        # relay events and agent prompts. They are infra-free; ignored lifecycle
+        # tests remain excluded and run in their dedicated integration lanes.
+        cargo nextest run -p buzz-acp --lib
     else
         ./scripts/run-tests.sh unit
     fi

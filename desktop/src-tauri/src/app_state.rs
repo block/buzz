@@ -36,8 +36,8 @@ pub struct AppState {
     pub workspace_apply_generation: AtomicU64,
     /// Defers managed-agent restore until `apply_workspace` installs relay and identity.
     pub managed_agent_restore_pending: AtomicBool,
-    /// Disabled by agent-managed profiles so agent profile updates survive start/restore.
-    pub managed_agent_profile_reconcile_enabled: AtomicBool,
+    /// Experiment state applied to managed-agent starts and profile reconciliation.
+    pub managed_agent_experiments: crate::managed_agents::ManagedAgentExperimentState,
     /// Shared shutdown signal checked by launch-time agent restoration.
     pub shutdown_started: AtomicBool,
     /// Serializes every managed-runtime transition that changes the protected
@@ -207,7 +207,7 @@ pub fn build_app_state() -> AppState {
         workspace_apply_lock: Arc::new(AsyncMutex::new(())),
         workspace_apply_generation: AtomicU64::new(0),
         managed_agent_restore_pending: AtomicBool::new(false),
-        managed_agent_profile_reconcile_enabled: AtomicBool::new(true),
+        managed_agent_experiments: crate::managed_agents::ManagedAgentExperimentState::default(),
         shutdown_started: AtomicBool::new(false),
         managed_agent_runtime_transition: Mutex::new(()),
         identity_mutation: Mutex::new(()),
@@ -634,23 +634,20 @@ fn resolve_identity_with_store(
     })
 }
 
-/// Recover from a corrupt nsec in the keyring (parse failed). Clear the bad
-/// keyring value, then migrate a valid leftover `identity.key` if one exists.
-/// If the migration marker is present but no valid file exists, the prior
-/// identity is unrecoverable — return `Lost` recovery rather than silently
-/// generating a new identity. Generating fresh is only correct when no prior
-/// identity ever existed (no marker). The keyring delete is best-effort: a
-/// delete failure logs and continues — it must never block startup.
+/// Recover from an unparseable keyring nsec, preferring a valid `identity.key`.
+/// If a migration marker exists without a valid file, retain the keyring value
+/// and return `Lost`. Without a marker, preserve the existing generate-fresh policy.
 fn recover_from_keyring(
     store: &impl IdentityKeyStore,
     legacy_path: &std::path::Path,
     data_dir: &std::path::Path,
     error: &str,
 ) -> Result<ResolvedIdentity, String> {
-    eprintln!("buzz-desktop: corrupt nsec in keyring ({error}), clearing and recovering from file");
-    if let Err(e) = store.delete(IDENTITY_KEY_NAME) {
-        eprintln!("buzz-desktop: failed to clear corrupt keyring value: {e}");
-    }
+    eprintln!(
+        "buzz-desktop: corrupt nsec in keyring ({error}), looking for a recovery path before clearing"
+    );
+    // Marker-only installs have no file fallback. Keep unreadable keyring
+    // material until a replacement exists rather than destroying the only copy.
     if legacy_path.exists() {
         if let Some(keys) = migrate_identity_file(store, legacy_path, data_dir)? {
             return Ok(ResolvedIdentity {
@@ -661,13 +658,13 @@ fn recover_from_keyring(
         }
     }
     // No valid file to recover from. If the migration marker exists, a prior
-    // identity was stored in the keyring and is now corrupt AND gone — the key
-    // is unrecoverable. Enter Lost recovery instead of silently rotating.
+    // identity was stored in the keyring — keep the corrupt entry for support /
+    // manual export and enter Lost rather than silently rotating.
     if migration_marker_path(data_dir).exists() {
         let ephemeral = Keys::generate();
         eprintln!(
-            "buzz-desktop: identity lost — keyring had corrupt data and no valid identity.key \
-             backup; prior identity (migration marker present) is unrecoverable; \
+            "buzz-desktop: identity lost — keyring value failed to parse and no valid identity.key \
+             backup exists; leaving the keyring entry in place; \
              using ephemeral key {}, awaiting user re-import",
             ephemeral.public_key().to_hex()
         );
@@ -677,7 +674,10 @@ fn recover_from_keyring(
             storage: IdentityStorage::Ephemeral,
         });
     }
-    // No marker: genuine first launch with a corrupt keyring. Generate fresh.
+    // No marker: preserve the existing clear-and-generate first-launch policy.
+    if let Err(e) = store.delete(IDENTITY_KEY_NAME) {
+        eprintln!("buzz-desktop: failed to clear corrupt keyring value: {e}");
+    }
     let (keys, storage) = generate_and_persist(store, legacy_path, data_dir)?;
     Ok(ResolvedIdentity {
         keys,

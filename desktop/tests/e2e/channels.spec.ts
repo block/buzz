@@ -1032,7 +1032,14 @@ test("drops an expanded DM after the first message fails", async ({ page }) => {
   await page.keyboard.type(" for a hand");
   await page.getByTestId("send-message").click();
 
-  await expect(page.getByText(sendError)).toBeVisible();
+  await expect(
+    page.getByTestId("new-message-page").getByText(sendError, { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page
+      .locator("[data-sonner-toast]")
+      .filter({ hasText: `Message failed to send: ${sendError}` }),
+  ).toBeVisible();
   await expect(input).toContainText("Fizz");
 
   const commandsAfterFailure = await readCommandPayloadLog(page);
@@ -1472,10 +1479,9 @@ test("create channel template selector matches the lifecycle controls", async ({
   await expect(page.getByTestId("create-channel-description")).toHaveValue(
     "Coordinate a new project from planning through launch.",
   );
-  await expect(page.getByTestId("create-channel-permissions")).toContainText(
-    "Private",
-  );
-  await page.getByTestId("create-channel-permissions").click();
+  await expect(
+    page.getByTestId("create-channel-permissions-option-private"),
+  ).toHaveAttribute("aria-pressed", "true");
   await page.getByTestId("create-channel-permissions-option-open").click();
   await expect(page.getByTestId("create-channel-template-summary")).toHaveText(
     "Open · Canvas included · 1 agent · 1 team",
@@ -1498,6 +1504,12 @@ test("create channel exposes templates when the library is empty", async ({
   const templateContainer = page.getByTestId(
     "create-channel-template-container",
   );
+  await expect(
+    page.getByTestId("create-channel-channel-type").getByRole("button"),
+  ).toHaveText(["Temporary", "Ongoing"]);
+  await expect(
+    page.getByTestId("create-channel-permissions").getByRole("button"),
+  ).toHaveText(["Private", "Public"]);
   await expect(templateContainer).toContainText("TemplateOptional");
   const typeBox = await typeContainer.boundingBox();
   const visibilityBox = await visibilityContainer.boundingBox();
@@ -1539,8 +1551,9 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
   await page
     .getByTestId("create-channel-description")
     .fill("Auto-cleaned test stream");
-  await page.getByTestId("create-channel-channel-type").click();
-  await page.getByLabel("Temporary channel").click();
+  await page
+    .getByTestId("create-channel-channel-type-option-temporary")
+    .click();
   const channelTypeContainer = page.getByTestId(
     "create-channel-channel-type-container",
   );
@@ -1550,22 +1563,20 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
   await expect(
     page.getByTestId("create-channel-permissions-container"),
   ).toBeVisible();
-  await expect(page.getByTestId("create-channel-permissions")).toContainText(
-    "Public",
-  );
-  await page.getByTestId("create-channel-permissions").click();
-  await page.getByTestId("create-channel-permissions-option-private").click();
-  await expect(page.getByTestId("create-channel-permissions")).toContainText(
-    "Private",
-  );
-  await expect(
-    page.getByTestId("create-channel-permissions-option-private"),
-  ).toHaveCount(0);
-  await page.getByTestId("create-channel-permissions").click();
   await expect(
     page.getByTestId("create-channel-permissions-option-open"),
-  ).toBeVisible();
+  ).toHaveAttribute("aria-pressed", "true");
+  await page.getByTestId("create-channel-permissions-option-private").click();
+  await expect(
+    page.getByTestId("create-channel-permissions-option-private"),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    page.getByTestId("create-channel-permissions-option-open"),
+  ).toHaveAttribute("aria-pressed", "false");
   await page.getByTestId("create-channel-permissions-option-open").click();
+  await expect(
+    page.getByTestId("create-channel-permissions-option-open"),
+  ).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByTestId("create-channel-ttl")).toContainText("7 days");
   await page.getByTestId("create-channel-ttl").click();
   await page.getByTestId("create-channel-ttl-option-1209600").click();
@@ -1674,8 +1685,9 @@ test("ephemeral countdown refreshes when switching channels after a clock jump",
     await page
       .getByTestId("create-channel-description")
       .fill("Auto-cleaned test stream");
-    await page.getByTestId("create-channel-channel-type").click();
-    await page.getByLabel("Temporary channel").click();
+    await page
+      .getByTestId("create-channel-channel-type-option-temporary")
+      .click();
     await page.getByTestId("create-channel-submit").click();
     await expect(page.getByTestId("chat-title")).toContainText(channelName);
   }
